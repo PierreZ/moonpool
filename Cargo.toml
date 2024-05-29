@@ -5,6 +5,8 @@ resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
+repository = "https://github.com/PierreZ/moonpool"
+license = "Apache-2.0"
 authors = ["Pierre Zemb <contact@pierrezemb.fr>"]
 description = "A place to experiment around actors"
 documentation = "https://docs.rs/moonpool"
