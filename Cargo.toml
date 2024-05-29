@@ -1,5 +1,11 @@
 [workspace]
 
+members = ["moonpool"]
 resolver = "2"
 
-members = ["moonpool"]
+[workspace.package]
+version = "0.1.0"
+authors = ["Pierre Zemb <contact@pierrezemb.fr>"]
+description = "A place to experiment around actors"
+documentation = "https://docs.rs/moonpool"
+edition = "2021"
