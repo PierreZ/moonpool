@@ -262,6 +262,93 @@ Controls timing of data transfer between connection pairs.
 
 **Tests:** Message ordering, throughput under load, pipeline stalls
 
+### 12. Intermittent Packet Loss
+
+Simulates unreliable networks where packets are silently dropped.
+
+| Setting | Default | `random_for_seed()` |
+|---------|---------|---------------------|
+| `packet_loss_probability` | 0.0 (disabled) | 0-5% |
+
+**Behavior:**
+- `poll_write()` succeeds normally
+- Data is silently discarded at `DataDelivery` event processing
+- No error returned to sender - packet simply never arrives
+- Higher-level protocols must rely on timeouts to detect loss
+
+**Tests:** Timeout handling, retry logic, at-least-once delivery semantics
+
+### 13. Send Buffer Limits
+
+Simulates TCP send buffer backpressure (BDP-based flow control).
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `send_buffer_capacity` | 64KB | Per-connection buffer limit |
+
+**Behavior:**
+- Tracks total bytes queued in `send_buffer`
+- When buffer reaches capacity, `poll_write()` returns `Poll::Pending`
+- Wakers registered via `register_send_buffer_waker()`
+- When data is consumed (delivered), waiting writers are woken
+
+**Tests:** TCP backpressure, flow control, producer-consumer rate limiting
+
+### 14. Per-Connection Asymmetric Delays
+
+Simulates networks with different latency in each direction.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `send_delay` | `Option<Duration>` | Per-connection send latency override |
+| `recv_delay` | `Option<Duration>` | Per-connection receive latency override |
+
+**Behavior:**
+- If set, overrides global `write_latency`/`read_latency` from `NetworkConfiguration`
+- If `None`, falls back to global config
+- Configured via `set_asymmetric_delays(send, recv)` on connection
+
+**Use cases:** Satellite links, asymmetric routing, geographic simulation
+
+### 15. Per-Connection-Pair Base Latency
+
+Provides consistent latency between IP pairs across connections.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `pair_latencies` | `HashMap<(IpAddr, IpAddr), Duration>` | Base latency per IP pair |
+
+**Behavior:**
+- First connection between IP pair establishes base latency
+- Subsequent connections reuse same base (with optional jitter on top)
+- Configured via `set_pair_latency_if_not_set()` / `get_pair_latency()`
+
+**Tests:** Consistent routing behavior, geographic distance simulation
+
+### 16. Half-Open Connection Simulation
+
+Simulates peer crashes with delayed error detection.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `is_half_open` | `bool` | Connection in half-open state |
+| `half_open_error_at` | `Option<Duration>` | When errors start manifesting |
+
+**API:** `simulate_peer_crash(delay)` - marks connection half-open with error delay
+
+**Two-phase behavior:**
+
+1. **Before `half_open_error_at`:**
+   - Local side thinks it's still connected
+   - Writes succeed but data is silently discarded
+   - Reads block waiting for data that will never come
+
+2. **After `half_open_error_at`:**
+   - `HalfOpenError` event wakes blocked tasks
+   - Both read and write return `ECONNRESET`
+
+**Tests:** Peer crash detection, heartbeat timeouts, connection health monitoring
+
 ## Configuration
 
 All chaos settings live in `ChaosConfiguration`:
