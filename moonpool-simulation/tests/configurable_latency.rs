@@ -4,14 +4,14 @@ use moonpool_simulation::{
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
-// Simple networking test that measures bind + accept latency
+// Simple networking test that measures bind + connect + accept latency
 async fn simple_network_test<P>(provider: P, addr: &str) -> std::io::Result<()>
 where
-    P: NetworkProvider,
+    P: NetworkProvider + Clone,
 {
     let listener = provider.bind(addr).await?;
-    let _addr = listener.local_addr()?;
-    let (mut stream, _peer_addr) = listener.accept().await?;
+    let _client = provider.connect(addr).await?; // Create connection first
+    let (mut stream, _peer_addr) = listener.accept().await?; // Then accept it
 
     // Write some data to exercise the write latency
     let test_data = b"test data for latency measurement";

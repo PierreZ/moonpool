@@ -27,6 +27,8 @@ struct ConnectionState {
     #[allow(dead_code)] // Will be used for routing and address resolution in future phases
     addr: String,
     receive_buffer: VecDeque<u8>,
+    /// Paired connection for bidirectional communication
+    paired_connection: Option<ConnectionId>,
 }
 
 /// Internal listener state for simulation
@@ -70,6 +72,9 @@ struct SimInner {
     next_task_id: u64,
     awakened_tasks: HashSet<u64>,
     task_wakers: HashMap<u64, Waker>,
+
+    // Phase 2e: Pending connection pairs for bidirectional communication
+    pending_connections: HashMap<String, ConnectionId>,
 }
 
 impl SimInner {
@@ -98,6 +103,9 @@ impl SimInner {
             next_task_id: 0,
             awakened_tasks: HashSet::new(),
             task_wakers: HashMap::new(),
+
+            // Phase 2e: Initialize pending connections
+            pending_connections: HashMap::new(),
         }
     }
 
@@ -251,24 +259,6 @@ impl SimWorld {
         Ok(listener_id)
     }
 
-    /// Create a connection in the simulation (used by SimNetworkProvider)
-    pub(crate) fn create_connection(&self, addr: String) -> SimulationResult<ConnectionId> {
-        let mut inner = self.inner.borrow_mut();
-        let connection_id = ConnectionId(inner.next_connection_id);
-        inner.next_connection_id += 1;
-
-        inner.connections.insert(
-            connection_id,
-            ConnectionState {
-                id: connection_id,
-                addr,
-                receive_buffer: VecDeque::new(),
-            },
-        );
-
-        Ok(connection_id)
-    }
-
     /// Read data from connection's receive buffer (used by SimTcpStream)
     pub(crate) fn read_from_connection(
         &self,
@@ -311,6 +301,77 @@ impl SimWorld {
                 "connection not found".to_string(),
             ))
         }
+    }
+
+    /// Create a connection pair for bidirectional communication
+    pub(crate) fn create_connection_pair(
+        &self,
+        client_addr: String,
+        server_addr: String,
+    ) -> SimulationResult<(ConnectionId, ConnectionId)> {
+        let mut inner = self.inner.borrow_mut();
+
+        let client_id = ConnectionId(inner.next_connection_id);
+        inner.next_connection_id += 1;
+
+        let server_id = ConnectionId(inner.next_connection_id);
+        inner.next_connection_id += 1;
+
+        // Create paired connections
+        inner.connections.insert(
+            client_id,
+            ConnectionState {
+                id: client_id,
+                addr: client_addr,
+                receive_buffer: VecDeque::new(),
+                paired_connection: Some(server_id),
+            },
+        );
+
+        inner.connections.insert(
+            server_id,
+            ConnectionState {
+                id: server_id,
+                addr: server_addr,
+                receive_buffer: VecDeque::new(),
+                paired_connection: Some(client_id),
+            },
+        );
+
+        Ok((client_id, server_id))
+    }
+
+    /// Register a waker for read operations
+    pub(crate) fn register_read_waker(
+        &self,
+        connection_id: ConnectionId,
+        waker: Waker,
+    ) -> SimulationResult<()> {
+        let mut inner = self.inner.borrow_mut();
+        inner.read_wakers.insert(connection_id, waker);
+        Ok(())
+    }
+
+    /// Store a pending connection for later accept() call
+    pub(crate) fn store_pending_connection(
+        &self,
+        addr: &str,
+        connection_id: ConnectionId,
+    ) -> SimulationResult<()> {
+        let mut inner = self.inner.borrow_mut();
+        inner
+            .pending_connections
+            .insert(addr.to_string(), connection_id);
+        Ok(())
+    }
+
+    /// Get a pending connection for accept() call
+    pub(crate) fn get_pending_connection(
+        &self,
+        addr: &str,
+    ) -> SimulationResult<Option<ConnectionId>> {
+        let mut inner = self.inner.borrow_mut();
+        Ok(inner.pending_connections.remove(addr))
     }
 
     /// Sleep for the specified duration in simulation time.
@@ -403,13 +464,26 @@ impl SimWorld {
                 connection_id,
                 data,
             } => {
-                // Data delivery completed - actually deliver data to receive buffer
+                // Data delivery completed - deliver data to paired connection's receive buffer
                 let connection_id = ConnectionId(connection_id);
 
-                // Deliver data directly using the passed inner reference
-                if let Some(connection) = inner.connections.get_mut(&connection_id) {
-                    for &byte in &data {
-                        connection.receive_buffer.push_back(byte);
+                // Find the paired connection
+                let paired_id = inner
+                    .connections
+                    .get(&connection_id)
+                    .and_then(|conn| conn.paired_connection);
+
+                if let Some(paired_id) = paired_id {
+                    // Write data to paired connection's receive buffer
+                    if let Some(paired_conn) = inner.connections.get_mut(&paired_id) {
+                        for &byte in &data {
+                            paired_conn.receive_buffer.push_back(byte);
+                        }
+
+                        // Wake any futures waiting to read from paired connection
+                        if let Some(waker) = inner.read_wakers.remove(&paired_id) {
+                            waker.wake();
+                        }
                     }
                 }
             }

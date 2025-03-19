@@ -25,7 +25,7 @@ impl SimTcpStream {
 impl AsyncRead for SimTcpStream {
     fn poll_read(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let sim = self
@@ -41,12 +41,13 @@ impl AsyncRead for SimTcpStream {
 
         if bytes_read > 0 {
             buf.put_slice(&temp_buf[..bytes_read]);
+            Poll::Ready(Ok(()))
+        } else {
+            // No data available - register for notification when data arrives
+            sim.register_read_waker(self.connection_id, cx.waker().clone())
+                .map_err(|e| io::Error::other(format!("waker registration error: {}", e)))?;
+            Poll::Pending
         }
-
-        // Note: In a real implementation, we would return Poll::Pending if no data
-        // is available and register a waker. For Phase 2c, we simplify by
-        // returning immediately with whatever data is available (0 bytes = EOF)
-        Poll::Ready(Ok(()))
     }
 }
 
@@ -65,10 +66,7 @@ impl AsyncWrite for SimTcpStream {
         let delay =
             sim.with_network_config_and_rng(|config, rng| config.latency.write_latency.sample(rng));
 
-        // For Phase 2c: immediately write data to the connection's buffer
-        // In a real implementation, this would be more complex with proper buffering
-        sim.write_to_connection(self.connection_id, buf)
-            .map_err(|e| io::Error::other(format!("write error: {}", e)))?;
+        // Schedule data delivery to paired connection with configured delay
 
         // Schedule the write completion event with configured delay
         sim.schedule_event(
@@ -124,10 +122,11 @@ impl TcpListenerTrait for SimTcpListener {
         let delay = sim
             .with_network_config_and_rng(|config, rng| config.latency.accept_latency.sample(rng));
 
-        // Create a connection for the accepted client
+        // Get the pending connection created by connect() call
         let connection_id = sim
-            .create_connection("client-addr".to_string())
-            .map_err(|_| io::Error::other("connection creation failed"))?;
+            .get_pending_connection(&self.local_addr)
+            .map_err(|_| io::Error::other("failed to get pending connection"))?
+            .ok_or_else(|| io::Error::other("no pending connection available"))?;
 
         // Schedule accept completion event to advance simulation time
         sim.schedule_event(

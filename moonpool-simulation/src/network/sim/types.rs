@@ -18,6 +18,8 @@ pub(crate) struct ConnectionState {
     pub addr: String,
     /// Buffer of received data waiting to be read
     pub receive_buffer: VecDeque<u8>,
+    /// Paired connection for bidirectional communication
+    pub paired_connection: Option<ConnectionId>,
 }
 
 /// Internal listener state

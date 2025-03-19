@@ -59,19 +59,24 @@ impl NetworkProvider for SimNetworkProvider {
         let delay = sim
             .with_network_config_and_rng(|config, rng| config.latency.connect_latency.sample(rng));
 
-        let connection_id = sim
-            .create_connection(addr.to_string())
-            .map_err(|e| io::Error::other(format!("Failed to create connection: {}", e)))?;
+        // Create a connection pair for bidirectional communication
+        let (client_id, server_id) = sim
+            .create_connection_pair("client-addr".to_string(), addr.to_string())
+            .map_err(|e| io::Error::other(format!("Failed to create connection pair: {}", e)))?;
+
+        // Store the server side for accept() to pick up later
+        sim.store_pending_connection(addr, server_id)
+            .map_err(|e| io::Error::other(format!("Failed to store pending connection: {}", e)))?;
 
         // Schedule connection ready event to advance simulation time
         sim.schedule_event(
             Event::ConnectionReady {
-                connection_id: connection_id.0,
+                connection_id: client_id.0,
             },
             delay,
         );
 
-        let stream = SimTcpStream::new(self.sim.clone(), connection_id);
+        let stream = SimTcpStream::new(self.sim.clone(), client_id);
         Ok(stream)
     }
 }

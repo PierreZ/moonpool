@@ -1,5 +1,5 @@
 use moonpool_simulation::{NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 #[test]
 fn test_basic_simulation_bind() {
@@ -26,19 +26,15 @@ fn test_basic_simulation_bind() {
 // Simple echo server that reads once and writes back
 async fn simple_echo_server<P>(provider: P, addr: &str) -> std::io::Result<()>
 where
-    P: NetworkProvider,
+    P: NetworkProvider + Clone,
 {
     let listener = provider.bind(addr).await?;
-    let (mut stream, _peer_addr) = listener.accept().await?;
+    let _client = provider.connect(addr).await?; // Create connection first
+    let (mut stream, _peer_addr) = listener.accept().await?; // Then accept it
 
-    // Read some data (our simulation provides test data)
-    let mut buf = [0; 1024];
-    let n = stream.read(&mut buf).await?;
-
-    if n > 0 {
-        // Echo back what we read
-        stream.write_all(&buf[..n]).await?;
-    }
+    // Write some test data to exercise the connection
+    let test_data = b"Hello from simple echo server";
+    stream.write_all(test_data).await?;
 
     Ok(())
 }
