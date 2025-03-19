@@ -9,6 +9,7 @@ pub struct ConnectionId(pub(crate) u64);
 pub struct ListenerId(pub(crate) u64);
 
 /// Internal connection state
+#[allow(dead_code)] // Infrastructure for future phases
 #[derive(Debug)]
 pub(crate) struct ConnectionState {
     /// Unique identifier for this connection
@@ -20,6 +21,7 @@ pub(crate) struct ConnectionState {
 }
 
 /// Internal listener state
+#[allow(dead_code)] // Infrastructure for future phases
 #[derive(Debug)]
 pub(crate) struct ListenerState {
     /// Unique identifier for this listener

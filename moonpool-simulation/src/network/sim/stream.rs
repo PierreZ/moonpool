@@ -1,13 +1,11 @@
 use super::types::{ConnectionId, ListenerId};
 use crate::network::traits::TcpListenerTrait;
-use crate::{Event, SimulationResult, WeakSimWorld};
+use crate::{Event, WeakSimWorld};
 use async_trait::async_trait;
-use rand::Rng;
 use std::{
     io,
     pin::Pin,
     task::{Context, Poll},
-    time::Duration,
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
@@ -15,17 +13,12 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 pub struct SimTcpStream {
     sim: WeakSimWorld,
     connection_id: ConnectionId,
-    has_read: bool, // Track if we've already provided data
 }
 
 impl SimTcpStream {
     /// Create a new simulated TCP stream
     pub(crate) fn new(sim: WeakSimWorld, connection_id: ConnectionId) -> Self {
-        Self {
-            sim,
-            connection_id,
-            has_read: false,
-        }
+        Self { sim, connection_id }
     }
 }
 
@@ -35,33 +28,24 @@ impl AsyncRead for SimTcpStream {
         _cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-
-        // Check if we've already provided data
-        if this.has_read {
-            // Return OK with no bytes added (EOF condition)
-            // This is what AsyncRead does to signal end of stream
-            return Poll::Ready(Ok(()));
-        }
-
-        let _sim = this
+        let sim = self
             .sim
             .upgrade()
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown"))?;
 
-        // For Phase 2b: simplified read simulation
-        // Returns test data once to enable echo server functionality
-        let test_data = b"Hello, echo server!";
-        let bytes_to_copy = buf.remaining().min(test_data.len());
+        // Try to read from connection's receive buffer
+        let mut temp_buf = vec![0u8; buf.remaining()];
+        let bytes_read = sim
+            .read_from_connection(self.connection_id, &mut temp_buf)
+            .map_err(|e| io::Error::other(format!("read error: {}", e)))?;
 
-        // Only add data if there's space in the buffer
-        if bytes_to_copy > 0 {
-            buf.put_slice(&test_data[..bytes_to_copy]);
+        if bytes_read > 0 {
+            buf.put_slice(&temp_buf[..bytes_read]);
         }
 
-        // Mark that we've provided data
-        this.has_read = true;
-
+        // Note: In a real implementation, we would return Poll::Pending if no data
+        // is available and register a waker. For Phase 2c, we simplify by
+        // returning immediately with whatever data is available (0 bytes = EOF)
         Poll::Ready(Ok(()))
     }
 }
@@ -77,14 +61,16 @@ impl AsyncWrite for SimTcpStream {
             .upgrade()
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown"))?;
 
-        // Simulate write delay with random jitter
-        let delay = sim.with_rng(|rng| {
-            let base = Duration::from_micros(100);
-            let jitter = Duration::from_micros(rng.gen_range(0..=500));
-            base + jitter
-        });
+        // Get write delay from network configuration
+        let delay =
+            sim.with_network_config_and_rng(|config, rng| config.latency.write_latency.sample(rng));
 
-        // Schedule data delivery event (simplified for Phase 2b)
+        // For Phase 2c: immediately write data to the connection's buffer
+        // In a real implementation, this would be more complex with proper buffering
+        sim.write_to_connection(self.connection_id, buf)
+            .map_err(|e| io::Error::other(format!("write error: {}", e)))?;
+
+        // Schedule the write completion event with configured delay
         sim.schedule_event(
             Event::DataDelivery {
                 connection_id: self.connection_id.0,
@@ -108,6 +94,7 @@ impl AsyncWrite for SimTcpStream {
 /// Simulated TCP listener
 pub struct SimTcpListener {
     sim: WeakSimWorld,
+    #[allow(dead_code)] // Will be used in future phases
     listener_id: ListenerId,
     local_addr: String,
 }
@@ -131,22 +118,24 @@ impl TcpListenerTrait for SimTcpListener {
         let sim = self
             .sim
             .upgrade()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "simulation shutdown"))?;
+            .map_err(|_| io::Error::other("simulation shutdown"))?;
 
-        // Simulate accept delay with random jitter
-        let delay = sim.with_rng(|rng| {
-            let base = Duration::from_millis(1);
-            let jitter = Duration::from_millis(rng.gen_range(0..=5));
-            base + jitter
-        });
+        // Get accept delay from network configuration
+        let delay = sim
+            .with_network_config_and_rng(|config, rng| config.latency.accept_latency.sample(rng));
 
-        // Use tokio sleep for the delay simulation
-        tokio::time::sleep(delay).await;
-
-        // For Phase 2b: simplified accept that immediately creates a connection
+        // Create a connection for the accepted client
         let connection_id = sim
             .create_connection("client-addr".to_string())
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "connection creation failed"))?;
+            .map_err(|_| io::Error::other("connection creation failed"))?;
+
+        // Schedule accept completion event to advance simulation time
+        sim.schedule_event(
+            Event::ConnectionReady {
+                connection_id: connection_id.0,
+            },
+            delay,
+        );
 
         let stream = SimTcpStream::new(self.sim.clone(), connection_id);
         Ok((stream, "127.0.0.1:12345".to_string()))

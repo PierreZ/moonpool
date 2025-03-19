@@ -43,5 +43,8 @@ pub mod sim;
 pub use error::{SimulationError, SimulationResult};
 pub use events::{Event, EventQueue, ScheduledEvent};
 // Network exports
-pub use network::{NetworkProvider, SimNetworkProvider, TcpListenerTrait, TokioNetworkProvider};
+pub use network::{
+    LatencyConfiguration, LatencyRange, NetworkConfiguration, NetworkProvider, SimNetworkProvider,
+    TcpListenerTrait, TokioNetworkProvider,
+};
 pub use sim::{SimWorld, WeakSimWorld};

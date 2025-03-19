@@ -1,7 +1,6 @@
 use super::stream::{SimTcpListener, SimTcpStream};
-use super::types::{ConnectionId, ListenerId};
-use crate::network::traits::{NetworkProvider, TcpListenerTrait};
-use crate::{SimulationError, SimulationResult, WeakSimWorld};
+use crate::network::traits::NetworkProvider;
+use crate::{Event, WeakSimWorld};
 use async_trait::async_trait;
 use std::io;
 
@@ -27,14 +26,24 @@ impl NetworkProvider for SimNetworkProvider {
         let sim = self
             .sim
             .upgrade()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "simulation shutdown"))?;
+            .map_err(|_| io::Error::other("simulation shutdown"))?;
 
-        let listener_id = sim.create_listener(addr.to_string()).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to create listener: {}", e),
-            )
-        })?;
+        // Get bind delay from network configuration and schedule bind completion event
+        let delay =
+            sim.with_network_config_and_rng(|config, rng| config.latency.bind_latency.sample(rng));
+
+        // Schedule bind completion event to advance simulation time
+        let listener_id = sim
+            .create_listener(addr.to_string())
+            .map_err(|e| io::Error::other(format!("Failed to create listener: {}", e)))?;
+
+        // Schedule an event to simulate the bind delay - this advances simulation time
+        sim.schedule_event(
+            Event::BindComplete {
+                listener_id: listener_id.0,
+            },
+            delay,
+        );
 
         let listener = SimTcpListener::new(self.sim.clone(), listener_id, addr.to_string());
         Ok(listener)
@@ -44,14 +53,23 @@ impl NetworkProvider for SimNetworkProvider {
         let sim = self
             .sim
             .upgrade()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "simulation shutdown"))?;
+            .map_err(|_| io::Error::other("simulation shutdown"))?;
 
-        let connection_id = sim.create_connection(addr.to_string()).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to create connection: {}", e),
-            )
-        })?;
+        // Get connect delay from network configuration and schedule connection event
+        let delay = sim
+            .with_network_config_and_rng(|config, rng| config.latency.connect_latency.sample(rng));
+
+        let connection_id = sim
+            .create_connection(addr.to_string())
+            .map_err(|e| io::Error::other(format!("Failed to create connection: {}", e)))?;
+
+        // Schedule connection ready event to advance simulation time
+        sim.schedule_event(
+            Event::ConnectionReady {
+                connection_id: connection_id.0,
+            },
+            delay,
+        );
 
         let stream = SimTcpStream::new(self.sim.clone(), connection_id);
         Ok(stream)

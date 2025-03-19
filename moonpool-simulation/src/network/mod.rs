@@ -3,6 +3,9 @@
 //! This module provides trait-based networking that allows seamless swapping
 //! between real Tokio networking and simulated networking for testing.
 
+/// Network configuration and settings
+pub mod config;
+
 /// Core networking traits and abstractions
 pub mod traits;
 
@@ -18,3 +21,6 @@ pub use traits::{NetworkProvider, TcpListenerTrait};
 // Re-export implementations
 pub use sim::SimNetworkProvider;
 pub use tokio::TokioNetworkProvider;
+
+// Re-export configuration
+pub use config::{LatencyConfiguration, LatencyRange, NetworkConfiguration};

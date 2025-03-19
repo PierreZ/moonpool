@@ -9,16 +9,21 @@ use std::{
 use crate::{
     error::{SimulationError, SimulationResult},
     events::{Event, EventQueue, ScheduledEvent},
-    network::sim::{ConnectionId, ListenerId, SimNetworkProvider},
+    network::{
+        NetworkConfiguration,
+        sim::{ConnectionId, ListenerId, SimNetworkProvider},
+    },
 };
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::collections::VecDeque;
 
 /// Internal connection state for simulation
 #[derive(Debug)]
 struct ConnectionState {
+    #[allow(dead_code)] // Will be used for routing and debugging in future phases
     id: ConnectionId,
+    #[allow(dead_code)] // Will be used for routing and address resolution in future phases
     addr: String,
     receive_buffer: VecDeque<u8>,
 }
@@ -26,8 +31,11 @@ struct ConnectionState {
 /// Internal listener state for simulation
 #[derive(Debug)]
 struct ListenerState {
+    #[allow(dead_code)] // Will be used for listener management in future phases
     id: ListenerId,
+    #[allow(dead_code)] // Will be used for address binding in future phases
     addr: String,
+    #[allow(dead_code)] // Will be used for connection queuing in future phases
     pending_connections: VecDeque<ConnectionId>,
 }
 
@@ -42,13 +50,19 @@ struct SimInner {
     next_connection_id: u64,
     next_listener_id: u64,
 
+    // Phase 2c network configuration
+    network_config: NetworkConfiguration,
+
     // Network state registries
     connections: HashMap<ConnectionId, ConnectionState>,
     listeners: HashMap<ListenerId, ListenerState>,
 
     // Waker storage for async coordination (simplified for Phase 2b)
+    #[allow(dead_code)] // Will be used for proper async coordination in future phases
     connection_wakers: HashMap<ConnectionId, Waker>,
+    #[allow(dead_code)] // Will be used for proper async coordination in future phases
     listener_wakers: HashMap<ListenerId, Waker>,
+    #[allow(dead_code)] // Will be used for proper async coordination in future phases
     read_wakers: HashMap<ConnectionId, Waker>,
 }
 
@@ -64,6 +78,9 @@ impl SimInner {
             next_connection_id: 0,
             next_listener_id: 0,
 
+            // Default network configuration
+            network_config: NetworkConfiguration::default(),
+
             connections: HashMap::new(),
             listeners: HashMap::new(),
 
@@ -71,6 +88,12 @@ impl SimInner {
             listener_wakers: HashMap::new(),
             read_wakers: HashMap::new(),
         }
+    }
+
+    fn new_with_config(network_config: NetworkConfiguration) -> Self {
+        let mut inner = Self::new();
+        inner.network_config = network_config;
+        inner
     }
 }
 
@@ -85,10 +108,17 @@ pub struct SimWorld {
 }
 
 impl SimWorld {
-    /// Creates a new simulation world.
+    /// Creates a new simulation world with default network configuration.
     pub fn new() -> Self {
         Self {
             inner: Rc::new(RefCell::new(SimInner::new())),
+        }
+    }
+
+    /// Creates a new simulation world with custom network configuration.
+    pub fn new_with_network_config(network_config: NetworkConfiguration) -> Self {
+        Self {
+            inner: Rc::new(RefCell::new(SimInner::new_with_config(network_config))),
         }
     }
 
@@ -103,8 +133,8 @@ impl SimWorld {
             // Advance logical time to event timestamp
             inner.current_time = scheduled_event.time();
 
-            // Process the event
-            self.process_event(scheduled_event.into_event());
+            // Process the event with the mutable reference
+            Self::process_event_with_inner(&mut inner, scheduled_event.into_event());
 
             // Return true if more events are available
             !inner.event_queue.is_empty()
@@ -181,6 +211,17 @@ impl SimWorld {
         f(&mut inner.rng)
     }
 
+    /// Access network configuration and RNG together for latency calculations
+    pub fn with_network_config_and_rng<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&NetworkConfiguration, &mut ChaCha8Rng) -> R,
+    {
+        let mut inner = self.inner.borrow_mut();
+        // Split borrows to avoid conflict
+        let config = &inner.network_config.clone(); // Clone config to avoid borrow conflict
+        f(config, &mut inner.rng)
+    }
+
     /// Create a listener in the simulation (used by SimNetworkProvider)
     pub(crate) fn create_listener(&self, addr: String) -> SimulationResult<ListenerId> {
         let mut inner = self.inner.borrow_mut();
@@ -217,24 +258,80 @@ impl SimWorld {
         Ok(connection_id)
     }
 
-    fn process_event(&self, event: Event) {
+    /// Read data from connection's receive buffer (used by SimTcpStream)
+    pub(crate) fn read_from_connection(
+        &self,
+        connection_id: ConnectionId,
+        buf: &mut [u8],
+    ) -> SimulationResult<usize> {
+        let mut inner = self.inner.borrow_mut();
+
+        if let Some(connection) = inner.connections.get_mut(&connection_id) {
+            let mut bytes_read = 0;
+            while bytes_read < buf.len() && !connection.receive_buffer.is_empty() {
+                if let Some(byte) = connection.receive_buffer.pop_front() {
+                    buf[bytes_read] = byte;
+                    bytes_read += 1;
+                }
+            }
+            Ok(bytes_read)
+        } else {
+            Err(SimulationError::InvalidState(
+                "connection not found".to_string(),
+            ))
+        }
+    }
+
+    /// Write data to connection's receive buffer (used by SimTcpStream write operations)
+    pub(crate) fn write_to_connection(
+        &self,
+        connection_id: ConnectionId,
+        data: &[u8],
+    ) -> SimulationResult<()> {
+        let mut inner = self.inner.borrow_mut();
+
+        if let Some(connection) = inner.connections.get_mut(&connection_id) {
+            for &byte in data {
+                connection.receive_buffer.push_back(byte);
+            }
+            Ok(())
+        } else {
+            Err(SimulationError::InvalidState(
+                "connection not found".to_string(),
+            ))
+        }
+    }
+
+    fn process_event_with_inner(inner: &mut SimInner, event: Event) {
+        // Process different event types
         match event {
             Event::Wake { task_id: _ } => {
                 // For Phase 1, we just acknowledge the wake event
                 // In later phases, this will wake actual tasks
             }
             Event::BindComplete { listener_id: _ } => {
-                // Network bind completed - simplified for Phase 2b
+                // Network bind completed - forward to network module for handling
+                // For Phase 2c, this is just acknowledgment
+                // In Phase 2d, this will wake futures and update state
             }
             Event::ConnectionReady { connection_id: _ } => {
-                // Connection establishment completed - simplified for Phase 2b
+                // Connection establishment completed - forward to network module for handling
+                // For Phase 2c, this is just acknowledgment
+                // In Phase 2d, this will wake futures and update state
             }
             Event::DataDelivery {
-                connection_id: _,
-                data: _,
+                connection_id,
+                data,
             } => {
-                // Data delivery completed - simplified for Phase 2b
-                // In a full implementation, this would deliver data to the receive buffer
+                // Data delivery completed - actually deliver data to receive buffer
+                let connection_id = ConnectionId(connection_id);
+
+                // Deliver data directly using the passed inner reference
+                if let Some(connection) = inner.connections.get_mut(&connection_id) {
+                    for &byte in &data {
+                        connection.receive_buffer.push_back(byte);
+                    }
+                }
             }
         }
     }
@@ -295,6 +392,44 @@ impl WeakSimWorld {
         let sim = self.upgrade()?;
         sim.schedule_event_at(event, time);
         Ok(())
+    }
+
+    /// Access network configuration and RNG together for latency calculations
+    ///
+    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
+    /// has been dropped.
+    pub fn with_network_config_and_rng<F, R>(&self, f: F) -> SimulationResult<R>
+    where
+        F: FnOnce(&NetworkConfiguration, &mut ChaCha8Rng) -> R,
+    {
+        let sim = self.upgrade()?;
+        Ok(sim.with_network_config_and_rng(f))
+    }
+
+    /// Read data from connection's receive buffer
+    ///
+    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
+    /// has been dropped.
+    pub fn read_from_connection(
+        &self,
+        connection_id: ConnectionId,
+        buf: &mut [u8],
+    ) -> SimulationResult<usize> {
+        let sim = self.upgrade()?;
+        sim.read_from_connection(connection_id, buf)
+    }
+
+    /// Write data to connection's receive buffer
+    ///
+    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
+    /// has been dropped.
+    pub fn write_to_connection(
+        &self,
+        connection_id: ConnectionId,
+        data: &[u8],
+    ) -> SimulationResult<()> {
+        let sim = self.upgrade()?;
+        sim.write_to_connection(connection_id, data)
     }
 }
 

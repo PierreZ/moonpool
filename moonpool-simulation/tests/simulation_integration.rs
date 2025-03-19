@@ -1,4 +1,4 @@
-use moonpool_simulation::{NetworkProvider, SimWorld, TcpListenerTrait};
+use moonpool_simulation::{NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[test]
@@ -53,7 +53,9 @@ fn test_simple_echo_simulation() {
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
-        let mut sim = SimWorld::new();
+        // Use a configuration with noticeable delays for this test
+        let config = NetworkConfiguration::wan_simulation(); // Has larger delays
+        let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
 
         // Test simple echo server with simulation
@@ -62,7 +64,7 @@ fn test_simple_echo_simulation() {
         // Process all simulation events
         sim.run_until_empty();
 
-        // Verify time advanced due to simulated delays
+        // Verify time advanced due to simulated delays (should be >10ms with WAN config)
         assert!(sim.current_time() > std::time::Duration::ZERO);
         println!("Simulation completed in {:?}", sim.current_time());
     });
@@ -82,7 +84,9 @@ fn test_deterministic_simulation_behavior() {
         let mut execution_times = Vec::new();
 
         for _run in 0..3 {
-            let mut sim = SimWorld::new();
+            // Use same config as other test for consistency
+            let config = NetworkConfiguration::wan_simulation();
+            let mut sim = SimWorld::new_with_network_config(config);
             let provider = sim.network_provider();
 
             simple_echo_server(provider, "deterministic-test")
