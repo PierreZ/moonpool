@@ -6,6 +6,30 @@ Moonpool is a Rust project designed to create the right toolbox for building dis
 ## Current Focus: Simulation Framework
 Currently working on the simulation framework located in `moonpool-simulation`. This is a deterministic simulation framework for testing distributed systems.
 
+### Architecture Constraints
+**IMPORTANT**: The simulation framework is designed for single-core execution only. This design decision ensures:
+- Deterministic behavior without complex synchronization
+- Simplified async implementation without Send/Sync bounds
+- Predictable event ordering and timing
+- No thread-safety complexity in simulation state
+
+**Networking Traits**: Do NOT add Send bounds to networking traits. Use `#[async_trait(?Send)]` for all async traits in the network module.
+
+### Phase 2 Testing Requirements
+**IMPORTANT**: Phase 2 networking implementation must include BOTH types of tests:
+
+1. **Simulation Tests**: Test network behavior using `SimNetworkProvider`
+   - Verify simulated connections, message delivery, fault injection
+   - Test deterministic behavior and event ordering
+   - Focus on simulation-specific features like time control
+
+2. **Tokio Integration Tests**: Test the same code using `TokioNetworkProvider` 
+   - Verify real networking works with the same trait implementations
+   - Ensure seamless swapping between simulation and real networking
+   - Test that application code works identically with both providers
+
+**Test Pattern**: Write tests that run the SAME application logic with both `SimNetworkProvider` and `TokioNetworkProvider` to verify trait compatibility and seamless swapping.
+
 ## Development Environment Setup
 
 **IMPORTANT**: Claude must use `nix develop` shell for compilation and testing.

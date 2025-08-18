@@ -4,9 +4,11 @@
       "Bash(direnv reload:*)",
       "Bash(cargo test)",
       "Bash(cargo check:*)",
-      "Bash(nix develop:*)"
+      "Bash(nix develop:*)",
+      "Bash(mkdir:*)"
     ],
     "deny": [],
-    "ask": []
+    "ask": [],
+    "defaultMode": "acceptEdits"
   }
 }
