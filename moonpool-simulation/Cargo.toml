@@ -9,3 +9,4 @@ documentation.workspace = true
 edition.workspace = true
 
 [dependencies]
+thiserror = "2.0"

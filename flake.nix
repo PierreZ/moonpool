@@ -35,6 +35,9 @@
             # Rust toolchain from oxalica
             rust-toolchain
             
+            # Build tools
+            gcc
+            
             # Development tools
             pkg-config
             openssl  

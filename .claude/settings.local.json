@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(direnv reload:*)",
+      "Bash(cargo test)",
+      "Bash(cargo check:*)",
+      "Bash(nix develop:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
