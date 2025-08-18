@@ -48,13 +48,13 @@ The framework offers a comprehensive I/O simulation layer that can replace real 
 
 ## Core Components
 
-### 1. Simulation World (`Sim`)
+### 1. Simulation World (`SimWorld`)
 
 The central coordinator that maintains the simulation state. It acts as the global clock and event dispatcher, ensuring all simulated operations happen in deterministic order.
 
 **Responsibilities:**
 - Advance logical time by processing events
-- Coordinate between time and network engines
+- Coordinate between time and network engines (future phases)
 - Maintain deterministic execution order
 - Provide global simulation state
 
