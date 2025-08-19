@@ -38,6 +38,8 @@ pub mod events;
 pub mod network;
 /// Core simulation world and coordination logic.
 pub mod sim;
+/// Sleep functionality for simulation time.
+pub mod sleep;
 
 // Public API exports
 pub use error::{SimulationError, SimulationResult};
@@ -48,3 +50,4 @@ pub use network::{
     TcpListenerTrait, TokioNetworkProvider,
 };
 pub use sim::{SimWorld, WeakSimWorld};
+pub use sleep::SleepFuture;

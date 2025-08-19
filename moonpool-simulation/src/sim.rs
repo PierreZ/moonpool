@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     rc::{Rc, Weak},
     task::Waker,
     time::Duration,
@@ -13,6 +13,7 @@ use crate::{
         NetworkConfiguration,
         sim::{ConnectionId, ListenerId, SimNetworkProvider},
     },
+    sleep::SleepFuture,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -64,6 +65,11 @@ struct SimInner {
     listener_wakers: HashMap<ListenerId, Waker>,
     #[allow(dead_code)] // Will be used for proper async coordination in future phases
     read_wakers: HashMap<ConnectionId, Waker>,
+
+    // Phase 2d: Task management for sleep functionality
+    next_task_id: u64,
+    awakened_tasks: HashSet<u64>,
+    task_wakers: HashMap<u64, Waker>,
 }
 
 impl SimInner {
@@ -87,6 +93,11 @@ impl SimInner {
             connection_wakers: HashMap::new(),
             listener_wakers: HashMap::new(),
             read_wakers: HashMap::new(),
+
+            // Phase 2d: Initialize task management
+            next_task_id: 0,
+            awakened_tasks: HashSet::new(),
+            task_wakers: HashMap::new(),
         }
     }
 
@@ -302,12 +313,81 @@ impl SimWorld {
         }
     }
 
+    /// Sleep for the specified duration in simulation time.
+    ///
+    /// Returns a future that will complete when the simulation time has advanced
+    /// by the specified duration. This integrates with the event system by
+    /// scheduling a Wake event and coordinating with the async runtime.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use moonpool_simulation::SimWorld;
+    /// use std::time::Duration;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut sim = SimWorld::new();
+    ///
+    /// // Sleep for 100ms in simulation time
+    /// sim.sleep(Duration::from_millis(100)).await?;
+    ///
+    /// // Advance simulation until the sleep completes
+    /// sim.run_until_empty();
+    ///
+    /// assert_eq!(sim.current_time(), Duration::from_millis(100));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn sleep(&self, duration: Duration) -> SleepFuture {
+        let task_id = self.generate_task_id();
+
+        // Schedule a wake event for this task
+        self.schedule_event(Event::Wake { task_id }, duration);
+
+        // Return a future that will be woken when the event is processed
+        SleepFuture::new(self.downgrade(), task_id)
+    }
+
+    /// Generate a unique task ID for sleep operations.
+    fn generate_task_id(&self) -> u64 {
+        let mut inner = self.inner.borrow_mut();
+        let task_id = inner.next_task_id;
+        inner.next_task_id += 1;
+        task_id
+    }
+
+    /// Check if a task has been awakened.
+    ///
+    /// This is used internally by SleepFuture to determine if its corresponding
+    /// Wake event has been processed.
+    pub(crate) fn is_task_awake(&self, task_id: u64) -> SimulationResult<bool> {
+        let inner = self.inner.borrow();
+        Ok(inner.awakened_tasks.contains(&task_id))
+    }
+
+    /// Register a waker for a task.
+    ///
+    /// This is used internally by SleepFuture to register a waker that should
+    /// be called when the task's Wake event is processed.
+    pub(crate) fn register_task_waker(&self, task_id: u64, waker: Waker) -> SimulationResult<()> {
+        let mut inner = self.inner.borrow_mut();
+        inner.task_wakers.insert(task_id, waker);
+        Ok(())
+    }
+
     fn process_event_with_inner(inner: &mut SimInner, event: Event) {
         // Process different event types
         match event {
-            Event::Wake { task_id: _ } => {
-                // For Phase 1, we just acknowledge the wake event
-                // In later phases, this will wake actual tasks
+            Event::Wake { task_id } => {
+                // Phase 2d: Real task waking implementation
+
+                // Mark this task as awakened
+                inner.awakened_tasks.insert(task_id);
+
+                // Wake the future that was sleeping
+                if let Some(waker) = inner.task_wakers.remove(&task_id) {
+                    waker.wake();
+                }
             }
             Event::BindComplete { listener_id: _ } => {
                 // Network bind completed - forward to network module for handling
