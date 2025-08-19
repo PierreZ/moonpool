@@ -37,9 +37,12 @@ fn deterministic_event_execution_order() {
     let first_result = &results[0];
     for (i, result) in results.iter().enumerate().skip(1) {
         assert_eq!(
-            result, first_result,
-            "Run {} produced different execution times than the first run. Expected: {:?}, Got: {:?}", 
-            i + 1, first_result, result
+            result,
+            first_result,
+            "Run {} produced different execution times than the first run. Expected: {:?}, Got: {:?}",
+            i + 1,
+            first_result,
+            result
         );
     }
 

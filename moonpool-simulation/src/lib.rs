@@ -34,10 +34,14 @@
 pub mod error;
 /// Event scheduling and processing for the simulation engine.
 pub mod events;
+/// Network simulation and abstraction layer.
+pub mod network;
 /// Core simulation world and coordination logic.
 pub mod sim;
 
 // Public API exports
 pub use error::{SimulationError, SimulationResult};
 pub use events::{Event, EventQueue, ScheduledEvent};
+// Network exports
+pub use network::{NetworkProvider, TcpListenerTrait, TokioNetworkProvider};
 pub use sim::{SimWorld, WeakSimWorld};

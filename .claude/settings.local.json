@@ -5,7 +5,8 @@
       "Bash(cargo test)",
       "Bash(cargo check:*)",
       "Bash(nix develop:*)",
-      "Bash(mkdir:*)"
+      "Bash(mkdir:*)",
+      "WebFetch(domain:pierrezemb.fr)"
     ],
     "deny": [],
     "ask": [],
