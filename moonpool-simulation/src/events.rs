@@ -8,6 +8,25 @@ pub enum Event {
         /// The unique identifier for the task to wake.
         task_id: u64,
     },
+
+    // Phase 2b network events
+    /// Listener bind operation completed
+    BindComplete {
+        /// Unique identifier for the listener
+        listener_id: u64,
+    },
+    /// Connection establishment completed
+    ConnectionReady {
+        /// Unique identifier for the connection
+        connection_id: u64,
+    },
+    /// Data delivery to connection's receive buffer
+    DataDelivery {
+        /// Unique identifier for the connection
+        connection_id: u64,
+        /// The data being delivered
+        data: Vec<u8>,
+    },
 }
 
 /// An event scheduled for execution at a specific simulation time.

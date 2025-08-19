@@ -1,19 +1,55 @@
 use std::{
     cell::RefCell,
+    collections::HashMap,
     rc::{Rc, Weak},
+    task::Waker,
     time::Duration,
 };
 
 use crate::{
     error::{SimulationError, SimulationResult},
     events::{Event, EventQueue, ScheduledEvent},
+    network::sim::{ConnectionId, ListenerId, SimNetworkProvider},
 };
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
+use std::collections::VecDeque;
+
+/// Internal connection state for simulation
+#[derive(Debug)]
+struct ConnectionState {
+    id: ConnectionId,
+    addr: String,
+    receive_buffer: VecDeque<u8>,
+}
+
+/// Internal listener state for simulation
+#[derive(Debug)]
+struct ListenerState {
+    id: ListenerId,
+    addr: String,
+    pending_connections: VecDeque<ConnectionId>,
+}
 
 #[derive(Debug)]
 struct SimInner {
     current_time: Duration,
     event_queue: EventQueue,
     next_sequence: u64,
+
+    // Phase 2b network simulation state
+    rng: ChaCha8Rng,
+    next_connection_id: u64,
+    next_listener_id: u64,
+
+    // Network state registries
+    connections: HashMap<ConnectionId, ConnectionState>,
+    listeners: HashMap<ListenerId, ListenerState>,
+
+    // Waker storage for async coordination (simplified for Phase 2b)
+    connection_wakers: HashMap<ConnectionId, Waker>,
+    listener_wakers: HashMap<ListenerId, Waker>,
+    read_wakers: HashMap<ConnectionId, Waker>,
 }
 
 impl SimInner {
@@ -22,6 +58,18 @@ impl SimInner {
             current_time: Duration::ZERO, // Starts at Duration::ZERO (0 unix time)
             event_queue: EventQueue::new(),
             next_sequence: 0,
+
+            // Initialize with deterministic seed for reproducible testing
+            rng: ChaCha8Rng::seed_from_u64(0),
+            next_connection_id: 0,
+            next_listener_id: 0,
+
+            connections: HashMap::new(),
+            listeners: HashMap::new(),
+
+            connection_wakers: HashMap::new(),
+            listener_wakers: HashMap::new(),
+            read_wakers: HashMap::new(),
         }
     }
 }
@@ -119,11 +167,74 @@ impl SimWorld {
         self.inner.borrow().event_queue.len()
     }
 
+    /// Create a network provider for this simulation
+    pub fn network_provider(&self) -> SimNetworkProvider {
+        SimNetworkProvider::new(self.downgrade())
+    }
+
+    /// Access shared RNG for deterministic delays and randomization
+    pub fn with_rng<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut ChaCha8Rng) -> R,
+    {
+        let mut inner = self.inner.borrow_mut();
+        f(&mut inner.rng)
+    }
+
+    /// Create a listener in the simulation (used by SimNetworkProvider)
+    pub(crate) fn create_listener(&self, addr: String) -> SimulationResult<ListenerId> {
+        let mut inner = self.inner.borrow_mut();
+        let listener_id = ListenerId(inner.next_listener_id);
+        inner.next_listener_id += 1;
+
+        inner.listeners.insert(
+            listener_id,
+            ListenerState {
+                id: listener_id,
+                addr,
+                pending_connections: VecDeque::new(),
+            },
+        );
+
+        Ok(listener_id)
+    }
+
+    /// Create a connection in the simulation (used by SimNetworkProvider)
+    pub(crate) fn create_connection(&self, addr: String) -> SimulationResult<ConnectionId> {
+        let mut inner = self.inner.borrow_mut();
+        let connection_id = ConnectionId(inner.next_connection_id);
+        inner.next_connection_id += 1;
+
+        inner.connections.insert(
+            connection_id,
+            ConnectionState {
+                id: connection_id,
+                addr,
+                receive_buffer: VecDeque::new(),
+            },
+        );
+
+        Ok(connection_id)
+    }
+
     fn process_event(&self, event: Event) {
         match event {
             Event::Wake { task_id: _ } => {
                 // For Phase 1, we just acknowledge the wake event
                 // In later phases, this will wake actual tasks
+            }
+            Event::BindComplete { listener_id: _ } => {
+                // Network bind completed - simplified for Phase 2b
+            }
+            Event::ConnectionReady { connection_id: _ } => {
+                // Connection establishment completed - simplified for Phase 2b
+            }
+            Event::DataDelivery {
+                connection_id: _,
+                data: _,
+            } => {
+                // Data delivery completed - simplified for Phase 2b
+                // In a full implementation, this would deliver data to the receive buffer
             }
         }
     }

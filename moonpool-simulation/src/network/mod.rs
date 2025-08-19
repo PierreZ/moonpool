@@ -9,8 +9,12 @@ pub mod traits;
 /// Real networking implementation using Tokio
 pub mod tokio;
 
+/// Simulated networking implementation for testing
+pub mod sim;
+
 // Re-export main traits
 pub use traits::{NetworkProvider, TcpListenerTrait};
 
-// Re-export Tokio implementation
+// Re-export implementations
+pub use sim::SimNetworkProvider;
 pub use tokio::TokioNetworkProvider;
