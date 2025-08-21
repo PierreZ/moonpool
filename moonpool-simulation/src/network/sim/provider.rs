@@ -3,6 +3,7 @@ use crate::network::traits::NetworkProvider;
 use crate::{Event, WeakSimWorld};
 use async_trait::async_trait;
 use std::io;
+use tracing::instrument;
 
 /// Simulated networking implementation
 #[derive(Debug, Clone)]
@@ -22,6 +23,7 @@ impl NetworkProvider for SimNetworkProvider {
     type TcpStream = SimTcpStream;
     type TcpListener = SimTcpListener;
 
+    #[instrument(skip(self))]
     async fn bind(&self, addr: &str) -> io::Result<Self::TcpListener> {
         let sim = self
             .sim
@@ -48,6 +50,7 @@ impl NetworkProvider for SimNetworkProvider {
         Ok(listener)
     }
 
+    #[instrument(skip(self))]
     async fn connect(&self, addr: &str) -> io::Result<Self::TcpStream> {
         let sim = self
             .sim

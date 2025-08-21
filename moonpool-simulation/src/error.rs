@@ -9,7 +9,16 @@ pub enum SimulationError {
     /// The simulation is in an invalid state.
     #[error("Invalid simulation state: {0}")]
     InvalidState(String),
+    /// An I/O error occurred during simulation.
+    #[error("I/O error: {0}")]
+    IoError(String),
 }
 
 /// A type alias for `Result<T, SimulationError>`.
 pub type SimulationResult<T> = Result<T, SimulationError>;
+
+impl From<std::io::Error> for SimulationError {
+    fn from(err: std::io::Error) -> Self {
+        SimulationError::IoError(err.to_string())
+    }
+}

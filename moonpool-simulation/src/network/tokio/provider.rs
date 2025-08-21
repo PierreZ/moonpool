@@ -1,6 +1,7 @@
 use crate::network::traits::{NetworkProvider, TcpListenerTrait};
 use async_trait::async_trait;
 use std::io;
+use tracing::instrument;
 
 /// Real Tokio networking implementation
 #[derive(Debug, Clone)]
@@ -24,11 +25,13 @@ impl NetworkProvider for TokioNetworkProvider {
     type TcpStream = tokio::net::TcpStream;
     type TcpListener = TokioTcpListener;
 
+    #[instrument(skip(self))]
     async fn bind(&self, addr: &str) -> io::Result<Self::TcpListener> {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         Ok(TokioTcpListener { inner: listener })
     }
 
+    #[instrument(skip(self))]
     async fn connect(&self, addr: &str) -> io::Result<Self::TcpStream> {
         tokio::net::TcpStream::connect(addr).await
     }
@@ -44,6 +47,7 @@ pub struct TokioTcpListener {
 impl TcpListenerTrait for TokioTcpListener {
     type TcpStream = tokio::net::TcpStream;
 
+    #[instrument(skip(self))]
     async fn accept(&self) -> io::Result<(Self::TcpStream, String)> {
         let (stream, addr) = self.inner.accept().await?;
         Ok((stream, addr.to_string()))

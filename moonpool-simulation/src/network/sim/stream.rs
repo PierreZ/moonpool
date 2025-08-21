@@ -8,6 +8,7 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tracing::instrument;
 
 /// Simulated TCP stream
 pub struct SimTcpStream {
@@ -23,6 +24,7 @@ impl SimTcpStream {
 }
 
 impl AsyncRead for SimTcpStream {
+    #[instrument(skip(self, cx, buf))]
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -52,6 +54,7 @@ impl AsyncRead for SimTcpStream {
 }
 
 impl AsyncWrite for SimTcpStream {
+    #[instrument(skip(self, _cx, buf))]
     fn poll_write(
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
@@ -111,6 +114,7 @@ impl SimTcpListener {
 impl TcpListenerTrait for SimTcpListener {
     type TcpStream = SimTcpStream;
 
+    #[instrument(skip(self))]
     async fn accept(&self) -> io::Result<(Self::TcpStream, String)> {
         let sim = self
             .sim

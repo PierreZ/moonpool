@@ -5,6 +5,7 @@ use std::{
     task::Waker,
     time::Duration,
 };
+use tracing::instrument;
 
 use crate::{
     assertions::reset_assertion_results,
@@ -74,6 +75,9 @@ struct SimInner {
 
     // Phase 2e: Pending connection pairs for bidirectional communication
     pending_connections: HashMap<String, ConnectionId>,
+
+    // Phase 3c: Event processing metrics
+    events_processed: u64,
 }
 
 impl SimInner {
@@ -103,6 +107,9 @@ impl SimInner {
 
             // Phase 2e: Initialize pending connections
             pending_connections: HashMap::new(),
+
+            // Phase 3c: Initialize event metrics
+            events_processed: 0,
         }
     }
 
@@ -211,6 +218,7 @@ impl SimWorld {
     ///
     /// Returns `true` if more events are available for processing,
     /// `false` if this was the last event or if no events are available.
+    #[instrument(skip(self))]
     pub fn step(&mut self) -> bool {
         let mut inner = self.inner.borrow_mut();
 
@@ -230,6 +238,7 @@ impl SimWorld {
     }
 
     /// Processes all scheduled events until the queue is empty.
+    #[instrument(skip(self))]
     pub fn run_until_empty(&mut self) {
         while self.step() {
             // Continue processing events
@@ -242,6 +251,7 @@ impl SimWorld {
     }
 
     /// Schedules an event to execute after the specified delay from the current time.
+    #[instrument(skip(self))]
     pub fn schedule_event(&self, event: Event, delay: Duration) {
         let mut inner = self.inner.borrow_mut();
         let scheduled_time = inner.current_time + delay;
@@ -473,6 +483,7 @@ impl SimWorld {
     /// # Ok(())
     /// # }
     /// ```
+    #[instrument(skip(self))]
     pub fn sleep(&self, duration: Duration) -> SleepFuture {
         let task_id = self.generate_task_id();
 
@@ -510,7 +521,11 @@ impl SimWorld {
         Ok(())
     }
 
+    #[instrument(skip(inner))]
     fn process_event_with_inner(inner: &mut SimInner, event: Event) {
+        // Increment event processing counter for metrics
+        inner.events_processed += 1;
+
         // Process different event types
         match event {
             Event::Wake { task_id } => {
@@ -614,6 +629,37 @@ impl SimWorld {
     pub fn reset_assertion_results(&self) {
         crate::assertions::reset_assertion_results();
     }
+
+    /// Extract simulation metrics for reporting.
+    ///
+    /// Returns the current simulation metrics including simulated time,
+    /// events processed, and custom metrics. This is useful for integration
+    /// with the simulation reporting framework.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use moonpool_simulation::SimWorld;
+    ///
+    /// let mut sim = SimWorld::new();
+    /// sim.run_until_empty();
+    ///
+    /// let metrics = sim.extract_metrics();
+    /// println!("Simulated time: {:?}", metrics.simulated_time);
+    /// println!("Events processed: {}", metrics.events_processed);
+    /// ```
+    pub fn extract_metrics(&self) -> crate::report::SimulationMetrics {
+        use std::collections::HashMap;
+
+        let inner = self.inner.borrow();
+
+        crate::report::SimulationMetrics {
+            wall_time: std::time::Duration::ZERO, // This will be filled by the report builder
+            simulated_time: inner.current_time,
+            events_processed: inner.events_processed,
+            custom_metrics: HashMap::new(), // Can be extended in future phases
+        }
+    }
 }
 
 impl Default for SimWorld {
@@ -709,6 +755,24 @@ impl WeakSimWorld {
     ) -> SimulationResult<()> {
         let sim = self.upgrade()?;
         sim.write_to_connection(connection_id, data)
+    }
+
+    /// Get a network provider for the simulation.
+    ///
+    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
+    /// has been dropped.
+    pub fn network_provider(&self) -> SimulationResult<SimNetworkProvider> {
+        let sim = self.upgrade()?;
+        Ok(sim.network_provider())
+    }
+
+    /// Sleep for the specified duration in simulation time.
+    ///
+    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
+    /// has been dropped.
+    pub fn sleep(&self, duration: Duration) -> SimulationResult<SleepFuture> {
+        let sim = self.upgrade()?;
+        Ok(sim.sleep(duration))
     }
 }
 

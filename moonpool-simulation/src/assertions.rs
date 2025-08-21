@@ -90,9 +90,7 @@ thread_local! {
 pub fn record_assertion(name: &str, success: bool) {
     ASSERTION_RESULTS.with(|results| {
         let mut results = results.borrow_mut();
-        let stats = results
-            .entry(name.to_string())
-            .or_default();
+        let stats = results.entry(name.to_string()).or_default();
         stats.record(success);
     });
 }
