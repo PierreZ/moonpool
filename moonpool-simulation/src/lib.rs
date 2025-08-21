@@ -36,6 +36,8 @@ pub mod error;
 pub mod events;
 /// Network simulation and abstraction layer.
 pub mod network;
+/// Thread-local random number generation for simulation.
+pub mod rng;
 /// Core simulation world and coordination logic.
 pub mod sim;
 /// Sleep functionality for simulation time.
@@ -49,5 +51,6 @@ pub use network::{
     LatencyConfiguration, LatencyRange, NetworkConfiguration, NetworkProvider, SimNetworkProvider,
     TcpListenerTrait, TokioNetworkProvider,
 };
+pub use rng::{reset_sim_rng, set_sim_seed, sim_random, sim_random_range};
 pub use sim::{SimWorld, WeakSimWorld};
 pub use sleep::SleepFuture;

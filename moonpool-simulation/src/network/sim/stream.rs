@@ -63,8 +63,7 @@ impl AsyncWrite for SimTcpStream {
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown"))?;
 
         // Get write delay from network configuration
-        let delay =
-            sim.with_network_config_and_rng(|config, rng| config.latency.write_latency.sample(rng));
+        let delay = sim.with_network_config(|config| config.latency.write_latency.sample());
 
         // Schedule data delivery to paired connection with configured delay
 
@@ -119,8 +118,7 @@ impl TcpListenerTrait for SimTcpListener {
             .map_err(|_| io::Error::other("simulation shutdown"))?;
 
         // Get accept delay from network configuration
-        let delay = sim
-            .with_network_config_and_rng(|config, rng| config.latency.accept_latency.sample(rng));
+        let delay = sim.with_network_config(|config| config.latency.accept_latency.sample());
 
         // Get the pending connection created by connect() call
         let connection_id = sim

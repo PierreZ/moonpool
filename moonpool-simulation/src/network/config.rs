@@ -1,3 +1,4 @@
+use crate::rng::sim_random_range;
 use std::time::Duration;
 
 /// Configuration for network simulation parameters
@@ -60,12 +61,28 @@ impl LatencyRange {
         }
     }
 
-    /// Generate a random duration within this range using the provided RNG
-    pub fn sample<R: rand::Rng>(&self, rng: &mut R) -> Duration {
+    /// Generate a random duration within this range using thread-local RNG.
+    ///
+    /// This method uses the thread-local simulation RNG for deterministic
+    /// randomness based on the current seed. The same seed will always
+    /// produce the same sequence of latency values.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use moonpool_simulation::{LatencyRange, set_sim_seed};
+    /// use std::time::Duration;
+    ///
+    /// set_sim_seed(42);
+    /// let range = LatencyRange::new(Duration::from_millis(10), Duration::from_millis(5));
+    /// let latency = range.sample();
+    /// // latency will be between 10ms and 15ms, deterministic based on seed
+    /// ```
+    pub fn sample(&self) -> Duration {
         if self.jitter.is_zero() {
             self.base
         } else {
-            let jitter_nanos = rng.gen_range(0..=self.jitter.as_nanos() as u64);
+            let jitter_nanos = sim_random_range(0..(self.jitter.as_nanos() as u64 + 1));
             self.base + Duration::from_nanos(jitter_nanos)
         }
     }

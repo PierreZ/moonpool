@@ -13,10 +13,9 @@ use crate::{
         NetworkConfiguration,
         sim::{ConnectionId, ListenerId, SimNetworkProvider},
     },
+    rng::{reset_sim_rng, set_sim_seed},
     sleep::SleepFuture,
 };
-use rand::SeedableRng;
-use rand_chacha::ChaCha8Rng;
 use std::collections::VecDeque;
 
 /// Internal connection state for simulation
@@ -49,7 +48,6 @@ struct SimInner {
     next_sequence: u64,
 
     // Phase 2b network simulation state
-    rng: ChaCha8Rng,
     next_connection_id: u64,
     next_listener_id: u64,
 
@@ -84,8 +82,6 @@ impl SimInner {
             event_queue: EventQueue::new(),
             next_sequence: 0,
 
-            // Initialize with deterministic seed for reproducible testing
-            rng: ChaCha8Rng::seed_from_u64(0),
             next_connection_id: 0,
             next_listener_id: 0,
 
@@ -128,7 +124,41 @@ pub struct SimWorld {
 
 impl SimWorld {
     /// Creates a new simulation world with default network configuration.
+    ///
+    /// Uses default seed (0) for reproducible testing. For custom seeds,
+    /// use [`SimWorld::new_with_seed`].
     pub fn new() -> Self {
+        // Initialize with default seed for deterministic behavior
+        reset_sim_rng();
+        set_sim_seed(0);
+
+        Self {
+            inner: Rc::new(RefCell::new(SimInner::new())),
+        }
+    }
+
+    /// Creates a new simulation world with a specific seed for deterministic randomness.
+    ///
+    /// This method ensures clean thread-local RNG state by resetting before
+    /// setting the seed, making it safe for consecutive simulations on the same thread.
+    ///
+    /// # Parameters
+    ///
+    /// * `seed` - The seed value for deterministic randomness
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use moonpool_simulation::SimWorld;
+    ///
+    /// // Create simulation with specific seed for reproducible behavior
+    /// let mut sim = SimWorld::new_with_seed(42);
+    /// // All random operations will be deterministic based on seed 42
+    /// ```
+    pub fn new_with_seed(seed: u64) -> Self {
+        reset_sim_rng();
+        set_sim_seed(seed);
+
         Self {
             inner: Rc::new(RefCell::new(SimInner::new())),
         }
@@ -136,6 +166,37 @@ impl SimWorld {
 
     /// Creates a new simulation world with custom network configuration.
     pub fn new_with_network_config(network_config: NetworkConfiguration) -> Self {
+        // Initialize with default seed for deterministic behavior
+        reset_sim_rng();
+        set_sim_seed(0);
+
+        Self {
+            inner: Rc::new(RefCell::new(SimInner::new_with_config(network_config))),
+        }
+    }
+
+    /// Creates a new simulation world with both custom network configuration and seed.
+    ///
+    /// # Parameters
+    ///
+    /// * `network_config` - Network configuration for latency and fault simulation
+    /// * `seed` - The seed value for deterministic randomness
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use moonpool_simulation::{SimWorld, NetworkConfiguration};
+    ///
+    /// let config = NetworkConfiguration::default();
+    /// let mut sim = SimWorld::new_with_network_config_and_seed(config, 42);
+    /// ```
+    pub fn new_with_network_config_and_seed(
+        network_config: NetworkConfiguration,
+        seed: u64,
+    ) -> Self {
+        reset_sim_rng();
+        set_sim_seed(seed);
+
         Self {
             inner: Rc::new(RefCell::new(SimInner::new_with_config(network_config))),
         }
@@ -221,24 +282,32 @@ impl SimWorld {
         SimNetworkProvider::new(self.downgrade())
     }
 
-    /// Access shared RNG for deterministic delays and randomization
-    pub fn with_rng<F, R>(&self, f: F) -> R
+    /// Access network configuration for latency calculations using thread-local RNG.
+    ///
+    /// This method provides access to the network configuration for calculating
+    /// latencies and other network parameters. Random values should be generated
+    /// using the thread-local RNG functions like `sim_random()`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use moonpool_simulation::{SimWorld, sim_random_range};
+    /// use std::time::Duration;
+    ///
+    /// let sim = SimWorld::new();
+    /// let delay = sim.with_network_config(|config| {
+    ///     // Use thread-local RNG for random delay
+    ///     let base_latency = config.latency.connect_latency.base;
+    ///     let jitter_ms = sim_random_range(0..100);
+    ///     base_latency + Duration::from_millis(jitter_ms)
+    /// });
+    /// ```
+    pub fn with_network_config<F, R>(&self, f: F) -> R
     where
-        F: FnOnce(&mut ChaCha8Rng) -> R,
+        F: FnOnce(&NetworkConfiguration) -> R,
     {
-        let mut inner = self.inner.borrow_mut();
-        f(&mut inner.rng)
-    }
-
-    /// Access network configuration and RNG together for latency calculations
-    pub fn with_network_config_and_rng<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&NetworkConfiguration, &mut ChaCha8Rng) -> R,
-    {
-        let mut inner = self.inner.borrow_mut();
-        // Split borrows to avoid conflict
-        let config = &inner.network_config.clone(); // Clone config to avoid borrow conflict
-        f(config, &mut inner.rng)
+        let inner = self.inner.borrow();
+        f(&inner.network_config)
     }
 
     /// Create a listener in the simulation (used by SimNetworkProvider)
@@ -548,16 +617,16 @@ impl WeakSimWorld {
         Ok(())
     }
 
-    /// Access network configuration and RNG together for latency calculations
+    /// Access network configuration for latency calculations using thread-local RNG.
     ///
     /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
     /// has been dropped.
-    pub fn with_network_config_and_rng<F, R>(&self, f: F) -> SimulationResult<R>
+    pub fn with_network_config<F, R>(&self, f: F) -> SimulationResult<R>
     where
-        F: FnOnce(&NetworkConfiguration, &mut ChaCha8Rng) -> R,
+        F: FnOnce(&NetworkConfiguration) -> R,
     {
         let sim = self.upgrade()?;
-        Ok(sim.with_network_config_and_rng(f))
+        Ok(sim.with_network_config(f))
     }
 
     /// Read data from connection's receive buffer

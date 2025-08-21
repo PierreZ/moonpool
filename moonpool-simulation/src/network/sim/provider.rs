@@ -29,8 +29,7 @@ impl NetworkProvider for SimNetworkProvider {
             .map_err(|_| io::Error::other("simulation shutdown"))?;
 
         // Get bind delay from network configuration and schedule bind completion event
-        let delay =
-            sim.with_network_config_and_rng(|config, rng| config.latency.bind_latency.sample(rng));
+        let delay = sim.with_network_config(|config| config.latency.bind_latency.sample());
 
         // Schedule bind completion event to advance simulation time
         let listener_id = sim
@@ -56,8 +55,7 @@ impl NetworkProvider for SimNetworkProvider {
             .map_err(|_| io::Error::other("simulation shutdown"))?;
 
         // Get connect delay from network configuration and schedule connection event
-        let delay = sim
-            .with_network_config_and_rng(|config, rng| config.latency.connect_latency.sample(rng));
+        let delay = sim.with_network_config(|config| config.latency.connect_latency.sample());
 
         // Create a connection pair for bidirectional communication
         let (client_id, server_id) = sim
