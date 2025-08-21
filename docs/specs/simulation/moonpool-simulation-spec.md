@@ -196,6 +196,134 @@ The simulated network types implement the exact same traits as Tokio's networkin
 
 Simulated time operations provide the same interface as `std::time` and Tokio's time utilities, but work with logical time instead of wall-clock time. Sleep operations schedule wake events in the simulation queue rather than blocking on actual time passage, enabling deterministic and fast test execution.
 
+## Simulation Report System
+
+### Report API and Metrics Collection
+
+The framework provides comprehensive reporting and metrics collection for analyzing simulation behavior across multiple runs. The `SimulationReport` captures detailed statistics and behavioral patterns to help understand system performance under various conditions.
+
+**Core API Pattern:**
+```rust
+let report = SimulationBuilder::new()
+    .set_iterations(100)
+    .register_workload("ping_pong", |seed| async move {
+        // Test logic here
+        let provider = get_network_provider(seed);
+        run_ping_pong_test(provider).await
+    })
+    .register_workload("consensus", |seed| async move {
+        // Another test scenario
+        run_consensus_test(seed).await
+    })
+    .run().await;
+
+// Analyze results
+println!("Total simulated time: {:?}", report.total_simulated_time());
+println!("Iterations completed: {}", report.iterations());
+println!("Success rate: {:.2}%", report.success_rate());
+```
+
+### SimulationReport Structure
+
+The `SimulationReport` provides comprehensive metrics and analysis:
+
+**Core Metrics:**
+- **Total Wall Time**: Real time spent running all iterations
+- **Total Simulated Time**: Sum of logical time across all iterations  
+- **Iteration Count**: Number of completed simulation runs
+- **Success Rate**: Percentage of iterations that completed successfully
+- **Failure Analysis**: Detailed breakdown of failure modes and their frequencies
+
+
+### Workload Registration System
+
+The framework supports registering multiple async workloads that can be executed across different seeds and iterations:
+
+**Workload Interface:**
+```rust
+pub trait WorkloadFunction: Fn(u64) -> Pin<Box<dyn Future<Output = WorkloadResult> + Send>> {}
+
+pub struct SimulationBuilder {
+    iterations: usize,
+    workloads: Vec<(&'static str, Box<dyn WorkloadFunction>)>,
+    seed_strategy: SeedStrategy,
+}
+
+impl SimulationBuilder {
+    pub fn register_workload<F, Fut>(self, name: &'static str, workload: F) -> Self 
+    where
+        F: Fn(u64) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = WorkloadResult> + Send + 'static,
+    {
+        // Register async closure for execution
+    }
+}
+```
+
+**Workload Execution Model:**
+- Each workload receives a unique seed for deterministic randomness
+- Workloads are executed in isolation with fresh simulation state
+- Failed workloads are captured in the report with detailed error information
+- Workloads can be combined and executed in different orders
+
+### Multiple Seeds Execution
+
+The framework automatically executes workloads across multiple seeds to comprehensively test system behavior:
+
+**Seed Management:**
+```rust
+pub enum SeedStrategy {
+    Random(usize),                      // Generate N random seeds
+}
+
+// Example usage
+let report = SimulationBuilder::new()
+    .set_iterations(1000)
+    .seed_strategy(SeedStrategy::Random(1000))
+    .register_workload("distributed_consensus", |seed| async move {
+        // Test runs with different seed each iteration
+        run_consensus_with_seed(seed).await
+    })
+    .run().await;
+```
+
+**Parallel Execution:**
+- Seeds can be executed in parallel across multiple threads
+- Each seed gets an isolated simulation environment
+- Results are aggregated into a comprehensive report
+- Failed seeds are retried with detailed logging
+
+### Thread-Local RNG Design
+
+The framework uses thread-local random number generation for better performance and cleaner API design:
+
+**Thread-Local RNG Architecture:**
+```rust
+thread_local! {
+    static SIM_RNG: RefCell<ChaCha8Rng> = RefCell::new(ChaCha8Rng::from_entropy());
+}
+
+pub fn sim_random<T>() -> T 
+where 
+    StandardDistribution: Distribution<T>,
+{
+    SIM_RNG.with(|rng| rng.borrow_mut().gen())
+}
+
+pub fn set_sim_seed(seed: u64) {
+    SIM_RNG.with(|rng| {
+        *rng.borrow_mut() = ChaCha8Rng::seed_from_u64(seed);
+    });
+}
+```
+
+**Benefits:**
+- No need to pass RNG through the simulation state
+- Cleaner API without explicit RNG parameters
+- Thread-safe by design (each thread has its own RNG)
+- Deterministic behavior within each thread/iteration
+- Compatible with single-core simulation execution model
+
 ## Usage Patterns
 
 ### 1. Library Integration
@@ -275,6 +403,120 @@ Default configurations should be pessimistic, creating hostile conditions that e
 
 **Simple Configuration:**
 Fault injection should be configurable through simple, understandable parameters. Complex network topologies or failure patterns should be built by composing simple fault types rather than requiring complex configuration schemas.
+
+## Buggify Chaos Testing System
+
+### Randomized Fault Injection
+
+Inspired by FoundationDB's Buggify system, the framework provides randomized chaos testing that automatically injects faults at strategic points in the code. This helps discover edge cases and race conditions that would be difficult to test manually.
+
+**Buggify API:**
+```rust
+// Probabilistic fault injection
+if buggify!(0.1) {  // 10% chance
+    // Inject network delay
+    sim_sleep(Duration::from_millis(sim_random_range(100..1000))).await;
+}
+```
+
+**Buggify Categories:**
+- **Network Buggify**: Random packet loss, delays, connection failures
+- **Timing Buggify**: Unexpected delays, early timeouts, clock skew
+- **Resource Buggify**: Memory pressure, file descriptor limits
+- **Logic Buggify**: State corruption, invalid messages, protocol violations
+
+**Integration with Thread-Local RNG:**
+Buggify uses the thread-local RNG system for deterministic randomization. The same seed will always produce the same sequence of buggify decisions, ensuring reproducible test failures.
+
+```rust
+// Buggify implementation using thread-local RNG
+pub fn buggify(probability: f64) -> bool {
+    debug_assert!(probability >= 0.0 && probability <= 1.0);
+    sim_random::<f64>() < probability
+}
+
+pub fn buggify_range<T>(min: T, max: T) -> T 
+where 
+    T: SampleUniform,
+{
+    sim_random_range(min..max)
+}
+```
+
+**Buggify Configuration:**
+```rust
+pub struct BuggifyConfig {
+    pub enabled: bool,
+}
+```
+
+**Strategic Injection Points:**
+Buggify should be placed at critical junctions where faults would expose the most bugs:
+- Before/after network operations
+- During state transitions
+- At synchronization points
+- During resource allocation/deallocation
+- At protocol boundaries
+
+### Chaos Engineering Integration
+
+The Buggify system integrates with the simulation framework to provide comprehensive chaos testing:
+
+**Automatic Fault Discovery:**
+- Continuously running tests with increasing fault rates
+- Automatic detection of new failure modes
+- Minimal reproduction of discovered failures
+- Integration with the SimulationReport for failure analysis
+
+
+## Assertions System
+
+The framework provides both traditional assertions and probabilistic "sometimes" assertions.
+
+**Basic API:**
+```rust
+// Traditional assertion - must always be true
+always_assert!(leader_elected, {
+    current_leader.is_some()
+}, "A leader must always be elected");
+
+// Sometimes assertion - should be true in some percentage of cases
+sometimes_assert!(consensus_reached_quickly, {
+    consensus_time < Duration::from_secs(5)
+}, "Consensus should complete quickly in normal conditions");
+```
+
+**Macro implementations:**
+```rust
+macro_rules! always_assert {
+    ($name:expr, $condition:expr, $description:expr) => {
+        {
+            let result = $condition;
+            // Record assertion result in simulation report
+            if let Some(report) = current_simulation_report() {
+                report.record_always_assertion($name, result, $description);
+            }
+            if !result {
+                panic!("Assertion failed: {} - {}", $name, $description);
+            }
+            result
+        }
+    };
+}
+
+macro_rules! sometimes_assert {
+    ($name:expr, $condition:expr, $description:expr) => {
+        {
+            let result = $condition;
+            // Record assertion result in simulation report for statistical analysis
+            if let Some(report) = current_simulation_report() {
+                report.record_sometimes_assertion($name, result, $description);
+            }
+            result
+        }
+    };
+}
+```
 
 ## Implementation Phases
 
