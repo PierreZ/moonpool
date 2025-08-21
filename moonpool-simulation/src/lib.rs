@@ -30,6 +30,8 @@
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 
+/// Assertion macros and result tracking for simulation testing.
+pub mod assertions;
 /// Error types and utilities for simulation operations.
 pub mod error;
 /// Event scheduling and processing for the simulation engine.
@@ -44,6 +46,7 @@ pub mod sim;
 pub mod sleep;
 
 // Public API exports
+pub use assertions::AssertionStats;
 pub use error::{SimulationError, SimulationResult};
 pub use events::{Event, EventQueue, ScheduledEvent};
 // Network exports
@@ -54,3 +57,5 @@ pub use network::{
 pub use rng::{reset_sim_rng, set_sim_seed, sim_random, sim_random_range};
 pub use sim::{SimWorld, WeakSimWorld};
 pub use sleep::SleepFuture;
+
+// Macros are automatically available at crate root when defined with #[macro_export]

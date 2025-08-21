@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::{
+    assertions::reset_assertion_results,
     error::{SimulationError, SimulationResult},
     events::{Event, EventQueue, ScheduledEvent},
     network::{
@@ -131,6 +132,7 @@ impl SimWorld {
         // Initialize with default seed for deterministic behavior
         reset_sim_rng();
         set_sim_seed(0);
+        reset_assertion_results();
 
         Self {
             inner: Rc::new(RefCell::new(SimInner::new())),
@@ -158,6 +160,7 @@ impl SimWorld {
     pub fn new_with_seed(seed: u64) -> Self {
         reset_sim_rng();
         set_sim_seed(seed);
+        reset_assertion_results();
 
         Self {
             inner: Rc::new(RefCell::new(SimInner::new())),
@@ -169,6 +172,7 @@ impl SimWorld {
         // Initialize with default seed for deterministic behavior
         reset_sim_rng();
         set_sim_seed(0);
+        reset_assertion_results();
 
         Self {
             inner: Rc::new(RefCell::new(SimInner::new_with_config(network_config))),
@@ -196,6 +200,7 @@ impl SimWorld {
     ) -> Self {
         reset_sim_rng();
         set_sim_seed(seed);
+        reset_assertion_results();
 
         Self {
             inner: Rc::new(RefCell::new(SimInner::new_with_config(network_config))),
@@ -557,6 +562,57 @@ impl SimWorld {
                 }
             }
         }
+    }
+
+    /// Get current assertion results for all tracked assertions.
+    ///
+    /// Returns a snapshot of assertion statistics collected during this simulation.
+    /// This provides access to both `always_assert!` and `sometimes_assert!` results
+    /// for statistical analysis of distributed system properties.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use moonpool_simulation::{SimWorld, always_assert, sometimes_assert};
+    /// use std::time::Duration;
+    ///
+    /// let sim = SimWorld::new_with_seed(42);
+    ///
+    /// // Example assertions (these would be in simulation logic)
+    /// always_assert!(system_running, true, "System should be running");
+    /// sometimes_assert!(fast_response, Duration::from_millis(50) < Duration::from_millis(100), "Responses should be fast");
+    ///
+    /// // Access results
+    /// let results = sim.assertion_results();
+    /// println!("System running: {:.2}% success", results.get("system_running").map_or(0.0, |s| s.success_rate()));
+    /// println!("Fast response rate: {:.2}%", results.get("fast_response").map_or(0.0, |s| s.success_rate()));
+    /// ```
+    pub fn assertion_results(
+        &self,
+    ) -> std::collections::HashMap<String, crate::assertions::AssertionStats> {
+        crate::assertions::get_assertion_results()
+    }
+
+    /// Reset assertion statistics to empty state.
+    ///
+    /// This should be called before each simulation run to ensure clean state
+    /// between consecutive simulations. It is automatically called by
+    /// `new_with_seed()` and related methods.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use moonpool_simulation::{SimWorld, sometimes_assert};
+    ///
+    /// let sim = SimWorld::new();
+    /// sometimes_assert!(test_assertion, true, "Test assertion");
+    /// assert_eq!(sim.assertion_results()["test_assertion"].total_checks, 1);
+    ///
+    /// sim.reset_assertion_results();
+    /// assert!(sim.assertion_results().is_empty());
+    /// ```
+    pub fn reset_assertion_results(&self) {
+        crate::assertions::reset_assertion_results();
     }
 }
 
