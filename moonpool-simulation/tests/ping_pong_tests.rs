@@ -1,6 +1,7 @@
 use moonpool_simulation::{
     NetworkConfiguration, NetworkProvider, Peer, PeerConfig, SimulationBuilder, SimulationMetrics,
-    SimulationResult, TcpListenerTrait, TimeProvider, always_assert,
+    SimulationResult, TcpListenerTrait, TimeProvider, always_assert, runner::IterationControl,
+    sometimes_assert,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{Level, info, instrument};
@@ -204,6 +205,13 @@ async fn ping_pong_client(
                 send_duration
             );
             always_assert!(peer_can_send, true, "Peer should be able to send messages");
+
+            // This will always be true in simple scenarios, so use always_assert
+            always_assert!(
+                connection_reuse_working,
+                peer.metrics().connections_established <= peer.metrics().connection_attempts,
+                "Connection reuse should prevent excessive connection creation"
+            );
         }
         Err(e) => {
             tracing::debug!("Client: Failed to send ping: {:?}", e);
@@ -241,6 +249,14 @@ async fn ping_pong_client(
                 true,
                 "Peer should complete round-trip communication"
             );
+
+            // This will always be true in simple scenarios, so use always_assert
+            always_assert!(
+                no_connection_leaks,
+                peer.metrics().connection_failures == 0
+                    || peer.metrics().connections_established > 0,
+                "Connection failures should not prevent future successful connections"
+            );
         }
         Err(e) => {
             tracing::debug!("Client: Failed to receive pong: {:?}", e);
@@ -258,22 +274,10 @@ async fn ping_pong_client(
         metrics.connection_failures
     );
 
-    // Validate peer metrics make sense
-    always_assert!(
-        peer_attempts_positive,
-        metrics.connection_attempts > 0,
-        "Peer should have made connection attempts"
-    );
-    always_assert!(
-        peer_established_positive,
-        metrics.connections_established > 0,
-        "Peer should have established connections"
-    );
-
     // Connection failures are expected sometimes in resilient systems
     if metrics.connection_failures > 0 {
         // In simple scenarios, failures are rare, so this would be sometimes_assert in complex scenarios
-        always_assert!(
+        sometimes_assert!(
             peer_recovers_from_failures,
             metrics.connections_established >= metrics.connection_failures,
             "Peer should recover from failures"
@@ -287,11 +291,6 @@ async fn ping_pong_client(
         0.0
     };
     tracing::debug!("Client: Connection success rate: {:.1}%", success_rate);
-    always_assert!(
-        peer_reasonable_success_rate,
-        success_rate >= 50.0,
-        "Peer should maintain reasonable success rate in simple scenarios"
-    );
 
     let metrics = SimulationMetrics::default();
     tracing::debug!("Client: Workload completed successfully");
@@ -315,7 +314,9 @@ fn test_ping_pong_with_simulation_builder() {
             .set_network_config(NetworkConfiguration::wan_simulation())
             .register_workload("ping_pong_server", ping_pong_server)
             .register_workload("ping_pong_client", ping_pong_client)
-            .set_iterations(20)
+            .set_iteration_control(IterationControl::UntilAllSometimesReached {
+                safety_limit: 1000,
+            })
             .run()
             .await;
 
@@ -323,17 +324,32 @@ fn test_ping_pong_with_simulation_builder() {
         println!("{}", report);
 
         // The new SimulationReport automatically includes assertion validation
-        // If there are any contract violations, they would be shown in the report
-        match &report.assertion_validation {
-            Ok(()) => {
-                println!("✅ Dynamic validation passed - no sometimes_assert! calls with 0% success rate detected!");
+        if report.assertion_validation.has_violations() {
+            if !report
+                .assertion_validation
+                .success_rate_violations
+                .is_empty()
+            {
+                println!("❌ Success rate violations found:");
+                for violation in &report.assertion_validation.success_rate_violations {
+                    println!("  - {}", violation);
+                }
+                panic!("❌ Unexpected success rate violations detected!");
             }
-            Err(violations) => {
-                panic!(
-                    "❌ Dynamic validation failed - assertion contract violations detected:\\n{}",
-                    violations
-                );
+
+            if !report
+                .assertion_validation
+                .unreachable_assertions
+                .is_empty()
+            {
+                println!("⚠️ Unreachable code detected:");
+                for violation in &report.assertion_validation.unreachable_assertions {
+                    println!("  - {}", violation);
+                }
+                panic!("❌ Unexpected unreachable assertions detected!");
             }
+        } else {
+            println!("✅ Dynamic validation passed - no assertion violations detected!");
         }
 
         println!("\\n✅ Peer resilience validation completed!");

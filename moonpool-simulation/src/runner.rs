@@ -7,7 +7,10 @@ use tracing::instrument;
 
 use crate::{
     SimulationResult,
-    assertions::{AssertionStats, get_assertion_results, validate_assertion_contracts},
+    assertions::{
+        AssertionStats, REGISTERED_ASSERTIONS, ValidationReport, get_assertion_results,
+        validate_assertion_contracts,
+    },
     reset_sim_rng, set_sim_seed,
 };
 use std::collections::HashMap;
@@ -15,6 +18,22 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
+
+/// Configuration for how many iterations a simulation should run.
+///
+/// Provides flexible control over simulation execution duration and completion criteria.
+#[derive(Debug, Clone)]
+pub enum IterationControl {
+    /// Run a fixed number of iterations with specific seeds
+    FixedCount(usize),
+    /// Run for a specific duration of wall-clock time
+    TimeLimit(Duration),
+    /// Run until all sometimes_assert! assertions have been reached (with a safety limit)
+    UntilAllSometimesReached {
+        /// Maximum number of iterations to prevent infinite loops
+        safety_limit: usize,
+    },
+}
 
 /// Core metrics collected during a simulation run.
 #[derive(Debug, Clone, PartialEq)]
@@ -54,8 +73,8 @@ pub struct SimulationReport {
     pub seeds_used: Vec<u64>,
     /// Aggregated assertion results across all iterations
     pub assertion_results: HashMap<String, AssertionStats>,
-    /// Assertion validation result
-    pub assertion_validation: Result<(), String>,
+    /// Assertion validation result with detailed violation information
+    pub assertion_validation: ValidationReport,
 }
 
 impl SimulationReport {
@@ -135,11 +154,21 @@ impl fmt::Display for SimulationReport {
 
         writeln!(f)?;
         writeln!(f, "=== Assertion Validation ===")?;
-        match &self.assertion_validation {
-            Ok(()) => writeln!(f, "✅ All assertions follow their contracts!")?,
-            Err(violations) => {
-                writeln!(f, "❌ Assertion contract violations:")?;
-                writeln!(f, "{}", violations)?;
+        if !self.assertion_validation.has_violations() {
+            writeln!(f, "✅ All assertions follow their contracts!")?;
+        } else {
+            if !self.assertion_validation.success_rate_violations.is_empty() {
+                writeln!(f, "❌ Success rate violations:")?;
+                for violation in &self.assertion_validation.success_rate_violations {
+                    writeln!(f, "  - {}", violation)?;
+                }
+            }
+
+            if !self.assertion_validation.unreachable_assertions.is_empty() {
+                writeln!(f, "❌ Unreachable code detected:")?;
+                for violation in &self.assertion_validation.unreachable_assertions {
+                    writeln!(f, "  - {}", violation)?;
+                }
             }
         }
 
@@ -186,7 +215,7 @@ impl fmt::Debug for Workload {
 /// Builder pattern for configuring and running simulation experiments.
 #[derive(Debug)]
 pub struct SimulationBuilder {
-    iterations: usize,
+    iteration_control: IterationControl,
     workloads: Vec<Workload>,
     seeds: Vec<u64>,
     next_ip: u32, // For auto-assigning IP addresses starting from 10.0.0.1
@@ -203,7 +232,7 @@ impl SimulationBuilder {
     /// Create a new empty simulation builder.
     pub fn new() -> Self {
         Self {
-            iterations: 1,
+            iteration_control: IterationControl::FixedCount(1),
             workloads: Vec::new(),
             seeds: Vec::new(),
             next_ip: 1, // Start from 10.0.0.1
@@ -242,7 +271,25 @@ impl SimulationBuilder {
 
     /// Set the number of iterations to run.
     pub fn set_iterations(mut self, iterations: usize) -> Self {
-        self.iterations = iterations;
+        self.iteration_control = IterationControl::FixedCount(iterations);
+        self
+    }
+
+    /// Set the iteration control strategy.
+    pub fn set_iteration_control(mut self, control: IterationControl) -> Self {
+        self.iteration_control = control;
+        self
+    }
+
+    /// Run for a specific wall-clock time duration.
+    pub fn set_time_limit(mut self, duration: Duration) -> Self {
+        self.iteration_control = IterationControl::TimeLimit(duration);
+        self
+    }
+
+    /// Run until all sometimes_assert! assertions have been reached.
+    pub fn run_until_all_sometimes_reached(mut self, safety_limit: usize) -> Self {
+        self.iteration_control = IterationControl::UntilAllSometimesReached { safety_limit };
         self
     }
 
@@ -259,6 +306,59 @@ impl SimulationBuilder {
         self
     }
 
+    /// Check if all registered sometimes_assert! assertions have been reached with at least one success.
+    /// This is used by the UntilAllSometimesReached iteration control.
+    fn all_sometimes_assertions_reached() -> bool {
+        let results = get_assertion_results();
+        let registry = REGISTERED_ASSERTIONS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // Get all registered assertion names across all modules
+        let all_registered: std::collections::HashSet<String> = registry
+            .values()
+            .flat_map(|assertions| assertions.iter())
+            .cloned()
+            .collect();
+
+        // Debug logging
+        tracing::debug!("Checking if all assertions reached with success:");
+        tracing::debug!("Registered assertions: {:?}", all_registered);
+        tracing::debug!(
+            "Executed assertions: {:?}",
+            results.keys().collect::<Vec<_>>()
+        );
+
+        // Check if all registered assertions have been executed AND have at least one success
+        for assertion_name in &all_registered {
+            match results.get(assertion_name) {
+                Some(stats) if stats.successes > 0 => {
+                    tracing::debug!(
+                        "Assertion {} reached with {} successes",
+                        assertion_name,
+                        stats.successes
+                    );
+                    // This assertion is satisfied
+                }
+                Some(stats) => {
+                    tracing::debug!(
+                        "Assertion {} executed {} times but never succeeded",
+                        assertion_name,
+                        stats.total_checks
+                    );
+                    return false;
+                }
+                None => {
+                    tracing::debug!("Missing assertion: {}", assertion_name);
+                    return false;
+                }
+            }
+        }
+
+        tracing::debug!("All assertions reached with at least one success!");
+        true
+    }
+
     #[instrument(skip_all)]
     /// Run the simulation and generate a report.
     pub async fn run(self) -> SimulationReport {
@@ -271,37 +371,64 @@ impl SimulationBuilder {
                 individual_metrics: Vec::new(),
                 seeds_used: Vec::new(),
                 assertion_results: HashMap::new(),
-                assertion_validation: Ok(()),
+                assertion_validation: ValidationReport::new(),
             };
         }
 
+        // Initialize iteration state
         let mut seeds_to_use = self.seeds.clone();
-
-        // Generate random seeds if none provided
-        if seeds_to_use.len() < self.iterations {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            use std::time::SystemTime;
-
-            let base_seed = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(12345);
-
-            for i in seeds_to_use.len()..self.iterations {
-                let mut hasher = DefaultHasher::new();
-                base_seed.hash(&mut hasher);
-                i.hash(&mut hasher);
-                seeds_to_use.push(hasher.finish());
-            }
-        }
-
         let mut individual_metrics = Vec::new();
         let mut successful_runs = 0;
         let mut failed_runs = 0;
         let mut aggregated_metrics = SimulationMetrics::default();
 
-        for (_, &seed) in seeds_to_use.iter().enumerate().take(self.iterations) {
+        // Generate random seeds if none provided
+        let base_seed = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(12345);
+
+        let mut iteration_count = 0;
+        let start_time = Instant::now();
+
+        loop {
+            // Check exit conditions
+            match &self.iteration_control {
+                IterationControl::FixedCount(count) => {
+                    if iteration_count >= *count {
+                        break;
+                    }
+                }
+                IterationControl::TimeLimit(duration) => {
+                    if start_time.elapsed() >= *duration {
+                        break;
+                    }
+                }
+                IterationControl::UntilAllSometimesReached { safety_limit } => {
+                    if iteration_count >= *safety_limit {
+                        break;
+                    }
+                    if iteration_count > 0 && Self::all_sometimes_assertions_reached() {
+                        break;
+                    }
+                }
+            }
+
+            // Get or generate seed for this iteration
+            let seed = if iteration_count < seeds_to_use.len() {
+                seeds_to_use[iteration_count]
+            } else {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                base_seed.hash(&mut hasher);
+                iteration_count.hash(&mut hasher);
+                let new_seed = hasher.finish();
+                seeds_to_use.push(new_seed);
+                new_seed
+            };
+
+            iteration_count += 1;
             // Prepare clean state for this iteration
             reset_sim_rng();
             set_sim_seed(seed);
@@ -505,12 +632,14 @@ impl SimulationBuilder {
             }
         }
 
+        // End of main iteration loop
+
         // Collect assertion results and validate them
         let assertion_results = get_assertion_results();
         let assertion_validation = validate_assertion_contracts();
 
         SimulationReport {
-            iterations: self.iterations,
+            iterations: iteration_count,
             successful_runs,
             failed_runs,
             metrics: aggregated_metrics,
@@ -600,7 +729,7 @@ mod tests {
             individual_metrics: vec![],
             seeds_used: vec![1, 2],
             assertion_results: HashMap::new(),
-            assertion_validation: Ok(()),
+            assertion_validation: ValidationReport::new(),
         };
 
         let display = format!("{}", report);
