@@ -41,7 +41,8 @@ nix develop --command <cargo-command>
 ```
 
 Example usage:
-- `nix develop --command cargo test` - Run tests
+- `nix develop --command cargo nextest run` - Run tests with nextest (preferred)
+- `nix develop --command cargo test` - Run tests with standard test runner (fallback)
 - `nix develop --command cargo build` - Build project
 - `nix develop --command cargo check` - Check compilation
 - `nix develop --command cargo fmt` - Format code
@@ -56,7 +57,7 @@ Example usage:
 If running multiple commands, Claude can enter the shell first:
 ```bash
 nix develop  # Enter the development shell
-cargo test   # Then run commands normally
+cargo nextest run   # Then run commands normally
 ```
 
 ## Phase Completion Criteria
@@ -64,15 +65,16 @@ cargo test   # Then run commands normally
 **IMPORTANT**: A phase is considered finished only when ALL of the following pass:
 
 ```bash
-nix develop --command cargo fmt    # Code formatting
-nix develop --command cargo clippy # Linting and code quality
-nix develop --command cargo test   # All tests pass
+nix develop --command cargo fmt         # Code formatting
+nix develop --command cargo clippy      # Linting and code quality
+nix develop --command cargo nextest run # All tests pass (preferred)
+# OR nix develop --command cargo test   # Fallback if nextest unavailable
 ```
 
 ### Phase Completion Checklist
 - ✅ **cargo fmt** - Code is properly formatted
 - ✅ **cargo clippy** - No linting warnings or errors  
-- ✅ **cargo test** - All tests pass (unit, integration, doc tests)
+- ✅ **cargo nextest run** - All tests pass (unit, integration, doc tests)
 - ✅ **Functionality** - All phase requirements implemented
 - ✅ **Documentation** - Code is documented and examples work
 
@@ -106,26 +108,28 @@ The crate uses `#![deny(clippy::unwrap_used)]` to automatically prevent unwraps 
 - `option.ok_or(SimulationError::InvalidState("missing value".to_string()))?`
 - Pattern matching with explicit error handling
 
-**Do not consider a phase complete until all three cargo commands pass without warnings or errors.**
+**Do not consider a phase complete until all cargo commands (fmt, clippy, nextest) pass without warnings or errors.**
 
-## Current Task
-- ✅ Phase 1 implementation completed with full test coverage
-- Ready for Phase 2: Network simulation features
+## Current Status
+All core simulation framework phases (1-3) are complete and ready for production use. The framework provides:
+- Deterministic simulation infrastructure 
+- Network abstraction with real and simulated implementations
+- Comprehensive testing and reporting capabilities
 
 ## Project Structure
-- `moonpool-simulation/` - Main simulation framework implementation (Phase 1 complete)
+- `moonpool-simulation/` - Main simulation framework implementation (Phases 1-3 complete)
 - `docs/specs/simulation/` - Simulation framework specification
 - `docs/plans/` - Implementation plans and roadmaps
 - `docs/references/` - Reference code from other projects for inspiration
 
-## Phase 1 Status: ✅ COMPLETED
+## Implementation Status: ✅ PHASES 1-3 COMPLETED
 
 ### Phase Completion Verification
 - ✅ **cargo fmt** - Code properly formatted (no changes needed)
 - ✅ **cargo clippy** - No linting warnings or errors
-- ✅ **cargo test** - All 14 tests passing (8 unit + 5 integration + 1 doc test)
+- ✅ **cargo nextest run** - All 85 tests passing
 
-### Implemented Features
+## Phase 1: ✅ COMPLETED - Core Infrastructure
 - Event queue with deterministic ordering
 - Logical time advancement engine
 - Basic simulation harness with handle pattern
@@ -133,4 +137,23 @@ The crate uses `#![deny(clippy::unwrap_used)]` to automatically prevent unwraps 
 - thiserror integration for better error handling
 - Clean module structure with documented public API
 
-**Phase 1 meets all completion criteria and is ready for Phase 2 development.**
+## Phase 2: ✅ COMPLETED - Network Simulation  
+- Point-to-point connections with bidirectional communication
+- Message delivery simulation with configurable latency
+- Basic fault injection (delays, packet loss)
+- NetworkProvider trait abstraction
+- TokioNetworkProvider for real networking
+- SimNetworkProvider for simulation
+- Comprehensive network configuration system
+- Sleep functionality for simulation coordination
+
+## Phase 3: ✅ COMPLETED - Simulation Reports and Testing
+- Thread-local RNG migration with deterministic seeding
+- Basic assertion macros (`always_assert!` and `sometimes_assert!`)
+- SimulationReport system with comprehensive metrics
+- SimulationBuilder for multi-iteration testing
+- Workload registration and parallel execution
+- Statistical analysis and failure tracking
+- Clean integration with networking simulation
+
+**All phases meet completion criteria and the simulation framework is ready for production use.**

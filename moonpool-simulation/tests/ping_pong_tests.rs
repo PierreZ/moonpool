@@ -151,7 +151,9 @@ async fn ping_pong_client(
     // Add coordination sleep to allow server setup before client connects
     // This prevents race conditions in concurrent workload execution
     tracing::debug!("Client: Sleeping for 100ms to allow server setup");
-    provider.sleep(std::time::Duration::from_millis(100))?.await?;
+    provider
+        .sleep(std::time::Duration::from_millis(100))?
+        .await?;
     tracing::debug!("Client: Sleep completed, connecting to server");
 
     // Connect to the server
@@ -170,7 +172,10 @@ async fn ping_pong_client(
     let mut response_buffer = [0u8; 6];
     client.read_exact(&mut response_buffer).await?;
     assert_eq!(&response_buffer, b"PONG-0");
-    tracing::debug!("Client: Received pong: {:?}", std::str::from_utf8(&response_buffer));
+    tracing::debug!(
+        "Client: Received pong: {:?}",
+        std::str::from_utf8(&response_buffer)
+    );
 
     let mut metrics = SimulationMetrics::default();
     metrics
@@ -180,12 +185,10 @@ async fn ping_pong_client(
     Ok(metrics)
 }
 
-
-
 #[test]
 fn test_ping_pong_with_simulation_builder() {
     let _ = tracing_subscriber::fmt()
-        .with_max_level(Level::DEBUG)  // Enable debug logging
+        .with_max_level(Level::DEBUG) // Enable debug logging
         .try_init();
 
     let local_runtime = tokio::runtime::Builder::new_current_thread()
@@ -228,4 +231,3 @@ fn test_ping_pong_with_simulation_builder() {
         println!("Simulation report:\n{}", report);
     });
 }
-

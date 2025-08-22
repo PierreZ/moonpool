@@ -102,18 +102,19 @@ pub struct AcceptFuture {
 
 impl Future for AcceptFuture {
     type Output = io::Result<(SimTcpStream, String)>;
-    
+
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let sim = match self.sim.upgrade() {
             Ok(sim) => sim,
             Err(_) => return Poll::Ready(Err(io::Error::other("simulation shutdown"))),
         };
-        
+
         match sim.get_pending_connection(&self.local_addr) {
             Ok(Some(connection_id)) => {
                 // Get accept delay from network configuration
-                let delay = sim.with_network_config(|config| config.latency.accept_latency.sample());
-                
+                let delay =
+                    sim.with_network_config(|config| config.latency.accept_latency.sample());
+
                 // Schedule accept completion event to advance simulation time
                 sim.schedule_event(
                     Event::ConnectionReady {
@@ -121,19 +122,25 @@ impl Future for AcceptFuture {
                     },
                     delay,
                 );
-                
+
                 let stream = SimTcpStream::new(self.sim.clone(), connection_id);
                 Poll::Ready(Ok((stream, "127.0.0.1:12345".to_string())))
-            },
+            }
             Ok(None) => {
                 // No connection available yet - register waker for when connection becomes available
                 if let Err(e) = sim.register_accept_waker(&self.local_addr, cx.waker().clone()) {
-                    Poll::Ready(Err(io::Error::other(format!("failed to register accept waker: {}", e))))
+                    Poll::Ready(Err(io::Error::other(format!(
+                        "failed to register accept waker: {}",
+                        e
+                    ))))
                 } else {
                     Poll::Pending
                 }
-            },
-            Err(e) => Poll::Ready(Err(io::Error::other(format!("failed to get pending connection: {}", e)))),
+            }
+            Err(e) => Poll::Ready(Err(io::Error::other(format!(
+                "failed to get pending connection: {}",
+                e
+            )))),
         }
     }
 }
@@ -167,7 +174,8 @@ impl TcpListenerTrait for SimTcpListener {
             sim: self.sim.clone(),
             local_addr: self.local_addr.clone(),
             listener_id: self.listener_id,
-        }.await
+        }
+        .await
     }
 
     fn local_addr(&self) -> io::Result<String> {

@@ -290,7 +290,10 @@ impl SimulationBuilder {
                 vec![result]
             } else {
                 // Multiple workloads - spawn them and process events cooperatively
-                tracing::debug!("Spawning {} workloads with spawn_local", self.workloads.len());
+                tracing::debug!(
+                    "Spawning {} workloads with spawn_local",
+                    self.workloads.len()
+                );
                 let mut handles = Vec::new();
                 for (idx, workload) in self.workloads.iter().enumerate() {
                     tracing::debug!("Spawning workload {}: {}", idx, workload.name);
@@ -309,8 +312,12 @@ impl SimulationBuilder {
                 while !handles.is_empty() {
                     loop_count += 1;
                     if loop_count % 100 == 0 {
-                        tracing::debug!("Cooperative loop iteration {}, {} handles remaining, {} pending events", 
-                                      loop_count, handles.len(), sim.pending_event_count());
+                        tracing::debug!(
+                            "Cooperative loop iteration {}, {} handles remaining, {} pending events",
+                            loop_count,
+                            handles.len(),
+                            sim.pending_event_count()
+                        );
                     }
 
                     let initial_handle_count = handles.len();
@@ -318,7 +325,10 @@ impl SimulationBuilder {
 
                     // Process one simulation event to allow better interleaving
                     if sim.pending_event_count() > 0 {
-                        tracing::trace!("Processing one simulation event, {} events pending", sim.pending_event_count());
+                        tracing::trace!(
+                            "Processing one simulation event, {} events pending",
+                            sim.pending_event_count()
+                        );
                         sim.step();
                     }
 
@@ -332,11 +342,13 @@ impl SimulationBuilder {
                                 Ok(workload_result) => {
                                     tracing::debug!("Workload completed successfully");
                                     workload_result
-                                },
+                                }
                                 Err(_) => {
                                     tracing::error!("Workload task panicked");
-                                    Err(crate::SimulationError::InvalidState("Task panicked".to_string()))
-                                },
+                                    Err(crate::SimulationError::InvalidState(
+                                        "Task panicked".to_string(),
+                                    ))
+                                }
                             };
                             results.push(result);
                         } else {
@@ -345,17 +357,21 @@ impl SimulationBuilder {
                     }
 
                     // Check for deadlock: no events and no progress made
-                    if sim.pending_event_count() == 0 && 
-                       handles.len() == initial_handle_count && 
-                       initial_event_count == 0 {
+                    if sim.pending_event_count() == 0
+                        && handles.len() == initial_handle_count
+                        && initial_event_count == 0
+                    {
                         no_progress_count += 1;
                         if no_progress_count > 1000 {
-                            tracing::error!("Deadlock detected: {} tasks remaining but no events to process after {} iterations", 
-                                          handles.len(), no_progress_count);
+                            tracing::error!(
+                                "Deadlock detected: {} tasks remaining but no events to process after {} iterations",
+                                handles.len(),
+                                no_progress_count
+                            );
                             // Mark all remaining tasks as failed
                             for _ in 0..handles.len() {
                                 results.push(Err(crate::SimulationError::InvalidState(
-                                    "Deadlock detected: tasks stuck with no events".to_string()
+                                    "Deadlock detected: tasks stuck with no events".to_string(),
                                 )));
                             }
                             break;
@@ -366,12 +382,18 @@ impl SimulationBuilder {
 
                     // Yield to allow tasks to make progress
                     if !handles.is_empty() {
-                        tracing::trace!("Yielding to allow {} tasks to make progress", handles.len());
+                        tracing::trace!(
+                            "Yielding to allow {} tasks to make progress",
+                            handles.len()
+                        );
                         tokio::task::yield_now().await;
                     }
                 }
-                
-                tracing::debug!("All workloads completed after {} loop iterations, processing remaining events", loop_count);
+
+                tracing::debug!(
+                    "All workloads completed after {} loop iterations, processing remaining events",
+                    loop_count
+                );
                 // Process any remaining events after all workloads complete
                 sim.run_until_empty();
                 results
@@ -623,28 +645,28 @@ mod tests {
 
         let report = local_runtime.block_on(async move {
             SimulationBuilder::new()
-            .register_workload("workload1", |seed, _provider, _ip| async move {
-                let mut metrics = SimulationMetrics::default();
-                metrics.simulated_time = Duration::from_millis(seed % 50);
-                metrics.events_processed = seed % 5;
-                metrics
-                    .custom_metrics
-                    .insert("workload1_metric".to_string(), seed as f64);
-                Ok(metrics)
-            })
-            .register_workload("workload2", |seed, _provider, _ip| async move {
-                let mut metrics = SimulationMetrics::default();
-                metrics.simulated_time = Duration::from_millis((seed * 2) % 50);
-                metrics.events_processed = (seed * 2) % 5;
-                metrics
-                    .custom_metrics
-                    .insert("workload2_metric".to_string(), (seed * 2) as f64);
-                Ok(metrics)
-            })
-            .set_iterations(2)
-            .set_seeds(vec![10, 20])
-            .run()
-            .await
+                .register_workload("workload1", |seed, _provider, _ip| async move {
+                    let mut metrics = SimulationMetrics::default();
+                    metrics.simulated_time = Duration::from_millis(seed % 50);
+                    metrics.events_processed = seed % 5;
+                    metrics
+                        .custom_metrics
+                        .insert("workload1_metric".to_string(), seed as f64);
+                    Ok(metrics)
+                })
+                .register_workload("workload2", |seed, _provider, _ip| async move {
+                    let mut metrics = SimulationMetrics::default();
+                    metrics.simulated_time = Duration::from_millis((seed * 2) % 50);
+                    metrics.events_processed = (seed * 2) % 5;
+                    metrics
+                        .custom_metrics
+                        .insert("workload2_metric".to_string(), (seed * 2) as f64);
+                    Ok(metrics)
+                })
+                .set_iterations(2)
+                .set_seeds(vec![10, 20])
+                .run()
+                .await
         });
 
         assert_eq!(report.successful_runs, 2);

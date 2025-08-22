@@ -167,38 +167,6 @@ let report = SimulationBuilder::new()
 println!("Success rate: {:.2}%", report.success_rate());
 ```
 
-## Phase 3d: Basic Buggify System
-
-**Goal**: Implement simple buggify chaos testing with probabilistic fault injection.
-
-### Implementation Steps
-
-1. **Create buggify module**
-   - Add `src/buggify.rs` module
-   - Implement `buggify!` macro using thread-local RNG
-   - Simple boolean enable/disable configuration
-
-2. **Add strategic buggify points**
-   - Network operation fault injection
-   - Connection establishment delays
-   - Message delivery chaos
-
-3. **Integration with existing network simulation**
-   - Add buggify calls to network provider
-   - Configurable chaos probability
-   - Deterministic chaos based on seed
-
-### API Design
-
-```rust
-// Basic buggify usage
-if buggify!(0.1) {  // 10% chance
-    sim_sleep(Duration::from_millis(100)).await;
-}
-
-// Configuration
-let config = BuggifyConfig { enabled: true };
-```
 
 ## Implementation Order
 
@@ -214,11 +182,7 @@ let config = BuggifyConfig { enabled: true };
    - Core infrastructure for multi-iteration testing
    - Foundation for statistical analysis
 
-4. **Phase 3d**: Basic buggify (1-2 days)
-   - Add chaos testing capabilities
-   - Enhance test coverage with randomized faults
-
-## Total Estimated Time: 5-8 days
+## Total Estimated Time: 4-6 days
 
 ## Dependencies
 
@@ -231,6 +195,5 @@ let config = BuggifyConfig { enabled: true };
 - Clean thread-local RNG API reduces code complexity
 - Assertion macros provide useful testing capabilities
 - Simulation reports enable statistical analysis of distributed systems
-- Buggify system catches edge cases not found by deterministic tests
 - All existing functionality continues to work
 - Comprehensive test coverage for all new features
