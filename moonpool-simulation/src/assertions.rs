@@ -78,9 +78,10 @@ thread_local! {
     static ASSERTION_RESULTS: RefCell<HashMap<String, AssertionStats>> = RefCell::new(HashMap::new());
 }
 
+
 /// Record an assertion result for statistical tracking.
 ///
-/// This function is used internally by the assertion macros to track
+/// This function is used internally by the `sometimes_assert!` macro to track
 /// assertion outcomes for later analysis.
 ///
 /// # Parameters
@@ -145,15 +146,63 @@ pub fn reset_assertion_results() {
     });
 }
 
+/// Validate that all `sometimes_assert!` assertions actually behave as "sometimes".
+///
+/// This function checks that:
+/// - `sometimes_assert!` assertions have a success rate between 1% and 99%
+/// - `always_assert!` assertions have a 100% success rate (if they didn't panic)
+///
+/// This helps catch incorrect usage of assertion macros automatically.
+///
+/// # Returns
+///
+/// `Ok(())` if all assertions follow their contracts, or `Err(message)` with details
+/// about which assertions violate their contracts.
+///
+/// # Example
+///
+/// ```rust
+/// use moonpool_simulation::assertions::{validate_assertion_contracts, reset_assertion_results};
+///
+/// reset_assertion_results();
+/// // ... run simulation with assertions ...
+/// validate_assertion_contracts().expect("All assertions should follow their contracts");
+/// ```
+pub fn validate_assertion_contracts() -> Result<(), String> {
+    let results = get_assertion_results();
+
+    let mut violations = Vec::new();
+
+    for (name, stats) in &results {
+        // All tracked assertions are sometimes_assert! now
+        let rate = stats.success_rate();
+        if rate == 0.0 || rate == 100.0 {
+            violations.push(format!(
+                "sometimes_assert!('{}') has {:.1}% success rate (expected between 1% and 99%)",
+                name, rate
+            ));
+        }
+    }
+
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Assertion contract violations:\n{}",
+            violations.join("\n")
+        ))
+    }
+}
+
 /// Assert that a condition is always true, panicking on failure.
 ///
 /// This macro is used for conditions that must always hold in a correct
 /// distributed system implementation. If the condition fails, the simulation
-/// will panic with a descriptive error message.
+/// will panic immediately with a descriptive error message including the current seed.
 ///
 /// # Parameters
 ///
-/// * `name` - An identifier for this assertion (for tracking purposes)
+/// * `name` - An identifier for this assertion (for error reporting)
 /// * `condition` - The expression to evaluate (must be boolean)
 /// * `message` - A descriptive error message to show on failure
 ///
@@ -168,16 +217,17 @@ pub fn reset_assertion_results() {
 ///
 /// # Panics
 ///
-/// Panics if the condition evaluates to false.
+/// Panics immediately if the condition evaluates to false.
 #[macro_export]
 macro_rules! always_assert {
     ($name:ident, $condition:expr, $message:expr) => {
         let result = $condition;
-        $crate::assertions::record_assertion(stringify!($name), result);
         if !result {
+            let current_seed = $crate::get_current_sim_seed();
             panic!(
-                "Always assertion '{}' failed: {}",
+                "Always assertion '{}' failed (seed: {}): {}",
                 stringify!($name),
+                current_seed,
                 $message
             );
         }
@@ -211,7 +261,10 @@ macro_rules! always_assert {
 macro_rules! sometimes_assert {
     ($name:ident, $condition:expr, $message:expr) => {
         let result = $condition;
-        $crate::assertions::record_assertion(stringify!($name), result);
+        $crate::assertions::record_assertion(
+            stringify!($name),
+            result,
+        );
     };
 }
 
@@ -298,14 +351,14 @@ mod tests {
         let value = 42;
         always_assert!(value_is_42, value == 42, "Value should be 42");
 
+        // always_assert! no longer tracks successful assertions
+        // It only panics on failure, so successful calls leave no trace
         let results = get_assertion_results();
-        let stats = &results["value_is_42"];
-        assert_eq!(stats.total_checks, 1);
-        assert_eq!(stats.successes, 1);
+        assert!(results.is_empty(), "always_assert! should not be tracked when successful");
     }
 
     #[test]
-    #[should_panic(expected = "Always assertion 'impossible' failed: This should never happen")]
+    #[should_panic(expected = "Always assertion 'impossible' failed (seed: 0): This should never happen")]
     fn test_always_assert_failure() {
         let value = 42;
         always_assert!(impossible, value == 0, "This should never happen");
@@ -385,7 +438,10 @@ mod tests {
         );
 
         let results = get_assertion_results();
+        // Only sometimes_assert! is tracked now
+        assert_eq!(results.len(), 1, "Only sometimes_assert should be tracked");
         assert_eq!(results["sum_in_range"].success_rate(), 100.0);
-        assert_eq!(results["not_empty"].success_rate(), 100.0);
+        // always_assert! no longer appears in results when successful
+        assert!(!results.contains_key("not_empty"), "always_assert should not be tracked");
     }
 }

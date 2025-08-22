@@ -19,6 +19,12 @@ thread_local! {
     /// Uses ChaCha8Rng for deterministic, reproducible randomness.
     /// Each thread maintains independent state for parallel test execution.
     static SIM_RNG: RefCell<ChaCha8Rng> = RefCell::new(ChaCha8Rng::from_entropy());
+
+    /// Thread-local storage for the current simulation seed.
+    ///
+    /// This stores the last seed set via [`set_sim_seed`] to enable
+    /// error reporting with seed information.
+    static CURRENT_SEED: RefCell<u64> = const { RefCell::new(0) };
 }
 
 /// Generate a random value using the thread-local simulation RNG.
@@ -119,6 +125,30 @@ pub fn set_sim_seed(seed: u64) {
     SIM_RNG.with(|rng| {
         *rng.borrow_mut() = ChaCha8Rng::seed_from_u64(seed);
     });
+    CURRENT_SEED.with(|current| {
+        *current.borrow_mut() = seed;
+    });
+}
+
+/// Get the current simulation seed.
+///
+/// Returns the seed that was last set via [`set_sim_seed`].
+/// This is useful for error reporting to help reproduce failing test cases.
+///
+/// # Returns
+///
+/// The current simulation seed, or 0 if no seed has been set.
+///
+/// # Example
+///
+/// ```rust
+/// use moonpool_simulation::rng::{set_sim_seed, get_current_sim_seed};
+///
+/// set_sim_seed(12345);
+/// assert_eq!(get_current_sim_seed(), 12345);
+/// ```
+pub fn get_current_sim_seed() -> u64 {
+    CURRENT_SEED.with(|current| *current.borrow())
 }
 
 /// Reset the thread-local simulation RNG to a fresh state.
@@ -144,6 +174,9 @@ pub fn set_sim_seed(seed: u64) {
 pub fn reset_sim_rng() {
     SIM_RNG.with(|rng| {
         *rng.borrow_mut() = ChaCha8Rng::from_entropy();
+    });
+    CURRENT_SEED.with(|current| {
+        *current.borrow_mut() = 0;
     });
 }
 
@@ -256,5 +289,19 @@ mod tests {
             set_sim_seed(seed);
             assert_eq!(first, sim_random::<f64>());
         }
+    }
+
+    #[test]
+    fn test_get_current_sim_seed() {
+        // Test getting current seed after setting
+        set_sim_seed(12345);
+        assert_eq!(get_current_sim_seed(), 12345);
+
+        set_sim_seed(98765);
+        assert_eq!(get_current_sim_seed(), 98765);
+
+        // Test that reset clears the seed
+        reset_sim_rng();
+        assert_eq!(get_current_sim_seed(), 0);
     }
 }

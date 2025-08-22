@@ -50,7 +50,9 @@ pub mod sleep;
 pub mod time;
 
 // Public API exports
-pub use assertions::AssertionStats;
+pub use assertions::{
+    AssertionStats, get_assertion_results, validate_assertion_contracts,
+};
 pub use error::{SimulationError, SimulationResult};
 pub use events::{Event, EventQueue, ScheduledEvent};
 // Network exports
@@ -59,7 +61,7 @@ pub use network::{
     PeerError, PeerMetrics, SimNetworkProvider, TcpListenerTrait, TokioNetworkProvider,
 };
 // Time provider exports
-pub use rng::{reset_sim_rng, set_sim_seed, sim_random, sim_random_range};
+pub use rng::{get_current_sim_seed, reset_sim_rng, set_sim_seed, sim_random, sim_random_range};
 pub use runner::{SimulationBuilder, SimulationMetrics, SimulationReport, WorkloadTopology};
 pub use sim::{SimWorld, WeakSimWorld};
 pub use sleep::SleepFuture;

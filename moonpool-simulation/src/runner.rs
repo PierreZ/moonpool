@@ -5,7 +5,12 @@
 
 use tracing::instrument;
 
-use crate::{SimulationResult, reset_sim_rng, set_sim_seed};
+use crate::{
+    SimulationResult,
+    assertions::{AssertionStats, get_assertion_results, validate_assertion_contracts},
+    reset_sim_rng, set_sim_seed,
+};
+use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -47,6 +52,10 @@ pub struct SimulationReport {
     pub individual_metrics: Vec<SimulationResult<SimulationMetrics>>,
     /// Seeds used for each iteration
     pub seeds_used: Vec<u64>,
+    /// Aggregated assertion results across all iterations
+    pub assertion_results: HashMap<String, AssertionStats>,
+    /// Assertion validation result
+    pub assertion_validation: Result<(), String>,
 }
 
 impl SimulationReport {
@@ -106,6 +115,33 @@ impl fmt::Display for SimulationReport {
             "Average Events Processed: {:.1}",
             self.average_events_processed()
         )?;
+        writeln!(f)?;
+
+        writeln!(f, "=== Assertion Results ===")?;
+        if self.assertion_results.is_empty() {
+            writeln!(f, "No assertions recorded")?;
+        } else {
+            for (name, stats) in &self.assertion_results {
+                writeln!(
+                    f,
+                    "{}: {}/{} successes ({:.1}%)",
+                    name,
+                    stats.successes,
+                    stats.total_checks,
+                    stats.success_rate()
+                )?;
+            }
+        }
+
+        writeln!(f)?;
+        writeln!(f, "=== Assertion Validation ===")?;
+        match &self.assertion_validation {
+            Ok(()) => writeln!(f, "✅ All assertions follow their contracts!")?,
+            Err(violations) => {
+                writeln!(f, "❌ Assertion contract violations:")?;
+                writeln!(f, "{}", violations)?;
+            }
+        }
 
         Ok(())
     }
@@ -125,6 +161,7 @@ type WorkloadFn = Box<
     dyn Fn(
         u64,
         crate::SimNetworkProvider,
+        crate::SimTimeProvider,
         WorkloadTopology,
     ) -> Pin<Box<dyn Future<Output = SimulationResult<SimulationMetrics>>>>,
 >;
@@ -178,19 +215,20 @@ impl SimulationBuilder {
     ///
     /// # Arguments
     /// * `name` - Name for the workload (for reporting purposes)
-    /// * `workload` - Async function that takes a seed, NetworkProvider, and WorkloadTopology and returns simulation metrics
+    /// * `workload` - Async function that takes a seed, NetworkProvider, TimeProvider, and WorkloadTopology and returns simulation metrics
     pub fn register_workload<S, F, Fut>(mut self, name: S, workload: F) -> Self
     where
         S: Into<String>,
-        F: Fn(u64, crate::SimNetworkProvider, WorkloadTopology) -> Fut + 'static,
+        F: Fn(u64, crate::SimNetworkProvider, crate::SimTimeProvider, WorkloadTopology) -> Fut
+            + 'static,
         Fut: Future<Output = SimulationResult<SimulationMetrics>> + 'static,
     {
         // Auto-assign IP address starting from 10.0.0.1
         let ip_address = format!("10.0.0.{}", self.next_ip);
         self.next_ip += 1;
 
-        let boxed_workload = Box::new(move |seed, provider, topology| {
-            let fut = workload(seed, provider, topology);
+        let boxed_workload = Box::new(move |seed, provider, time_provider, topology| {
+            let fut = workload(seed, provider, time_provider, topology);
             Box::pin(fut) as Pin<Box<dyn Future<Output = SimulationResult<SimulationMetrics>>>>
         });
 
@@ -232,6 +270,8 @@ impl SimulationBuilder {
                 metrics: SimulationMetrics::default(),
                 individual_metrics: Vec::new(),
                 seeds_used: Vec::new(),
+                assertion_results: HashMap::new(),
+                assertion_validation: Ok(()),
             };
         }
 
@@ -289,7 +329,10 @@ impl SimulationBuilder {
                 let peer_ips = all_ips.iter().filter(|ip| *ip != &my_ip).cloned().collect();
                 let topology = WorkloadTopology { my_ip, peer_ips };
 
-                let result = (self.workloads[0].workload)(seed, provider.clone(), topology).await;
+                let time_provider = sim.time_provider();
+                let result =
+                    (self.workloads[0].workload)(seed, provider.clone(), time_provider, topology)
+                        .await;
                 vec![result]
             } else {
                 // Multiple workloads - spawn them and process events cooperatively
@@ -305,9 +348,11 @@ impl SimulationBuilder {
                     let peer_ips = all_ips.iter().filter(|ip| *ip != &my_ip).cloned().collect();
                     let topology = WorkloadTopology { my_ip, peer_ips };
 
+                    let time_provider = sim.time_provider();
                     let handle = tokio::task::spawn_local((workload.workload)(
                         seed,
                         provider.clone(),
+                        time_provider,
                         topology,
                     ));
                     handles.push(handle);
@@ -460,6 +505,10 @@ impl SimulationBuilder {
             }
         }
 
+        // Collect assertion results and validate them
+        let assertion_results = get_assertion_results();
+        let assertion_validation = validate_assertion_contracts();
+
         SimulationReport {
             iterations: self.iterations,
             successful_runs,
@@ -467,6 +516,8 @@ impl SimulationBuilder {
             metrics: aggregated_metrics,
             individual_metrics,
             seeds_used: seeds_to_use,
+            assertion_results,
+            assertion_validation,
         }
     }
 }
@@ -479,12 +530,15 @@ mod tests {
     #[tokio::test]
     async fn test_simulation_builder_basic() {
         let report = SimulationBuilder::new()
-            .register_workload("test_workload", |seed, _provider, _topology| async move {
-                let mut metrics = SimulationMetrics::default();
-                metrics.simulated_time = Duration::from_millis(seed % 100);
-                metrics.events_processed = seed % 10;
-                Ok(metrics)
-            })
+            .register_workload(
+                "test_workload",
+                |seed, _provider, _time_provider, _topology| async move {
+                    let mut metrics = SimulationMetrics::default();
+                    metrics.simulated_time = Duration::from_millis(seed % 100);
+                    metrics.events_processed = seed % 10;
+                    Ok(metrics)
+                },
+            )
             .set_iterations(3)
             .set_seeds(vec![1, 2, 3])
             .run()
@@ -504,7 +558,7 @@ mod tests {
         let report = SimulationBuilder::new()
             .register_workload(
                 "failing_workload",
-                |seed, _provider, _topology| async move {
+                |seed, _provider, _time_provider, _topology| async move {
                     if seed % 2 == 0 {
                         Err(crate::SimulationError::InvalidState(
                             "Test failure".to_string(),
@@ -545,6 +599,8 @@ mod tests {
             metrics,
             individual_metrics: vec![],
             seeds_used: vec![1, 2],
+            assertion_results: HashMap::new(),
+            assertion_validation: Ok(()),
         };
 
         let display = format!("{}", report);
@@ -558,12 +614,15 @@ mod tests {
 
         let report = SimulationBuilder::new()
             .set_network_config(wan_config)
-            .register_workload("network_test", |_seed, _provider, _topology| async move {
-                let mut metrics = SimulationMetrics::default();
-                metrics.simulated_time = Duration::from_millis(50);
-                metrics.events_processed = 10;
-                Ok(metrics)
-            })
+            .register_workload(
+                "network_test",
+                |_seed, _provider, _time_provider, _topology| async move {
+                    let mut metrics = SimulationMetrics::default();
+                    metrics.simulated_time = Duration::from_millis(50);
+                    metrics.events_processed = 10;
+                    Ok(metrics)
+                },
+            )
             .set_iterations(2)
             .set_seeds(vec![42, 43])
             .run()
@@ -589,18 +648,24 @@ mod tests {
 
         let report = local_runtime.block_on(async move {
             SimulationBuilder::new()
-                .register_workload("workload1", |seed, _provider, _topology| async move {
-                    let mut metrics = SimulationMetrics::default();
-                    metrics.simulated_time = Duration::from_millis(seed % 50);
-                    metrics.events_processed = seed % 5;
-                    Ok(metrics)
-                })
-                .register_workload("workload2", |seed, _provider, _topology| async move {
-                    let mut metrics = SimulationMetrics::default();
-                    metrics.simulated_time = Duration::from_millis((seed * 2) % 50);
-                    metrics.events_processed = (seed * 2) % 5;
-                    Ok(metrics)
-                })
+                .register_workload(
+                    "workload1",
+                    |seed, _provider, _time_provider, _topology| async move {
+                        let mut metrics = SimulationMetrics::default();
+                        metrics.simulated_time = Duration::from_millis(seed % 50);
+                        metrics.events_processed = seed % 5;
+                        Ok(metrics)
+                    },
+                )
+                .register_workload(
+                    "workload2",
+                    |seed, _provider, _time_provider, _topology| async move {
+                        let mut metrics = SimulationMetrics::default();
+                        metrics.simulated_time = Duration::from_millis((seed * 2) % 50);
+                        metrics.events_processed = (seed * 2) % 5;
+                        Ok(metrics)
+                    },
+                )
                 .set_iterations(2)
                 .set_seeds(vec![10, 20])
                 .run()

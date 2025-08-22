@@ -9,15 +9,13 @@ fn test_always_assert_success() {
     let value = 42;
     always_assert!(value_check, value == 42, "Value should be 42");
 
+    // always_assert! no longer tracks successful assertions
     let results = sim.assertion_results();
-    let stats = &results["value_check"];
-    assert_eq!(stats.total_checks, 1);
-    assert_eq!(stats.successes, 1);
-    assert_eq!(stats.success_rate(), 100.0);
+    assert!(results.is_empty(), "always_assert! should not be tracked when successful");
 }
 
 #[test]
-#[should_panic(expected = "Always assertion 'failing_check' failed: This should fail")]
+#[should_panic(expected = "Always assertion 'failing_check' failed (seed: 42): This should fail")]
 fn test_always_assert_failure() {
     let _sim = SimWorld::new_with_seed(42);
 
@@ -54,23 +52,18 @@ fn test_multiple_assertion_types() {
 
     let results = sim.assertion_results();
 
-    // Check system_valid assertions
-    let system_stats = &results["system_valid"];
-    assert_eq!(system_stats.total_checks, 1);
-    assert_eq!(system_stats.successes, 1);
-    assert_eq!(system_stats.success_rate(), 100.0);
-
-    // Check performance_good assertions
+    // Only sometimes_assert! calls are tracked now
+    assert_eq!(results.len(), 1);
+    
+    // Check performance_good assertions (only sometimes_assert! tracked)
     let perf_stats = &results["performance_good"];
     assert_eq!(perf_stats.total_checks, 2);
     assert_eq!(perf_stats.successes, 1);
     assert_eq!(perf_stats.success_rate(), 50.0);
 
-    // Check invariant_holds assertions
-    let invariant_stats = &results["invariant_holds"];
-    assert_eq!(invariant_stats.total_checks, 1);
-    assert_eq!(invariant_stats.successes, 1);
-    assert_eq!(invariant_stats.success_rate(), 100.0);
+    // always_assert! calls are no longer tracked
+    assert!(!results.contains_key("system_valid"));
+    assert!(!results.contains_key("invariant_holds"));
 }
 
 #[test]
@@ -109,8 +102,8 @@ fn test_simworld_assertion_methods() {
 
     // Test SimWorld assertion methods
     let results = sim.assertion_results();
-    assert_eq!(results.len(), 2);
-    assert!(results.contains_key("basic_check"));
+    assert_eq!(results.len(), 1);  // Only sometimes_assert! is tracked
+    assert!(!results.contains_key("basic_check"));  // always_assert! not tracked
     assert!(results.contains_key("probabilistic"));
 
     // Test manual reset
@@ -154,9 +147,10 @@ fn test_complex_simulation_workflow() {
 
     let results = sim.assertion_results();
 
-    // Verify invariants hold
-    assert_eq!(results["node_count_valid"].success_rate(), 100.0);
-    assert_eq!(results["leader_valid"].success_rate(), 100.0);
+    // Only sometimes_assert! calls are tracked now
+    assert_eq!(results.len(), 2);
+    assert!(!results.contains_key("node_count_valid"));
+    assert!(!results.contains_key("leader_valid"));
 
     // Verify performance metrics
     assert_eq!(results["fast_consensus"].total_checks, 10);
@@ -266,9 +260,12 @@ fn test_assertion_with_complex_conditions() {
 
     let results = sim.assertion_results();
 
-    assert_eq!(results["data_valid"].success_rate(), 100.0);
+    // Only sometimes_assert! is tracked now
+    assert_eq!(results.len(), 1);
     assert_eq!(results["performance_target"].success_rate(), 100.0);
-    assert_eq!(results["fibonacci_correct"].success_rate(), 100.0);
+    // always_assert! calls are no longer tracked
+    assert!(!results.contains_key("data_valid"));
+    assert!(!results.contains_key("fibonacci_correct"));
 }
 
 #[test]
@@ -292,11 +289,13 @@ fn test_assertion_macros_with_variables() {
 
     let results = sim.assertion_results();
 
-    assert_eq!(results.len(), 4);
-    assert_eq!(results["leadership"].success_rate(), 100.0);
+    // Only sometimes_assert! is tracked now (2 calls)
+    assert_eq!(results.len(), 2);
     assert_eq!(results["scale"].success_rate(), 100.0);
     assert_eq!(results["latency"].success_rate(), 100.0);
-    assert_eq!(results["message_valid"].success_rate(), 100.0);
+    // always_assert! calls are no longer tracked
+    assert!(!results.contains_key("leadership"));
+    assert!(!results.contains_key("message_valid"));
 }
 
 #[test]

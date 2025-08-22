@@ -63,6 +63,11 @@ impl Default for PeerMetrics {
 impl PeerMetrics {
     /// Create new metrics instance.
     pub fn new() -> Self {
+        Self::new_at(Instant::now())
+    }
+
+    /// Create new metrics instance with a specific creation time.
+    pub fn new_at(created_at: Instant) -> Self {
         Self {
             connection_attempts: 0,
             connections_established: 0,
@@ -74,7 +79,7 @@ impl PeerMetrics {
             bytes_sent: 0,
             bytes_received: 0,
             current_queue_size: 0,
-            created_at: Instant::now(),
+            created_at,
             last_connected: None,
             last_failure: None,
             consecutive_failures: 0,
@@ -90,16 +95,26 @@ impl PeerMetrics {
 
     /// Record a successful connection.
     pub fn record_connection_success(&mut self) {
+        self.record_connection_success_at(Instant::now());
+    }
+
+    /// Record a successful connection at a specific time.
+    pub fn record_connection_success_at(&mut self, now: Instant) {
         self.connections_established += 1;
-        self.last_connected = Some(Instant::now());
+        self.last_connected = Some(now);
         self.consecutive_failures = 0;
         self.is_connected = true;
     }
 
     /// Record a connection failure.
     pub fn record_connection_failure(&mut self, reconnect_delay: Duration) {
+        self.record_connection_failure_at(Instant::now(), reconnect_delay);
+    }
+
+    /// Record a connection failure at a specific time.
+    pub fn record_connection_failure_at(&mut self, now: Instant, reconnect_delay: Duration) {
         self.connection_failures += 1;
-        self.last_failure = Some(Instant::now());
+        self.last_failure = Some(now);
         self.consecutive_failures += 1;
         self.current_reconnect_delay = reconnect_delay;
         self.is_connected = false;

@@ -78,6 +78,7 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
     /// Create a new peer for the destination address.
     pub fn new(network: N, time: T, destination: String, config: PeerConfig) -> Self {
         let reconnect_state = ReconnectState::new(config.initial_reconnect_delay);
+        let now = time.now();
 
         Self {
             network,
@@ -87,7 +88,7 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
             send_queue: VecDeque::new(),
             reconnect_state,
             config,
-            metrics: PeerMetrics::new(),
+            metrics: PeerMetrics::new_at(now),
         }
     }
 
@@ -159,8 +160,10 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
                     Err(e) => {
                         // Connection failed
                         self.connection = None;
-                        self.metrics
-                            .record_connection_failure(self.reconnect_state.current_delay);
+                        self.metrics.record_connection_failure_at(
+                            self.time.now(),
+                            self.reconnect_state.current_delay,
+                        );
                         Err(e.into())
                     }
                 }
@@ -214,8 +217,10 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
                     Err(e) => {
                         // Connection failed - clear it
                         self.connection = None;
-                        self.metrics
-                            .record_connection_failure(self.reconnect_state.current_delay);
+                        self.metrics.record_connection_failure_at(
+                            self.time.now(),
+                            self.reconnect_state.current_delay,
+                        );
                         Err(e.into())
                     }
                 }
@@ -257,7 +262,7 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
         }
 
         // Record attempt
-        self.reconnect_state.last_attempt = Some(Instant::now());
+        self.reconnect_state.last_attempt = Some(self.time.now());
         self.metrics.record_connection_attempt();
 
         // Attempt connection with timeout
@@ -273,7 +278,7 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
                 self.connection = Some(stream);
                 self.reconnect_state
                     .reset(self.config.initial_reconnect_delay);
-                self.metrics.record_connection_success();
+                self.metrics.record_connection_success_at(self.time.now());
                 Ok(())
             }
             Ok(Ok(Err(e))) => {
@@ -308,7 +313,8 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
         self.reconnect_state.current_delay = next_delay;
         self.reconnect_state.reconnecting = true;
 
-        self.metrics.record_connection_failure(next_delay);
+        self.metrics
+            .record_connection_failure_at(self.time.now(), next_delay);
     }
 
     /// Process queued messages when connection is available.
