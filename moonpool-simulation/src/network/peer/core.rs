@@ -8,6 +8,7 @@ use super::config::PeerConfig;
 use super::error::{PeerError, PeerResult};
 use super::metrics::PeerMetrics;
 use crate::network::NetworkProvider;
+use crate::time::TimeProvider;
 
 /// State for managing reconnections with exponential backoff.
 #[derive(Debug, Clone)]
@@ -46,16 +47,19 @@ impl ReconnectState {
 /// A resilient peer that manages connections to a remote address.
 ///
 /// Provides automatic reconnection and message queuing while abstracting
-/// over NetworkProvider implementations.
-pub struct Peer<P: NetworkProvider> {
+/// over NetworkProvider and TimeProvider implementations.
+pub struct Peer<N: NetworkProvider, T: TimeProvider> {
     /// Network provider for creating connections
-    provider: P,
+    network: N,
+
+    /// Time provider for delays and timing
+    time: T,
 
     /// Destination address
     destination: String,
 
     /// Current connection state
-    connection: Option<P::TcpStream>,
+    connection: Option<N::TcpStream>,
 
     /// Message queue for pending sends (FIFO)
     send_queue: VecDeque<Vec<u8>>,
@@ -70,13 +74,14 @@ pub struct Peer<P: NetworkProvider> {
     metrics: PeerMetrics,
 }
 
-impl<P: NetworkProvider> Peer<P> {
+impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
     /// Create a new peer for the destination address.
-    pub fn new(provider: P, destination: String, config: PeerConfig) -> Self {
+    pub fn new(network: N, time: T, destination: String, config: PeerConfig) -> Self {
         let reconnect_state = ReconnectState::new(config.initial_reconnect_delay);
 
         Self {
-            provider,
+            network,
+            time,
             destination,
             connection: None,
             send_queue: VecDeque::new(),
@@ -87,8 +92,8 @@ impl<P: NetworkProvider> Peer<P> {
     }
 
     /// Create a new peer with default configuration.
-    pub fn new_with_defaults(provider: P, destination: String) -> Self {
-        Self::new(provider, destination, PeerConfig::default())
+    pub fn new_with_defaults(network: N, time: T, destination: String) -> Self {
+        Self::new(network, time, destination, PeerConfig::default())
     }
 
     /// Check if currently connected.
@@ -243,8 +248,11 @@ impl<P: NetworkProvider> Peer<P> {
             if elapsed < self.reconnect_state.current_delay {
                 let sleep_duration = self.reconnect_state.current_delay - elapsed;
 
-                // For now, use tokio sleep - we'll add simulation-aware sleep later
-                tokio::time::sleep(sleep_duration).await;
+                // Use TimeProvider for simulation-aware sleep
+                if self.time.sleep(sleep_duration).await.is_err() {
+                    // Sleep failed - likely simulation shutdown, return error
+                    return Err(PeerError::ConnectionFailed);
+                }
             }
         }
 
@@ -253,10 +261,14 @@ impl<P: NetworkProvider> Peer<P> {
         self.metrics.record_connection_attempt();
 
         // Attempt connection with timeout
-        let connect_future = self.provider.connect(&self.destination);
+        let connect_future = self.network.connect(&self.destination);
 
-        match tokio::time::timeout(self.config.connection_timeout, connect_future).await {
-            Ok(Ok(stream)) => {
+        match self
+            .time
+            .timeout(self.config.connection_timeout, connect_future)
+            .await
+        {
+            Ok(Ok(Ok(stream))) => {
                 // Connection successful
                 self.connection = Some(stream);
                 self.reconnect_state
@@ -264,15 +276,20 @@ impl<P: NetworkProvider> Peer<P> {
                 self.metrics.record_connection_success();
                 Ok(())
             }
-            Ok(Err(e)) => {
+            Ok(Ok(Err(e))) => {
                 // Connection failed
                 self.handle_connection_failure();
                 Err(e.into())
             }
-            Err(_) => {
+            Ok(Err(())) => {
                 // Timeout
                 self.handle_connection_failure();
                 Err(PeerError::Timeout)
+            }
+            Err(_) => {
+                // TimeProvider error (e.g., simulation shutdown)
+                self.handle_connection_failure();
+                Err(PeerError::ConnectionFailed)
             }
         }
     }
@@ -324,10 +341,11 @@ mod tests {
     #[tokio::test]
     async fn test_peer_creation() {
         let sim = SimWorld::new();
-        let provider = sim.network_provider();
+        let network = sim.network_provider();
+        let time = sim.time_provider();
         let config = PeerConfig::default();
 
-        let peer = Peer::new(provider, "test:8080".to_string(), config);
+        let peer = Peer::new(network, time, "test:8080".to_string(), config);
 
         assert_eq!(peer.destination(), "test:8080");
         assert!(!peer.is_connected());
@@ -337,9 +355,10 @@ mod tests {
     #[tokio::test]
     async fn test_peer_with_defaults() {
         let sim = SimWorld::new();
-        let provider = sim.network_provider();
+        let network = sim.network_provider();
+        let time = sim.time_provider();
 
-        let peer = Peer::new_with_defaults(provider, "test:8080".to_string());
+        let peer = Peer::new_with_defaults(network, time, "test:8080".to_string());
 
         assert_eq!(peer.destination(), "test:8080");
         assert!(!peer.is_connected());
@@ -348,9 +367,10 @@ mod tests {
     #[tokio::test]
     async fn test_peer_metrics_initialization() {
         let sim = SimWorld::new();
-        let provider = sim.network_provider();
+        let network = sim.network_provider();
+        let time = sim.time_provider();
 
-        let peer = Peer::new_with_defaults(provider, "test:8080".to_string());
+        let peer = Peer::new_with_defaults(network, time, "test:8080".to_string());
         let metrics = peer.metrics();
 
         assert_eq!(metrics.connection_attempts, 0);

@@ -297,6 +297,11 @@ impl SimWorld {
         SimNetworkProvider::new(self.downgrade())
     }
 
+    /// Create a time provider for this simulation
+    pub fn time_provider(&self) -> crate::time::SimTimeProvider {
+        crate::time::SimTimeProvider::new(self.downgrade())
+    }
+
     /// Access network configuration for latency calculations using thread-local RNG.
     ///
     /// This method provides access to the network configuration for calculating
@@ -787,6 +792,15 @@ impl WeakSimWorld {
     pub fn network_provider(&self) -> SimulationResult<SimNetworkProvider> {
         let sim = self.upgrade()?;
         Ok(sim.network_provider())
+    }
+
+    /// Get a time provider for the simulation.
+    ///
+    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
+    /// has been dropped.
+    pub fn time_provider(&self) -> SimulationResult<crate::time::SimTimeProvider> {
+        let sim = self.upgrade()?;
+        Ok(sim.time_provider())
     }
 
     /// Sleep for the specified duration in simulation time.

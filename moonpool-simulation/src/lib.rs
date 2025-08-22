@@ -46,6 +46,8 @@ pub mod runner;
 pub mod sim;
 /// Sleep functionality for simulation time.
 pub mod sleep;
+/// Time provider abstraction for simulation and real time.
+pub mod time;
 
 // Public API exports
 pub use assertions::AssertionStats;
@@ -56,9 +58,11 @@ pub use network::{
     LatencyConfiguration, LatencyRange, NetworkConfiguration, NetworkProvider, Peer, PeerConfig,
     PeerError, PeerMetrics, SimNetworkProvider, TcpListenerTrait, TokioNetworkProvider,
 };
+// Time provider exports
 pub use rng::{reset_sim_rng, set_sim_seed, sim_random, sim_random_range};
 pub use runner::{SimulationBuilder, SimulationMetrics, SimulationReport, WorkloadTopology};
 pub use sim::{SimWorld, WeakSimWorld};
 pub use sleep::SleepFuture;
+pub use time::{SimTimeProvider, TimeProvider, TokioTimeProvider};
 
 // Macros are automatically available at crate root when defined with #[macro_export]

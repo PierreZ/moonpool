@@ -1,7 +1,5 @@
 [profile.default]
-# Set a reasonable timeout for tests to prevent hanging
-slow-timeout = { period = "30s", terminate-after = 2 }
-leak-timeout = "5s"
+slow-timeout = { period = "1s", terminate-after = 2 }
 
 # Show test output for hanging tests
 failure-output = "immediate"
@@ -13,8 +11,3 @@ test-threads = 1
 [profile.default.junit]
 # Store test results
 path = "target/nextest/default/junit.xml"
-
-# Override settings for specific tests that might need more time
-[[profile.default.overrides]]
-filter = 'test(ping_pong)'
-slow-timeout = { period = "10s", terminate-after = 1 }
