@@ -78,7 +78,6 @@ thread_local! {
     static ASSERTION_RESULTS: RefCell<HashMap<String, AssertionStats>> = RefCell::new(HashMap::new());
 }
 
-
 /// Record an assertion result for statistical tracking.
 ///
 /// This function is used internally by the `sometimes_assert!` macro to track
@@ -261,10 +260,7 @@ macro_rules! always_assert {
 macro_rules! sometimes_assert {
     ($name:ident, $condition:expr, $message:expr) => {
         let result = $condition;
-        $crate::assertions::record_assertion(
-            stringify!($name),
-            result,
-        );
+        $crate::assertions::record_assertion(stringify!($name), result);
     };
 }
 
@@ -354,11 +350,16 @@ mod tests {
         // always_assert! no longer tracks successful assertions
         // It only panics on failure, so successful calls leave no trace
         let results = get_assertion_results();
-        assert!(results.is_empty(), "always_assert! should not be tracked when successful");
+        assert!(
+            results.is_empty(),
+            "always_assert! should not be tracked when successful"
+        );
     }
 
     #[test]
-    #[should_panic(expected = "Always assertion 'impossible' failed (seed: 0): This should never happen")]
+    #[should_panic(
+        expected = "Always assertion 'impossible' failed (seed: 0): This should never happen"
+    )]
     fn test_always_assert_failure() {
         let value = 42;
         always_assert!(impossible, value == 0, "This should never happen");
@@ -442,6 +443,9 @@ mod tests {
         assert_eq!(results.len(), 1, "Only sometimes_assert should be tracked");
         assert_eq!(results["sum_in_range"].success_rate(), 100.0);
         // always_assert! no longer appears in results when successful
-        assert!(!results.contains_key("not_empty"), "always_assert should not be tracked");
+        assert!(
+            !results.contains_key("not_empty"),
+            "always_assert should not be tracked"
+        );
     }
 }

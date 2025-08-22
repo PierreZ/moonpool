@@ -11,7 +11,10 @@ fn test_always_assert_success() {
 
     // always_assert! no longer tracks successful assertions
     let results = sim.assertion_results();
-    assert!(results.is_empty(), "always_assert! should not be tracked when successful");
+    assert!(
+        results.is_empty(),
+        "always_assert! should not be tracked when successful"
+    );
 }
 
 #[test]
@@ -54,7 +57,7 @@ fn test_multiple_assertion_types() {
 
     // Only sometimes_assert! calls are tracked now
     assert_eq!(results.len(), 1);
-    
+
     // Check performance_good assertions (only sometimes_assert! tracked)
     let perf_stats = &results["performance_good"];
     assert_eq!(perf_stats.total_checks, 2);
@@ -102,8 +105,8 @@ fn test_simworld_assertion_methods() {
 
     // Test SimWorld assertion methods
     let results = sim.assertion_results();
-    assert_eq!(results.len(), 1);  // Only sometimes_assert! is tracked
-    assert!(!results.contains_key("basic_check"));  // always_assert! not tracked
+    assert_eq!(results.len(), 1); // Only sometimes_assert! is tracked
+    assert!(!results.contains_key("basic_check")); // always_assert! not tracked
     assert!(results.contains_key("probabilistic"));
 
     // Test manual reset

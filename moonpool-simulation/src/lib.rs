@@ -50,9 +50,7 @@ pub mod sleep;
 pub mod time;
 
 // Public API exports
-pub use assertions::{
-    AssertionStats, get_assertion_results, validate_assertion_contracts,
-};
+pub use assertions::{AssertionStats, get_assertion_results, validate_assertion_contracts};
 pub use error::{SimulationError, SimulationResult};
 pub use events::{Event, EventQueue, ScheduledEvent};
 // Network exports

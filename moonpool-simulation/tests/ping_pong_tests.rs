@@ -182,7 +182,6 @@ async fn ping_pong_client(
     let _actual_sleep_time = time_provider.now() - start_time;
     tracing::debug!("Client: Sleep completed, connecting to server");
 
-
     // Create a resilient peer for communication
     let peer_config = PeerConfig::local_network();
     let mut peer = Peer::new(
@@ -205,7 +204,6 @@ async fn ping_pong_client(
                 send_duration
             );
             always_assert!(peer_can_send, true, "Peer should be able to send messages");
-
         }
         Err(e) => {
             tracing::debug!("Client: Failed to send ping: {:?}", e);
@@ -243,7 +241,6 @@ async fn ping_pong_client(
                 true,
                 "Peer should complete round-trip communication"
             );
-
         }
         Err(e) => {
             tracing::debug!("Client: Failed to receive pong: {:?}", e);
@@ -295,8 +292,6 @@ async fn ping_pong_client(
         success_rate >= 50.0,
         "Peer should maintain reasonable success rate in simple scenarios"
     );
-
-
 
     let metrics = SimulationMetrics::default();
     tracing::debug!("Client: Workload completed successfully");
