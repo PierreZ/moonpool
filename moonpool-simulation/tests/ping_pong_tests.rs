@@ -32,10 +32,7 @@ async fn ping_pong_simple(
     stream.write_all(pong_data).await?;
 
     // Return metrics
-    let mut metrics = SimulationMetrics::default();
-    metrics
-        .custom_metrics
-        .insert("ping_pong_messages_sent".to_string(), 2.0);
+    let metrics = SimulationMetrics::default();
 
     Ok(metrics)
 }
@@ -70,23 +67,14 @@ fn test_ping_pong_with_simulation_report() {
         let sim_metrics = sim.extract_metrics();
 
         match result {
-            Ok(workload_metrics) => {
+            Ok(_workload_metrics) => {
                 println!("Ping-pong workload completed successfully!");
                 println!("Simulated time: {:?}", sim_metrics.simulated_time);
                 println!("Events processed: {}", sim_metrics.events_processed);
-                println!("Custom metrics: {:?}", workload_metrics.custom_metrics);
 
                 // Verify the simulation worked
                 assert!(sim_metrics.simulated_time > std::time::Duration::ZERO);
                 assert!(sim_metrics.events_processed > 0);
-
-                // Verify custom metrics from the workload
-                assert_eq!(
-                    workload_metrics
-                        .custom_metrics
-                        .get("ping_pong_messages_sent"),
-                    Some(&2.0)
-                );
 
                 println!("Manual ping-pong simulation test passed!");
             }
@@ -102,10 +90,16 @@ fn test_ping_pong_with_simulation_report() {
 async fn ping_pong_server(
     _seed: u64,
     provider: moonpool_simulation::SimNetworkProvider,
-    _ip_address: Option<String>,
+    topology: moonpool_simulation::WorkloadTopology,
 ) -> SimulationResult<SimulationMetrics> {
-    let server_addr = "ping-pong-server";
-    tracing::debug!("Server: Starting server workload");
+    // Use the server's own IP as the bind address
+    let server_addr = &topology.my_ip;
+    tracing::debug!(
+        "Server: Starting server workload on {} with {} peer(s): {:?}",
+        topology.my_ip,
+        topology.peer_ips.len(),
+        topology.peer_ips
+    );
 
     // Bind to the server address
     tracing::debug!("Server: Binding to {}", server_addr);
@@ -130,10 +124,7 @@ async fn ping_pong_server(
     stream.write_all(pong_data).await?;
     tracing::debug!("Server: Sent pong response");
 
-    let mut metrics = SimulationMetrics::default();
-    metrics
-        .custom_metrics
-        .insert("server_responses_sent".to_string(), 1.0);
+    let metrics = SimulationMetrics::default();
     tracing::debug!("Server: Workload completed successfully");
     Ok(metrics)
 }
@@ -143,10 +134,18 @@ async fn ping_pong_server(
 async fn ping_pong_client(
     _seed: u64,
     provider: moonpool_simulation::SimNetworkProvider,
-    _ip_address: Option<String>,
+    topology: moonpool_simulation::WorkloadTopology,
 ) -> SimulationResult<SimulationMetrics> {
-    let server_addr = "ping-pong-server";
-    tracing::debug!("Client: Starting client workload");
+    // Connect to the first peer (assuming it's the server)
+    let default_server = "ping-pong-server".to_string();
+    let server_addr = topology.peer_ips.first().unwrap_or(&default_server);
+    tracing::debug!(
+        "Client: Starting client workload on {} with {} peer(s): {:?}",
+        topology.my_ip,
+        topology.peer_ips.len(),
+        topology.peer_ips
+    );
+    tracing::debug!("Client: Will connect to server at {}", server_addr);
 
     // Add coordination sleep to allow server setup before client connects
     // This prevents race conditions in concurrent workload execution
@@ -177,10 +176,7 @@ async fn ping_pong_client(
         std::str::from_utf8(&response_buffer)
     );
 
-    let mut metrics = SimulationMetrics::default();
-    metrics
-        .custom_metrics
-        .insert("client_pings_sent".to_string(), 1.0);
+    let metrics = SimulationMetrics::default();
     tracing::debug!("Client: Workload completed successfully");
     Ok(metrics)
 }
@@ -216,16 +212,6 @@ fn test_ping_pong_with_simulation_builder() {
         // Verify simulation time advanced (indicating events were processed)
         assert!(report.average_simulated_time() > std::time::Duration::ZERO);
         assert!(report.average_events_processed() > 0.0);
-
-        // Verify both workloads contributed metrics
-        assert_eq!(
-            report.metrics.custom_metrics.get("server_responses_sent"),
-            Some(&1.0)
-        );
-        assert_eq!(
-            report.metrics.custom_metrics.get("client_pings_sent"),
-            Some(&1.0)
-        );
 
         println!("Separate client-server ping-pong with SimulationBuilder test passed!");
         println!("Simulation report:\n{}", report);

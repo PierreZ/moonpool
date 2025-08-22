@@ -674,16 +674,13 @@ impl SimWorld {
     /// println!("Simulated time: {:?}", metrics.simulated_time);
     /// println!("Events processed: {}", metrics.events_processed);
     /// ```
-    pub fn extract_metrics(&self) -> crate::report::SimulationMetrics {
-        use std::collections::HashMap;
-
+    pub fn extract_metrics(&self) -> crate::runner::SimulationMetrics {
         let inner = self.inner.borrow();
 
-        crate::report::SimulationMetrics {
+        crate::runner::SimulationMetrics {
             wall_time: std::time::Duration::ZERO, // This will be filled by the report builder
             simulated_time: inner.current_time,
             events_processed: inner.events_processed,
-            custom_metrics: HashMap::new(), // Can be extended in future phases
         }
     }
 }
