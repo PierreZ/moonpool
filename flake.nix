@@ -40,7 +40,8 @@
             
             # Development tools
             pkg-config
-            openssl  
+            openssl
+            cargo-nextest
           ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             # macOS specific dependencies
             pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
@@ -59,8 +60,10 @@
             # Inform about available tools
             echo "Available tools:"
             echo "  • rustc, cargo, rustfmt, clippy, rust-analyzer"
+            echo "  • cargo-nextest for better test management"
             echo "  • Use 'cargo build' to build the project"
             echo "  • Use 'cargo test' to run tests"
+            echo "  • Use 'cargo nextest run' for better test output with timeouts"
             echo "  • Use 'cargo fmt' to format code"
           '';
 

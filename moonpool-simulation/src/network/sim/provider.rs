@@ -16,6 +16,17 @@ impl SimNetworkProvider {
     pub fn new(sim: WeakSimWorld) -> Self {
         Self { sim }
     }
+
+    /// Sleep in simulation time.
+    ///
+    /// This allows workloads to introduce delays for coordination purposes.
+    /// The sleep completes when the simulation processes the corresponding Wake event.
+    pub fn sleep(
+        &self,
+        duration: std::time::Duration,
+    ) -> crate::SimulationResult<crate::SleepFuture> {
+        self.sim.sleep(duration)
+    }
 }
 
 #[async_trait(?Send)]

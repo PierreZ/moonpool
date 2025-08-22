@@ -436,6 +436,24 @@ impl SimWorld {
         Ok(())
     }
 
+    /// Register a waker for accept operations
+    pub(crate) fn register_accept_waker(
+        &self,
+        addr: &str,
+        waker: Waker,
+    ) -> SimulationResult<()> {
+        let mut inner = self.inner.borrow_mut();
+        // For simplicity, we'll use addr hash as listener ID for waker storage
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        addr.hash(&mut hasher);
+        let listener_key = ListenerId(hasher.finish());
+        
+        inner.listener_wakers.insert(listener_key, waker);
+        Ok(())
+    }
+
     /// Store a pending connection for later accept() call
     pub(crate) fn store_pending_connection(
         &self,
@@ -446,6 +464,18 @@ impl SimWorld {
         inner
             .pending_connections
             .insert(addr.to_string(), connection_id);
+        
+        // Wake any accept() calls waiting for this connection
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        addr.hash(&mut hasher);
+        let listener_key = ListenerId(hasher.finish());
+        
+        if let Some(waker) = inner.listener_wakers.remove(&listener_key) {
+            waker.wake();
+        }
+        
         Ok(())
     }
 

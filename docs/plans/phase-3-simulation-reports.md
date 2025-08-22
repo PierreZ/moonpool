@@ -146,11 +146,12 @@ println!("Fast consensus rate: {:.2}%", results["fast_consensus"].success_rate);
    - Aggregate results across multiple iterations
    - Generate comprehensive report
 
-4. **TODO: Re-enable SimulationBuilder for combined workloads**
-   - Current ping-pong test uses manual SimWorld approach due to coordination issues
-   - Fix SimulationBuilder to properly handle concurrent workloads that need coordination
-   - Enable the original combined server+client workload approach in ping-pong test
-   - Ensure proper event processing and simulation time advancement in SimulationBuilder
+4. **✅ COMPLETED: Re-enabled SimulationBuilder for combined workloads**
+   - ✅ Added `sleep()` method to SimNetworkProvider for workload coordination
+   - ✅ Fixed SimulationBuilder to process events concurrently with workloads using `tokio::select!`
+   - ✅ Re-enabled combined server+client workload approach in ping-pong test
+   - ✅ Ensured proper event processing and simulation time advancement in SimulationBuilder
+   - ✅ All tests now pass including concurrent workload scenarios
 
 ### API Design
 

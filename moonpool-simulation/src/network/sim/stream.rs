@@ -3,6 +3,7 @@ use crate::network::traits::TcpListenerTrait;
 use crate::{Event, WeakSimWorld};
 use async_trait::async_trait;
 use std::{
+    future::Future,
     io,
     pin::Pin,
     task::{Context, Poll},
@@ -91,6 +92,52 @@ impl AsyncWrite for SimTcpStream {
     }
 }
 
+/// Future representing an accept operation
+pub struct AcceptFuture {
+    sim: WeakSimWorld,
+    local_addr: String,
+    #[allow(dead_code)] // May be used in future phases for more sophisticated listener tracking
+    listener_id: ListenerId,
+}
+
+impl Future for AcceptFuture {
+    type Output = io::Result<(SimTcpStream, String)>;
+    
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let sim = match self.sim.upgrade() {
+            Ok(sim) => sim,
+            Err(_) => return Poll::Ready(Err(io::Error::other("simulation shutdown"))),
+        };
+        
+        match sim.get_pending_connection(&self.local_addr) {
+            Ok(Some(connection_id)) => {
+                // Get accept delay from network configuration
+                let delay = sim.with_network_config(|config| config.latency.accept_latency.sample());
+                
+                // Schedule accept completion event to advance simulation time
+                sim.schedule_event(
+                    Event::ConnectionReady {
+                        connection_id: connection_id.0,
+                    },
+                    delay,
+                );
+                
+                let stream = SimTcpStream::new(self.sim.clone(), connection_id);
+                Poll::Ready(Ok((stream, "127.0.0.1:12345".to_string())))
+            },
+            Ok(None) => {
+                // No connection available yet - register waker for when connection becomes available
+                if let Err(e) = sim.register_accept_waker(&self.local_addr, cx.waker().clone()) {
+                    Poll::Ready(Err(io::Error::other(format!("failed to register accept waker: {}", e))))
+                } else {
+                    Poll::Pending
+                }
+            },
+            Err(e) => Poll::Ready(Err(io::Error::other(format!("failed to get pending connection: {}", e)))),
+        }
+    }
+}
+
 /// Simulated TCP listener
 pub struct SimTcpListener {
     sim: WeakSimWorld,
@@ -116,30 +163,11 @@ impl TcpListenerTrait for SimTcpListener {
 
     #[instrument(skip(self))]
     async fn accept(&self) -> io::Result<(Self::TcpStream, String)> {
-        let sim = self
-            .sim
-            .upgrade()
-            .map_err(|_| io::Error::other("simulation shutdown"))?;
-
-        // Get accept delay from network configuration
-        let delay = sim.with_network_config(|config| config.latency.accept_latency.sample());
-
-        // Get the pending connection created by connect() call
-        let connection_id = sim
-            .get_pending_connection(&self.local_addr)
-            .map_err(|_| io::Error::other("failed to get pending connection"))?
-            .ok_or_else(|| io::Error::other("no pending connection available"))?;
-
-        // Schedule accept completion event to advance simulation time
-        sim.schedule_event(
-            Event::ConnectionReady {
-                connection_id: connection_id.0,
-            },
-            delay,
-        );
-
-        let stream = SimTcpStream::new(self.sim.clone(), connection_id);
-        Ok((stream, "127.0.0.1:12345".to_string()))
+        AcceptFuture {
+            sim: self.sim.clone(),
+            local_addr: self.local_addr.clone(),
+            listener_id: self.listener_id,
+        }.await
     }
 
     fn local_addr(&self) -> io::Result<String> {
