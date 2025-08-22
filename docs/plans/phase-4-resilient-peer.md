@@ -269,7 +269,6 @@ impl<P: NetworkProvider> Peer<P> {
 ### Phase 4e: Integration and Polish
 - ✅ Integrate with simulation time vs real time appropriately
 - ✅ Add proper error handling and edge cases
-- ✅ Optimize for performance
 
 ### Phase 4f: Testing and Integration
 - ✅ Comprehensive unit tests for all Peer functionality

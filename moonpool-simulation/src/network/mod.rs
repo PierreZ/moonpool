@@ -15,12 +15,18 @@ pub mod tokio;
 /// Simulated networking implementation for testing
 pub mod sim;
 
+/// Resilient peer connection management
+pub mod peer;
+
 // Re-export main traits
 pub use traits::{NetworkProvider, TcpListenerTrait};
 
 // Re-export implementations
 pub use sim::SimNetworkProvider;
 pub use tokio::TokioNetworkProvider;
+
+// Re-export peer types
+pub use peer::{Peer, PeerConfig, PeerError, PeerMetrics};
 
 // Re-export configuration
 pub use config::{LatencyConfiguration, LatencyRange, NetworkConfiguration};

@@ -53,8 +53,8 @@ pub use error::{SimulationError, SimulationResult};
 pub use events::{Event, EventQueue, ScheduledEvent};
 // Network exports
 pub use network::{
-    LatencyConfiguration, LatencyRange, NetworkConfiguration, NetworkProvider, SimNetworkProvider,
-    TcpListenerTrait, TokioNetworkProvider,
+    LatencyConfiguration, LatencyRange, NetworkConfiguration, NetworkProvider, Peer, PeerConfig,
+    PeerError, PeerMetrics, SimNetworkProvider, TcpListenerTrait, TokioNetworkProvider,
 };
 pub use rng::{reset_sim_rng, set_sim_seed, sim_random, sim_random_range};
 pub use runner::{SimulationBuilder, SimulationMetrics, SimulationReport, WorkloadTopology};

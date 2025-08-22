@@ -4,8 +4,9 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Provider trait for creating network connections and listeners
 /// Single-core design - no Send bounds needed
+/// Clone allows sharing providers across multiple peers efficiently
 #[async_trait(?Send)]
-pub trait NetworkProvider {
+pub trait NetworkProvider: Clone {
     /// The TCP stream type for this provider
     type TcpStream: AsyncRead + AsyncWrite + Unpin + 'static;
     /// The TCP listener type for this provider
