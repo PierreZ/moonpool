@@ -11,9 +11,114 @@ use std::{
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tracing::instrument;
 
-/// Simulated TCP stream
+/// Simulated TCP stream that implements async read/write operations.
+///
+/// `SimTcpStream` provides a realistic simulation of TCP socket behavior by implementing
+/// the `AsyncRead` and `AsyncWrite` traits. It interfaces with the simulation event system
+/// to provide ordered, reliable data delivery with configurable network delays.
+///
+/// ## Architecture Overview
+///
+/// Each `SimTcpStream` represents one endpoint of a TCP connection:
+///
+/// ```text
+/// Application Layer          SimTcpStream Layer          Simulation Layer
+/// ─────────────────          ──────────────────          ─────────────────
+///                                                        
+/// stream.write_all(data) ──► poll_write(data) ────────► buffer_send(data)
+///                                                        └─► ProcessSendBuffer event
+///                                                            └─► DataDelivery event
+///                                                                └─► paired connection
+///                                                        
+/// stream.read(buf) ◄────── poll_read(buf) ◄──────────── receive_buffer
+///                          │                           └─► waker registration
+///                          └─► Poll::Pending/Ready     
+/// ```
+///
+/// ## TCP Semantics Implemented
+///
+/// This implementation provides the core TCP guarantees required for realistic simulation:
+///
+/// ### 1. Reliable Delivery
+/// - All written data will eventually be delivered to the paired connection
+/// - No data loss (unless explicitly simulated via fault injection)
+/// - Delivery confirmation through the event system
+///
+/// ### 2. Ordered Delivery (FIFO)
+/// - Messages written first will arrive first at the destination
+/// - Achieved through per-connection send buffering
+/// - Critical for protocols that depend on message ordering
+///
+/// ### 3. Flow Control Simulation
+/// - Read operations block (`Poll::Pending`) when no data is available
+/// - Write operations complete immediately (buffering model)
+/// - Backpressure handled at the application layer
+///
+/// ## Usage Examples
+///
+/// ### Basic Client Usage
+/// ```rust,no_run
+/// use moonpool_simulation::SimNetworkProvider;
+///
+/// let provider = sim.network_provider();
+/// let mut stream = provider.connect("10.0.0.1:8080").await?;
+///
+/// // Write data (buffered and sent with ordering guarantees)
+/// stream.write_all(b"Hello, Server!").await?;
+///
+/// // Read response (blocks until data arrives)
+/// let mut buffer = [0; 1024];
+/// let bytes_read = stream.read(&mut buffer).await?;
+/// ```
+///
+/// ### Server-side Usage
+/// ```rust,no_run
+/// let listener = provider.bind("10.0.0.1:8080").await?;
+/// let (mut stream, peer_addr) = listener.accept().await?;
+///
+/// // Echo server implementation
+/// loop {
+///     let mut buffer = [0; 1024];
+///     let n = stream.read(&mut buffer).await?;
+///     if n == 0 { break; } // Connection closed
+///     
+///     stream.write_all(&buffer[..n]).await?; // Echo back
+/// }
+/// ```
+///
+/// ## Performance Characteristics
+///
+/// - **Write Latency**: O(1) - writes are buffered immediately
+/// - **Read Latency**: O(network_delay) - depends on simulation configuration
+/// - **Memory Usage**: O(buffered_data) - proportional to unread data
+/// - **CPU Overhead**: Minimal - leverages efficient event system
+///
+/// ## Connection Lifecycle
+///
+/// 1. **Creation**: Stream created with reference to simulation and connection ID
+/// 2. **Active Phase**: Read/write operations interact with simulation buffers
+/// 3. **Data Transfer**: Asynchronous event processing handles network simulation
+/// 4. **Termination**: Stream dropped when connection ends (automatic cleanup)
+///
+/// ## Thread Safety
+///
+/// `SimTcpStream` is designed for single-threaded simulation environments:
+/// - No `Send` or `Sync` bounds (uses `#[async_trait(?Send)]`)
+/// - Safe for use within single-threaded async runtimes
+/// - Eliminates synchronization overhead for deterministic simulation
 pub struct SimTcpStream {
+    /// Weak reference to the simulation world.
+    ///
+    /// Uses `WeakSimWorld` to avoid circular references while allowing the stream
+    /// to detect if the simulation has been dropped. Operations return errors
+    /// gracefully if the simulation is no longer available.
     sim: WeakSimWorld,
+
+    /// Unique identifier for this connection within the simulation.
+    ///
+    /// This ID corresponds to a `ConnectionState` entry in the simulation's
+    /// connection table. Used to route read/write operations to the correct
+    /// connection buffers and waker registrations.
     connection_id: ConnectionId,
 }
 
@@ -31,6 +136,10 @@ impl AsyncRead for SimTcpStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        tracing::info!(
+            "SimTcpStream::poll_read called on connection_id={}",
+            self.connection_id.0
+        );
         let sim = self
             .sim
             .upgrade()
@@ -42,11 +151,27 @@ impl AsyncRead for SimTcpStream {
             .read_from_connection(self.connection_id, &mut temp_buf)
             .map_err(|e| io::Error::other(format!("read error: {}", e)))?;
 
+        tracing::info!(
+            "SimTcpStream::poll_read connection_id={} read {} bytes",
+            self.connection_id.0,
+            bytes_read
+        );
+
         if bytes_read > 0 {
+            let data_preview = String::from_utf8_lossy(&temp_buf[..std::cmp::min(bytes_read, 20)]);
+            tracing::info!(
+                "SimTcpStream::poll_read connection_id={} returning data: '{}'",
+                self.connection_id.0,
+                data_preview
+            );
             buf.put_slice(&temp_buf[..bytes_read]);
             Poll::Ready(Ok(()))
         } else {
             // No data available - register for notification when data arrives
+            tracing::info!(
+                "SimTcpStream::poll_read connection_id={} no data, registering waker",
+                self.connection_id.0
+            );
             sim.register_read_waker(self.connection_id, cx.waker().clone())
                 .map_err(|e| io::Error::other(format!("waker registration error: {}", e)))?;
             Poll::Pending
@@ -66,26 +191,17 @@ impl AsyncWrite for SimTcpStream {
             .upgrade()
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown"))?;
 
-        // Get write delay from network configuration
-        let delay = sim.with_network_config(|config| config.latency.write_latency.sample());
-
-        // Log the write with its delay to track message ordering
+        // Use buffered send to maintain TCP ordering
         let data_preview = String::from_utf8_lossy(&buf[..std::cmp::min(buf.len(), 20)]);
         tracing::info!(
-            "SimTcpStream::poll_write scheduling delivery of {} bytes: '{}' with delay {:?}",
+            "SimTcpStream::poll_write buffering {} bytes: '{}' for ordered delivery",
             buf.len(),
-            data_preview,
-            delay
+            data_preview
         );
 
-        // Schedule data delivery to paired connection with configured delay
-        sim.schedule_event(
-            Event::DataDelivery {
-                connection_id: self.connection_id.0,
-                data: buf.to_vec(),
-            },
-            delay,
-        );
+        // Buffer the data for ordered processing instead of direct event scheduling
+        sim.buffer_send(self.connection_id, buf.to_vec())
+            .map_err(|e| io::Error::other(format!("buffer send error: {}", e)))?;
 
         Poll::Ready(Ok(buf.len()))
     }

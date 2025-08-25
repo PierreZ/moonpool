@@ -27,6 +27,11 @@ pub enum Event {
         /// The data being delivered
         data: Vec<u8>,
     },
+    /// Process next message from connection's send buffer (for TCP ordering)
+    ProcessSendBuffer {
+        /// Unique identifier for the connection
+        connection_id: u64,
+    },
 }
 
 /// An event scheduled for execution at a specific simulation time.

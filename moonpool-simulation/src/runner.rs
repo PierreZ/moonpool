@@ -261,6 +261,30 @@ impl SimulationBuilder {
         self
     }
 
+    /// Set specific seeds for deterministic debugging and regression testing.
+    ///
+    /// This method is specifically designed for debugging scenarios where you need
+    /// to reproduce specific problematic behavior. Unlike `set_seeds()`, the name
+    /// makes it clear this is for debugging/testing specific scenarios.
+    ///
+    /// **Key differences from `set_seeds()`:**
+    /// - **Intent**: Clearly indicates debugging/testing purpose
+    /// - **Usage**: Typically used with `FixedCount(1)` for reproducing exact scenarios
+    /// - **Documentation**: Self-documenting that these seeds are for specific test cases
+    ///
+    /// **Common use cases:**
+    /// - Reproducing TCP ordering bugs (e.g., seed 42 revealed the ordering issue)
+    /// - Regression testing for specific edge cases
+    /// - Deterministic testing in CI/CD pipelines
+    /// - Investigating assertion failures at specific seeds
+    ///
+    /// Example: `set_debug_seeds(vec![42])` with `FixedCount(1)` ensures the test
+    /// always runs with seed 42, making it reproducible for debugging the TCP ordering fix.
+    pub fn set_debug_seeds(mut self, seeds: Vec<u64>) -> Self {
+        self.seeds = seeds;
+        self
+    }
+
     /// Set the network configuration for the simulation.
     pub fn set_network_config(mut self, network_config: crate::NetworkConfiguration) -> Self {
         self.network_config = network_config;
@@ -390,6 +414,20 @@ impl SimulationBuilder {
             };
 
             iteration_count += 1;
+
+            // Log which seed is being used for this iteration
+            tracing::info!(
+                "🌱 Starting iteration {} with seed {} (iteration {}/{})",
+                iteration_count,
+                seed,
+                iteration_count,
+                match &self.iteration_control {
+                    IterationControl::FixedCount(count) => *count,
+                    IterationControl::TimeLimit(_) => 0, // Unknown count for time-based
+                    IterationControl::UntilAllSometimesReached(limit) => *limit,
+                }
+            );
+
             // Prepare clean state for this iteration
             reset_sim_rng();
             set_sim_seed(seed);
@@ -505,14 +543,16 @@ impl SimulationBuilder {
                         no_progress_count += 1;
                         if no_progress_count > 10 {
                             tracing::error!(
-                                "Deadlock detected: {} tasks remaining but no events to process after {} iterations",
+                                "🔒 DEADLOCK detected on iteration {} with seed {}: {} tasks remaining but no events to process after {} iterations",
+                                iteration_count,
+                                seed,
                                 handles.len(),
                                 no_progress_count
                             );
                             // Mark all remaining tasks as failed
                             for _ in 0..handles.len() {
                                 results.push(Err(crate::SimulationError::InvalidState(
-                                    "Deadlock detected: tasks stuck with no events".to_string(),
+                                    format!("Deadlock detected on iteration {} with seed {}: tasks stuck with no events", iteration_count, seed),
                                 )));
                             }
                             break;
@@ -562,6 +602,11 @@ impl SimulationBuilder {
 
             if iteration_successful {
                 successful_runs += 1;
+                tracing::info!(
+                    "✅ Iteration {} with seed {} completed successfully",
+                    iteration_count,
+                    seed
+                );
 
                 // Extract final simulation metrics
                 let sim_metrics = sim.extract_metrics();
@@ -587,13 +632,33 @@ impl SimulationBuilder {
                 individual_metrics.push(Ok(combined_metrics));
             } else {
                 failed_runs += 1;
-                individual_metrics.push(Err(crate::SimulationError::InvalidState(
-                    "One or more workloads failed".to_string(),
-                )));
+                tracing::error!(
+                    "❌ Iteration {} with seed {} FAILED - workload error or deadlock detected",
+                    iteration_count,
+                    seed
+                );
+                individual_metrics.push(Err(crate::SimulationError::InvalidState(format!(
+                    "One or more workloads failed (iteration {}, seed {})",
+                    iteration_count, seed
+                ))));
             }
         }
 
         // End of main iteration loop
+
+        // Log summary of all seeds used
+        tracing::info!(
+            "📊 Simulation completed: {}/{} iterations successful",
+            successful_runs,
+            iteration_count
+        );
+        tracing::info!("🌱 Seeds used: {:?}", seeds_to_use);
+        if failed_runs > 0 {
+            tracing::warn!(
+                "⚠️ {} iterations failed - check logs above for failing seeds",
+                failed_runs
+            );
+        }
 
         // Collect assertion results and validate them
         let assertion_results = get_assertion_results();

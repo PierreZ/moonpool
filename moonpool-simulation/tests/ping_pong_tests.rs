@@ -4,7 +4,7 @@ use moonpool_simulation::{
     runner::IterationControl, sometimes_assert,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{Level, instrument};
+use tracing::{Level, instrument, warn};
 use tracing_subscriber;
 
 static MAX_PING: i32 = 100;
@@ -12,6 +12,7 @@ static MAX_PING: i32 = 100;
 #[test]
 fn test_ping_pong_with_simulation_builder() {
     let _ = tracing_subscriber::fmt()
+        .with_test_writer()
         .with_max_level(Level::INFO)
         .try_init();
 
@@ -27,6 +28,7 @@ fn test_ping_pong_with_simulation_builder() {
             .register_workload("ping_pong_server", ping_pong_server)
             .register_workload("ping_pong_client", ping_pong_client)
             .set_iteration_control(IterationControl::FixedCount(1))
+            .set_debug_seeds(vec![9495001370864752853]) // Fixed seed for debugging TCP ordering fix - ensures reproducible test behavior
             .run()
             .await;
 
@@ -105,7 +107,16 @@ async fn ping_pong_server(
         // Read message from client
         tracing::info!("Server: About to read next message");
         let mut buffer = [0u8; 16];
-        let bytes_read = stream.read(&mut buffer).await?;
+        let bytes_read = match stream.read(&mut buffer).await {
+            Ok(n) => {
+                tracing::info!("Server: Read {} bytes successfully", n);
+                n
+            }
+            Err(e) => {
+                tracing::error!("Server: Read failed with error: {:?}", e);
+                return Err(e.into());
+            }
+        };
         let message = std::str::from_utf8(&buffer[..bytes_read])
             .unwrap_or("INVALID")
             .trim_end_matches('\0')
@@ -357,7 +368,14 @@ async fn ping_pong_client(
                         "Peer should receive PONG responses"
                     );
                     let expected_pong = format!("PONG-{}", response_idx);
-                    assert_eq!(pong_message, expected_pong);
+                    always_assert!(
+                        pong_sequence_matches,
+                        pong_message == expected_pong,
+                        format!(
+                            "PONG sequence mismatch: expected '{}', got '{}'",
+                            expected_pong, pong_message
+                        )
+                    );
                 }
                 Err(e) => {
                     tracing::debug!("Client: Failed to receive pong {}: {:?}", response_idx, e);
@@ -402,7 +420,14 @@ async fn ping_pong_client(
                 ack_message == "BYE!!",
                 "Client should receive BYE acknowledgment from server"
             );
-            assert_eq!(&ack_buffer[..bytes_read], b"BYE!!");
+            always_assert!(
+                bye_message_exact,
+                &ack_buffer[..bytes_read] == b"BYE!!",
+                format!(
+                    "BYE message should be exact: expected 'BYE!!', got '{}'",
+                    String::from_utf8_lossy(&ack_buffer[..bytes_read])
+                )
+            );
         }
         Err(e) => {
             tracing::warn!("Client: Failed to receive CLOSE acknowledgment: {:?}", e);

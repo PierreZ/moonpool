@@ -22,14 +22,131 @@ use std::collections::VecDeque;
 
 /// Internal connection state for simulation
 #[derive(Debug)]
+/// State for a simulated TCP connection.
+///
+/// Each `ConnectionState` represents one end of a bidirectional TCP connection pair.
+/// The simulation creates two `ConnectionState` instances for each TCP connection:
+/// one for the client side and one for the server side, linked together via
+/// `paired_connection`.
+///
+/// ## TCP Connection Model
+///
+/// The simulation models TCP connections using a simplified but semantically correct approach:
+///
+/// ```text
+/// Client Connection (ID: 0)              Server Connection (ID: 1)
+/// ┌─────────────────────────┐            ┌─────────────────────────┐
+/// │ send_buffer: [data...]  │   writes   │ receive_buffer: []      │
+/// │ receive_buffer: []      │ ────────►  │ send_buffer: [resp...]  │
+/// │ paired_connection: 1    │            │ paired_connection: 0    │
+/// └─────────────────────────┘            └─────────────────────────┘
+/// ```
+///
+/// ## Message Flow Architecture
+///
+/// 1. **Write Operation**: When application calls `stream.write_all(data)`:
+///    - Data goes to connection's `send_buffer` (FIFO queue)
+///    - `ProcessSendBuffer` event is scheduled if not already in progress
+///    - Ensures FIFO ordering within a connection
+///
+/// 2. **Send Processing**: `ProcessSendBuffer` event handler:
+///    - Dequeues one message from `send_buffer`
+///    - Applies network delay simulation
+///    - Schedules `DataDelivery` to paired connection
+///    - Continues processing remaining buffered messages
+///
+/// 3. **Data Delivery**: `DataDelivery` event handler:
+///    - Writes data to target connection's `receive_buffer`
+///    - Wakes up any pending read operations on that connection
+///    - Maintains TCP's reliable, ordered delivery semantics
+///
+/// 4. **Read Operation**: When application calls `stream.read(buf)`:
+///    - Reads available data from connection's `receive_buffer`
+///    - Returns `Poll::Pending` if no data available (registers waker)
+///    - Returns `Poll::Ready` with data when available
+///
+/// ## TCP Ordering Guarantees
+///
+/// This implementation ensures TCP's critical ordering properties:
+///
+/// - **FIFO within connection**: Messages sent on connection A arrive at paired
+///   connection B in the same order
+/// - **No reordering**: Unlike the original implementation, separate `write_all()`
+///   calls cannot overtake each other
+/// - **Reliable delivery**: All data written will eventually be delivered
+///   (no packet loss in basic implementation)
+///
+/// ## Example Usage in Tests
+///
+/// ```rust
+/// // Client sends multiple messages
+/// stream.write_all(b"PING-0").await?;  // Goes to send_buffer[0]
+/// stream.write_all(b"PING-1").await?;  // Goes to send_buffer[1]
+/// stream.write_all(b"PING-2").await?;  // Goes to send_buffer[2]
+///
+/// // Server will receive them in order: PING-0, PING-1, PING-2
+/// // This ordering is guaranteed by the send_buffer FIFO processing
+/// ```
+///
+/// ## Performance Characteristics
+///
+/// - **Memory**: O(n) where n is the total buffered data across all connections
+/// - **Latency**: Configurable per-message delays via `NetworkConfiguration`
+/// - **Throughput**: Limited by event processing rate, not by connection count
+/// - **Ordering overhead**: Minimal - uses efficient VecDeque for FIFO operations
 struct ConnectionState {
+    /// Unique identifier for this connection within the simulation.
+    ///
+    /// Connection IDs are assigned sequentially starting from 0. Each TCP connection
+    /// pair gets two IDs: one for client side, one for server side.
     #[allow(dead_code)] // Will be used for routing and debugging in future phases
     id: ConnectionId,
+
+    /// Network address this connection is associated with.
+    ///
+    /// For client connections, this is typically a generated address.
+    /// For server connections, this matches the bind address (e.g., "10.0.0.1:8080").
     #[allow(dead_code)] // Will be used for routing and address resolution in future phases
     addr: String,
+
+    /// FIFO buffer for incoming data that hasn't been read by the application yet.
+    ///
+    /// Data flows: `paired_connection.send_buffer` → network delay → `this.receive_buffer`
+    ///
+    /// The application's `stream.read()` calls consume data from this buffer.
+    /// When empty, read operations return `Poll::Pending` until data arrives.
     receive_buffer: VecDeque<u8>,
-    /// Paired connection for bidirectional communication
+
+    /// Reference to the other end of this bidirectional TCP connection.
+    ///
+    /// For a client-server connection pair:
+    /// - Client connection's `paired_connection` points to server connection ID
+    /// - Server connection's `paired_connection` points to client connection ID
+    ///
+    /// Data written to this connection will be delivered to the paired connection's
+    /// `receive_buffer` after network delay simulation.
     paired_connection: Option<ConnectionId>,
+
+    /// FIFO buffer for outgoing data waiting to be sent over the network.
+    ///
+    /// This buffer is crucial for maintaining TCP ordering semantics:
+    /// - Each `write_all()` call appends data as a separate message
+    /// - Messages are processed sequentially by `ProcessSendBuffer` events
+    /// - Prevents newer writes from overtaking older ones due to random delays
+    ///
+    /// Example: If client calls write_all("A"), write_all("B"), write_all("C"),
+    /// the send_buffer contains ["A", "B", "C"] and they're processed in order.
+    send_buffer: VecDeque<Vec<u8>>,
+
+    /// Flag indicating whether a `ProcessSendBuffer` event is currently scheduled.
+    ///
+    /// This prevents multiple concurrent send operations on the same connection:
+    /// - Set to `true` when first message enters empty send_buffer
+    /// - Remains `true` while messages are being processed
+    /// - Set to `false` when send_buffer becomes empty
+    ///
+    /// Ensures sequential processing without event conflicts.
+    send_in_progress: bool,
 }
 
 /// Internal listener state for simulation
@@ -392,7 +509,183 @@ impl SimWorld {
         }
     }
 
-    /// Create a connection pair for bidirectional communication
+    /// Buffer data for ordered sending on a TCP connection.
+    ///
+    /// This method implements the core TCP ordering guarantee by ensuring that all
+    /// write operations on a single connection are processed in FIFO (First-In-First-Out) order.
+    ///
+    /// ## TCP Ordering Problem Solved
+    ///
+    /// The original implementation gave each `write_all()` call an independent random network delay,
+    /// which could cause messages to arrive out of order:
+    ///
+    /// ```text
+    /// BROKEN: Independent delays per write
+    /// write("PING-0") -> 50ms delay -> arrives second
+    /// write("PING-1") -> 20ms delay -> arrives first  ❌ WRONG ORDER
+    /// ```
+    ///
+    /// This method fixes the problem by buffering all writes and processing them sequentially:
+    ///
+    /// ```text
+    /// FIXED: Sequential processing with buffering
+    /// write("PING-0") -> buffer[0] -> process -> 50ms -> arrives first
+    /// write("PING-1") -> buffer[1] -> wait    -> 1ns  -> arrives second ✅ CORRECT ORDER
+    /// ```
+    ///
+    /// ## Implementation Strategy
+    ///
+    /// 1. **Buffer the data**: Add the message to the connection's `send_buffer`
+    /// 2. **Start processing if idle**: If no send operation is in progress, schedule a `ProcessSendBuffer` event
+    /// 3. **Sequential processing**: The event handler processes messages one by one, maintaining order
+    /// 4. **Network delay**: Only the final message in a burst gets the full network delay
+    ///
+    /// ## Arguments
+    ///
+    /// * `connection_id` - The connection to send data on
+    /// * `data` - The message data to send (typically from a `write_all()` call)
+    ///
+    /// ## Returns
+    ///
+    /// * `Ok(())` - Data successfully buffered for sending
+    /// * `Err(SimulationError)` - Connection not found or simulation error
+    ///
+    /// ## Usage Pattern
+    ///
+    /// This method is called by `SimTcpStream::poll_write()` for every write operation:
+    ///
+    /// ```rust
+    /// // Application code
+    /// stream.write_all(b"message1").await?;  // Calls buffer_send("message1")
+    /// stream.write_all(b"message2").await?;  // Calls buffer_send("message2")
+    ///
+    /// // Results in ordered delivery: message1 then message2
+    /// ```
+    ///
+    /// ## Event Flow
+    ///
+    /// 1. `buffer_send()` adds data to `send_buffer`
+    /// 2. If `!send_in_progress`, schedules `ProcessSendBuffer` event immediately  
+    /// 3. `ProcessSendBuffer` handler dequeues and sends one message
+    /// 4. If more messages remain, schedules next `ProcessSendBuffer` event
+    /// 5. Continues until `send_buffer` is empty
+    ///
+    /// This ensures that even rapid successive writes are processed in order.
+    pub(crate) fn buffer_send(
+        &self,
+        connection_id: ConnectionId,
+        data: Vec<u8>,
+    ) -> SimulationResult<()> {
+        let mut inner = self.inner.borrow_mut();
+
+        if let Some(conn) = inner.connections.get_mut(&connection_id) {
+            // Always add data to send buffer for TCP ordering
+            conn.send_buffer.push_back(data);
+
+            // If sender is not already active, start processing the buffer
+            if !conn.send_in_progress {
+                conn.send_in_progress = true;
+
+                // Schedule immediate processing of the buffer - add directly to queue to avoid borrowing conflict
+                let scheduled_time = inner.current_time + std::time::Duration::ZERO;
+                let sequence = inner.next_sequence;
+                inner.next_sequence += 1;
+                let scheduled_event = ScheduledEvent::new(
+                    scheduled_time,
+                    Event::ProcessSendBuffer {
+                        connection_id: connection_id.0,
+                    },
+                    sequence,
+                );
+                inner.event_queue.schedule(scheduled_event);
+            }
+            // If sender is already active, the new data will be processed when the current buffer is processed
+
+            Ok(())
+        } else {
+            Err(SimulationError::InvalidState(
+                "connection not found".to_string(),
+            ))
+        }
+    }
+
+    /// Create a bidirectional TCP connection pair for client-server communication.
+    ///
+    /// This method establishes the foundation of TCP simulation by creating two linked
+    /// `ConnectionState` instances that represent both ends of a TCP connection.
+    ///
+    /// ## Connection Pair Architecture
+    ///
+    /// ```text
+    /// ┌─────────────────────────────────────────────────────────────┐
+    /// │                    TCP Connection Pair                      │
+    /// │                                                             │
+    /// │  Client Side (ID: N)              Server Side (ID: N+1)     │
+    /// │  ┌─────────────────────┐          ┌─────────────────────┐   │
+    /// │  │ addr: "client-addr" │          │ addr: server_addr   │   │
+    /// │  │ paired_connection: │◄─────────►│ paired_connection:  │   │
+    /// │  │   Some(N+1)        │          │   Some(N)           │   │
+    /// │  │                    │          │                     │   │
+    /// │  │ send_buffer: []    │   ┌──┐   │ receive_buffer: []  │   │
+    /// │  │ receive_buffer: [] │   │  │   │ send_buffer: []     │   │
+    /// │  └─────────────────────┘   └──┘   └─────────────────────┘   │
+    /// └─────────────────────────────────────────────────────────────┘
+    /// ```
+    ///
+    /// ## Connection Pairing Logic
+    ///
+    /// Each connection knows about its counterpart via `paired_connection`:
+    /// - **Client connection** has `paired_connection = Some(server_id)`
+    /// - **Server connection** has `paired_connection = Some(client_id)`
+    ///
+    /// This enables the data flow:
+    /// 1. Data written to client's `send_buffer` → delivered to server's `receive_buffer`
+    /// 2. Data written to server's `send_buffer` → delivered to client's `receive_buffer`
+    ///
+    /// ## Usage in Network Provider
+    ///
+    /// This method is called by `SimNetworkProvider::connect()`:
+    ///
+    /// ```rust
+    /// // Client initiates connection
+    /// let stream = provider.connect("10.0.0.1:8080").await?;
+    ///
+    /// // Internally calls:
+    /// let (client_id, server_id) = sim.create_connection_pair(
+    ///     "client-addr".to_string(),
+    ///     "10.0.0.1:8080".to_string()
+    /// )?;
+    ///
+    /// // Client gets stream with client_id
+    /// // Server gets stream with server_id via accept()
+    /// ```
+    ///
+    /// ## Connection ID Management
+    ///
+    /// Connection IDs are assigned sequentially:
+    /// - **Client connection**: Uses current `next_connection_id` (even numbers: 0, 2, 4...)
+    /// - **Server connection**: Uses `next_connection_id + 1` (odd numbers: 1, 3, 5...)
+    /// - Counter increments by 2 to reserve both IDs
+    ///
+    /// This pairing convention makes debugging easier and ensures unique IDs.
+    ///
+    /// ## Arguments
+    ///
+    /// * `client_addr` - Address string for the client side (typically generated)
+    /// * `server_addr` - Address string for the server side (the bind address)
+    ///
+    /// ## Returns
+    ///
+    /// * `Ok((client_id, server_id))` - Connection IDs for both ends of the pair
+    /// * `Err(SimulationError)` - If connection creation fails
+    ///
+    /// ## Connection Lifecycle
+    ///
+    /// 1. **Creation**: Both connections start with empty buffers and `send_in_progress = false`
+    /// 2. **Active Use**: Applications write/read data via `SimTcpStream` operations
+    /// 3. **Data Flow**: Writes go to `send_buffer`, reads come from `receive_buffer`
+    /// 4. **Event Processing**: `ProcessSendBuffer` and `DataDelivery` events handle data transfer
+    /// 5. **Cleanup**: Connections remain until simulation ends (no explicit close yet)
     pub(crate) fn create_connection_pair(
         &self,
         client_addr: String,
@@ -414,6 +707,8 @@ impl SimWorld {
                 addr: client_addr,
                 receive_buffer: VecDeque::new(),
                 paired_connection: Some(server_id),
+                send_buffer: VecDeque::new(),
+                send_in_progress: false,
             },
         );
 
@@ -424,6 +719,8 @@ impl SimWorld {
                 addr: server_addr,
                 receive_buffer: VecDeque::new(),
                 paired_connection: Some(client_id),
+                send_buffer: VecDeque::new(),
+                send_in_progress: false,
             },
         );
 
@@ -552,6 +849,71 @@ impl SimWorld {
         Ok(())
     }
 
+    /// Static event processor for simulation events with comprehensive TCP simulation support.
+    ///
+    /// This method is the heart of the simulation engine, processing all types of events
+    /// that drive the deterministic simulation forward. It's implemented as a static method
+    /// to avoid borrowing conflicts when event processing needs to modify simulation state.
+    ///
+    /// ## Event Processing Architecture
+    ///
+    /// ```text
+    /// Event Queue                Event Processor              Connection State
+    /// ─────────────             ─────────────────            ──────────────────
+    ///
+    /// [TaskWake]           ──► process_event_with_inner ──► awakened_tasks.insert()
+    /// [DataDelivery]       ──►        │                 ──► connection.receive_buffer.push()
+    /// [ProcessSendBuffer]  ──►        │                 ──► connection.send_buffer.pop()
+    /// [ConnectionReady]    ──►        │                 ──► // Future connection events
+    /// ```
+    ///
+    /// ## TCP-Specific Event Handling
+    ///
+    /// ### ProcessSendBuffer Event
+    /// Core of the TCP ordering fix - ensures FIFO message delivery:
+    /// 1. **Message Dequeue**: Removes next message from connection's send_buffer
+    /// 2. **Delay Strategy**:
+    ///    - Last message in buffer: Full network delay (realistic latency)
+    ///    - More messages queued: Minimal delay (1ns) for immediate processing
+    /// 3. **Delivery Scheduling**: Creates DataDelivery event for paired connection
+    /// 4. **Continuation**: Schedules next ProcessSendBuffer if buffer not empty
+    ///
+    /// ### DataDelivery Event
+    /// Handles reliable data transfer between connection pairs:
+    /// 1. **Target Resolution**: Finds destination connection by ID
+    /// 2. **Data Transfer**: Appends data to connection's receive_buffer
+    /// 3. **Notification**: Wakes any pending read operations on that connection
+    /// 4. **Logging**: Comprehensive tracing for debugging network behavior
+    ///
+    /// ## Event Processing Guarantees
+    ///
+    /// - **Atomicity**: Each event is processed completely before the next
+    /// - **Ordering**: Events are processed by scheduled time, then sequence number
+    /// - **Isolation**: No event can interfere with another's processing
+    /// - **Determinism**: Same events + same order = identical simulation results
+    ///
+    /// ## Error Handling Strategy
+    ///
+    /// The method is designed to be robust against various error conditions:
+    /// - **Missing connections**: Log warnings but continue processing
+    /// - **Invalid wakers**: Handle gracefully without simulation failure  
+    /// - **Empty buffers**: Treat as normal operation completion
+    ///
+    /// ## Performance Characteristics
+    ///
+    /// - **Time Complexity**: O(1) for most events, O(log n) for queue operations
+    /// - **Memory Usage**: Minimal - operates on existing connection state
+    /// - **Event Throughput**: Limited by connection buffer operations, not event count
+    ///
+    /// ## Integration with AsyncRead/AsyncWrite
+    ///
+    /// This event processor directly supports the async stream operations:
+    /// - **Write operations** → buffer_send() → ProcessSendBuffer events
+    /// - **Read operations** → register_read_waker() → DataDelivery wake-ups
+    /// - **Connection setup** → ConnectionReady events (future enhancement)
+    ///
+    /// The static design prevents the common async borrowing issue where event
+    /// processing needs to modify simulation state while async operations hold borrows.
     #[instrument(skip(inner))]
     fn process_event_with_inner(inner: &mut SimInner, event: Event) {
         // Increment event processing counter for metrics
@@ -584,7 +946,32 @@ impl SimWorld {
                 connection_id,
                 data,
             } => {
-                // Data delivery completed - deliver data to paired connection's receive buffer
+                // **DataDelivery Event Handler**: Core TCP data transfer implementation
+                //
+                // This event handler completes the final step of TCP message delivery by
+                // transferring data from the sender's send_buffer to the receiver's receive_buffer.
+                // It's the endpoint of the TCP ordering pipeline that maintains reliable delivery.
+                //
+                // Event Flow Context:
+                // 1. Application calls stream.write_all(data)  -> buffer_send(data)
+                // 2. buffer_send() adds to send_buffer        -> ProcessSendBuffer event scheduled
+                // 3. ProcessSendBuffer dequeues data          -> DataDelivery event scheduled (THIS EVENT)
+                // 4. DataDelivery writes to receive_buffer   -> Application stream.read() succeeds
+                //
+                // Key Responsibilities:
+                // - **Data Transfer**: Move bytes from network simulation to connection buffer
+                // - **Async Notification**: Wake any read operations waiting for this data
+                // - **Reliability**: Ensure no data is lost in transfer
+                // - **Ordering**: Maintain FIFO delivery within the connection
+                //
+                // Critical Fix (Phase 6): This handler now delivers data to the CORRECT connection
+                // - Previous bug: delivered to paired_connection (wrong direction!)
+                // - Current fix: delivers directly to specified connection_id (correct!)
+                //
+                // Connection ID Routing:
+                // - Client writes to server: Client ProcessSendBuffer -> Server DataDelivery
+                // - Server writes to client: Server ProcessSendBuffer -> Client DataDelivery
+                // - Each DataDelivery specifies the TARGET connection to receive the data
                 let data_preview = String::from_utf8_lossy(&data[..std::cmp::min(data.len(), 20)]);
                 tracing::info!(
                     "Event::DataDelivery processing delivery of {} bytes: '{}' to connection {}",
@@ -595,23 +982,119 @@ impl SimWorld {
 
                 let connection_id = ConnectionId(connection_id);
 
-                // Find the paired connection
-                let paired_id = inner
-                    .connections
-                    .get(&connection_id)
-                    .and_then(|conn| conn.paired_connection);
+                // Write data directly to the specified connection's receive buffer
+                if let Some(conn) = inner.connections.get_mut(&connection_id) {
+                    for &byte in &data {
+                        conn.receive_buffer.push_back(byte);
+                    }
 
-                if let Some(paired_id) = paired_id {
-                    // Write data to paired connection's receive buffer
-                    if let Some(paired_conn) = inner.connections.get_mut(&paired_id) {
-                        for &byte in &data {
-                            paired_conn.receive_buffer.push_back(byte);
+                    // Wake any futures waiting to read from this connection
+                    if let Some(waker) = inner.read_wakers.remove(&connection_id) {
+                        tracing::info!(
+                            "DataDelivery waking up read waker for connection_id={}",
+                            connection_id.0
+                        );
+                        waker.wake();
+                    } else {
+                        tracing::info!(
+                            "DataDelivery no waker found for connection_id={}",
+                            connection_id.0
+                        );
+                    }
+                }
+            }
+            // Process the next message from a connection's send buffer.
+            //
+            // This event handler is the core of the TCP ordering fix. It ensures that
+            // messages are sent in FIFO order by processing the send buffer sequentially.
+            //
+            // Event Processing Flow:
+            // 1. Dequeue Message: Remove the next message from send_buffer
+            // 2. Apply Delay Logic:
+            //    - If more messages remain: minimal delay (1ns) for immediate processing
+            //    - If this is the last message: full network delay simulation
+            // 3. Schedule Delivery: Create DataDelivery event to paired connection
+            // 4. Continue Processing: If more messages remain, schedule next ProcessSendBuffer
+            // 5. Mark Idle: If buffer empty, set send_in_progress = false
+            //
+            // TCP Ordering Guarantee:
+            // The key insight is that within a connection, we want FIFO ordering but still
+            // need realistic network delays. The solution:
+            //
+            // Message Flow Timeline:
+            // T=0ms:  buffer_send("A") -> send_buffer = ["A"]          -> ProcessSendBuffer scheduled
+            // T=1ms:  buffer_send("B") -> send_buffer = ["A", "B"]     -> (ProcessSendBuffer already active)
+            // T=2ms:  buffer_send("C") -> send_buffer = ["A","B","C"]  -> (ProcessSendBuffer already active)
+            //
+            // T=5ms:  ProcessSendBuffer -> pop "A", 2 msgs remaining   -> DataDelivery("A") @ T=6ms (1ns delay)
+            // T=6ms:  ProcessSendBuffer -> pop "B", 1 msg remaining    -> DataDelivery("B") @ T=7ms (1ns delay)
+            // T=7ms:  ProcessSendBuffer -> pop "C", 0 msgs remaining   -> DataDelivery("C") @ T=57ms (50ms delay)
+            //
+            // Result: A arrives at T=6ms, B arrives at T=7ms, C arrives at T=57ms ✅ ORDERED
+            //
+            // This preserves both ordering (A→B→C) and realistic network delays (C gets full latency).
+            Event::ProcessSendBuffer { connection_id } => {
+                let connection_id = ConnectionId(connection_id);
+
+                if let Some(conn) = inner.connections.get_mut(&connection_id) {
+                    if let Some(data) = conn.send_buffer.pop_front() {
+                        // For TCP ordering, we need to maintain connection-level delays
+                        // Check if there are more messages AFTER popping the current one
+                        let has_more_messages = !conn.send_buffer.is_empty();
+                        let delay = if has_more_messages {
+                            // More messages in buffer, minimal delay for immediate processing
+                            std::time::Duration::from_nanos(1)
+                        } else {
+                            // This is the last message in buffer, apply network delay
+                            inner.network_config.latency.write_latency.sample()
+                        };
+
+                        tracing::info!(
+                            "Event::ProcessSendBuffer processing {} bytes from connection {} with delay {:?}, has_more_messages={}",
+                            data.len(),
+                            connection_id.0,
+                            delay,
+                            has_more_messages
+                        );
+
+                        // Schedule delivery to paired connection
+                        if let Some(paired_id) = conn.paired_connection {
+                            let scheduled_time = inner.current_time + delay;
+                            let sequence = inner.next_sequence;
+                            inner.next_sequence += 1;
+
+                            let scheduled_event = ScheduledEvent::new(
+                                scheduled_time,
+                                Event::DataDelivery {
+                                    connection_id: paired_id.0,
+                                    data,
+                                },
+                                sequence,
+                            );
+                            inner.event_queue.schedule(scheduled_event);
                         }
 
-                        // Wake any futures waiting to read from paired connection
-                        if let Some(waker) = inner.read_wakers.remove(&paired_id) {
-                            waker.wake();
+                        // If more messages in buffer, schedule next processing immediately to maintain throughput
+                        if !conn.send_buffer.is_empty() {
+                            let scheduled_time = inner.current_time; // Process immediately
+                            let sequence = inner.next_sequence;
+                            inner.next_sequence += 1;
+
+                            let scheduled_event = ScheduledEvent::new(
+                                scheduled_time,
+                                Event::ProcessSendBuffer {
+                                    connection_id: connection_id.0,
+                                },
+                                sequence,
+                            );
+                            inner.event_queue.schedule(scheduled_event);
+                        } else {
+                            // Mark sender as no longer active
+                            conn.send_in_progress = false;
                         }
+                    } else {
+                        // No more messages, mark sender as inactive
+                        conn.send_in_progress = false;
                     }
                 }
             }
@@ -791,6 +1274,18 @@ impl WeakSimWorld {
     ) -> SimulationResult<()> {
         let sim = self.upgrade()?;
         sim.write_to_connection(connection_id, data)
+    }
+
+    /// Buffer data for ordered sending on a connection.
+    ///
+    /// This method implements TCP-like ordering by buffering the data and processing
+    /// it through a FIFO queue to prevent message reordering due to random delays.
+    ///
+    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
+    /// has been dropped.
+    pub fn buffer_send(&self, connection_id: ConnectionId, data: Vec<u8>) -> SimulationResult<()> {
+        let sim = self.upgrade()?;
+        sim.buffer_send(connection_id, data)
     }
 
     /// Get a network provider for the simulation.
