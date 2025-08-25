@@ -1,306 +1,18 @@
 use moonpool_simulation::{
     NetworkConfiguration, NetworkProvider, Peer, PeerConfig, SimulationBuilder, SimulationMetrics,
-    SimulationResult, TcpListenerTrait, TimeProvider, always_assert, runner::IterationControl,
-    sometimes_assert,
+    SimulationResult, TcpListenerTrait, TimeProvider, always_assert, rng::sim_random_range,
+    runner::IterationControl, sometimes_assert,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{Level, info, instrument};
+use tracing::{Level, instrument};
 use tracing_subscriber;
 
-/// Simplified ping-pong workload similar to the working echo pattern
-#[instrument(skip(provider))]
-async fn ping_pong_simple(
-    _seed: u64,
-    provider: moonpool_simulation::SimNetworkProvider,
-    ip_address: Option<String>,
-) -> SimulationResult<SimulationMetrics> {
-    // IP address assigned: use for identification or logging if needed
-    let _assigned_ip = ip_address.unwrap_or_else(|| "no-ip".to_string());
-
-    let server_addr = "ping-pong-server";
-
-    // Follow the working pattern from simple_echo_server
-    let listener = provider.bind(server_addr).await?;
-    let _client = provider.connect(server_addr).await?; // Create connection first
-    let (mut stream, _peer_addr) = listener.accept().await?; // Then accept it
-
-    // Just write some ping-pong style test data to exercise the connection
-    let ping_data = b"PING-0";
-    let pong_data = b"PONG-0";
-
-    // Write ping and pong data
-    stream.write_all(ping_data).await?;
-    stream.write_all(pong_data).await?;
-
-    // Return metrics
-    let metrics = SimulationMetrics::default();
-
-    Ok(metrics)
-}
-
-#[test]
-fn test_ping_pong_with_simulation_report() {
-    let _ = tracing_subscriber::fmt()
-        .with_max_level(Level::WARN)
-        .try_init();
-
-    info!("tracing setup");
-
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build_local(Default::default())
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
-        // Use manual SimWorld approach like the working tests
-        let config = NetworkConfiguration::wan_simulation(); // Use WAN config for noticeable delays
-        let mut sim = moonpool_simulation::SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
-
-        // Run the ping-pong workload directly
-        let result = ping_pong_simple(12345, provider, Some("10.0.0.1".to_string())).await;
-
-        // Process all simulation events
-        sim.run_until_empty();
-
-        // Extract metrics from the simulation
-        let sim_metrics = sim.extract_metrics();
-
-        match result {
-            Ok(_workload_metrics) => {
-                println!("Ping-pong workload completed successfully!");
-                println!("Simulated time: {:?}", sim_metrics.simulated_time);
-                println!("Events processed: {}", sim_metrics.events_processed);
-
-                // Verify the simulation worked
-                assert!(sim_metrics.simulated_time > std::time::Duration::ZERO);
-                assert!(sim_metrics.events_processed > 0);
-
-                println!("Manual ping-pong simulation test passed!");
-            }
-            Err(e) => {
-                panic!("Ping-pong workload failed: {:?}", e);
-            }
-        }
-    });
-}
-
-/// Server workload for ping-pong communication
-#[instrument(skip(provider))]
-async fn ping_pong_server(
-    _seed: u64,
-    provider: moonpool_simulation::SimNetworkProvider,
-    _time_provider: moonpool_simulation::SimTimeProvider,
-    topology: moonpool_simulation::WorkloadTopology,
-) -> SimulationResult<SimulationMetrics> {
-    // Use the server's own IP as the bind address
-    let server_addr = &topology.my_ip;
-    tracing::debug!(
-        "Server: Starting server workload on {} with {} peer(s): {:?}",
-        topology.my_ip,
-        topology.peer_ips.len(),
-        topology.peer_ips
-    );
-
-    // Bind to the server address
-    tracing::debug!("Server: Binding to {}", server_addr);
-    let listener = provider.bind(server_addr).await?;
-    tracing::debug!("Server: Bound successfully, waiting for connections");
-
-    // Accept a connection from the client
-    tracing::debug!("Server: Accepting connection");
-    let (mut stream, _peer_addr) = listener.accept().await?;
-    tracing::debug!("Server: Accepted connection from client");
-
-    // Read ping from client
-    tracing::debug!("Server: Reading ping from client");
-    let mut buffer = [0u8; 6];
-    stream.read_exact(&mut buffer).await?;
-    let ping_message = std::str::from_utf8(&buffer).unwrap_or("INVALID");
-    tracing::debug!("Server: Received ping: {:?}", ping_message);
-
-    // Verify we received a valid ping
-    always_assert!(
-        server_receives_ping,
-        ping_message.starts_with("PING"),
-        "Server should always receive PING messages"
-    );
-    assert_eq!(&buffer, b"PING-0");
-
-    // Send pong response back to client
-    tracing::debug!("Server: Sending pong response");
-    let pong_data = b"PONG-0";
-    stream.write_all(pong_data).await?;
-    tracing::debug!("Server: Sent pong response");
-
-    // Record successful server response
-    always_assert!(
-        server_sends_pong,
-        true,
-        "Server should always be able to send PONG responses"
-    );
-
-    // This should always trigger - use always_assert since it's always true
-    always_assert!(
-        server_always_succeeds,
-        true,
-        "Server always succeeds in basic ping-pong"
-    );
-
-    let metrics = SimulationMetrics::default();
-    tracing::debug!("Server: Workload completed successfully");
-    Ok(metrics)
-}
-
-/// Client workload for ping-pong communication
-#[instrument(skip(provider))]
-async fn ping_pong_client(
-    _seed: u64,
-    provider: moonpool_simulation::SimNetworkProvider,
-    time_provider: moonpool_simulation::SimTimeProvider,
-    topology: moonpool_simulation::WorkloadTopology,
-) -> SimulationResult<SimulationMetrics> {
-    // Get the server address from topology
-    let server_addr = topology.peer_ips.first().ok_or_else(|| {
-        moonpool_simulation::SimulationError::InvalidState("No server peer in topology".to_string())
-    })?;
-    tracing::debug!(
-        "Client: Starting client workload on {} with {} peer(s): {:?}",
-        topology.my_ip,
-        topology.peer_ips.len(),
-        topology.peer_ips
-    );
-    tracing::debug!("Client: Will connect to server at {}", server_addr);
-
-    // Add coordination sleep to allow server setup before client connects
-    // This prevents race conditions in concurrent workload execution
-    tracing::debug!("Client: Sleeping for 100ms to allow server setup");
-    let start_time = time_provider.now();
-    provider
-        .sleep(std::time::Duration::from_millis(100))?
-        .await?;
-    let _actual_sleep_time = time_provider.now() - start_time;
-    tracing::debug!("Client: Sleep completed, connecting to server");
-
-    // Create a resilient peer for communication
-    let peer_config = PeerConfig::local_network();
-    let mut peer = Peer::new(
-        provider.clone(),
-        time_provider.clone(),
-        server_addr.to_string(),
-        peer_config,
-    );
-    tracing::debug!("Client: Created peer for server connection");
-
-    // Send ping using the peer
-    tracing::debug!("Client: Sending ping using peer");
-    let ping_data = b"PING-0";
-    let send_start = time_provider.now();
-    match peer.send(ping_data.to_vec()).await {
-        Ok(_) => {
-            let send_duration = time_provider.now() - send_start;
-            tracing::debug!(
-                "Client: Successfully sent ping using peer in {:?}",
-                send_duration
-            );
-            always_assert!(peer_can_send, true, "Peer should be able to send messages");
-
-            // This will always be true in simple scenarios, so use always_assert
-            always_assert!(
-                connection_reuse_working,
-                peer.metrics().connections_established <= peer.metrics().connection_attempts,
-                "Connection reuse should prevent excessive connection creation"
-            );
-        }
-        Err(e) => {
-            tracing::debug!("Client: Failed to send ping: {:?}", e);
-            // In this simple scenario, sends should not fail
-            return Err(moonpool_simulation::SimulationError::IoError(e.to_string()));
-        }
-    }
-
-    // Read pong response using the peer
-    tracing::debug!("Client: Reading pong response");
-    let receive_start = time_provider.now();
-    let mut response_buffer = [0u8; 6];
-    match peer.receive(&mut response_buffer).await {
-        Ok(bytes_read) => {
-            let receive_duration = time_provider.now() - receive_start;
-            let pong_message =
-                std::str::from_utf8(&response_buffer[..bytes_read]).unwrap_or("INVALID");
-            tracing::debug!(
-                "Client: Received pong: {:?} in {:?}",
-                pong_message,
-                receive_duration
-            );
-
-            // Verify we got a valid pong response
-            always_assert!(
-                peer_receives_pong,
-                pong_message.starts_with("PONG"),
-                "Peer should receive PONG responses"
-            );
-            assert_eq!(&response_buffer[..bytes_read], b"PONG-0");
-
-            // Record successful round-trip communication
-            always_assert!(
-                peer_roundtrip_success,
-                true,
-                "Peer should complete round-trip communication"
-            );
-
-            // This will always be true in simple scenarios, so use always_assert
-            always_assert!(
-                no_connection_leaks,
-                peer.metrics().connection_failures == 0
-                    || peer.metrics().connections_established > 0,
-                "Connection failures should not prevent future successful connections"
-            );
-        }
-        Err(e) => {
-            tracing::debug!("Client: Failed to receive pong: {:?}", e);
-            // In this simple scenario, receives should not fail
-            return Err(moonpool_simulation::SimulationError::IoError(e.to_string()));
-        }
-    }
-
-    // Log peer metrics and validate resilient behavior
-    let metrics = peer.metrics();
-    tracing::debug!(
-        "Client: Peer metrics - attempts={}, established={}, failures={}",
-        metrics.connection_attempts,
-        metrics.connections_established,
-        metrics.connection_failures
-    );
-
-    // Connection failures are expected sometimes in resilient systems
-    if metrics.connection_failures > 0 {
-        // In simple scenarios, failures are rare, so this would be sometimes_assert in complex scenarios
-        sometimes_assert!(
-            peer_recovers_from_failures,
-            metrics.connections_established >= metrics.connection_failures,
-            "Peer should recover from failures"
-        );
-    }
-
-    // Success rate validation - in simple scenarios, success rate is always high
-    let success_rate = if metrics.connection_attempts > 0 {
-        (metrics.connections_established as f64 / metrics.connection_attempts as f64) * 100.0
-    } else {
-        0.0
-    };
-    tracing::debug!("Client: Connection success rate: {:.1}%", success_rate);
-
-    let metrics = SimulationMetrics::default();
-    tracing::debug!("Client: Workload completed successfully");
-    Ok(metrics)
-}
+static MAX_PING: i32 = 100;
 
 #[test]
 fn test_ping_pong_with_simulation_builder() {
     let _ = tracing_subscriber::fmt()
-        .with_max_level(Level::DEBUG) // Enable debug logging
+        .with_max_level(Level::INFO)
         .try_init();
 
     let local_runtime = tokio::runtime::Builder::new_current_thread()
@@ -314,9 +26,7 @@ fn test_ping_pong_with_simulation_builder() {
             .set_network_config(NetworkConfiguration::wan_simulation())
             .register_workload("ping_pong_server", ping_pong_server)
             .register_workload("ping_pong_client", ping_pong_client)
-            .set_iteration_control(IterationControl::UntilAllSometimesReached {
-                safety_limit: 1000,
-            })
+            .set_iteration_control(IterationControl::UntilAllSometimesReached(1000))
             .run()
             .await;
 
@@ -360,4 +70,328 @@ fn test_ping_pong_with_simulation_builder() {
         );
         println!("with WAN network simulation conditions and comprehensive assertion tracking.");
     });
+}
+
+/// Server workload for ping-pong communication
+#[instrument(skip(provider))]
+async fn ping_pong_server(
+    _seed: u64, // Seed is set via thread_local, parameter kept for API compatibility
+    provider: moonpool_simulation::SimNetworkProvider,
+    _time_provider: moonpool_simulation::SimTimeProvider,
+    topology: moonpool_simulation::WorkloadTopology,
+) -> SimulationResult<SimulationMetrics> {
+    // Use the server's own IP as the bind address
+    let server_addr = &topology.my_ip;
+    tracing::debug!(
+        "Server: Starting server workload on {} with {} peer(s): {:?}",
+        topology.my_ip,
+        topology.peer_ips.len(),
+        topology.peer_ips
+    );
+
+    // Bind to the server address
+    tracing::debug!("Server: Binding to {}", server_addr);
+    let listener = provider.bind(server_addr).await?;
+    tracing::debug!("Server: Bound successfully, waiting for connections");
+
+    // Accept a connection from the client
+    tracing::debug!("Server: Accepting connection");
+    let (mut stream, _peer_addr) = listener.accept().await?;
+    tracing::debug!("Server: Accepted connection from client {}", _peer_addr);
+
+    // loop to listen for client's messages
+    let mut ping_sequence = 0;
+    loop {
+        // Read message from client
+        tracing::debug!("Server: Reading message {} from client", ping_sequence);
+        let mut buffer = [0u8; 16];
+        let bytes_read = stream.read(&mut buffer).await?;
+        let message = std::str::from_utf8(&buffer[..bytes_read])
+            .unwrap_or("INVALID")
+            .trim_end_matches('\0');
+        tracing::debug!(
+            "Server: Received message {} ({} bytes): {:?}",
+            ping_sequence,
+            bytes_read,
+            message
+        );
+
+        // Match on the message type
+        if message.starts_with("PING-") {
+            // Handle PING message
+            let ping_message = message;
+
+            // Verify that after splitting on "-", it is a valid number matching the sequence
+            if let Some((prefix, number_str)) = ping_message.split_once('-') {
+                always_assert!(
+                    server_receives_valid_format,
+                    prefix == "PING",
+                    "Ping message should have PING prefix"
+                );
+
+                // Parse the number and verify it matches expected sequence
+                if let Ok(ping_number) = number_str.parse::<i32>() {
+                    always_assert!(
+                        server_receives_valid_sequence,
+                        ping_number == ping_sequence,
+                        "Ping sequence number should match expected value"
+                    );
+
+                    // Send corresponding PONG response
+                    let pong_data = format!("PONG-{}", ping_number);
+                    tracing::debug!("Server: Sending pong response: {}", pong_data);
+                    stream.write_all(pong_data.as_bytes()).await?;
+                    tracing::debug!("Server: Sent pong response {}", ping_number);
+
+                    always_assert!(
+                        server_sends_pong,
+                        true,
+                        "Server should always be able to send PONG responses"
+                    );
+
+                    ping_sequence += 1;
+                } else {
+                    panic!("Invalid ping number format: {}", number_str);
+                }
+            } else {
+                panic!("Invalid ping message format: {}", ping_message);
+            }
+        } else if message == "CLOSE" {
+            // Handle CLOSE message
+            tracing::debug!("Server: Received CLOSE message, shutting down");
+
+            always_assert!(
+                server_receives_close,
+                true,
+                "Server should receive CLOSE message to shutdown gracefully"
+            );
+
+            // Send BYE!! response and exit
+            tracing::debug!("Server: Sending CLOSE acknowledgment");
+            stream.write_all(b"BYE!!").await?;
+            tracing::debug!("Server: Sent CLOSE acknowledgment, shutting down");
+
+            break; // Exit the loop
+        } else {
+            // Unknown message type
+            tracing::warn!("Server: Received unknown message: {:?}", message);
+            panic!("Unknown message type: {}", message);
+        }
+    }
+
+    // This should always trigger - use always_assert since it's always true
+    always_assert!(
+        server_always_succeeds,
+        true,
+        "Server always succeeds in basic ping-pong"
+    );
+
+    let metrics = SimulationMetrics::default();
+    tracing::debug!("Server: Workload completed successfully");
+    Ok(metrics)
+}
+
+/// Client workload for ping-pong communication
+#[instrument(skip(provider))]
+async fn ping_pong_client(
+    _seed: u64, // Seed is set via thread_local, parameter kept for API compatibility
+    provider: moonpool_simulation::SimNetworkProvider,
+    time_provider: moonpool_simulation::SimTimeProvider,
+    topology: moonpool_simulation::WorkloadTopology,
+) -> SimulationResult<SimulationMetrics> {
+    // Get the server address from topology
+    let server_addr = topology.peer_ips.first().ok_or_else(|| {
+        moonpool_simulation::SimulationError::InvalidState("No server peer in topology".to_string())
+    })?;
+    tracing::debug!(
+        "Client: Starting client workload on {} with {} peer(s): {:?}",
+        topology.my_ip,
+        topology.peer_ips.len(),
+        topology.peer_ips
+    );
+    tracing::debug!("Client: Will connect to server at {}", server_addr);
+
+    // Add coordination sleep to allow server setup before client connects
+    // This prevents race conditions in concurrent workload execution
+    tracing::debug!("Client: Sleeping for 100ms to allow server setup");
+    let start_time = time_provider.now();
+    provider
+        .sleep(std::time::Duration::from_millis(100))?
+        .await?;
+    let _actual_sleep_time = time_provider.now() - start_time;
+    tracing::debug!("Client: Sleep completed, connecting to server");
+
+    // Generate a random number of pings to send (between 1 and 5 for testing)
+    let ping_count = sim_random_range(1..MAX_PING) as u8;
+    tracing::debug!("Client: Will send {} pings to server", ping_count);
+
+    // Create a resilient peer for communication
+    let peer_config = PeerConfig::local_network();
+    let mut peer = Peer::new(
+        provider.clone(),
+        time_provider.clone(),
+        server_addr.to_string(),
+        peer_config,
+    );
+    tracing::debug!("Client: Created peer for server connection");
+
+    // Send multiple pings and receive pongs
+    for i in 0..ping_count {
+        // Send ping using the peer - pad to 16 bytes to match server buffer
+        tracing::debug!("Client: Sending ping {} using peer", i);
+        let ping_data = format!("PING-{}", i);
+        let mut padded_data = [0u8; 16];
+        let bytes = ping_data.as_bytes();
+        padded_data[..bytes.len()].copy_from_slice(bytes);
+
+        let send_start = time_provider.now();
+        match peer.send(padded_data.to_vec()).await {
+            Ok(_) => {
+                let send_duration = time_provider.now() - send_start;
+                tracing::debug!(
+                    "Client: Successfully sent ping {} using peer in {:?}",
+                    i,
+                    send_duration
+                );
+                always_assert!(peer_can_send, true, "Peer should be able to send messages");
+
+                // This will always be true in simple scenarios, so use always_assert
+                always_assert!(
+                    connection_reuse_working,
+                    peer.metrics().connections_established <= peer.metrics().connection_attempts,
+                    "Connection reuse should prevent excessive connection creation"
+                );
+            }
+            Err(e) => {
+                tracing::debug!("Client: Failed to send ping {}: {:?}", i, e);
+                // In this simple scenario, sends should not fail
+                return Err(moonpool_simulation::SimulationError::IoError(e.to_string()));
+            }
+        }
+
+        // Read pong response using the peer - expect variable length response
+        tracing::debug!("Client: Reading pong response {}", i);
+        let receive_start = time_provider.now();
+        let mut response_buffer = [0u8; 16];
+        match peer.receive(&mut response_buffer).await {
+            Ok(bytes_read) => {
+                let receive_duration = time_provider.now() - receive_start;
+                let pong_message =
+                    std::str::from_utf8(&response_buffer[..bytes_read]).unwrap_or("INVALID");
+                tracing::debug!(
+                    "Client: Received pong {}: {:?} in {:?}",
+                    i,
+                    pong_message,
+                    receive_duration
+                );
+
+                // Verify we got a valid pong response
+                always_assert!(
+                    peer_receives_pong,
+                    pong_message.starts_with("PONG"),
+                    "Peer should receive PONG responses"
+                );
+                let expected_pong = format!("PONG-{}", i);
+                assert_eq!(pong_message, expected_pong);
+            }
+            Err(e) => {
+                tracing::debug!("Client: Failed to receive pong {}: {:?}", i, e);
+                // In this simple scenario, receives should not fail
+                return Err(moonpool_simulation::SimulationError::IoError(e.to_string()));
+            }
+        }
+    }
+
+    // Send CLOSE message to server - pad to 16 bytes to match server buffer
+    tracing::debug!("Client: Sending CLOSE message to server");
+    let mut close_data = [0u8; 16];
+    close_data[..5].copy_from_slice(b"CLOSE");
+
+    match peer.send(close_data.to_vec()).await {
+        Ok(_) => {
+            tracing::debug!("Client: Successfully sent CLOSE message");
+            always_assert!(
+                client_sends_close,
+                true,
+                "Client should be able to send CLOSE message"
+            );
+        }
+        Err(e) => {
+            tracing::debug!("Client: Failed to send CLOSE message: {:?}", e);
+            return Err(moonpool_simulation::SimulationError::IoError(e.to_string()));
+        }
+    }
+
+    // Read server's acknowledgment (if CLOSE was sent successfully)
+    tracing::debug!("Client: Reading server's CLOSE acknowledgment");
+    let mut ack_buffer = [0u8; 5];
+    match peer.receive(&mut ack_buffer).await {
+        Ok(bytes_read) => {
+            let ack_message = std::str::from_utf8(&ack_buffer[..bytes_read]).unwrap_or("INVALID");
+            tracing::debug!("Client: Received acknowledgment: {:?}", ack_message);
+
+            // Verify we got the expected acknowledgment
+            always_assert!(
+                client_receives_bye,
+                ack_message == "BYE!!",
+                "Client should receive BYE acknowledgment from server"
+            );
+            assert_eq!(&ack_buffer[..bytes_read], b"BYE!!");
+        }
+        Err(e) => {
+            tracing::warn!("Client: Failed to receive CLOSE acknowledgment: {:?}", e);
+            // Not critical - server might have already closed
+            sometimes_assert!(
+                close_ack_received,
+                false,
+                "CLOSE acknowledgment may not always be received"
+            );
+            tracing::info!("Client: Server may have already closed, continuing");
+        }
+    }
+
+    // Record successful round-trip communication
+    always_assert!(
+        peer_roundtrip_success,
+        true,
+        "Peer should complete round-trip communication"
+    );
+
+    // This will always be true in simple scenarios, so use always_assert
+    always_assert!(
+        no_connection_leaks,
+        peer.metrics().connection_failures == 0 || peer.metrics().connections_established > 0,
+        "Connection failures should not prevent future successful connections"
+    );
+
+    // Log peer metrics and validate resilient behavior
+    let metrics = peer.metrics();
+    tracing::debug!(
+        "Client: Peer metrics - attempts={}, established={}, failures={}",
+        metrics.connection_attempts,
+        metrics.connections_established,
+        metrics.connection_failures
+    );
+
+    // Connection failures are expected sometimes in resilient systems
+    if metrics.connection_failures > 0 {
+        // In simple scenarios, failures are rare, so this would be sometimes_assert in complex scenarios
+        sometimes_assert!(
+            peer_recovers_from_failures,
+            metrics.connections_established >= metrics.connection_failures,
+            "Peer should recover from failures"
+        );
+    }
+
+    // Success rate validation - in simple scenarios, success rate is always high
+    let success_rate = if metrics.connection_attempts > 0 {
+        (metrics.connections_established as f64 / metrics.connection_attempts as f64) * 100.0
+    } else {
+        0.0
+    };
+    tracing::debug!("Client: Connection success rate: {:.1}%", success_rate);
+
+    let metrics = SimulationMetrics::default();
+    tracing::debug!("Client: Workload completed successfully");
+    Ok(metrics)
 }

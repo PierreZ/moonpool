@@ -157,3 +157,80 @@ All core simulation framework phases (1-3) are complete and ready for production
 - Clean integration with networking simulation
 
 **All phases meet completion criteria and the simulation framework is ready for production use.**
+
+## Sometimes Assertions Best Practices (Antithesis)
+
+### When to Use Sometimes vs Always Assertions
+
+**Always Assertions (`always_assert!`):**
+- Guard against unexpected program states that should NEVER occur
+- Verify invariants that must hold in every execution
+- Check critical safety properties
+- Example: "Server should always receive valid protocol messages"
+
+**Sometimes Assertions (`sometimes_assert!`):**
+- Verify that important code paths are actually being tested
+- Check rare but important scenarios are reachable
+- Validate error handling and recovery paths are exercised
+- Example: "Connection retry logic should sometimes be triggered"
+
+### What Makes a Good Sometimes Assertion
+
+1. **Target Rare Events**: Focus on low-probability but high-impact scenarios
+2. **Error Path Coverage**: Place in error handling and recovery code
+3. **Boundary Conditions**: Check edge cases and limits are tested
+4. **Race Conditions**: Verify concurrent scenarios are explored
+5. **State Transitions**: Confirm rare state changes occur
+
+### Patterns for Distributed Systems
+
+**Good Patterns:**
+```rust
+// Failover scenarios
+sometimes_assert!(
+    failover_triggered,
+    primary_failed && backup_activated,
+    "Failover to backup should sometimes occur"
+);
+
+// Retry mechanisms
+sometimes_assert!(
+    retry_with_backoff,
+    retry_count > 0 && backoff_applied,
+    "Connection retries with backoff should sometimes happen"
+);
+
+// Queue saturation
+sometimes_assert!(
+    queue_full,
+    queue.len() >= queue.capacity() * 0.9,
+    "Message queue should sometimes approach capacity"
+);
+
+// Network issues
+sometimes_assert!(
+    connection_timeout,
+    elapsed > timeout_threshold,
+    "Connections should sometimes timeout"
+);
+```
+
+**Anti-Patterns to Avoid:**
+- Don't add sometimes assertions to trivial or always-executed paths
+- Don't use them without understanding their purpose
+- Don't add too many - be strategic and intentional
+- Don't use for normal program flow validation
+
+### Strategic Placement Guidelines
+
+Place sometimes assertions in:
+1. **Error handling blocks** - Verify error paths are tested
+2. **Reconnection/retry logic** - Ensure resilience mechanisms activate
+3. **Queue overflow handling** - Check backpressure scenarios
+4. **Timeout handlers** - Validate timeout paths are exercised
+5. **Concurrent access points** - Verify race conditions are explored
+6. **Resource exhaustion handlers** - Test limit conditions
+7. **Fallback mechanisms** - Ensure degraded modes are tested
+
+### Key Principle
+Sometimes assertions directly address testing completeness by ensuring that rare but important code paths are actually exercised during testing. They serve as a more nuanced alternative to traditional code coverage metrics by focusing on behavioral coverage rather than line coverage.

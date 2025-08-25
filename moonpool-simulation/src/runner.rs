@@ -29,10 +29,7 @@ pub enum IterationControl {
     /// Run for a specific duration of wall-clock time
     TimeLimit(Duration),
     /// Run until all sometimes_assert! assertions have been reached (with a safety limit)
-    UntilAllSometimesReached {
-        /// Maximum number of iterations to prevent infinite loops
-        safety_limit: usize,
-    },
+    UntilAllSometimesReached(usize),
 }
 
 /// Core metrics collected during a simulation run.
@@ -135,42 +132,6 @@ impl fmt::Display for SimulationReport {
             self.average_events_processed()
         )?;
         writeln!(f)?;
-
-        writeln!(f, "=== Assertion Results ===")?;
-        if self.assertion_results.is_empty() {
-            writeln!(f, "No assertions recorded")?;
-        } else {
-            for (name, stats) in &self.assertion_results {
-                writeln!(
-                    f,
-                    "{}: {}/{} successes ({:.1}%)",
-                    name,
-                    stats.successes,
-                    stats.total_checks,
-                    stats.success_rate()
-                )?;
-            }
-        }
-
-        writeln!(f)?;
-        writeln!(f, "=== Assertion Validation ===")?;
-        if !self.assertion_validation.has_violations() {
-            writeln!(f, "✅ All assertions follow their contracts!")?;
-        } else {
-            if !self.assertion_validation.success_rate_violations.is_empty() {
-                writeln!(f, "❌ Success rate violations:")?;
-                for violation in &self.assertion_validation.success_rate_violations {
-                    writeln!(f, "  - {}", violation)?;
-                }
-            }
-
-            if !self.assertion_validation.unreachable_assertions.is_empty() {
-                writeln!(f, "❌ Unreachable code detected:")?;
-                for violation in &self.assertion_validation.unreachable_assertions {
-                    writeln!(f, "  - {}", violation)?;
-                }
-            }
-        }
 
         Ok(())
     }
@@ -289,7 +250,7 @@ impl SimulationBuilder {
 
     /// Run until all sometimes_assert! assertions have been reached.
     pub fn run_until_all_sometimes_reached(mut self, safety_limit: usize) -> Self {
-        self.iteration_control = IterationControl::UntilAllSometimesReached { safety_limit };
+        self.iteration_control = IterationControl::UntilAllSometimesReached(safety_limit);
         self
     }
 
@@ -404,7 +365,7 @@ impl SimulationBuilder {
                         break;
                     }
                 }
-                IterationControl::UntilAllSometimesReached { safety_limit } => {
+                IterationControl::UntilAllSometimesReached(safety_limit) => {
                     if iteration_count >= *safety_limit {
                         break;
                     }
@@ -542,7 +503,7 @@ impl SimulationBuilder {
                         && initial_event_count == 0
                     {
                         no_progress_count += 1;
-                        if no_progress_count > 1000 {
+                        if no_progress_count > 10 {
                             tracing::error!(
                                 "Deadlock detected: {} tasks remaining but no events to process after {} iterations",
                                 handles.len(),

@@ -8,7 +8,9 @@ use super::config::PeerConfig;
 use super::error::{PeerError, PeerResult};
 use super::metrics::PeerMetrics;
 use crate::network::NetworkProvider;
+use crate::sometimes_assert;
 use crate::time::TimeProvider;
+// use crate::sometimes_assert;
 
 /// State for managing reconnections with exponential backoff.
 #[derive(Debug, Clone)]
@@ -127,6 +129,14 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
             match self.send_raw(&data).await {
                 Ok(_) => {
                     self.metrics.record_message_sent(data.len());
+
+                    // Verify direct send without queuing
+                    sometimes_assert!(
+                        peer_sends_without_queue,
+                        self.send_queue.is_empty(),
+                        "Peer should sometimes send directly without queuing"
+                    );
+
                     return Ok(());
                 }
                 Err(_) => {
@@ -137,6 +147,19 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
 
         // No connection or send failed - queue the message
         self.queue_message(data)?;
+
+        // Check if messages are being queued
+        sometimes_assert!(
+            peer_queues_messages,
+            !self.send_queue.is_empty(),
+            "Peer should sometimes queue messages when connection unavailable"
+        );
+
+        sometimes_assert!(
+            peer_queue_grows,
+            self.send_queue.len() > 1,
+            "Message queue should sometimes contain multiple messages"
+        );
 
         // Attempt to reconnect and process queue
         self.ensure_connection().await?;
@@ -196,6 +219,13 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
 
     /// Add message to send queue with overflow handling.
     fn queue_message(&mut self, data: Vec<u8>) -> PeerResult<()> {
+        // Check if queue is approaching capacity
+        sometimes_assert!(
+            peer_queue_near_capacity,
+            self.send_queue.len() >= (self.config.max_queue_size as f64 * 0.8) as usize,
+            "Message queue should sometimes approach capacity limit"
+        );
+
         if self.send_queue.len() >= self.config.max_queue_size {
             // Drop oldest message (FIFO)
             if self.send_queue.pop_front().is_some() {
@@ -232,7 +262,24 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
     /// Ensure we have a valid connection, attempting to reconnect if necessary.
     async fn ensure_connection(&mut self) -> PeerResult<()> {
         if self.connection.is_some() {
+            // Check connection reuse (only if we've already sent messages)
+            if self.metrics.messages_sent > 0 {
+                sometimes_assert!(
+                    peer_reuses_connection,
+                    true,
+                    "Peer should sometimes reuse existing connections"
+                );
+            }
             return Ok(());
+        }
+
+        // Check if this is a reconnection attempt (only if we've had failures)
+        if self.reconnect_state.failure_count > 0 {
+            sometimes_assert!(
+                peer_reconnects,
+                true,
+                "Peer should sometimes need to reconnect after failures"
+            );
         }
 
         self.connect().await
@@ -241,10 +288,15 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
     /// Attempt to establish a connection with exponential backoff.
     async fn connect(&mut self) -> PeerResult<()> {
         // Check if we've exceeded maximum failure count
-        if let Some(max_failures) = self.config.max_connection_failures
-            && self.reconnect_state.failure_count >= max_failures
-        {
-            return Err(PeerError::ConnectionFailed);
+        if let Some(max_failures) = self.config.max_connection_failures {
+            if self.reconnect_state.failure_count >= max_failures {
+                sometimes_assert!(
+                    peer_hits_max_failures,
+                    true,
+                    "Peer should sometimes hit maximum failure limit"
+                );
+                return Err(PeerError::ConnectionFailed);
+            }
         }
 
         // Wait for backoff delay if needed
@@ -252,6 +304,13 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
             let elapsed = last_attempt.elapsed();
             if elapsed < self.reconnect_state.current_delay {
                 let sleep_duration = self.reconnect_state.current_delay - elapsed;
+
+                // Check backoff activation
+                sometimes_assert!(
+                    peer_backoff_activated,
+                    sleep_duration > Duration::from_millis(0),
+                    "Peer should sometimes wait for backoff before reconnecting"
+                );
 
                 // Use TimeProvider for simulation-aware sleep
                 if self.time.sleep(sleep_duration).await.is_err() {
@@ -275,6 +334,14 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
         {
             Ok(Ok(Ok(stream))) => {
                 // Connection successful
+
+                // Check if this is recovery after failures
+                sometimes_assert!(
+                    peer_recovers_after_failures,
+                    self.reconnect_state.failure_count > 0,
+                    "Peer should sometimes successfully connect after previous failures"
+                );
+
                 self.connection = Some(stream);
                 self.reconnect_state
                     .reset(self.config.initial_reconnect_delay);
@@ -288,6 +355,11 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
             }
             Ok(Err(())) => {
                 // Timeout
+                sometimes_assert!(
+                    peer_connection_timeout,
+                    true,
+                    "Connection attempts should sometimes timeout"
+                );
                 self.handle_connection_failure();
                 Err(PeerError::Timeout)
             }
@@ -310,6 +382,19 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
             self.config.max_reconnect_delay,
         );
 
+        // Check backoff behavior
+        sometimes_assert!(
+            peer_backoff_increases,
+            next_delay > self.reconnect_state.current_delay,
+            "Backoff delay should sometimes increase exponentially"
+        );
+
+        sometimes_assert!(
+            peer_hits_max_backoff,
+            next_delay == self.config.max_reconnect_delay,
+            "Peer should sometimes hit maximum backoff delay"
+        );
+
         self.reconnect_state.current_delay = next_delay;
         self.reconnect_state.reconnecting = true;
 
@@ -329,6 +414,12 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
                 }
                 Err(e) => {
                     // Connection failed - put message back at front and return error
+                    sometimes_assert!(
+                        peer_requeues_on_failure,
+                        true,
+                        "Peer should sometimes re-queue messages after send failure"
+                    );
+
                     self.send_queue.push_front(data);
                     self.metrics.record_message_queued(); // Re-queue metrics
                     return Err(e);
