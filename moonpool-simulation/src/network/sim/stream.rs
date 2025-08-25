@@ -69,9 +69,16 @@ impl AsyncWrite for SimTcpStream {
         // Get write delay from network configuration
         let delay = sim.with_network_config(|config| config.latency.write_latency.sample());
 
-        // Schedule data delivery to paired connection with configured delay
+        // Log the write with its delay to track message ordering
+        let data_preview = String::from_utf8_lossy(&buf[..std::cmp::min(buf.len(), 20)]);
+        tracing::info!(
+            "SimTcpStream::poll_write scheduling delivery of {} bytes: '{}' with delay {:?}",
+            buf.len(),
+            data_preview,
+            delay
+        );
 
-        // Schedule the write completion event with configured delay
+        // Schedule data delivery to paired connection with configured delay
         sim.schedule_event(
             Event::DataDelivery {
                 connection_id: self.connection_id.0,

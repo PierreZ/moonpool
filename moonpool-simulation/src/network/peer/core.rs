@@ -124,10 +124,19 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
     /// If connected, sends immediately. If disconnected, queues the message
     /// and attempts to reconnect.
     pub async fn send(&mut self, data: Vec<u8>) -> PeerResult<()> {
+        tracing::info!(
+            "Peer::send called with {} bytes, connected={}, queue_size={}",
+            data.len(),
+            self.connection.is_some(),
+            self.send_queue.len()
+        );
+
         // If we have a connection, try to send immediately
         if self.connection.is_some() {
+            tracing::info!("Peer::send attempting direct send (connected)");
             match self.send_raw(&data).await {
                 Ok(_) => {
+                    tracing::info!("Peer::send direct send successful");
                     self.metrics.record_message_sent(data.len());
 
                     // Verify direct send without queuing
@@ -139,14 +148,25 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
 
                     return Ok(());
                 }
-                Err(_) => {
+                Err(e) => {
+                    tracing::info!("Peer::send direct send failed: {:?}, will queue", e);
                     // Connection failed - it will be cleared in send_raw
                 }
             }
+        } else {
+            tracing::info!("Peer::send no connection, will queue message");
         }
 
         // No connection or send failed - queue the message
+        tracing::info!(
+            "Peer::send queuing message, current queue size: {}",
+            self.send_queue.len()
+        );
         self.queue_message(data)?;
+        tracing::info!(
+            "Peer::send message queued, new queue size: {}",
+            self.send_queue.len()
+        );
 
         // Check if messages are being queued
         sometimes_assert!(
@@ -162,6 +182,7 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
         );
 
         // Attempt to reconnect and process queue
+        tracing::info!("Peer::send attempting to ensure connection and process queue");
         self.ensure_connection().await?;
         self.process_send_queue().await
     }
@@ -404,15 +425,29 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
 
     /// Process queued messages when connection is available.
     async fn process_send_queue(&mut self) -> PeerResult<()> {
+        tracing::info!(
+            "Peer::process_send_queue starting with {} queued messages",
+            self.send_queue.len()
+        );
+
         while let Some(data) = self.send_queue.pop_front() {
+            tracing::info!(
+                "Peer::process_send_queue processing message with {} bytes",
+                data.len()
+            );
             self.metrics.record_message_dequeued();
 
             match self.send_raw(&data).await {
                 Ok(_) => {
+                    tracing::info!("Peer::process_send_queue successfully sent queued message");
                     self.metrics.record_message_sent(data.len());
                     // Continue with next message
                 }
                 Err(e) => {
+                    tracing::info!(
+                        "Peer::process_send_queue failed to send queued message: {:?}, re-queuing",
+                        e
+                    );
                     // Connection failed - put message back at front and return error
                     sometimes_assert!(
                         peer_requeues_on_failure,
@@ -426,6 +461,8 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
                 }
             }
         }
+
+        tracing::info!("Peer::process_send_queue completed, queue is now empty");
         Ok(())
     }
 }

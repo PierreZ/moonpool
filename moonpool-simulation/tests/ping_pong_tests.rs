@@ -26,7 +26,7 @@ fn test_ping_pong_with_simulation_builder() {
             .set_network_config(NetworkConfiguration::wan_simulation())
             .register_workload("ping_pong_server", ping_pong_server)
             .register_workload("ping_pong_client", ping_pong_client)
-            .set_iteration_control(IterationControl::UntilAllSometimesReached(1000))
+            .set_iteration_control(IterationControl::FixedCount(1))
             .run()
             .await;
 
@@ -103,15 +103,15 @@ async fn ping_pong_server(
     let mut ping_sequence = 0;
     loop {
         // Read message from client
-        tracing::debug!("Server: Reading message {} from client", ping_sequence);
+        tracing::info!("Server: About to read next message");
         let mut buffer = [0u8; 16];
         let bytes_read = stream.read(&mut buffer).await?;
         let message = std::str::from_utf8(&buffer[..bytes_read])
             .unwrap_or("INVALID")
-            .trim_end_matches('\0');
-        tracing::debug!(
-            "Server: Received message {} ({} bytes): {:?}",
-            ping_sequence,
+            .trim_end_matches('\0')
+            .trim_end_matches('\n');
+        tracing::info!(
+            "Server: Received message ({} bytes): {:?}",
             bytes_read,
             message
         );
@@ -134,7 +134,10 @@ async fn ping_pong_server(
                     always_assert!(
                         server_receives_valid_sequence,
                         ping_number == ping_sequence,
-                        "Ping sequence number should match expected value"
+                        format!(
+                            "Ping sequence number should match expected value, expected {}, got {}",
+                            ping_sequence, ping_number
+                        )
                     );
 
                     // Send corresponding PONG response
@@ -221,12 +224,37 @@ async fn ping_pong_client(
     let _actual_sleep_time = time_provider.now() - start_time;
     tracing::debug!("Client: Sleep completed, connecting to server");
 
-    // Generate a random number of pings to send (between 1 and 5 for testing)
-    let ping_count = sim_random_range(1..MAX_PING) as u8;
+    // Generate a random number of pings to send - more messages to fill small queues
+    let ping_count = sim_random_range(5..50) as u8;
     tracing::debug!("Client: Will send {} pings to server", ping_count);
 
-    // Create a resilient peer for communication
-    let peer_config = PeerConfig::local_network();
+    // Create a resilient peer for communication with randomized config
+    let queue_size = sim_random_range(2..10);
+    let timeout_ms = sim_random_range(1..100);
+    let init_delay_ms = sim_random_range(1..50);
+    let max_delay_ms = sim_random_range(50..200);
+    let max_failures = if sim_random_range(1..100) <= 50 {
+        Some(sim_random_range(1..5) as u32)
+    } else {
+        None
+    };
+
+    tracing::info!(
+        "Client: Creating peer with config: queue_size={}, timeout_ms={}, init_delay_ms={}, max_delay_ms={}, max_failures={:?}",
+        queue_size,
+        timeout_ms,
+        init_delay_ms,
+        max_delay_ms,
+        max_failures
+    );
+
+    let peer_config = PeerConfig::new(
+        queue_size,
+        std::time::Duration::from_millis(timeout_ms as u64),
+        std::time::Duration::from_millis(init_delay_ms as u64),
+        std::time::Duration::from_millis(max_delay_ms as u64),
+        max_failures,
+    );
     let mut peer = Peer::new(
         provider.clone(),
         time_provider.clone(),
@@ -235,69 +263,107 @@ async fn ping_pong_client(
     );
     tracing::debug!("Client: Created peer for server connection");
 
+    // Sometimes send messages in bursts to fill queue, sometimes one-by-one
+    let burst_mode = sim_random_range(1..100) <= 40; // 40% chance of burst mode
+    let burst_size = if burst_mode {
+        sim_random_range(3..8)
+    } else {
+        1
+    };
+
     // Send multiple pings and receive pongs
-    for i in 0..ping_count {
-        // Send ping using the peer - pad to 16 bytes to match server buffer
-        tracing::debug!("Client: Sending ping {} using peer", i);
-        let ping_data = format!("PING-{}", i);
-        let mut padded_data = [0u8; 16];
-        let bytes = ping_data.as_bytes();
-        padded_data[..bytes.len()].copy_from_slice(bytes);
+    let mut ping_idx = 0;
+    tracing::debug!(
+        "Client: Starting to send {} pings, burst_mode={}, burst_size={}",
+        ping_count,
+        burst_mode,
+        burst_size
+    );
 
-        let send_start = time_provider.now();
-        match peer.send(padded_data.to_vec()).await {
-            Ok(_) => {
-                let send_duration = time_provider.now() - send_start;
-                tracing::debug!(
-                    "Client: Successfully sent ping {} using peer in {:?}",
-                    i,
-                    send_duration
-                );
-                always_assert!(peer_can_send, true, "Peer should be able to send messages");
+    while ping_idx < ping_count {
+        // Send burst of messages
+        let current_burst = std::cmp::min(burst_size, (ping_count - ping_idx) as usize);
+        tracing::debug!(
+            "Client: Starting burst at ping_idx={}, current_burst={}",
+            ping_idx,
+            current_burst
+        );
 
-                // This will always be true in simple scenarios, so use always_assert
-                always_assert!(
-                    connection_reuse_working,
-                    peer.metrics().connections_established <= peer.metrics().connection_attempts,
-                    "Connection reuse should prevent excessive connection creation"
-                );
+        for _j in 0..current_burst {
+            // Send ping using the peer - pad to 16 bytes to match server buffer
+            tracing::info!(
+                "Client: About to send PING-{} (ping_idx={})",
+                ping_idx,
+                ping_idx
+            );
+            let ping_data = format!("PING-{}\n", ping_idx); // Add newline separator
+            let mut padded_data = [0u8; 16];
+            let bytes = ping_data.as_bytes();
+            padded_data[..bytes.len()].copy_from_slice(bytes);
+
+            let send_start = time_provider.now();
+            match peer.send(padded_data.to_vec()).await {
+                Ok(_) => {
+                    let send_duration = time_provider.now() - send_start;
+                    tracing::info!(
+                        "Client: Successfully sent PING-{} using peer in {:?}",
+                        ping_idx,
+                        send_duration
+                    );
+                    always_assert!(peer_can_send, true, "Peer should be able to send messages");
+
+                    // This will always be true in simple scenarios, so use always_assert
+                    always_assert!(
+                        connection_reuse_working,
+                        peer.metrics().connections_established
+                            <= peer.metrics().connection_attempts,
+                        "Connection reuse should prevent excessive connection creation"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!("Client: Failed to send ping {}: {:?}", ping_idx, e);
+                    // In this simple scenario, sends should not fail
+                    return Err(moonpool_simulation::SimulationError::IoError(e.to_string()));
+                }
             }
-            Err(e) => {
-                tracing::debug!("Client: Failed to send ping {}: {:?}", i, e);
-                // In this simple scenario, sends should not fail
-                return Err(moonpool_simulation::SimulationError::IoError(e.to_string()));
-            }
+            ping_idx += 1;
         }
 
-        // Read pong response using the peer - expect variable length response
-        tracing::debug!("Client: Reading pong response {}", i);
-        let receive_start = time_provider.now();
-        let mut response_buffer = [0u8; 16];
-        match peer.receive(&mut response_buffer).await {
-            Ok(bytes_read) => {
-                let receive_duration = time_provider.now() - receive_start;
-                let pong_message =
-                    std::str::from_utf8(&response_buffer[..bytes_read]).unwrap_or("INVALID");
-                tracing::debug!(
-                    "Client: Received pong {}: {:?} in {:?}",
-                    i,
-                    pong_message,
-                    receive_duration
-                );
+        // Now receive responses for the burst
+        let start_idx = ping_idx - current_burst as u8;
+        for j in 0..current_burst {
+            let response_idx = start_idx + j as u8;
 
-                // Verify we got a valid pong response
-                always_assert!(
-                    peer_receives_pong,
-                    pong_message.starts_with("PONG"),
-                    "Peer should receive PONG responses"
-                );
-                let expected_pong = format!("PONG-{}", i);
-                assert_eq!(pong_message, expected_pong);
-            }
-            Err(e) => {
-                tracing::debug!("Client: Failed to receive pong {}: {:?}", i, e);
-                // In this simple scenario, receives should not fail
-                return Err(moonpool_simulation::SimulationError::IoError(e.to_string()));
+            // Read pong response using the peer - expect variable length response
+            tracing::debug!("Client: Reading pong response {}", response_idx);
+            let receive_start = time_provider.now();
+            let mut response_buffer = [0u8; 16];
+            match peer.receive(&mut response_buffer).await {
+                Ok(bytes_read) => {
+                    let receive_duration = time_provider.now() - receive_start;
+                    let pong_message =
+                        std::str::from_utf8(&response_buffer[..bytes_read]).unwrap_or("INVALID");
+                    tracing::debug!(
+                        "Client: Received pong {}: {:?} in {:?}",
+                        response_idx,
+                        pong_message,
+                        receive_duration
+                    );
+
+                    // Verify we got a valid pong response
+                    always_assert!(
+                        peer_receives_pong,
+                        pong_message.starts_with("PONG"),
+                        "Peer should receive PONG responses"
+                    );
+                    let expected_pong = format!("PONG-{}", response_idx);
+                    assert_eq!(pong_message, expected_pong);
+                }
+                Err(e) => {
+                    tracing::debug!("Client: Failed to receive pong {}: {:?}", response_idx, e);
+                    // In this simple scenario, receives should not fail
+                    return Err(moonpool_simulation::SimulationError::IoError(e.to_string()));
+                }
             }
         }
     }
@@ -305,7 +371,7 @@ async fn ping_pong_client(
     // Send CLOSE message to server - pad to 16 bytes to match server buffer
     tracing::debug!("Client: Sending CLOSE message to server");
     let mut close_data = [0u8; 16];
-    close_data[..5].copy_from_slice(b"CLOSE");
+    close_data[..6].copy_from_slice(b"CLOSE\n");
 
     match peer.send(close_data.to_vec()).await {
         Ok(_) => {

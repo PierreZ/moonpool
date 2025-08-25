@@ -35,6 +35,23 @@ impl Default for PeerConfig {
 }
 
 impl PeerConfig {
+    /// Create a new configuration with specified parameters.
+    pub fn new(
+        max_queue_size: usize,
+        connection_timeout: Duration,
+        initial_reconnect_delay: Duration,
+        max_reconnect_delay: Duration,
+        max_connection_failures: Option<u32>,
+    ) -> Self {
+        Self {
+            initial_reconnect_delay,
+            max_reconnect_delay,
+            max_queue_size,
+            connection_timeout,
+            max_connection_failures,
+        }
+    }
+
     /// Create a configuration for low-latency local networking.
     pub fn local_network() -> Self {
         Self {

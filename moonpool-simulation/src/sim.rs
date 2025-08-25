@@ -585,6 +585,14 @@ impl SimWorld {
                 data,
             } => {
                 // Data delivery completed - deliver data to paired connection's receive buffer
+                let data_preview = String::from_utf8_lossy(&data[..std::cmp::min(data.len(), 20)]);
+                tracing::info!(
+                    "Event::DataDelivery processing delivery of {} bytes: '{}' to connection {}",
+                    data.len(),
+                    data_preview,
+                    connection_id
+                );
+
                 let connection_id = ConnectionId(connection_id);
 
                 // Find the paired connection
