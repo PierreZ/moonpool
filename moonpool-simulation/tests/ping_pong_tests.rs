@@ -9,8 +9,13 @@ use tracing_subscriber;
 
 static MAX_PING: usize = 10000;
 
+// TODO: Fix cut_count
+// TODO: Check sometimes assert
+
 #[test]
 fn test_ping_pong_with_simulation_builder() {
+    let iteration_count = 1000;
+    let check_assert = false;
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
         .with_max_level(Level::WARN)
@@ -22,8 +27,6 @@ fn test_ping_pong_with_simulation_builder() {
         .build_local(Default::default())
         .expect("Failed to build local runtime");
 
-    let iteration_count = 1000;
-    let check_assert = false;
 
     local_runtime.block_on(async move {
         let report = SimulationBuilder::new()

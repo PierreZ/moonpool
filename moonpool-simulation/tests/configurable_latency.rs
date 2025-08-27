@@ -207,6 +207,10 @@ fn test_network_randomization_ranges() {
             clogging_probability_range: 0.0..0.01, // Almost no clogging
             clogging_base_duration_range: 1..2,    // Minimal duration
             clogging_jitter_duration_range: 1..2,  // Minimal duration
+            cutting_probability_range: 0.0..0.001, // Almost no cutting
+            cutting_reconnect_base_range: 1000..1001, // Minimal reconnect delay
+            cutting_reconnect_jitter_range: 1..2,   // Minimal jitter
+            cutting_max_cuts_range: 1..2,           // Max 1 cut per connection
         };
 
         // Create network configuration using custom ranges
@@ -267,6 +271,10 @@ fn test_randomization_ranges_produce_variance() {
             clogging_probability_range: 0.0..0.01, // Minimal clogging for this test
             clogging_base_duration_range: 1..2,
             clogging_jitter_duration_range: 1..2,
+            cutting_probability_range: 0.0..0.001, // Minimal cutting for this test
+            cutting_reconnect_base_range: 1000..2000, // 1-2ms reconnect delay
+            cutting_reconnect_jitter_range: 100..200, // 100-200µs jitter
+            cutting_max_cuts_range: 1..3,            // 1-2 cuts per connection max
         };
 
         let mut execution_times = Vec::new();

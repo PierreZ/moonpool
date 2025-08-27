@@ -95,6 +95,39 @@ where
     SIM_RNG.with(|rng| rng.borrow_mut().gen_range(range))
 }
 
+/// Generate a random value within the given range, returning the start value if the range is empty.
+///
+/// This is a safe version of [`sim_random_range`] that handles empty ranges gracefully
+/// by returning the start value when start == end.
+///
+/// # Parameters
+///
+/// * `range` - The range to sample from (start..end)
+///
+/// # Returns
+///
+/// A random value within the range, or the start value if the range is empty.
+///
+/// # Example
+///
+/// ```rust
+/// use moonpool_simulation::{set_sim_seed, sim_random_range_or_default};
+///
+/// set_sim_seed(42);
+/// let value = sim_random_range_or_default(0.0..0.0); // Returns 0.0 (start value)
+/// let value2 = sim_random_range_or_default(1.0..5.0); // Returns random value 1.0-5.0
+/// ```
+pub fn sim_random_range_or_default<T>(range: std::ops::Range<T>) -> T
+where
+    T: SampleUniform + PartialOrd + Clone,
+{
+    if range.start >= range.end {
+        range.start
+    } else {
+        sim_random_range(range)
+    }
+}
+
 /// Set the seed for the thread-local simulation RNG.
 ///
 /// This function initializes the thread-local RNG with a specific seed,

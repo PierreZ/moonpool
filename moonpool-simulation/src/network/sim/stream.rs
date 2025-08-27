@@ -145,6 +145,14 @@ impl AsyncRead for SimTcpStream {
             .upgrade()
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown"))?;
 
+        // Phase 7b: Check if connection is cut
+        if sim.is_connection_cut(self.connection_id) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "Connection was cut",
+            )));
+        }
+
         // Try to read from connection's receive buffer
         let mut temp_buf = vec![0u8; buf.remaining()];
         let bytes_read = sim
@@ -211,6 +219,14 @@ impl AsyncWrite for SimTcpStream {
             .sim
             .upgrade()
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown"))?;
+
+        // Phase 7b: Check if connection is cut
+        if sim.is_connection_cut(self.connection_id) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "Connection was cut",
+            )));
+        }
 
         // Phase 7: Check for write clogging
         if sim.is_write_clogged(self.connection_id) {

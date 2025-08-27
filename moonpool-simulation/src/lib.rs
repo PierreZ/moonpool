@@ -60,7 +60,10 @@ pub use network::{
     SimNetworkProvider, TcpListenerTrait, TokioNetworkProvider,
 };
 // Time provider exports
-pub use rng::{get_current_sim_seed, reset_sim_rng, set_sim_seed, sim_random, sim_random_range};
+pub use rng::{
+    get_current_sim_seed, reset_sim_rng, set_sim_seed, sim_random, sim_random_range,
+    sim_random_range_or_default,
+};
 pub use runner::{SimulationBuilder, SimulationMetrics, SimulationReport, WorkloadTopology};
 pub use sim::{SimWorld, WeakSimWorld};
 pub use sleep::SleepFuture;

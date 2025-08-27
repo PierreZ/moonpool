@@ -1,4 +1,4 @@
-use crate::rng::sim_random_range;
+use crate::rng::{sim_random_range, sim_random_range_or_default};
 use std::ops::Range;
 use std::time::Duration;
 
@@ -31,6 +31,14 @@ pub struct NetworkRandomizationRanges {
     pub clogging_base_duration_range: Range<u64>,
     /// Range for clogging jitter duration (microseconds)
     pub clogging_jitter_duration_range: Range<u64>,
+    /// Range for cutting probability per connection per tick (0.0 - 1.0)
+    pub cutting_probability_range: Range<f64>,
+    /// Range for cutting reconnect base delay (microseconds)
+    pub cutting_reconnect_base_range: Range<u64>,
+    /// Range for cutting reconnect jitter delay (microseconds)
+    pub cutting_reconnect_jitter_range: Range<u64>,
+    /// Range for maximum cuts per connection (1-5, will be converted to Option<u32>)
+    pub cutting_max_cuts_range: Range<u32>,
 }
 
 impl Default for NetworkRandomizationRanges {
@@ -49,6 +57,35 @@ impl Default for NetworkRandomizationRanges {
             clogging_probability_range: 0.3..0.8,           // 30-80%
             clogging_base_duration_range: 100000..1000000,  // 100-1000ms in µs
             clogging_jitter_duration_range: 200000..800000, // 200-800ms in µs
+            cutting_probability_range: 0.0..0.0,            // Disabled by default (use chaos_ranges for testing)
+            cutting_reconnect_base_range: 200000..800000,    // 200-800ms in µs
+            cutting_reconnect_jitter_range: 100000..500000,  // 100-500ms in µs
+            cutting_max_cuts_range: 1..3,                    // 1-2 cuts per connection max
+        }
+    }
+}
+
+impl NetworkRandomizationRanges {
+    /// Create chaos testing ranges with connection cutting enabled for distributed systems testing
+    pub fn chaos_testing() -> Self {
+        Self {
+            bind_base_range: 10..200,                       // 10-200µs
+            bind_jitter_range: 10..100,                     // 10-100µs
+            accept_base_range: 1000..10000,                 // 1-10ms in µs
+            accept_jitter_range: 1000..15000,               // 1-15ms in µs
+            connect_base_range: 1000..50000,                // 1-50ms in µs
+            connect_jitter_range: 5000..100000,             // 5-100ms in µs
+            read_base_range: 5..100,                        // 5-100µs
+            read_jitter_range: 10..200,                     // 10-200µs
+            write_base_range: 50..1000,                     // 50-1000µs
+            write_jitter_range: 100..2000,                  // 100-2000µs
+            clogging_probability_range: 0.1..0.3,           // 10-30% clogging
+            clogging_base_duration_range: 50000..300000,    // 50-300ms in µs
+            clogging_jitter_duration_range: 100000..400000, // 100-400ms in µs
+            cutting_probability_range: 0.01..0.03,          // 1-3% cutting chance per tick
+            cutting_reconnect_base_range: 200000..800000,    // 200-800ms in µs
+            cutting_reconnect_jitter_range: 100000..500000,  // 100-500ms in µs
+            cutting_max_cuts_range: 1..3,                    // 1-2 cuts per connection max
         }
     }
 }
@@ -60,6 +97,8 @@ pub struct NetworkConfiguration {
     pub latency: LatencyConfiguration,
     /// Network clogging configuration for write operations
     pub clogging: CloggingConfiguration,
+    /// Network connection cutting configuration
+    pub cutting: CuttingConfiguration,
 }
 
 /// Configuration for network operation latencies
@@ -232,6 +271,55 @@ impl CloggingConfiguration {
     }
 }
 
+/// Configuration for network connection cutting (temporary connection termination)
+#[derive(Debug, Clone)]
+pub struct CuttingConfiguration {
+    /// Probability per connection per tick (0.0 - 1.0)
+    pub probability: f64,
+    /// How long before reconnection is possible
+    pub reconnect_delay: LatencyRange,
+    /// Maximum cuts per connection (None = unlimited)
+    pub max_cuts_per_connection: Option<u32>,
+}
+
+impl Default for CuttingConfiguration {
+    fn default() -> Self {
+        Self {
+            probability: 0.0, // No cutting by default
+            reconnect_delay: LatencyRange::new(
+                Duration::from_millis(200),
+                Duration::from_millis(300),
+            ),
+            max_cuts_per_connection: None,
+        }
+    }
+}
+
+impl CuttingConfiguration {
+    /// Create randomized cutting configuration with custom ranges
+    pub fn random_with_ranges(ranges: &NetworkRandomizationRanges) -> Self {
+        // Generate random cutting parameters using the provided ranges (all in microseconds)
+        let probability = sim_random_range_or_default(ranges.cutting_probability_range.clone());
+        let base_delay = sim_random_range(ranges.cutting_reconnect_base_range.clone());
+        let jitter_delay = sim_random_range(ranges.cutting_reconnect_jitter_range.clone());
+        let max_cuts = sim_random_range(ranges.cutting_max_cuts_range.clone());
+
+        Self {
+            probability,
+            reconnect_delay: LatencyRange::new(
+                Duration::from_micros(base_delay),
+                Duration::from_micros(jitter_delay),
+            ),
+            max_cuts_per_connection: Some(max_cuts),
+        }
+    }
+
+    /// Create randomized cutting configuration based on the current simulation seed with default ranges
+    pub fn random_for_seed() -> Self {
+        Self::random_with_ranges(&NetworkRandomizationRanges::default())
+    }
+}
+
 impl NetworkConfiguration {
     /// Create a new network configuration with custom latency settings
     pub fn new() -> Self {
@@ -243,6 +331,7 @@ impl NetworkConfiguration {
         Self {
             latency: LatencyConfiguration::random_with_ranges(ranges),
             clogging: CloggingConfiguration::random_with_ranges(ranges),
+            cutting: CuttingConfiguration::random_with_ranges(ranges),
         }
     }
 
@@ -262,6 +351,7 @@ impl NetworkConfiguration {
                 write_latency: LatencyRange::fixed(Duration::from_micros(1)),
             },
             clogging: CloggingConfiguration::default(), // No clogging for fast tests
+            cutting: CuttingConfiguration::default(),   // No cutting for fast tests
         }
     }
 }

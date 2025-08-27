@@ -27,8 +27,19 @@ struct ClogState {
     expires_at: Duration,
 }
 
+/// Connection cutting state - tracks cut connections for restoration
+#[derive(Debug, Clone)]
+struct CutState {
+    /// Original connection data (for restoration)
+    connection_data: ConnectionState,
+    /// When connection can be restored (in simulation time)
+    reconnect_at: Duration,
+    /// Cut count for this connection
+    cut_count: u32,
+}
+
 /// Internal connection state for simulation
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 /// State for a simulated TCP connection.
 ///
 /// Each `ConnectionState` represents one end of a bidirectional TCP connection pair.
@@ -209,6 +220,10 @@ struct SimInner {
     connection_clogs: HashMap<ConnectionId, ClogState>,
     clog_wakers: HashMap<ConnectionId, Vec<Waker>>,
 
+    // Phase 7b: Connection cutting state
+    cut_connections: HashMap<ConnectionId, CutState>,
+    cut_wakers: HashMap<ConnectionId, Vec<Waker>>,
+
     // Phase 3c: Event processing metrics
     events_processed: u64,
 }
@@ -244,6 +259,10 @@ impl SimInner {
             // Phase 7: Initialize clogging state
             connection_clogs: HashMap::new(),
             clog_wakers: HashMap::new(),
+
+            // Phase 7b: Initialize cutting state
+            cut_connections: HashMap::new(),
+            cut_wakers: HashMap::new(),
 
             // Phase 3c: Initialize event metrics
             events_processed: 0,
@@ -365,6 +384,12 @@ impl SimWorld {
 
             // Phase 7: Clear expired clogs after time advancement
             Self::clear_expired_clogs_with_inner(&mut inner);
+
+            // Phase 7b: Restore cut connections after time advancement
+            Self::restore_cut_connections_with_inner(&mut inner);
+
+            // Phase 7b: Randomly cut connections based on probability
+            Self::randomly_cut_connections_with_inner(&mut inner);
 
             // Process the event with the mutable reference
             Self::process_event_with_inner(&mut inner, scheduled_event.into_event());
@@ -1336,6 +1361,210 @@ impl SimWorld {
                 for waker in wakers {
                     waker.wake();
                 }
+            }
+        }
+    }
+
+    // Phase 7b: Connection cutting methods
+
+    /// Check if a connection should be cut based on probability and limits
+    pub fn should_cut_connection(&self, connection_id: ConnectionId) -> bool {
+        let inner = self.inner.borrow();
+        let config = &inner.network_config.cutting;
+
+        // Skip if already cut
+        if inner.cut_connections.contains_key(&connection_id) {
+            return false;
+        }
+
+        // Check max cuts limit
+        if let Some(max_cuts) = config.max_cuts_per_connection {
+            // Count previous cuts for this connection
+            let previous_cuts = inner
+                .cut_connections
+                .values()
+                .filter(|cut_state| cut_state.connection_data.id == connection_id)
+                .count() as u32;
+            if previous_cuts >= max_cuts {
+                return false;
+            }
+        }
+
+        // Probability check
+        sim_random::<f64>() < config.probability
+    }
+
+    /// Cut a connection and store it for later restoration
+    pub fn cut_connection(&self, connection_id: ConnectionId) {
+        let mut inner = self.inner.borrow_mut();
+        let reconnect_delay = inner.network_config.cutting.reconnect_delay.clone();
+
+        if let Some(connection_state) = inner.connections.remove(&connection_id) {
+            let reconnect_delay_sample = reconnect_delay.sample();
+            let reconnect_at = inner.current_time + reconnect_delay_sample;
+
+            // Count existing cuts for this connection
+            let cut_count = inner
+                .cut_connections
+                .values()
+                .filter(|cut_state| cut_state.connection_data.id == connection_id)
+                .count() as u32;
+
+            let cut_state = CutState {
+                connection_data: connection_state,
+                reconnect_at,
+                cut_count: cut_count + 1,
+            };
+
+            inner.cut_connections.insert(connection_id, cut_state);
+        }
+    }
+
+    /// Check if a connection is currently cut
+    pub fn is_connection_cut(&self, connection_id: ConnectionId) -> bool {
+        let inner = self.inner.borrow();
+        inner.cut_connections.contains_key(&connection_id)
+    }
+
+    /// Register a waker for when connection is restored
+    pub fn register_cut_waker(&self, connection_id: ConnectionId, waker: Waker) {
+        let mut inner = self.inner.borrow_mut();
+        inner
+            .cut_wakers
+            .entry(connection_id)
+            .or_default()
+            .push(waker);
+    }
+
+    /// Restore connections that are ready to be reconnected
+    pub fn restore_cut_connections(&self) {
+        let mut inner = self.inner.borrow_mut();
+        let now = inner.current_time;
+
+        let ready_connections: Vec<ConnectionId> = inner
+            .cut_connections
+            .iter()
+            .filter_map(|(id, state)| {
+                if now >= state.reconnect_at {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for connection_id in ready_connections {
+            if let Some(cut_state) = inner.cut_connections.remove(&connection_id) {
+                // Restore the connection
+                inner
+                    .connections
+                    .insert(connection_id, cut_state.connection_data);
+
+                // Wake any waiting tasks
+                if let Some(wakers) = inner.cut_wakers.remove(&connection_id) {
+                    for waker in wakers {
+                        waker.wake();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Randomly cut connections based on configuration probability
+    pub fn randomly_cut_connections(&self) {
+        let connection_ids: Vec<ConnectionId> = {
+            let inner = self.inner.borrow();
+            inner.connections.keys().copied().collect()
+        };
+
+        for connection_id in connection_ids {
+            if self.should_cut_connection(connection_id) {
+                self.cut_connection(connection_id);
+            }
+        }
+    }
+
+    /// Helper method for use with SimInner - restore cut connections
+    fn restore_cut_connections_with_inner(inner: &mut SimInner) {
+        let now = inner.current_time;
+
+        let ready_connections: Vec<ConnectionId> = inner
+            .cut_connections
+            .iter()
+            .filter_map(|(id, state)| {
+                if now >= state.reconnect_at {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for connection_id in ready_connections {
+            if let Some(cut_state) = inner.cut_connections.remove(&connection_id) {
+                // Restore the connection
+                inner
+                    .connections
+                    .insert(connection_id, cut_state.connection_data);
+
+                // Wake any waiting tasks
+                if let Some(wakers) = inner.cut_wakers.remove(&connection_id) {
+                    for waker in wakers {
+                        waker.wake();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Helper method for use with SimInner - randomly cut connections
+    fn randomly_cut_connections_with_inner(inner: &mut SimInner) {
+        let cutting_config = inner.network_config.cutting.clone();
+
+        // Skip if cutting is disabled
+        if cutting_config.probability == 0.0 {
+            return;
+        }
+
+        let connection_ids: Vec<ConnectionId> = inner.connections.keys().copied().collect();
+
+        for connection_id in connection_ids {
+            // Skip if already cut
+            if inner.cut_connections.contains_key(&connection_id) {
+                continue;
+            }
+
+            // Check max cuts limit
+            if let Some(max_cuts) = cutting_config.max_cuts_per_connection {
+                let previous_cuts = inner
+                    .cut_connections
+                    .values()
+                    .filter(|cut_state| cut_state.connection_data.id == connection_id)
+                    .count() as u32;
+                if previous_cuts >= max_cuts {
+                    continue;
+                }
+            }
+
+            // Probability check
+            if sim_random::<f64>() < cutting_config.probability
+                && let Some(connection_state) = inner.connections.remove(&connection_id) {
+                    let reconnect_delay = cutting_config.reconnect_delay.sample();
+                    let reconnect_at = inner.current_time + reconnect_delay;
+
+                    let cut_count = inner
+                        .cut_connections
+                        .values()
+                        .filter(|cut_state| cut_state.connection_data.id == connection_id)
+                        .count() as u32;
+
+                    let cut_state = CutState {
+                        connection_data: connection_state,
+                        reconnect_at,
+                        cut_count: cut_count + 1,
+                    };
+
+                    inner.cut_connections.insert(connection_id, cut_state);
             }
         }
     }
