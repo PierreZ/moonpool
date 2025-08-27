@@ -174,7 +174,28 @@ impl AsyncRead for SimTcpStream {
             );
             sim.register_read_waker(self.connection_id, cx.waker().clone())
                 .map_err(|e| io::Error::other(format!("waker registration error: {}", e)))?;
-            Poll::Pending
+
+            // Double-check for data after registering waker to handle race conditions
+            // This prevents deadlocks where DataDelivery arrives between initial check and waker registration
+            let mut temp_buf_recheck = vec![0u8; buf.remaining()];
+            let bytes_read_recheck = sim
+                .read_from_connection(self.connection_id, &mut temp_buf_recheck)
+                .map_err(|e| io::Error::other(format!("recheck read error: {}", e)))?;
+
+            if bytes_read_recheck > 0 {
+                let data_preview = String::from_utf8_lossy(
+                    &temp_buf_recheck[..std::cmp::min(bytes_read_recheck, 20)],
+                );
+                tracing::info!(
+                    "SimTcpStream::poll_read connection_id={} found data on recheck: '{}' (race condition avoided)",
+                    self.connection_id.0,
+                    data_preview
+                );
+                buf.put_slice(&temp_buf_recheck[..bytes_read_recheck]);
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
         }
     }
 }

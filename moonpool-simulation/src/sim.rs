@@ -147,6 +147,11 @@ struct ConnectionState {
     ///
     /// Ensures sequential processing without event conflicts.
     send_in_progress: bool,
+    /// Next available time for sending messages from this connection.
+    ///
+    /// This ensures TCP ordering by preventing later messages from being
+    /// scheduled before earlier messages due to random delay variations.
+    next_send_time: Duration,
 }
 
 /// Internal listener state for simulation
@@ -699,6 +704,9 @@ impl SimWorld {
         let server_id = ConnectionId(inner.next_connection_id);
         inner.next_connection_id += 1;
 
+        // Capture current time to avoid borrow conflicts
+        let current_time = inner.current_time;
+
         // Create paired connections
         inner.connections.insert(
             client_id,
@@ -709,6 +717,7 @@ impl SimWorld {
                 paired_connection: Some(server_id),
                 send_buffer: VecDeque::new(),
                 send_in_progress: false,
+                next_send_time: current_time,
             },
         );
 
@@ -721,6 +730,7 @@ impl SimWorld {
                 paired_connection: Some(client_id),
                 send_buffer: VecDeque::new(),
                 send_in_progress: false,
+                next_send_time: current_time,
             },
         );
 
@@ -1041,7 +1051,7 @@ impl SimWorld {
                         // For TCP ordering, we need to maintain connection-level delays
                         // Check if there are more messages AFTER popping the current one
                         let has_more_messages = !conn.send_buffer.is_empty();
-                        let delay = if has_more_messages {
+                        let base_delay = if has_more_messages {
                             // More messages in buffer, minimal delay for immediate processing
                             std::time::Duration::from_nanos(1)
                         } else {
@@ -1049,17 +1059,26 @@ impl SimWorld {
                             inner.network_config.latency.write_latency.sample()
                         };
 
+                        // Ensure TCP ordering: schedule at next available time for this connection
+                        let earliest_time =
+                            std::cmp::max(inner.current_time + base_delay, conn.next_send_time);
+                        let actual_delay = earliest_time - inner.current_time;
+
+                        // Update next available send time for this connection
+                        conn.next_send_time = earliest_time + std::time::Duration::from_nanos(1);
+
                         tracing::info!(
-                            "Event::ProcessSendBuffer processing {} bytes from connection {} with delay {:?}, has_more_messages={}",
+                            "Event::ProcessSendBuffer processing {} bytes from connection {} with delay {:?}, has_more_messages={} (TCP ordering: earliest_time={:?})",
                             data.len(),
                             connection_id.0,
-                            delay,
-                            has_more_messages
+                            actual_delay,
+                            has_more_messages,
+                            earliest_time
                         );
 
                         // Schedule delivery to paired connection
                         if let Some(paired_id) = conn.paired_connection {
-                            let scheduled_time = inner.current_time + delay;
+                            let scheduled_time = earliest_time;
                             let sequence = inner.next_sequence;
                             inner.next_sequence += 1;
 

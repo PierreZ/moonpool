@@ -68,6 +68,8 @@ pub struct SimulationReport {
     pub individual_metrics: Vec<SimulationResult<SimulationMetrics>>,
     /// Seeds used for each iteration
     pub seeds_used: Vec<u64>,
+    /// failed seeds
+    pub seeds_failing: Vec<u64>,
     /// Aggregated assertion results across all iterations
     pub assertion_results: HashMap<String, AssertionStats>,
     /// Assertion validation result with detailed violation information
@@ -131,6 +133,12 @@ impl fmt::Display for SimulationReport {
             "Average Events Processed: {:.1}",
             self.average_events_processed()
         )?;
+
+        if !self.seeds_failing.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "Faulty seeds: {:?}", self.seeds_failing)?;
+        }
+
         writeln!(f)?;
 
         Ok(())
@@ -355,6 +363,7 @@ impl SimulationBuilder {
                 metrics: SimulationMetrics::default(),
                 individual_metrics: Vec::new(),
                 seeds_used: Vec::new(),
+                seeds_failing: Vec::new(),
                 assertion_results: HashMap::new(),
                 assertion_validation: ValidationReport::new(),
             };
@@ -366,6 +375,7 @@ impl SimulationBuilder {
         let mut successful_runs = 0;
         let mut failed_runs = 0;
         let mut aggregated_metrics = SimulationMetrics::default();
+        let mut faulty_seeds = Vec::new();
 
         // Generate random seeds if none provided
         let base_seed = std::time::SystemTime::now()
@@ -641,6 +651,7 @@ impl SimulationBuilder {
                     "One or more workloads failed (iteration {}, seed {})",
                     iteration_count, seed
                 ))));
+                faulty_seeds.push(seed);
             }
         }
 
@@ -671,6 +682,7 @@ impl SimulationBuilder {
             metrics: aggregated_metrics,
             individual_metrics,
             seeds_used: seeds_to_use,
+            seeds_failing: faulty_seeds,
             assertion_results,
             assertion_validation,
         }
@@ -754,6 +766,7 @@ mod tests {
             metrics,
             individual_metrics: vec![],
             seeds_used: vec![1, 2],
+            seeds_failing: vec![42],
             assertion_results: HashMap::new(),
             assertion_validation: ValidationReport::new(),
         };
