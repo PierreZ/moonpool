@@ -32,6 +32,11 @@ pub enum Event {
         /// Unique identifier for the connection
         connection_id: u64,
     },
+    /// Clear clog for a connection (Phase 7)
+    ClogClear {
+        /// Unique identifier for the connection
+        connection_id: u64,
+    },
 }
 
 /// An event scheduled for execution at a specific simulation time.

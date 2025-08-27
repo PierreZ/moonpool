@@ -55,8 +55,9 @@ pub use error::{SimulationError, SimulationResult};
 pub use events::{Event, EventQueue, ScheduledEvent};
 // Network exports
 pub use network::{
-    LatencyConfiguration, LatencyRange, NetworkConfiguration, NetworkProvider, Peer, PeerConfig,
-    PeerError, PeerMetrics, SimNetworkProvider, TcpListenerTrait, TokioNetworkProvider,
+    CloggingConfiguration, LatencyConfiguration, LatencyRange, NetworkConfiguration,
+    NetworkProvider, NetworkRandomizationRanges, Peer, PeerConfig, PeerError, PeerMetrics,
+    SimNetworkProvider, TcpListenerTrait, TokioNetworkProvider,
 };
 // Time provider exports
 pub use rng::{get_current_sim_seed, reset_sim_rng, set_sim_seed, sim_random, sim_random_range};

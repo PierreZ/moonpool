@@ -309,15 +309,15 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
     /// Attempt to establish a connection with exponential backoff.
     async fn connect(&mut self) -> PeerResult<()> {
         // Check if we've exceeded maximum failure count
-        if let Some(max_failures) = self.config.max_connection_failures {
-            if self.reconnect_state.failure_count >= max_failures {
-                sometimes_assert!(
-                    peer_hits_max_failures,
-                    true,
-                    "Peer should sometimes hit maximum failure limit"
-                );
-                return Err(PeerError::ConnectionFailed);
-            }
+        if let Some(max_failures) = self.config.max_connection_failures
+            && self.reconnect_state.failure_count >= max_failures
+        {
+            sometimes_assert!(
+                peer_hits_max_failures,
+                true,
+                "Peer should sometimes hit maximum failure limit"
+            );
+            return Err(PeerError::ConnectionFailed);
         }
 
         // Wait for backoff delay if needed

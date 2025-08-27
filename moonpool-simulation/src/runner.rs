@@ -188,7 +188,7 @@ pub struct SimulationBuilder {
     workloads: Vec<Workload>,
     seeds: Vec<u64>,
     next_ip: u32, // For auto-assigning IP addresses starting from 10.0.0.1
-    network_config: crate::NetworkConfiguration, // Network configuration for simulation
+    randomization_ranges: Option<crate::NetworkRandomizationRanges>,
 }
 
 impl Default for SimulationBuilder {
@@ -205,7 +205,7 @@ impl SimulationBuilder {
             workloads: Vec::new(),
             seeds: Vec::new(),
             next_ip: 1, // Start from 10.0.0.1
-            network_config: crate::NetworkConfiguration::default(),
+            randomization_ranges: None,
         }
     }
 
@@ -293,9 +293,9 @@ impl SimulationBuilder {
         self
     }
 
-    /// Set the network configuration for the simulation.
-    pub fn set_network_config(mut self, network_config: crate::NetworkConfiguration) -> Self {
-        self.network_config = network_config;
+    /// Set custom randomization ranges for network parameter generation
+    pub fn set_randomization_ranges(mut self, ranges: crate::NetworkRandomizationRanges) -> Self {
+        self.randomization_ranges = Some(ranges);
         self
     }
 
@@ -442,11 +442,15 @@ impl SimulationBuilder {
             reset_sim_rng();
             set_sim_seed(seed);
 
-            // Create shared SimWorld for this iteration using configured network
-            let mut sim = crate::SimWorld::new_with_network_config_and_seed(
-                self.network_config.clone(),
-                seed,
-            );
+            // Create fresh NetworkConfiguration for this iteration (uses seed-based randomization)
+            let network_config = if let Some(ref ranges) = self.randomization_ranges {
+                crate::NetworkConfiguration::random_with_ranges(ranges)
+            } else {
+                crate::NetworkConfiguration::random_for_seed()
+            };
+
+            // Create shared SimWorld for this iteration using fresh network config
+            let mut sim = crate::SimWorld::new_with_network_config_and_seed(network_config, seed);
             let provider = sim.network_provider();
 
             let start_time = Instant::now();
@@ -778,10 +782,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simulation_builder_with_network_config() {
-        let wan_config = crate::NetworkConfiguration::wan_simulation();
-
         let report = SimulationBuilder::new()
-            .set_network_config(wan_config)
             .register_workload(
                 "network_test",
                 |_seed, _provider, _time_provider, _topology| async move {

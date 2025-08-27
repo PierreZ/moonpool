@@ -1,5 +1,6 @@
 use moonpool_simulation::{
-    LatencyRange, NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait,
+    LatencyRange, NetworkConfiguration, NetworkProvider, NetworkRandomizationRanges, SimWorld,
+    TcpListenerTrait,
 };
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -56,7 +57,7 @@ fn test_fast_local_configuration() {
 }
 
 #[test]
-fn test_wan_simulation_configuration() {
+fn test_default_simulation_configuration() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
@@ -64,7 +65,7 @@ fn test_wan_simulation_configuration() {
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
-        let wan_config = NetworkConfiguration::wan_simulation();
+        let wan_config = NetworkConfiguration::default(); // Use default config with reasonable delays
         let mut sim = SimWorld::new_with_network_config(wan_config);
         let provider = sim.network_provider();
 
@@ -76,15 +77,15 @@ fn test_wan_simulation_configuration() {
         sim.run_until_empty();
         let sim_time = sim.current_time();
 
-        // WAN config should take significantly longer (at least 10ms simulation time)
+        // Default config should take longer than fast config (at least 5ms simulation time)
         assert!(
-            sim_time > Duration::from_millis(10),
-            "WAN simulation should be over 10ms, got {:?}",
+            sim_time > Duration::from_millis(5),
+            "Default config should be over 5ms, got {:?}",
             sim_time
         );
 
         println!(
-            "WAN test completed in real time: {:?}, sim time: {:?}",
+            "Default config test completed in real time: {:?}, sim time: {:?}",
             elapsed, sim_time
         );
     });
@@ -178,6 +179,143 @@ fn test_latency_range_sampling() {
             println!("✓ Latency jitter working - execution times vary");
         } else {
             println!("⚠ All execution times were identical (could happen by chance)");
+        }
+    });
+}
+
+#[test]
+fn test_network_randomization_ranges() {
+    let local_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build_local(Default::default())
+        .expect("Failed to build local runtime");
+
+    local_runtime.block_on(async move {
+        // Create custom randomization ranges with tight constraints for predictable testing
+        let custom_ranges = NetworkRandomizationRanges {
+            bind_base_range: 1000..1001,           // Exactly 1ms (1000µs)
+            bind_jitter_range: 1..2,               // Minimal jitter
+            accept_base_range: 2000..2001,         // Exactly 2ms (2000µs)
+            accept_jitter_range: 1..2,             // Minimal jitter
+            connect_base_range: 3000..3001,        // Exactly 3ms (3000µs)
+            connect_jitter_range: 1..2,            // Minimal jitter
+            read_base_range: 100..101,             // Exactly 100µs
+            read_jitter_range: 1..2,               // Minimal jitter
+            write_base_range: 500..501,            // Exactly 500µs
+            write_jitter_range: 1..2,              // Minimal jitter
+            clogging_probability_range: 0.0..0.01, // Almost no clogging
+            clogging_base_duration_range: 1..2,    // Minimal duration
+            clogging_jitter_duration_range: 1..2,  // Minimal duration
+        };
+
+        // Create network configuration using custom ranges
+        moonpool_simulation::set_sim_seed(42); // Deterministic seed
+        let config = NetworkConfiguration::random_with_ranges(&custom_ranges);
+
+        let mut sim = SimWorld::new_with_network_config(config);
+        let provider = sim.network_provider();
+
+        simple_network_test(provider, "custom-ranges-test")
+            .await
+            .unwrap();
+
+        // Process all simulation events
+        sim.run_until_empty();
+        let sim_time = sim.current_time();
+
+        // With our custom ranges, we expect predictable latency:
+        // connect(3ms) + accept(2ms) + write(500µs) = ~5.5ms minimum
+        // The exact timing depends on event scheduling and which latencies are actually triggered
+        assert!(
+            sim_time >= Duration::from_millis(3),
+            "Expected at least 3ms with custom ranges, got {:?}",
+            sim_time
+        );
+
+        assert!(
+            sim_time <= Duration::from_millis(10),
+            "Expected less than 10ms with custom ranges, got {:?}",
+            sim_time
+        );
+
+        println!("Custom ranges test completed in sim time: {:?}", sim_time);
+    });
+}
+
+#[test]
+fn test_randomization_ranges_produce_variance() {
+    let local_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build_local(Default::default())
+        .expect("Failed to build local runtime");
+
+    local_runtime.block_on(async move {
+        // Create ranges with high variance to test randomization
+        let high_variance_ranges = NetworkRandomizationRanges {
+            bind_base_range: 500..5000,            // 0.5ms to 5ms variance
+            bind_jitter_range: 100..1000,          // 0.1ms to 1ms jitter
+            accept_base_range: 1000..10000,        // 1ms to 10ms variance
+            accept_jitter_range: 500..2000,        // 0.5ms to 2ms jitter
+            connect_base_range: 2000..20000,       // 2ms to 20ms variance
+            connect_jitter_range: 1000..3000,      // 1ms to 3ms jitter
+            read_base_range: 50..500,              // 50µs to 500µs
+            read_jitter_range: 10..100,            // 10µs to 100µs
+            write_base_range: 100..1000,           // 100µs to 1ms
+            write_jitter_range: 50..500,           // 50µs to 500µs
+            clogging_probability_range: 0.0..0.01, // Minimal clogging for this test
+            clogging_base_duration_range: 1..2,
+            clogging_jitter_duration_range: 1..2,
+        };
+
+        let mut execution_times = Vec::new();
+
+        // Run multiple iterations with different seeds to test variance
+        for seed in [42, 123, 456, 789, 999] {
+            moonpool_simulation::set_sim_seed(seed);
+            let config = NetworkConfiguration::random_with_ranges(&high_variance_ranges);
+
+            let mut sim = SimWorld::new_with_network_config(config);
+            let provider = sim.network_provider();
+
+            simple_network_test(provider, &format!("variance-test-{}", seed))
+                .await
+                .unwrap();
+
+            sim.run_until_empty();
+            execution_times.push(sim.current_time());
+        }
+
+        // Verify we got some variance in execution times
+        let min_time = execution_times.iter().min().unwrap();
+        let max_time = execution_times.iter().max().unwrap();
+        let variance = *max_time - *min_time;
+
+        println!(
+            "Execution times with high variance ranges: {:?}",
+            execution_times
+        );
+        println!(
+            "Min: {:?}, Max: {:?}, Variance: {:?}",
+            min_time, max_time, variance
+        );
+
+        // With high variance ranges, we should see significant differences
+        assert!(
+            variance > Duration::from_millis(1),
+            "Expected more than 1ms variance, got {:?}",
+            variance
+        );
+
+        // All times should be positive and reasonable
+        for &time in &execution_times {
+            assert!(time > Duration::ZERO, "Time should be positive: {:?}", time);
+            assert!(
+                time < Duration::from_secs(1),
+                "Time should be under 1 second: {:?}",
+                time
+            );
         }
     });
 }

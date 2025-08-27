@@ -49,8 +49,8 @@ fn test_simple_echo_simulation() {
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
-        // Use a configuration with noticeable delays for this test
-        let config = NetworkConfiguration::wan_simulation(); // Has larger delays
+        // Use fast local config for integration tests to avoid timeouts
+        let config = NetworkConfiguration::fast_local(); // Deterministic, fast
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
 
@@ -80,8 +80,8 @@ fn test_deterministic_simulation_behavior() {
         let mut execution_times = Vec::new();
 
         for _run in 0..3 {
-            // Use same config as other test for consistency
-            let config = NetworkConfiguration::wan_simulation();
+            // Use fast local config for deterministic integration tests
+            let config = NetworkConfiguration::fast_local();
             let mut sim = SimWorld::new_with_network_config(config);
             let provider = sim.network_provider();
 

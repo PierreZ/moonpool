@@ -201,16 +201,30 @@ impl AsyncRead for SimTcpStream {
 }
 
 impl AsyncWrite for SimTcpStream {
-    #[instrument(skip(self, _cx, buf))]
+    #[instrument(skip(self, cx, buf))]
     fn poll_write(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, io::Error>> {
         let sim = self
             .sim
             .upgrade()
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown"))?;
+
+        // Phase 7: Check for write clogging
+        if sim.is_write_clogged(self.connection_id) {
+            // Already clogged, register waker and return Pending
+            sim.register_clog_waker(self.connection_id, cx.waker().clone());
+            return Poll::Pending;
+        }
+
+        // Check if this write should be clogged
+        if sim.should_clog_write(self.connection_id) {
+            sim.clog_write(self.connection_id);
+            sim.register_clog_waker(self.connection_id, cx.waker().clone());
+            return Poll::Pending;
+        }
 
         // Use buffered send to maintain TCP ordering
         let data_preview = String::from_utf8_lossy(&buf[..std::cmp::min(buf.len(), 20)]);

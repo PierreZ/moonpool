@@ -15,10 +15,17 @@ use crate::{
         NetworkConfiguration,
         sim::{ConnectionId, ListenerId, SimNetworkProvider},
     },
-    rng::{reset_sim_rng, set_sim_seed},
+    rng::{reset_sim_rng, set_sim_seed, sim_random},
     sleep::SleepFuture,
 };
 use std::collections::VecDeque;
+
+/// Simple clog state - just tracks when it expires
+#[derive(Debug)]
+struct ClogState {
+    /// When the clog expires and writes can resume (in simulation time)
+    expires_at: Duration,
+}
 
 /// Internal connection state for simulation
 #[derive(Debug)]
@@ -198,6 +205,10 @@ struct SimInner {
     // Phase 2e: Pending connection pairs for bidirectional communication
     pending_connections: HashMap<String, ConnectionId>,
 
+    // Phase 7: Simple write clogging state
+    connection_clogs: HashMap<ConnectionId, ClogState>,
+    clog_wakers: HashMap<ConnectionId, Vec<Waker>>,
+
     // Phase 3c: Event processing metrics
     events_processed: u64,
 }
@@ -229,6 +240,10 @@ impl SimInner {
 
             // Phase 2e: Initialize pending connections
             pending_connections: HashMap::new(),
+
+            // Phase 7: Initialize clogging state
+            connection_clogs: HashMap::new(),
+            clog_wakers: HashMap::new(),
 
             // Phase 3c: Initialize event metrics
             events_processed: 0,
@@ -347,6 +362,9 @@ impl SimWorld {
         if let Some(scheduled_event) = inner.event_queue.pop_earliest() {
             // Advance logical time to event timestamp
             inner.current_time = scheduled_event.time();
+
+            // Phase 7: Clear expired clogs after time advancement
+            Self::clear_expired_clogs_with_inner(&mut inner);
 
             // Process the event with the mutable reference
             Self::process_event_with_inner(&mut inner, scheduled_event.into_event());
@@ -924,6 +942,32 @@ impl SimWorld {
     ///
     /// The static design prevents the common async borrowing issue where event
     /// processing needs to modify simulation state while async operations hold borrows.
+    /// Clear expired clogs and wake pending tasks (helper for use with SimInner)
+    fn clear_expired_clogs_with_inner(inner: &mut SimInner) {
+        let now = inner.current_time;
+
+        let expired_connections: Vec<ConnectionId> = inner
+            .connection_clogs
+            .iter()
+            .filter_map(|(id, state)| {
+                if now >= state.expires_at {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for connection_id in expired_connections {
+            inner.connection_clogs.remove(&connection_id);
+            if let Some(wakers) = inner.clog_wakers.remove(&connection_id) {
+                for waker in wakers {
+                    waker.wake();
+                }
+            }
+        }
+    }
+
     #[instrument(skip(inner))]
     fn process_event_with_inner(inner: &mut SimInner, event: Event) {
         // Increment event processing counter for metrics
@@ -1117,6 +1161,17 @@ impl SimWorld {
                     }
                 }
             }
+            Event::ClogClear { connection_id } => {
+                // Phase 7: Clear clog for the specified connection and wake any waiting tasks
+                let connection_id = ConnectionId(connection_id);
+
+                inner.connection_clogs.remove(&connection_id);
+                if let Some(wakers) = inner.clog_wakers.remove(&connection_id) {
+                    for waker in wakers {
+                        waker.wake();
+                    }
+                }
+            }
         }
     }
 
@@ -1196,6 +1251,92 @@ impl SimWorld {
             wall_time: std::time::Duration::ZERO, // This will be filled by the report builder
             simulated_time: inner.current_time,
             events_processed: inner.events_processed,
+        }
+    }
+
+    // Phase 7: Simple write clogging methods
+
+    /// Check if a write should be clogged based on probability
+    pub fn should_clog_write(&self, connection_id: ConnectionId) -> bool {
+        let inner = self.inner.borrow();
+        let config = &inner.network_config.clogging;
+
+        // Skip if already clogged
+        if let Some(clog_state) = inner.connection_clogs.get(&connection_id) {
+            return inner.current_time < clog_state.expires_at;
+        }
+
+        // Check probability
+        config.probability > 0.0 && sim_random::<f64>() < config.probability
+    }
+
+    /// Clog a connection's write operations
+    pub fn clog_write(&self, connection_id: ConnectionId) {
+        let mut inner = self.inner.borrow_mut();
+        let config = &inner.network_config.clogging;
+
+        let clog_duration = config.duration.sample();
+        let expires_at = inner.current_time + clog_duration;
+        inner
+            .connection_clogs
+            .insert(connection_id, ClogState { expires_at });
+
+        // Schedule an event to clear this clog
+        let clear_event = Event::ClogClear {
+            connection_id: connection_id.0,
+        };
+        let sequence = inner.next_sequence;
+        inner.next_sequence += 1;
+        inner
+            .event_queue
+            .schedule(ScheduledEvent::new(expires_at, clear_event, sequence));
+    }
+
+    /// Check if a connection's writes are currently clogged
+    pub fn is_write_clogged(&self, connection_id: ConnectionId) -> bool {
+        let inner = self.inner.borrow();
+
+        if let Some(clog_state) = inner.connection_clogs.get(&connection_id) {
+            inner.current_time < clog_state.expires_at
+        } else {
+            false
+        }
+    }
+
+    /// Register a waker for when clog clears
+    pub fn register_clog_waker(&self, connection_id: ConnectionId, waker: Waker) {
+        let mut inner = self.inner.borrow_mut();
+        inner
+            .clog_wakers
+            .entry(connection_id)
+            .or_default()
+            .push(waker);
+    }
+
+    /// Clear expired clogs and wake pending tasks
+    pub fn clear_expired_clogs(&self) {
+        let mut inner = self.inner.borrow_mut();
+        let now = inner.current_time;
+
+        let expired_connections: Vec<ConnectionId> = inner
+            .connection_clogs
+            .iter()
+            .filter_map(|(id, state)| {
+                if now >= state.expires_at {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for connection_id in expired_connections {
+            inner.connection_clogs.remove(&connection_id);
+            if let Some(wakers) = inner.clog_wakers.remove(&connection_id) {
+                for waker in wakers {
+                    waker.wake();
+                }
+            }
         }
     }
 }
