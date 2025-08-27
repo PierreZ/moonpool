@@ -4,16 +4,16 @@ use moonpool_simulation::{
     runner::IterationControl, sometimes_assert,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{Level, instrument, warn};
+use tracing::{Level, instrument};
 use tracing_subscriber;
 
-static MAX_PING: i32 = 100;
+static MAX_PING: u8 = 100;
 
 #[test]
 fn test_ping_pong_with_simulation_builder() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
-        .with_max_level(Level::INFO)
+        .with_max_level(Level::WARN)
         .try_init();
 
     let local_runtime = tokio::runtime::Builder::new_current_thread()
@@ -242,7 +242,7 @@ async fn ping_pong_client(
     tracing::debug!("Client: Sleep completed, connecting to server");
 
     // Generate a random number of pings to send - more messages to fill small queues
-    let ping_count = sim_random_range(5..50) as u8;
+    let ping_count = sim_random_range(5..MAX_PING) as u8;
     tracing::debug!("Client: Will send {} pings to server", ping_count);
 
     // Create a resilient peer for communication with randomized config
