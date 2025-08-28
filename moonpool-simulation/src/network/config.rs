@@ -82,7 +82,7 @@ impl NetworkRandomizationRanges {
             clogging_probability_range: 0.1..0.3,           // 10-30% clogging
             clogging_base_duration_range: 50000..300000,    // 50-300ms in µs
             clogging_jitter_duration_range: 100000..400000, // 100-400ms in µs
-            cutting_probability_range: 0.01..0.03,          // 1-3% cutting chance per tick
+            cutting_probability_range: 0.10..0.20,          // 1-3% cutting chance per tick
             cutting_reconnect_base_range: 200000..800000,   // 200-800ms in µs
             cutting_reconnect_jitter_range: 100000..500000, // 100-500ms in µs
             cutting_max_cuts_range: 1..3,                   // 1-2 cuts per connection max

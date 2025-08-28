@@ -11,11 +11,11 @@ use super::actors::{PingPongClientActor, PingPongServerActor};
 
 #[test]
 fn test_ping_pong_with_simulation_builder() {
-    let iteration_count = 1;
+    let iteration_count = 500;
     let check_assert = false;
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
-        .with_max_level(Level::DEBUG)
+        .with_max_level(Level::ERROR)
         .try_init();
 
     let local_runtime = tokio::runtime::Builder::new_current_thread()
@@ -24,11 +24,11 @@ fn test_ping_pong_with_simulation_builder() {
 
     local_runtime.block_on(async move {
         let report = SimulationBuilder::new()
-            .set_randomization_ranges(NetworkRandomizationRanges::default())
+            .set_randomization_ranges(NetworkRandomizationRanges::chaos_testing())
             .register_workload("ping_pong_server", ping_pong_server)
             .register_workload("ping_pong_client", ping_pong_client)
             .set_iteration_control(IterationControl::FixedCount(iteration_count))
-            .set_debug_seeds(vec![42]) // Start with single seed for debugging
+            .set_debug_seeds(vec![42]) // Debug with known failing seed
             .run()
             .await;
 

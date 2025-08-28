@@ -30,6 +30,8 @@ nix develop --command cargo nextest run
 
 **CRITICAL**: Simulation finds bugs by testing worst-case scenarios.
 
+**TARGET**: 100% success rate when running simulation tests. Workloads must be written to always try to make progress, even if it takes time with timeouts. No deadlocks or hanging tasks are acceptable - all actors must complete gracefully under any chaos testing scenario.
+
 **When failing seeds found:**
 1. Debug manually with detailed logging
 2. Identify root cause in production code

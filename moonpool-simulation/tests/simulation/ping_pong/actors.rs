@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::instrument;
 
-static MAX_PING: usize = 10;
+static MAX_PING: usize = 100;
 
 /// Server actor for ping-pong communication with reconnection handling
 pub struct PingPongServerActor<N: NetworkProvider, T: TimeProvider> {
@@ -113,17 +113,42 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongServerActor<N, T> {
     /// Handle a single client session (ping-pong communication)
     async fn handle_client_session(&mut self, stream: &mut N::TcpStream) -> SimulationResult<()> {
         loop {
-            // Read message from client
+            // Read message from client with timeout for chaos resilience
             tracing::info!("Server: About to read next message");
+            let timeout = Duration::from_secs(sim_random_range(5..10)); // Server timeout for reads
             let mut buffer = [0u8; 128]; // Larger buffer for UUID messages
-            let bytes_read = match stream.read(&mut buffer).await {
-                Ok(n) => {
-                    tracing::info!("Server: Read {} bytes successfully", n);
-                    n
+
+            let read_future = stream.read(&mut buffer);
+            let bytes_read = match self.time.timeout(timeout, read_future).await? {
+                Ok(result) => {
+                    match result {
+                        Ok(n) => {
+                            if n == 0 {
+                                tracing::debug!("Server: Client disconnected (EOF)");
+                                break; // Client disconnected
+                            }
+                            tracing::info!("Server: Read {} bytes successfully", n);
+                            n
+                        }
+                        Err(e) => {
+                            sometimes_assert!(
+                                server_read_fails,
+                                true,
+                                "Server reads should sometimes fail during chaos testing"
+                            );
+                            tracing::debug!("Server: Read failed with error: {:?}", e);
+                            break; // Connection error - exit gracefully
+                        }
+                    }
                 }
-                Err(e) => {
-                    tracing::error!("Server: Read failed with error: {:?}", e);
-                    return Err(e.into());
+                Err(_timeout) => {
+                    sometimes_assert!(
+                        server_read_timeout,
+                        true,
+                        "Server reads should sometimes timeout during chaos testing"
+                    );
+                    tracing::debug!("Server: Read timeout - client may have disconnected");
+                    break; // Timeout - exit gracefully
                 }
             };
 
@@ -139,7 +164,16 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongServerActor<N, T> {
 
             // Match on the message type
             if message.starts_with("PING-") {
-                self.handle_ping_message_uuid(stream, message).await?;
+                // Handle PING message - if it fails, the connection is likely broken
+                if let Err(e) = self.handle_ping_message_uuid(stream, message).await {
+                    sometimes_assert!(
+                        server_ping_handling_fails,
+                        true,
+                        "Server PING handling should sometimes fail during chaos testing"
+                    );
+                    tracing::debug!("Server: PING handling failed: {:?}, exiting session", e);
+                    break; // Exit gracefully on connection error
+                }
             } else if message == "CLOSE" {
                 self.handle_close_message(stream).await?;
                 break; // Exit the loop
@@ -179,17 +213,29 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongServerActor<N, T> {
             if let Ok(uuid) = uuid_str.parse::<u128>() {
                 tracing::debug!("Server: Processing PING with UUID {}", uuid);
 
-                // Send corresponding PONG response with same UUID
+                // Send corresponding PONG response with same UUID - handle connection failures gracefully
                 let pong_data = format!("PONG-{}\n", uuid);
                 tracing::debug!("Server: Sending pong response: {}", pong_data);
-                stream.write_all(pong_data.as_bytes()).await?;
-                tracing::debug!("Server: Sent pong response for UUID {}", uuid);
-
-                always_assert!(
-                    server_sends_pong,
-                    true,
-                    "Server should always be able to send PONG responses"
-                );
+                match stream.write_all(pong_data.as_bytes()).await {
+                    Ok(_) => {
+                        tracing::debug!("Server: Sent pong response for UUID {}", uuid);
+                        always_assert!(
+                            server_sends_pong,
+                            true,
+                            "Server should always be able to send PONG responses"
+                        );
+                    }
+                    Err(e) => {
+                        sometimes_assert!(
+                            server_pong_send_fails,
+                            true,
+                            "Server PONG sends should sometimes fail during chaos testing"
+                        );
+                        tracing::debug!("Server: Failed to send PONG for UUID {}: {:?}", uuid, e);
+                        // Return error to break the session loop - connection is likely broken
+                        return Err(e.into());
+                    }
+                }
             } else {
                 panic!("Invalid ping UUID format: {}", uuid_str);
             }
@@ -210,10 +256,22 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongServerActor<N, T> {
             "Server should receive CLOSE message to shutdown gracefully"
         );
 
-        // Send BYE!! response and exit
+        // Send BYE!! response and exit - may fail if client disconnects
         tracing::debug!("Server: Sending CLOSE acknowledgment");
-        stream.write_all(b"BYE!!").await?;
-        tracing::debug!("Server: Sent CLOSE acknowledgment, shutting down");
+        match stream.write_all(b"BYE!!").await {
+            Ok(_) => {
+                tracing::debug!("Server: Sent CLOSE acknowledgment, shutting down");
+            }
+            Err(e) => {
+                sometimes_assert!(
+                    server_bye_send_fails,
+                    true,
+                    "Server BYE send should sometimes fail during chaos testing"
+                );
+                tracing::debug!("Server: Failed to send CLOSE acknowledgment: {:?}", e);
+                // Continue shutdown regardless - client may have disconnected
+            }
+        }
 
         Ok(())
     }
@@ -521,42 +579,59 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongClientActor<N, T> {
                 );
             }
             Err(e) => {
+                sometimes_assert!(
+                    close_send_fails_during_chaos,
+                    true,
+                    "CLOSE send should sometimes fail during chaos testing"
+                );
                 tracing::debug!("Client: Failed to send CLOSE message: {:?}", e);
-                return Err(moonpool_simulation::SimulationError::IoError(e.to_string()));
+                return Ok(()); // Return OK - connection cutting may prevent CLOSE
             }
         }
 
-        // Read server's acknowledgment
+        // Read server's acknowledgment with timeout for chaos resilience
         tracing::debug!("Client: Reading server's CLOSE acknowledgment");
+        let timeout = Duration::from_secs(sim_random_range(2..5)); // Shorter timeout for CLOSE
         let mut ack_buffer = [0u8; 5];
-        match peer.receive(&mut ack_buffer).await {
-            Ok(bytes_read) => {
-                let ack_message =
-                    std::str::from_utf8(&ack_buffer[..bytes_read]).unwrap_or("INVALID");
-                tracing::debug!("Client: Received acknowledgment: {:?}", ack_message);
 
-                always_assert!(
-                    client_receives_bye,
-                    ack_message == "BYE!!",
-                    "Client should receive BYE acknowledgment from server"
-                );
-                always_assert!(
-                    bye_message_exact,
-                    &ack_buffer[..bytes_read] == b"BYE!!",
-                    format!(
-                        "BYE message should be exact: expected 'BYE!!', got '{}'",
-                        String::from_utf8_lossy(&ack_buffer[..bytes_read])
-                    )
-                );
-            }
-            Err(e) => {
-                tracing::warn!("Client: Failed to receive CLOSE acknowledgment: {:?}", e);
+        let receive_future = peer.receive(&mut ack_buffer);
+        match self.time.timeout(timeout, receive_future).await? {
+            Ok(result) => match result {
+                Ok(bytes_read) => {
+                    let ack_message =
+                        std::str::from_utf8(&ack_buffer[..bytes_read]).unwrap_or("INVALID");
+                    tracing::debug!("Client: Received acknowledgment: {:?}", ack_message);
+
+                    always_assert!(
+                        client_receives_bye,
+                        ack_message == "BYE!!",
+                        "Client should receive BYE acknowledgment from server"
+                    );
+                    always_assert!(
+                        bye_message_exact,
+                        &ack_buffer[..bytes_read] == b"BYE!!",
+                        format!(
+                            "BYE message should be exact: expected 'BYE!!', got '{}'",
+                            String::from_utf8_lossy(&ack_buffer[..bytes_read])
+                        )
+                    );
+                }
+                Err(e) => {
+                    sometimes_assert!(
+                        close_ack_receive_fails,
+                        true,
+                        "CLOSE acknowledgment receive should sometimes fail during chaos testing"
+                    );
+                    tracing::debug!("Client: Failed to receive CLOSE acknowledgment: {:?}", e);
+                }
+            },
+            Err(_timeout) => {
                 sometimes_assert!(
-                    close_ack_received,
-                    false,
-                    "CLOSE acknowledgment may not always be received"
+                    close_ack_timeout,
+                    true,
+                    "CLOSE acknowledgment should sometimes timeout during chaos testing"
                 );
-                tracing::info!("Client: Server may have already closed, continuing");
+                tracing::debug!("Client: Timeout waiting for CLOSE acknowledgment");
             }
         }
 
