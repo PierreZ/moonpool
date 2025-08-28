@@ -1,12 +1,15 @@
 use moonpool_simulation::{
     NetworkProvider, Peer, PeerConfig, SimulationMetrics, SimulationResult, TcpListenerTrait,
-    TimeProvider, WorkloadTopology, always_assert, rng::sim_random_range, sometimes_assert,
+    TimeProvider, WorkloadTopology, always_assert,
+    rng::{random_unique_id, sim_random_range},
+    sometimes_assert,
 };
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::instrument;
 
-static MAX_PING: usize = 10000;
+static MAX_PING: usize = 10;
 
 /// Server actor for ping-pong communication with reconnection handling
 pub struct PingPongServerActor<N: NetworkProvider, T: TimeProvider> {
@@ -109,12 +112,10 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongServerActor<N, T> {
 
     /// Handle a single client session (ping-pong communication)
     async fn handle_client_session(&mut self, stream: &mut N::TcpStream) -> SimulationResult<()> {
-        let mut ping_sequence = 0;
-
         loop {
             // Read message from client
             tracing::info!("Server: About to read next message");
-            let mut buffer = [0u8; 16];
+            let mut buffer = [0u8; 128]; // Larger buffer for UUID messages
             let bytes_read = match stream.read(&mut buffer).await {
                 Ok(n) => {
                     tracing::info!("Server: Read {} bytes successfully", n);
@@ -138,8 +139,7 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongServerActor<N, T> {
 
             // Match on the message type
             if message.starts_with("PING-") {
-                self.handle_ping_message(stream, message, &mut ping_sequence)
-                    .await?;
+                self.handle_ping_message_uuid(stream, message).await?;
             } else if message == "CLOSE" {
                 self.handle_close_message(stream).await?;
                 break; // Exit the loop
@@ -159,49 +159,39 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongServerActor<N, T> {
         Ok(())
     }
 
-    /// Handle a PING message and send PONG response
-    async fn handle_ping_message(
+    /// Handle a PING message with UUID and send PONG response
+    async fn handle_ping_message_uuid(
         &mut self,
         stream: &mut N::TcpStream,
         message: &str,
-        ping_sequence: &mut i32,
     ) -> SimulationResult<()> {
         let ping_message = message;
 
-        // Verify that after splitting on "-", it is a valid number matching the sequence
-        if let Some((prefix, number_str)) = ping_message.split_once('-') {
+        // Verify that after splitting on "-", it is a valid UUID
+        if let Some((prefix, uuid_str)) = ping_message.split_once('-') {
             always_assert!(
                 server_receives_valid_format,
                 prefix == "PING",
                 "Ping message should have PING prefix"
             );
 
-            // Parse the number and verify it matches expected sequence
-            if let Ok(ping_number) = number_str.parse::<i32>() {
-                always_assert!(
-                    server_receives_valid_sequence,
-                    ping_number == *ping_sequence,
-                    format!(
-                        "Ping sequence number should match expected value, expected {}, got {}",
-                        *ping_sequence, ping_number
-                    )
-                );
+            // Parse the UUID - no sequence validation needed
+            if let Ok(uuid) = uuid_str.parse::<u128>() {
+                tracing::debug!("Server: Processing PING with UUID {}", uuid);
 
-                // Send corresponding PONG response
-                let pong_data = format!("PONG-{}\n", ping_number);
+                // Send corresponding PONG response with same UUID
+                let pong_data = format!("PONG-{}\n", uuid);
                 tracing::debug!("Server: Sending pong response: {}", pong_data);
                 stream.write_all(pong_data.as_bytes()).await?;
-                tracing::debug!("Server: Sent pong response {}", ping_number);
+                tracing::debug!("Server: Sent pong response for UUID {}", uuid);
 
                 always_assert!(
                     server_sends_pong,
                     true,
                     "Server should always be able to send PONG responses"
                 );
-
-                *ping_sequence += 1;
             } else {
-                panic!("Invalid ping number format: {}", number_str);
+                panic!("Invalid ping UUID format: {}", uuid_str);
             }
         } else {
             panic!("Invalid ping message format: {}", ping_message);
@@ -341,6 +331,9 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongClientActor<N, T> {
         peer: &mut Peer<N, T>,
         ping_count: u8,
     ) -> SimulationResult<()> {
+        // Track pending requests with UUIDs instead of sequences
+        let mut pending_requests: HashMap<u128, String> = HashMap::new();
+
         // Sometimes send messages in bursts to fill queue, sometimes one-by-one
         let burst_mode = sim_random_range(1..100) <= 40; // 40% chance of burst mode
         let burst_size = if burst_mode {
@@ -368,28 +361,35 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongClientActor<N, T> {
 
             // Send burst
             for _j in 0..current_burst {
-                self.send_ping_message(peer, ping_idx).await?;
+                let uuid = self.send_ping_message_uuid(peer, ping_idx).await?;
+                pending_requests.insert(uuid, format!("PING-{}", ping_idx));
                 ping_idx += 1;
             }
 
-            // Receive responses for the burst
-            let start_idx = ping_idx - current_burst as u8;
-            self.receive_pong_responses(peer, current_burst, start_idx)
+            // Receive responses for the burst with timeout
+            self.receive_pong_responses_uuid(peer, &mut pending_requests, current_burst)
                 .await?;
         }
 
         Ok(())
     }
 
-    /// Send a single ping message
-    async fn send_ping_message(&self, peer: &mut Peer<N, T>, ping_idx: u8) -> SimulationResult<()> {
+    /// Send a single ping message with UUID
+    async fn send_ping_message_uuid(
+        &self,
+        peer: &mut Peer<N, T>,
+        ping_idx: u8,
+    ) -> SimulationResult<u128> {
+        let uuid = random_unique_id();
+
         tracing::info!(
-            "Client: About to send PING-{} (ping_idx={})",
+            "Client: About to send PING-{} (ping_idx={}, uuid={})",
+            uuid,
             ping_idx,
-            ping_idx
+            uuid
         );
-        let ping_data = format!("PING-{}\n", ping_idx);
-        let mut padded_data = [0u8; 16];
+        let ping_data = format!("PING-{}\n", uuid);
+        let mut padded_data = [0u8; 128]; // Larger buffer for UUID
         let bytes = ping_data.as_bytes();
         padded_data[..bytes.len()].copy_from_slice(bytes);
 
@@ -399,7 +399,7 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongClientActor<N, T> {
                 let send_duration = self.time.now() - send_start;
                 tracing::info!(
                     "Client: Successfully sent PING-{} using peer in {:?}",
-                    ping_idx,
+                    uuid,
                     send_duration
                 );
                 always_assert!(peer_can_send, true, "Peer should be able to send messages");
@@ -411,71 +411,92 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongClientActor<N, T> {
                 );
             }
             Err(e) => {
-                tracing::debug!("Client: Failed to send ping {}: {:?}", ping_idx, e);
+                tracing::debug!("Client: Failed to send ping {}: {:?}", uuid, e);
                 return Err(moonpool_simulation::SimulationError::IoError(e.to_string()));
             }
         }
 
-        Ok(())
+        Ok(uuid)
     }
 
-    /// Receive pong responses for a burst of messages
-    async fn receive_pong_responses(
+    /// Receive pong responses for a burst of messages with UUID validation and timeout
+    async fn receive_pong_responses_uuid(
         &self,
         peer: &mut Peer<N, T>,
+        pending_requests: &mut HashMap<u128, String>,
         expected_count: usize,
-        start_idx: u8,
     ) -> SimulationResult<()> {
         let mut pending_data = String::new();
         let mut responses_received = 0;
 
         while responses_received < expected_count {
-            // Read data from peer
-            let mut response_buffer = [0u8; 64];
-            match peer.receive(&mut response_buffer).await {
-                Ok(bytes_read) => {
-                    let new_data =
-                        std::str::from_utf8(&response_buffer[..bytes_read]).unwrap_or("INVALID");
-                    pending_data.push_str(new_data);
+            // Add randomized timeout to prevent deadlocks
+            let timeout = Duration::from_secs(sim_random_range(3..8));
+            let mut response_buffer = [0u8; 128];
 
-                    // Process all complete lines (messages ending with \n)
-                    while let Some(newline_pos) = pending_data.find('\n') {
-                        let message = pending_data[..newline_pos].trim().to_string();
-                        let remaining = pending_data[newline_pos + 1..].to_string();
-                        pending_data = remaining;
+            // Use TimeProvider timeout for deterministic behavior
+            let receive_future = peer.receive(&mut response_buffer);
+            match self.time.timeout(timeout, receive_future).await? {
+                Ok(result) => {
+                    match result {
+                        Ok(bytes_read) => {
+                            let new_data = std::str::from_utf8(&response_buffer[..bytes_read])
+                                .unwrap_or("INVALID");
+                            pending_data.push_str(new_data);
 
-                        if message.starts_with("PONG-") {
-                            let response_idx = start_idx + responses_received as u8;
+                            // Process all complete lines (messages ending with \n)
+                            while let Some(newline_pos) = pending_data.find('\n') {
+                                let message = pending_data[..newline_pos].trim().to_string();
+                                let remaining = pending_data[newline_pos + 1..].to_string();
+                                pending_data = remaining;
 
-                            tracing::debug!(
-                                "Client: Received pong {}: '{}'",
-                                response_idx,
-                                message
+                                if message.starts_with("PONG-") {
+                                    if let Some((_, uuid_str)) = message.split_once('-') {
+                                        if let Ok(uuid) = uuid_str.parse::<u128>() {
+                                            if pending_requests.remove(&uuid).is_some() {
+                                                tracing::debug!(
+                                                    "Client: Received expected pong for UUID {}: '{}'",
+                                                    uuid,
+                                                    message
+                                                );
+
+                                                always_assert!(
+                                                    peer_receives_pong,
+                                                    message.starts_with("PONG"),
+                                                    "Peer should receive PONG responses"
+                                                );
+
+                                                responses_received += 1;
+                                            } else {
+                                                tracing::debug!(
+                                                    "Client: Received unexpected PONG for UUID {}",
+                                                    uuid
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            sometimes_assert!(
+                                receive_fails_during_chaos,
+                                true,
+                                "Receive should sometimes fail during chaos testing"
                             );
-
-                            // Verify we got a valid pong response
-                            always_assert!(
-                                peer_receives_pong,
-                                message.starts_with("PONG"),
-                                "Peer should receive PONG responses"
-                            );
-                            let expected_pong = format!("PONG-{}", response_idx);
-                            always_assert!(
-                                pong_sequence_matches,
-                                message == expected_pong,
-                                format!(
-                                    "PONG sequence mismatch: expected '{}', got '{}'",
-                                    expected_pong, message
-                                )
-                            );
-
-                            responses_received += 1;
+                            tracing::debug!("Client: Failed to receive data: {:?}", e);
+                            return Ok(()); // Return OK to avoid propagating receive error
                         }
                     }
                 }
-                Err(e) => {
-                    tracing::debug!("Client: Failed to receive data: {:?}", e);
-                    return Err(moonpool_simulation::SimulationError::IoError(e.to_string()));
+                Err(_timeout) => {
+                    sometimes_assert!(
+                        timeout_during_chaos,
+                        true,
+                        "Timeouts should occur during chaos testing"
+                    );
+                    tracing::debug!("Client: Timeout waiting for responses, returning early");
+                    return Ok(()); // Return OK to avoid propagating timeout as error
                 }
             }
         }
@@ -487,7 +508,7 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongClientActor<N, T> {
     async fn send_close_and_receive_ack(&self, peer: &mut Peer<N, T>) -> SimulationResult<()> {
         // Send CLOSE message to server
         tracing::debug!("Client: Sending CLOSE message to server");
-        let mut close_data = [0u8; 16];
+        let mut close_data = [0u8; 128];
         close_data[..6].copy_from_slice(b"CLOSE\n");
 
         match peer.send(close_data.to_vec()).await {

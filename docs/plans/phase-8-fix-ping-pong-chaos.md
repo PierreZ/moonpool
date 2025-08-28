@@ -60,31 +60,45 @@ match self.time.timeout(timeout, receive_future).await? {
 - Don't panic on failed seeds during chaos testing
 - Accept >0% success rate as passing (not 100%)
 
-## Implementation Steps
+## Implementation Status
 
-1. **Add `generate_uuid()` to rng module**:
-   - `pub fn generate_uuid() -> u64`
-   - Use `sim_random_range(1..u64::MAX)` for deterministic UUIDs
+### ✅ Completed
+1. **Added `random_unique_id()` to rng module** (`moonpool-simulation/src/rng.rs:193`):
+   - `pub fn random_unique_id() -> u128`
+   - Uses deterministic u128 UUIDs following FoundationDB pattern
 
-2. **Update client protocol** (`actors.rs`):
-   - Generate UUID per message: `let uuid = generate_uuid()`
-   - Send `PING-{uuid}` format
-   - Track pending UUIDs in HashMap, not sequences
+2. **Updated client protocol** (`actors.rs`):
+   - Generates UUID per message with `random_unique_id()`
+   - Sends `PING-{uuid}` format
+   - Tracks pending UUIDs in HashMap instead of sequences
 
-3. **Update server protocol** (`actors.rs`):  
-   - Accept any valid UUID (no sequence validation)
-   - Respond with `PONG-{same-uuid}`
-   - Remove sequence increment logic
+3. **Updated server protocol** (`actors.rs`):  
+   - Accepts any valid UUID (no sequence validation)
+   - Responds with `PONG-{same-uuid}`
+   - Removed sequence increment logic
 
-4. **Add randomized timeout handling**:
-   - Use `sim_random_range(3..8)` for timeout duration
-   - Wrap receive in `TimeProvider::timeout(random_duration, ...)`
-   - Break gracefully on timeout
+4. **Added randomized timeout handling**:
+   - Uses `sim_random_range(3..8)` for timeout duration
+   - Wraps receive in `TimeProvider::timeout()` for determinism
+   - Returns gracefully on timeout/error
 
-5. **Update test expectations** (`single_server.rs`):
-   - Don't panic on failed seeds during chaos testing
-   - Log partial success as expected behavior
-   - Accept chaos testing degradation as normal
+5. **Updated test expectations** (`single_server.rs`):
+   - Added chaos-aware failure handling
+   - Early deadlock detection (3 iterations vs 10)
+   - Accepts partial success during chaos testing
+
+### 🔄 In Progress
+6. **Remaining deadlock issues**:
+   - UUID protocol works without chaos testing (100% success)
+   - Still deadlocks with chaos testing due to connection cutting
+   - Need to fix actor completion coordination during network failures
+
+## TODO
+- [ ] Fix actor coordination during connection failures
+- [ ] Ensure 100% success rate with chaos testing enabled
+- [ ] Restore full test suite (50 iterations, multiple seeds)
+
+## Implementation Steps (Original Plan)
 
 ## Success Criteria
 

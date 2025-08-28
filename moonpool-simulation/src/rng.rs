@@ -163,6 +163,39 @@ pub fn set_sim_seed(seed: u64) {
     });
 }
 
+/// Generate a random unique identifier using the simulation RNG.
+///
+/// This function generates deterministic unique IDs for the simulation,
+/// following the FoundationDB pattern from `deterministicRandom()->randomUniqueID()`.
+/// Uses u128 for sufficient uniqueness space in simulation scenarios.
+///
+/// # Returns
+///
+/// A deterministic u128 unique ID that is unique within the simulation.
+///
+/// # Example
+///
+/// ```rust
+/// use moonpool_simulation::rng::{set_sim_seed, random_unique_id};
+///
+/// set_sim_seed(42);
+/// let id1 = random_unique_id();
+/// let id2 = random_unique_id();
+///
+/// // IDs should be different
+/// assert_ne!(id1, id2);
+///
+/// // Reset to same seed - will produce identical sequence
+/// set_sim_seed(42);
+/// assert_eq!(id1, random_unique_id());
+/// assert_eq!(id2, random_unique_id());
+/// ```
+pub fn random_unique_id() -> u128 {
+    let high: u64 = sim_random();
+    let low: u64 = sim_random();
+    ((high as u128) << 64) | (low as u128)
+}
+
 /// Get the current simulation seed.
 ///
 /// Returns the seed that was last set via [`set_sim_seed`].

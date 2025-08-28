@@ -555,7 +555,7 @@ impl SimulationBuilder {
                         && initial_event_count == 0
                     {
                         no_progress_count += 1;
-                        if no_progress_count > 10 {
+                        if no_progress_count > 3 {
                             tracing::error!(
                                 "🔒 DEADLOCK detected on iteration {} with seed {}: {} tasks remaining but no events to process after {} iterations",
                                 iteration_count,
