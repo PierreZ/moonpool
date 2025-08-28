@@ -68,10 +68,13 @@ nix develop --command cargo nextest run
 
 When working on Rust implementation, read corresponding reference sections:
 
-- **Peer** → FoundationDB Peer class (FlowTransport.h:147-191, FlowTransport.actor.cpp:1016-1125)
-- **SimWorld** → FoundationDB Sim2 class (sim2.actor.cpp:1051+)  
-- **Configuration design** → TigerBeetle PacketSimulator (packet_simulator.zig:12-488)
-- **Connection management** → FoundationDB connectionKeeper (FlowTransport.actor.cpp:760-900)
-- **Exponential backoff** → FoundationDB reconnection logic (FlowTransport.actor.cpp:892-897)
+- **Peer** → FoundationDB Peer class (docs/references/fdb/FlowTransport.h:147-191, docs/references/fdb/FlowTransport.actor.cpp:1016-1125)
+- **SimWorld** → FoundationDB Sim2 class (docs/references/fdb/sim2.actor.cpp:1051+)  
+- **Configuration design** → TigerBeetle PacketSimulator (docs/references/tigerbeetle/packet_simulator.zig:12-488)
+- **Connection management** → FoundationDB connectionKeeper (docs/references/fdb/FlowTransport.actor.cpp:760-900)
+- **Exponential backoff** → FoundationDB reconnection logic (docs/references/fdb/FlowTransport.actor.cpp:892-897)
+- **Message reliability** → FoundationDB ReliablePacket system (docs/references/fdb/Net2Packet.h:30-111)
+- **Request-response pattern** → FoundationDB ping workload (docs/references/fdb/Ping.actor.cpp:29-38, 147-169)
+- **Message queuing** → FoundationDB UnsentPacketQueue (docs/references/fdb/Net2Packet.h:43-91)
 
 **Note**: We focus on TCP-level simulation (connection cutting/clogging) rather than packet-level faults, since TCP abstracts packet reliability for applications.
