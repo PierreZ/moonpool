@@ -66,6 +66,34 @@ nix develop --command cargo nextest run
 
 **Anti-patterns**: Don't use on normal execution paths or without clear purpose.
 
+## Buggify (FDB Style)
+**Purpose**: Deterministic fault injection that biases simulation toward dangerous scenarios.
+
+**Key Principles**:
+- Only active during simulation testing (disabled in production)
+- Each `BUGGIFY` point randomly enabled/disabled per test run
+- Enabled points have configurable probability of triggering (default 25%)
+- Deterministic behavior ensures reproducible test results
+
+**Strategic placement**:
+- Before expensive operations (force minimal work paths)
+- At decision points (bias toward rare but dangerous choices)
+- In error handling setup (force specific failure scenarios)
+- Around timing-sensitive code (introduce delays/races)
+- Configuration randomization (test edge case parameters)
+
+**Implementation pattern**:
+```rust
+// Rust equivalent concept
+if simulation_buggify!() {
+    // Force the difficult/dangerous path
+    return early_timeout();
+}
+// Normal execution continues
+```
+
+**Philosophy**: Make the system "cooperate with the simulator" by explicitly instrumenting potential failure modes, rather than relying purely on black-box external fault injection.
+
 ## Reference Code Mapping
 
 When working on Rust implementation, read corresponding reference sections:
@@ -78,5 +106,6 @@ When working on Rust implementation, read corresponding reference sections:
 - **Message reliability** → FoundationDB ReliablePacket system (docs/references/fdb/Net2Packet.h:30-111)
 - **Request-response pattern** → FoundationDB ping workload (docs/references/fdb/Ping.actor.cpp:29-38, 147-169)
 - **Message queuing** → FoundationDB UnsentPacketQueue (docs/references/fdb/Net2Packet.h:43-91)
+- **Deterministic chaos testing** → FoundationDB Buggify system (docs/references/foundationdb/Buggify.h:79-88)
 
 **Note**: We focus on TCP-level simulation (connection cutting/clogging) rather than packet-level faults, since TCP abstracts packet reliability for applications.
