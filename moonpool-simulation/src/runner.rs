@@ -11,6 +11,7 @@ use crate::{
         AssertionStats, REGISTERED_ASSERTIONS, ValidationReport, get_assertion_results,
         validate_assertion_contracts,
     },
+    buggify::{buggify_init, buggify_reset},
     reset_sim_rng, set_sim_seed,
 };
 use std::collections::HashMap;
@@ -262,13 +263,6 @@ impl SimulationBuilder {
         self
     }
 
-    /// Set specific seeds to use for the iterations.
-    /// If not set, random seeds will be generated.
-    pub fn set_seeds(mut self, seeds: Vec<u64>) -> Self {
-        self.seeds = seeds;
-        self
-    }
-
     /// Set specific seeds for deterministic debugging and regression testing.
     ///
     /// This method is specifically designed for debugging scenarios where you need
@@ -441,6 +435,10 @@ impl SimulationBuilder {
             // Prepare clean state for this iteration
             reset_sim_rng();
             set_sim_seed(seed);
+
+            // Initialize buggify system for this iteration
+            // Use moderate probabilities: 50% activation rate, 25% firing rate
+            buggify_init(0.5, 0.25);
 
             // Create fresh NetworkConfiguration for this iteration (uses seed-based randomization)
             let network_config = if let Some(ref ranges) = self.randomization_ranges {
@@ -657,6 +655,9 @@ impl SimulationBuilder {
                 ))));
                 faulty_seeds.push(seed);
             }
+
+            // Reset buggify state after each iteration to ensure clean state
+            buggify_reset();
         }
 
         // End of main iteration loop
@@ -678,6 +679,9 @@ impl SimulationBuilder {
         // Collect assertion results and validate them
         let assertion_results = get_assertion_results();
         let assertion_validation = validate_assertion_contracts();
+
+        // Final buggify reset to ensure no impact on subsequent code
+        buggify_reset();
 
         SimulationReport {
             iterations: iteration_count,
@@ -711,7 +715,7 @@ mod tests {
                 },
             )
             .set_iterations(3)
-            .set_seeds(vec![1, 2, 3])
+            .set_debug_seeds(vec![1, 2, 3])
             .run()
             .await;
 
@@ -743,7 +747,7 @@ mod tests {
                 },
             )
             .set_iterations(4)
-            .set_seeds(vec![1, 2, 3, 4])
+            .set_debug_seeds(vec![1, 2, 3, 4])
             .run()
             .await;
 
@@ -793,7 +797,7 @@ mod tests {
                 },
             )
             .set_iterations(2)
-            .set_seeds(vec![42, 43])
+            .set_debug_seeds(vec![42, 43])
             .run()
             .await;
 
@@ -836,7 +840,7 @@ mod tests {
                     },
                 )
                 .set_iterations(2)
-                .set_seeds(vec![10, 20])
+                .set_debug_seeds(vec![10, 20])
                 .run()
                 .await
         });

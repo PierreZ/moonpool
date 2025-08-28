@@ -11,8 +11,7 @@ use super::actors::{PingPongClientActor, PingPongServerActor};
 
 #[test]
 fn test_ping_pong_with_simulation_builder() {
-    let iteration_count = 500;
-    let check_assert = false;
+    let iteration_count = 1000; // Test with smaller count first
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
         .with_max_level(Level::ERROR)
@@ -28,7 +27,6 @@ fn test_ping_pong_with_simulation_builder() {
             .register_workload("ping_pong_server", ping_pong_server)
             .register_workload("ping_pong_client", ping_pong_client)
             .set_iteration_control(IterationControl::FixedCount(iteration_count))
-            .set_debug_seeds(vec![42]) // Debug with known failing seed
             .run()
             .await;
 
@@ -51,9 +49,7 @@ fn test_ping_pong_with_simulation_builder() {
                 for violation in &report.assertion_validation.success_rate_violations {
                     println!("  - {}", violation);
                 }
-                if check_assert {
-                    panic!("❌ Unexpected success rate violations detected!");
-                }
+                panic!("❌ Unexpected success rate violations detected!");
             }
 
             if !report
@@ -65,9 +61,7 @@ fn test_ping_pong_with_simulation_builder() {
                 for violation in &report.assertion_validation.unreachable_assertions {
                     println!("  - {}", violation);
                 }
-                if check_assert {
-                    panic!("❌ Unexpected unreachable assertions detected!");
-                }
+                panic!("❌ Unexpected unreachable assertions detected!");
             }
         } else {
             println!("");

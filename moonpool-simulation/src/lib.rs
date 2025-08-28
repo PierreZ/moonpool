@@ -32,6 +32,8 @@
 
 /// Assertion macros and result tracking for simulation testing.
 pub mod assertions;
+/// Buggify system for deterministic chaos testing.
+pub mod buggify;
 /// Error types and utilities for simulation operations.
 pub mod error;
 /// Event scheduling and processing for the simulation engine.
@@ -53,6 +55,7 @@ pub mod time;
 
 // Public API exports
 pub use assertions::{AssertionStats, get_assertion_results, validate_assertion_contracts};
+pub use buggify::{buggify_init, buggify_reset};
 pub use error::{SimulationError, SimulationResult};
 pub use events::{Event, EventQueue, ScheduledEvent};
 // Network exports
