@@ -8,15 +8,11 @@ success-output = "never"
 # Run tests in parallel but limit concurrency for simulation tests
 test-threads = 1
 
-# Specific timeout overrides for slow tests
+# Timeout overrides for simulation tests
+# All tests in the simulation folder get longer timeouts
 [[profile.default.overrides]]
-filter = 'test(ping_pong)'
-slow-timeout = { period = "30s", terminate-after = 10 }
-
-# Alternative: target specific test functions
-[[profile.default.overrides]]
-filter = 'test(test_ping_pong_with_simulation_builder)'
-slow-timeout = { period = "10s", terminate-after = 30 }
+filter = 'test(/simulation/)'
+slow-timeout = { period = "30s", terminate-after = 2 }
 
 [profile.default.junit]
 # Store test results

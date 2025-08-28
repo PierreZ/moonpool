@@ -194,23 +194,23 @@ fn test_network_randomization_ranges() {
     local_runtime.block_on(async move {
         // Create custom randomization ranges with tight constraints for predictable testing
         let custom_ranges = NetworkRandomizationRanges {
-            bind_base_range: 1000..1001,           // Exactly 1ms (1000µs)
-            bind_jitter_range: 1..2,               // Minimal jitter
-            accept_base_range: 2000..2001,         // Exactly 2ms (2000µs)
-            accept_jitter_range: 1..2,             // Minimal jitter
-            connect_base_range: 3000..3001,        // Exactly 3ms (3000µs)
-            connect_jitter_range: 1..2,            // Minimal jitter
-            read_base_range: 100..101,             // Exactly 100µs
-            read_jitter_range: 1..2,               // Minimal jitter
-            write_base_range: 500..501,            // Exactly 500µs
-            write_jitter_range: 1..2,              // Minimal jitter
-            clogging_probability_range: 0.0..0.01, // Almost no clogging
-            clogging_base_duration_range: 1..2,    // Minimal duration
-            clogging_jitter_duration_range: 1..2,  // Minimal duration
-            cutting_probability_range: 0.0..0.001, // Almost no cutting
+            bind_base_range: 1000..1001,              // Exactly 1ms (1000µs)
+            bind_jitter_range: 1..2,                  // Minimal jitter
+            accept_base_range: 2000..2001,            // Exactly 2ms (2000µs)
+            accept_jitter_range: 1..2,                // Minimal jitter
+            connect_base_range: 3000..3001,           // Exactly 3ms (3000µs)
+            connect_jitter_range: 1..2,               // Minimal jitter
+            read_base_range: 100..101,                // Exactly 100µs
+            read_jitter_range: 1..2,                  // Minimal jitter
+            write_base_range: 500..501,               // Exactly 500µs
+            write_jitter_range: 1..2,                 // Minimal jitter
+            clogging_probability_range: 0.0..0.01,    // Almost no clogging
+            clogging_base_duration_range: 1..2,       // Minimal duration
+            clogging_jitter_duration_range: 1..2,     // Minimal duration
+            cutting_probability_range: 0.0..0.001,    // Almost no cutting
             cutting_reconnect_base_range: 1000..1001, // Minimal reconnect delay
-            cutting_reconnect_jitter_range: 1..2,   // Minimal jitter
-            cutting_max_cuts_range: 1..2,           // Max 1 cut per connection
+            cutting_reconnect_jitter_range: 1..2,     // Minimal jitter
+            cutting_max_cuts_range: 1..2,             // Max 1 cut per connection
         };
 
         // Create network configuration using custom ranges
@@ -274,7 +274,7 @@ fn test_randomization_ranges_produce_variance() {
             cutting_probability_range: 0.0..0.001, // Minimal cutting for this test
             cutting_reconnect_base_range: 1000..2000, // 1-2ms reconnect delay
             cutting_reconnect_jitter_range: 100..200, // 100-200µs jitter
-            cutting_max_cuts_range: 1..3,            // 1-2 cuts per connection max
+            cutting_max_cuts_range: 1..3,          // 1-2 cuts per connection max
         };
 
         let mut execution_times = Vec::new();

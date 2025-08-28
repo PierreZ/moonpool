@@ -38,6 +38,8 @@ pub mod error;
 pub mod events;
 /// Network simulation and abstraction layer.
 pub mod network;
+/// Network state management for simulation.
+mod network_state;
 /// Thread-local random number generation for simulation.
 pub mod rng;
 /// Simulation runner and statistical analysis framework.

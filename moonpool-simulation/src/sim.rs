@@ -15,172 +15,22 @@ use crate::{
         NetworkConfiguration,
         sim::{ConnectionId, ListenerId, SimNetworkProvider},
     },
+    network_state::{ClogState, ConnectionState, CutState, ListenerState, NetworkState},
     rng::{reset_sim_rng, set_sim_seed, sim_random},
     sleep::SleepFuture,
 };
 use std::collections::VecDeque;
 
-/// Simple clog state - just tracks when it expires
-#[derive(Debug)]
-struct ClogState {
-    /// When the clog expires and writes can resume (in simulation time)
-    expires_at: Duration,
-}
-
-/// Connection cutting state - tracks cut connections for restoration
-#[derive(Debug, Clone)]
-struct CutState {
-    /// Original connection data (for restoration)
-    connection_data: ConnectionState,
-    /// When connection can be restored (in simulation time)
-    reconnect_at: Duration,
-    /// Cut count for this connection
-    cut_count: u32,
-}
-
-/// Internal connection state for simulation
-#[derive(Debug, Clone)]
-/// State for a simulated TCP connection.
-///
-/// Each `ConnectionState` represents one end of a bidirectional TCP connection pair.
-/// The simulation creates two `ConnectionState` instances for each TCP connection:
-/// one for the client side and one for the server side, linked together via
-/// `paired_connection`.
-///
-/// ## TCP Connection Model
-///
-/// The simulation models TCP connections using a simplified but semantically correct approach:
-///
-/// ```text
-/// Client Connection (ID: 0)              Server Connection (ID: 1)
-/// ┌─────────────────────────┐            ┌─────────────────────────┐
-/// │ send_buffer: [data...]  │   writes   │ receive_buffer: []      │
-/// │ receive_buffer: []      │ ────────►  │ send_buffer: [resp...]  │
-/// │ paired_connection: 1    │            │ paired_connection: 0    │
-/// └─────────────────────────┘            └─────────────────────────┘
-/// ```
-///
-/// ## Message Flow Architecture
-///
-/// 1. **Write Operation**: When application calls `stream.write_all(data)`:
-///    - Data goes to connection's `send_buffer` (FIFO queue)
-///    - `ProcessSendBuffer` event is scheduled if not already in progress
-///    - Ensures FIFO ordering within a connection
-///
-/// 2. **Send Processing**: `ProcessSendBuffer` event handler:
-///    - Dequeues one message from `send_buffer`
-///    - Applies network delay simulation
-///    - Schedules `DataDelivery` to paired connection
-///    - Continues processing remaining buffered messages
-///
-/// 3. **Data Delivery**: `DataDelivery` event handler:
-///    - Writes data to target connection's `receive_buffer`
-///    - Wakes up any pending read operations on that connection
-///    - Maintains TCP's reliable, ordered delivery semantics
-///
-/// 4. **Read Operation**: When application calls `stream.read(buf)`:
-///    - Reads available data from connection's `receive_buffer`
-///    - Returns `Poll::Pending` if no data available (registers waker)
-///    - Returns `Poll::Ready` with data when available
-///
-/// ## TCP Ordering Guarantees
-///
-/// This implementation ensures TCP's critical ordering properties:
-///
-/// - **FIFO within connection**: Messages sent on connection A arrive at paired
-///   connection B in the same order
-/// - **No reordering**: Unlike the original implementation, separate `write_all()`
-///   calls cannot overtake each other
-/// - **Reliable delivery**: All data written will eventually be delivered
-///   (no packet loss in basic implementation)
-///
-/// ## Example Usage in Tests
-///
-/// ```rust
-/// // Client sends multiple messages
-/// stream.write_all(b"PING-0").await?;  // Goes to send_buffer[0]
-/// stream.write_all(b"PING-1").await?;  // Goes to send_buffer[1]
-/// stream.write_all(b"PING-2").await?;  // Goes to send_buffer[2]
-///
-/// // Server will receive them in order: PING-0, PING-1, PING-2
-/// // This ordering is guaranteed by the send_buffer FIFO processing
-/// ```
-///
-/// ## Performance Characteristics
-///
-/// - **Memory**: O(n) where n is the total buffered data across all connections
-/// - **Latency**: Configurable per-message delays via `NetworkConfiguration`
-/// - **Throughput**: Limited by event processing rate, not by connection count
-/// - **Ordering overhead**: Minimal - uses efficient VecDeque for FIFO operations
-struct ConnectionState {
-    /// Unique identifier for this connection within the simulation.
-    ///
-    /// Connection IDs are assigned sequentially starting from 0. Each TCP connection
-    /// pair gets two IDs: one for client side, one for server side.
-    #[allow(dead_code)] // Will be used for routing and debugging in future phases
-    id: ConnectionId,
-
-    /// Network address this connection is associated with.
-    ///
-    /// For client connections, this is typically a generated address.
-    /// For server connections, this matches the bind address (e.g., "10.0.0.1:8080").
-    #[allow(dead_code)] // Will be used for routing and address resolution in future phases
-    addr: String,
-
-    /// FIFO buffer for incoming data that hasn't been read by the application yet.
-    ///
-    /// Data flows: `paired_connection.send_buffer` → network delay → `this.receive_buffer`
-    ///
-    /// The application's `stream.read()` calls consume data from this buffer.
-    /// When empty, read operations return `Poll::Pending` until data arrives.
-    receive_buffer: VecDeque<u8>,
-
-    /// Reference to the other end of this bidirectional TCP connection.
-    ///
-    /// For a client-server connection pair:
-    /// - Client connection's `paired_connection` points to server connection ID
-    /// - Server connection's `paired_connection` points to client connection ID
-    ///
-    /// Data written to this connection will be delivered to the paired connection's
-    /// `receive_buffer` after network delay simulation.
-    paired_connection: Option<ConnectionId>,
-
-    /// FIFO buffer for outgoing data waiting to be sent over the network.
-    ///
-    /// This buffer is crucial for maintaining TCP ordering semantics:
-    /// - Each `write_all()` call appends data as a separate message
-    /// - Messages are processed sequentially by `ProcessSendBuffer` events
-    /// - Prevents newer writes from overtaking older ones due to random delays
-    ///
-    /// Example: If client calls write_all("A"), write_all("B"), write_all("C"),
-    /// the send_buffer contains ["A", "B", "C"] and they're processed in order.
-    send_buffer: VecDeque<Vec<u8>>,
-
-    /// Flag indicating whether a `ProcessSendBuffer` event is currently scheduled.
-    ///
-    /// This prevents multiple concurrent send operations on the same connection:
-    /// - Set to `true` when first message enters empty send_buffer
-    /// - Remains `true` while messages are being processed
-    /// - Set to `false` when send_buffer becomes empty
-    ///
-    /// Ensures sequential processing without event conflicts.
-    send_in_progress: bool,
-    /// Next available time for sending messages from this connection.
-    ///
-    /// This ensures TCP ordering by preventing later messages from being
-    /// scheduled before earlier messages due to random delay variations.
-    next_send_time: Duration,
-}
-
-/// Internal listener state for simulation
-#[derive(Debug)]
-struct ListenerState {
-    #[allow(dead_code)] // Will be used for listener management in future phases
-    id: ListenerId,
-    #[allow(dead_code)] // Will be used for address binding in future phases
-    addr: String,
-    #[allow(dead_code)] // Will be used for connection queuing in future phases
-    pending_connections: VecDeque<ConnectionId>,
+/// Waker management for async coordination.
+#[derive(Debug, Default)]
+struct WakerRegistry {
+    #[allow(dead_code)] // Will be used for connection coordination in future phases
+    connection_wakers: HashMap<ConnectionId, Waker>,
+    listener_wakers: HashMap<ListenerId, Waker>,
+    read_wakers: HashMap<ConnectionId, Waker>,
+    task_wakers: HashMap<u64, Waker>,
+    clog_wakers: HashMap<ConnectionId, Vec<Waker>>,
+    cut_wakers: HashMap<ConnectionId, Vec<Waker>>,
 }
 
 #[derive(Debug)]
@@ -189,90 +39,45 @@ struct SimInner {
     event_queue: EventQueue,
     next_sequence: u64,
 
-    // Phase 2b network simulation state
-    next_connection_id: u64,
-    next_listener_id: u64,
+    // Network management
+    network: NetworkState,
 
-    // Phase 2c network configuration
-    network_config: NetworkConfiguration,
+    // Async coordination
+    wakers: WakerRegistry,
 
-    // Network state registries
-    connections: HashMap<ConnectionId, ConnectionState>,
-    listeners: HashMap<ListenerId, ListenerState>,
-
-    // Waker storage for async coordination (simplified for Phase 2b)
-    #[allow(dead_code)] // Will be used for proper async coordination in future phases
-    connection_wakers: HashMap<ConnectionId, Waker>,
-    #[allow(dead_code)] // Will be used for proper async coordination in future phases
-    listener_wakers: HashMap<ListenerId, Waker>,
-    #[allow(dead_code)] // Will be used for proper async coordination in future phases
-    read_wakers: HashMap<ConnectionId, Waker>,
-
-    // Phase 2d: Task management for sleep functionality
+    // Task management for sleep functionality
     next_task_id: u64,
     awakened_tasks: HashSet<u64>,
-    task_wakers: HashMap<u64, Waker>,
 
-    // Phase 2e: Pending connection pairs for bidirectional communication
-    pending_connections: HashMap<String, ConnectionId>,
-
-    // Phase 7: Simple write clogging state
-    connection_clogs: HashMap<ConnectionId, ClogState>,
-    clog_wakers: HashMap<ConnectionId, Vec<Waker>>,
-
-    // Phase 7b: Connection cutting state
-    cut_connections: HashMap<ConnectionId, CutState>,
-    cut_wakers: HashMap<ConnectionId, Vec<Waker>>,
-
-    // Phase 3c: Event processing metrics
+    // Event processing metrics
     events_processed: u64,
 }
 
 impl SimInner {
     fn new() -> Self {
         Self {
-            current_time: Duration::ZERO, // Starts at Duration::ZERO (0 unix time)
+            current_time: Duration::ZERO,
             event_queue: EventQueue::new(),
             next_sequence: 0,
-
-            next_connection_id: 0,
-            next_listener_id: 0,
-
-            // Default network configuration
-            network_config: NetworkConfiguration::default(),
-
-            connections: HashMap::new(),
-            listeners: HashMap::new(),
-
-            connection_wakers: HashMap::new(),
-            listener_wakers: HashMap::new(),
-            read_wakers: HashMap::new(),
-
-            // Phase 2d: Initialize task management
+            network: NetworkState::new(NetworkConfiguration::default()),
+            wakers: WakerRegistry::default(),
             next_task_id: 0,
             awakened_tasks: HashSet::new(),
-            task_wakers: HashMap::new(),
-
-            // Phase 2e: Initialize pending connections
-            pending_connections: HashMap::new(),
-
-            // Phase 7: Initialize clogging state
-            connection_clogs: HashMap::new(),
-            clog_wakers: HashMap::new(),
-
-            // Phase 7b: Initialize cutting state
-            cut_connections: HashMap::new(),
-            cut_wakers: HashMap::new(),
-
-            // Phase 3c: Initialize event metrics
             events_processed: 0,
         }
     }
 
     fn new_with_config(network_config: NetworkConfiguration) -> Self {
-        let mut inner = Self::new();
-        inner.network_config = network_config;
-        inner
+        Self {
+            current_time: Duration::ZERO,
+            event_queue: EventQueue::new(),
+            next_sequence: 0,
+            network: NetworkState::new(network_config),
+            wakers: WakerRegistry::default(),
+            next_task_id: 0,
+            awakened_tasks: HashSet::new(),
+            events_processed: 0,
+        }
     }
 }
 
@@ -492,16 +297,16 @@ impl SimWorld {
         F: FnOnce(&NetworkConfiguration) -> R,
     {
         let inner = self.inner.borrow();
-        f(&inner.network_config)
+        f(&inner.network.config)
     }
 
     /// Create a listener in the simulation (used by SimNetworkProvider)
     pub(crate) fn create_listener(&self, addr: String) -> SimulationResult<ListenerId> {
         let mut inner = self.inner.borrow_mut();
-        let listener_id = ListenerId(inner.next_listener_id);
-        inner.next_listener_id += 1;
+        let listener_id = ListenerId(inner.network.next_listener_id);
+        inner.network.next_listener_id += 1;
 
-        inner.listeners.insert(
+        inner.network.listeners.insert(
             listener_id,
             ListenerState {
                 id: listener_id,
@@ -521,7 +326,7 @@ impl SimWorld {
     ) -> SimulationResult<usize> {
         let mut inner = self.inner.borrow_mut();
 
-        if let Some(connection) = inner.connections.get_mut(&connection_id) {
+        if let Some(connection) = inner.network.connections.get_mut(&connection_id) {
             let mut bytes_read = 0;
             while bytes_read < buf.len() && !connection.receive_buffer.is_empty() {
                 if let Some(byte) = connection.receive_buffer.pop_front() {
@@ -545,7 +350,7 @@ impl SimWorld {
     ) -> SimulationResult<()> {
         let mut inner = self.inner.borrow_mut();
 
-        if let Some(connection) = inner.connections.get_mut(&connection_id) {
+        if let Some(connection) = inner.network.connections.get_mut(&connection_id) {
             for &byte in data {
                 connection.receive_buffer.push_back(byte);
             }
@@ -626,7 +431,7 @@ impl SimWorld {
     ) -> SimulationResult<()> {
         let mut inner = self.inner.borrow_mut();
 
-        if let Some(conn) = inner.connections.get_mut(&connection_id) {
+        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
             // Always add data to send buffer for TCP ordering
             conn.send_buffer.push_back(data);
 
@@ -741,17 +546,17 @@ impl SimWorld {
     ) -> SimulationResult<(ConnectionId, ConnectionId)> {
         let mut inner = self.inner.borrow_mut();
 
-        let client_id = ConnectionId(inner.next_connection_id);
-        inner.next_connection_id += 1;
+        let client_id = ConnectionId(inner.network.next_connection_id);
+        inner.network.next_connection_id += 1;
 
-        let server_id = ConnectionId(inner.next_connection_id);
-        inner.next_connection_id += 1;
+        let server_id = ConnectionId(inner.network.next_connection_id);
+        inner.network.next_connection_id += 1;
 
         // Capture current time to avoid borrow conflicts
         let current_time = inner.current_time;
 
         // Create paired connections
-        inner.connections.insert(
+        inner.network.connections.insert(
             client_id,
             ConnectionState {
                 id: client_id,
@@ -764,7 +569,7 @@ impl SimWorld {
             },
         );
 
-        inner.connections.insert(
+        inner.network.connections.insert(
             server_id,
             ConnectionState {
                 id: server_id,
@@ -787,7 +592,7 @@ impl SimWorld {
         waker: Waker,
     ) -> SimulationResult<()> {
         let mut inner = self.inner.borrow_mut();
-        inner.read_wakers.insert(connection_id, waker);
+        inner.wakers.read_wakers.insert(connection_id, waker);
         Ok(())
     }
 
@@ -801,7 +606,7 @@ impl SimWorld {
         addr.hash(&mut hasher);
         let listener_key = ListenerId(hasher.finish());
 
-        inner.listener_wakers.insert(listener_key, waker);
+        inner.wakers.listener_wakers.insert(listener_key, waker);
         Ok(())
     }
 
@@ -813,6 +618,7 @@ impl SimWorld {
     ) -> SimulationResult<()> {
         let mut inner = self.inner.borrow_mut();
         inner
+            .network
             .pending_connections
             .insert(addr.to_string(), connection_id);
 
@@ -823,7 +629,7 @@ impl SimWorld {
         addr.hash(&mut hasher);
         let listener_key = ListenerId(hasher.finish());
 
-        if let Some(waker) = inner.listener_wakers.remove(&listener_key) {
+        if let Some(waker) = inner.wakers.listener_wakers.remove(&listener_key) {
             waker.wake();
         }
 
@@ -836,7 +642,7 @@ impl SimWorld {
         addr: &str,
     ) -> SimulationResult<Option<ConnectionId>> {
         let mut inner = self.inner.borrow_mut();
-        Ok(inner.pending_connections.remove(addr))
+        Ok(inner.network.pending_connections.remove(addr))
     }
 
     /// Sleep for the specified duration in simulation time.
@@ -883,6 +689,15 @@ impl SimWorld {
         task_id
     }
 
+    /// Wake all tasks associated with a connection
+    fn wake_all(wakers: &mut HashMap<ConnectionId, Vec<Waker>>, connection_id: ConnectionId) {
+        if let Some(waker_list) = wakers.remove(&connection_id) {
+            for waker in waker_list {
+                waker.wake();
+            }
+        }
+    }
+
     /// Check if a task has been awakened.
     ///
     /// This is used internally by SleepFuture to determine if its corresponding
@@ -898,7 +713,7 @@ impl SimWorld {
     /// be called when the task's Wake event is processed.
     pub(crate) fn register_task_waker(&self, task_id: u64, waker: Waker) -> SimulationResult<()> {
         let mut inner = self.inner.borrow_mut();
-        inner.task_wakers.insert(task_id, waker);
+        inner.wakers.task_wakers.insert(task_id, waker);
         Ok(())
     }
 
@@ -970,26 +785,16 @@ impl SimWorld {
     /// Clear expired clogs and wake pending tasks (helper for use with SimInner)
     fn clear_expired_clogs_with_inner(inner: &mut SimInner) {
         let now = inner.current_time;
-
-        let expired_connections: Vec<ConnectionId> = inner
+        let expired: Vec<ConnectionId> = inner
+            .network
             .connection_clogs
             .iter()
-            .filter_map(|(id, state)| {
-                if now >= state.expires_at {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
+            .filter_map(|(id, state)| (now >= state.expires_at).then_some(*id))
             .collect();
 
-        for connection_id in expired_connections {
-            inner.connection_clogs.remove(&connection_id);
-            if let Some(wakers) = inner.clog_wakers.remove(&connection_id) {
-                for waker in wakers {
-                    waker.wake();
-                }
-            }
+        for id in expired {
+            inner.network.connection_clogs.remove(&id);
+            Self::wake_all(&mut inner.wakers.clog_wakers, id);
         }
     }
 
@@ -1007,7 +812,7 @@ impl SimWorld {
                 inner.awakened_tasks.insert(task_id);
 
                 // Wake the future that was sleeping
-                if let Some(waker) = inner.task_wakers.remove(&task_id) {
+                if let Some(waker) = inner.wakers.task_wakers.remove(&task_id) {
                     waker.wake();
                 }
             }
@@ -1062,13 +867,13 @@ impl SimWorld {
                 let connection_id = ConnectionId(connection_id);
 
                 // Write data directly to the specified connection's receive buffer
-                if let Some(conn) = inner.connections.get_mut(&connection_id) {
+                if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
                     for &byte in &data {
                         conn.receive_buffer.push_back(byte);
                     }
 
                     // Wake any futures waiting to read from this connection
-                    if let Some(waker) = inner.read_wakers.remove(&connection_id) {
+                    if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
                         tracing::info!(
                             "DataDelivery waking up read waker for connection_id={}",
                             connection_id.0
@@ -1115,7 +920,7 @@ impl SimWorld {
             Event::ProcessSendBuffer { connection_id } => {
                 let connection_id = ConnectionId(connection_id);
 
-                if let Some(conn) = inner.connections.get_mut(&connection_id) {
+                if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
                     if let Some(data) = conn.send_buffer.pop_front() {
                         // For TCP ordering, we need to maintain connection-level delays
                         // Check if there are more messages AFTER popping the current one
@@ -1125,7 +930,7 @@ impl SimWorld {
                             std::time::Duration::from_nanos(1)
                         } else {
                             // This is the last message in buffer, apply network delay
-                            inner.network_config.latency.write_latency.sample()
+                            inner.network.config.latency.write_latency.sample()
                         };
 
                         // Ensure TCP ordering: schedule at next available time for this connection
@@ -1190,8 +995,8 @@ impl SimWorld {
                 // Phase 7: Clear clog for the specified connection and wake any waiting tasks
                 let connection_id = ConnectionId(connection_id);
 
-                inner.connection_clogs.remove(&connection_id);
-                if let Some(wakers) = inner.clog_wakers.remove(&connection_id) {
+                inner.network.connection_clogs.remove(&connection_id);
+                if let Some(wakers) = inner.wakers.clog_wakers.remove(&connection_id) {
                     for waker in wakers {
                         waker.wake();
                     }
@@ -1284,10 +1089,10 @@ impl SimWorld {
     /// Check if a write should be clogged based on probability
     pub fn should_clog_write(&self, connection_id: ConnectionId) -> bool {
         let inner = self.inner.borrow();
-        let config = &inner.network_config.clogging;
+        let config = &inner.network.config.clogging;
 
         // Skip if already clogged
-        if let Some(clog_state) = inner.connection_clogs.get(&connection_id) {
+        if let Some(clog_state) = inner.network.connection_clogs.get(&connection_id) {
             return inner.current_time < clog_state.expires_at;
         }
 
@@ -1298,11 +1103,12 @@ impl SimWorld {
     /// Clog a connection's write operations
     pub fn clog_write(&self, connection_id: ConnectionId) {
         let mut inner = self.inner.borrow_mut();
-        let config = &inner.network_config.clogging;
+        let config = &inner.network.config.clogging;
 
         let clog_duration = config.duration.sample();
         let expires_at = inner.current_time + clog_duration;
         inner
+            .network
             .connection_clogs
             .insert(connection_id, ClogState { expires_at });
 
@@ -1321,7 +1127,7 @@ impl SimWorld {
     pub fn is_write_clogged(&self, connection_id: ConnectionId) -> bool {
         let inner = self.inner.borrow();
 
-        if let Some(clog_state) = inner.connection_clogs.get(&connection_id) {
+        if let Some(clog_state) = inner.network.connection_clogs.get(&connection_id) {
             inner.current_time < clog_state.expires_at
         } else {
             false
@@ -1332,6 +1138,7 @@ impl SimWorld {
     pub fn register_clog_waker(&self, connection_id: ConnectionId, waker: Waker) {
         let mut inner = self.inner.borrow_mut();
         inner
+            .wakers
             .clog_wakers
             .entry(connection_id)
             .or_default()
@@ -1342,26 +1149,16 @@ impl SimWorld {
     pub fn clear_expired_clogs(&self) {
         let mut inner = self.inner.borrow_mut();
         let now = inner.current_time;
-
-        let expired_connections: Vec<ConnectionId> = inner
+        let expired: Vec<ConnectionId> = inner
+            .network
             .connection_clogs
             .iter()
-            .filter_map(|(id, state)| {
-                if now >= state.expires_at {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
+            .filter_map(|(id, state)| (now >= state.expires_at).then_some(*id))
             .collect();
 
-        for connection_id in expired_connections {
-            inner.connection_clogs.remove(&connection_id);
-            if let Some(wakers) = inner.clog_wakers.remove(&connection_id) {
-                for waker in wakers {
-                    waker.wake();
-                }
-            }
+        for id in expired {
+            inner.network.connection_clogs.remove(&id);
+            Self::wake_all(&mut inner.wakers.clog_wakers, id);
         }
     }
 
@@ -1370,10 +1167,10 @@ impl SimWorld {
     /// Check if a connection should be cut based on probability and limits
     pub fn should_cut_connection(&self, connection_id: ConnectionId) -> bool {
         let inner = self.inner.borrow();
-        let config = &inner.network_config.cutting;
+        let config = &inner.network.config.cutting;
 
         // Skip if already cut
-        if inner.cut_connections.contains_key(&connection_id) {
+        if inner.network.cut_connections.contains_key(&connection_id) {
             return false;
         }
 
@@ -1381,6 +1178,7 @@ impl SimWorld {
         if let Some(max_cuts) = config.max_cuts_per_connection {
             // Count previous cuts for this connection
             let previous_cuts = inner
+                .network
                 .cut_connections
                 .values()
                 .filter(|cut_state| cut_state.connection_data.id == connection_id)
@@ -1397,14 +1195,15 @@ impl SimWorld {
     /// Cut a connection and store it for later restoration
     pub fn cut_connection(&self, connection_id: ConnectionId) {
         let mut inner = self.inner.borrow_mut();
-        let reconnect_delay = inner.network_config.cutting.reconnect_delay.clone();
+        let reconnect_delay = inner.network.config.cutting.reconnect_delay.clone();
 
-        if let Some(connection_state) = inner.connections.remove(&connection_id) {
+        if let Some(connection_state) = inner.network.connections.remove(&connection_id) {
             let reconnect_delay_sample = reconnect_delay.sample();
             let reconnect_at = inner.current_time + reconnect_delay_sample;
 
             // Count existing cuts for this connection
             let cut_count = inner
+                .network
                 .cut_connections
                 .values()
                 .filter(|cut_state| cut_state.connection_data.id == connection_id)
@@ -1416,20 +1215,24 @@ impl SimWorld {
                 cut_count: cut_count + 1,
             };
 
-            inner.cut_connections.insert(connection_id, cut_state);
+            inner
+                .network
+                .cut_connections
+                .insert(connection_id, cut_state);
         }
     }
 
     /// Check if a connection is currently cut
     pub fn is_connection_cut(&self, connection_id: ConnectionId) -> bool {
         let inner = self.inner.borrow();
-        inner.cut_connections.contains_key(&connection_id)
+        inner.network.cut_connections.contains_key(&connection_id)
     }
 
     /// Register a waker for when connection is restored
     pub fn register_cut_waker(&self, connection_id: ConnectionId, waker: Waker) {
         let mut inner = self.inner.borrow_mut();
         inner
+            .wakers
             .cut_wakers
             .entry(connection_id)
             .or_default()
@@ -1439,42 +1242,14 @@ impl SimWorld {
     /// Restore connections that are ready to be reconnected
     pub fn restore_cut_connections(&self) {
         let mut inner = self.inner.borrow_mut();
-        let now = inner.current_time;
-
-        let ready_connections: Vec<ConnectionId> = inner
-            .cut_connections
-            .iter()
-            .filter_map(|(id, state)| {
-                if now >= state.reconnect_at {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        for connection_id in ready_connections {
-            if let Some(cut_state) = inner.cut_connections.remove(&connection_id) {
-                // Restore the connection
-                inner
-                    .connections
-                    .insert(connection_id, cut_state.connection_data);
-
-                // Wake any waiting tasks
-                if let Some(wakers) = inner.cut_wakers.remove(&connection_id) {
-                    for waker in wakers {
-                        waker.wake();
-                    }
-                }
-            }
-        }
+        Self::restore_cut_connections_with_inner(&mut inner);
     }
 
     /// Randomly cut connections based on configuration probability
     pub fn randomly_cut_connections(&self) {
         let connection_ids: Vec<ConnectionId> = {
             let inner = self.inner.borrow();
-            inner.connections.keys().copied().collect()
+            inner.network.connections.keys().copied().collect()
         };
 
         for connection_id in connection_ids {
@@ -1487,56 +1262,45 @@ impl SimWorld {
     /// Helper method for use with SimInner - restore cut connections
     fn restore_cut_connections_with_inner(inner: &mut SimInner) {
         let now = inner.current_time;
-
         let ready_connections: Vec<ConnectionId> = inner
+            .network
             .cut_connections
             .iter()
-            .filter_map(|(id, state)| {
-                if now >= state.reconnect_at {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
+            .filter_map(|(id, state)| (now >= state.reconnect_at).then_some(*id))
             .collect();
 
         for connection_id in ready_connections {
-            if let Some(cut_state) = inner.cut_connections.remove(&connection_id) {
-                // Restore the connection
+            if let Some(cut_state) = inner.network.cut_connections.remove(&connection_id) {
                 inner
+                    .network
                     .connections
                     .insert(connection_id, cut_state.connection_data);
-
-                // Wake any waiting tasks
-                if let Some(wakers) = inner.cut_wakers.remove(&connection_id) {
-                    for waker in wakers {
-                        waker.wake();
-                    }
-                }
+                Self::wake_all(&mut inner.wakers.cut_wakers, connection_id);
             }
         }
     }
 
     /// Helper method for use with SimInner - randomly cut connections
     fn randomly_cut_connections_with_inner(inner: &mut SimInner) {
-        let cutting_config = inner.network_config.cutting.clone();
+        let cutting_config = inner.network.config.cutting.clone();
 
         // Skip if cutting is disabled
         if cutting_config.probability == 0.0 {
             return;
         }
 
-        let connection_ids: Vec<ConnectionId> = inner.connections.keys().copied().collect();
+        let connection_ids: Vec<ConnectionId> = inner.network.connections.keys().copied().collect();
 
         for connection_id in connection_ids {
             // Skip if already cut
-            if inner.cut_connections.contains_key(&connection_id) {
+            if inner.network.cut_connections.contains_key(&connection_id) {
                 continue;
             }
 
             // Check max cuts limit
             if let Some(max_cuts) = cutting_config.max_cuts_per_connection {
                 let previous_cuts = inner
+                    .network
                     .cut_connections
                     .values()
                     .filter(|cut_state| cut_state.connection_data.id == connection_id)
@@ -1548,23 +1312,28 @@ impl SimWorld {
 
             // Probability check
             if sim_random::<f64>() < cutting_config.probability
-                && let Some(connection_state) = inner.connections.remove(&connection_id) {
-                    let reconnect_delay = cutting_config.reconnect_delay.sample();
-                    let reconnect_at = inner.current_time + reconnect_delay;
+                && let Some(connection_state) = inner.network.connections.remove(&connection_id)
+            {
+                let reconnect_delay = cutting_config.reconnect_delay.sample();
+                let reconnect_at = inner.current_time + reconnect_delay;
 
-                    let cut_count = inner
-                        .cut_connections
-                        .values()
-                        .filter(|cut_state| cut_state.connection_data.id == connection_id)
-                        .count() as u32;
+                let cut_count = inner
+                    .network
+                    .cut_connections
+                    .values()
+                    .filter(|cut_state| cut_state.connection_data.id == connection_id)
+                    .count() as u32;
 
-                    let cut_state = CutState {
-                        connection_data: connection_state,
-                        reconnect_at,
-                        cut_count: cut_count + 1,
-                    };
+                let cut_state = CutState {
+                    connection_data: connection_state,
+                    reconnect_at,
+                    cut_count: cut_count + 1,
+                };
 
-                    inner.cut_connections.insert(connection_id, cut_state);
+                inner
+                    .network
+                    .cut_connections
+                    .insert(connection_id, cut_state);
             }
         }
     }
