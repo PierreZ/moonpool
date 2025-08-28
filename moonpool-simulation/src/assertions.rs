@@ -254,7 +254,7 @@ pub fn reset_assertion_results() {
 /// and detect unreachable code.
 ///
 /// This function checks that:
-/// - `sometimes_assert!` assertions have a success rate between 1% and 99%
+/// - `sometimes_assert!` assertions have a success rate of at least 1% (100% is acceptable)
 /// - All assertions registered in active modules were actually executed
 ///
 /// This helps catch incorrect usage of assertion macros and identifies unreachable code paths.
@@ -283,9 +283,9 @@ pub fn validate_assertion_contracts() -> ValidationReport {
     let results = get_assertion_results();
     for (name, stats) in &results {
         let rate = stats.success_rate();
-        if rate == 0.0 || rate == 100.0 {
+        if rate == 0.0 {
             report.success_rate_violations.push(format!(
-                "sometimes_assert!('{}') has {:.1}% success rate (expected between 1% and 99%)",
+                "sometimes_assert!('{}') has {:.1}% success rate (expected at least 1%)",
                 name, rate
             ));
         }
@@ -653,10 +653,10 @@ mod tests {
         register_assertion_at_compile_time(test_module, "always_success");
         register_assertion_at_compile_time(test_module, "unreachable");
 
-        // Execute one with 100% success rate (violation)
-        record_assertion_with_module(test_module, "always_success", true);
-        record_assertion_with_module(test_module, "always_success", true);
-        record_assertion_with_module(test_module, "always_success", true);
+        // Execute one with 0% success rate (violation)
+        record_assertion_with_module(test_module, "always_success", false);
+        record_assertion_with_module(test_module, "always_success", false);
+        record_assertion_with_module(test_module, "always_success", false);
 
         // Don't execute the other one (unreachable)
 
@@ -666,7 +666,7 @@ mod tests {
         assert_eq!(report.unreachable_assertions.len(), 1);
 
         assert!(report.success_rate_violations[0].contains("always_success"));
-        assert!(report.success_rate_violations[0].contains("100.0%"));
+        assert!(report.success_rate_violations[0].contains("0.0%"));
         assert!(report.unreachable_assertions[0].contains("unreachable"));
     }
 

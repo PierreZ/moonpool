@@ -445,10 +445,10 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
                 }
                 Err(e) => {
                     tracing::info!(
-                        "Peer::process_send_queue failed to send queued message: {:?}, re-queuing",
+                        "Peer::process_send_queue failed to send queued message: {:?}, re-queuing and attempting reconnect",
                         e
                     );
-                    // Connection failed - put message back at front and return error
+                    // Connection failed - put message back at front
                     sometimes_assert!(
                         peer_requeues_on_failure,
                         true,
@@ -457,7 +457,23 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
 
                     self.send_queue.push_front(data);
                     self.metrics.record_message_queued(); // Re-queue metrics
-                    return Err(e);
+
+                    // Try to reconnect and continue processing
+                    match self.ensure_connection().await {
+                        Ok(_) => {
+                            tracing::info!(
+                                "Peer::process_send_queue reconnected successfully, continuing"
+                            );
+                            // Continue the loop to retry the re-queued message
+                        }
+                        Err(reconnect_err) => {
+                            tracing::info!(
+                                "Peer::process_send_queue failed to reconnect: {:?}, stopping queue processing",
+                                reconnect_err
+                            );
+                            return Err(reconnect_err);
+                        }
+                    }
                 }
             }
         }
