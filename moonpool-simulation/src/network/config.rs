@@ -37,7 +37,7 @@ pub struct NetworkRandomizationRanges {
     pub cutting_reconnect_base_range: Range<u64>,
     /// Range for cutting reconnect jitter delay (microseconds)
     pub cutting_reconnect_jitter_range: Range<u64>,
-    /// Range for maximum cuts per connection (1-5, will be converted to Option<u32>)
+    /// Range for maximum cuts per connection (1-5, will be converted to `Option<u32>`)
     pub cutting_max_cuts_range: Range<u32>,
 }
 

@@ -16,16 +16,20 @@ Moonpool provides a comprehensive framework for developing and testing distribut
 
 - **Deterministic Simulation** - Reproducible testing with controlled time and event ordering
 - **Network Abstraction** - Seamlessly swap between simulated and real networking
-- **Fault Injection** - Test resilience with configurable delays and packet loss
+- **Buggify Chaos Testing** - FoundationDB-style deterministic fault injection
+- **Actor-Based Architecture** - Event-driven peer networking with backoff and reliability
 - **Statistical Testing** - Run multiple iterations with comprehensive reporting
 - **Single-Core Design** - Simplified async without thread-safety complexity
 
 ## Current Status
 
-The core simulation framework (Phases 1-3) is complete and functional:
-- ✅ **Phase 1:** Event queue, time engine, and simulation harness
-- ✅ **Phase 2:** Network abstraction with simulated and real implementations
-- ✅ **Phase 3:** Statistical testing and comprehensive reporting
+### Implementation Status
+- ✅ **Provider Traits** - Complete abstraction layer (Network, Time, Task)
+- ✅ **Buggify System** - Deterministic fault injection framework
+- ✅ **Sometimes Assert** - Statistical assertion coverage for chaos testing
+- ✅ **TCP with Buggify** - Connection management with chaos testing
+- ✅ **Actor-based Peer** - Event-driven networking with reliability
+- ✅ **Ping Pong Actor** - DST-enabled test actor for active bug discovery
 
 ## Getting Started
 
@@ -33,11 +37,13 @@ The core simulation framework (Phases 1-3) is complete and functional:
 # Enter development environment
 nix develop
 
-# Run tests
-cargo nextest run
+# Run all validation checks
+nix develop --command cargo fmt
+nix develop --command cargo clippy
+nix develop --command cargo nextest run
 
 # Build the project
-cargo build
+nix develop --command cargo build
 ```
 
 ## Project Structure
