@@ -14,22 +14,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: cargo clippy -- --deny warnings
+      - uses: cachix/install-nix-action@v26
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run cargo clippy
+        run: nix develop --command cargo clippy -- --deny warnings
+        
   fmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v26
         with:
-          components: rustfmt
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Run cargo fmt
-        run: |
-          cargo fmt --all -- --check
+        run: nix develop --command cargo fmt --all -- --check
+        
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Run cargo test
-        run: |
-          cargo test
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v26
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run cargo nextest
+        run: nix develop --command cargo nextest run
