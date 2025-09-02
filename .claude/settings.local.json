@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(direnv reload:*)",
+      "Bash(cargo test)",
+      "Bash(cargo check:*)",
+      "Bash(nix develop:*)",
+      "Bash(mkdir:*)",
+      "WebFetch(domain:pierrezemb.fr)",
+      "Bash(timeout 5s nix develop:*)",
+      "Bash(timeout 10s nix develop:*)",
+      "Bash(timeout 15s nix develop:*)"
+    ],
+    "deny": [],
+    "ask": [],
+    "defaultMode": "acceptEdits"
+  }
+}
