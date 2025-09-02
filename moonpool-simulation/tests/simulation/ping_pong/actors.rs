@@ -19,7 +19,9 @@ pub struct PingPongServerActor<N: NetworkProvider, T: TimeProvider, TP: TaskProv
     topology: WorkloadTopology,
 }
 
-impl<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> PingPongServerActor<N, T, TP> {
+impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider>
+    PingPongServerActor<N, T, TP>
+{
     pub fn new(network: N, time: T, task_provider: TP, topology: WorkloadTopology) -> Self {
         Self {
             network,
@@ -296,7 +298,9 @@ pub struct PingPongClientActor<N: NetworkProvider, T: TimeProvider, TP: TaskProv
     topology: WorkloadTopology,
 }
 
-impl<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> PingPongClientActor<N, T, TP> {
+impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider>
+    PingPongClientActor<N, T, TP>
+{
     pub fn new(network: N, time: T, task_provider: TP, topology: WorkloadTopology) -> Self {
         Self {
             network,
@@ -511,7 +515,7 @@ impl<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> PingPongClientActor<
         let retry_delay = Duration::from_millis(100);
 
         loop {
-            match peer.send(padded_data.to_vec()).await {
+            match peer.send(padded_data.to_vec()) {
                 Ok(_) => {
                     let send_duration = self.time.now() - send_start;
                     tracing::info!(
@@ -581,16 +585,14 @@ impl<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> PingPongClientActor<
         while responses_received < expected_count {
             // Add randomized timeout to prevent deadlocks
             let timeout = Duration::from_secs(sim_random_range(3..8));
-            let mut response_buffer = [0u8; 128];
 
             // Use TimeProvider timeout for deterministic behavior
-            let receive_future = peer.receive(&mut response_buffer);
+            let receive_future = peer.receive();
             match self.time.timeout(timeout, receive_future).await? {
                 Ok(result) => {
                     match result {
-                        Ok(bytes_read) => {
-                            let new_data = std::str::from_utf8(&response_buffer[..bytes_read])
-                                .unwrap_or("INVALID");
+                        Ok(data) => {
+                            let new_data = std::str::from_utf8(&data).unwrap_or("INVALID");
                             pending_data.push_str(new_data);
 
                             // Process all complete lines (messages ending with \n)
@@ -660,7 +662,7 @@ impl<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> PingPongClientActor<
         let mut close_data = [0u8; 128];
         close_data[..6].copy_from_slice(b"CLOSE\n");
 
-        match peer.send(close_data.to_vec()).await {
+        match peer.send(close_data.to_vec()) {
             Ok(_) => {
                 tracing::debug!("Client: Successfully sent CLOSE message");
                 always_assert!(
@@ -683,14 +685,12 @@ impl<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> PingPongClientActor<
         // Read server's acknowledgment with timeout for chaos resilience
         tracing::debug!("Client: Reading server's CLOSE acknowledgment");
         let timeout = Duration::from_secs(sim_random_range(2..5)); // Shorter timeout for CLOSE
-        let mut ack_buffer = [0u8; 5];
 
-        let receive_future = peer.receive(&mut ack_buffer);
+        let receive_future = peer.receive();
         match self.time.timeout(timeout, receive_future).await? {
             Ok(result) => match result {
-                Ok(bytes_read) => {
-                    let ack_message =
-                        std::str::from_utf8(&ack_buffer[..bytes_read]).unwrap_or("INVALID");
+                Ok(data) => {
+                    let ack_message = std::str::from_utf8(&data).unwrap_or("INVALID");
                     tracing::debug!("Client: Received acknowledgment: {:?}", ack_message);
 
                     always_assert!(
@@ -700,10 +700,10 @@ impl<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> PingPongClientActor<
                     );
                     always_assert!(
                         bye_message_exact,
-                        &ack_buffer[..bytes_read] == b"BYE!!",
+                        &data == b"BYE!!",
                         format!(
                             "BYE message should be exact: expected 'BYE!!', got '{}'",
-                            String::from_utf8_lossy(&ack_buffer[..bytes_read])
+                            String::from_utf8_lossy(&data)
                         )
                     );
                 }

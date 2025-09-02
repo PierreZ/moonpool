@@ -584,7 +584,26 @@ impl SimulationBuilder {
                                     format!("Deadlock detected on iteration {} with seed {}: tasks stuck with no events", iteration_count, seed),
                                 )));
                             }
-                            break;
+                            // Exit early on deadlock to avoid continuing with faulty simulation state
+                            faulty_seeds.push(seed);
+                            failed_runs += 1;
+
+                            // Create early exit report
+                            let assertion_results = get_assertion_results();
+                            let assertion_validation = validate_assertion_contracts();
+                            buggify_reset();
+
+                            return SimulationReport {
+                                iterations: iteration_count,
+                                successful_runs,
+                                failed_runs,
+                                metrics: aggregated_metrics,
+                                individual_metrics,
+                                seeds_used: seeds_to_use[..iteration_count].to_vec(),
+                                seeds_failing: faulty_seeds,
+                                assertion_results,
+                                assertion_validation,
+                            };
                         }
                     } else {
                         no_progress_count = 0;

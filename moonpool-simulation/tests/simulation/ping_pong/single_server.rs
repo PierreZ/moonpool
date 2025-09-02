@@ -11,7 +11,6 @@ use super::actors::{PingPongClientActor, PingPongServerActor};
 
 #[test]
 fn test_ping_pong_with_simulation_builder() {
-    let iteration_count = 1000; // Test with smaller count first
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
         .with_max_level(Level::ERROR)
@@ -26,7 +25,7 @@ fn test_ping_pong_with_simulation_builder() {
             .set_randomization_ranges(NetworkRandomizationRanges::chaos_testing())
             .register_workload("ping_pong_server", ping_pong_server)
             .register_workload("ping_pong_client", ping_pong_client)
-            .set_iteration_control(IterationControl::FixedCount(iteration_count))
+            .set_iteration_control(IterationControl::UntilAllSometimesReached(1000))
             .run()
             .await;
 

@@ -21,6 +21,9 @@
 - Use traits, not concrete types
 - KISS principle
 - Use LocalRuntime, not LocalSet (spawn_local without Builder)
+- **No direct tokio calls**: Use Provider traits (`TimeProvider::sleep()`, not `tokio::time::sleep()`)
+  - Forbidden: `tokio::time::sleep()`, `tokio::time::timeout()`, `tokio::spawn()`
+  - Required: `time.sleep()`, `time.timeout()`, `task_provider.spawn_task()`
 
 ## Testing Philosophy
 **Goal**: 100% sometimes assertion coverage via chaos testing
