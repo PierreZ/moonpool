@@ -272,6 +272,11 @@ impl SimWorld {
         crate::time::SimTimeProvider::new(self.downgrade())
     }
 
+    /// Create a task provider for this simulation
+    pub fn task_provider(&self) -> crate::task::tokio_provider::TokioTaskProvider {
+        crate::task::tokio_provider::TokioTaskProvider
+    }
+
     /// Access network configuration for latency calculations using thread-local RNG.
     ///
     /// This method provides access to the network configuration for calculating

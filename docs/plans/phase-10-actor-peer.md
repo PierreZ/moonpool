@@ -147,3 +147,62 @@ pub struct Peer<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> {
 4. **Incremental**: Keep existing Peer logic, add TaskProvider parameter only
 
 **Recommendation**: Start with approach #4 - minimal change to working system
+
+## Phase 0 Implementation Status: ✅ COMPLETED
+
+### TaskProvider Integration Complete
+- ✅ `TaskProvider` trait created in `src/task/mod.rs`
+- ✅ `TokioTaskProvider` implemented in `src/task/tokio_provider.rs` 
+- ✅ `SimWorld::task_provider()` method added
+- ✅ `Peer<N, T, TP>` updated to include TaskProvider parameter
+- ✅ All constructors updated: `Peer::new()`, `Peer::new_with_defaults()`
+- ✅ All tests updated to pass TaskProvider parameter
+- ✅ WorkloadFn signature updated to include TaskProvider
+- ✅ All ping-pong actors updated for TaskProvider compatibility
+
+### Current State
+The Peer now has TaskProvider capability but still uses synchronous request-response pattern. The infrastructure is ready for actor-based implementation using message passing to avoid RefCell borrow conflicts.
+
+## Next Phase: Channel-based Actor Implementation
+
+### Phase 1: Message Passing Architecture
+Replace shared RefCell state with mpsc channels to avoid async borrow conflicts:
+
+```rust
+pub struct Peer<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> {
+    // Actor handles
+    keeper_handle: Option<JoinHandle<()>>,
+    
+    // Channel-based communication (no RefCell conflicts)
+    send_tx: mpsc::UnboundedSender<Vec<u8>>,
+    receive_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    
+    // Simple shutdown signaling
+    shutdown_tx: mpsc::UnboundedSender<()>,
+    
+    config: PeerConfig,
+    task_provider: TP,
+}
+```
+
+### Phase 2: Actor Functions
+- `connection_keeper_actor()` - Connection lifecycle management
+- `connection_reader_actor()` - Background TCP reading  
+- `connection_writer_actor()` - Background TCP writing
+
+### Phase 3: API Transformation
+- `Peer::send()` remains async but becomes channel send (no TCP I/O blocking)
+- `Peer::receive()` remains async but becomes channel receive 
+- All actors spawn in `Peer::new()`
+- **Keep familiar tokio patterns** - developers expect async network APIs
+
+### Phase 4: Restore Queue & Connection Sometimes Assertions
+Re-enable commented out `sometimes_assert!` calls to ensure comprehensive chaos testing coverage:
+
+**Queue-related assertions in `peer/core.rs`:**
+- `peer_queue_grows` - Message queue should sometimes contain multiple messages
+- `peer_queue_near_capacity` - Message queue should sometimes approach capacity limit  
+- `peer_requeues_on_failure` - Peer should sometimes re-queue messages after send failure
+- `peer_recovers_after_failures` - Peer should sometimes successfully connect after previous failures
+
+**Purpose**: Validate that chaos testing exercises all queue management and connection recovery code paths during actor-based operation.

@@ -75,9 +75,11 @@ async fn ping_pong_server(
     _seed: u64,
     provider: moonpool_simulation::SimNetworkProvider,
     time_provider: moonpool_simulation::SimTimeProvider,
+    task_provider: moonpool_simulation::TokioTaskProvider,
     topology: moonpool_simulation::WorkloadTopology,
 ) -> SimulationResult<SimulationMetrics> {
-    let mut server_actor = PingPongServerActor::new(provider, time_provider, topology);
+    let mut server_actor =
+        PingPongServerActor::new(provider, time_provider, task_provider, topology);
     server_actor.run().await
 }
 
@@ -86,8 +88,10 @@ async fn ping_pong_client(
     _seed: u64,
     provider: moonpool_simulation::SimNetworkProvider,
     time_provider: moonpool_simulation::SimTimeProvider,
+    task_provider: moonpool_simulation::TokioTaskProvider,
     topology: moonpool_simulation::WorkloadTopology,
 ) -> SimulationResult<SimulationMetrics> {
-    let mut client_actor = PingPongClientActor::new(provider, time_provider, topology);
+    let mut client_actor =
+        PingPongClientActor::new(provider, time_provider, task_provider, topology);
     client_actor.run().await
 }

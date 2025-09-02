@@ -36,6 +36,12 @@
 
 Strategic placement: error handling, timeouts, retries, resource limits
 
+## API Design Principles
+**Keep APIs familiar**: APIs should match what developers expect from tokio objects
+- Maintain async patterns where developers expect them
+- Use standard tokio types and conventions
+- Avoid surprises in API behavior vs real networking
+
 ## References
 **Read first**: `docs/analysis/flow.md` (before any `actor.cpp` code)
 **Architecture**: `docs/analysis/fdb-network.md`

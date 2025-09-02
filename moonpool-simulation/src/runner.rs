@@ -161,6 +161,7 @@ type WorkloadFn = Box<
         u64,
         crate::SimNetworkProvider,
         crate::SimTimeProvider,
+        crate::task::tokio_provider::TokioTaskProvider,
         WorkloadTopology,
     ) -> Pin<Box<dyn Future<Output = SimulationResult<SimulationMetrics>>>>,
 >;
@@ -218,7 +219,13 @@ impl SimulationBuilder {
     pub fn register_workload<S, F, Fut>(mut self, name: S, workload: F) -> Self
     where
         S: Into<String>,
-        F: Fn(u64, crate::SimNetworkProvider, crate::SimTimeProvider, WorkloadTopology) -> Fut
+        F: Fn(
+                u64,
+                crate::SimNetworkProvider,
+                crate::SimTimeProvider,
+                crate::task::tokio_provider::TokioTaskProvider,
+                WorkloadTopology,
+            ) -> Fut
             + 'static,
         Fut: Future<Output = SimulationResult<SimulationMetrics>> + 'static,
     {
@@ -226,10 +233,12 @@ impl SimulationBuilder {
         let ip_address = format!("10.0.0.{}", self.next_ip);
         self.next_ip += 1;
 
-        let boxed_workload = Box::new(move |seed, provider, time_provider, topology| {
-            let fut = workload(seed, provider, time_provider, topology);
-            Box::pin(fut) as Pin<Box<dyn Future<Output = SimulationResult<SimulationMetrics>>>>
-        });
+        let boxed_workload = Box::new(
+            move |seed, provider, time_provider, task_provider, topology| {
+                let fut = workload(seed, provider, time_provider, task_provider, topology);
+                Box::pin(fut) as Pin<Box<dyn Future<Output = SimulationResult<SimulationMetrics>>>>
+            },
+        );
 
         self.workloads.push(Workload {
             name: name.into(),
@@ -468,9 +477,15 @@ impl SimulationBuilder {
                 let topology = WorkloadTopology { my_ip, peer_ips };
 
                 let time_provider = sim.time_provider();
-                let result =
-                    (self.workloads[0].workload)(seed, provider.clone(), time_provider, topology)
-                        .await;
+                let task_provider = sim.task_provider();
+                let result = (self.workloads[0].workload)(
+                    seed,
+                    provider.clone(),
+                    time_provider,
+                    task_provider,
+                    topology,
+                )
+                .await;
                 vec![result]
             } else {
                 // Multiple workloads - spawn them and process events cooperatively
@@ -487,10 +502,12 @@ impl SimulationBuilder {
                     let topology = WorkloadTopology { my_ip, peer_ips };
 
                     let time_provider = sim.time_provider();
+                    let task_provider = sim.task_provider();
                     let handle = tokio::task::spawn_local((workload.workload)(
                         seed,
                         provider.clone(),
                         time_provider,
+                        task_provider,
                         topology,
                     ));
                     handles.push(handle);
@@ -707,7 +724,7 @@ mod tests {
         let report = SimulationBuilder::new()
             .register_workload(
                 "test_workload",
-                |seed, _provider, _time_provider, _topology| async move {
+                |seed, _provider, _time_provider, _task_provider, _topology| async move {
                     let mut metrics = SimulationMetrics::default();
                     metrics.simulated_time = Duration::from_millis(seed % 100);
                     metrics.events_processed = seed % 10;
@@ -733,7 +750,7 @@ mod tests {
         let report = SimulationBuilder::new()
             .register_workload(
                 "failing_workload",
-                |seed, _provider, _time_provider, _topology| async move {
+                |seed, _provider, _time_provider, _task_provider, _topology| async move {
                     if seed % 2 == 0 {
                         Err(crate::SimulationError::InvalidState(
                             "Test failure".to_string(),
@@ -789,7 +806,7 @@ mod tests {
         let report = SimulationBuilder::new()
             .register_workload(
                 "network_test",
-                |_seed, _provider, _time_provider, _topology| async move {
+                |_seed, _provider, _time_provider, _task_provider, _topology| async move {
                     let mut metrics = SimulationMetrics::default();
                     metrics.simulated_time = Duration::from_millis(50);
                     metrics.events_processed = 10;
@@ -823,7 +840,7 @@ mod tests {
             SimulationBuilder::new()
                 .register_workload(
                     "workload1",
-                    |seed, _provider, _time_provider, _topology| async move {
+                    |seed, _provider, _time_provider, _task_provider, _topology| async move {
                         let mut metrics = SimulationMetrics::default();
                         metrics.simulated_time = Duration::from_millis(seed % 50);
                         metrics.events_processed = seed % 5;
@@ -832,7 +849,7 @@ mod tests {
                 )
                 .register_workload(
                     "workload2",
-                    |seed, _provider, _time_provider, _topology| async move {
+                    |seed, _provider, _time_provider, _task_provider, _topology| async move {
                         let mut metrics = SimulationMetrics::default();
                         metrics.simulated_time = Duration::from_millis((seed * 2) % 50);
                         metrics.events_processed = (seed * 2) % 5;

@@ -1,6 +1,6 @@
 use moonpool_simulation::{
-    NetworkProvider, Peer, PeerConfig, SimulationMetrics, SimulationResult, TcpListenerTrait,
-    TimeProvider, WorkloadTopology, always_assert, buggify, buggify_with_prob,
+    NetworkProvider, Peer, PeerConfig, SimulationMetrics, SimulationResult, TaskProvider,
+    TcpListenerTrait, TimeProvider, WorkloadTopology, always_assert, buggify, buggify_with_prob,
     rng::{random_unique_id, sim_random_range},
     sometimes_assert,
 };
@@ -12,17 +12,19 @@ use tracing::instrument;
 static MAX_PING: usize = 100;
 
 /// Server actor for ping-pong communication with reconnection handling
-pub struct PingPongServerActor<N: NetworkProvider, T: TimeProvider> {
+pub struct PingPongServerActor<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> {
     network: N,
     time: T,
+    task_provider: TP,
     topology: WorkloadTopology,
 }
 
-impl<N: NetworkProvider, T: TimeProvider> PingPongServerActor<N, T> {
-    pub fn new(network: N, time: T, topology: WorkloadTopology) -> Self {
+impl<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> PingPongServerActor<N, T, TP> {
+    pub fn new(network: N, time: T, task_provider: TP, topology: WorkloadTopology) -> Self {
         Self {
             network,
             time,
+            task_provider,
             topology,
         }
     }
@@ -287,17 +289,19 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongServerActor<N, T> {
 }
 
 /// Client actor for ping-pong communication using resilient Peer
-pub struct PingPongClientActor<N: NetworkProvider, T: TimeProvider> {
+pub struct PingPongClientActor<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> {
     network: N,
     time: T,
+    task_provider: TP,
     topology: WorkloadTopology,
 }
 
-impl<N: NetworkProvider, T: TimeProvider> PingPongClientActor<N, T> {
-    pub fn new(network: N, time: T, topology: WorkloadTopology) -> Self {
+impl<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> PingPongClientActor<N, T, TP> {
+    pub fn new(network: N, time: T, task_provider: TP, topology: WorkloadTopology) -> Self {
         Self {
             network,
             time,
+            task_provider,
             topology,
         }
     }
@@ -371,7 +375,7 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongClientActor<N, T> {
     }
 
     /// Create a resilient peer with randomized configuration
-    async fn create_resilient_peer(&self, server_addr: &str) -> Peer<N, T> {
+    async fn create_resilient_peer(&self, server_addr: &str) -> Peer<N, T, TP> {
         let queue_size = sim_random_range(2..10);
 
         let timeout_ms = if buggify!() {
@@ -409,6 +413,7 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongClientActor<N, T> {
         Peer::new(
             self.network.clone(),
             self.time.clone(),
+            self.task_provider.clone(),
             server_addr.to_string(),
             peer_config,
         )
@@ -417,7 +422,7 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongClientActor<N, T> {
     /// Send ping messages and receive pong responses
     async fn send_ping_pong_messages(
         &self,
-        peer: &mut Peer<N, T>,
+        peer: &mut Peer<N, T, TP>,
         ping_count: u8,
     ) -> SimulationResult<()> {
         // Track pending requests with UUIDs instead of sequences
@@ -482,7 +487,7 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongClientActor<N, T> {
     /// Send a single ping message with UUID
     async fn send_ping_message_uuid(
         &self,
-        peer: &mut Peer<N, T>,
+        peer: &mut Peer<N, T, TP>,
         ping_idx: u8,
     ) -> SimulationResult<u128> {
         let uuid = random_unique_id();
@@ -566,7 +571,7 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongClientActor<N, T> {
     /// Receive pong responses for a burst of messages with UUID validation and timeout
     async fn receive_pong_responses_uuid(
         &self,
-        peer: &mut Peer<N, T>,
+        peer: &mut Peer<N, T, TP>,
         pending_requests: &mut HashMap<u128, String>,
         expected_count: usize,
     ) -> SimulationResult<()> {
@@ -649,7 +654,7 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongClientActor<N, T> {
     }
 
     /// Send CLOSE message and receive acknowledgment
-    async fn send_close_and_receive_ack(&self, peer: &mut Peer<N, T>) -> SimulationResult<()> {
+    async fn send_close_and_receive_ack(&self, peer: &mut Peer<N, T, TP>) -> SimulationResult<()> {
         // Send CLOSE message to server
         tracing::debug!("Client: Sending CLOSE message to server");
         let mut close_data = [0u8; 128];
@@ -728,7 +733,7 @@ impl<N: NetworkProvider, T: TimeProvider> PingPongClientActor<N, T> {
     }
 
     /// Validate peer metrics and connection behavior
-    fn validate_peer_metrics(&self, peer: &Peer<N, T>) {
+    fn validate_peer_metrics(&self, peer: &Peer<N, T, TP>) {
         always_assert!(
             no_connection_leaks,
             peer.metrics().connection_failures == 0 || peer.metrics().connections_established > 0,

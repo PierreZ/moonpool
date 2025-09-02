@@ -50,6 +50,8 @@ pub mod runner;
 pub mod sim;
 /// Sleep functionality for simulation time.
 pub mod sleep;
+/// Task provider abstraction for spawning local tasks.
+pub mod task;
 /// Time provider abstraction for simulation and real time.
 pub mod time;
 
@@ -72,6 +74,7 @@ pub use rng::{
 pub use runner::{SimulationBuilder, SimulationMetrics, SimulationReport, WorkloadTopology};
 pub use sim::{SimWorld, WeakSimWorld};
 pub use sleep::SleepFuture;
+pub use task::{TaskProvider, tokio_provider::TokioTaskProvider};
 pub use time::{SimTimeProvider, TimeProvider, TokioTimeProvider};
 
 // Macros are automatically available at crate root when defined with #[macro_export]

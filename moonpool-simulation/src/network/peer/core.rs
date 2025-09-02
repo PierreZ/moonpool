@@ -9,6 +9,7 @@ use super::error::{PeerError, PeerResult};
 use super::metrics::PeerMetrics;
 use crate::network::NetworkProvider;
 use crate::sometimes_assert;
+use crate::task::TaskProvider;
 use crate::time::TimeProvider;
 // use crate::sometimes_assert;
 
@@ -49,13 +50,16 @@ impl ReconnectState {
 /// A resilient peer that manages connections to a remote address.
 ///
 /// Provides automatic reconnection and message queuing while abstracting
-/// over NetworkProvider and TimeProvider implementations.
-pub struct Peer<N: NetworkProvider, T: TimeProvider> {
+/// over NetworkProvider, TimeProvider, and TaskProvider implementations.
+pub struct Peer<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> {
     /// Network provider for creating connections
     network: N,
 
     /// Time provider for delays and timing
     time: T,
+
+    /// Task provider for spawning background actors
+    task_provider: TP,
 
     /// Destination address
     destination: String,
@@ -76,15 +80,22 @@ pub struct Peer<N: NetworkProvider, T: TimeProvider> {
     metrics: PeerMetrics,
 }
 
-impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
+impl<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> Peer<N, T, TP> {
     /// Create a new peer for the destination address.
-    pub fn new(network: N, time: T, destination: String, config: PeerConfig) -> Self {
+    pub fn new(
+        network: N,
+        time: T,
+        task_provider: TP,
+        destination: String,
+        config: PeerConfig,
+    ) -> Self {
         let reconnect_state = ReconnectState::new(config.initial_reconnect_delay);
         let now = time.now();
 
         Self {
             network,
             time,
+            task_provider,
             destination,
             connection: None,
             send_queue: VecDeque::new(),
@@ -95,8 +106,14 @@ impl<N: NetworkProvider, T: TimeProvider> Peer<N, T> {
     }
 
     /// Create a new peer with default configuration.
-    pub fn new_with_defaults(network: N, time: T, destination: String) -> Self {
-        Self::new(network, time, destination, PeerConfig::default())
+    pub fn new_with_defaults(network: N, time: T, task_provider: TP, destination: String) -> Self {
+        Self::new(
+            network,
+            time,
+            task_provider,
+            destination,
+            PeerConfig::default(),
+        )
     }
 
     /// Check if currently connected.
@@ -503,9 +520,16 @@ mod tests {
         let sim = SimWorld::new();
         let network = sim.network_provider();
         let time = sim.time_provider();
+        let task_provider = sim.task_provider();
         let config = PeerConfig::default();
 
-        let peer = Peer::new(network, time, "test:8080".to_string(), config);
+        let peer = Peer::new(
+            network,
+            time,
+            task_provider,
+            "test:8080".to_string(),
+            config,
+        );
 
         assert_eq!(peer.destination(), "test:8080");
         assert!(!peer.is_connected());
@@ -517,8 +541,9 @@ mod tests {
         let sim = SimWorld::new();
         let network = sim.network_provider();
         let time = sim.time_provider();
+        let task_provider = sim.task_provider();
 
-        let peer = Peer::new_with_defaults(network, time, "test:8080".to_string());
+        let peer = Peer::new_with_defaults(network, time, task_provider, "test:8080".to_string());
 
         assert_eq!(peer.destination(), "test:8080");
         assert!(!peer.is_connected());
@@ -529,8 +554,9 @@ mod tests {
         let sim = SimWorld::new();
         let network = sim.network_provider();
         let time = sim.time_provider();
+        let task_provider = sim.task_provider();
 
-        let peer = Peer::new_with_defaults(network, time, "test:8080".to_string());
+        let peer = Peer::new_with_defaults(network, time, task_provider, "test:8080".to_string());
         let metrics = peer.metrics();
 
         assert_eq!(metrics.connection_attempts, 0);
