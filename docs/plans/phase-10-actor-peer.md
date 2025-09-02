@@ -204,9 +204,10 @@ All queue and connection assertions have been restored and are actively working:
 
 **Validation**: All assertions trigger reliably with `UntilAllSometimesReached(1000)` iteration control.
 
-## Phase 10.1: Enhancements (TODO)
+## Phase 10.1: Enhancements (COMPLETED)
 
-### TODO Items
-- [ ] **Clean clippy warnings**: Remove unused `task_provider` fields and fix other warnings
-- [ ] **Improve reading notifications**: Enable proper event-driven reading instead of polling with 1ms sleep
-- [ ] **Factorize assertion validation**: Extract common assertion validation logic from `single_server.rs` into reusable helper function
+### Completed Items
+- [x] **Clean clippy warnings**: Removed unnecessary `#[allow(dead_code)]` annotations where fields are actually used
+- [x] **Improve reading notifications**: Implemented truly event-driven reading using FDB pattern with `std::future::pending()` when no connection exists
+- [x] **Factorize assertion validation**: Extracted common validation logic into `panic_on_assertion_violations()` helper function in assertions module
+- [x] **Add TaskProvider::yield_now()**: Added abstracted yield method to TaskProvider trait for proper async coordination

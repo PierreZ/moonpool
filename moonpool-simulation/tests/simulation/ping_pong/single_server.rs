@@ -1,6 +1,6 @@
 use moonpool_simulation::{
     NetworkRandomizationRanges, SimulationBuilder, SimulationMetrics, SimulationResult,
-    runner::IterationControl,
+    assertions::panic_on_assertion_violations, runner::IterationControl,
 };
 use tracing::Level;
 use tracing_subscriber;
@@ -35,35 +35,8 @@ fn test_ping_pong_with_simulation_builder() {
             panic!("faulty seeds detected: {:?}", report.seeds_failing);
         }
 
-        // The new SimulationReport automatically includes assertion validation
-        if report.assertion_validation.has_violations() {
-            if !report
-                .assertion_validation
-                .success_rate_violations
-                .is_empty()
-            {
-                println!("❌ Success rate violations found:");
-                for violation in &report.assertion_validation.success_rate_violations {
-                    println!("  - {}", violation);
-                }
-                panic!("❌ Unexpected success rate violations detected!");
-            }
-
-            if !report
-                .assertion_validation
-                .unreachable_assertions
-                .is_empty()
-            {
-                println!("⚠️ Unreachable code detected:");
-                for violation in &report.assertion_validation.unreachable_assertions {
-                    println!("  - {}", violation);
-                }
-                panic!("❌ Unexpected unreachable assertions detected!");
-            }
-        } else {
-            println!("");
-            println!("✅ Dynamic validation passed - no assertion violations detected!");
-        }
+        // Validate assertion contracts using the helper function
+        panic_on_assertion_violations(&report);
     });
 }
 

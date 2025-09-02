@@ -19,4 +19,10 @@ pub trait TaskProvider: Clone {
     fn spawn_task<F>(&self, name: &str, future: F) -> tokio::task::JoinHandle<()>
     where
         F: Future<Output = ()> + 'static;
+
+    /// Yield control to allow other tasks to run.
+    ///
+    /// This is equivalent to tokio::task::yield_now() but abstracted
+    /// to enable simulation control and deterministic behavior.
+    async fn yield_now(&self);
 }

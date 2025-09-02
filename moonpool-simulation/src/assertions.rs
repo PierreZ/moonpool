@@ -250,6 +250,49 @@ pub fn reset_assertion_results() {
     });
 }
 
+/// Check assertion validation and panic if violations are found.
+///
+/// This is a convenience function that validates assertion contracts and panics
+/// with detailed error messages if any violations are found. This is the common
+/// pattern used in test files.
+///
+/// # Parameters
+///
+/// * `report` - The simulation report containing assertion validation results
+///
+/// # Panics
+///
+/// Panics if there are success rate violations or unreachable assertions.
+pub fn panic_on_assertion_violations(report: &crate::runner::SimulationReport) {
+    if report.assertion_validation.has_violations() {
+        if !report
+            .assertion_validation
+            .success_rate_violations
+            .is_empty()
+        {
+            println!("❌ Success rate violations found:");
+            for violation in &report.assertion_validation.success_rate_violations {
+                println!("  - {}", violation);
+            }
+            panic!("❌ Unexpected success rate violations detected!");
+        }
+
+        if !report
+            .assertion_validation
+            .unreachable_assertions
+            .is_empty()
+        {
+            println!("⚠️ Unreachable code detected:");
+            for violation in &report.assertion_validation.unreachable_assertions {
+                println!("  - {}", violation);
+            }
+            panic!("❌ Unexpected unreachable assertions detected!");
+        }
+    } else {
+        println!("✅ Dynamic validation passed - no assertion violations detected!");
+    }
+}
+
 /// Validate that all `sometimes_assert!` assertions actually behave as "sometimes"
 /// and detect unreachable code.
 ///

@@ -20,7 +20,7 @@ pub struct PingPongServerActor<N: NetworkProvider, T: TimeProvider, TP: TaskProv
     topology: WorkloadTopology,
 }
 
-impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider>
+impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider + 'static>
     PingPongServerActor<N, T, TP>
 {
     pub fn new(network: N, time: T, task_provider: TP, topology: WorkloadTopology) -> Self {
@@ -331,12 +331,11 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider>
 pub struct PingPongClientActor<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> {
     network: N,
     time: T,
-    #[allow(dead_code)]
     task_provider: TP,
     topology: WorkloadTopology,
 }
 
-impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider>
+impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider + 'static>
     PingPongClientActor<N, T, TP>
 {
     pub fn new(network: N, time: T, task_provider: TP, topology: WorkloadTopology) -> Self {

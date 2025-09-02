@@ -30,4 +30,8 @@ impl TaskProvider for TokioTaskProvider {
             })
             .expect("Failed to spawn task")
     }
+
+    async fn yield_now(&self) {
+        tokio::task::yield_now().await;
+    }
 }

@@ -104,7 +104,9 @@ struct PeerSharedState<N: NetworkProvider, T: TimeProvider> {
     metrics: PeerMetrics,
 }
 
-impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider> Peer<N, T, TP> {
+impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider + 'static>
+    Peer<N, T, TP>
+{
     /// Create a new peer for the destination address.
     pub fn new(
         network: N,
@@ -141,6 +143,7 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider> 
                 config.clone(),
                 receive_tx,
                 shutdown_rx,
+                task_provider.clone(),
             ),
         );
 
@@ -276,12 +279,17 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider> 
 /// - Handles connection failures and reconnection
 /// - Owns the connection exclusively to avoid RefCell conflicts
 /// - Handles both reading and writing operations
-async fn connection_task<N: NetworkProvider + 'static, T: TimeProvider + 'static>(
+async fn connection_task<
+    N: NetworkProvider + 'static,
+    T: TimeProvider + 'static,
+    TP: TaskProvider + 'static,
+>(
     shared_state: Rc<RefCell<PeerSharedState<N, T>>>,
     data_to_send: Rc<Notify>,
     config: PeerConfig,
     receive_tx: mpsc::UnboundedSender<Vec<u8>>,
     mut shutdown_rx: mpsc::UnboundedReceiver<()>,
+    _task_provider: TP,
 ) {
     let mut current_connection: Option<N::TcpStream> = None;
 
@@ -388,43 +396,45 @@ async fn connection_task<N: NetworkProvider + 'static, T: TimeProvider + 'static
                 }
             }
 
-            // Handle reading (simplified - poll for data)
-            _ = async {
-                // Use a small delay for polling - should use TimeProvider but this is temp
-                let time = {
-                    let state = shared_state.borrow();
-                    state.time.clone()
-                };
-                time.sleep(Duration::from_millis(1)).await
+            // Handle reading (truly event-driven - FDB pattern)
+            read_result = async {
+                match &mut current_connection {
+                    Some(stream) => {
+                        let mut buffer = vec![0u8; 4096];
+                        stream.read(&mut buffer).await.map(|n| (buffer, n))
+                    }
+                    None => std::future::pending().await  // Never resolves when no connection
+                }
             } => {
-                if let Some(ref mut stream) = current_connection {
-                    let mut buffer = vec![0u8; 4096];
-
-                    // Try to read without blocking
-                    match stream.read(&mut buffer).await {
-                        Ok(0) => {
-                            // Connection closed
-                            current_connection = None;
-                            {
-                                let mut state = shared_state.borrow_mut();
-                                state.connection = None;
-                                state.metrics.is_connected = false;
-                            }
+                match read_result {
+                    Ok((_buffer, 0)) => {
+                        // Connection closed
+                        current_connection = None;
+                        {
+                            let mut state = shared_state.borrow_mut();
+                            state.connection = None;
+                            state.metrics.is_connected = false;
                         }
-                        Ok(n) => {
-                            // Data received
-                            let data = buffer[..n].to_vec();
-                            {
-                                let mut state = shared_state.borrow_mut();
-                                state.metrics.record_message_received(n);
-                            }
-
-                            if receive_tx.send(data).is_err() {
-                                break; // Receiver dropped
-                            }
+                    }
+                    Ok((buffer, n)) => {
+                        // Data received
+                        let data = buffer[..n].to_vec();
+                        {
+                            let mut state = shared_state.borrow_mut();
+                            state.metrics.record_message_received(n);
                         }
-                        Err(_) => {
-                            // Read error - ignore for now (non-blocking)
+
+                        if receive_tx.send(data).is_err() {
+                            return; // Receiver dropped
+                        }
+                    }
+                    Err(_) => {
+                        // Read error - connection likely broken
+                        current_connection = None;
+                        {
+                            let mut state = shared_state.borrow_mut();
+                            state.connection = None;
+                            state.metrics.is_connected = false;
                         }
                     }
                 }
