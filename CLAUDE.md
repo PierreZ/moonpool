@@ -1,111 +1,54 @@
-# Claude Context for Moonpool
+# Moonpool: Deterministic Simulation Framework
 
-## Project Overview
-Moonpool is a Rust workspace for building distributed systems tooling. Current focus: deterministic simulation framework in `moonpool-simulation/`.
+## Environment & Commands
+**Nix shell required**: `nix develop --command <cargo-command>`
 
-## Development Environment
-**CRITICAL**: Must use Nix development shell:
-```bash
-nix develop --command <cargo-command>
-```
+**Phase completion**: All must pass:
+- `nix develop --command cargo fmt`
+- `nix develop --command cargo clippy`
+- `nix develop --command cargo nextest run`
 
-## Phase Completion Criteria
-Phase complete only when ALL pass:
-```bash
-nix develop --command cargo fmt
-nix develop --command cargo clippy  
-nix develop --command cargo nextest run
-```
+**Validation**: Each phase/subphase must validate through:
+- Full compilation (code + tests)
+- All tests passing
+- No test timeouts or hangs
 
-## Architecture Constraints
-- **Single-core execution**: Deterministic behavior, no Send/Sync complexity
-- **No unwrap()**: Use `Result<T, E>` with `?` operator (enforced by clippy)
-- **Documentation required**: All public items must be documented
-- **Networking traits**: Use `#[async_trait(?Send)]`
-- **Use traits, not implementations**: Always use trait definitions, never concrete implementation structs
-- **KISS principle**: Keep It Simple, Stupid - prefer simple solutions over complex ones
+## Core Constraints
+- Single-core execution (no Send/Sync)
+- No `unwrap()` - use `Result<T, E>` with `?`
+- Document all public items
+- Networking: `#[async_trait(?Send)]`
+- Use traits, not concrete types
+- KISS principle
+- Use LocalRuntime, not LocalSet (spawn_local without Builder)
 
-## Simulation Testing Philosophy
-**GOAL**: Add sometimes assertions to critical code paths and reach 100% of them through simulation chaos testing.
+## Testing Philosophy
+**Goal**: 100% sometimes assertion coverage via chaos testing
+**Target**: 100% success rate - no deadlocks/hangs acceptable
 
-**CRITICAL**: Simulation finds bugs by testing worst-case scenarios.
+**Failing seeds**: Debug with `SimulationBuilder::set_seed(failing_seed)` → fix root cause → verify → re-enable chaos
+**Goal**: Find bugs, not regression testing
 
-**TARGET**: 100% success rate when running simulation tests. Workloads must be written to always try to make progress, even if it takes time with timeouts. No deadlocks or hanging tasks are acceptable - all actors must complete gracefully under any chaos testing scenario.
+## Assertions & Buggify
+**Always**: Guard invariants (never fail)
+**Sometimes**: Test error paths (statistical coverage)
+**Buggify**: Deterministic fault injection (25% probability when enabled)
 
-**When failing seeds found:**
-1. Debug manually with detailed logging
-2. Identify root cause in production code
-3. Fix underlying bug
-4. Verify fix with failing seed
-5. Re-enable chaos testing
+Strategic placement: error handling, timeouts, retries, resource limits
 
-**Never ignore failing seeds - they represent real production bugs.**
+## References
+**Read first**: `docs/analysis/flow.md` (before any `actor.cpp` code)
+**Architecture**: `docs/analysis/fdb-network.md`
 
-## Implementation Status
+**Code mapping**:
+- Peer → FlowTransport.h:147-191, FlowTransport.actor.cpp:1016-1125
+- SimWorld → sim2.actor.cpp:1051+
+- Config → tigerbeetle/packet_simulator.zig:12-488
+- Connection → FlowTransport.actor.cpp:760-900
+- Backoff → FlowTransport.actor.cpp:892-897
+- Reliability → Net2Packet.h:30-111
+- Ping → Ping.actor.cpp:29-38,147-169
+- Queuing → Net2Packet.h:43-91
+- Chaos → foundationdb/Buggify.h:79-88
 
-**Core Infrastructure**: Event queue with deterministic ordering, logical time advancement, SimWorld coordination harness with handle pattern, comprehensive error handling.
-
-**Network Abstraction**: NetworkProvider trait system enabling seamless swapping between real (TokioNetworkProvider) and simulated (SimNetworkProvider) networking implementations.
-
-**Testing Framework**: Thread-local RNG with deterministic seeding, assertion macros (`always_assert!`/`sometimes_assert!`) with statistical tracking, SimulationReport system with multi-iteration testing and comprehensive metrics.
-
-**Fault Tolerance**: Resilient Peer implementation with automatic reconnection, exponential backoff, message queuing during disconnections, and robust handling of network failures across all provider types.
-
-## Sometimes Assertions (Antithesis-Style)
-**Purpose**: Verify rare but critical code paths are tested.
-
-**Always Assertions**: Guard invariants that must NEVER fail
-**Sometimes Assertions**: Verify error/recovery paths are exercised when multiple seeds are runned
-
-**Strategic placement**:
-- Error handling blocks
-- Reconnection/retry logic  
-- Queue overflow scenarios
-- Timeout handlers
-- Resource exhaustion paths
-
-**Anti-patterns**: Don't use on normal execution paths or without clear purpose.
-
-## Buggify (FDB Style)
-**Purpose**: Deterministic fault injection that biases simulation toward dangerous scenarios.
-
-**Key Principles**:
-- Only active during simulation testing (disabled in production)
-- Each `BUGGIFY` point randomly enabled/disabled per test run
-- Enabled points have configurable probability of triggering (default 25%)
-- Deterministic behavior ensures reproducible test results
-
-**Strategic placement**:
-- Before expensive operations (force minimal work paths)
-- At decision points (bias toward rare but dangerous choices)
-- In error handling setup (force specific failure scenarios)
-- Around timing-sensitive code (introduce delays/races)
-- Configuration randomization (test edge case parameters)
-
-**Implementation pattern**:
-```rust
-// Rust equivalent concept
-if simulation_buggify!() {
-    // Force the difficult/dangerous path
-    return early_timeout();
-}
-// Normal execution continues
-```
-
-**Philosophy**: Make the system "cooperate with the simulator" by explicitly instrumenting potential failure modes, rather than relying purely on black-box external fault injection.
-
-## Reference Code Mapping
-
-When working on Rust implementation, read corresponding reference sections:
-
-- **Peer** → FoundationDB Peer class (docs/references/fdb/FlowTransport.h:147-191, docs/references/fdb/FlowTransport.actor.cpp:1016-1125)
-- **SimWorld** → FoundationDB Sim2 class (docs/references/fdb/sim2.actor.cpp:1051+)  
-- **Configuration design** → TigerBeetle PacketSimulator (docs/references/tigerbeetle/packet_simulator.zig:12-488)
-- **Connection management** → FoundationDB connectionKeeper (docs/references/fdb/FlowTransport.actor.cpp:760-900)
-- **Exponential backoff** → FoundationDB reconnection logic (docs/references/fdb/FlowTransport.actor.cpp:892-897)
-- **Message reliability** → FoundationDB ReliablePacket system (docs/references/fdb/Net2Packet.h:30-111)
-- **Request-response pattern** → FoundationDB ping workload (docs/references/fdb/Ping.actor.cpp:29-38, 147-169)
-- **Message queuing** → FoundationDB UnsentPacketQueue (docs/references/fdb/Net2Packet.h:43-91)
-- **Deterministic chaos testing** → FoundationDB Buggify system (docs/references/foundationdb/Buggify.h:79-88)
-
-**Note**: We focus on TCP-level simulation (connection cutting/clogging) rather than packet-level faults, since TCP abstracts packet reliability for applications.
+**Focus**: TCP-level simulation (connection faults) not packet-level
