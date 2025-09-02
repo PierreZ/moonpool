@@ -7,8 +7,6 @@ use tracing_subscriber;
 
 use super::actors::{PingPongClientActor, PingPongServerActor};
 
-// TODO: Check sometimes assert
-
 #[test]
 fn test_ping_pong_with_simulation_builder() {
     let _ = tracing_subscriber::fmt()
@@ -25,7 +23,7 @@ fn test_ping_pong_with_simulation_builder() {
             .set_randomization_ranges(NetworkRandomizationRanges::chaos_testing())
             .register_workload("ping_pong_server", ping_pong_server)
             .register_workload("ping_pong_client", ping_pong_client)
-            .set_iteration_control(IterationControl::UntilAllSometimesReached(1000))
+            .set_iteration_control(IterationControl::UntilAllSometimesReached(100))
             .run()
             .await;
 

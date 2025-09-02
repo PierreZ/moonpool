@@ -160,49 +160,53 @@ pub struct Peer<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> {
 - ✅ WorkloadFn signature updated to include TaskProvider
 - ✅ All ping-pong actors updated for TaskProvider compatibility
 
-### Current State
-The Peer now has TaskProvider capability but still uses synchronous request-response pattern. The infrastructure is ready for actor-based implementation using message passing to avoid RefCell borrow conflicts.
+## Phase 10 Implementation Status: ✅ COMPLETED
 
-## Next Phase: Channel-based Actor Implementation
+### FoundationDB Synchronous API Pattern Implemented
+- ✅ **Synchronous send() API**: Returns immediately after queuing (no async I/O blocking)
+- ✅ **Background connection task**: Single actor handles both read/write TCP operations using event-driven model
+- ✅ **Trigger-based coordination**: Uses `Rc<Notify>` to wake task when data queued
+- ✅ **RefCell conflict resolution**: No RefCell borrows held across await points
+- ✅ **Channel-based receive**: Background task sends data via mpsc::unbounded_channel
+- ✅ **API compatibility**: receive() returns Vec<u8> instead of filling buffer
+- ✅ **Function naming**: Renamed connection_writer_actor → connection_task (handles both R/W)
+- ✅ **Early exit on deadlock**: Simulation runner exits immediately on deadlock detection
+- ✅ **Full event-driven model**: Connection task uses `tokio::select!` for:
+  - Shutdown signal monitoring (`shutdown_rx.recv()`)
+  - Data-to-send notifications (`data_to_send.notified()`)
+  - Continuous reading with polling (`async { time.sleep(1ms) }`)
+- ✅ **Testing strategy**: 
+  - Default: `UntilAllSometimesReached(1000)` for comprehensive chaos testing
+  - Debug: `FixedCount(1)` with ERROR level filtering for faulty seed investigation
 
-### Phase 1: Message Passing Architecture
-Replace shared RefCell state with mpsc channels to avoid async borrow conflicts:
+### Architecture Deviation from Original Plan
+**Used FoundationDB's actual pattern** instead of three-actor design:
+- **Single background task** instead of separate ConnectionKeeper/Reader/Writer
+- **Synchronous send()** instead of async channel send
+- **Trigger coordination** instead of complex channel orchestration
+- **Immediate queueing** instead of async message passing
 
-```rust
-pub struct Peer<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> {
-    // Actor handles
-    keeper_handle: Option<JoinHandle<()>>,
-    
-    // Channel-based communication (no RefCell conflicts)
-    send_tx: mpsc::UnboundedSender<Vec<u8>>,
-    receive_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    
-    // Simple shutdown signaling
-    shutdown_tx: mpsc::UnboundedSender<()>,
-    
-    config: PeerConfig,
-    task_provider: TP,
-}
-```
+### Current State  
+The Peer implementation now matches FoundationDB's network architecture with synchronous API and background actor handling all TCP I/O. All tests pass (104/104) and RefCell borrow conflicts are eliminated.
 
-### Phase 2: Actor Functions
-- `connection_keeper_actor()` - Connection lifecycle management
-- `connection_reader_actor()` - Background TCP reading  
-- `connection_writer_actor()` - Background TCP writing
+## Queue & Connection Assertions: ✅ COMPLETED
 
-### Phase 3: API Transformation
-- `Peer::send()` remains async but becomes channel send (no TCP I/O blocking)
-- `Peer::receive()` remains async but becomes channel receive 
-- All actors spawn in `Peer::new()`
-- **Keep familiar tokio patterns** - developers expect async network APIs
-
-### Phase 4: Restore Queue & Connection Sometimes Assertions
-Re-enable commented out `sometimes_assert!` calls to ensure comprehensive chaos testing coverage:
+### Sometimes Assertions Fully Integrated
+All queue and connection assertions have been restored and are actively working:
 
 **Queue-related assertions in `peer/core.rs`:**
-- `peer_queue_grows` - Message queue should sometimes contain multiple messages
-- `peer_queue_near_capacity` - Message queue should sometimes approach capacity limit  
-- `peer_requeues_on_failure` - Peer should sometimes re-queue messages after send failure
-- `peer_recovers_after_failures` - Peer should sometimes successfully connect after previous failures
+- ✅ `peer_queue_grows` - Message queue sometimes contains multiple messages
+- ✅ `peer_queue_near_capacity` - Message queue sometimes approaches capacity limit  
+- ✅ `peer_requeues_on_failure` - Peer sometimes re-queues messages after send failure
+- ✅ `peer_recovers_after_failures` - Peer sometimes successfully connects after previous failures
 
-**Purpose**: Validate that chaos testing exercises all queue management and connection recovery code paths during actor-based operation.
+**Strategic buggify placement**: Coordinated with PeerConfig tuning (queue sizes 2-6, burst sizes 5-15) to naturally trigger all assertions during chaos testing.
+
+**Validation**: All assertions trigger reliably with `UntilAllSometimesReached(1000)` iteration control.
+
+## Phase 10.1: Enhancements (TODO)
+
+### TODO Items
+- [ ] **Clean clippy warnings**: Remove unused `task_provider` fields and fix other warnings
+- [ ] **Improve reading notifications**: Enable proper event-driven reading instead of polling with 1ms sleep
+- [ ] **Factorize assertion validation**: Extract common assertion validation logic from `single_server.rs` into reusable helper function

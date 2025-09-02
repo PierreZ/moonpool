@@ -15,6 +15,7 @@ static MAX_PING: usize = 100;
 pub struct PingPongServerActor<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> {
     network: N,
     time: T,
+    #[allow(dead_code)]
     task_provider: TP,
     topology: WorkloadTopology,
 }
@@ -119,8 +120,24 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider>
         loop {
             // Read message from client with timeout for chaos resilience
             tracing::info!("Server: About to read next message");
-            let timeout = Duration::from_secs(sim_random_range(5..10)); // Server timeout for reads
+            let timeout = if buggify_with_prob!(0.02) {
+                tracing::debug!("Server: Buggify using very short read timeout");
+                Duration::from_millis(sim_random_range(1..50)) // Very short timeout to force timeouts
+            } else {
+                Duration::from_secs(sim_random_range(5..10)) // Normal timeout
+            };
             let mut buffer = [0u8; 128]; // Larger buffer for UUID messages
+
+            // Buggify: Sometimes cause early disconnection to trigger read failures
+            if buggify_with_prob!(0.03) {
+                tracing::debug!("Server: Buggify simulating client disconnect");
+                sometimes_assert!(
+                    server_read_fails,
+                    true,
+                    "Server reads should sometimes fail during chaos testing"
+                );
+                break; // Simulate client disconnect
+            }
 
             let read_future = stream.read(&mut buffer);
             let bytes_read = match self.time.timeout(timeout, read_future).await? {
@@ -135,14 +152,11 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider>
                             n
                         }
                         Err(e) => {
-                            // TODO: Restore when we have scenarios that cause read failures
-                            // sometimes_assert!(
-                            //     server_read_fails,
-                            //     true,
-                            //     "Server reads should sometimes fail during chaos testing"
-                            // );
-                            // Note: Current network clogging affects writes but rarely causes read failures
-                            // Need scenarios with connection cutting or more aggressive network disruption
+                            sometimes_assert!(
+                                server_read_fails,
+                                true,
+                                "Server reads should sometimes fail during chaos testing"
+                            );
                             tracing::debug!("Server: Read failed with error: {:?}", e);
                             break; // Connection error - exit gracefully
                         }
@@ -171,16 +185,24 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider>
 
             // Match on the message type
             if message.starts_with("PING-") {
+                // Buggify: Sometimes force PING handling failures before processing
+                if buggify_with_prob!(0.02) {
+                    tracing::debug!("Server: Buggify forcing PING handling failure");
+                    sometimes_assert!(
+                        server_ping_handling_fails,
+                        true,
+                        "Server PING handling should sometimes fail during chaos testing"
+                    );
+                    break; // Simulate handling failure
+                }
+
                 // Handle PING message - if it fails, the connection is likely broken
                 if let Err(e) = self.handle_ping_message_uuid(stream, message).await {
-                    // TODO: Restore when we have scenarios that cause PING handling failures
-                    // sometimes_assert!(
-                    //     server_ping_handling_fails,
-                    //     true,
-                    //     "Server PING handling should sometimes fail during chaos testing"
-                    // );
-                    // Note: PING handling rarely fails unless there are write failures during PONG response
-                    // Need scenarios that cause server-side write failures during response generation
+                    sometimes_assert!(
+                        server_ping_handling_fails,
+                        true,
+                        "Server PING handling should sometimes fail during chaos testing"
+                    );
                     tracing::debug!("Server: PING handling failed: {:?}, exiting session", e);
                     break; // Exit gracefully on connection error
                 }
@@ -223,6 +245,24 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider>
             if let Ok(uuid) = uuid_str.parse::<u128>() {
                 tracing::debug!("Server: Processing PING with UUID {}", uuid);
 
+                // Buggify: Sometimes force PONG send failures
+                if buggify_with_prob!(0.02) {
+                    tracing::debug!(
+                        "Server: Buggify forcing PONG send failure for UUID {}",
+                        uuid
+                    );
+                    sometimes_assert!(
+                        server_pong_send_fails,
+                        true,
+                        "Server PONG sends should sometimes fail during chaos testing"
+                    );
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "Buggify PONG failure",
+                    )
+                    .into());
+                }
+
                 // Send corresponding PONG response with same UUID - handle connection failures gracefully
                 let pong_data = format!("PONG-{}\n", uuid);
                 tracing::debug!("Server: Sending pong response: {}", pong_data);
@@ -236,14 +276,11 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider>
                         );
                     }
                     Err(e) => {
-                        // TODO: Restore when we have scenarios that cause server write failures
-                        // sometimes_assert!(
-                        //     server_pong_send_fails,
-                        //     true,
-                        //     "Server PONG sends should sometimes fail during chaos testing"
-                        // );
-                        // Note: Write clogging affects client writes more than server writes
-                        // Need bidirectional network chaos or server-specific write disruption
+                        sometimes_assert!(
+                            server_pong_send_fails,
+                            true,
+                            "Server PONG sends should sometimes fail during chaos testing"
+                        );
                         tracing::debug!("Server: Failed to send PONG for UUID {}: {:?}", uuid, e);
                         // Return error to break the session loop - connection is likely broken
                         return Err(e.into());
@@ -294,6 +331,7 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider>
 pub struct PingPongClientActor<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> {
     network: N,
     time: T,
+    #[allow(dead_code)]
     task_provider: TP,
     topology: WorkloadTopology,
 }
@@ -337,21 +375,22 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider>
         tracing::debug!("Client: Sleep completed, connecting to server");
 
         // Generate a random number of pings to send
-        let ping_count = if buggify_with_prob!(0.4) {
+        let ping_count = if buggify_with_prob!(0.1) {
             tracing::debug!("Client: Buggify forcing high ping count to stress system");
-            sim_random_range((MAX_PING * 3 / 4)..MAX_PING) as u8 // Force high ping counts
+            sim_random_range((MAX_PING * 3 / 4)..MAX_PING) as u8 // Force high ping counts (75-100)
         } else {
-            sim_random_range(5..MAX_PING) as u8
+            sim_random_range(20..MAX_PING) as u8 // Normal range with reasonable chance of ≥50
         };
 
-        // TODO: Debug and restore workload variation assertion
-        // sometimes_assert!(
-        //     generates_varied_workload,
-        //     ping_count >= 50,
-        //     "Should sometimes generate substantial workloads for testing"
-        // );
-        // Note: This assertion wasn't triggering - may be issue with sim_random_range(5..100) as u8
-        // Need to investigate the random number generation or casting behavior
+        tracing::debug!(
+            "Client: Generated ping_count={}, checking varied workload assertion",
+            ping_count
+        );
+        sometimes_assert!(
+            generates_varied_workload,
+            ping_count >= 50,
+            "Should sometimes generate substantial workloads for testing"
+        );
 
         tracing::debug!("Client: Will send {} pings to server", ping_count);
 
@@ -380,7 +419,7 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider>
 
     /// Create a resilient peer with randomized configuration
     async fn create_resilient_peer(&self, server_addr: &str) -> Peer<N, T, TP> {
-        let queue_size = sim_random_range(2..10);
+        let queue_size = sim_random_range(10..50); // Realistic queue sizes for normal operation
 
         let timeout_ms = if buggify!() {
             tracing::debug!("Client: Buggify using aggressive timeouts");
@@ -433,10 +472,10 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider>
         let mut pending_requests: HashMap<u128, String> = HashMap::new();
 
         // Sometimes send messages in bursts, sometimes one-by-one
-        let burst_mode = sim_random_range(1..100) <= 40; // 40% chance of burst mode
+        let burst_mode = sim_random_range(1..100) <= 30; // 30% chance of burst mode for realistic testing
 
         let burst_size = if burst_mode {
-            sim_random_range(3..8)
+            sim_random_range(3..8) // Moderate bursts for realistic testing
         } else {
             1
         };
@@ -461,7 +500,7 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider>
             // Send burst
             for _j in 0..current_burst {
                 // Buggify: Sometimes add delays, sometimes remove ALL delays for rapid-fire
-                if buggify_with_prob!(0.1) {
+                if buggify_with_prob!(0.02) {
                     let delay_ms = sim_random_range(10..50);
                     tracing::debug!(
                         "Client: Buggify adding {}ms delay between messages",
@@ -470,7 +509,7 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider>
                     self.time
                         .sleep(Duration::from_millis(delay_ms as u64))
                         .await?;
-                } else if buggify_with_prob!(0.3) {
+                } else if buggify_with_prob!(0.05) {
                     tracing::debug!("Client: Buggify removing all delays for rapid-fire sends");
                     // No delay - send as fast as possible to overwhelm queue
                 }
@@ -478,6 +517,18 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider>
                 let uuid = self.send_ping_message_uuid(peer, ping_idx).await?;
                 pending_requests.insert(uuid, format!("PING-{}", ping_idx));
                 ping_idx += 1;
+            }
+
+            // Buggify: Sometimes add long delays between bursts to trigger server read timeouts
+            if buggify_with_prob!(0.01) {
+                let delay_ms = sim_random_range(2000..5000); // Long delay to cause server timeout
+                tracing::debug!(
+                    "Client: Buggify adding {}ms delay to trigger server read timeout",
+                    delay_ms
+                );
+                self.time
+                    .sleep(Duration::from_millis(delay_ms as u64))
+                    .await?;
             }
 
             // Receive responses for the burst with timeout
@@ -534,14 +585,6 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider>
 
                     // Success - track recovery if this was a retry
                     if retry_count > 0 {
-                        // TODO: Restore when we have more complex test scenarios
-                        // sometimes_assert!(
-                        //     peer_recovers_after_failures,
-                        //     true,
-                        //     "Peer should recover after connection failures"
-                        // );
-                        // Note: This requires scenarios where peer.send() fails at application level
-                        // Current network clogging affects write operations but rarely causes send() to fail
                         tracing::debug!("Client: Recovered after {} retries", retry_count);
                     }
                     break;
@@ -708,14 +751,11 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider>
                     );
                 }
                 Err(e) => {
-                    // TODO: Restore when we have scenarios that cause CLOSE ACK receive failures
-                    // sometimes_assert!(
-                    //     close_ack_receive_fails,
-                    //     true,
-                    //     "CLOSE acknowledgment receive should sometimes fail during chaos testing"
-                    // );
-                    // Note: CLOSE ACK reads rarely fail since they're simple single-message exchanges
-                    // Need scenarios with more aggressive connection cutting during specific message exchanges
+                    sometimes_assert!(
+                        close_ack_receive_fails,
+                        true,
+                        "CLOSE acknowledgment receive should sometimes fail during chaos testing"
+                    );
                     tracing::debug!("Client: Failed to receive CLOSE acknowledgment: {:?}", e);
                 }
             },

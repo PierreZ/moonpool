@@ -12,6 +12,7 @@ use super::config::PeerConfig;
 use super::error::{PeerError, PeerResult};
 use super::metrics::PeerMetrics;
 use crate::network::NetworkProvider;
+use crate::sometimes_assert;
 use crate::task::TaskProvider;
 use crate::time::TimeProvider;
 
@@ -75,6 +76,7 @@ pub struct Peer<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> {
     config: PeerConfig,
 
     /// Task provider for spawning background actors
+    #[allow(dead_code)]
     task_provider: TP,
 }
 
@@ -193,6 +195,13 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider> 
         {
             let mut state = self.shared_state.borrow_mut();
 
+            // Check queue capacity before adding
+            sometimes_assert!(
+                peer_queue_near_capacity,
+                state.send_queue.len() >= (self.config.max_queue_size as f64 * 0.8) as usize,
+                "Message queue should sometimes approach capacity limit"
+            );
+
             // Handle queue overflow
             if state.send_queue.len() >= self.config.max_queue_size
                 && state.send_queue.pop_front().is_some()
@@ -203,6 +212,13 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider> 
             let first_unsent = state.send_queue.is_empty();
             state.send_queue.push_back(data);
             state.metrics.record_message_queued();
+
+            // Check if queue is growing with multiple messages
+            sometimes_assert!(
+                peer_queue_grows,
+                state.send_queue.len() > 1,
+                "Message queue should sometimes contain multiple messages"
+            );
 
             // Wake connection task if this is first message (FoundationDB pattern)
             if first_unsent {
@@ -317,6 +333,28 @@ async fn connection_task<N: NetworkProvider + 'static, T: TimeProvider + 'static
                         break; // Queue empty
                     };
 
+                    // Buggify: Sometimes force write failures to test requeuing
+                    if crate::buggify_with_prob!(0.02) {
+                        tracing::debug!("Buggify forcing write failure for requeue testing");
+                        // Simulate write failure
+                        current_connection = None;
+                        {
+                            let mut state = shared_state.borrow_mut();
+                            state.connection = None;
+                            state.metrics.is_connected = false;
+
+                            sometimes_assert!(
+                                peer_requeues_on_failure,
+                                true,
+                                "Peer should sometimes re-queue messages after send failure"
+                            );
+
+                            // Re-queue the failed message
+                            state.send_queue.push_front(data);
+                        }
+                        break; // Exit send loop, will retry on next trigger
+                    }
+
                     // Send the message (no RefCell borrow held)
                     match stream.write_all(&data).await {
                         Ok(_) => {
@@ -334,6 +372,13 @@ async fn connection_task<N: NetworkProvider + 'static, T: TimeProvider + 'static
                                 let mut state = shared_state.borrow_mut();
                                 state.connection = None;
                                 state.metrics.is_connected = false;
+
+                                sometimes_assert!(
+                                    peer_requeues_on_failure,
+                                    true,
+                                    "Peer should sometimes re-queue messages after send failure"
+                                );
+
                                 // Re-queue the failed message
                                 state.send_queue.push_front(data);
                             }
@@ -445,9 +490,18 @@ async fn establish_connection<N: NetworkProvider + 'static, T: TimeProvider + 's
             .await
         {
             Ok(Ok(Ok(stream))) => {
-                // Success
+                // Success - check if this was a recovery after failures
                 {
                     let mut state = shared_state.borrow_mut();
+
+                    if state.reconnect_state.failure_count > 0 {
+                        sometimes_assert!(
+                            peer_recovers_after_failures,
+                            true,
+                            "Peer should sometimes successfully connect after previous failures"
+                        );
+                    }
+
                     let now = state.time.now();
                     state.connection = Some(()); // Mark as connected
                     state.reconnect_state.reset(config.initial_reconnect_delay);
