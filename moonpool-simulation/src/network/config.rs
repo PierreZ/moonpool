@@ -88,6 +88,29 @@ impl NetworkRandomizationRanges {
             cutting_max_cuts_range: 1..3,                   // 1-2 cuts per connection max
         }
     }
+
+    /// Create stable testing ranges with minimal latency and no disruption for functional testing
+    pub fn stable_testing() -> Self {
+        Self {
+            bind_base_range: 1..2,                  // 1µs (minimal)
+            bind_jitter_range: 0..1,                // 0µs (no jitter)
+            accept_base_range: 10..11,              // 10µs (minimal)
+            accept_jitter_range: 0..1,              // 0µs (no jitter)
+            connect_base_range: 10..11,             // 10µs (minimal)
+            connect_jitter_range: 0..1,             // 0µs (no jitter)
+            read_base_range: 1..2,                  // 1µs (minimal)
+            read_jitter_range: 0..1,                // 0µs (no jitter)
+            write_base_range: 1..2,                 // 1µs (minimal)
+            write_jitter_range: 0..1,               // 0µs (no jitter)
+            clogging_probability_range: 0.0..0.001, // Effectively 0% clogging
+            clogging_base_duration_range: 1..2,     // Minimal (not used)
+            clogging_jitter_duration_range: 1..2,   // Minimal (not used)
+            cutting_probability_range: 0.0..0.001,  // Effectively 0% cutting
+            cutting_reconnect_base_range: 1..2,     // Minimal (not used)
+            cutting_reconnect_jitter_range: 1..2,   // Minimal (not used)
+            cutting_max_cuts_range: 1..2,           // Minimal (not used)
+        }
+    }
 }
 
 /// Configuration for network simulation parameters

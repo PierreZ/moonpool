@@ -12,7 +12,7 @@ test-threads = 1
 # All tests in the simulation folder get longer timeouts
 [[profile.default.overrides]]
 filter = 'test(/simulation/)'
-slow-timeout = { period = "1m", terminate-after = 10 }
+slow-timeout = { period = "1s", terminate-after = 1 }
 
 [profile.default.junit]
 # Store test results

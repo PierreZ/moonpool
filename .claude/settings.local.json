@@ -9,7 +9,9 @@
       "WebFetch(domain:pierrezemb.fr)",
       "Bash(timeout 5s nix develop:*)",
       "Bash(timeout 10s nix develop:*)",
-      "Bash(timeout 15s nix develop:*)"
+      "Bash(timeout 15s nix develop:*)",
+      "Bash(RUST_LOG=trace nix develop --command cargo test --package moonpool-simulation single_server -- --nocapture)",
+      "Bash(RUST_LOG=debug nix develop --command cargo test --package moonpool-simulation single_server -- --nocapture)"
     ],
     "deny": [],
     "ask": [],

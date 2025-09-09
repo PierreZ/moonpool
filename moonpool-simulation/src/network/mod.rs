@@ -18,6 +18,9 @@ pub mod sim;
 /// Resilient peer connection management
 pub mod peer;
 
+/// Transport layer with Sans I/O architecture
+pub mod transport;
+
 // Re-export main traits
 pub use traits::{NetworkProvider, TcpListenerTrait};
 
@@ -32,4 +35,11 @@ pub use peer::{Peer, PeerConfig, PeerError, PeerMetrics};
 pub use config::{
     CloggingConfiguration, LatencyConfiguration, LatencyRange, NetworkConfiguration,
     NetworkRandomizationRanges,
+};
+
+// Re-export transport types
+pub use transport::{
+    ClientTransport, EnvelopeSerializer, NetTransport, ReceivedEnvelope, RequestResponseEnvelope,
+    RequestResponseSerializer, SerializationError, ServerTransport, Transmit, TransportDriver,
+    TransportError, TransportProtocol,
 };

@@ -239,6 +239,13 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
         self.receive_rx.recv().await.ok_or(PeerError::Disconnected)
     }
 
+    /// Try to receive data from the peer without blocking.
+    ///
+    /// Returns immediately with available data or None if no data is ready.
+    pub fn try_receive(&mut self) -> Option<Vec<u8>> {
+        self.receive_rx.try_recv().ok()
+    }
+
     /// Force reconnection by dropping current connection.
     pub fn reconnect(&mut self) {
         let mut state = self.shared_state.borrow_mut();
@@ -297,11 +304,13 @@ async fn connection_task<
         tokio::select! {
             // Check for shutdown
             _ = shutdown_rx.recv() => {
+                tracing::trace!("Peer connection task shutting down");
                 break;
             }
 
             // Wait for data to send (FoundationDB pattern)
             _ = data_to_send.notified() => {
+                tracing::trace!("Peer connection task notified to send data");
                 // First, ensure we have messages to send
                 let has_messages = {
                     let state = shared_state.borrow();
@@ -309,6 +318,7 @@ async fn connection_task<
                 };
 
                 if !has_messages {
+                    tracing::trace!("Peer connection task: spurious wakeup, no messages to send");
                     continue; // Spurious wakeup, wait for real data
                 }
 
@@ -400,10 +410,14 @@ async fn connection_task<
             read_result = async {
                 match &mut current_connection {
                     Some(stream) => {
+                        tracing::trace!("Peer connection task: attempting to read from connection");
                         let mut buffer = vec![0u8; 4096];
                         stream.read(&mut buffer).await.map(|n| (buffer, n))
                     }
-                    None => std::future::pending().await  // Never resolves when no connection
+                    None => {
+                        tracing::trace!("Peer connection task: no connection for reading");
+                        std::future::pending().await  // Never resolves when no connection
+                    }
                 }
             } => {
                 match read_result {
@@ -418,6 +432,7 @@ async fn connection_task<
                     }
                     Ok((buffer, n)) => {
                         // Data received
+                        tracing::debug!("Peer connection task: received {} bytes", n);
                         let data = buffer[..n].to_vec();
                         {
                             let mut state = shared_state.borrow_mut();
@@ -425,6 +440,7 @@ async fn connection_task<
                         }
 
                         if receive_tx.send(data).is_err() {
+                            tracing::debug!("Peer connection task: receiver dropped, shutting down");
                             return; // Receiver dropped
                         }
                     }

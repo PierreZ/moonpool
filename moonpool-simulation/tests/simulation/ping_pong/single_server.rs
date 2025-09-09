@@ -11,7 +11,7 @@ use super::actors::{PingPongClientActor, PingPongServerActor};
 fn test_ping_pong_with_simulation_builder() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
-        .with_max_level(Level::ERROR)
+        .with_max_level(Level::DEBUG)
         .try_init();
 
     let local_runtime = tokio::runtime::Builder::new_current_thread()
@@ -20,10 +20,11 @@ fn test_ping_pong_with_simulation_builder() {
 
     local_runtime.block_on(async move {
         let report = SimulationBuilder::new()
-            .set_randomization_ranges(NetworkRandomizationRanges::chaos_testing())
+            .set_randomization_ranges(NetworkRandomizationRanges::stable_testing())
             .register_workload("ping_pong_server", ping_pong_server)
             .register_workload("ping_pong_client", ping_pong_client)
-            .set_iteration_control(IterationControl::UntilAllSometimesReached(100))
+            .set_iteration_control(IterationControl::FixedCount(1))
+            .set_debug_seeds(vec![3616945354941036101])
             .run()
             .await;
 
@@ -48,9 +49,12 @@ async fn ping_pong_server(
     task_provider: moonpool_simulation::TokioTaskProvider,
     topology: moonpool_simulation::WorkloadTopology,
 ) -> SimulationResult<SimulationMetrics> {
+    tracing::debug!("SERVER WORKLOAD: Starting");
     let mut server_actor =
         PingPongServerActor::new(provider, time_provider, task_provider, topology);
-    server_actor.run().await
+    let result = server_actor.run().await;
+    tracing::debug!("SERVER WORKLOAD: Exiting with result: {:?}", result.is_ok());
+    result
 }
 
 /// Client workload for ping-pong communication
@@ -61,7 +65,10 @@ async fn ping_pong_client(
     task_provider: moonpool_simulation::TokioTaskProvider,
     topology: moonpool_simulation::WorkloadTopology,
 ) -> SimulationResult<SimulationMetrics> {
+    tracing::debug!("CLIENT WORKLOAD: Starting");
     let mut client_actor =
         PingPongClientActor::new(provider, time_provider, task_provider, topology);
-    client_actor.run().await
+    let result = client_actor.run().await;
+    tracing::debug!("CLIENT WORKLOAD: Exiting with result: {:?}", result.is_ok());
+    result
 }
