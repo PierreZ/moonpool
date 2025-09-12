@@ -23,10 +23,10 @@ pub trait EnvelopeSerializer: Clone {
 pub trait EnvelopeFactory<S: EnvelopeSerializer> {
     /// Create a request envelope with auto-generated correlation ID
     fn create_request(correlation_id: u64, payload: Vec<u8>) -> S::Envelope;
-    
+
     /// Create a reply envelope from an incoming request
     fn create_reply(request: &S::Envelope, payload: Vec<u8>) -> S::Envelope;
-    
+
     /// Extract payload from an envelope
     fn extract_payload(envelope: &S::Envelope) -> &[u8];
 }

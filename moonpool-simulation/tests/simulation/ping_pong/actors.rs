@@ -87,9 +87,11 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
     ) -> SimulationResult<()> {
         tracing::debug!("Server: Processing PING from {}", from);
 
-        self.transport.send_reply(envelope, b"PONG".to_vec()).map_err(|e| {
-            moonpool_simulation::SimulationError::IoError(format!("Send reply failed: {:?}", e))
-        })?;
+        self.transport
+            .send_reply(envelope, b"PONG".to_vec())
+            .map_err(|e| {
+                moonpool_simulation::SimulationError::IoError(format!("Send reply failed: {:?}", e))
+            })?;
 
         always_assert!(
             server_sends_pong,
@@ -138,13 +140,19 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
         tracing::debug!("Client: Connecting to server at {}", self.server_address);
 
         // Send PING and wait for PONG
+        tracing::debug!("Client: About to send PING");
         self.send_ping().await?;
+        tracing::debug!("Client: PING/PONG completed successfully");
 
         // Send CLOSE and wait for BYE
+        tracing::debug!("Client: About to send CLOSE");
         self.send_close().await?;
+        tracing::debug!("Client: CLOSE/BYE completed successfully");
 
         // Close transport
+        tracing::debug!("Client: About to close transport");
         self.transport.close().await;
+        tracing::debug!("Client: Transport closed");
 
         tracing::debug!("Client: Completed successfully");
         Ok(SimulationMetrics::default())
@@ -152,15 +160,13 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
 
     async fn send_ping(&mut self) -> SimulationResult<()> {
         tracing::debug!("Client: Sending PING");
-        
-        let response = self.transport
+
+        let response = self
+            .transport
             .get_reply::<RequestResponseEnvelope>(&self.server_address, b"PING".to_vec())
-            .map_err(|e| {
-                moonpool_simulation::SimulationError::IoError(format!("Get reply failed: {:?}", e))
-            })?
             .await
             .map_err(|e| {
-                moonpool_simulation::SimulationError::IoError(format!("Reply failed: {:?}", e))
+                moonpool_simulation::SimulationError::IoError(format!("Get reply failed: {:?}", e))
             })?;
 
         let message = String::from_utf8_lossy(&response);
@@ -169,25 +175,20 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
             Ok(())
         } else {
             tracing::warn!("Client: Expected PONG, got: '{}'", message);
-            Err(moonpool_simulation::SimulationError::IoError(
-                format!("Unexpected response: {}", message)
-            ))
+            Err(moonpool_simulation::SimulationError::IoError(format!(
+                "Unexpected response: {}",
+                message
+            )))
         }
     }
 
     async fn send_close(&mut self) -> SimulationResult<()> {
         tracing::debug!("Client: Sending CLOSE");
-        
-        let response = self.transport
+
+        let response = self
+            .transport
             .get_reply::<RequestResponseEnvelope>(&self.server_address, b"CLOSE".to_vec())
-            .map_err(|e| {
-                moonpool_simulation::SimulationError::IoError(format!("Get reply failed: {:?}", e))
-            })?
-            .await
-            .map_err(|e| {
-                tracing::warn!("Client: Close reply failed: {:?}, continuing anyway", e);
-                e
-            });
+            .await;
 
         match response {
             Ok(response) => {
@@ -198,11 +199,11 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
                     tracing::warn!("Client: Expected BYE, got: '{}'", message);
                 }
             }
-            Err(_) => {
-                // Already warned above
+            Err(e) => {
+                tracing::warn!("Client: Close reply failed: {:?}, continuing anyway", e);
             }
         }
-        
+
         Ok(()) // Always return Ok for close
     }
 }

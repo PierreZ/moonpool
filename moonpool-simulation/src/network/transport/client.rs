@@ -1,9 +1,11 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::future::Future;
 use tokio::sync::oneshot;
 
-use super::{EnvelopeSerializer, EnvelopeFactory, EnvelopeReplyDetection, NetTransport, ReceivedEnvelope, TransportDriver, TransportError};
+use super::{
+    EnvelopeFactory, EnvelopeReplyDetection, EnvelopeSerializer, NetTransport, ReceivedEnvelope,
+    TransportDriver, TransportError,
+};
 use crate::network::NetworkProvider;
 use crate::task::TaskProvider;
 use crate::time::TimeProvider;
@@ -72,31 +74,48 @@ where
         Ok(())
     }
 
-    fn get_reply<E>(&mut self, destination: &str, payload: Vec<u8>) -> Result<impl Future<Output = Result<Vec<u8>, TransportError>>, TransportError>
+    async fn get_reply<E>(
+        &mut self,
+        destination: &str,
+        payload: Vec<u8>,
+    ) -> Result<Vec<u8>, TransportError>
     where
         E: EnvelopeFactory<S> + EnvelopeReplyDetection + 'static,
     {
         let correlation_id = self.next_correlation_id();
-        let (tx, rx) = oneshot::channel();
-        
+        let (tx, mut rx) = oneshot::channel();
+
         // Store the response channel
         self.pending_requests.insert(correlation_id, tx);
-        
+
         // Create envelope using the factory
         let envelope = E::create_request(correlation_id, payload);
-        
+
         // Send the request through the driver
         self.driver.send(destination, envelope);
-        
-        // Return future that resolves when response arrives
-        Ok(async move {
-            match rx.await {
-                Ok(response_payload) => Ok(response_payload),
-                Err(_) => Err(TransportError::SendFailed("Request cancelled or timed out".to_string()))
+
+        // Drive the transport until response arrives
+        loop {
+            // Poll the transport to process incoming messages
+            self.poll_receive();
+
+            // Check if our response is ready
+            match rx.try_recv() {
+                Ok(response_payload) => return Ok(response_payload),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    // Not ready yet, yield and continue polling
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    return Err(TransportError::SendFailed(
+                        "Request cancelled or timed out".to_string(),
+                    ));
+                }
             }
-        })
+        }
     }
-    
+
     fn send_reply(&mut self, request: &S::Envelope, payload: Vec<u8>) -> Result<(), TransportError>
     where
         S::Envelope: EnvelopeFactory<S>,
@@ -108,17 +127,38 @@ where
     }
 
     fn poll_receive(&mut self) -> Option<ReceivedEnvelope<S::Envelope>> {
-        while let Some(envelope) = self.driver.poll_receive() {
-            // Check if this is a response to a pending request
-            if let Some(correlation_id) = envelope.correlation_id() {
-                if let Some(tx) = self.pending_requests.remove(&correlation_id) {
-                    // This is a response - send it to the waiting future
-                    let payload = S::Envelope::extract_payload(&envelope).to_vec();
-                    let _ = tx.send(payload);
-                    continue; // Don't return this envelope
+        // Process messages directly from peers (event-driven, not polling)
+        let destinations: Vec<String> = self.driver.peers.keys().cloned().collect();
+
+        for destination in destinations {
+            if let Some(peer_rc) = self.driver.peers.get(&destination)
+                && let Ok(mut peer) = peer_rc.try_borrow_mut()
+            {
+                // Process all available messages from this peer
+                while let Some(data) = peer.try_receive() {
+                    tracing::debug!(
+                        "ClientTransport: Processing {} bytes from {}",
+                        data.len(),
+                        destination
+                    );
+                    self.driver
+                        .protocol
+                        .handle_received(destination.clone(), data);
                 }
             }
-            
+        }
+
+        while let Some(envelope) = self.driver.poll_receive() {
+            // Check if this is a response to a pending request
+            if let Some(correlation_id) = envelope.correlation_id()
+                && let Some(tx) = self.pending_requests.remove(&correlation_id)
+            {
+                // This is a response - send it to the waiting future
+                let payload = S::Envelope::extract_payload(&envelope).to_vec();
+                let _ = tx.send(payload);
+                continue; // Don't return this envelope
+            }
+
             // This is an unsolicited message - return it
             return Some(ReceivedEnvelope {
                 from: "server".to_string(), // Simplified for Phase 11
@@ -131,6 +171,11 @@ where
     async fn tick(&mut self) {
         // Drive the underlying transport
         self.driver.tick().await;
+
+        // Also process any received messages
+        while self.poll_receive().is_some() {
+            // Just drain the receive queue to trigger response matching
+        }
     }
 
     async fn close(&mut self) {

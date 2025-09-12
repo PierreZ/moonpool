@@ -3,6 +3,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::{EnvelopeSerializer, TransportProtocol};
+
+/// Type alias for shared peer connection handle
+type PeerHandle<N, T, TP> = Rc<RefCell<Peer<N, T, TP>>>;
 use crate::network::{NetworkProvider, Peer, PeerConfig};
 use crate::task::TaskProvider;
 use crate::time::TimeProvider;
@@ -25,10 +28,10 @@ where
     S: EnvelopeSerializer,
 {
     /// Sans I/O protocol state machine
-    protocol: TransportProtocol<S>,
+    pub(super) protocol: TransportProtocol<S>,
 
     /// Pool of peer connections by destination address
-    peers: HashMap<String, Rc<RefCell<Peer<N, T, TP>>>>,
+    pub(super) peers: HashMap<String, PeerHandle<N, T, TP>>,
 
     /// Network provider for creating new connections
     pub(super) network: N,
@@ -174,7 +177,7 @@ where
     }
 
     /// Read data from all peer connections and forward to protocol (non-blocking)
-    fn process_peer_reads(&mut self) {
+    pub fn process_peer_reads(&mut self) {
         // Collect destinations to avoid borrowing issues
         let destinations: Vec<String> = self.peers.keys().cloned().collect();
 
@@ -236,10 +239,36 @@ where
 
     /// Close all peer connections and clean up resources
     pub async fn close(&mut self) {
-        for (destination, peer_rc) in self.peers.drain() {
+        // Collect all peer handles and extract task handles first (non-async operations)
+        let peer_handles: Vec<(String, PeerHandle<N, T, TP>)> = self.peers.drain().collect();
+        let mut task_handles = Vec::new();
+
+        // Signal shutdown to all peers and collect task handles
+        for (destination, peer_rc) in &peer_handles {
             if let Ok(mut peer) = peer_rc.try_borrow_mut() {
-                tracing::debug!("Transport: Closing peer connection to {}", destination);
-                peer.close().await;
+                tracing::debug!(
+                    "Transport: Signaling shutdown to peer connection {}",
+                    destination
+                );
+                if let Some(handle) = peer.shutdown() {
+                    task_handles.push(handle);
+                }
+            }
+        }
+
+        // Wait for all tasks to complete (outside RefCell borrows)
+        for handle in task_handles {
+            let _ = handle.await;
+        }
+
+        // Clear state for all peers
+        for (destination, peer_rc) in peer_handles {
+            if let Ok(mut peer) = peer_rc.try_borrow_mut() {
+                tracing::debug!(
+                    "Transport: Clearing state for peer connection {}",
+                    destination
+                );
+                peer.clear_state();
             }
         }
     }

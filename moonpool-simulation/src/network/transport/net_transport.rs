@@ -1,7 +1,6 @@
 use async_trait::async_trait;
-use std::future::Future;
 
-use super::{EnvelopeSerializer, EnvelopeFactory, EnvelopeReplyDetection};
+use super::{EnvelopeFactory, EnvelopeReplyDetection, EnvelopeSerializer};
 
 /// High-level transport abstraction similar to FoundationDB's FlowTransport.
 ///
@@ -16,11 +15,15 @@ where
     /// Bind to address and start accepting connections (server mode)
     async fn bind(&mut self, address: &str) -> Result<(), TransportError>;
 
-    /// Send request and get future that resolves with reply payload
-    fn get_reply<E>(&mut self, destination: &str, payload: Vec<u8>) -> Result<impl Future<Output = Result<Vec<u8>, TransportError>>, TransportError>
+    /// Send request and await reply payload
+    async fn get_reply<E>(
+        &mut self,
+        destination: &str,
+        payload: Vec<u8>,
+    ) -> Result<Vec<u8>, TransportError>
     where
         E: EnvelopeFactory<S> + EnvelopeReplyDetection + 'static;
-        
+
     /// Send reply to an incoming request
     fn send_reply(&mut self, request: &S::Envelope, payload: Vec<u8>) -> Result<(), TransportError>
     where

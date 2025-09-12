@@ -259,22 +259,28 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
         self.data_to_send.notify_one();
     }
 
-    /// Close the connection and clear send queue.
-    pub async fn close(&mut self) {
-        // Signal shutdown to connection task
+    /// Signal shutdown to connection task and extract task handle (non-async)
+    pub fn shutdown(&mut self) -> Option<JoinHandle<()>> {
         let _ = self.shutdown_tx.send(());
+        self.writer_handle.take()
+    }
 
-        // Wait for connection task to complete
-        if let Some(handle) = self.writer_handle.take() {
-            let _ = handle.await;
-        }
-
-        // Clear state
+    /// Clear peer state (non-async)
+    pub fn clear_state(&mut self) {
         let mut state = self.shared_state.borrow_mut();
         state.connection = None;
         state.send_queue.clear();
         state.metrics.is_connected = false;
         state.metrics.current_queue_size = 0;
+    }
+
+    /// Close the connection and clear send queue.
+    pub async fn close(&mut self) {
+        let handle = self.shutdown();
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
+        self.clear_state();
     }
 }
 
@@ -431,7 +437,7 @@ async fn connection_task<
                         }
                     }
                     Ok((buffer, n)) => {
-                        // Data received
+                        // Data received - process immediately (FDB pattern)
                         tracing::debug!("Peer connection task: received {} bytes", n);
                         let data = buffer[..n].to_vec();
                         {
@@ -439,6 +445,7 @@ async fn connection_task<
                             state.metrics.record_message_received(n);
                         }
 
+                        // Send to application immediately via channel (like FDB's deliver())
                         if receive_tx.send(data).is_err() {
                             tracing::debug!("Peer connection task: receiver dropped, shutting down");
                             return; // Receiver dropped

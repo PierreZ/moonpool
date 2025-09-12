@@ -69,14 +69,14 @@ impl EnvelopeFactory<RequestResponseSerializer> for RequestResponseEnvelope {
             payload,
         }
     }
-    
+
     fn create_reply(request: &Self, payload: Vec<u8>) -> Self {
         Self {
             correlation_id: request.correlation_id,
             payload,
         }
     }
-    
+
     fn extract_payload(envelope: &Self) -> &[u8] {
         &envelope.payload
     }
