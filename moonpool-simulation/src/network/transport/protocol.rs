@@ -17,8 +17,6 @@ use super::{EnvelopeSerializer, Transmit};
 pub struct TransportProtocol<S: EnvelopeSerializer> {
     /// Envelope serialization strategy
     serializer: S,
-    /// Counter for generating unique tokens
-    next_token: u64,
 
     /// Queue of messages ready to be transmitted by I/O driver
     transmit_queue: VecDeque<Transmit>,
@@ -31,22 +29,9 @@ impl<S: EnvelopeSerializer> TransportProtocol<S> {
     pub fn new(serializer: S) -> Self {
         Self {
             serializer,
-            next_token: 1,
             transmit_queue: VecDeque::new(),
             receive_queue: VecDeque::new(),
         }
-    }
-
-    /// Generate next unique token for envelope correlation
-    fn next_token(&mut self) -> u64 {
-        let token = self.next_token;
-        self.next_token += 1;
-        token
-    }
-
-    /// Get the current token counter value (for testing/debugging)
-    pub fn current_token(&self) -> u64 {
-        self.next_token
     }
 
     /// Send envelope to destination.
@@ -137,8 +122,7 @@ mod tests {
         let mut protocol = TransportProtocol::new(RequestResponseSerializer);
 
         let envelope = RequestResponseEnvelope {
-            destination_token: 42,
-            source_token: 1,
+            correlation_id: 42,
             payload: b"test".to_vec(),
         };
 
@@ -153,8 +137,7 @@ mod tests {
         let mut protocol = TransportProtocol::new(RequestResponseSerializer);
 
         let envelope = RequestResponseEnvelope {
-            destination_token: 42,
-            source_token: 1,
+            correlation_id: 42,
             payload: b"test".to_vec(),
         };
 
@@ -174,8 +157,7 @@ mod tests {
         let serializer = RequestResponseSerializer;
 
         let envelope = RequestResponseEnvelope {
-            destination_token: 42,
-            source_token: 1,
+            correlation_id: 42,
             payload: b"test".to_vec(),
         };
 
@@ -187,8 +169,7 @@ mod tests {
         let received = protocol
             .poll_receive()
             .expect("should have received message");
-        assert_eq!(received.destination_token, 42);
-        assert_eq!(received.source_token, 1);
+        assert_eq!(received.correlation_id, 42);
         assert_eq!(received.payload, b"test");
     }
 
@@ -201,20 +182,5 @@ mod tests {
 
         // Should not crash, should not queue any messages
         assert_eq!(protocol.receive_queue_len(), 0);
-    }
-
-    #[test]
-    fn test_protocol_token_generation() {
-        let mut protocol = TransportProtocol::new(RequestResponseSerializer);
-
-        assert_eq!(protocol.current_token(), 1);
-
-        let token1 = protocol.next_token();
-        assert_eq!(token1, 1);
-        assert_eq!(protocol.current_token(), 2);
-
-        let token2 = protocol.next_token();
-        assert_eq!(token2, 2);
-        assert_eq!(protocol.current_token(), 3);
     }
 }

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use std::collections::VecDeque;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::{EnvelopeSerializer, NetTransport, ReceivedEnvelope, TransportDriver, TransportError};
+use super::{EnvelopeSerializer, EnvelopeFactory, EnvelopeReplyDetection, NetTransport, ReceivedEnvelope, TransportDriver, TransportError};
 use crate::network::{NetworkProvider, TcpListenerTrait};
 use crate::task::TaskProvider;
 use crate::time::TimeProvider;
@@ -74,6 +74,7 @@ where
     T: TimeProvider + 'static,
     TP: TaskProvider + 'static,
     S: EnvelopeSerializer,
+    S::Envelope: EnvelopeReplyDetection + EnvelopeFactory<S>,
 {
     async fn bind(&mut self, address: &str) -> Result<(), TransportError> {
         // Get network provider from driver to create listener
@@ -88,17 +89,34 @@ where
         Ok(())
     }
 
-    fn send(&mut self, destination: &str, envelope: S::Envelope) -> Result<(), TransportError> {
+    fn get_reply<E>(&mut self, _destination: &str, _payload: Vec<u8>) -> Result<impl std::future::Future<Output = Result<Vec<u8>, TransportError>>, TransportError>
+    where
+        E: EnvelopeFactory<S> + EnvelopeReplyDetection + 'static,
+    {
+        // Servers typically don't initiate requests, but we implement it for completeness
+        // This would be used if a server needs to make requests to other servers
+        Err::<std::future::Ready<Result<Vec<u8>, TransportError>>, TransportError>(
+            TransportError::SendFailed("Server get_reply not implemented yet".to_string())
+        )
+    }
+    
+    fn send_reply(&mut self, request: &S::Envelope, payload: Vec<u8>) -> Result<(), TransportError>
+    where
+        S::Envelope: EnvelopeFactory<S>,
+    {
+        // Create reply envelope using the factory
+        let reply_envelope = S::Envelope::create_reply(request, payload);
+        
         // For servers, we should send responses back through the existing client connection
         // instead of creating a new outbound connection
         if let Some((ref mut _stream, ref peer_addr)) = self.client_stream {
             // Serialize the envelope and send it directly through the stream
-            let data = self.driver.serialize_envelope(&envelope);
+            let data = self.driver.serialize_envelope(&reply_envelope);
             // Queue the data to be written during the next tick
             self.pending_writes.push_back(data);
-            tracing::debug!("ServerTransport: Queued response for client {}", peer_addr);
+            tracing::debug!("ServerTransport: Queued reply for client {}", peer_addr);
         } else {
-            tracing::warn!("ServerTransport: No client connection to send response to");
+            tracing::warn!("ServerTransport: No client connection to send reply to");
         }
         Ok(())
     }

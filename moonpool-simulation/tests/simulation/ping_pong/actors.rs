@@ -17,7 +17,6 @@ use tracing::instrument;
 /// Server for ping-pong communication using NetTransport
 pub struct Server<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> {
     transport: ServerTransport<N, T, TP, RequestResponseSerializer>,
-    server_token: u64,
     bind_address: String,
 }
 
@@ -30,7 +29,6 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
 
         Self {
             transport: server_transport,
-            server_token: 1, // Server uses token 1
             bind_address,
         }
     }
@@ -89,14 +87,8 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
     ) -> SimulationResult<()> {
         tracing::debug!("Server: Processing PING from {}", from);
 
-        let pong_response = RequestResponseEnvelope {
-            destination_token: envelope.source_token,
-            source_token: self.server_token,
-            payload: b"PONG".to_vec(),
-        };
-
-        self.transport.send(from, pong_response).map_err(|e| {
-            moonpool_simulation::SimulationError::IoError(format!("Send failed: {:?}", e))
+        self.transport.send_reply(envelope, b"PONG".to_vec()).map_err(|e| {
+            moonpool_simulation::SimulationError::IoError(format!("Send reply failed: {:?}", e))
         })?;
 
         always_assert!(
@@ -116,13 +108,7 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
     ) -> SimulationResult<()> {
         tracing::debug!("Server: Processing CLOSE from {}", from);
 
-        let bye_response = RequestResponseEnvelope {
-            destination_token: envelope.source_token,
-            source_token: self.server_token,
-            payload: b"BYE!!".to_vec(),
-        };
-
-        let _ = self.transport.send(from, bye_response); // May fail if client disconnects
+        let _ = self.transport.send_reply(envelope, b"BYE!!".to_vec()); // May fail if client disconnects
         tracing::debug!("Server: Sent BYE response to {}", from);
         Ok(())
     }
@@ -131,7 +117,6 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
 /// Client for ping-pong communication using NetTransport
 pub struct Client<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> {
     transport: ClientTransport<N, T, TP, RequestResponseSerializer>,
-    client_token: u64,
     server_address: String,
 }
 
@@ -144,7 +129,6 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
 
         Self {
             transport: client_transport,
-            client_token: 2, // Client uses token 2
             server_address,
         }
     }
@@ -167,74 +151,59 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
     }
 
     async fn send_ping(&mut self) -> SimulationResult<()> {
-        let ping_envelope = RequestResponseEnvelope {
-            destination_token: 1, // Server token
-            source_token: self.client_token,
-            payload: b"PING".to_vec(),
-        };
-
         tracing::debug!("Client: Sending PING");
-        self.transport
-            .send(&self.server_address, ping_envelope)
+        
+        let response = self.transport
+            .get_reply::<RequestResponseEnvelope>(&self.server_address, b"PING".to_vec())
             .map_err(|e| {
-                moonpool_simulation::SimulationError::IoError(format!("Send failed: {:?}", e))
+                moonpool_simulation::SimulationError::IoError(format!("Get reply failed: {:?}", e))
+            })?
+            .await
+            .map_err(|e| {
+                moonpool_simulation::SimulationError::IoError(format!("Reply failed: {:?}", e))
             })?;
 
-        // Wait for PONG response
-        for i in 0..100 {
-            self.transport.tick().await;
-
-            if let Some(received) = self.transport.poll_receive() {
-                let message = String::from_utf8_lossy(&received.envelope.payload);
-                if message == "PONG" {
-                    tracing::debug!("Client: Received PONG");
-                    return Ok(());
-                } else {
-                    tracing::warn!("Client: Expected PONG, got: '{}'", message);
-                }
-            }
-
-            tokio::task::yield_now().await;
+        let message = String::from_utf8_lossy(&response);
+        if message == "PONG" {
+            tracing::debug!("Client: Received PONG");
+            Ok(())
+        } else {
+            tracing::warn!("Client: Expected PONG, got: '{}'", message);
+            Err(moonpool_simulation::SimulationError::IoError(
+                format!("Unexpected response: {}", message)
+            ))
         }
-
-        Err(moonpool_simulation::SimulationError::IoError(
-            "Timeout waiting for PONG".to_string(),
-        ))
     }
 
     async fn send_close(&mut self) -> SimulationResult<()> {
-        let close_envelope = RequestResponseEnvelope {
-            destination_token: 1, // Server token
-            source_token: self.client_token,
-            payload: b"CLOSE".to_vec(),
-        };
-
         tracing::debug!("Client: Sending CLOSE");
-        self.transport
-            .send(&self.server_address, close_envelope)
+        
+        let response = self.transport
+            .get_reply::<RequestResponseEnvelope>(&self.server_address, b"CLOSE".to_vec())
             .map_err(|e| {
-                moonpool_simulation::SimulationError::IoError(format!("Send failed: {:?}", e))
-            })?;
+                moonpool_simulation::SimulationError::IoError(format!("Get reply failed: {:?}", e))
+            })?
+            .await
+            .map_err(|e| {
+                tracing::warn!("Client: Close reply failed: {:?}, continuing anyway", e);
+                e
+            });
 
-        // Wait for BYE response
-        for i in 0..100 {
-            self.transport.tick().await;
-
-            if let Some(received) = self.transport.poll_receive() {
-                let message = String::from_utf8_lossy(&received.envelope.payload);
+        match response {
+            Ok(response) => {
+                let message = String::from_utf8_lossy(&response);
                 if message == "BYE!!" {
                     tracing::debug!("Client: Received BYE");
-                    return Ok(());
                 } else {
                     tracing::warn!("Client: Expected BYE, got: '{}'", message);
                 }
             }
-
-            tokio::task::yield_now().await;
+            Err(_) => {
+                // Already warned above
+            }
         }
-
-        tracing::warn!("Client: Timeout waiting for BYE, continuing anyway");
-        Ok(())
+        
+        Ok(()) // Always return Ok for close
     }
 }
 

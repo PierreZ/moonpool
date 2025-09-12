@@ -548,22 +548,18 @@ tests/simulation/ping_pong/
 
 ## Phase 11.2 Roadmap - Transport Resilience & Ergonomics
 
-**Priority 1: Chaos Testing Compatibility**
-- Fix transport layer deadlock under network chaos conditions
+**Priority 1: Fix Deadlock in get_reply() Implementation**
+- Fix deadlock where client awaiting reply blocks tick() from processing responses
+- Add background task spawning in get_reply() to drive transport while waiting
+- Ensure poll_receive() is called during response waiting to route messages
+- Test simulation runs without deadlock with new API
+- Validate that correlation ID matching works properly in background
+
+**Priority 2: Chaos Testing Compatibility**
+- Fix transport layer deadlock under network chaos conditions  
 - Add proper timeout and retry mechanisms for network disruption
 - Ensure transport gracefully handles connection cutting and clogging
 - Validate all chaos testing seeds work without deadlock
 
-**Priority 2: Request-Response API Improvements** 
-- Add `NetTransport::send_with_timeout()` method for request-response patterns
-- Eliminate manual polling loops in ping-pong actors
-- Implement correlation-aware response waiting
-- Add configurable timeout and retry policies
-
-**Priority 3: Advanced Transport Features**
-- Connection health monitoring and automatic reconnection
-- Batched message sending for efficiency
-- Transport-level metrics and observability
-- Multi-destination routing for future multi-server support
-
-This establishes a robust, ergonomic transport foundation ready for distributed systems testing.
+**Priority 3: Request-Response API Improvements** 
+- Add `NetTransport::reply()` method for request-response patterns

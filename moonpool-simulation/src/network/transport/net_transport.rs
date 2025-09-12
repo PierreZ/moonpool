@@ -1,6 +1,7 @@
 use async_trait::async_trait;
+use std::future::Future;
 
-use super::EnvelopeSerializer;
+use super::{EnvelopeSerializer, EnvelopeFactory, EnvelopeReplyDetection};
 
 /// High-level transport abstraction similar to FoundationDB's FlowTransport.
 ///
@@ -8,12 +9,22 @@ use super::EnvelopeSerializer;
 /// by different transport strategies (server, client, etc.) while maintaining
 /// a consistent interface for application code.
 #[async_trait(?Send)]
-pub trait NetTransport<S: EnvelopeSerializer> {
+pub trait NetTransport<S: EnvelopeSerializer>
+where
+    S::Envelope: EnvelopeReplyDetection + EnvelopeFactory<S>,
+{
     /// Bind to address and start accepting connections (server mode)
     async fn bind(&mut self, address: &str) -> Result<(), TransportError>;
 
-    /// Send envelope to destination
-    fn send(&mut self, destination: &str, envelope: S::Envelope) -> Result<(), TransportError>;
+    /// Send request and get future that resolves with reply payload
+    fn get_reply<E>(&mut self, destination: &str, payload: Vec<u8>) -> Result<impl Future<Output = Result<Vec<u8>, TransportError>>, TransportError>
+    where
+        E: EnvelopeFactory<S> + EnvelopeReplyDetection + 'static;
+        
+    /// Send reply to an incoming request
+    fn send_reply(&mut self, request: &S::Envelope, payload: Vec<u8>) -> Result<(), TransportError>
+    where
+        S::Envelope: EnvelopeFactory<S>;
 
     /// Poll for received envelopes (non-blocking)
     fn poll_receive(&mut self) -> Option<ReceivedEnvelope<S::Envelope>>;
