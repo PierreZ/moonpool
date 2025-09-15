@@ -563,3 +563,52 @@ tests/simulation/ping_pong/
 
 **Priority 3: Request-Response API Improvements** 
 - Add `NetTransport::reply()` method for request-response patterns
+
+## TODOs
+
+### Fix Server Transport Architecture - Missing ConnectionReader Actors
+
+**Problem**: Ping-pong simulation deadlocks on seed `3616945354941036101` due to server transport lacking FoundationDB-style connectionReader actors.
+
+**Root Cause Analysis**: 
+Server transport uses direct TCP stream management instead of peer system with background actors:
+- **Client transport**: Uses `TransportDriver` → `Peer` → `connection_task` actor (has connectionReader) ✅
+- **Server transport**: Direct TCP stream management (NO connectionReader) ❌
+
+**Evidence from logs**:
+```
+DataDelivery no waker found for connection_id=1
+```
+- Connection_id=0 (client peer) has waker/reader ✅  
+- Connection_id=1 (server direct stream) has no waker/reader ❌
+
+**FoundationDB Pattern (from docs/analysis/fdb-network.md)**:
+Each connection spawns `connectionIncoming()` actor that creates 3 child actors:
+- `connectionKeeper` (coordinates)
+- **`connectionReader` (continuously reads packets)** ← Missing in server
+- `connectionWriter` (sends outgoing messages)
+
+**Solution**: Architectural Alignment (Priority 1)
+
+**File**: `moonpool-simulation/src/network/transport/server.rs`
+
+1. **Remove direct connection management** from `ServerTransport`
+2. **Delegate to peer system**: Server hands listener to driver/peer system  
+3. **Peer system handles**: Connection acceptance + connectionReader actor spawning
+4. **Server receives messages**: Through `driver.poll_receive()` like client
+
+**Implementation Pattern**:
+```rust
+// Instead of server accepting directly:
+listener.accept().await -> direct stream management
+
+// Use peer system:  
+driver.handle_listener(listener) -> peer creates connectionReader actors
+```
+
+**Testing**:
+- Failing seed: `3616945354941036101`
+- Success criteria: "DataDelivery no waker found" message disappears
+- Ping-pong completes without deadlock
+
+**Expected Outcome**: Server transport follows FoundationDB actor-per-connection pattern with proper connectionReader actors for all I/O
