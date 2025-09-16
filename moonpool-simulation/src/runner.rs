@@ -192,6 +192,7 @@ pub struct SimulationBuilder {
     seeds: Vec<u64>,
     next_ip: u32, // For auto-assigning IP addresses starting from 10.0.0.1
     randomization_ranges: Option<crate::NetworkRandomizationRanges>,
+    buggify_enabled: bool,
 }
 
 impl Default for SimulationBuilder {
@@ -209,6 +210,7 @@ impl SimulationBuilder {
             seeds: Vec::new(),
             next_ip: 1, // Start from 10.0.0.1
             randomization_ranges: None,
+            buggify_enabled: true,
         }
     }
 
@@ -308,6 +310,30 @@ impl SimulationBuilder {
     /// Set custom randomization ranges for network parameter generation
     pub fn set_randomization_ranges(mut self, ranges: crate::NetworkRandomizationRanges) -> Self {
         self.randomization_ranges = Some(ranges);
+        self
+    }
+
+    /// Disable buggify for this simulation run.
+    ///
+    /// Buggify is enabled by default to provide chaos testing and fault injection.
+    /// This method allows you to disable it when you need deterministic behavior
+    /// without random faults being injected.
+    pub fn disable_buggify(mut self) -> Self {
+        self.buggify_enabled = false;
+        self
+    }
+
+    /// Enable fully deterministic mode by disabling all perturbations.
+    ///
+    /// This is a convenience method that:
+    /// - Disables buggify (no fault injection)
+    /// - Sets network ranges to zero perturbation (no latency, no jitter, no disruptions)
+    ///
+    /// Use this when you need completely predictable simulation behavior for debugging
+    /// or when you want to eliminate all randomness from the simulation.
+    pub fn enable_deterministic_mode(mut self) -> Self {
+        self.buggify_enabled = false;
+        self.randomization_ranges = Some(crate::NetworkRandomizationRanges::zero_perturbation());
         self
     }
 
@@ -454,9 +480,11 @@ impl SimulationBuilder {
             reset_sim_rng();
             set_sim_seed(seed);
 
-            // Initialize buggify system for this iteration
-            // Use moderate probabilities: 50% activation rate, 25% firing rate
-            buggify_init(0.5, 0.25);
+            // Initialize buggify system for this iteration if enabled
+            if self.buggify_enabled {
+                // Use moderate probabilities: 50% activation rate, 25% firing rate
+                buggify_init(0.5, 0.25);
+            }
 
             // Create fresh NetworkConfiguration for this iteration (uses seed-based randomization)
             let network_config = if let Some(ref ranges) = self.randomization_ranges {
@@ -912,6 +940,54 @@ mod tests {
         // Verify the network configuration was used by checking if simulation time advanced
         // (WAN config should have higher latencies that cause time advancement)
         assert!(report.average_simulated_time() >= Duration::from_millis(50));
+    }
+
+    #[tokio::test]
+    async fn test_simulation_builder_disable_buggify() {
+        let report = SimulationBuilder::new()
+            .register_workload(
+                "buggify_disabled_test",
+                |_seed, _provider, _time_provider, _task_provider, _topology, _shutdown_rx| async move {
+                    let mut metrics = SimulationMetrics::default();
+                    metrics.simulated_time = Duration::from_millis(100);
+                    metrics.events_processed = 5;
+                    Ok(metrics)
+                },
+            )
+            .set_iterations(1)
+            .set_debug_seeds(vec![123])
+            .disable_buggify()  // Test that this method compiles and works
+            .run()
+            .await;
+
+        assert_eq!(report.iterations, 1);
+        assert_eq!(report.successful_runs, 1);
+        assert_eq!(report.failed_runs, 0);
+        assert_eq!(report.success_rate(), 100.0);
+    }
+
+    #[tokio::test]
+    async fn test_simulation_builder_deterministic_mode() {
+        let report = SimulationBuilder::new()
+            .register_workload(
+                "deterministic_test",
+                |_seed, _provider, _time_provider, _task_provider, _topology, _shutdown_rx| async move {
+                    let mut metrics = SimulationMetrics::default();
+                    metrics.simulated_time = Duration::from_millis(50);
+                    metrics.events_processed = 3;
+                    Ok(metrics)
+                },
+            )
+            .set_iterations(1)
+            .set_debug_seeds(vec![456])
+            .enable_deterministic_mode()  // Test that this method compiles and works
+            .run()
+            .await;
+
+        assert_eq!(report.iterations, 1);
+        assert_eq!(report.successful_runs, 1);
+        assert_eq!(report.failed_runs, 0);
+        assert_eq!(report.success_rate(), 100.0);
     }
 
     #[test]
