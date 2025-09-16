@@ -12,6 +12,7 @@ use moonpool_simulation::{
         ServerTransport,
     },
 };
+use tokio::select;
 use tracing::instrument;
 
 /// Server for ping-pong communication using NetTransport
@@ -34,7 +35,10 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
     }
 
     #[instrument(skip(self))]
-    pub async fn run(&mut self) -> SimulationResult<SimulationMetrics> {
+    pub async fn run(
+        &mut self,
+        mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> SimulationResult<SimulationMetrics> {
         // Bind to server address
         self.transport.bind(&self.bind_address).await.map_err(|e| {
             moonpool_simulation::SimulationError::IoError(format!("Bind failed: {:?}", e))
@@ -42,42 +46,54 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
 
         tracing::debug!("Server: Bound to {}", self.bind_address);
 
-        // Handle incoming messages
+        // Handle incoming messages with tokio::select! for proper shutdown
         loop {
-            self.transport.tick().await;
-            tracing::trace!("Server: Completed tick, polling for messages");
-
-            while let Some(received) = self.transport.poll_receive() {
-                let message = String::from_utf8_lossy(&received.envelope.payload);
-                tracing::debug!("Server: Received message: '{}'", message);
-
-                match message.as_ref() {
-                    "PING" => {
-                        self.handle_ping(&received.from, &received.envelope).await?;
-                    }
-                    "CLOSE" => {
-                        tracing::debug!("Server: Received CLOSE, sending BYE and shutting down");
-                        self.handle_close(&received.from, &received.envelope)
-                            .await?;
-
-                        tracing::debug!(
-                            "Server: BYE queued, closing transport (will flush automatically)"
-                        );
-                        // Close will flush pending writes automatically
-                        self.transport.close().await;
-                        tracing::debug!("Server: Shutdown complete");
-
-                        return Ok(SimulationMetrics::default());
-                    }
-                    _ => {
-                        tracing::warn!("Server: Unknown message: '{}'", message);
+            select! {
+                // Wait for shutdown signal
+                shutdown_result = &mut shutdown_rx => {
+                    match shutdown_result {
+                        Ok(()) => {
+                            tracing::debug!("Server: Received shutdown signal, closing transport");
+                            self.transport.close().await;
+                            tracing::debug!("Server: Shutdown complete");
+                            return Ok(SimulationMetrics::default());
+                        }
+                        Err(_) => {
+                            tracing::debug!("Server: Shutdown channel closed");
+                            return Ok(SimulationMetrics::default());
+                        }
                     }
                 }
+                // Do transport work
+                _ = self.do_transport_work() => {
+                    // Continue loop for next iteration
+                }
             }
-
-            tracing::trace!("Server: No messages received, yielding");
-            tokio::task::yield_now().await;
         }
+    }
+
+    async fn do_transport_work(&mut self) -> SimulationResult<()> {
+        // Do transport work
+        self.transport.tick().await;
+        tracing::trace!("Server: Completed tick, polling for messages");
+
+        while let Some(received) = self.transport.poll_receive() {
+            let message = String::from_utf8_lossy(&received.envelope.payload);
+            tracing::debug!("Server: Received message: '{}'", message);
+
+            match message.as_ref() {
+                "PING" => {
+                    self.handle_ping(&received.from, &received.envelope).await?;
+                }
+                _ => {
+                    tracing::warn!("Server: Unknown message: '{}'", message);
+                }
+            }
+        }
+
+        tracing::trace!("Server: No messages received, yielding");
+        tokio::task::yield_now().await;
+        Ok(())
     }
 
     async fn handle_ping(
@@ -100,18 +116,6 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
         );
 
         tracing::debug!("Server: Sent PONG response to {}", from);
-        Ok(())
-    }
-
-    async fn handle_close(
-        &mut self,
-        from: &str,
-        envelope: &RequestResponseEnvelope,
-    ) -> SimulationResult<()> {
-        tracing::debug!("Server: Processing CLOSE from {}", from);
-
-        let _ = self.transport.send_reply(envelope, b"BYE!!".to_vec()); // May fail if client disconnects
-        tracing::debug!("Server: Sent BYE response to {}", from);
         Ok(())
     }
 }
@@ -143,11 +147,6 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
         tracing::debug!("Client: About to send PING");
         self.send_ping().await?;
         tracing::debug!("Client: PING/PONG completed successfully");
-
-        // Send CLOSE and wait for BYE
-        tracing::debug!("Client: About to send CLOSE");
-        self.send_close().await?;
-        tracing::debug!("Client: CLOSE/BYE completed successfully");
 
         // Close transport
         tracing::debug!("Client: About to close transport");
@@ -181,31 +180,6 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
             )))
         }
     }
-
-    async fn send_close(&mut self) -> SimulationResult<()> {
-        tracing::debug!("Client: Sending CLOSE");
-
-        let response = self
-            .transport
-            .get_reply::<RequestResponseEnvelope>(&self.server_address, b"CLOSE".to_vec())
-            .await;
-
-        match response {
-            Ok(response) => {
-                let message = String::from_utf8_lossy(&response);
-                if message == "BYE!!" {
-                    tracing::debug!("Client: Received BYE");
-                } else {
-                    tracing::warn!("Client: Expected BYE, got: '{}'", message);
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Client: Close reply failed: {:?}, continuing anyway", e);
-            }
-        }
-
-        Ok(()) // Always return Ok for close
-    }
 }
 
 // Legacy actor wrappers for compatibility with existing test infrastructure
@@ -213,18 +187,34 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
 /// Server actor wrapper for existing test infrastructure
 pub struct PingPongServerActor<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> {
     server: Server<N, T, TP>,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 }
 
 impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider + 'static>
     PingPongServerActor<N, T, TP>
 {
-    pub fn new(network: N, time: T, task_provider: TP, topology: WorkloadTopology) -> Self {
+    pub fn new(
+        network: N,
+        time: T,
+        task_provider: TP,
+        topology: WorkloadTopology,
+        shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> Self {
         let server = Server::new(network, time, task_provider, topology.my_ip);
-        Self { server }
+        Self {
+            server,
+            shutdown_rx,
+        }
     }
 
     pub async fn run(&mut self) -> SimulationResult<SimulationMetrics> {
-        self.server.run().await
+        // Take the shutdown_rx to pass it to the server
+        let shutdown_rx = std::mem::replace(&mut self.shutdown_rx, {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            drop(tx); // Drop the sender immediately so receiver is closed
+            rx
+        });
+        self.server.run(shutdown_rx).await
     }
 }
 

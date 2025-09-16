@@ -163,6 +163,7 @@ type WorkloadFn = Box<
         crate::SimTimeProvider,
         crate::task::tokio_provider::TokioTaskProvider,
         WorkloadTopology,
+        tokio::sync::oneshot::Receiver<()>,
     ) -> Pin<Box<dyn Future<Output = SimulationResult<SimulationMetrics>>>>,
 >;
 
@@ -225,6 +226,7 @@ impl SimulationBuilder {
                 crate::SimTimeProvider,
                 crate::task::tokio_provider::TokioTaskProvider,
                 WorkloadTopology,
+                tokio::sync::oneshot::Receiver<()>,
             ) -> Fut
             + 'static,
         Fut: Future<Output = SimulationResult<SimulationMetrics>> + 'static,
@@ -234,8 +236,15 @@ impl SimulationBuilder {
         self.next_ip += 1;
 
         let boxed_workload = Box::new(
-            move |seed, provider, time_provider, task_provider, topology| {
-                let fut = workload(seed, provider, time_provider, task_provider, topology);
+            move |seed, provider, time_provider, task_provider, topology, shutdown_rx| {
+                let fut = workload(
+                    seed,
+                    provider,
+                    time_provider,
+                    task_provider,
+                    topology,
+                    shutdown_rx,
+                );
                 Box::pin(fut) as Pin<Box<dyn Future<Output = SimulationResult<SimulationMetrics>>>>
             },
         );
@@ -471,19 +480,21 @@ impl SimulationBuilder {
 
             // Execute workloads cooperatively using spawn_local and event processing
             let all_results = if self.workloads.len() == 1 {
-                // Single workload - execute directly
+                // Single workload - execute directly (no shutdown coordination needed)
                 let my_ip = self.workloads[0].ip_address.clone();
                 let peer_ips = all_ips.iter().filter(|ip| *ip != &my_ip).cloned().collect();
                 let topology = WorkloadTopology { my_ip, peer_ips };
 
                 let time_provider = sim.time_provider();
                 let task_provider = sim.task_provider();
+                let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
                 let result = (self.workloads[0].workload)(
                     seed,
                     provider.clone(),
                     time_provider,
                     task_provider,
                     topology,
+                    shutdown_rx,
                 )
                 .await;
                 vec![result]
@@ -494,6 +505,8 @@ impl SimulationBuilder {
                     self.workloads.len()
                 );
                 let mut handles = Vec::new();
+                let mut shutdown_senders = Vec::new();
+
                 for (idx, workload) in self.workloads.iter().enumerate() {
                     tracing::debug!("Spawning workload {}: {}", idx, workload.name);
 
@@ -503,12 +516,16 @@ impl SimulationBuilder {
 
                     let time_provider = sim.time_provider();
                     let task_provider = sim.task_provider();
+                    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+                    shutdown_senders.push(shutdown_tx);
+
                     let handle = tokio::task::spawn_local((workload.workload)(
                         seed,
                         provider.clone(),
                         time_provider,
                         task_provider,
                         topology,
+                        shutdown_rx,
                     ));
                     handles.push(handle);
                 }
@@ -517,6 +534,7 @@ impl SimulationBuilder {
                 let mut results = Vec::new();
                 let mut loop_count = 0;
                 let mut no_progress_count = 0;
+                let mut shutdown_triggered = false;
                 while !handles.is_empty() {
                     loop_count += 1;
 
@@ -566,6 +584,18 @@ impl SimulationBuilder {
                                 }
                             };
                             results.push(result);
+
+                            // Trigger shutdown for all remaining workloads when first one completes
+                            if !shutdown_triggered {
+                                tracing::debug!(
+                                    "🔄 RUNNER: First workload completed, triggering shutdown for remaining workloads"
+                                );
+                                // Send shutdown signal to all remaining workloads
+                                for shutdown_sender in shutdown_senders.drain(..) {
+                                    let _ = shutdown_sender.send(()); // Ignore error if receiver was dropped
+                                }
+                                shutdown_triggered = true;
+                            }
                         } else {
                             tracing::error!("⏳ RUNNER: Handle {} still running", i);
                             i += 1;
@@ -780,7 +810,7 @@ mod tests {
         let report = SimulationBuilder::new()
             .register_workload(
                 "test_workload",
-                |seed, _provider, _time_provider, _task_provider, _topology| async move {
+                |seed, _provider, _time_provider, _task_provider, _topology, _shutdown_rx| async move {
                     let mut metrics = SimulationMetrics::default();
                     metrics.simulated_time = Duration::from_millis(seed % 100);
                     metrics.events_processed = seed % 10;
@@ -806,7 +836,7 @@ mod tests {
         let report = SimulationBuilder::new()
             .register_workload(
                 "failing_workload",
-                |seed, _provider, _time_provider, _task_provider, _topology| async move {
+                |seed, _provider, _time_provider, _task_provider, _topology, _shutdown_rx| async move {
                     if seed % 2 == 0 {
                         Err(crate::SimulationError::InvalidState(
                             "Test failure".to_string(),
@@ -862,7 +892,7 @@ mod tests {
         let report = SimulationBuilder::new()
             .register_workload(
                 "network_test",
-                |_seed, _provider, _time_provider, _task_provider, _topology| async move {
+                |_seed, _provider, _time_provider, _task_provider, _topology, _shutdown_rx| async move {
                     let mut metrics = SimulationMetrics::default();
                     metrics.simulated_time = Duration::from_millis(50);
                     metrics.events_processed = 10;
@@ -894,28 +924,38 @@ mod tests {
 
         let report = local_runtime.block_on(async move {
             SimulationBuilder::new()
-                .register_workload(
-                    "workload1",
-                    |seed, _provider, _time_provider, _task_provider, _topology| async move {
-                        let mut metrics = SimulationMetrics::default();
-                        metrics.simulated_time = Duration::from_millis(seed % 50);
-                        metrics.events_processed = seed % 5;
-                        Ok(metrics)
-                    },
-                )
-                .register_workload(
-                    "workload2",
-                    |seed, _provider, _time_provider, _task_provider, _topology| async move {
-                        let mut metrics = SimulationMetrics::default();
-                        metrics.simulated_time = Duration::from_millis((seed * 2) % 50);
-                        metrics.events_processed = (seed * 2) % 5;
-                        Ok(metrics)
-                    },
-                )
-                .set_iterations(2)
-                .set_debug_seeds(vec![10, 20])
-                .run()
-                .await
+                    .register_workload(
+                        "workload1",
+                        |seed,
+                         _provider,
+                         _time_provider,
+                         _task_provider,
+                         _topology,
+                         _shutdown_rx| async move {
+                            let mut metrics = SimulationMetrics::default();
+                            metrics.simulated_time = Duration::from_millis(seed % 50);
+                            metrics.events_processed = seed % 5;
+                            Ok(metrics)
+                        },
+                    )
+                    .register_workload(
+                        "workload2",
+                        |seed,
+                         _provider,
+                         _time_provider,
+                         _task_provider,
+                         _topology,
+                         _shutdown_rx| async move {
+                            let mut metrics = SimulationMetrics::default();
+                            metrics.simulated_time = Duration::from_millis((seed * 2) % 50);
+                            metrics.events_processed = (seed * 2) % 5;
+                            Ok(metrics)
+                        },
+                    )
+                    .set_iterations(2)
+                    .set_debug_seeds(vec![10, 20])
+                    .run()
+                    .await
         });
 
         assert_eq!(report.successful_runs, 2);

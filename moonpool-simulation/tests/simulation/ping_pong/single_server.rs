@@ -23,8 +23,8 @@ fn test_ping_pong_with_simulation_builder() {
             .set_randomization_ranges(NetworkRandomizationRanges::stable_testing())
             .register_workload("ping_pong_server", ping_pong_server)
             .register_workload("ping_pong_client", ping_pong_client)
-            .set_iteration_control(IterationControl::FixedCount(1))
-            .set_debug_seeds(vec![15302657452152344853])
+            .set_iteration_control(IterationControl::UntilAllSometimesReached(10_000))
+            //.set_debug_seeds(vec![15302657452152344853])
             .run()
             .await;
 
@@ -48,10 +48,16 @@ async fn ping_pong_server(
     time_provider: moonpool_simulation::SimTimeProvider,
     task_provider: moonpool_simulation::TokioTaskProvider,
     topology: moonpool_simulation::WorkloadTopology,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> SimulationResult<SimulationMetrics> {
     tracing::debug!("SERVER WORKLOAD: Starting");
-    let mut server_actor =
-        PingPongServerActor::new(provider, time_provider, task_provider, topology);
+    let mut server_actor = PingPongServerActor::new(
+        provider,
+        time_provider,
+        task_provider,
+        topology,
+        shutdown_rx,
+    );
     let result = server_actor.run().await;
     tracing::debug!("SERVER WORKLOAD: Exiting with result: {:?}", result.is_ok());
     result
@@ -64,6 +70,7 @@ async fn ping_pong_client(
     time_provider: moonpool_simulation::SimTimeProvider,
     task_provider: moonpool_simulation::TokioTaskProvider,
     topology: moonpool_simulation::WorkloadTopology,
+    _shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> SimulationResult<SimulationMetrics> {
     tracing::debug!("CLIENT WORKLOAD: Starting");
     let mut client_actor =
