@@ -519,40 +519,47 @@ impl SimulationBuilder {
                 let mut no_progress_count = 0;
                 while !handles.is_empty() {
                     loop_count += 1;
-                    if loop_count % 100 == 0 {
-                        tracing::debug!(
-                            "Cooperative loop iteration {}, {} handles remaining, {} pending events",
-                            loop_count,
-                            handles.len(),
-                            sim.pending_event_count()
-                        );
-                    }
+
+                    tracing::error!(
+                        "🔄 RUNNER: Loop iteration {}, {} handles remaining, {} pending events",
+                        loop_count,
+                        handles.len(),
+                        sim.pending_event_count()
+                    );
 
                     let initial_handle_count = handles.len();
                     let initial_event_count = sim.pending_event_count();
 
                     // Process one simulation event to allow better interleaving
                     if sim.pending_event_count() > 0 {
-                        tracing::trace!(
-                            "Processing one simulation event, {} events pending",
+                        tracing::error!(
+                            "📦 RUNNER: Processing one simulation event, {} events pending",
                             sim.pending_event_count()
                         );
                         sim.step();
+                        tracing::error!(
+                            "📦 RUNNER: Event processed, {} events remaining",
+                            sim.pending_event_count()
+                        );
+                    } else {
+                        tracing::error!("❌ RUNNER: NO EVENTS to process");
                     }
 
                     // Check if any handles are ready
                     let mut i = 0;
+                    let mut finished_tasks = 0;
                     while i < handles.len() {
                         if handles[i].is_finished() {
-                            tracing::debug!("Workload handle {} finished", i);
+                            tracing::error!("🎯 RUNNER: Workload handle {} FINISHED", i);
+                            finished_tasks += 1;
                             let join_result = handles.remove(i).await;
                             let result = match join_result {
                                 Ok(workload_result) => {
-                                    tracing::debug!("Workload completed successfully");
+                                    tracing::error!("✅ RUNNER: Workload completed successfully");
                                     workload_result
                                 }
                                 Err(_) => {
-                                    tracing::error!("Workload task panicked");
+                                    tracing::error!("❌ RUNNER: Workload task panicked");
                                     Err(crate::SimulationError::InvalidState(
                                         "Task panicked".to_string(),
                                     ))
@@ -560,16 +567,42 @@ impl SimulationBuilder {
                             };
                             results.push(result);
                         } else {
+                            tracing::error!("⏳ RUNNER: Handle {} still running", i);
                             i += 1;
                         }
                     }
 
+                    if finished_tasks == 0 {
+                        tracing::error!("⏸️ RUNNER: NO tasks finished this iteration");
+                    } else {
+                        tracing::error!(
+                            "🎉 RUNNER: {} tasks finished this iteration",
+                            finished_tasks
+                        );
+                    }
+
                     // Check for deadlock: no events and no progress made
+                    let made_progress = sim.pending_event_count() != initial_event_count
+                        || handles.len() != initial_handle_count;
+                    tracing::error!(
+                        "🔍 RUNNER: Progress check - events: {} -> {}, handles: {} -> {}, made_progress: {}",
+                        initial_event_count,
+                        sim.pending_event_count(),
+                        initial_handle_count,
+                        handles.len(),
+                        made_progress
+                    );
+
                     if sim.pending_event_count() == 0
                         && handles.len() == initial_handle_count
                         && initial_event_count == 0
                     {
                         no_progress_count += 1;
+                        tracing::error!(
+                            "🚨 RUNNER: NO PROGRESS made - no events, no task completion (no_progress_count: {})",
+                            no_progress_count
+                        );
+
                         if no_progress_count > 3 {
                             tracing::error!(
                                 "🔒 DEADLOCK detected on iteration {} with seed {}: {} tasks remaining but no events to process after {} iterations",
@@ -606,16 +639,20 @@ impl SimulationBuilder {
                             };
                         }
                     } else {
+                        tracing::error!(
+                            "✅ RUNNER: Progress made - resetting no_progress_count to 0"
+                        );
                         no_progress_count = 0;
                     }
 
                     // Yield to allow tasks to make progress
                     if !handles.is_empty() {
-                        tracing::trace!(
-                            "Yielding to allow {} tasks to make progress",
+                        tracing::error!(
+                            "⏸️ RUNNER: About to yield_now() to allow {} tasks to make progress - YIELDING CONTROL",
                             handles.len()
                         );
                         tokio::task::yield_now().await;
+                        tracing::error!("⏸️ RUNNER: Resumed from yield_now() - CONTROL RETURNED");
                     }
                 }
 

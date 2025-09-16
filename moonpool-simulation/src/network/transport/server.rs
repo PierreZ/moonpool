@@ -136,81 +136,126 @@ where
     }
 
     async fn tick(&mut self) {
+        let has_client = self.client_stream.is_some();
+        let has_listener = self.listener.is_some();
+        let pending_writes_count = self.pending_writes.len();
+
+        tracing::error!(
+            "🔄 ServerTransport::tick() START - has_client: {}, has_listener: {}, pending_writes: {}",
+            has_client,
+            has_listener,
+            pending_writes_count
+        );
+
         // Accept a connection if we don't have one yet
         if self.client_stream.is_none()
             && let Some(ref listener) = self.listener
         {
+            tracing::error!(
+                "🚪 ServerTransport: Entering connection acceptance block (client_stream is None)"
+            );
+
             // Just try to accept - this will work if a connection is available
+            tracing::error!(
+                "🚪 ServerTransport: About to call listener.accept().await - YIELDING CONTROL"
+            );
             match listener.accept().await {
                 Ok((stream, peer_addr)) => {
-                    tracing::debug!("ServerTransport: Accepted connection from {}", peer_addr);
+                    tracing::error!(
+                        "🎉 ServerTransport: Accepted connection from {} - RESUMED FROM YIELD",
+                        peer_addr
+                    );
                     self.client_stream = Some((stream, peer_addr));
                 }
                 Err(e) => {
-                    tracing::debug!("ServerTransport: No connection to accept: {:?}", e);
-                }
-            }
-
-            // Write any pending responses to client FIRST (before reading more data)
-            if let Some((ref mut stream, ref peer_addr)) = self.client_stream {
-                while let Some(data) = self.pending_writes.pop_front() {
-                    tracing::debug!(
-                        "ServerTransport: Writing {} bytes to client {}",
-                        data.len(),
-                        peer_addr
+                    tracing::error!(
+                        "❌ ServerTransport: No connection to accept: {:?} - RESUMED FROM YIELD",
+                        e
                     );
-                    match stream.write_all(&data).await {
-                        Ok(_) => {
-                            tracing::debug!(
-                                "ServerTransport: Successfully wrote {} bytes to client {}",
-                                data.len(),
-                                peer_addr
-                            );
-                        }
-                        Err(e) => {
-                            tracing::debug!(
-                                "ServerTransport: Write error to {}: {:?}",
-                                peer_addr,
-                                e
-                            );
-                            self.client_stream = None;
-                            break;
-                        }
-                    }
                 }
             }
+        }
 
-            // Read data from client if we have a connection
-            if let Some((ref mut stream, ref peer_addr)) = self.client_stream {
-                let mut buffer = [0u8; 4096];
-                tracing::trace!(
-                    "ServerTransport: Attempting to read from connection {}",
+        // MOVED OUTSIDE: Write any pending responses to client FIRST (before reading more data)
+        if let Some((ref mut stream, ref peer_addr)) = self.client_stream {
+            tracing::error!(
+                "📤 ServerTransport: Processing {} pending writes to client {}",
+                self.pending_writes.len(),
+                peer_addr
+            );
+
+            while let Some(data) = self.pending_writes.pop_front() {
+                tracing::error!(
+                    "📤 ServerTransport: About to write {} bytes to client {} - YIELDING CONTROL",
+                    data.len(),
                     peer_addr
                 );
-                match stream.read(&mut buffer).await {
-                    Ok(0) => {
-                        // Connection closed
-                        tracing::debug!("ServerTransport: Client {} disconnected", peer_addr);
-                        self.client_stream = None;
-                    }
-                    Ok(n) => {
-                        let data = buffer[..n].to_vec();
-                        tracing::debug!("ServerTransport: Read {} bytes from {}", n, peer_addr);
-                        // Forward to transport protocol
-                        self.driver.on_peer_received(peer_addr.clone(), data);
+                match stream.write_all(&data).await {
+                    Ok(_) => {
+                        tracing::error!(
+                            "✅ ServerTransport: Successfully wrote {} bytes to client {} - RESUMED FROM YIELD",
+                            data.len(),
+                            peer_addr
+                        );
                     }
                     Err(e) => {
-                        tracing::debug!("ServerTransport: Read error from {}: {:?}", peer_addr, e);
+                        tracing::error!(
+                            "❌ ServerTransport: Write error to {}: {:?} - RESUMED FROM YIELD",
+                            peer_addr,
+                            e
+                        );
                         self.client_stream = None;
+                        break;
                     }
                 }
-            } else {
-                tracing::trace!("ServerTransport: No client connection to read from");
             }
-
-            // Drive the underlying transport
-            self.driver.tick().await;
         }
+
+        // MOVED OUTSIDE: Read data from client if we have a connection
+        if let Some((ref mut stream, ref peer_addr)) = self.client_stream {
+            let mut buffer = [0u8; 4096];
+            tracing::error!(
+                "📥 ServerTransport: About to read from connection {} - YIELDING CONTROL",
+                peer_addr
+            );
+            match stream.read(&mut buffer).await {
+                Ok(0) => {
+                    // Connection closed
+                    tracing::error!(
+                        "🔌 ServerTransport: Client {} disconnected - RESUMED FROM YIELD",
+                        peer_addr
+                    );
+                    self.client_stream = None;
+                }
+                Ok(n) => {
+                    let data = buffer[..n].to_vec();
+                    tracing::error!(
+                        "📥 ServerTransport: Read {} bytes from {} - RESUMED FROM YIELD",
+                        n,
+                        peer_addr
+                    );
+                    // Forward to transport protocol
+                    self.driver.on_peer_received(peer_addr.clone(), data);
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "❌ ServerTransport: Read error from {}: {:?} - RESUMED FROM YIELD",
+                        peer_addr,
+                        e
+                    );
+                    self.client_stream = None;
+                }
+            }
+        } else {
+            tracing::error!("❌ ServerTransport: No client connection to read/write from");
+        }
+
+        // Drive the underlying transport
+        tracing::error!("🚗 ServerTransport: About to call driver.tick().await - YIELDING CONTROL");
+        self.driver.tick().await;
+        tracing::error!("🚗 ServerTransport: driver.tick() completed - RESUMED FROM YIELD");
+
+        tracing::error!("🔄 ServerTransport::tick() END");
     }
 
     async fn close(&mut self) {

@@ -862,8 +862,8 @@ impl SimWorld {
                 // - Server writes to client: Server ProcessSendBuffer -> Client DataDelivery
                 // - Each DataDelivery specifies the TARGET connection to receive the data
                 let data_preview = String::from_utf8_lossy(&data[..std::cmp::min(data.len(), 20)]);
-                tracing::info!(
-                    "Event::DataDelivery processing delivery of {} bytes: '{}' to connection {}",
+                tracing::error!(
+                    "📦 Event::DataDelivery processing delivery of {} bytes: '{}' to connection {}",
                     data.len(),
                     data_preview,
                     connection_id
@@ -873,23 +873,53 @@ impl SimWorld {
 
                 // Write data directly to the specified connection's receive buffer
                 if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
+                    let buffer_before = conn.receive_buffer.len();
                     for &byte in &data {
                         conn.receive_buffer.push_back(byte);
                     }
+                    let buffer_after = conn.receive_buffer.len();
+
+                    tracing::error!(
+                        "📦 DataDelivery: Added {} bytes to connection_id={} receive_buffer (before: {}, after: {})",
+                        data.len(),
+                        connection_id.0,
+                        buffer_before,
+                        buffer_after
+                    );
 
                     // Wake any futures waiting to read from this connection
+                    let has_waker = inner.wakers.read_wakers.contains_key(&connection_id);
+                    tracing::error!(
+                        "📦 DataDelivery: Checking for read waker for connection_id={}, has_waker: {}",
+                        connection_id.0,
+                        has_waker
+                    );
+
                     if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
-                        tracing::info!(
-                            "DataDelivery waking up read waker for connection_id={}",
+                        tracing::error!(
+                            "🎯 DataDelivery: FOUND waker for connection_id={}, waking it up!",
                             connection_id.0
                         );
                         waker.wake();
                     } else {
-                        tracing::info!(
-                            "DataDelivery no waker found for connection_id={}",
+                        tracing::error!(
+                            "❌ DataDelivery: NO WAKER found for connection_id={} - THIS IS THE PROBLEM!",
                             connection_id.0
                         );
+
+                        // Debug: Show all available wakers
+                        let all_waker_ids: Vec<u64> =
+                            inner.wakers.read_wakers.keys().map(|id| id.0).collect();
+                        tracing::error!(
+                            "📋 DataDelivery: Available read wakers: {:?}",
+                            all_waker_ids
+                        );
                     }
+                } else {
+                    tracing::error!(
+                        "❌ DataDelivery: Connection {} not found in connections map!",
+                        connection_id.0
+                    );
                 }
             }
             // Process the next message from a connection's send buffer.

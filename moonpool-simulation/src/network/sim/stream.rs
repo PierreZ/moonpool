@@ -159,16 +159,16 @@ impl AsyncRead for SimTcpStream {
             .read_from_connection(self.connection_id, &mut temp_buf)
             .map_err(|e| io::Error::other(format!("read error: {}", e)))?;
 
-        tracing::info!(
-            "SimTcpStream::poll_read connection_id={} read {} bytes",
+        tracing::error!(
+            "📖 SimTcpStream::poll_read connection_id={} read {} bytes from receive buffer",
             self.connection_id.0,
             bytes_read
         );
 
         if bytes_read > 0 {
             let data_preview = String::from_utf8_lossy(&temp_buf[..std::cmp::min(bytes_read, 20)]);
-            tracing::info!(
-                "SimTcpStream::poll_read connection_id={} returning data: '{}'",
+            tracing::error!(
+                "✅ SimTcpStream::poll_read connection_id={} returning data: '{}' with Poll::Ready",
                 self.connection_id.0,
                 data_preview
             );
@@ -176,15 +176,38 @@ impl AsyncRead for SimTcpStream {
             Poll::Ready(Ok(()))
         } else {
             // No data available - register for notification when data arrives
-            tracing::info!(
-                "SimTcpStream::poll_read connection_id={} no data, registering waker",
+            tracing::error!(
+                "⏳ SimTcpStream::poll_read connection_id={} no data available, registering READ WAKER",
                 self.connection_id.0
             );
-            sim.register_read_waker(self.connection_id, cx.waker().clone())
-                .map_err(|e| io::Error::other(format!("waker registration error: {}", e)))?;
+
+            match sim.register_read_waker(self.connection_id, cx.waker().clone()) {
+                Ok(_) => {
+                    tracing::error!(
+                        "🎯 SimTcpStream::poll_read connection_id={} successfully REGISTERED read waker",
+                        self.connection_id.0
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "❌ SimTcpStream::poll_read connection_id={} FAILED to register read waker: {}",
+                        self.connection_id.0,
+                        e
+                    );
+                    return Poll::Ready(Err(io::Error::other(format!(
+                        "waker registration error: {}",
+                        e
+                    ))));
+                }
+            }
 
             // Double-check for data after registering waker to handle race conditions
             // This prevents deadlocks where DataDelivery arrives between initial check and waker registration
+            tracing::error!(
+                "🔍 SimTcpStream::poll_read connection_id={} double-checking for race condition data",
+                self.connection_id.0
+            );
+
             let mut temp_buf_recheck = vec![0u8; buf.remaining()];
             let bytes_read_recheck = sim
                 .read_from_connection(self.connection_id, &mut temp_buf_recheck)
@@ -194,14 +217,18 @@ impl AsyncRead for SimTcpStream {
                 let data_preview = String::from_utf8_lossy(
                     &temp_buf_recheck[..std::cmp::min(bytes_read_recheck, 20)],
                 );
-                tracing::info!(
-                    "SimTcpStream::poll_read connection_id={} found data on recheck: '{}' (race condition avoided)",
+                tracing::error!(
+                    "🏃 SimTcpStream::poll_read connection_id={} found data on recheck: '{}' (race condition avoided) - returning Poll::Ready",
                     self.connection_id.0,
                     data_preview
                 );
                 buf.put_slice(&temp_buf_recheck[..bytes_read_recheck]);
                 Poll::Ready(Ok(()))
             } else {
+                tracing::error!(
+                    "⏸️ SimTcpStream::poll_read connection_id={} no data on recheck - returning Poll::Pending",
+                    self.connection_id.0
+                );
                 Poll::Pending
             }
         }
@@ -244,17 +271,33 @@ impl AsyncWrite for SimTcpStream {
 
         // Use buffered send to maintain TCP ordering
         let data_preview = String::from_utf8_lossy(&buf[..std::cmp::min(buf.len(), 20)]);
-        tracing::info!(
-            "SimTcpStream::poll_write buffering {} bytes: '{}' for ordered delivery",
+        tracing::error!(
+            "📝 SimTcpStream::poll_write connection_id={} buffering {} bytes: '{}' for ordered delivery",
+            self.connection_id.0,
             buf.len(),
             data_preview
         );
 
         // Buffer the data for ordered processing instead of direct event scheduling
-        sim.buffer_send(self.connection_id, buf.to_vec())
-            .map_err(|e| io::Error::other(format!("buffer send error: {}", e)))?;
-
-        Poll::Ready(Ok(buf.len()))
+        match sim.buffer_send(self.connection_id, buf.to_vec()) {
+            Ok(_) => {
+                tracing::error!(
+                    "✅ SimTcpStream::poll_write connection_id={} successfully buffered {} bytes - returning Poll::Ready({})",
+                    self.connection_id.0,
+                    buf.len(),
+                    buf.len()
+                );
+                Poll::Ready(Ok(buf.len()))
+            }
+            Err(e) => {
+                tracing::error!(
+                    "❌ SimTcpStream::poll_write connection_id={} failed to buffer: {}",
+                    self.connection_id.0,
+                    e
+                );
+                Poll::Ready(Err(io::Error::other(format!("buffer send error: {}", e))))
+            }
+        }
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {

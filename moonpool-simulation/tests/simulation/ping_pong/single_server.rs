@@ -24,7 +24,7 @@ fn test_ping_pong_with_simulation_builder() {
             .register_workload("ping_pong_server", ping_pong_server)
             .register_workload("ping_pong_client", ping_pong_client)
             .set_iteration_control(IterationControl::FixedCount(1))
-            .set_debug_seeds(vec![3616945354941036101])
+            .set_debug_seeds(vec![15302657452152344853])
             .run()
             .await;
 
