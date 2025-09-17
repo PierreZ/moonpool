@@ -448,42 +448,6 @@ async fn get_reply<E>(&mut self, destination: &str, payload: Vec<u8>) -> Result<
 }
 ```
 
-### 3. Shutdown Coordination
-**File:** `moonpool-simulation/src/runner.rs:547-626`
-
-**Problem:** Tests hang when client completes before server.
-
-**Solution:** Runner sends shutdown signals:
-```rust
-// Create shutdown channels for each workload
-let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-shutdown_senders.push(shutdown_tx);
-
-// When first workload completes, signal all others
-if !shutdown_triggered {
-    for shutdown_sender in shutdown_senders.drain(..) {
-        let _ = shutdown_sender.send(());
-    }
-    shutdown_triggered = true;
-}
-```
-
-**Server implementation:**
-```rust
-async fn run(&mut self, mut shutdown_rx: tokio::sync::oneshot::Receiver<()>) -> SimulationResult<SimulationMetrics> {
-    loop {
-        select! {
-            shutdown_result = &mut shutdown_rx => {
-                self.transport.close().await;
-                return Ok(SimulationMetrics::default());
-            }
-            _ = self.do_transport_work() => {
-                // Continue processing
-            }
-        }
-    }
-}
-```
 
 ## Current Test Structure
 
@@ -539,20 +503,16 @@ async fn send_ping(&mut self) -> SimulationResult<()> {
 - `protocol.rs` - Sans I/O state machine with tests
 - `driver.rs` - Basic driver with retry logic (uses Phase 10 Peer pool)
 - `net_transport.rs` - Trait definition
-- `server.rs` - ServerTransport with shutdown support
+- `server.rs` - ServerTransport implementation
 - `client.rs` - ClientTransport with basic get_reply
-- `actors.rs` - Updated ping-pong actors with shutdown hooks
-- `runner.rs` - Shutdown coordination support
+- `actors.rs` - Updated ping-pong actors
 - `types.rs` - Transmit struct
 
 **Key Integration Points:**
 - **TransportDriver creates Peer instances**: Uses Phase 10 `Peer::new(network, time, task_provider, destination, config)`
 - **Driver uses Peer.send()**: Converts envelope bytes to Phase 10 raw byte send
 - **Driver polls Peer.try_receive()**: Converts raw bytes back to envelopes
-- **Shutdown coordination**: Uses same TaskProvider for transport tasks and Peer background actors
-
 **Key Features:**
-- Shutdown hooks (required or test hangs)
 - Basic timeout/retry (required for chaos)
 - Simple correlation IDs (required for request/response)
 - Server control flow fix (required to prevent deadlock)
@@ -584,54 +544,9 @@ fn test_protocol_retries_on_failure() {
 fn test_server_control_flow_fix() {
     // Verify server processes I/O on every tick
 }
-
-#[test]
-fn test_shutdown_coordination() {
-    // Verify clean shutdown with multiple workloads
-}
 ```
 
-### PR 2: Add Real Tokio Test
-**Size:** ~200 lines
-**Goal:** Validate transport works outside simulation
-
-**New File:**
-- `tests/simulation/ping_pong/tokio.rs`
-
-**Implementation:**
-```rust
-#[test]
-fn test_ping_pong_with_real_tokio() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    
-    runtime.block_on(async {
-        // Use TokioNetworkProvider (real TCP)
-        // Use TokioTimeProvider (real time)
-        // Run same ping-pong actors
-        // Verify it works without simulation
-    });
-}
-
-#[test]
-fn test_transport_with_real_network() {
-    // Test transport with actual TCP connections
-}
-
-#[test]
-fn test_timeouts_with_real_time() {
-    // Test timeout behavior with real time passage
-}
-```
-
-**Critical Validation:**
-- Ensures we're not accidentally depending on simulation-specific behavior
-- Catches timing assumptions
-- Validates real-world usage
-
-### PR 3: Make get_reply Self-Driving
+### PR 2: Make get_reply Self-Driving
 **Size:** ~100 lines
 **Goal:** Fix deadlock in request/response pattern
 
@@ -658,7 +573,7 @@ fn test_get_reply_with_tokio() {
 }
 ```
 
-### PR 4: Improve Chaos Resilience
+### PR 3: Improve Chaos Resilience
 **Size:** ~300 lines
 **Goal:** Handle more chaos scenarios
 
@@ -686,7 +601,7 @@ fn test_exponential_backoff() {
 }
 ```
 
-### PR 5: Add Peer Management to Driver
+### PR 4: Add Peer Management to Driver
 **Size:** ~200 lines
 **Goal:** Automatic peer lifecycle management
 
@@ -708,7 +623,7 @@ fn test_idle_connection_cleanup() {
 }
 ```
 
-### PR 6: Multi-Server Support
+### PR 5: Multi-Server Support
 **Size:** ~300 lines
 **Goal:** Test with multiple servers
 
@@ -762,28 +677,25 @@ fn test_server_failover() {
 - All tests pass with chaos enabled (no exceptions)
 - Get_reply never deadlocks under any conditions
 - Server handles connection failures gracefully
-- Clean shutdown under all failure scenarios
 - Performance acceptable under light chaos (not just heavy)
 
 ## Lessons Learned
 
-1. **Shutdown Coordination is Essential:** Without it, tests hang unpredictably
+1. **Transport Coordination is Essential:** Without proper coordination, tests hang unpredictably
 2. **Control Flow Bugs are Subtle:** Server I/O bug was hard to diagnose
 3. **get_reply Must Be Self-Driving:** Any blocking wait on transport needs driving
 4. **Chaos Testing Cannot Be Deferred:** Must be enabled from the start
-5. **Real Tokio Testing Catches Edge Cases:** Simulation can hide timing issues
-6. **Tight Coupling Makes Small PRs Hard:** Some components cannot be meaningfully separated
+5. **Tight Coupling Makes Small PRs Hard:** Some components cannot be meaningfully separated
 
 ## Dependencies Between PRs
 
 - **PR 1 → All Others:** Foundation required
-- **PR 2 → PR 3+:** Tokio test validates each improvement
-- **PR 3 → PR 4+:** Self-driving get_reply enables higher chaos
-- **PR 4 → PR 5+:** Resilience enables more complex scenarios
-- **PR 5 → PR 6:** Peer management enables multi-server
+- **PR 2 → PR 3+:** Self-driving get_reply enables higher chaos
+- **PR 3 → PR 4+:** Resilience enables more complex scenarios
+- **PR 4 → PR 5:** Peer management enables multi-server
 
 ## Summary
 
-This plan acknowledges that some complexity cannot be avoided - the transport layer has fundamental interdependencies that make very small PRs impossible. However, by building chaos resilience from the start and validating with real Tokio tests early, we can ensure each increment is solid and builds proper foundation for the next.
+This plan acknowledges that some complexity cannot be avoided - the transport layer has fundamental interdependencies that make very small PRs impossible. However, by building chaos resilience from the start, we can ensure each increment is solid and builds proper foundation for the next.
 
 The key insight is to front-load the essential complexity (PR 1) while maintaining rigorous testing standards, then iterate on improvements with smaller, focused PRs.

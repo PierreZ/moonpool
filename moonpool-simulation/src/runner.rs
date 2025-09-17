@@ -153,6 +153,8 @@ pub struct WorkloadTopology {
     pub my_ip: String,
     /// The IP addresses of all other peers in the simulation
     pub peer_ips: Vec<String>,
+    /// Shutdown signal that gets triggered when the first workload exits with Ok
+    pub shutdown_signal: tokio_util::sync::CancellationToken,
 }
 
 /// Type alias for workload function signature to reduce complexity.
@@ -462,6 +464,9 @@ impl SimulationBuilder {
 
             let start_time = Instant::now();
 
+            // Create shutdown signal for this iteration
+            let shutdown_signal = tokio_util::sync::CancellationToken::new();
+
             // Build topology information for each workload
             let all_ips: Vec<String> = self
                 .workloads
@@ -474,7 +479,11 @@ impl SimulationBuilder {
                 // Single workload - execute directly
                 let my_ip = self.workloads[0].ip_address.clone();
                 let peer_ips = all_ips.iter().filter(|ip| *ip != &my_ip).cloned().collect();
-                let topology = WorkloadTopology { my_ip, peer_ips };
+                let topology = WorkloadTopology {
+                    my_ip,
+                    peer_ips,
+                    shutdown_signal: shutdown_signal.clone(),
+                };
 
                 let time_provider = sim.time_provider();
                 let task_provider = sim.task_provider();
@@ -486,6 +495,15 @@ impl SimulationBuilder {
                     topology,
                 )
                 .await;
+
+                // For single workload, trigger shutdown signal if successful
+                if result.is_ok() {
+                    tracing::debug!(
+                        "Single workload completed successfully, triggering shutdown signal"
+                    );
+                    shutdown_signal.cancel();
+                }
+
                 vec![result]
             } else {
                 // Multiple workloads - spawn them and process events cooperatively
@@ -499,7 +517,11 @@ impl SimulationBuilder {
 
                     let my_ip = workload.ip_address.clone();
                     let peer_ips = all_ips.iter().filter(|ip| *ip != &my_ip).cloned().collect();
-                    let topology = WorkloadTopology { my_ip, peer_ips };
+                    let topology = WorkloadTopology {
+                        my_ip,
+                        peer_ips,
+                        shutdown_signal: shutdown_signal.clone(),
+                    };
 
                     let time_provider = sim.time_provider();
                     let task_provider = sim.task_provider();
@@ -517,6 +539,7 @@ impl SimulationBuilder {
                 let mut results = Vec::new();
                 let mut loop_count = 0;
                 let mut no_progress_count = 0;
+                let mut first_success_triggered = false;
                 while !handles.is_empty() {
                     loop_count += 1;
                     if loop_count % 100 == 0 {
@@ -558,6 +581,16 @@ impl SimulationBuilder {
                                     ))
                                 }
                             };
+
+                            // If this is the first successful workload, trigger shutdown signal
+                            if !first_success_triggered && result.is_ok() {
+                                tracing::debug!(
+                                    "First workload completed successfully, triggering shutdown signal"
+                                );
+                                shutdown_signal.cancel();
+                                first_success_triggered = true;
+                            }
+
                             results.push(result);
                         } else {
                             i += 1;

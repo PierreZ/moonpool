@@ -49,6 +49,11 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
         let max_backoff = Duration::from_millis(1000);
 
         loop {
+            // Check if shutdown signal has been triggered
+            if self.topology.shutdown_signal.is_cancelled() {
+                tracing::debug!("Server: Shutdown signal received, exiting gracefully");
+                return Ok(SimulationMetrics::default());
+            }
             // Try to bind to the server address
             tracing::debug!("Server: Attempting to bind to {}", server_addr);
             let listener = match self.network.bind(&server_addr).await {
@@ -118,6 +123,13 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
     /// Handle a single client session (ping-pong communication)
     async fn handle_client_session(&mut self, stream: &mut N::TcpStream) -> SimulationResult<()> {
         loop {
+            // Check if shutdown signal has been triggered before processing
+            if self.topology.shutdown_signal.is_cancelled() {
+                tracing::debug!(
+                    "Server: Shutdown signal received during session, exiting gracefully"
+                );
+                return Ok(());
+            }
             // Read message from client with timeout for chaos resilience
             tracing::info!("Server: About to read next message");
             let timeout = if buggify_with_prob!(0.02) {
@@ -140,8 +152,10 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
             }
 
             let read_future = stream.read(&mut buffer);
-            let bytes_read = match self.time.timeout(timeout, read_future).await? {
-                Ok(result) => {
+            let timeout_future = self.time.sleep(timeout);
+
+            let bytes_read = tokio::select! {
+                result = read_future => {
                     match result {
                         Ok(n) => {
                             if n == 0 {
@@ -162,7 +176,7 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
                         }
                     }
                 }
-                Err(_timeout) => {
+                _ = timeout_future => {
                     sometimes_assert!(
                         server_read_timeout,
                         true,
@@ -170,6 +184,10 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
                     );
                     tracing::debug!("Server: Read timeout - client may have disconnected");
                     break; // Timeout - exit gracefully
+                }
+                _ = self.topology.shutdown_signal.cancelled() => {
+                    tracing::debug!("Server: Shutdown signal received during read, exiting gracefully");
+                    return Ok(());
                 }
             };
 
@@ -206,9 +224,6 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
                     tracing::debug!("Server: PING handling failed: {:?}, exiting session", e);
                     break; // Exit gracefully on connection error
                 }
-            } else if message == "CLOSE" {
-                self.handle_close_message(stream).await?;
-                break; // Exit the loop
             } else {
                 // Unknown message type
                 tracing::warn!("Server: Received unknown message: {:?}", message);
@@ -295,36 +310,6 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
 
         Ok(())
     }
-
-    /// Handle a CLOSE message and send acknowledgment
-    async fn handle_close_message(&mut self, stream: &mut N::TcpStream) -> SimulationResult<()> {
-        tracing::debug!("Server: Received CLOSE message, shutting down");
-
-        always_assert!(
-            server_receives_close,
-            true,
-            "Server should receive CLOSE message to shutdown gracefully"
-        );
-
-        // Send BYE!! response and exit - may fail if client disconnects
-        tracing::debug!("Server: Sending CLOSE acknowledgment");
-        match stream.write_all(b"BYE!!").await {
-            Ok(_) => {
-                tracing::debug!("Server: Sent CLOSE acknowledgment, shutting down");
-            }
-            Err(e) => {
-                sometimes_assert!(
-                    server_bye_send_fails,
-                    true,
-                    "Server BYE send should sometimes fail during chaos testing"
-                );
-                tracing::debug!("Server: Failed to send CLOSE acknowledgment: {:?}", e);
-                // Continue shutdown regardless - client may have disconnected
-            }
-        }
-
-        Ok(())
-    }
 }
 
 /// Client actor for ping-pong communication using resilient Peer
@@ -389,9 +374,6 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
 
         // Send pings and receive pongs
         self.send_ping_pong_messages(&mut peer, ping_count).await?;
-
-        // Send CLOSE message and receive acknowledgment
-        self.send_close_and_receive_ack(&mut peer).await?;
 
         // Record successful round-trip communication
         always_assert!(
@@ -682,80 +664,6 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
                     tracing::debug!("Client: Timeout waiting for responses, returning early");
                     return Ok(()); // Return OK to avoid propagating timeout as error
                 }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Send CLOSE message and receive acknowledgment
-    async fn send_close_and_receive_ack(&self, peer: &mut Peer<N, T, TP>) -> SimulationResult<()> {
-        // Send CLOSE message to server
-        tracing::debug!("Client: Sending CLOSE message to server");
-        let mut close_data = [0u8; 128];
-        close_data[..6].copy_from_slice(b"CLOSE\n");
-
-        match peer.send(close_data.to_vec()) {
-            Ok(_) => {
-                tracing::debug!("Client: Successfully sent CLOSE message");
-                always_assert!(
-                    client_sends_close,
-                    true,
-                    "Client should be able to send CLOSE message"
-                );
-            }
-            Err(e) => {
-                sometimes_assert!(
-                    close_send_fails_during_chaos,
-                    true,
-                    "CLOSE send should sometimes fail during chaos testing"
-                );
-                tracing::debug!("Client: Failed to send CLOSE message: {:?}", e);
-                return Ok(()); // Return OK - connection cutting may prevent CLOSE
-            }
-        }
-
-        // Read server's acknowledgment with timeout for chaos resilience
-        tracing::debug!("Client: Reading server's CLOSE acknowledgment");
-        let timeout = Duration::from_secs(sim_random_range(2..5)); // Shorter timeout for CLOSE
-
-        let receive_future = peer.receive();
-        match self.time.timeout(timeout, receive_future).await? {
-            Ok(result) => match result {
-                Ok(data) => {
-                    let ack_message = std::str::from_utf8(&data).unwrap_or("INVALID");
-                    tracing::debug!("Client: Received acknowledgment: {:?}", ack_message);
-
-                    always_assert!(
-                        client_receives_bye,
-                        ack_message == "BYE!!",
-                        "Client should receive BYE acknowledgment from server"
-                    );
-                    always_assert!(
-                        bye_message_exact,
-                        &data == b"BYE!!",
-                        format!(
-                            "BYE message should be exact: expected 'BYE!!', got '{}'",
-                            String::from_utf8_lossy(&data)
-                        )
-                    );
-                }
-                Err(e) => {
-                    sometimes_assert!(
-                        close_ack_receive_fails,
-                        true,
-                        "CLOSE acknowledgment receive should sometimes fail during chaos testing"
-                    );
-                    tracing::debug!("Client: Failed to receive CLOSE acknowledgment: {:?}", e);
-                }
-            },
-            Err(_timeout) => {
-                sometimes_assert!(
-                    close_ack_timeout,
-                    true,
-                    "CLOSE acknowledgment should sometimes timeout during chaos testing"
-                );
-                tracing::debug!("Client: Timeout waiting for CLOSE acknowledgment");
             }
         }
 

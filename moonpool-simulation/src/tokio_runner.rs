@@ -151,6 +151,9 @@ impl TokioRunner {
 
         let start_time = Instant::now();
 
+        // Create shutdown signal for this execution
+        let shutdown_signal = tokio_util::sync::CancellationToken::new();
+
         // Build topology information for each workload
         let all_ips: Vec<String> = self
             .workloads
@@ -168,7 +171,11 @@ impl TokioRunner {
             let workload = &self.workloads[0];
             let my_ip = workload.ip_address.clone();
             let peer_ips = all_ips.iter().filter(|ip| *ip != &my_ip).cloned().collect();
-            let topology = WorkloadTopology { my_ip, peer_ips };
+            let topology = WorkloadTopology {
+                my_ip,
+                peer_ips,
+                shutdown_signal: shutdown_signal.clone(),
+            };
 
             let provider = TokioNetworkProvider::new();
             let time_provider = TokioTimeProvider::new();
@@ -176,6 +183,11 @@ impl TokioRunner {
 
             let result =
                 (workload.workload)(provider, time_provider, task_provider, topology).await;
+
+            // For single workload, trigger shutdown signal if successful
+            if result.is_ok() {
+                shutdown_signal.cancel();
+            }
 
             match result {
                 Ok(_) => successful += 1,
@@ -189,7 +201,11 @@ impl TokioRunner {
             for workload in &self.workloads {
                 let my_ip = workload.ip_address.clone();
                 let peer_ips = all_ips.iter().filter(|ip| *ip != &my_ip).cloned().collect();
-                let topology = WorkloadTopology { my_ip, peer_ips };
+                let topology = WorkloadTopology {
+                    my_ip,
+                    peer_ips,
+                    shutdown_signal: shutdown_signal.clone(),
+                };
 
                 let provider = TokioNetworkProvider::new();
                 let time_provider = TokioTimeProvider::new();
@@ -205,6 +221,7 @@ impl TokioRunner {
             }
 
             // Wait for all workloads to complete
+            let mut first_success_triggered = false;
             for (name, handle) in handles {
                 let result = match handle.await {
                     Ok(workload_result) => workload_result,
@@ -212,6 +229,12 @@ impl TokioRunner {
                         "Task panicked".to_string(),
                     )),
                 };
+
+                // If this is the first successful workload, trigger shutdown signal
+                if !first_success_triggered && result.is_ok() {
+                    shutdown_signal.cancel();
+                    first_success_triggered = true;
+                }
 
                 match result {
                     Ok(_) => successful += 1,
