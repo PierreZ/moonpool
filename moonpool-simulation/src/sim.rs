@@ -862,7 +862,7 @@ impl SimWorld {
                 // - Server writes to client: Server ProcessSendBuffer -> Client DataDelivery
                 // - Each DataDelivery specifies the TARGET connection to receive the data
                 let data_preview = String::from_utf8_lossy(&data[..std::cmp::min(data.len(), 20)]);
-                tracing::error!(
+                tracing::trace!(
                     "📦 Event::DataDelivery processing delivery of {} bytes: '{}' to connection {}",
                     data.len(),
                     data_preview,
@@ -879,7 +879,7 @@ impl SimWorld {
                     }
                     let buffer_after = conn.receive_buffer.len();
 
-                    tracing::error!(
+                    tracing::trace!(
                         "📦 DataDelivery: Added {} bytes to connection_id={} receive_buffer (before: {}, after: {})",
                         data.len(),
                         connection_id.0,
@@ -889,20 +889,20 @@ impl SimWorld {
 
                     // Wake any futures waiting to read from this connection
                     let has_waker = inner.wakers.read_wakers.contains_key(&connection_id);
-                    tracing::error!(
+                    tracing::trace!(
                         "📦 DataDelivery: Checking for read waker for connection_id={}, has_waker: {}",
                         connection_id.0,
                         has_waker
                     );
 
                     if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
-                        tracing::error!(
+                        tracing::trace!(
                             "🎯 DataDelivery: FOUND waker for connection_id={}, waking it up!",
                             connection_id.0
                         );
                         waker.wake();
                     } else {
-                        tracing::error!(
+                        tracing::trace!(
                             "❌ DataDelivery: NO WAKER found for connection_id={} - THIS IS THE PROBLEM!",
                             connection_id.0
                         );
@@ -910,7 +910,7 @@ impl SimWorld {
                         // Debug: Show all available wakers
                         let all_waker_ids: Vec<u64> =
                             inner.wakers.read_wakers.keys().map(|id| id.0).collect();
-                        tracing::error!(
+                        tracing::trace!(
                             "📋 DataDelivery: Available read wakers: {:?}",
                             all_waker_ids
                         );
