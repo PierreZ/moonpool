@@ -24,7 +24,7 @@ fn test_ping_pong_with_simulation_builder() {
             .set_randomization_ranges(NetworkRandomizationRanges::chaos_testing())
             .register_workload("ping_pong_server", ping_pong_server)
             .register_workload("ping_pong_client", ping_pong_client)
-            .set_iteration_control(IterationControl::UntilAllSometimesReached(100))
+            .set_iteration_control(IterationControl::UntilAllSometimesReached(10_000))
             .run()
             .await;
 
