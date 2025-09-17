@@ -364,15 +364,6 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
         );
         tracing::debug!("Client: Will connect to server at {}", server_addr);
 
-        // Add coordination sleep to allow server setup before client connects
-        tracing::debug!("Client: Sleeping for 100ms to allow server setup");
-        let start_time = self.time.now();
-        self.time
-            .sleep(std::time::Duration::from_millis(100))
-            .await?;
-        let _actual_sleep_time = self.time.now() - start_time;
-        tracing::debug!("Client: Sleep completed, connecting to server");
-
         // Generate a random number of pings to send
         let ping_count = if buggify_with_prob!(0.1) {
             tracing::debug!("Client: Buggify forcing high ping count to stress system");
