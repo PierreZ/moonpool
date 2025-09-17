@@ -54,6 +54,8 @@ pub mod sleep;
 pub mod task;
 /// Time provider abstraction for simulation and real time.
 pub mod time;
+/// Tokio-based runner for real-world execution.
+pub mod tokio_runner;
 
 // Public API exports
 pub use assertions::{AssertionStats, get_assertion_results, validate_assertion_contracts};
@@ -76,5 +78,6 @@ pub use sim::{SimWorld, WeakSimWorld};
 pub use sleep::SleepFuture;
 pub use task::{TaskProvider, tokio_provider::TokioTaskProvider};
 pub use time::{SimTimeProvider, TimeProvider, TokioTimeProvider};
+pub use tokio_runner::{TokioReport, TokioRunner};
 
 // Macros are automatically available at crate root when defined with #[macro_export]

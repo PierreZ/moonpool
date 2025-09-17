@@ -1,5 +1,6 @@
 use moonpool_simulation::{
     NetworkRandomizationRanges, SimulationBuilder, SimulationMetrics, SimulationResult,
+    TokioNetworkProvider, TokioRunner, TokioTaskProvider, TokioTimeProvider, WorkloadTopology,
     assertions::panic_on_assertion_violations, runner::IterationControl,
 };
 use tracing::Level;
@@ -60,6 +61,66 @@ async fn ping_pong_client(
     time_provider: moonpool_simulation::SimTimeProvider,
     task_provider: moonpool_simulation::TokioTaskProvider,
     topology: moonpool_simulation::WorkloadTopology,
+) -> SimulationResult<SimulationMetrics> {
+    let mut client_actor =
+        PingPongClientActor::new(provider, time_provider, task_provider, topology);
+    client_actor.run().await
+}
+
+#[test]
+fn test_ping_pong_with_tokio_runner() {
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_max_level(Level::INFO)
+        .try_init();
+
+    // Create single-threaded Tokio runtime for deterministic execution
+    let local_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build_local(Default::default())
+        .expect("Failed to build local runtime");
+
+    let report = local_runtime.block_on(async move {
+        TokioRunner::new()
+            .register_workload("ping_pong_server", tokio_ping_pong_server)
+            .register_workload("ping_pong_client", tokio_ping_pong_client)
+            .run()
+            .await
+    });
+
+    // Display the report
+    println!("{}", report);
+
+    // Validate that both workloads completed successfully
+    assert_eq!(
+        report.successful, 2,
+        "Both server and client should succeed"
+    );
+    assert_eq!(report.failed, 0, "No failures expected");
+    assert_eq!(report.success_rate(), 100.0);
+
+    println!("✅ TokioRunner ping-pong test completed successfully");
+}
+
+/// Adapter function to run server actor with TokioRunner signature
+async fn tokio_ping_pong_server(
+    provider: TokioNetworkProvider,
+    time_provider: TokioTimeProvider,
+    task_provider: TokioTaskProvider,
+    topology: WorkloadTopology,
+) -> SimulationResult<SimulationMetrics> {
+    let mut server_actor =
+        PingPongServerActor::new(provider, time_provider, task_provider, topology);
+    server_actor.run().await
+}
+
+/// Adapter function to run client actor with TokioRunner signature
+async fn tokio_ping_pong_client(
+    provider: TokioNetworkProvider,
+    time_provider: TokioTimeProvider,
+    task_provider: TokioTaskProvider,
+    topology: WorkloadTopology,
 ) -> SimulationResult<SimulationMetrics> {
     let mut client_actor =
         PingPongClientActor::new(provider, time_provider, task_provider, topology);
