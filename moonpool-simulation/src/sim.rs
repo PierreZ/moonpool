@@ -450,8 +450,9 @@ impl SimWorld {
                 inner.next_sequence += 1;
                 let scheduled_event = ScheduledEvent::new(
                     scheduled_time,
-                    Event::ProcessSendBuffer {
+                    Event::Network {
                         connection_id: connection_id.0,
+                        operation: crate::NetworkOperation::ProcessSendBuffer,
                     },
                     sequence,
                 );
@@ -680,7 +681,7 @@ impl SimWorld {
         let task_id = self.generate_task_id();
 
         // Schedule a wake event for this task
-        self.schedule_event(Event::Wake { task_id }, duration);
+        self.schedule_event(Event::Timer { task_id }, duration);
 
         // Return a future that will be woken when the event is processed
         SleepFuture::new(self.downgrade(), task_id)
@@ -810,7 +811,7 @@ impl SimWorld {
 
         // Process different event types
         match event {
-            Event::Wake { task_id } => {
+            Event::Timer { task_id } => {
                 // Phase 2d: Real task waking implementation
 
                 // Mark this task as awakened
@@ -821,189 +822,206 @@ impl SimWorld {
                     waker.wake();
                 }
             }
-            Event::BindComplete { listener_id: _ } => {
-                // Network bind completed - forward to network module for handling
-                // For Phase 2c, this is just acknowledgment
-                // In Phase 2d, this will wake futures and update state
+            Event::Connection { id, state } => {
+                match state {
+                    crate::ConnectionStateChange::BindComplete => {
+                        // Network bind completed - forward to network module for handling
+                        // For Phase 2c, this is just acknowledgment
+                        // In Phase 2d, this will wake futures and update state
+                    }
+                    crate::ConnectionStateChange::ConnectionReady => {
+                        // Connection establishment completed - forward to network module for handling
+                        // For Phase 2c, this is just acknowledgment
+                        // In Phase 2d, this will wake futures and update state
+                    }
+                    crate::ConnectionStateChange::ClogClear => {
+                        // Phase 7: Clear clog for the specified connection and wake any waiting tasks
+                        let connection_id = ConnectionId(id);
+
+                        inner.network.connection_clogs.remove(&connection_id);
+                        if let Some(wakers) = inner.wakers.clog_wakers.remove(&connection_id) {
+                            for waker in wakers {
+                                waker.wake();
+                            }
+                        }
+                    }
+                }
             }
-            Event::ConnectionReady { connection_id: _ } => {
-                // Connection establishment completed - forward to network module for handling
-                // For Phase 2c, this is just acknowledgment
-                // In Phase 2d, this will wake futures and update state
-            }
-            Event::DataDelivery {
+            Event::Network {
                 connection_id,
-                data,
+                operation,
             } => {
-                // **DataDelivery Event Handler**: Core TCP data transfer implementation
-                //
-                // This event handler completes the final step of TCP message delivery by
-                // transferring data from the sender's send_buffer to the receiver's receive_buffer.
-                // It's the endpoint of the TCP ordering pipeline that maintains reliable delivery.
-                //
-                // Event Flow Context:
-                // 1. Application calls stream.write_all(data)  -> buffer_send(data)
-                // 2. buffer_send() adds to send_buffer        -> ProcessSendBuffer event scheduled
-                // 3. ProcessSendBuffer dequeues data          -> DataDelivery event scheduled (THIS EVENT)
-                // 4. DataDelivery writes to receive_buffer   -> Application stream.read() succeeds
-                //
-                // Key Responsibilities:
-                // - **Data Transfer**: Move bytes from network simulation to connection buffer
-                // - **Async Notification**: Wake any read operations waiting for this data
-                // - **Reliability**: Ensure no data is lost in transfer
-                // - **Ordering**: Maintain FIFO delivery within the connection
-                //
-                // Critical Fix (Phase 6): This handler now delivers data to the CORRECT connection
-                // - Previous bug: delivered to paired_connection (wrong direction!)
-                // - Current fix: delivers directly to specified connection_id (correct!)
-                //
-                // Connection ID Routing:
-                // - Client writes to server: Client ProcessSendBuffer -> Server DataDelivery
-                // - Server writes to client: Server ProcessSendBuffer -> Client DataDelivery
-                // - Each DataDelivery specifies the TARGET connection to receive the data
-                let data_preview = String::from_utf8_lossy(&data[..std::cmp::min(data.len(), 20)]);
-                tracing::info!(
-                    "Event::DataDelivery processing delivery of {} bytes: '{}' to connection {}",
-                    data.len(),
-                    data_preview,
-                    connection_id
-                );
-
-                let connection_id = ConnectionId(connection_id);
-
-                // Write data directly to the specified connection's receive buffer
-                if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-                    for &byte in &data {
-                        conn.receive_buffer.push_back(byte);
-                    }
-
-                    // Wake any futures waiting to read from this connection
-                    if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
+                match operation {
+                    crate::NetworkOperation::DataDelivery { data } => {
+                        // **DataDelivery Event Handler**: Core TCP data transfer implementation
+                        //
+                        // This event handler completes the final step of TCP message delivery by
+                        // transferring data from the sender's send_buffer to the receiver's receive_buffer.
+                        // It's the endpoint of the TCP ordering pipeline that maintains reliable delivery.
+                        //
+                        // Event Flow Context:
+                        // 1. Application calls stream.write_all(data)  -> buffer_send(data)
+                        // 2. buffer_send() adds to send_buffer        -> ProcessSendBuffer event scheduled
+                        // 3. ProcessSendBuffer dequeues data          -> DataDelivery event scheduled (THIS EVENT)
+                        // 4. DataDelivery writes to receive_buffer   -> Application stream.read() succeeds
+                        //
+                        // Key Responsibilities:
+                        // - **Data Transfer**: Move bytes from network simulation to connection buffer
+                        // - **Async Notification**: Wake any read operations waiting for this data
+                        // - **Reliability**: Ensure no data is lost in transfer
+                        // - **Ordering**: Maintain FIFO delivery within the connection
+                        //
+                        // Critical Fix (Phase 6): This handler now delivers data to the CORRECT connection
+                        // - Previous bug: delivered to paired_connection (wrong direction!)
+                        // - Current fix: delivers directly to specified connection_id (correct!)
+                        //
+                        // Connection ID Routing:
+                        // - Client writes to server: Client ProcessSendBuffer -> Server DataDelivery
+                        // - Server writes to client: Server ProcessSendBuffer -> Client DataDelivery
+                        // - Each DataDelivery specifies the TARGET connection to receive the data
+                        let data_preview =
+                            String::from_utf8_lossy(&data[..std::cmp::min(data.len(), 20)]);
                         tracing::info!(
-                            "DataDelivery waking up read waker for connection_id={}",
-                            connection_id.0
-                        );
-                        waker.wake();
-                    } else {
-                        tracing::info!(
-                            "DataDelivery no waker found for connection_id={}",
-                            connection_id.0
-                        );
-                    }
-                }
-            }
-            // Process the next message from a connection's send buffer.
-            //
-            // This event handler is the core of the TCP ordering fix. It ensures that
-            // messages are sent in FIFO order by processing the send buffer sequentially.
-            //
-            // Event Processing Flow:
-            // 1. Dequeue Message: Remove the next message from send_buffer
-            // 2. Apply Delay Logic:
-            //    - If more messages remain: minimal delay (1ns) for immediate processing
-            //    - If this is the last message: full network delay simulation
-            // 3. Schedule Delivery: Create DataDelivery event to paired connection
-            // 4. Continue Processing: If more messages remain, schedule next ProcessSendBuffer
-            // 5. Mark Idle: If buffer empty, set send_in_progress = false
-            //
-            // TCP Ordering Guarantee:
-            // The key insight is that within a connection, we want FIFO ordering but still
-            // need realistic network delays. The solution:
-            //
-            // Message Flow Timeline:
-            // T=0ms:  buffer_send("A") -> send_buffer = ["A"]          -> ProcessSendBuffer scheduled
-            // T=1ms:  buffer_send("B") -> send_buffer = ["A", "B"]     -> (ProcessSendBuffer already active)
-            // T=2ms:  buffer_send("C") -> send_buffer = ["A","B","C"]  -> (ProcessSendBuffer already active)
-            //
-            // T=5ms:  ProcessSendBuffer -> pop "A", 2 msgs remaining   -> DataDelivery("A") @ T=6ms (1ns delay)
-            // T=6ms:  ProcessSendBuffer -> pop "B", 1 msg remaining    -> DataDelivery("B") @ T=7ms (1ns delay)
-            // T=7ms:  ProcessSendBuffer -> pop "C", 0 msgs remaining   -> DataDelivery("C") @ T=57ms (50ms delay)
-            //
-            // Result: A arrives at T=6ms, B arrives at T=7ms, C arrives at T=57ms ✅ ORDERED
-            //
-            // This preserves both ordering (A→B→C) and realistic network delays (C gets full latency).
-            Event::ProcessSendBuffer { connection_id } => {
-                let connection_id = ConnectionId(connection_id);
-
-                if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-                    if let Some(data) = conn.send_buffer.pop_front() {
-                        // For TCP ordering, we need to maintain connection-level delays
-                        // Check if there are more messages AFTER popping the current one
-                        let has_more_messages = !conn.send_buffer.is_empty();
-                        let base_delay = if has_more_messages {
-                            // More messages in buffer, minimal delay for immediate processing
-                            std::time::Duration::from_nanos(1)
-                        } else {
-                            // This is the last message in buffer, apply network delay
-                            inner.network.config.latency.write_latency.sample()
-                        };
-
-                        // Ensure TCP ordering: schedule at next available time for this connection
-                        let earliest_time =
-                            std::cmp::max(inner.current_time + base_delay, conn.next_send_time);
-                        let actual_delay = earliest_time - inner.current_time;
-
-                        // Update next available send time for this connection
-                        conn.next_send_time = earliest_time + std::time::Duration::from_nanos(1);
-
-                        tracing::info!(
-                            "Event::ProcessSendBuffer processing {} bytes from connection {} with delay {:?}, has_more_messages={} (TCP ordering: earliest_time={:?})",
+                            "Event::DataDelivery processing delivery of {} bytes: '{}' to connection {}",
                             data.len(),
-                            connection_id.0,
-                            actual_delay,
-                            has_more_messages,
-                            earliest_time
+                            data_preview,
+                            connection_id
                         );
 
-                        // Schedule delivery to paired connection
-                        if let Some(paired_id) = conn.paired_connection {
-                            let scheduled_time = earliest_time;
-                            let sequence = inner.next_sequence;
-                            inner.next_sequence += 1;
+                        let connection_id = ConnectionId(connection_id);
 
-                            let scheduled_event = ScheduledEvent::new(
-                                scheduled_time,
-                                Event::DataDelivery {
-                                    connection_id: paired_id.0,
-                                    data,
-                                },
-                                sequence,
-                            );
-                            inner.event_queue.schedule(scheduled_event);
+                        // Write data directly to the specified connection's receive buffer
+                        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
+                            for &byte in &data {
+                                conn.receive_buffer.push_back(byte);
+                            }
+
+                            // Wake any futures waiting to read from this connection
+                            if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
+                                tracing::info!(
+                                    "DataDelivery waking up read waker for connection_id={}",
+                                    connection_id.0
+                                );
+                                waker.wake();
+                            } else {
+                                tracing::info!(
+                                    "DataDelivery no waker found for connection_id={}",
+                                    connection_id.0
+                                );
+                            }
                         }
-
-                        // If more messages in buffer, schedule next processing immediately to maintain throughput
-                        if !conn.send_buffer.is_empty() {
-                            let scheduled_time = inner.current_time; // Process immediately
-                            let sequence = inner.next_sequence;
-                            inner.next_sequence += 1;
-
-                            let scheduled_event = ScheduledEvent::new(
-                                scheduled_time,
-                                Event::ProcessSendBuffer {
-                                    connection_id: connection_id.0,
-                                },
-                                sequence,
-                            );
-                            inner.event_queue.schedule(scheduled_event);
-                        } else {
-                            // Mark sender as no longer active
-                            conn.send_in_progress = false;
-                        }
-                    } else {
-                        // No more messages, mark sender as inactive
-                        conn.send_in_progress = false;
                     }
-                }
-            }
-            Event::ClogClear { connection_id } => {
-                // Phase 7: Clear clog for the specified connection and wake any waiting tasks
-                let connection_id = ConnectionId(connection_id);
+                    // Process the next message from a connection's send buffer.
+                    //
+                    // This event handler is the core of the TCP ordering fix. It ensures that
+                    // messages are sent in FIFO order by processing the send buffer sequentially.
+                    //
+                    // Event Processing Flow:
+                    // 1. Dequeue Message: Remove the next message from send_buffer
+                    // 2. Apply Delay Logic:
+                    //    - If more messages remain: minimal delay (1ns) for immediate processing
+                    //    - If this is the last message: full network delay simulation
+                    // 3. Schedule Delivery: Create DataDelivery event to paired connection
+                    // 4. Continue Processing: If more messages remain, schedule next ProcessSendBuffer
+                    // 5. Mark Idle: If buffer empty, set send_in_progress = false
+                    //
+                    // TCP Ordering Guarantee:
+                    // The key insight is that within a connection, we want FIFO ordering but still
+                    // need realistic network delays. The solution:
+                    //
+                    // Message Flow Timeline:
+                    // T=0ms:  buffer_send("A") -> send_buffer = ["A"]          -> ProcessSendBuffer scheduled
+                    // T=1ms:  buffer_send("B") -> send_buffer = ["A", "B"]     -> (ProcessSendBuffer already active)
+                    // T=2ms:  buffer_send("C") -> send_buffer = ["A","B","C"]  -> (ProcessSendBuffer already active)
+                    //
+                    // T=5ms:  ProcessSendBuffer -> pop "A", 2 msgs remaining   -> DataDelivery("A") @ T=6ms (1ns delay)
+                    // T=6ms:  ProcessSendBuffer -> pop "B", 1 msg remaining    -> DataDelivery("B") @ T=7ms (1ns delay)
+                    // T=7ms:  ProcessSendBuffer -> pop "C", 0 msgs remaining   -> DataDelivery("C") @ T=57ms (50ms delay)
+                    //
+                    // Result: A arrives at T=6ms, B arrives at T=7ms, C arrives at T=57ms ✅ ORDERED
+                    //
+                    // This preserves both ordering (A→B→C) and realistic network delays (C gets full latency).
+                    crate::NetworkOperation::ProcessSendBuffer => {
+                        let connection_id = ConnectionId(connection_id);
 
-                inner.network.connection_clogs.remove(&connection_id);
-                if let Some(wakers) = inner.wakers.clog_wakers.remove(&connection_id) {
-                    for waker in wakers {
-                        waker.wake();
+                        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
+                            if let Some(data) = conn.send_buffer.pop_front() {
+                                // For TCP ordering, we need to maintain connection-level delays
+                                // Check if there are more messages AFTER popping the current one
+                                let has_more_messages = !conn.send_buffer.is_empty();
+                                let base_delay = if has_more_messages {
+                                    // More messages in buffer, minimal delay for immediate processing
+                                    std::time::Duration::from_nanos(1)
+                                } else {
+                                    // This is the last message in buffer, apply network delay
+                                    crate::network::config::sample_duration(
+                                        &inner.network.config.write_latency,
+                                    )
+                                };
+
+                                // Ensure TCP ordering: schedule at next available time for this connection
+                                let earliest_time = std::cmp::max(
+                                    inner.current_time + base_delay,
+                                    conn.next_send_time,
+                                );
+                                let actual_delay = earliest_time - inner.current_time;
+
+                                // Update next available send time for this connection
+                                conn.next_send_time =
+                                    earliest_time + std::time::Duration::from_nanos(1);
+
+                                tracing::info!(
+                                    "Event::ProcessSendBuffer processing {} bytes from connection {} with delay {:?}, has_more_messages={} (TCP ordering: earliest_time={:?})",
+                                    data.len(),
+                                    connection_id.0,
+                                    actual_delay,
+                                    has_more_messages,
+                                    earliest_time
+                                );
+
+                                // Schedule delivery to paired connection
+                                if let Some(paired_id) = conn.paired_connection {
+                                    let scheduled_time = earliest_time;
+                                    let sequence = inner.next_sequence;
+                                    inner.next_sequence += 1;
+
+                                    let scheduled_event = ScheduledEvent::new(
+                                        scheduled_time,
+                                        Event::Network {
+                                            connection_id: paired_id.0,
+                                            operation: crate::NetworkOperation::DataDelivery {
+                                                data,
+                                            },
+                                        },
+                                        sequence,
+                                    );
+                                    inner.event_queue.schedule(scheduled_event);
+                                }
+
+                                // If more messages in buffer, schedule next processing immediately to maintain throughput
+                                if !conn.send_buffer.is_empty() {
+                                    let scheduled_time = inner.current_time; // Process immediately
+                                    let sequence = inner.next_sequence;
+                                    inner.next_sequence += 1;
+
+                                    let scheduled_event = ScheduledEvent::new(
+                                        scheduled_time,
+                                        Event::Network {
+                                            connection_id: connection_id.0,
+                                            operation: crate::NetworkOperation::ProcessSendBuffer,
+                                        },
+                                        sequence,
+                                    );
+                                    inner.event_queue.schedule(scheduled_event);
+                                } else {
+                                    // Mark sender as no longer active
+                                    conn.send_in_progress = false;
+                                }
+                            } else {
+                                // No more messages, mark sender as inactive
+                                conn.send_in_progress = false;
+                            }
+                        }
                     }
                 }
             }
@@ -1094,7 +1112,7 @@ impl SimWorld {
     /// Check if a write should be clogged based on probability
     pub fn should_clog_write(&self, connection_id: ConnectionId) -> bool {
         let inner = self.inner.borrow();
-        let config = &inner.network.config.clogging;
+        let config = &inner.network.config;
 
         // Skip if already clogged
         if let Some(clog_state) = inner.network.connection_clogs.get(&connection_id) {
@@ -1102,15 +1120,15 @@ impl SimWorld {
         }
 
         // Check probability
-        config.probability > 0.0 && sim_random::<f64>() < config.probability
+        config.fault_probability > 0.0 && sim_random::<f64>() < config.fault_probability
     }
 
     /// Clog a connection's write operations
     pub fn clog_write(&self, connection_id: ConnectionId) {
         let mut inner = self.inner.borrow_mut();
-        let config = &inner.network.config.clogging;
+        let config = &inner.network.config;
 
-        let clog_duration = config.duration.sample();
+        let clog_duration = crate::network::config::sample_duration(&config.fault_duration);
         let expires_at = inner.current_time + clog_duration;
         inner
             .network
@@ -1118,8 +1136,9 @@ impl SimWorld {
             .insert(connection_id, ClogState { expires_at });
 
         // Schedule an event to clear this clog
-        let clear_event = Event::ClogClear {
-            connection_id: connection_id.0,
+        let clear_event = Event::Connection {
+            id: connection_id.0,
+            state: crate::ConnectionStateChange::ClogClear,
         };
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
@@ -1172,7 +1191,7 @@ impl SimWorld {
     /// Check if a connection should be cut based on probability and limits
     pub fn should_cut_connection(&self, connection_id: ConnectionId) -> bool {
         let inner = self.inner.borrow();
-        let config = &inner.network.config.cutting;
+        let config = &inner.network.config;
 
         // Skip if already cut
         if inner.network.cut_connections.contains_key(&connection_id) {
@@ -1180,7 +1199,7 @@ impl SimWorld {
         }
 
         // Check max cuts limit
-        if let Some(max_cuts) = config.max_cuts_per_connection {
+        if let Some(max_cuts) = config.max_faults_per_connection {
             // Count previous cuts for this connection
             let previous_cuts = inner
                 .network
@@ -1194,16 +1213,17 @@ impl SimWorld {
         }
 
         // Probability check
-        sim_random::<f64>() < config.probability
+        sim_random::<f64>() < config.fault_probability
     }
 
     /// Cut a connection and store it for later restoration
     pub fn cut_connection(&self, connection_id: ConnectionId) {
         let mut inner = self.inner.borrow_mut();
-        let reconnect_delay = inner.network.config.cutting.reconnect_delay.clone();
+        let reconnect_delay_range = inner.network.config.fault_duration.clone();
 
         if let Some(connection_state) = inner.network.connections.remove(&connection_id) {
-            let reconnect_delay_sample = reconnect_delay.sample();
+            let reconnect_delay_sample =
+                crate::network::config::sample_duration(&reconnect_delay_range);
             let reconnect_at = inner.current_time + reconnect_delay_sample;
 
             // Count existing cuts for this connection
@@ -1287,10 +1307,10 @@ impl SimWorld {
 
     /// Helper method for use with SimInner - randomly cut connections
     fn randomly_cut_connections_with_inner(inner: &mut SimInner) {
-        let cutting_config = inner.network.config.cutting.clone();
+        let cutting_config = &inner.network.config;
 
         // Skip if cutting is disabled
-        if cutting_config.probability == 0.0 {
+        if cutting_config.fault_probability == 0.0 {
             return;
         }
 
@@ -1303,7 +1323,7 @@ impl SimWorld {
             }
 
             // Check max cuts limit
-            if let Some(max_cuts) = cutting_config.max_cuts_per_connection {
+            if let Some(max_cuts) = cutting_config.max_faults_per_connection {
                 let previous_cuts = inner
                     .network
                     .cut_connections
@@ -1316,10 +1336,11 @@ impl SimWorld {
             }
 
             // Probability check
-            if sim_random::<f64>() < cutting_config.probability
+            if sim_random::<f64>() < cutting_config.fault_probability
                 && let Some(connection_state) = inner.network.connections.remove(&connection_id)
             {
-                let reconnect_delay = cutting_config.reconnect_delay.sample();
+                let reconnect_delay =
+                    crate::network::config::sample_duration(&cutting_config.fault_duration);
                 let reconnect_at = inner.current_time + reconnect_delay;
 
                 let cut_count = inner
@@ -1501,7 +1522,7 @@ mod tests {
         assert_eq!(sim.pending_event_count(), 0);
 
         // Schedule an event
-        sim.schedule_event(Event::Wake { task_id: 1 }, Duration::from_millis(100));
+        sim.schedule_event(Event::Timer { task_id: 1 }, Duration::from_millis(100));
 
         assert!(sim.has_pending_events());
         assert_eq!(sim.pending_event_count(), 1);
@@ -1520,9 +1541,9 @@ mod tests {
         let mut sim = SimWorld::new();
 
         // Schedule multiple events
-        sim.schedule_event(Event::Wake { task_id: 3 }, Duration::from_millis(300));
-        sim.schedule_event(Event::Wake { task_id: 1 }, Duration::from_millis(100));
-        sim.schedule_event(Event::Wake { task_id: 2 }, Duration::from_millis(200));
+        sim.schedule_event(Event::Timer { task_id: 3 }, Duration::from_millis(300));
+        sim.schedule_event(Event::Timer { task_id: 1 }, Duration::from_millis(100));
+        sim.schedule_event(Event::Timer { task_id: 2 }, Duration::from_millis(200));
 
         assert_eq!(sim.pending_event_count(), 3);
 
@@ -1545,9 +1566,9 @@ mod tests {
         let mut sim = SimWorld::new();
 
         // Schedule multiple events
-        sim.schedule_event(Event::Wake { task_id: 1 }, Duration::from_millis(100));
-        sim.schedule_event(Event::Wake { task_id: 2 }, Duration::from_millis(200));
-        sim.schedule_event(Event::Wake { task_id: 3 }, Duration::from_millis(300));
+        sim.schedule_event(Event::Timer { task_id: 1 }, Duration::from_millis(100));
+        sim.schedule_event(Event::Timer { task_id: 2 }, Duration::from_millis(200));
+        sim.schedule_event(Event::Timer { task_id: 3 }, Duration::from_millis(300));
 
         // Run until all events are processed
         sim.run_until_empty();
@@ -1561,7 +1582,7 @@ mod tests {
         let mut sim = SimWorld::new();
 
         // Schedule event at specific time (not relative to current time)
-        sim.schedule_event_at(Event::Wake { task_id: 1 }, Duration::from_millis(500));
+        sim.schedule_event_at(Event::Timer { task_id: 1 }, Duration::from_millis(500));
 
         // Current time is still zero
         assert_eq!(sim.current_time(), Duration::ZERO);
@@ -1582,7 +1603,7 @@ mod tests {
         assert_eq!(weak.current_time().unwrap(), Duration::ZERO);
 
         // Schedule event through weak reference
-        weak.schedule_event(Event::Wake { task_id: 1 }, Duration::from_millis(100))
+        weak.schedule_event(Event::Timer { task_id: 1 }, Duration::from_millis(100))
             .unwrap();
 
         // Verify event was scheduled
@@ -1597,7 +1618,7 @@ mod tests {
             Err(SimulationError::SimulationShutdown)
         );
         assert_eq!(
-            weak.schedule_event(Event::Wake { task_id: 2 }, Duration::from_millis(200)),
+            weak.schedule_event(Event::Timer { task_id: 2 }, Duration::from_millis(200)),
             Err(SimulationError::SimulationShutdown)
         );
     }
@@ -1607,9 +1628,9 @@ mod tests {
         let mut sim = SimWorld::new();
 
         // Schedule events at the same time - should be processed in sequence order
-        sim.schedule_event(Event::Wake { task_id: 2 }, Duration::from_millis(100));
-        sim.schedule_event(Event::Wake { task_id: 1 }, Duration::from_millis(100));
-        sim.schedule_event(Event::Wake { task_id: 3 }, Duration::from_millis(100));
+        sim.schedule_event(Event::Timer { task_id: 2 }, Duration::from_millis(100));
+        sim.schedule_event(Event::Timer { task_id: 1 }, Duration::from_millis(100));
+        sim.schedule_event(Event::Timer { task_id: 3 }, Duration::from_millis(100));
 
         // All events are at the same time, but should be processed in the order they were scheduled
         // due to sequence numbers

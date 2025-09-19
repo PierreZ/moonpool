@@ -1,7 +1,4 @@
-use moonpool_simulation::{
-    LatencyRange, NetworkConfiguration, NetworkProvider, NetworkRandomizationRanges, SimWorld,
-    TcpListenerTrait,
-};
+use moonpool_simulation::{NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
@@ -101,10 +98,16 @@ fn test_custom_latency_configuration() {
 
     local_runtime.block_on(async move {
         // Create custom configuration with specific latency ranges
-        let mut config = NetworkConfiguration::default();
-        config.latency.bind_latency = LatencyRange::fixed(Duration::from_millis(5));
-        config.latency.accept_latency = LatencyRange::fixed(Duration::from_millis(10));
-        config.latency.write_latency = LatencyRange::fixed(Duration::from_millis(2));
+        let config = NetworkConfiguration {
+            bind_latency: Duration::from_millis(5)..Duration::from_millis(5),
+            accept_latency: Duration::from_millis(10)..Duration::from_millis(10),
+            connect_latency: Duration::from_millis(1)..Duration::from_millis(1),
+            read_latency: Duration::from_micros(10)..Duration::from_micros(10),
+            write_latency: Duration::from_millis(2)..Duration::from_millis(2),
+            fault_probability: 0.0,
+            fault_duration: Duration::ZERO..Duration::ZERO,
+            max_faults_per_connection: None,
+        };
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
@@ -142,11 +145,16 @@ fn test_latency_range_sampling() {
 
     local_runtime.block_on(async move {
         // Test multiple runs to verify latency variance with jitter
-        let mut config = NetworkConfiguration::default();
-        config.latency.bind_latency = LatencyRange::new(
-            Duration::from_millis(1),
-            Duration::from_millis(5), // 0-5ms jitter
-        );
+        let config = NetworkConfiguration {
+            bind_latency: Duration::from_millis(1)..Duration::from_millis(6), // 1-6ms range
+            accept_latency: Duration::from_millis(1)..Duration::from_millis(6),
+            connect_latency: Duration::from_millis(1)..Duration::from_millis(6),
+            read_latency: Duration::from_micros(10)..Duration::from_micros(10),
+            write_latency: Duration::from_millis(1)..Duration::from_millis(6),
+            fault_probability: 0.0,
+            fault_duration: Duration::ZERO..Duration::ZERO,
+            max_faults_per_connection: None,
+        };
 
         let mut execution_times = Vec::new();
 
@@ -192,30 +200,17 @@ fn test_network_randomization_ranges() {
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
-        // Create custom randomization ranges with tight constraints for predictable testing
-        let custom_ranges = NetworkRandomizationRanges {
-            bind_base_range: 1000..1001,              // Exactly 1ms (1000µs)
-            bind_jitter_range: 1..2,                  // Minimal jitter
-            accept_base_range: 2000..2001,            // Exactly 2ms (2000µs)
-            accept_jitter_range: 1..2,                // Minimal jitter
-            connect_base_range: 3000..3001,           // Exactly 3ms (3000µs)
-            connect_jitter_range: 1..2,               // Minimal jitter
-            read_base_range: 100..101,                // Exactly 100µs
-            read_jitter_range: 1..2,                  // Minimal jitter
-            write_base_range: 500..501,               // Exactly 500µs
-            write_jitter_range: 1..2,                 // Minimal jitter
-            clogging_probability_range: 0.0..0.01,    // Almost no clogging
-            clogging_base_duration_range: 1..2,       // Minimal duration
-            clogging_jitter_duration_range: 1..2,     // Minimal duration
-            cutting_probability_range: 0.0..0.001,    // Almost no cutting
-            cutting_reconnect_base_range: 1000..1001, // Minimal reconnect delay
-            cutting_reconnect_jitter_range: 1..2,     // Minimal jitter
-            cutting_max_cuts_range: 1..2,             // Max 1 cut per connection
+        // Create custom configuration with predictable latencies
+        let config = NetworkConfiguration {
+            bind_latency: Duration::from_millis(1)..Duration::from_millis(1),
+            accept_latency: Duration::from_millis(2)..Duration::from_millis(2),
+            connect_latency: Duration::from_millis(3)..Duration::from_millis(3),
+            read_latency: Duration::from_micros(100)..Duration::from_micros(100),
+            write_latency: Duration::from_micros(500)..Duration::from_micros(500),
+            fault_probability: 0.0,
+            fault_duration: Duration::ZERO..Duration::ZERO,
+            max_faults_per_connection: None,
         };
-
-        // Create network configuration using custom ranges
-        moonpool_simulation::set_sim_seed(42); // Deterministic seed
-        let config = NetworkConfiguration::random_with_ranges(&custom_ranges);
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
@@ -256,33 +251,12 @@ fn test_randomization_ranges_produce_variance() {
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
-        // Create ranges with high variance to test randomization
-        let high_variance_ranges = NetworkRandomizationRanges {
-            bind_base_range: 500..5000,            // 0.5ms to 5ms variance
-            bind_jitter_range: 100..1000,          // 0.1ms to 1ms jitter
-            accept_base_range: 1000..10000,        // 1ms to 10ms variance
-            accept_jitter_range: 500..2000,        // 0.5ms to 2ms jitter
-            connect_base_range: 2000..20000,       // 2ms to 20ms variance
-            connect_jitter_range: 1000..3000,      // 1ms to 3ms jitter
-            read_base_range: 50..500,              // 50µs to 500µs
-            read_jitter_range: 10..100,            // 10µs to 100µs
-            write_base_range: 100..1000,           // 100µs to 1ms
-            write_jitter_range: 50..500,           // 50µs to 500µs
-            clogging_probability_range: 0.0..0.01, // Minimal clogging for this test
-            clogging_base_duration_range: 1..2,
-            clogging_jitter_duration_range: 1..2,
-            cutting_probability_range: 0.0..0.001, // Minimal cutting for this test
-            cutting_reconnect_base_range: 1000..2000, // 1-2ms reconnect delay
-            cutting_reconnect_jitter_range: 100..200, // 100-200µs jitter
-            cutting_max_cuts_range: 1..3,          // 1-2 cuts per connection max
-        };
-
         let mut execution_times = Vec::new();
 
         // Run multiple iterations with different seeds to test variance
         for seed in [42, 123, 456, 789, 999] {
             moonpool_simulation::set_sim_seed(seed);
-            let config = NetworkConfiguration::random_with_ranges(&high_variance_ranges);
+            let config = NetworkConfiguration::random_for_seed();
 
             let mut sim = SimWorld::new_with_network_config(config);
             let provider = sim.network_provider();

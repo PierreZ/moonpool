@@ -19,7 +19,7 @@
 //! let mut sim = SimWorld::new();
 //!
 //! // Schedule a wake event
-//! sim.schedule_event(Event::Wake { task_id: 1 }, Duration::from_millis(100));
+//! sim.schedule_event(Event::Timer { task_id: 1 }, Duration::from_millis(100));
 //!
 //! // Process events
 //! sim.run_until_empty();
@@ -61,12 +61,11 @@ pub mod tokio_runner;
 pub use assertions::{AssertionStats, get_assertion_results, validate_assertion_contracts};
 pub use buggify::{buggify_init, buggify_reset};
 pub use error::{SimulationError, SimulationResult};
-pub use events::{Event, EventQueue, ScheduledEvent};
+pub use events::{ConnectionStateChange, Event, EventQueue, NetworkOperation, ScheduledEvent};
 // Network exports
 pub use network::{
-    CloggingConfiguration, LatencyConfiguration, LatencyRange, NetworkConfiguration,
-    NetworkProvider, NetworkRandomizationRanges, Peer, PeerConfig, PeerError, PeerMetrics,
-    SimNetworkProvider, TcpListenerTrait, TokioNetworkProvider,
+    NetworkConfiguration, NetworkProvider, Peer, PeerConfig, PeerError, PeerMetrics,
+    SimNetworkProvider, TcpListenerTrait, TokioNetworkProvider, sample_duration,
 };
 // Time provider exports
 pub use rng::{

@@ -81,9 +81,9 @@ async fn test_event_ordering_and_processing() {
     let mut sim = SimWorld::new();
 
     // Schedule multiple wake events at different times using direct scheduling
-    sim.schedule_event(Event::Wake { task_id: 1 }, Duration::from_millis(100));
-    sim.schedule_event(Event::Wake { task_id: 2 }, Duration::from_millis(50));
-    sim.schedule_event(Event::Wake { task_id: 3 }, Duration::from_millis(150));
+    sim.schedule_event(Event::Timer { task_id: 1 }, Duration::from_millis(100));
+    sim.schedule_event(Event::Timer { task_id: 2 }, Duration::from_millis(50));
+    sim.schedule_event(Event::Timer { task_id: 3 }, Duration::from_millis(150));
 
     // Process events one by one
     assert!(sim.step()); // Should process task 2 first (50ms)

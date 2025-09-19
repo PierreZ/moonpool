@@ -3,40 +3,50 @@ use std::{cmp::Ordering, collections::BinaryHeap, time::Duration};
 /// Events that can be scheduled in the simulation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    /// A wake event for a specific task.
-    Wake {
+    /// Timer event for waking sleeping tasks
+    Timer {
         /// The unique identifier for the task to wake.
         task_id: u64,
     },
 
-    // Phase 2b network events
-    /// Listener bind operation completed
-    BindComplete {
-        /// Unique identifier for the listener
-        listener_id: u64,
-    },
-    /// Connection establishment completed
-    ConnectionReady {
-        /// Unique identifier for the connection
+    /// Network data operations
+    Network {
+        /// The connection involved
         connection_id: u64,
+        /// The operation type
+        operation: NetworkOperation,
     },
-    /// Data delivery to connection's receive buffer
+
+    /// Connection state changes
+    Connection {
+        /// The connection or listener ID
+        id: u64,
+        /// The state change type  
+        state: ConnectionStateChange,
+    },
+}
+
+/// Network data operations
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetworkOperation {
+    /// Deliver data to connection's receive buffer
     DataDelivery {
-        /// Unique identifier for the connection
-        connection_id: u64,
-        /// The data being delivered
+        /// The data bytes to deliver
         data: Vec<u8>,
     },
-    /// Process next message from connection's send buffer (for TCP ordering)
-    ProcessSendBuffer {
-        /// Unique identifier for the connection
-        connection_id: u64,
-    },
-    /// Clear clog for a connection (Phase 7)
-    ClogClear {
-        /// Unique identifier for the connection
-        connection_id: u64,
-    },
+    /// Process next message from connection's send buffer
+    ProcessSendBuffer,
+}
+
+/// Connection state changes
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionStateChange {
+    /// Listener bind operation completed
+    BindComplete,
+    /// Connection establishment completed
+    ConnectionReady,
+    /// Clear clog for a connection
+    ClogClear,
 }
 
 /// An event scheduled for execution at a specific simulation time.
@@ -154,32 +164,32 @@ mod tests {
         // Schedule events in random order
         queue.schedule(ScheduledEvent::new(
             Duration::from_millis(300),
-            Event::Wake { task_id: 3 },
+            Event::Timer { task_id: 3 },
             2,
         ));
         queue.schedule(ScheduledEvent::new(
             Duration::from_millis(100),
-            Event::Wake { task_id: 1 },
+            Event::Timer { task_id: 1 },
             0,
         ));
         queue.schedule(ScheduledEvent::new(
             Duration::from_millis(200),
-            Event::Wake { task_id: 2 },
+            Event::Timer { task_id: 2 },
             1,
         ));
 
         // Should pop in time order
         let event1 = queue.pop_earliest().unwrap();
         assert_eq!(event1.time(), Duration::from_millis(100));
-        assert_eq!(event1.event(), &Event::Wake { task_id: 1 });
+        assert_eq!(event1.event(), &Event::Timer { task_id: 1 });
 
         let event2 = queue.pop_earliest().unwrap();
         assert_eq!(event2.time(), Duration::from_millis(200));
-        assert_eq!(event2.event(), &Event::Wake { task_id: 2 });
+        assert_eq!(event2.event(), &Event::Timer { task_id: 2 });
 
         let event3 = queue.pop_earliest().unwrap();
         assert_eq!(event3.time(), Duration::from_millis(300));
-        assert_eq!(event3.event(), &Event::Wake { task_id: 3 });
+        assert_eq!(event3.event(), &Event::Timer { task_id: 3 });
 
         assert!(queue.is_empty());
     }
@@ -192,31 +202,31 @@ mod tests {
         // Schedule multiple events at the same time with different sequence numbers
         queue.schedule(ScheduledEvent::new(
             same_time,
-            Event::Wake { task_id: 3 },
+            Event::Timer { task_id: 3 },
             2, // Later sequence
         ));
         queue.schedule(ScheduledEvent::new(
             same_time,
-            Event::Wake { task_id: 1 },
+            Event::Timer { task_id: 1 },
             0, // Earlier sequence
         ));
         queue.schedule(ScheduledEvent::new(
             same_time,
-            Event::Wake { task_id: 2 },
+            Event::Timer { task_id: 2 },
             1, // Middle sequence
         ));
 
         // Should pop in sequence order when times are equal
         let event1 = queue.pop_earliest().unwrap();
-        assert_eq!(event1.event(), &Event::Wake { task_id: 1 });
+        assert_eq!(event1.event(), &Event::Timer { task_id: 1 });
         assert_eq!(event1.sequence, 0);
 
         let event2 = queue.pop_earliest().unwrap();
-        assert_eq!(event2.event(), &Event::Wake { task_id: 2 });
+        assert_eq!(event2.event(), &Event::Timer { task_id: 2 });
         assert_eq!(event2.sequence, 1);
 
         let event3 = queue.pop_earliest().unwrap();
-        assert_eq!(event3.event(), &Event::Wake { task_id: 3 });
+        assert_eq!(event3.event(), &Event::Timer { task_id: 3 });
         assert_eq!(event3.sequence, 2);
 
         assert!(queue.is_empty());

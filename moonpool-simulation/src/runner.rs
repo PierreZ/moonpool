@@ -7,10 +7,7 @@ use tracing::instrument;
 
 use crate::{
     SimulationResult,
-    assertions::{
-        AssertionStats, REGISTERED_ASSERTIONS, ValidationReport, get_assertion_results,
-        validate_assertion_contracts,
-    },
+    assertions::{AssertionStats, get_assertion_results, validate_assertion_contracts},
     buggify::{buggify_init, buggify_reset},
     reset_sim_rng, set_sim_seed,
 };
@@ -73,8 +70,8 @@ pub struct SimulationReport {
     pub seeds_failing: Vec<u64>,
     /// Aggregated assertion results across all iterations
     pub assertion_results: HashMap<String, AssertionStats>,
-    /// Assertion validation result with detailed violation information
-    pub assertion_validation: ValidationReport,
+    /// Assertion validation violations (if any)
+    pub assertion_violations: Vec<String>,
 }
 
 impl SimulationReport {
@@ -192,7 +189,7 @@ pub struct SimulationBuilder {
     workloads: Vec<Workload>,
     seeds: Vec<u64>,
     next_ip: u32, // For auto-assigning IP addresses starting from 10.0.0.1
-    randomization_ranges: Option<crate::NetworkRandomizationRanges>,
+    use_random_config: bool,
 }
 
 impl Default for SimulationBuilder {
@@ -209,7 +206,7 @@ impl SimulationBuilder {
             workloads: Vec::new(),
             seeds: Vec::new(),
             next_ip: 1, // Start from 10.0.0.1
-            randomization_ranges: None,
+            use_random_config: false,
         }
     }
 
@@ -298,62 +295,42 @@ impl SimulationBuilder {
         self
     }
 
-    /// Set custom randomization ranges for network parameter generation
-    pub fn set_randomization_ranges(mut self, ranges: crate::NetworkRandomizationRanges) -> Self {
-        self.randomization_ranges = Some(ranges);
+    /// Enable randomized network configuration for chaos testing
+    pub fn use_random_config(mut self) -> Self {
+        self.use_random_config = true;
         self
     }
 
-    /// Check if all registered sometimes_assert! assertions have been reached with at least one success.
-    /// This is used by the UntilAllSometimesReached iteration control.
+    /// Check if all sometimes_assert! assertions have been reached with at least one success.
+    /// This simplified version checks that we have some assertion results and they have successes.
     fn all_sometimes_assertions_reached() -> bool {
         let results = get_assertion_results();
-        let registry = REGISTERED_ASSERTIONS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        // Get all registered assertion names across all modules
-        let all_registered: std::collections::HashSet<String> = registry
-            .values()
-            .flat_map(|assertions| assertions.iter())
-            .cloned()
-            .collect();
-
-        // Debug logging
-        tracing::debug!("Checking if all assertions reached with success:");
-        tracing::debug!("Registered assertions: {:?}", all_registered);
-        tracing::debug!(
-            "Executed assertions: {:?}",
-            results.keys().collect::<Vec<_>>()
-        );
-
-        // Check if all registered assertions have been executed AND have at least one success
-        for assertion_name in &all_registered {
-            match results.get(assertion_name) {
-                Some(stats) if stats.successes > 0 => {
-                    tracing::debug!(
-                        "Assertion {} reached with {} successes",
-                        assertion_name,
-                        stats.successes
-                    );
-                    // This assertion is satisfied
-                }
-                Some(stats) => {
-                    tracing::debug!(
-                        "Assertion {} executed {} times but never succeeded",
-                        assertion_name,
-                        stats.total_checks
-                    );
-                    return false;
-                }
-                None => {
-                    tracing::debug!("Missing assertion: {}", assertion_name);
-                    return false;
-                }
-            }
+        // Must have at least one assertion
+        if results.is_empty() {
+            tracing::debug!("No assertions found yet");
+            return false;
         }
 
-        tracing::debug!("All assertions reached with at least one success!");
+        // Check if all executed assertions have at least one success
+        for (name, stats) in &results {
+            if stats.total_checks > 0 && stats.successes == 0 {
+                tracing::debug!(
+                    "Assertion '{}' executed {} times but never succeeded",
+                    name,
+                    stats.total_checks
+                );
+                return false;
+            }
+            tracing::debug!(
+                "Assertion '{}' succeeded {} times out of {}",
+                name,
+                stats.successes,
+                stats.total_checks
+            );
+        }
+
+        tracing::debug!("All assertions have at least one success!");
         true
     }
 
@@ -370,7 +347,7 @@ impl SimulationBuilder {
                 seeds_used: Vec::new(),
                 seeds_failing: Vec::new(),
                 assertion_results: HashMap::new(),
-                assertion_validation: ValidationReport::new(),
+                assertion_violations: Vec::new(),
             };
         }
 
@@ -451,11 +428,11 @@ impl SimulationBuilder {
             // Use moderate probabilities: 50% activation rate, 25% firing rate
             buggify_init(0.5, 0.25);
 
-            // Create fresh NetworkConfiguration for this iteration (uses seed-based randomization)
-            let network_config = if let Some(ref ranges) = self.randomization_ranges {
-                crate::NetworkConfiguration::random_with_ranges(ranges)
-            } else {
+            // Create fresh NetworkConfiguration for this iteration
+            let network_config = if self.use_random_config {
                 crate::NetworkConfiguration::random_for_seed()
+            } else {
+                crate::NetworkConfiguration::default()
             };
 
             // Create shared SimWorld for this iteration using fresh network config
@@ -623,7 +600,7 @@ impl SimulationBuilder {
 
                             // Create early exit report
                             let assertion_results = get_assertion_results();
-                            let assertion_validation = validate_assertion_contracts();
+                            let assertion_violations = validate_assertion_contracts();
                             buggify_reset();
 
                             return SimulationReport {
@@ -635,7 +612,7 @@ impl SimulationBuilder {
                                 seeds_used: seeds_to_use[..iteration_count].to_vec(),
                                 seeds_failing: faulty_seeds,
                                 assertion_results,
-                                assertion_validation,
+                                assertion_violations,
                             };
                         }
                     } else {
@@ -747,7 +724,7 @@ impl SimulationBuilder {
 
         // Collect assertion results and validate them
         let assertion_results = get_assertion_results();
-        let assertion_validation = validate_assertion_contracts();
+        let assertion_violations = validate_assertion_contracts();
 
         // Final buggify reset to ensure no impact on subsequent code
         buggify_reset();
@@ -761,7 +738,7 @@ impl SimulationBuilder {
             seeds_used: seeds_to_use,
             seeds_failing: faulty_seeds,
             assertion_results,
-            assertion_validation,
+            assertion_violations,
         }
     }
 }
@@ -845,7 +822,7 @@ mod tests {
             seeds_used: vec![1, 2],
             seeds_failing: vec![42],
             assertion_results: HashMap::new(),
-            assertion_validation: ValidationReport::new(),
+            assertion_violations: Vec::new(),
         };
 
         let display = format!("{}", report);

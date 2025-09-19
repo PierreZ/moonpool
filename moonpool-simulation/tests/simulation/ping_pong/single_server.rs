@@ -1,6 +1,6 @@
 use moonpool_simulation::{
-    NetworkRandomizationRanges, SimulationBuilder, SimulationMetrics, SimulationResult,
-    TokioNetworkProvider, TokioRunner, TokioTaskProvider, TokioTimeProvider, WorkloadTopology,
+    SimulationBuilder, SimulationMetrics, SimulationResult, TokioNetworkProvider, TokioRunner,
+    TokioTaskProvider, TokioTimeProvider, WorkloadTopology,
     assertions::panic_on_assertion_violations, runner::IterationControl,
 };
 use tracing::Level;
@@ -21,7 +21,7 @@ fn test_ping_pong_with_simulation_builder() {
 
     local_runtime.block_on(async move {
         let report = SimulationBuilder::new()
-            .set_randomization_ranges(NetworkRandomizationRanges::chaos_testing())
+            .use_random_config()
             .register_workload("ping_pong_server", ping_pong_server)
             .register_workload("ping_pong_client", ping_pong_client)
             .set_iteration_control(IterationControl::UntilAllSometimesReached(10_000))

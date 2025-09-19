@@ -286,13 +286,15 @@ impl Future for AcceptFuture {
         match sim.get_pending_connection(&self.local_addr) {
             Ok(Some(connection_id)) => {
                 // Get accept delay from network configuration
-                let delay =
-                    sim.with_network_config(|config| config.latency.accept_latency.sample());
+                let delay = sim.with_network_config(|config| {
+                    crate::network::config::sample_duration(&config.accept_latency)
+                });
 
                 // Schedule accept completion event to advance simulation time
                 sim.schedule_event(
-                    Event::ConnectionReady {
-                        connection_id: connection_id.0,
+                    Event::Connection {
+                        id: connection_id.0,
+                        state: crate::ConnectionStateChange::ConnectionReady,
                     },
                     delay,
                 );

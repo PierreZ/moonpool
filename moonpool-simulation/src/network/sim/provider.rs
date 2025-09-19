@@ -42,7 +42,9 @@ impl NetworkProvider for SimNetworkProvider {
             .map_err(|_| io::Error::other("simulation shutdown"))?;
 
         // Get bind delay from network configuration and schedule bind completion event
-        let delay = sim.with_network_config(|config| config.latency.bind_latency.sample());
+        let delay = sim.with_network_config(|config| {
+            crate::network::config::sample_duration(&config.bind_latency)
+        });
 
         // Schedule bind completion event to advance simulation time
         let listener_id = sim
@@ -51,8 +53,9 @@ impl NetworkProvider for SimNetworkProvider {
 
         // Schedule an event to simulate the bind delay - this advances simulation time
         sim.schedule_event(
-            Event::BindComplete {
-                listener_id: listener_id.0,
+            Event::Connection {
+                id: listener_id.0,
+                state: crate::ConnectionStateChange::BindComplete,
             },
             delay,
         );
@@ -69,7 +72,9 @@ impl NetworkProvider for SimNetworkProvider {
             .map_err(|_| io::Error::other("simulation shutdown"))?;
 
         // Get connect delay from network configuration and schedule connection event
-        let delay = sim.with_network_config(|config| config.latency.connect_latency.sample());
+        let delay = sim.with_network_config(|config| {
+            crate::network::config::sample_duration(&config.connect_latency)
+        });
 
         // Create a connection pair for bidirectional communication
         let (client_id, server_id) = sim
@@ -82,8 +87,9 @@ impl NetworkProvider for SimNetworkProvider {
 
         // Schedule connection ready event to advance simulation time
         sim.schedule_event(
-            Event::ConnectionReady {
-                connection_id: client_id.0,
+            Event::Connection {
+                id: client_id.0,
+                state: crate::ConnectionStateChange::ConnectionReady,
             },
             delay,
         );

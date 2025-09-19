@@ -353,7 +353,9 @@ fn test_simulation_with_deterministic_assertions() {
 fn run_deterministic_assertions(sim: &SimWorld) {
     // Use network config to get deterministic latencies
     for _i in 0..5 {
-        let delay = sim.with_network_config(|config| config.latency.connect_latency.sample());
+        let delay = sim.with_network_config(|config| {
+            moonpool_simulation::sample_duration(&config.connect_latency)
+        });
         let is_fast = delay.as_millis() < 10; // Some will be fast, some slow
 
         sometimes_assert!(connection_speed, is_fast, "Connections should be fast");

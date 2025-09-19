@@ -1,5 +1,5 @@
 use moonpool_simulation::{
-    LatencyRange, NetworkConfiguration, SimWorld, reset_sim_rng, set_sim_seed, sim_random,
+    NetworkConfiguration, SimWorld, reset_sim_rng, sample_duration, set_sim_seed, sim_random,
     sim_random_range,
 };
 use std::sync::Arc;
@@ -26,10 +26,10 @@ fn test_thread_local_rng_determinism() {
 fn test_simworld_with_seed_determinism() {
     // Test that SimWorld::new_with_seed produces deterministic behavior
     let sim1 = SimWorld::new_with_seed(123);
-    let delay1 = sim1.with_network_config(|config| config.latency.connect_latency.sample());
+    let delay1 = sim1.with_network_config(|config| sample_duration(&config.connect_latency));
 
     let sim2 = SimWorld::new_with_seed(123);
-    let delay2 = sim2.with_network_config(|config| config.latency.connect_latency.sample());
+    let delay2 = sim2.with_network_config(|config| sample_duration(&config.connect_latency));
 
     assert_eq!(delay1, delay2);
 }
@@ -37,10 +37,10 @@ fn test_simworld_with_seed_determinism() {
 #[test]
 fn test_simworld_different_seeds_different_behavior() {
     let sim1 = SimWorld::new_with_seed(1);
-    let delay1 = sim1.with_network_config(|config| config.latency.connect_latency.sample());
+    let delay1 = sim1.with_network_config(|config| sample_duration(&config.connect_latency));
 
     let sim2 = SimWorld::new_with_seed(2);
-    let delay2 = sim2.with_network_config(|config| config.latency.connect_latency.sample());
+    let delay2 = sim2.with_network_config(|config| sample_duration(&config.connect_latency));
 
     // Different seeds should produce different delays (with very high probability)
     assert_ne!(delay1, delay2);
@@ -53,50 +53,50 @@ fn test_consecutive_simulations_same_thread() {
 
     for seed in [1, 2, 3, 4, 5] {
         let sim = SimWorld::new_with_seed(seed);
-        let delay = sim.with_network_config(|config| config.latency.write_latency.sample());
+        let delay = sim.with_network_config(|config| sample_duration(&config.write_latency));
         delays.push(delay);
     }
 
     // Repeat with same seeds - should get identical delays
     for (i, seed) in [1, 2, 3, 4, 5].iter().enumerate() {
         let sim = SimWorld::new_with_seed(*seed);
-        let delay = sim.with_network_config(|config| config.latency.write_latency.sample());
+        let delay = sim.with_network_config(|config| sample_duration(&config.write_latency));
         assert_eq!(delays[i], delay, "Delay mismatch for seed {}", seed);
     }
 }
 
 #[test]
 fn test_latency_range_determinism() {
-    let range = LatencyRange::new(Duration::from_millis(10), Duration::from_millis(5));
+    let range = Duration::from_millis(10)..Duration::from_millis(15);
 
     set_sim_seed(42);
-    let delay1 = range.sample();
-    let delay2 = range.sample();
+    let delay1 = sample_duration(&range);
+    let delay2 = sample_duration(&range);
 
     set_sim_seed(42);
-    assert_eq!(delay1, range.sample());
-    assert_eq!(delay2, range.sample());
+    assert_eq!(delay1, sample_duration(&range));
+    assert_eq!(delay2, sample_duration(&range));
 }
 
 #[test]
 fn test_latency_range_bounds() {
-    let range = LatencyRange::new(Duration::from_millis(100), Duration::from_millis(50));
+    let range = Duration::from_millis(100)..Duration::from_millis(150);
 
     set_sim_seed(123);
     for _ in 0..100 {
-        let delay = range.sample();
+        let delay = sample_duration(&range);
         assert!(delay >= Duration::from_millis(100));
-        assert!(delay <= Duration::from_millis(150));
+        assert!(delay < Duration::from_millis(150));
     }
 }
 
 #[test]
 fn test_latency_range_fixed() {
-    let range = LatencyRange::fixed(Duration::from_millis(42));
+    let range = Duration::from_millis(42)..Duration::from_millis(42);
 
     set_sim_seed(999);
     for _ in 0..10 {
-        assert_eq!(range.sample(), Duration::from_millis(42));
+        assert_eq!(sample_duration(&range), Duration::from_millis(42));
     }
 }
 
@@ -175,10 +175,10 @@ fn test_simworld_network_config_integration() {
     let sim = SimWorld::new_with_network_config_and_seed(config, 456);
 
     // Sample various latencies
-    let bind_delay = sim.with_network_config(|config| config.latency.bind_latency.sample());
-    let connect_delay = sim.with_network_config(|config| config.latency.connect_latency.sample());
-    let read_delay = sim.with_network_config(|config| config.latency.read_latency.sample());
-    let write_delay = sim.with_network_config(|config| config.latency.write_latency.sample());
+    let bind_delay = sim.with_network_config(|config| sample_duration(&config.bind_latency));
+    let connect_delay = sim.with_network_config(|config| sample_duration(&config.connect_latency));
+    let read_delay = sim.with_network_config(|config| sample_duration(&config.read_latency));
+    let write_delay = sim.with_network_config(|config| sample_duration(&config.write_latency));
 
     // All should be within expected bounds
     assert!(bind_delay >= Duration::from_micros(50));
@@ -190,19 +190,19 @@ fn test_simworld_network_config_integration() {
     let sim2 = SimWorld::new_with_network_config_and_seed(NetworkConfiguration::default(), 456);
     assert_eq!(
         bind_delay,
-        sim2.with_network_config(|config| config.latency.bind_latency.sample())
+        sim2.with_network_config(|config| sample_duration(&config.bind_latency))
     );
     assert_eq!(
         connect_delay,
-        sim2.with_network_config(|config| config.latency.connect_latency.sample())
+        sim2.with_network_config(|config| sample_duration(&config.connect_latency))
     );
     assert_eq!(
         read_delay,
-        sim2.with_network_config(|config| config.latency.read_latency.sample())
+        sim2.with_network_config(|config| sample_duration(&config.read_latency))
     );
     assert_eq!(
         write_delay,
-        sim2.with_network_config(|config| config.latency.write_latency.sample())
+        sim2.with_network_config(|config| sample_duration(&config.write_latency))
     );
 }
 
@@ -232,10 +232,10 @@ fn run_complex_simulation_sequence(seed: u64) -> Vec<Duration> {
 
     // Simulate various network operations
     for _ in 0..5 {
-        results.push(sim.with_network_config(|config| config.latency.bind_latency.sample()));
-        results.push(sim.with_network_config(|config| config.latency.connect_latency.sample()));
-        results.push(sim.with_network_config(|config| config.latency.write_latency.sample()));
-        results.push(sim.with_network_config(|config| config.latency.read_latency.sample()));
+        results.push(sim.with_network_config(|config| sample_duration(&config.bind_latency)));
+        results.push(sim.with_network_config(|config| sample_duration(&config.connect_latency)));
+        results.push(sim.with_network_config(|config| sample_duration(&config.write_latency)));
+        results.push(sim.with_network_config(|config| sample_duration(&config.read_latency)));
     }
 
     results
@@ -253,7 +253,7 @@ fn test_multiple_simulations_same_thread_no_contamination() {
 
         for _ in 0..3 {
             sim_results
-                .push(sim.with_network_config(|config| config.latency.connect_latency.sample()));
+                .push(sim.with_network_config(|config| sample_duration(&config.connect_latency)));
         }
 
         all_results.push(sim_results);
@@ -266,7 +266,7 @@ fn test_multiple_simulations_same_thread_no_contamination() {
 
         for _ in 0..3 {
             sim_results
-                .push(sim.with_network_config(|config| config.latency.connect_latency.sample()));
+                .push(sim.with_network_config(|config| sample_duration(&config.connect_latency)));
         }
 
         assert_eq!(
