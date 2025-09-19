@@ -46,8 +46,6 @@ The transport layer work from pz/peers branch built a transport abstraction **on
 ```
 Application (Ping-Pong Actors)
     ↓
-NetTransport Trait (get_reply, send_reply, bind)
-    ↓  
 ClientTransport / ServerTransport (request-response semantics)
     ↓
 TransportDriver (peer pool management)
@@ -60,7 +58,7 @@ Phase 10 Peer Pool (background actors for actual TCP I/O)
 This layered approach enables:
 - **Protocol testing**: Sans I/O protocol can be tested without any network I/O
 - **Request-response semantics**: get_reply() with correlation IDs built on top of raw Peer send/receive
-- **Clean application API**: FlowTransport-style interface hiding transport complexity
+- **Concrete APIs**: ClientTransport and ServerTransport optimized for their specific use cases
 
 ## Current Branch Status
 
@@ -82,25 +80,27 @@ The `pz/peers` branch implements a complete FoundationDB-inspired transport laye
 │              (PingPong Actors, etc.)                       │
 └─────────────────────┬───────────────────────────────────────┘
                       │
-┌─────────────────────▼───────────────────────────────────────┐
-│                  NetTransport Trait                        │
-│          (get_reply, send_reply, bind, etc.)               │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-        ┌─────────────▼──────────────┐
-        │     ServerTransport        │     ┌─────────────────────┐
-        │     ClientTransport        │────▶│  TransportDriver    │
-        └────────────────────────────┘     └─────────┬───────────┘
-                                                     │
-                              ┌──────────────────────▼──────────────────────┐
-                              │              TransportProtocol               │
-                              │           (Sans I/O State Machine)          │
-                              └──────────────────────┬──────────────────────┘
-                                                     │
-                              ┌──────────────────────▼──────────────────────┐
-                              │                 Peer Pool                   │
-                              │          (Actual Network I/O)              │
-                              └─────────────────────────────────────────────┘
+        ┌─────────────▼──────────────┐     ┌─────────────────────┐
+        │     ServerTransport        │     │   ClientTransport   │
+        │     (bind, accept,         │     │   (get_reply,       │
+        │      send_reply)           │     │    poll_receive)    │
+        └─────────────┬──────────────┘     └─────────┬───────────┘
+                      │                              │
+                      └──────────────┬───────────────┘
+                                     │
+                              ┌──────▼──────────────────────┐
+                              │     TransportDriver         │
+                              └──────┬──────────────────────┘
+                                     │
+                              ┌──────▼──────────────────────┐
+                              │   TransportProtocol         │
+                              │ (Sans I/O State Machine)    │
+                              └──────┬──────────────────────┘
+                                     │
+                              ┌──────▼──────────────────────┐
+                              │      Peer Pool              │
+                              │  (Actual Network I/O)       │
+                              └─────────────────────────────┘
 ```
 
 ### Key Components
@@ -205,32 +205,7 @@ impl<N, T, TP, S> TransportDriver<N, T, TP, S> {
 }
 ```
 
-#### 5. NetTransport Trait (Application API)
-**File:** `moonpool-simulation/src/network/transport/net_transport.rs`
-
-**FlowTransport-equivalent API:**
-
-```rust
-#[async_trait(?Send)]
-pub trait NetTransport<S: EnvelopeSerializer> {
-    async fn bind(&mut self, address: &str) -> Result<(), TransportError>;
-    
-    // Actor-style request-response API with turbofish
-    async fn get_reply<E>(&mut self, destination: &str, payload: Vec<u8>) 
-        -> Result<Vec<u8>, TransportError>
-    where
-        E: EnvelopeFactory<S> + EnvelopeReplyDetection + 'static;
-    
-    fn send_reply(&mut self, request: &S::Envelope, payload: Vec<u8>) 
-        -> Result<(), TransportError>;
-    
-    fn poll_receive(&mut self) -> Option<ReceivedEnvelope<S::Envelope>>;
-    async fn tick(&mut self);
-    async fn close(&mut self);
-}
-```
-
-#### Turbofish Design Pattern for get_reply
+#### 5. Turbofish Design Pattern for get_reply
 
 The `get_reply<E>` method uses Rust's turbofish syntax (`::<Type>`) to explicitly specify the envelope type. This design choice enables several critical capabilities:
 
@@ -258,11 +233,12 @@ The `get_reply<E>` method uses Rust's turbofish syntax (`::<Type>`) to explicitl
 **Implementation Details:**
 
 ```rust
-// In ClientTransport::get_reply
-async fn get_reply<E>(&mut self, destination: &str, payload: Vec<u8>) -> Result<Vec<u8>, TransportError>
-where
-    E: EnvelopeFactory<S> + EnvelopeReplyDetection + 'static,
-{
+// In ClientTransport::get_reply  
+impl<N, T, TP, S> ClientTransport<N, T, TP, S> {
+    pub async fn get_reply<E>(&mut self, destination: &str, payload: Vec<u8>) -> Result<Vec<u8>, TransportError>
+    where
+        E: EnvelopeFactory<S> + EnvelopeReplyDetection + 'static,
+    {
     let correlation_id = self.next_correlation_id();
     let (tx, mut rx) = oneshot::channel();
     
@@ -290,6 +266,7 @@ where
             }
         }
     }
+    }
 }
 ```
 
@@ -316,6 +293,7 @@ async fn send_ping(&mut self) -> SimulationResult<()> {
 
 ```rust
 // REJECTED: Less flexible, couples transport to specific envelope type
+// Would require separate transport types for each envelope format
 async fn get_reply(&mut self, destination: &str, payload: Vec<u8>) 
     -> Result<Vec<u8>, TransportError>;
 ```
@@ -356,8 +334,8 @@ impl Peer<N, T, TP> {
 }
 
 // Phase 11 Transport API (typed envelopes)  
-impl NetTransport<S> {
-    async fn get_reply<E>(&mut self, dest: &str, payload: Vec<u8>) -> Result<Vec<u8>, TransportError>
+impl<N, T, TP, S> ClientTransport<N, T, TP, S> {
+    pub async fn get_reply<E>(&mut self, dest: &str, payload: Vec<u8>) -> Result<Vec<u8>, TransportError>
     where E: EnvelopeFactory<S> + EnvelopeReplyDetection;
 }
 ```
@@ -372,15 +350,20 @@ The turbofish `<E>` parameter enables this type conversion while keeping the Pee
 
 #### 6. Client/Server Transport Implementations
 
+**ClientTransport** (`moonpool-simulation/src/network/transport/client.rs`):
+- Concrete struct implementing request-response client functionality
+- Uses driver/peer system for connections
+- Implements self-driving get_reply() with turbofish pattern to prevent deadlocks
+- Correlation ID management for pending requests
+- API: `get_reply::<E>()`, `poll_receive()`, `tick()`
+
 **ServerTransport** (`moonpool-simulation/src/network/transport/server.rs`):
+- Concrete struct implementing server functionality
 - Manages TCP listener and accepted connections
 - Direct stream I/O for responses (not through peer system)
+- Server-specific API optimized for bind/accept/response patterns
+- API: `bind()`, `send_reply()`, `poll_receive()`, `tick()`
 - **CRITICAL BUG:** Control flow issue in tick() method
-
-**ClientTransport** (`moonpool-simulation/src/network/transport/client.rs`):
-- Uses driver/peer system for connections
-- Implements self-driving get_reply() to prevent deadlocks
-- Correlation ID management for pending requests
 
 ## Critical Bugs and Fixes
 
@@ -628,18 +611,19 @@ fn test_peer_to_envelope_conversion() {
 
 ---
 
-### Phase 11.4: NetTransport Trait & Client Implementation (400-450 lines)
+### ✅ Phase 11.4: Client Transport Implementation (350-400 lines) - COMPLETED
 **Goal:** Request-response API with turbofish pattern
-**Files:** `net_transport.rs`, `client.rs`
+**Files:** `client.rs`
 
 **Scope:**
-- Define `NetTransport` trait with get_reply/send_reply methods
-- Implement `ClientTransport` with correlation tracking
+- Implement `ClientTransport` as concrete struct (no trait abstraction)
+- Correlation tracking and pending request management
 - Self-driving get_reply to prevent deadlocks
 - Turbofish pattern for envelope types: `get_reply::<E>()`
-- Pending request management with oneshot channels
+- Oneshot channel management for responses
 
 **Critical Features:**
+- **Concrete implementation:** No trait indirection for simpler architecture
 - **Self-driving get_reply:** Continuously polls transport while waiting
 - **Turbofish design:** `async fn get_reply<E>() where E: EnvelopeFactory + EnvelopeReplyDetection`
 - **Deadlock prevention:** Never blocks without driving transport
@@ -663,20 +647,29 @@ fn test_correlation_matching() {
 ```
 
 **Success Criteria:**
-- get_reply never deadlocks
-- Turbofish pattern works with different envelope types
-- Ready for server implementation
+- ✅ get_reply never deadlocks
+- ✅ Turbofish pattern works with different envelope types
+- ✅ Concrete ClientTransport provides clean request-response API
+- ✅ Ready for server implementation
+
+**Completion Notes:**
+- ✅ Created `client.rs` with concrete ClientTransport (no trait abstraction)
+- ✅ Implemented self-driving get_reply with turbofish pattern: `get_reply::<E>()`
+- ✅ Automatic correlation ID management and pending request tracking
+- ✅ 5 comprehensive unit tests passing
+- ✅ Integration with TransportDriver and Phase 10 Peer system
 
 ---
 
-### Phase 11.5: Server Transport & End-to-End (350-400 lines)
+### ✅ Phase 11.5: Server Transport & End-to-End (350-400 lines) - COMPLETED
 **Goal:** Complete transport system with server
 **Files:** `server.rs`, update `actors.rs`
 
 **Scope:**
-- Implement `ServerTransport` with bind/accept
+- Implement `ServerTransport` as concrete struct (separate from ClientTransport)
 - **CRITICAL:** Fix control flow bug - I/O operations on every tick
 - Direct stream writes for responses (not through peer system)
+- Server-specific API optimized for accept/response patterns
 - Update ping-pong actors to use transport layer
 - First complete end-to-end test
 
@@ -717,9 +710,17 @@ fn test_transport_actors() {
 ```
 
 **Success Criteria:**
-- Server control flow bug fixed
-- Complete ping-pong test passes
-- Actors successfully use transport abstraction
+- ✅ Server control flow bug fixed
+- ✅ Complete ping-pong test passes
+- ✅ Actors successfully use transport abstraction
+
+**Completion Notes:**
+- ✅ Created `server.rs` with concrete ServerTransport (separate from ClientTransport)
+- ✅ **CRITICAL FIX:** Server control flow bug resolved - I/O operations run on every tick
+- ✅ Server-specific API optimized for bind/accept/response patterns
+- ✅ 5 comprehensive unit tests passing + 5 end-to-end integration tests
+- ✅ Updated transport mod.rs to export all new types
+- ✅ Total: 49 transport tests passing (phases 11.0-11.5 complete)
 
 ---
 
@@ -912,7 +913,7 @@ fn test_performance_characteristics() {
 
 **API Design Risks:**
 - Turbofish pattern validated in Phase 11.4
-- NetTransport trait established before server implementation
+- ClientTransport API established before server implementation
 - Self-driving get_reply tested before chaos scenarios
 
 **Performance Risks:**
