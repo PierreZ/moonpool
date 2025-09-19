@@ -1,0 +1,363 @@
+use std::fmt::Debug;
+
+use crate::network::transport::types::EnvelopeError;
+use crate::network::transport::{Envelope, EnvelopeFactory, EnvelopeReplyDetection};
+
+/// Trait for swappable envelope serialization strategies
+pub trait EnvelopeSerializer: Clone {
+    /// The envelope type this serializer works with
+    type Envelope: Envelope + Clone + Debug;
+
+    /// Serialize an envelope to bytes for wire transmission
+    fn serialize(&self, envelope: &Self::Envelope) -> Vec<u8>;
+
+    /// Deserialize bytes from wire into an envelope
+    fn deserialize(&self, data: &[u8]) -> Result<Self::Envelope, EnvelopeError>;
+}
+
+/// Request-response envelope with correlation ID and payload
+/// Wire format: [correlation_id:8][len:4][payload:N]
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestResponseEnvelope {
+    /// The correlation ID for matching requests and responses
+    pub correlation_id: u64,
+    /// The payload data carried by this envelope
+    pub payload: Vec<u8>,
+}
+
+impl RequestResponseEnvelope {
+    /// Create a new RequestResponseEnvelope with the given correlation ID and payload
+    pub fn new(correlation_id: u64, payload: Vec<u8>) -> Self {
+        Self {
+            correlation_id,
+            payload,
+        }
+    }
+
+    /// Check if the payload is empty
+    pub fn is_empty(&self) -> bool {
+        self.payload.is_empty()
+    }
+
+    /// Get the payload size in bytes
+    pub fn payload_size(&self) -> usize {
+        self.payload.len()
+    }
+
+    /// Get the total serialized size in bytes (header + payload)
+    pub fn serialized_size(&self) -> usize {
+        8 + 4 + self.payload.len() // correlation_id + length + payload
+    }
+}
+
+impl Envelope for RequestResponseEnvelope {
+    fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+}
+
+impl EnvelopeReplyDetection for RequestResponseEnvelope {
+    fn is_reply_to(&self, correlation_id: u64) -> bool {
+        self.correlation_id == correlation_id
+    }
+
+    fn correlation_id(&self) -> Option<u64> {
+        Some(self.correlation_id)
+    }
+}
+
+/// Factory for creating RequestResponseEnvelope instances
+pub struct RequestResponseEnvelopeFactory;
+
+impl EnvelopeFactory<RequestResponseEnvelope> for RequestResponseEnvelopeFactory {
+    fn create_request(correlation_id: u64, payload: Vec<u8>) -> RequestResponseEnvelope {
+        RequestResponseEnvelope::new(correlation_id, payload)
+    }
+
+    fn create_reply(
+        request: &RequestResponseEnvelope,
+        payload: Vec<u8>,
+    ) -> RequestResponseEnvelope {
+        RequestResponseEnvelope::new(request.correlation_id, payload)
+    }
+
+    fn extract_payload(envelope: &RequestResponseEnvelope) -> &[u8] {
+        envelope.payload()
+    }
+}
+
+/// Binary serializer for RequestResponseEnvelope
+/// Wire format: [correlation_id:8][len:4][payload:N] (little-endian)
+#[derive(Clone)]
+pub struct RequestResponseSerializer;
+
+impl RequestResponseSerializer {
+    /// Create a new RequestResponseSerializer
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Maximum supported payload size (1MB)
+    pub const MAX_PAYLOAD_SIZE: usize = 1024 * 1024;
+
+    /// Header size in bytes (correlation_id + length)
+    pub const HEADER_SIZE: usize = 8 + 4;
+}
+
+impl Default for RequestResponseSerializer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EnvelopeSerializer for RequestResponseSerializer {
+    type Envelope = RequestResponseEnvelope;
+
+    fn serialize(&self, envelope: &Self::Envelope) -> Vec<u8> {
+        let payload_len = envelope.payload.len();
+        let total_len = Self::HEADER_SIZE + payload_len;
+        let mut buffer = Vec::with_capacity(total_len);
+
+        // Write correlation_id (8 bytes, little-endian)
+        buffer.extend_from_slice(&envelope.correlation_id.to_le_bytes());
+
+        // Write payload length (4 bytes, little-endian)
+        buffer.extend_from_slice(&(payload_len as u32).to_le_bytes());
+
+        // Write payload
+        buffer.extend_from_slice(&envelope.payload);
+
+        buffer
+    }
+
+    fn deserialize(&self, data: &[u8]) -> Result<Self::Envelope, EnvelopeError> {
+        // Check minimum size for header
+        if data.len() < Self::HEADER_SIZE {
+            return Err(EnvelopeError::DeserializationFailed(format!(
+                "Data too short: got {} bytes, need at least {}",
+                data.len(),
+                Self::HEADER_SIZE
+            )));
+        }
+
+        // Parse correlation_id (8 bytes, little-endian)
+        let correlation_id = u64::from_le_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ]);
+
+        // Parse payload length (4 bytes, little-endian)
+        let payload_len = u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
+
+        // Validate payload length
+        if payload_len > Self::MAX_PAYLOAD_SIZE {
+            return Err(EnvelopeError::DeserializationFailed(format!(
+                "Payload too large: {} bytes, max allowed: {}",
+                payload_len,
+                Self::MAX_PAYLOAD_SIZE
+            )));
+        }
+
+        let expected_total_len = Self::HEADER_SIZE + payload_len;
+        if data.len() != expected_total_len {
+            return Err(EnvelopeError::DeserializationFailed(format!(
+                "Invalid data length: got {} bytes, expected {} bytes",
+                data.len(),
+                expected_total_len
+            )));
+        }
+
+        // Extract payload
+        let payload = data[Self::HEADER_SIZE..].to_vec();
+
+        Ok(RequestResponseEnvelope::new(correlation_id, payload))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_request_response_envelope_creation() {
+        let envelope = RequestResponseEnvelope::new(42, b"test payload".to_vec());
+
+        assert_eq!(EnvelopeReplyDetection::correlation_id(&envelope), Some(42));
+        assert_eq!(envelope.payload(), b"test payload");
+        assert!(!envelope.is_empty());
+        assert_eq!(envelope.payload_size(), 12);
+        assert_eq!(envelope.serialized_size(), 8 + 4 + 12); // header + payload
+    }
+
+    #[test]
+    fn test_request_response_envelope_empty_payload() {
+        let envelope = RequestResponseEnvelope::new(0, Vec::new());
+
+        assert_eq!(EnvelopeReplyDetection::correlation_id(&envelope), Some(0));
+        assert_eq!(envelope.payload(), b"");
+        assert!(envelope.is_empty());
+        assert_eq!(envelope.payload_size(), 0);
+        assert_eq!(envelope.serialized_size(), 12); // header only
+    }
+
+    #[test]
+    fn test_request_response_envelope_factory() {
+        let correlation_id = 123;
+        let request =
+            RequestResponseEnvelopeFactory::create_request(correlation_id, b"ping".to_vec());
+        let reply = RequestResponseEnvelopeFactory::create_reply(&request, b"pong".to_vec());
+
+        // Both should have same correlation ID
+        assert_eq!(
+            EnvelopeReplyDetection::correlation_id(&request),
+            Some(correlation_id)
+        );
+        assert_eq!(
+            EnvelopeReplyDetection::correlation_id(&reply),
+            Some(correlation_id)
+        );
+
+        // Reply should be detected as reply to request
+        assert!(reply.is_reply_to(correlation_id));
+
+        // Extract payload should work
+        assert_eq!(
+            RequestResponseEnvelopeFactory::extract_payload(&request),
+            b"ping"
+        );
+        assert_eq!(
+            RequestResponseEnvelopeFactory::extract_payload(&reply),
+            b"pong"
+        );
+    }
+
+    #[test]
+    fn test_serialization_roundtrip() {
+        let serializer = RequestResponseSerializer::new();
+        let original = RequestResponseEnvelope::new(0x123456789ABCDEF0, b"Hello, World!".to_vec());
+
+        // Serialize
+        let serialized = serializer.serialize(&original);
+
+        // Deserialize
+        let deserialized = serializer
+            .deserialize(&serialized)
+            .expect("Deserialization should succeed");
+
+        // Should be identical
+        assert_eq!(original, deserialized);
+        assert_eq!(original.correlation_id, deserialized.correlation_id);
+        assert_eq!(original.payload, deserialized.payload);
+    }
+
+    #[test]
+    fn test_serialization_empty_payload() {
+        let serializer = RequestResponseSerializer::new();
+        let original = RequestResponseEnvelope::new(42, Vec::new());
+
+        let serialized = serializer.serialize(&original);
+        let deserialized = serializer
+            .deserialize(&serialized)
+            .expect("Deserialization should succeed");
+
+        assert_eq!(original, deserialized);
+        assert_eq!(deserialized.payload_size(), 0);
+    }
+
+    #[test]
+    fn test_serialization_wire_format() {
+        let serializer = RequestResponseSerializer::new();
+        let envelope = RequestResponseEnvelope::new(0x0102030405060708, b"AB".to_vec());
+
+        let serialized = serializer.serialize(&envelope);
+
+        // Check wire format: [correlation_id:8][len:4][payload:N]
+        assert_eq!(serialized.len(), 8 + 4 + 2);
+
+        // correlation_id (little-endian)
+        assert_eq!(
+            &serialized[0..8],
+            &[0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]
+        );
+
+        // payload length (little-endian)
+        assert_eq!(&serialized[8..12], &[0x02, 0x00, 0x00, 0x00]); // 2 as u32 LE
+
+        // payload
+        assert_eq!(&serialized[12..14], b"AB");
+    }
+
+    #[test]
+    fn test_deserialization_too_short() {
+        let serializer = RequestResponseSerializer::new();
+
+        // Too short for header
+        let result = serializer.deserialize(&[1, 2, 3]);
+        assert!(matches!(
+            result,
+            Err(EnvelopeError::DeserializationFailed(_))
+        ));
+
+        // Header only, but claims to have payload
+        let mut data = vec![0u8; 12];
+        data[8..12].copy_from_slice(&5u32.to_le_bytes()); // claims 5 byte payload
+        let result = serializer.deserialize(&data);
+        assert!(matches!(
+            result,
+            Err(EnvelopeError::DeserializationFailed(_))
+        ));
+    }
+
+    #[test]
+    fn test_deserialization_payload_too_large() {
+        let serializer = RequestResponseSerializer::new();
+
+        // Create data claiming massive payload
+        let mut data = vec![0u8; 12];
+        let massive_size = RequestResponseSerializer::MAX_PAYLOAD_SIZE + 1;
+        data[8..12].copy_from_slice(&(massive_size as u32).to_le_bytes());
+
+        let result = serializer.deserialize(&data);
+        assert!(matches!(
+            result,
+            Err(EnvelopeError::DeserializationFailed(_))
+        ));
+    }
+
+    #[test]
+    fn test_deserialization_length_mismatch() {
+        let serializer = RequestResponseSerializer::new();
+
+        // Create valid header but wrong total length
+        let mut data = vec![0u8; 15]; // 12 header + 3 bytes
+        data[8..12].copy_from_slice(&5u32.to_le_bytes()); // claims 5 byte payload, but only 3 provided
+
+        let result = serializer.deserialize(&data);
+        assert!(matches!(
+            result,
+            Err(EnvelopeError::DeserializationFailed(_))
+        ));
+    }
+
+    #[test]
+    fn test_clone_and_equality() {
+        let envelope1 = RequestResponseEnvelope::new(999, b"test data".to_vec());
+        let envelope2 = envelope1.clone();
+
+        assert_eq!(envelope1, envelope2);
+        assert_eq!(envelope1.correlation_id, envelope2.correlation_id);
+        assert_eq!(envelope1.payload, envelope2.payload);
+    }
+
+    #[test]
+    fn test_serializer_default() {
+        let serializer1 = RequestResponseSerializer::new();
+        let serializer2 = RequestResponseSerializer::default();
+
+        // Both should work the same way
+        let envelope = RequestResponseEnvelope::new(1, b"test".to_vec());
+        let ser1 = serializer1.serialize(&envelope);
+        let ser2 = serializer2.serialize(&envelope);
+
+        assert_eq!(ser1, ser2);
+    }
+}
