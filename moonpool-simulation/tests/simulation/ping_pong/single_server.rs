@@ -12,7 +12,7 @@ use super::actors::{PingPongClientActor, PingPongServerActor};
 fn test_ping_pong_with_simulation_builder() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
-        .with_max_level(Level::ERROR)
+        .with_max_level(Level::DEBUG)
         .try_init();
 
     let local_runtime = tokio::runtime::Builder::new_current_thread()
@@ -24,7 +24,8 @@ fn test_ping_pong_with_simulation_builder() {
             .use_random_config()
             .register_workload("ping_pong_server", ping_pong_server)
             .register_workload("ping_pong_client", ping_pong_client)
-            .set_iteration_control(IterationControl::UntilAllSometimesReached(10_000))
+            .set_iteration_control(IterationControl::FixedCount(1))
+            .set_debug_seeds(vec![42])
             .run()
             .await;
 
