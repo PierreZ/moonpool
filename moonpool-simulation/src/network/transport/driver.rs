@@ -1,11 +1,26 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use crate::network::transport::{EnvelopeSerializer, TransportProtocol};
 use crate::network::{NetworkProvider, Peer, PeerConfig};
 use crate::task::TaskProvider;
 use crate::time::provider::TimeProvider;
+
+// Connection recovery constants following FoundationDB patterns
+const INITIAL_RECONNECTION_TIME: Duration = Duration::from_millis(50);
+const MAX_RECONNECTION_TIME: Duration = Duration::from_millis(500);
+const RECONNECTION_TIME_GROWTH_RATE: f64 = 1.2;
+
+/// State tracking for peer reconnection with exponential backoff
+#[derive(Debug, Clone)]
+struct PeerReconnectState {
+    /// Current reconnection delay
+    reconnect_delay: Duration,
+    /// Time of last failure (for implementing delays)
+    last_failure: Option<Instant>,
+}
 
 /// Errors that can occur during transport driver operations
 #[derive(Debug, Clone)]
@@ -64,6 +79,9 @@ where
 
     /// Configuration for new peer connections
     peer_config: PeerConfig,
+
+    /// Reconnection state tracking for failed peers
+    reconnect_states: HashMap<String, PeerReconnectState>,
 }
 
 impl<N, T, TP, S> TransportDriver<N, T, TP, S>
@@ -88,6 +106,7 @@ where
             time,
             task_provider,
             peer_config,
+            reconnect_states: HashMap::new(),
         }
     }
 
@@ -116,6 +135,9 @@ where
                     // Transmission successful
                 }
                 Err(peer_error) => {
+                    // Handle peer failure with reconnection tracking
+                    self.handle_peer_failure(&transmit.destination);
+
                     return Err(DriverError::PeerOperationFailed(format!(
                         "Failed to send to {}: {}",
                         transmit.destination, peer_error
@@ -151,6 +173,14 @@ where
             return Ok(peer.clone());
         }
 
+        // Check if we should attempt reconnection (respects exponential backoff)
+        if !self.should_attempt_reconnect(destination) {
+            return Err(DriverError::PeerCreationFailed(format!(
+                "Reconnection backoff active for destination: {}",
+                destination
+            )));
+        }
+
         // Create new peer (returns Self, not Result)
         let peer = Peer::new(
             self.network.clone(),
@@ -163,6 +193,10 @@ where
         let peer_handle = Rc::new(RefCell::new(peer));
         self.peers
             .insert(destination.to_string(), peer_handle.clone());
+
+        // Reset reconnection state on successful creation
+        self.reset_reconnection_state(destination);
+
         Ok(peer_handle)
     }
 
@@ -207,6 +241,48 @@ where
         self.process_peer_reads();
 
         Ok(())
+    }
+
+    /// Handle peer connection failure with exponential backoff
+    fn handle_peer_failure(&mut self, destination: &str) {
+        // Remove the failed peer from the pool
+        self.peers.remove(destination);
+
+        // Update reconnection state with exponential backoff
+        let state = self
+            .reconnect_states
+            .entry(destination.to_string())
+            .or_insert(PeerReconnectState {
+                reconnect_delay: INITIAL_RECONNECTION_TIME,
+                last_failure: None,
+            });
+
+        // Record failure time and update delay for next attempt
+        state.last_failure = Some(Instant::now());
+        state.reconnect_delay = Duration::from_secs_f64(
+            (state.reconnect_delay.as_secs_f64() * RECONNECTION_TIME_GROWTH_RATE)
+                .min(MAX_RECONNECTION_TIME.as_secs_f64()),
+        );
+    }
+
+    /// Check if we should attempt reconnection to a destination
+    fn should_attempt_reconnect(&self, destination: &str) -> bool {
+        if let Some(state) = self.reconnect_states.get(destination)
+            && let Some(last_failure) = state.last_failure {
+                // Check if enough time has passed since last failure
+                return last_failure.elapsed() >= state.reconnect_delay;
+            }
+        true // No previous failure recorded, can attempt connection
+    }
+
+    /// Reset reconnection state on successful connection
+    fn reset_reconnection_state(&mut self, destination: &str) {
+        self.reconnect_states.remove(destination);
+    }
+
+    /// Get access to the time provider
+    pub fn time(&self) -> &T {
+        &self.time
     }
 
     /// Get access to the underlying protocol (for testing)

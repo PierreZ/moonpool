@@ -71,7 +71,7 @@ where
         payload: Vec<u8>,
     ) -> Result<Vec<u8>, TransportError>
     where
-        E: EnvelopeFactory<S::Envelope> + EnvelopeReplyDetection + 'static,
+        E: EnvelopeFactory<S::Envelope> + 'static,
         S::Envelope: Clone,
     {
         let correlation_id = self.next_correlation_id();
@@ -140,6 +140,33 @@ where
         }
 
         None
+    }
+
+    /// Send a request and wait for response with timeout
+    ///
+    /// This method adds timeout functionality to get_reply using tokio::select!
+    /// to race between the request completion and a timeout from TimeProvider::sleep.
+    pub async fn get_reply_with_timeout<E>(
+        &mut self,
+        destination: &str,
+        payload: Vec<u8>,
+        timeout_duration: std::time::Duration,
+    ) -> Result<Vec<u8>, TransportError>
+    where
+        E: EnvelopeFactory<S::Envelope> + 'static,
+        S::Envelope: Clone,
+    {
+        // Clone the time provider to avoid borrowing conflicts
+        let time_provider = self.driver.time().clone();
+
+        tokio::select! {
+            result = self.get_reply::<E>(destination, payload) => {
+                result
+            }
+            _ = time_provider.sleep(timeout_duration) => {
+                Err(TransportError::Timeout)
+            }
+        }
     }
 
     /// Periodic maintenance operations
