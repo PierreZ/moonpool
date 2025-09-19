@@ -36,6 +36,7 @@ pub use config::{NetworkConfiguration, sample_duration};
 
 // Re-export transport types
 pub use transport::{
-    Envelope, EnvelopeError, EnvelopeFactory, EnvelopeReplyDetection, SimpleEnvelope,
-    SimpleEnvelopeFactory,
+    Envelope, EnvelopeError, EnvelopeFactory, EnvelopeReplyDetection, EnvelopeSerializer,
+    RequestResponseEnvelope, RequestResponseEnvelopeFactory, RequestResponseSerializer,
+    SimpleEnvelope, SimpleEnvelopeFactory,
 };
