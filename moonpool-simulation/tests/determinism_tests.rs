@@ -11,11 +11,11 @@ fn deterministic_event_execution_order() {
         let mut execution_times = Vec::new();
 
         // Schedule events in a specific pattern
-        sim.schedule_event(Event::Wake { task_id: 1 }, Duration::from_millis(100));
-        sim.schedule_event(Event::Wake { task_id: 2 }, Duration::from_millis(50));
-        sim.schedule_event(Event::Wake { task_id: 3 }, Duration::from_millis(100)); // Same time as task 1
-        sim.schedule_event(Event::Wake { task_id: 4 }, Duration::from_millis(75));
-        sim.schedule_event(Event::Wake { task_id: 5 }, Duration::from_millis(100)); // Same time as task 1&3
+        sim.schedule_event(Event::Timer { task_id: 1 }, Duration::from_millis(100));
+        sim.schedule_event(Event::Timer { task_id: 2 }, Duration::from_millis(50));
+        sim.schedule_event(Event::Timer { task_id: 3 }, Duration::from_millis(100)); // Same time as task 1
+        sim.schedule_event(Event::Timer { task_id: 4 }, Duration::from_millis(75));
+        sim.schedule_event(Event::Timer { task_id: 5 }, Duration::from_millis(100)); // Same time as task 1&3
 
         // Execute and record the time progression
         // Use a different approach: process all events and record each step
@@ -68,10 +68,10 @@ fn same_time_events_sequence_order() {
     let target_time = Duration::from_millis(100);
 
     // Schedule multiple events at exactly the same time
-    sim.schedule_event_at(Event::Wake { task_id: 10 }, target_time);
-    sim.schedule_event_at(Event::Wake { task_id: 20 }, target_time);
-    sim.schedule_event_at(Event::Wake { task_id: 30 }, target_time);
-    sim.schedule_event_at(Event::Wake { task_id: 40 }, target_time);
+    sim.schedule_event_at(Event::Timer { task_id: 10 }, target_time);
+    sim.schedule_event_at(Event::Timer { task_id: 20 }, target_time);
+    sim.schedule_event_at(Event::Timer { task_id: 30 }, target_time);
+    sim.schedule_event_at(Event::Timer { task_id: 40 }, target_time);
 
     assert_eq!(sim.pending_event_count(), 4);
     assert_eq!(sim.current_time(), Duration::ZERO);
@@ -102,27 +102,27 @@ fn interleaved_scheduling_consistency() {
 
     fn create_sim_variant_1() -> SimWorld {
         let sim = SimWorld::new();
-        sim.schedule_event_at(Event::Wake { task_id: 1 }, Duration::from_millis(100));
-        sim.schedule_event_at(Event::Wake { task_id: 2 }, Duration::from_millis(100));
-        sim.schedule_event_at(Event::Wake { task_id: 3 }, Duration::from_millis(100));
+        sim.schedule_event_at(Event::Timer { task_id: 1 }, Duration::from_millis(100));
+        sim.schedule_event_at(Event::Timer { task_id: 2 }, Duration::from_millis(100));
+        sim.schedule_event_at(Event::Timer { task_id: 3 }, Duration::from_millis(100));
         sim
     }
 
     fn create_sim_variant_2() -> SimWorld {
         let sim = SimWorld::new();
         // Schedule in reverse order
-        sim.schedule_event_at(Event::Wake { task_id: 3 }, Duration::from_millis(100));
-        sim.schedule_event_at(Event::Wake { task_id: 2 }, Duration::from_millis(100));
-        sim.schedule_event_at(Event::Wake { task_id: 1 }, Duration::from_millis(100));
+        sim.schedule_event_at(Event::Timer { task_id: 3 }, Duration::from_millis(100));
+        sim.schedule_event_at(Event::Timer { task_id: 2 }, Duration::from_millis(100));
+        sim.schedule_event_at(Event::Timer { task_id: 1 }, Duration::from_millis(100));
         sim
     }
 
     fn create_sim_variant_3() -> SimWorld {
         let sim = SimWorld::new();
         // Schedule in mixed order
-        sim.schedule_event_at(Event::Wake { task_id: 2 }, Duration::from_millis(100));
-        sim.schedule_event_at(Event::Wake { task_id: 1 }, Duration::from_millis(100));
-        sim.schedule_event_at(Event::Wake { task_id: 3 }, Duration::from_millis(100));
+        sim.schedule_event_at(Event::Timer { task_id: 2 }, Duration::from_millis(100));
+        sim.schedule_event_at(Event::Timer { task_id: 1 }, Duration::from_millis(100));
+        sim.schedule_event_at(Event::Timer { task_id: 3 }, Duration::from_millis(100));
         sim
     }
 
@@ -153,9 +153,9 @@ fn time_advancement_deterministic() {
     let mut sim = SimWorld::new();
 
     // Schedule events at various times
-    sim.schedule_event(Event::Wake { task_id: 3 }, Duration::from_millis(150));
-    sim.schedule_event(Event::Wake { task_id: 1 }, Duration::from_millis(50));
-    sim.schedule_event(Event::Wake { task_id: 2 }, Duration::from_millis(100));
+    sim.schedule_event(Event::Timer { task_id: 3 }, Duration::from_millis(150));
+    sim.schedule_event(Event::Timer { task_id: 1 }, Duration::from_millis(50));
+    sim.schedule_event(Event::Timer { task_id: 2 }, Duration::from_millis(100));
 
     // Time should start at zero and only advance when events are processed
     assert_eq!(sim.current_time(), Duration::ZERO);

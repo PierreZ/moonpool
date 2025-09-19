@@ -29,7 +29,4 @@ pub use tokio::TokioNetworkProvider;
 pub use peer::{Peer, PeerConfig, PeerError, PeerMetrics};
 
 // Re-export configuration
-pub use config::{
-    CloggingConfiguration, LatencyConfiguration, LatencyRange, NetworkConfiguration,
-    NetworkRandomizationRanges,
-};
+pub use config::{NetworkConfiguration, sample_duration};

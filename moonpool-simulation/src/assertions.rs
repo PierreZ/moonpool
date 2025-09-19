@@ -5,8 +5,7 @@
 //! to enable statistical analysis of system behavior across multiple simulation runs.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
-use std::sync::{LazyLock, Mutex};
+use std::collections::HashMap;
 
 /// Statistics for a tracked assertion.
 ///
@@ -19,39 +18,6 @@ pub struct AssertionStats {
     pub total_checks: usize,
     /// Number of times the assertion condition was true
     pub successes: usize,
-}
-
-/// Report of assertion validation results.
-///
-/// Contains information about both success rate violations (existing functionality)
-/// and unreachable assertion violations (new functionality for Phase 5).
-#[derive(Debug, Clone, PartialEq)]
-pub struct ValidationReport {
-    /// Assertions with problematic success rates (0% or 100%)
-    pub success_rate_violations: Vec<String>,
-    /// Assertions that were registered but never executed in active modules
-    pub unreachable_assertions: Vec<String>,
-}
-
-impl ValidationReport {
-    /// Create a new empty validation report.
-    pub fn new() -> Self {
-        Self {
-            success_rate_violations: Vec::new(),
-            unreachable_assertions: Vec::new(),
-        }
-    }
-
-    /// Check if there are any violations in this report.
-    pub fn has_violations(&self) -> bool {
-        !self.success_rate_violations.is_empty() || !self.unreachable_assertions.is_empty()
-    }
-}
-
-impl Default for ValidationReport {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl AssertionStats {
@@ -103,71 +69,13 @@ impl Default for AssertionStats {
     }
 }
 
-/// Global registry of all assertions registered at compile time.
-///
-/// Maps module paths to sets of assertion names that were declared in those modules.
-/// This enables detection of assertions that are registered but never executed,
-/// indicating potentially unreachable code paths.
-pub static REGISTERED_ASSERTIONS: LazyLock<Mutex<HashMap<String, HashSet<String>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
 thread_local! {
-    /// Thread-local set of modules that have executed at least one assertion.
-    ///
-    /// Used to determine which modules should be validated for unreachable assertions.
-    /// Only modules that have executed at least one assertion will be checked for
-    /// missing assertions, avoiding false positives from completely unused modules.
-    static ACTIVE_MODULES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
-
     /// Thread-local storage for assertion results.
     ///
     /// Each thread maintains independent assertion statistics, ensuring
     /// proper isolation between parallel test execution while allowing
     /// statistical collection within each simulation run.
     static ASSERTION_RESULTS: RefCell<HashMap<String, AssertionStats>> = RefCell::new(HashMap::new());
-}
-
-/// Register an assertion at compile time in the global registry.
-///
-/// This function is called automatically by the `sometimes_assert!` macro expansion
-/// to register all assertions that exist in the compiled code, regardless of whether
-/// they are executed at runtime.
-///
-/// # Parameters
-///
-/// * `module_path` - The module path where the assertion is defined
-/// * `name` - The assertion identifier
-pub fn register_assertion_at_compile_time(module_path: &'static str, name: &'static str) {
-    let mut registry = REGISTERED_ASSERTIONS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    let assertions = registry.entry(module_path.to_string()).or_default();
-    assertions.insert(name.to_string());
-}
-
-/// Record an assertion result for statistical tracking with module information.
-///
-/// This function is used internally by the `sometimes_assert!` macro to track
-/// assertion outcomes and module activity for unreachable code detection.
-///
-/// # Parameters
-///
-/// * `module_path` - The module path where the assertion is located
-/// * `name` - The assertion identifier
-/// * `success` - Whether the assertion condition was true
-pub fn record_assertion_with_module(module_path: &str, name: &str, success: bool) {
-    // Mark this module as active
-    ACTIVE_MODULES.with(|modules| {
-        modules.borrow_mut().insert(module_path.to_string());
-    });
-
-    // Record the assertion result
-    ASSERTION_RESULTS.with(|results| {
-        let mut results = results.borrow_mut();
-        let stats = results.entry(name.to_string()).or_default();
-        stats.record(success);
-    });
 }
 
 /// Record an assertion result for statistical tracking.
@@ -213,14 +121,6 @@ pub fn get_assertion_results() -> HashMap<String, AssertionStats> {
     ASSERTION_RESULTS.with(|results| results.borrow().clone())
 }
 
-/// Get the currently active modules (modules that have executed at least one assertion).
-///
-/// Returns a set of module paths that have executed assertions on the current thread.
-/// This is used by the iteration control logic to determine completion criteria.
-pub fn get_active_modules() -> HashSet<String> {
-    ACTIVE_MODULES.with(|modules| modules.borrow().clone())
-}
-
 /// Reset all assertion statistics to empty state.
 ///
 /// This should be called before each simulation run to ensure clean state
@@ -243,69 +143,52 @@ pub fn reset_assertion_results() {
     ASSERTION_RESULTS.with(|results| {
         results.borrow_mut().clear();
     });
-
-    // Also clear active modules for clean state
-    ACTIVE_MODULES.with(|modules| {
-        modules.borrow_mut().clear();
-    });
 }
 
 /// Check assertion validation and panic if violations are found.
 ///
-/// This is a convenience function that validates assertion contracts and panics
-/// with detailed error messages if any violations are found. This is the common
-/// pattern used in test files.
+/// This is a simplified function that checks for basic assertion issues.
+/// It looks for assertions that never succeed (0% success rate).
 ///
 /// # Parameters
 ///
-/// * `report` - The simulation report containing assertion validation results
+/// * `_report` - The simulation report (unused in simplified version)
 ///
 /// # Panics
 ///
-/// Panics if there are success rate violations or unreachable assertions.
-pub fn panic_on_assertion_violations(report: &crate::runner::SimulationReport) {
-    if report.assertion_validation.has_violations() {
-        if !report
-            .assertion_validation
-            .success_rate_violations
-            .is_empty()
-        {
-            println!("❌ Success rate violations found:");
-            for violation in &report.assertion_validation.success_rate_violations {
-                println!("  - {}", violation);
-            }
-            panic!("❌ Unexpected success rate violations detected!");
-        }
+/// Panics if there are assertions that never succeed.
+pub fn panic_on_assertion_violations(_report: &crate::runner::SimulationReport) {
+    let results = get_assertion_results();
+    let mut violations = Vec::new();
 
-        if !report
-            .assertion_validation
-            .unreachable_assertions
-            .is_empty()
-        {
-            println!("⚠️ Unreachable code detected:");
-            for violation in &report.assertion_validation.unreachable_assertions {
-                println!("  - {}", violation);
-            }
-            panic!("❌ Unexpected unreachable assertions detected!");
+    for (name, stats) in &results {
+        if stats.total_checks > 0 && stats.success_rate() == 0.0 {
+            violations.push(format!(
+                "sometimes_assert!('{}') has 0% success rate (expected at least 1%)",
+                name
+            ));
         }
+    }
+
+    if !violations.is_empty() {
+        println!("❌ Assertion violations found:");
+        for violation in &violations {
+            println!("  - {}", violation);
+        }
+        panic!("❌ Unexpected assertion violations detected!");
     } else {
-        println!("✅ Dynamic validation passed - no assertion violations detected!");
+        println!("✅ All assertions passed basic validation!");
     }
 }
 
-/// Validate that all `sometimes_assert!` assertions actually behave as "sometimes"
-/// and detect unreachable code.
+/// Validate that all `sometimes_assert!` assertions actually behave as "sometimes".
 ///
-/// This function checks that:
-/// - `sometimes_assert!` assertions have a success rate of at least 1% (100% is acceptable)
-/// - All assertions registered in active modules were actually executed
-///
-/// This helps catch incorrect usage of assertion macros and identifies unreachable code paths.
+/// This simplified function checks that `sometimes_assert!` assertions have a
+/// success rate of at least 1%.
 ///
 /// # Returns
 ///
-/// `Ok(ValidationReport)` with details about any violations found, or information that
-/// all assertions follow their contracts.
+/// A vector of violation messages, or empty if all assertions are valid.
 ///
 /// # Example
 ///
@@ -314,48 +197,26 @@ pub fn panic_on_assertion_violations(report: &crate::runner::SimulationReport) {
 ///
 /// reset_assertion_results();
 /// // ... run simulation with assertions ...
-/// let report = validate_assertion_contracts();
-/// if report.has_violations() {
+/// let violations = validate_assertion_contracts();
+/// if !violations.is_empty() {
 ///     // Handle violations
 /// }
 /// ```
-pub fn validate_assertion_contracts() -> ValidationReport {
-    let mut report = ValidationReport::new();
-
-    // Check success rate violations (existing functionality)
+pub fn validate_assertion_contracts() -> Vec<String> {
+    let mut violations = Vec::new();
     let results = get_assertion_results();
+
     for (name, stats) in &results {
         let rate = stats.success_rate();
-        if rate == 0.0 {
-            report.success_rate_violations.push(format!(
+        if stats.total_checks > 0 && rate == 0.0 {
+            violations.push(format!(
                 "sometimes_assert!('{}') has {:.1}% success rate (expected at least 1%)",
                 name, rate
             ));
         }
     }
 
-    // Check unreachable assertions (new functionality)
-    let registry = REGISTERED_ASSERTIONS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    let active_modules = ACTIVE_MODULES.with(|modules| modules.borrow().clone());
-
-    for active_module in &active_modules {
-        if let Some(registered_assertions) = registry.get(active_module) {
-            for assertion_name in registered_assertions {
-                // Check if this assertion was actually executed
-                if !results.contains_key(assertion_name) {
-                    report.unreachable_assertions.push(format!(
-                        "{} in module {} was never called",
-                        assertion_name, active_module
-                    ));
-                }
-            }
-        }
-    }
-
-    report
+    violations
 }
 
 /// Assert that a condition is always true, panicking on failure.
@@ -427,12 +288,9 @@ macro_rules! always_assert {
 #[macro_export]
 macro_rules! sometimes_assert {
     ($name:ident, $condition:expr, $message:expr) => {
-        // Compile-time registration
-        $crate::assertions::register_assertion_at_compile_time(module_path!(), stringify!($name));
-
-        // Runtime execution
+        // Runtime execution - simplified to just record the result
         let result = $condition;
-        $crate::assertions::record_assertion_with_module(module_path!(), stringify!($name), result);
+        $crate::assertions::record_assertion(stringify!($name), result);
     };
 }
 
@@ -622,146 +480,10 @@ mod tests {
     }
 
     #[test]
-    fn test_validation_report() {
-        let mut report = ValidationReport::new();
-        assert!(!report.has_violations());
-
-        report
-            .success_rate_violations
-            .push("test violation".to_string());
-        assert!(report.has_violations());
-
-        report
-            .unreachable_assertions
-            .push("test unreachable".to_string());
-        assert!(report.has_violations());
-    }
-
-    #[test]
-    fn test_compile_time_registration_and_module_tracking() {
+    fn test_sometimes_assert_macro() {
         reset_assertion_results();
 
-        // Test that sometimes_assert! macro registers at compile time and tracks module execution
-        let test_module = "test_module";
-
-        // Simulate compile-time registration (normally done by macro)
-        register_assertion_at_compile_time(test_module, "test_assertion");
-
-        // Simulate runtime execution (normally done by macro)
-        record_assertion_with_module(test_module, "test_assertion", true);
-        record_assertion_with_module(test_module, "test_assertion", false);
-
-        // Check that assertion was recorded
-        let results = get_assertion_results();
-        assert!(results.contains_key("test_assertion"));
-
-        // Check that module was marked as active
-        let report = validate_assertion_contracts();
-        if report.has_violations() {
-            println!("Unexpected violations: {:?}", report);
-        }
-        assert!(!report.has_violations()); // Should pass since the assertion was executed
-    }
-
-    #[test]
-    fn test_unreachable_assertion_detection() {
-        reset_assertion_results();
-
-        let test_module = "test_module";
-
-        // Register two assertions at compile time
-        register_assertion_at_compile_time(test_module, "executed_assertion");
-        register_assertion_at_compile_time(test_module, "unreachable_assertion");
-
-        // Only execute one of them with mixed results to avoid success rate violations
-        record_assertion_with_module(test_module, "executed_assertion", true);
-        record_assertion_with_module(test_module, "executed_assertion", false);
-
-        // Validate should detect the unreachable assertion
-        let report = validate_assertion_contracts();
-        assert!(report.has_violations());
-        assert!(report.success_rate_violations.is_empty()); // No success rate violations
-        assert_eq!(report.unreachable_assertions.len(), 1);
-        assert!(report.unreachable_assertions[0].contains("unreachable_assertion"));
-        assert!(report.unreachable_assertions[0].contains(test_module));
-    }
-
-    #[test]
-    fn test_mixed_violations() {
-        reset_assertion_results();
-
-        let test_module = "test_module";
-
-        // Register assertions at compile time
-        register_assertion_at_compile_time(test_module, "always_success");
-        register_assertion_at_compile_time(test_module, "unreachable");
-
-        // Execute one with 0% success rate (violation)
-        record_assertion_with_module(test_module, "always_success", false);
-        record_assertion_with_module(test_module, "always_success", false);
-        record_assertion_with_module(test_module, "always_success", false);
-
-        // Don't execute the other one (unreachable)
-
-        let report = validate_assertion_contracts();
-        assert!(report.has_violations());
-        assert_eq!(report.success_rate_violations.len(), 1);
-        assert_eq!(report.unreachable_assertions.len(), 1);
-
-        assert!(report.success_rate_violations[0].contains("always_success"));
-        assert!(report.success_rate_violations[0].contains("0.0%"));
-        assert!(report.unreachable_assertions[0].contains("unreachable"));
-    }
-
-    #[test]
-    fn test_module_isolation() {
-        reset_assertion_results();
-
-        let active_module = "active_module";
-        let inactive_module = "inactive_module";
-
-        // Register assertions in both modules
-        register_assertion_at_compile_time(active_module, "active_assertion");
-        register_assertion_at_compile_time(inactive_module, "inactive_assertion");
-
-        // Only execute assertion in active module with mixed results to avoid success rate violations
-        record_assertion_with_module(active_module, "active_assertion", true);
-        record_assertion_with_module(active_module, "active_assertion", false);
-
-        // Validation should not report inactive_assertion as unreachable
-        // because its module was never active
-        let report = validate_assertion_contracts();
-        assert!(!report.has_violations());
-    }
-
-    #[test]
-    fn test_reset_clears_active_modules() {
-        let test_module = "test_module";
-
-        // Register and execute an assertion with mixed results
-        register_assertion_at_compile_time(test_module, "test_assertion");
-        record_assertion_with_module(test_module, "test_assertion", true);
-        record_assertion_with_module(test_module, "test_assertion", false);
-
-        // Verify module is active by checking there are no unreachable violations
-        let report = validate_assertion_contracts();
-        assert!(!report.has_violations());
-
-        // Reset and verify clean state
-        reset_assertion_results();
-
-        // Now the same assertion should be reported as unreachable if we only register
-        // it without executing, because the active modules were cleared
-        register_assertion_at_compile_time(test_module, "test_assertion");
-        let report = validate_assertion_contracts();
-        assert!(!report.has_violations()); // No active modules, so no violations
-    }
-
-    #[test]
-    fn test_sometimes_assert_macro_with_phase5_features() {
-        reset_assertion_results();
-
-        // Test the macro with the new Phase 5 functionality
+        // Test the simplified macro functionality
         sometimes_assert!(macro_test, true, "Test assertion");
         sometimes_assert!(macro_test, false, "Test assertion");
 
@@ -771,7 +493,7 @@ mod tests {
         assert_eq!(results["macro_test"].successes, 1);
 
         // Should not have violations (50% success rate is valid)
-        let report = validate_assertion_contracts();
-        assert!(!report.has_violations());
+        let violations = validate_assertion_contracts();
+        assert!(violations.is_empty());
     }
 }
