@@ -1,8 +1,8 @@
-# Transport Layer Split Plan: Rebuilding pz/peers Branch Incrementally
+# Phase 11: Transport Layer Implementation - Incremental 7-Phase Approach
 
 ## Overview
 
-This document contains the complete knowledge from the `pz/peers` branch to rebuild the Sans I/O transport layer incrementally with proper chaos testing enabled from the start. The original branch contains ~2000 lines of changes that need to be split into manageable PRs while maintaining stability.
+This document provides a complete guide to implementing the Sans I/O transport layer incrementally across 7 sub-phases (11.0-11.7). Each phase builds systematically on the previous, with sizes ranging from 150-450 lines, ensuring reviewable PRs and early validation. The design is based on complete knowledge from the `pz/peers` branch and incorporates all lessons learned about chaos testing, deadlock prevention, and Sans I/O architecture.
 
 ## Context: Building on Phase 10 Foundation
 
@@ -485,199 +485,398 @@ async fn send_ping(&mut self) -> SimulationResult<()> {
 }
 ```
 
-## PR Split Plan
+## 7-Phase Implementation Plan
 
-### PR 1: Foundation Transport + Ping-Pong (Large but Necessary)
-**Size:** ~1000 lines
-**Rationale:** Core dependencies are too tightly coupled to split further
+### Phase 11.0: Basic Envelope System (150-200 lines)
+**Goal:** Establish envelope abstraction without serialization complexity
+**Files:** `envelope.rs`
 
-**Dependencies on Phase 10 Foundation (Already in Main):**
-- **Uses existing TaskProvider**: All transport components use TaskProvider for spawning (already available)
-- **Uses existing Peer actors**: TransportDriver manages pool of Phase 10 Peer instances (already available)
-- **Uses Peer send/receive API**: Raw byte interface for actual network I/O (already available)
-- **Leverages Peer event model**: Transport protocol events trigger Peer actor wake-ups (already available)
+**Scope:**
+- Define core `Envelope` trait with correlation_id() and payload() methods
+- Create `SimpleEnvelope` struct (correlation_id: u64, payload: Vec<u8>)
+- Basic envelope creation helpers (new_request, new_reply)
+- Error types for envelope operations
 
-**Files:**
-- `envelope.rs` - Basic trait and error types
-- `request_response_envelope.rs` - Implementation with tests  
-- `protocol.rs` - Sans I/O state machine with tests
-- `driver.rs` - Basic driver with retry logic (uses Phase 10 Peer pool)
-- `net_transport.rs` - Trait definition
-- `server.rs` - ServerTransport implementation
-- `client.rs` - ClientTransport with basic get_reply
-- `actors.rs` - Updated ping-pong actors
-- `types.rs` - Transmit struct
+**Tests:**
+```rust
+#[test]
+fn test_envelope_creation() {
+    // Test envelope creation with correlation IDs
+}
 
-**Key Integration Points:**
-- **TransportDriver creates Peer instances**: Uses Phase 10 `Peer::new(network, time, task_provider, destination, config)`
-- **Driver uses Peer.send()**: Converts envelope bytes to Phase 10 raw byte send
-- **Driver polls Peer.try_receive()**: Converts raw bytes back to envelopes
-**Key Features:**
-- Basic timeout/retry (required for chaos)
-- Simple correlation IDs (required for request/response)
-- Server control flow fix (required to prevent deadlock)
+#[test]
+fn test_correlation_id_matching() {
+    // Test reply detection by correlation ID
+}
+```
 
-**Tests (Must Pass with Chaos Enabled):**
+**Success Criteria:**
+- All envelope unit tests pass
+- Clean trait design ready for serialization
+
+---
+
+### Phase 11.1: Envelope Serialization (200-250 lines)
+**Goal:** Add serialization layer with wire format
+**Files:** `request_response_envelope.rs`
+
+**Scope:**
+- Implement `EnvelopeSerializer` trait
+- Add `RequestResponseSerializer` with wire format: `[correlation_id:8][len:4][payload:N]`
+- Comprehensive error handling for malformed data
+- Factory traits for envelope creation
+
+**Tests:**
+```rust
+#[test]
+fn test_serialization_roundtrip() {
+    // Test serialize -> deserialize maintains data
+}
+
+#[test]
+fn test_malformed_data_handling() {
+    // Test graceful handling of corrupted wire data
+}
+
+#[test]
+fn test_envelope_factory() {
+    // Test EnvelopeFactory trait implementation
+}
+```
+
+**Success Criteria:**
+- Serialization roundtrip tests pass
+- Handles malformed data gracefully
+- Ready for protocol integration
+
+---
+
+### Phase 11.2: Sans I/O Protocol Core (250-300 lines)
+**Goal:** Pure state machine for protocol logic
+**Files:** `protocol.rs`, `types.rs`
+
+**Scope:**
+- Create `TransportProtocol<S: EnvelopeSerializer>` struct
+- Implement send() and handle_received() methods
+- Add `Transmit` type for outbound queue
+- Basic message queuing (no timeouts yet)
+- Pure function design - all I/O passed as parameters
+
+**Tests:**
+```rust
+#[test]
+fn test_protocol_send_receive() {
+    // Test message flow through protocol state machine
+}
+
+#[test]
+fn test_protocol_queue_management() {
+    // Test outbound/inbound queue behavior
+}
+
+#[test]
+fn test_protocol_sans_io() {
+    // Verify no I/O dependencies in protocol
+}
+```
+
+**Success Criteria:**
+- Protocol passes all unit tests
+- No I/O dependencies (testable without networking)
+- Ready for driver integration
+
+---
+
+### Phase 11.3: Minimal Transport Driver (300-350 lines)
+**Goal:** Connect protocol to Phase 10 Peers
+**Files:** `driver.rs`
+
+**Scope:**
+- Create `TransportDriver<N, T, TP, S>` that wraps protocol
+- Integration with Phase 10 Peer for actual I/O
+- Basic send/receive flow (no retry logic yet)
+- Peer pool management (create on demand)
+- process_transmissions() and process_peer_reads() methods
+
+**Integration Points:**
+- Uses `Peer::new(network, time, task_provider, destination, config)`
+- Converts envelopes → raw bytes via serializer
+- Polls `Peer.try_receive()` for incoming data
+
+**Tests:**
+```rust
+#[test]
+fn test_driver_peer_integration() {
+    // Test driver creates and manages peers
+}
+
+#[test]
+fn test_envelope_to_peer_conversion() {
+    // Test envelope serialization to peer send
+}
+
+#[test]
+fn test_peer_to_envelope_conversion() {
+    // Test peer receive to envelope deserialization
+}
+```
+
+**Success Criteria:**
+- Driver integrates with Phase 10 Peers
+- Basic send/receive works end-to-end
+- Ready for transport trait layer
+
+---
+
+### Phase 11.4: NetTransport Trait & Client Implementation (400-450 lines)
+**Goal:** Request-response API with turbofish pattern
+**Files:** `net_transport.rs`, `client.rs`
+
+**Scope:**
+- Define `NetTransport` trait with get_reply/send_reply methods
+- Implement `ClientTransport` with correlation tracking
+- Self-driving get_reply to prevent deadlocks
+- Turbofish pattern for envelope types: `get_reply::<E>()`
+- Pending request management with oneshot channels
+
+**Critical Features:**
+- **Self-driving get_reply:** Continuously polls transport while waiting
+- **Turbofish design:** `async fn get_reply<E>() where E: EnvelopeFactory + EnvelopeReplyDetection`
+- **Deadlock prevention:** Never blocks without driving transport
+
+**Tests:**
+```rust
+#[test]
+fn test_get_reply_self_driving() {
+    // Test get_reply doesn't deadlock
+}
+
+#[test]
+fn test_turbofish_envelope_types() {
+    // Test multiple envelope types via turbofish
+}
+
+#[test]
+fn test_correlation_matching() {
+    // Test request-response correlation
+}
+```
+
+**Success Criteria:**
+- get_reply never deadlocks
+- Turbofish pattern works with different envelope types
+- Ready for server implementation
+
+---
+
+### Phase 11.5: Server Transport & End-to-End (350-400 lines)
+**Goal:** Complete transport system with server
+**Files:** `server.rs`, update `actors.rs`
+
+**Scope:**
+- Implement `ServerTransport` with bind/accept
+- **CRITICAL:** Fix control flow bug - I/O operations on every tick
+- Direct stream writes for responses (not through peer system)
+- Update ping-pong actors to use transport layer
+- First complete end-to-end test
+
+**Critical Bug Fix:**
+```rust
+// BEFORE (Bug): I/O only on first tick
+if self.client_stream.is_none() {
+    // Accept connection...
+    // BUG: Read/write logic here - only runs once!
+}
+
+// AFTER (Fixed): I/O on every tick
+if self.client_stream.is_none() {
+    // Accept connection only
+}
+// FIXED: Read/write logic runs every tick
+if let Some((ref mut stream, _)) = self.client_stream {
+    // Process I/O operations
+}
+```
+
+**Tests:**
+```rust
+#[test]
+fn test_server_control_flow_fix() {
+    // Verify server processes I/O on every tick
+}
+
+#[test]
+fn test_end_to_end_ping_pong() {
+    // Complete ping-pong using transport layer
+}
+
+#[test]
+fn test_transport_actors() {
+    // Test updated ping-pong actors
+}
+```
+
+**Success Criteria:**
+- Server control flow bug fixed
+- Complete ping-pong test passes
+- Actors successfully use transport abstraction
+
+---
+
+### Phase 11.6: Retry & Timeout Logic + Chaos Testing (200-250 lines)
+**Goal:** Add resilience and enable full chaos testing
+**Files:** Update `protocol.rs`, `driver.rs`
+
+**Scope:**
+- Add timeout handling to protocol (handle_timeout method)
+- Implement basic retry with exponential backoff
+- Connection failure recovery in driver
+- **CRITICAL:** Enable buggify/chaos testing for all tests
+
+**Features:**
+- Protocol timeout state management
+- Driver retry logic for failed sends
+- Connection pool cleanup on failures
+- Chaos-resilient test configuration
+
+**Tests (ALL with Chaos Enabled):**
 ```rust
 #[test]
 fn test_ping_pong_with_chaos() {
     SimulationBuilder::new()
         .set_iteration_control(IterationControl::UntilAllSometimesReached(100))
-        .enable_buggify() // ENABLED from start
+        .enable_buggify() // MUST be enabled
         .register_workload("server", ping_pong_server)
         .register_workload("client", ping_pong_client)
         .run()
         .await;
 }
 
-#[test] 
-fn test_envelope_survives_corruption() {
-    // Test envelope serialization with corrupted data
+#[test]
+fn test_timeout_and_retry() {
+    // Test timeout handling and retry logic
 }
 
 #[test]
-fn test_protocol_retries_on_failure() {
-    // Test Sans I/O protocol handles failures
-}
-
-#[test]
-fn test_server_control_flow_fix() {
-    // Verify server processes I/O on every tick
-}
-```
-
-### PR 2: Make get_reply Self-Driving
-**Size:** ~100 lines
-**Goal:** Fix deadlock in request/response pattern
-
-**Changes:**
-- Convert get_reply from returning Future to async fn
-- Make it poll transport while waiting
-- Add proper timeout handling
-
-**Tests:**
-```rust
-#[test]
-fn test_get_reply_no_deadlock() {
-    // Verify get_reply doesn't deadlock waiting for response
-}
-
-#[test]
-fn test_concurrent_get_reply() {
-    // Multiple concurrent get_reply calls
-}
-
-#[test]
-fn test_get_reply_with_tokio() {
-    // Test with real Tokio runtime
-}
-```
-
-### PR 3: Improve Chaos Resilience
-**Size:** ~300 lines
-**Goal:** Handle more chaos scenarios
-
-**Improvements:**
-- Better connection pool management
-- Exponential backoff with jitter
-- Circuit breaker for failing peers
-- Dead letter queue for undeliverable messages
-
-**Tests:**
-```rust
-#[test]
-fn test_connection_pool_recovery() {
+fn test_connection_recovery() {
     // Test peer connection recovery after failures
 }
-
-#[test]
-fn test_circuit_breaker_triggers() {
-    // Test circuit breaker pattern
-}
-
-#[test]
-fn test_exponential_backoff() {
-    // Test retry behavior under failures
-}
 ```
 
-### PR 4: Add Peer Management to Driver
-**Size:** ~200 lines
-**Goal:** Automatic peer lifecycle management
+**Success Criteria:**
+- **ALL tests pass with chaos enabled**
+- No deadlocks under any chaos scenario
+- Retries work correctly under failures
 
-**Changes:**
-- Driver creates peers on demand
-- Cleanup idle connections
-- Connection health monitoring
+---
+
+### Phase 11.7: Advanced Features (Optional, 300+ lines)
+**Goal:** Production readiness and optimizations
+**Files:** New files or extensions to existing
+
+**Scope:**
+- Connection pool management improvements
+- Circuit breaker pattern for failing peers
+- Dead letter queue for undeliverable messages
+- Multi-server support tests
+- Performance optimizations
 
 **Tests:**
 ```rust
 #[test]
-fn test_peer_lifecycle() {
-    // Test automatic peer creation/cleanup
+fn test_circuit_breaker() {
+    // Test circuit breaker prevents cascading failures
 }
 
 #[test]
-fn test_idle_connection_cleanup() {
-    // Test cleanup of unused connections
+fn test_multi_server_support() {
+    // Test client with multiple servers
+}
+
+#[test]
+fn test_performance_characteristics() {
+    // Test performance under various loads
 }
 ```
 
-### PR 5: Multi-Server Support
-**Size:** ~300 lines
-**Goal:** Test with multiple servers
-
-**New Test:**
-- `tests/simulation/ping_pong/multi_server.rs`
-- Client talks to multiple servers
-- Load balancing and failover
-
-**Tests:**
-```rust
-#[test]
-fn test_multi_server_ping_pong() {
-    // Client communicates with multiple servers
-}
-
-#[test]
-fn test_server_failover() {
-    // Client handles server failures
-}
-```
+**Success Criteria:**
+- Advanced resilience patterns work
+- Multi-server scenarios supported
+- Performance acceptable under chaos
 
 ## Implementation Guidelines
 
+### Phase-by-Phase Development Strategy
+
+**Phase-First Approach:**
+1. **Complete each phase fully** before moving to next
+2. **Test thoroughly** at each phase boundary
+3. **Enable chaos gradually** - full chaos by Phase 11.6
+4. **Validate integration points** between phases
+5. **Document lessons learned** at each phase
+
 ### Testing Strategy: Three-Layer Approach
 
-1. **Unit Tests:** Test components in isolation
-   - Envelope serialization
-   - Protocol state machine
-   - Driver peer management
+1. **Unit Tests (All Phases):** Test components in isolation
+   - Envelope serialization (11.0-11.1)
+   - Protocol state machine (11.2)
+   - Driver peer management (11.3-11.4)
 
-2. **Simulation Tests:** Test with chaos and determinism  
-   - Always run with buggify enabled
+2. **Integration Tests (11.3+):** Test component interactions
+   - Driver-to-Peer integration
+   - Client-to-Server communication
+   - End-to-end message flow
+
+3. **Simulation Tests (11.5+):** Test with chaos and determinism  
+   - Enable buggify by Phase 11.6
    - 100+ iterations for robustness
    - Deterministic failure reproduction
 
-3. **Tokio Tests:** Test with real runtime and network
+4. **Tokio Tests (11.5+):** Test with real runtime and network
    - Catch simulation assumptions
    - Validate real-world behavior
    - Performance characteristics
 
 ### Chaos-First Development Principles
 
-1. **Never Disable Chaos:** Every PR must pass with buggify enabled
-2. **Timeouts Everywhere:** Every async operation has timeout
-3. **Retry by Default:** Assume failures and retry appropriately
-4. **Graceful Degradation:** Handle partial failures cleanly
-5. **Observable Failures:** Log and metrics for debugging
+1. **Gradual Chaos Introduction:** 
+   - Phases 11.0-11.5: Deterministic testing
+   - Phase 11.6+: Full chaos enabled
+2. **Never Regress on Chaos:** Once enabled, must always pass
+3. **Timeouts Everywhere:** Every async operation has timeout
+4. **Retry by Default:** Assume failures and retry appropriately
+5. **Graceful Degradation:** Handle partial failures cleanly
+6. **Observable Failures:** Log and metrics for debugging
 
-### Key Success Metrics
+### Phase Success Criteria
 
+**Every Phase Must Achieve:**
+- All unit tests pass
+- Code compiles without warnings
+- Integration tests pass (where applicable)
+- Clear API boundaries established
+- Documentation updated
+
+**Phase 11.6+ Must Additionally Achieve:**
 - All tests pass with chaos enabled (no exceptions)
-- Get_reply never deadlocks under any conditions
+- get_reply never deadlocks under any conditions
 - Server handles connection failures gracefully
 - Performance acceptable under light chaos (not just heavy)
+
+### Phase Dependencies & Order
+
+```
+11.0 (Envelope) → 11.1 (Serialization) → 11.2 (Protocol)
+                                             ↓
+11.7 (Advanced) ← 11.6 (Chaos) ← 11.5 (Server) ← 11.4 (Client) ← 11.3 (Driver)
+```
+
+**Critical Dependencies:**
+- **11.3 requires Phase 10:** Uses existing Peer infrastructure
+- **11.4 builds on 11.3:** Client uses driver for peer management
+- **11.5 completes system:** Server enables end-to-end testing
+- **11.6 enables chaos:** All previous phases must work under chaos
+- **11.7 is optional:** Advanced features for production use
 
 ## Lessons Learned
 
@@ -687,15 +886,60 @@ fn test_server_failover() {
 4. **Chaos Testing Cannot Be Deferred:** Must be enabled from the start
 5. **Tight Coupling Makes Small PRs Hard:** Some components cannot be meaningfully separated
 
-## Dependencies Between PRs
+## Phase Benefits & Risk Mitigation
 
-- **PR 1 → All Others:** Foundation required
-- **PR 2 → PR 3+:** Self-driving get_reply enables higher chaos
-- **PR 3 → PR 4+:** Resilience enables more complex scenarios
-- **PR 4 → PR 5:** Peer management enables multi-server
+### Benefits of 7-Phase Approach
+
+1. **Reviewable Size:** Each phase 150-450 lines vs 1000+ line monolith
+2. **Early Validation:** Can test envelope/protocol logic before any networking
+3. **Clear Milestones:** Each phase has specific, measurable goals
+4. **Rollback Friendly:** Easy to revert individual phases without losing everything
+5. **Incremental Chaos:** Can introduce chaos testing gradually
+6. **Reduced Risk:** Problems found early, before complex integration
+7. **Better Reviews:** Smaller chunks allow thorough review
+
+### Risk Mitigation Strategies
+
+**Integration Risks:**
+- Phase 11.3 validates driver-to-peer integration early
+- Phase 11.5 completes end-to-end testing before chaos
+- Each phase includes integration tests where applicable
+
+**Chaos Testing Risks:**
+- Deterministic testing through Phase 11.5
+- Gradual chaos introduction in Phase 11.6
+- All previous phases must work before enabling chaos
+
+**API Design Risks:**
+- Turbofish pattern validated in Phase 11.4
+- NetTransport trait established before server implementation
+- Self-driving get_reply tested before chaos scenarios
+
+**Performance Risks:**
+- Basic performance tested in Phase 11.5
+- Chaos performance validated in Phase 11.6
+- Optimizations deferred to optional Phase 11.7
+
+## Dependencies Between Phases
+
+- **Phase 10 → 11.3:** Driver requires existing Peer infrastructure
+- **11.0 → 11.1 → 11.2:** Sequential envelope → serialization → protocol
+- **11.2 → 11.3:** Driver wraps protocol
+- **11.3 → 11.4:** Client uses driver for peer management
+- **11.4 → 11.5:** Server complements client for end-to-end
+- **11.5 → 11.6:** Complete system required before chaos testing
+- **11.6 → 11.7:** Chaos resilience required for advanced features
 
 ## Summary
 
-This plan acknowledges that some complexity cannot be avoided - the transport layer has fundamental interdependencies that make very small PRs impossible. However, by building chaos resilience from the start, we can ensure each increment is solid and builds proper foundation for the next.
+This 7-phase approach transforms Phase 11 from a risky 1000+ line implementation into a series of manageable, well-tested increments. Each phase builds systematically on the previous, with clear success criteria and early validation opportunities.
 
-The key insight is to front-load the essential complexity (PR 1) while maintaining rigorous testing standards, then iterate on improvements with smaller, focused PRs.
+**Key Advantages:**
+- **No giant PRs:** Largest phase is ~450 lines
+- **Testable at every step:** Each phase validates specific functionality
+- **Incremental complexity:** Start simple, add features gradually
+- **Chaos-ready:** System designed for chaos from the ground up
+- **Review-friendly:** Small chunks enable thorough code review
+- **Risk mitigation:** Problems caught early, before integration complexity
+
+The approach acknowledges that transport layer complexity is inherent, but distributes it across phases to make each step manageable and verifiable.
