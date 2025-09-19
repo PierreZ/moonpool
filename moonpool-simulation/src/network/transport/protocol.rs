@@ -149,7 +149,6 @@ impl<S: EnvelopeSerializer> TransportProtocol<S> {
         self.receive_queue.pop_front()
     }
 
-
     /// Get the current protocol statistics
     pub fn stats(&self) -> &ProtocolStats {
         &self.stats
