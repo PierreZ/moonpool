@@ -726,18 +726,26 @@ fn test_transport_actors() {
 
 ### Phase 11.6: Retry & Timeout Logic + Chaos Testing (200-250 lines)
 **Goal:** Add resilience and enable full chaos testing
-**Files:** Update `protocol.rs`, `driver.rs`
+**Files:** Update `client.rs`, `driver.rs`, add timeout tests
 
 **Scope:**
-- Add timeout handling to protocol (handle_timeout method)
-- Implement basic retry with exponential backoff
+- Add timeout handling to ClientTransport (NOT protocol - maintaining Sans I/O purity)
+- Implement basic retry with exponential backoff in ClientTransport
 - Connection failure recovery in driver
 - **CRITICAL:** Enable buggify/chaos testing for all tests
 
+**Design Rationale: Why Timeouts in ClientTransport, Not Protocol**
+The protocol layer is designed as a pure Sans I/O state machine with no time dependencies. Timeouts are a **client-level concern** for request-response semantics:
+
+1. **Sans I/O Purity**: Protocol has no async operations or time management
+2. **Request-Response Semantics**: Timeouts apply to specific get_reply() calls
+3. **FoundationDB Pattern**: Actors handle timeouts, transport focuses on delivery
+4. **Separation of Concerns**: Client layer owns timeout policies, protocol owns message logic
+
 **Features:**
-- Protocol timeout state management
-- Driver retry logic for failed sends
-- Connection pool cleanup on failures
+- ClientTransport timeout using TimeProvider::timeout()
+- Client-level retry logic for failed requests
+- Driver connection pool cleanup on failures  
 - Chaos-resilient test configuration
 
 **Tests (ALL with Chaos Enabled):**
