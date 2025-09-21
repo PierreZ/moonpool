@@ -145,15 +145,8 @@ impl AsyncRead for SimTcpStream {
             .upgrade()
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown"))?;
 
-        // Phase 7b: Check if connection is cut
-        if sim.is_connection_cut(self.connection_id) {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::ConnectionReset,
-                "Connection was cut",
-            )));
-        }
-
-        // Try to read from connection's receive buffer
+        // Try to read from connection's receive buffer first
+        // We should be able to read buffered data even if connection is currently cut
         let mut temp_buf = vec![0u8; buf.remaining()];
         let bytes_read = sim
             .read_from_connection(self.connection_id, &mut temp_buf)
@@ -175,7 +168,15 @@ impl AsyncRead for SimTcpStream {
             buf.put_slice(&temp_buf[..bytes_read]);
             Poll::Ready(Ok(()))
         } else {
-            // No data available - register for notification when data arrives
+            // No data available - check if connection is cut
+            if sim.is_connection_cut(self.connection_id) {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::ConnectionReset,
+                    "Connection was cut",
+                )));
+            }
+
+            // Register for notification when data arrives
             tracing::info!(
                 "SimTcpStream::poll_read connection_id={} no data, registering waker",
                 self.connection_id.0
@@ -202,7 +203,15 @@ impl AsyncRead for SimTcpStream {
                 buf.put_slice(&temp_buf_recheck[..bytes_read_recheck]);
                 Poll::Ready(Ok(()))
             } else {
-                Poll::Pending
+                // Final check - if connection is cut and no data available, return error
+                if sim.is_connection_cut(self.connection_id) {
+                    Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::ConnectionReset,
+                        "Connection was cut",
+                    )))
+                } else {
+                    Poll::Pending
+                }
             }
         }
     }

@@ -15,7 +15,7 @@ use crate::{
         NetworkConfiguration,
         sim::{ConnectionId, ListenerId, SimNetworkProvider},
     },
-    network_state::{ClogState, ConnectionState, CutState, ListenerState, NetworkState},
+    network_state::{ClogState, ConnectionState, ListenerState, NetworkState},
     rng::{reset_sim_rng, set_sim_seed, sim_random},
     sleep::SleepFuture,
 };
@@ -30,7 +30,6 @@ struct WakerRegistry {
     read_wakers: HashMap<ConnectionId, Waker>,
     task_wakers: HashMap<u64, Waker>,
     clog_wakers: HashMap<ConnectionId, Vec<Waker>>,
-    cut_wakers: HashMap<ConnectionId, Vec<Waker>>,
 }
 
 #[derive(Debug)]
@@ -434,14 +433,26 @@ impl SimWorld {
         connection_id: ConnectionId,
         data: Vec<u8>,
     ) -> SimulationResult<()> {
+        tracing::debug!(
+            "buffer_send called for connection_id={} with {} bytes",
+            connection_id.0,
+            data.len()
+        );
         let mut inner = self.inner.borrow_mut();
 
         if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
             // Always add data to send buffer for TCP ordering
             conn.send_buffer.push_back(data);
+            tracing::debug!(
+                "buffer_send: added data to send_buffer, new length: {}",
+                conn.send_buffer.len()
+            );
 
             // If sender is not already active, start processing the buffer
             if !conn.send_in_progress {
+                tracing::debug!(
+                    "buffer_send: sender not in progress, scheduling ProcessSendBuffer event"
+                );
                 conn.send_in_progress = true;
 
                 // Schedule immediate processing of the buffer - add directly to queue to avoid borrowing conflict
@@ -457,11 +468,23 @@ impl SimWorld {
                     sequence,
                 );
                 inner.event_queue.schedule(scheduled_event);
+                tracing::debug!(
+                    "buffer_send: scheduled ProcessSendBuffer event with sequence {}",
+                    sequence
+                );
+            } else {
+                tracing::debug!(
+                    "buffer_send: sender already in progress, not scheduling new event"
+                );
             }
             // If sender is already active, the new data will be processed when the current buffer is processed
 
             Ok(())
         } else {
+            tracing::debug!(
+                "buffer_send: connection_id={} not found in connections table",
+                connection_id.0
+            );
             Err(SimulationError::InvalidState(
                 "connection not found".to_string(),
             ))
@@ -572,6 +595,9 @@ impl SimWorld {
                 send_buffer: VecDeque::new(),
                 send_in_progress: false,
                 next_send_time: current_time,
+                is_cut: false,
+                cut_until: None,
+                queued_messages: VecDeque::new(),
             },
         );
 
@@ -585,6 +611,9 @@ impl SimWorld {
                 send_buffer: VecDeque::new(),
                 send_in_progress: false,
                 next_send_time: current_time,
+                is_cut: false,
+                cut_until: None,
+                queued_messages: VecDeque::new(),
             },
         );
 
@@ -890,25 +919,48 @@ impl SimWorld {
 
                         let connection_id = ConnectionId(connection_id);
 
-                        // Write data directly to the specified connection's receive buffer
+                        // Write data to the specified connection's receive buffer or queue if cut
                         if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-                            for &byte in &data {
-                                conn.receive_buffer.push_back(byte);
-                            }
-
-                            // Wake any futures waiting to read from this connection
-                            if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
-                                tracing::info!(
-                                    "DataDelivery waking up read waker for connection_id={}",
-                                    connection_id.0
+                            if conn.is_cut {
+                                // Connection is cut - queue message for delivery after restoration
+                                conn.queued_messages.push_back(data);
+                                tracing::debug!(
+                                    "DataDelivery queued {} bytes for cut connection {}, queue size now: {}",
+                                    conn.queued_messages.back().unwrap().len(),
+                                    connection_id.0,
+                                    conn.queued_messages.len()
                                 );
-                                waker.wake();
                             } else {
-                                tracing::info!(
-                                    "DataDelivery no waker found for connection_id={}",
+                                // Normal delivery to receive buffer
+                                tracing::debug!(
+                                    "DataDelivery writing {} bytes to connection {} receive_buffer",
+                                    data.len(),
                                     connection_id.0
                                 );
+                                for &byte in &data {
+                                    conn.receive_buffer.push_back(byte);
+                                }
+
+                                // Wake any futures waiting to read from this connection
+                                if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id)
+                                {
+                                    tracing::debug!(
+                                        "DataDelivery waking up read waker for connection_id={}",
+                                        connection_id.0
+                                    );
+                                    waker.wake();
+                                } else {
+                                    tracing::debug!(
+                                        "DataDelivery no waker found for connection_id={}",
+                                        connection_id.0
+                                    );
+                                }
                             }
+                        } else {
+                            tracing::warn!(
+                                "DataDelivery failed: connection_id={} not found in connections HashMap",
+                                connection_id.0
+                            );
                         }
                     }
                     // Process the next message from a connection's send buffer.
@@ -1194,74 +1246,51 @@ impl SimWorld {
         let config = &inner.network.config;
 
         // Skip if already cut
-        if inner.network.cut_connections.contains_key(&connection_id) {
+        if let Some(conn) = inner.network.connections.get(&connection_id) {
+            if conn.is_cut {
+                return false;
+            }
+        } else {
+            // Connection doesn't exist
             return false;
         }
 
-        // Check max cuts limit
-        if let Some(max_cuts) = config.max_faults_per_connection {
-            // Count previous cuts for this connection
-            let previous_cuts = inner
-                .network
-                .cut_connections
-                .values()
-                .filter(|cut_state| cut_state.connection_data.id == connection_id)
-                .count() as u32;
-            if previous_cuts >= max_cuts {
-                return false;
-            }
-        }
-
-        // Probability check
+        // Probability check (removed max_cuts limit for simplicity)
         sim_random::<f64>() < config.fault_probability
     }
 
-    /// Cut a connection and store it for later restoration
+    /// Cut a connection by marking it as temporarily disconnected
     pub fn cut_connection(&self, connection_id: ConnectionId) {
         let mut inner = self.inner.borrow_mut();
         let reconnect_delay_range = inner.network.config.fault_duration.clone();
+        let current_time = inner.current_time;
 
-        if let Some(connection_state) = inner.network.connections.remove(&connection_id) {
-            let reconnect_delay_sample =
-                crate::network::config::sample_duration(&reconnect_delay_range);
-            let reconnect_at = inner.current_time + reconnect_delay_sample;
+        if let Some(conn) = inner.network.connections.get_mut(&connection_id)
+            && !conn.is_cut
+        {
+            let reconnect_delay = crate::network::config::sample_duration(&reconnect_delay_range);
+            let reconnect_at = current_time + reconnect_delay;
 
-            // Count existing cuts for this connection
-            let cut_count = inner
-                .network
-                .cut_connections
-                .values()
-                .filter(|cut_state| cut_state.connection_data.id == connection_id)
-                .count() as u32;
+            conn.is_cut = true;
+            conn.cut_until = Some(reconnect_at);
 
-            let cut_state = CutState {
-                connection_data: connection_state,
+            tracing::debug!(
+                "Connection {} cut until {:?} (delay: {:?})",
+                connection_id.0,
                 reconnect_at,
-                cut_count: cut_count + 1,
-            };
-
-            inner
-                .network
-                .cut_connections
-                .insert(connection_id, cut_state);
+                reconnect_delay
+            );
         }
     }
 
     /// Check if a connection is currently cut
     pub fn is_connection_cut(&self, connection_id: ConnectionId) -> bool {
         let inner = self.inner.borrow();
-        inner.network.cut_connections.contains_key(&connection_id)
-    }
-
-    /// Register a waker for when connection is restored
-    pub fn register_cut_waker(&self, connection_id: ConnectionId, waker: Waker) {
-        let mut inner = self.inner.borrow_mut();
         inner
-            .wakers
-            .cut_wakers
-            .entry(connection_id)
-            .or_default()
-            .push(waker);
+            .network
+            .connections
+            .get(&connection_id)
+            .is_some_and(|conn| conn.is_cut)
     }
 
     /// Restore connections that are ready to be reconnected
@@ -1289,18 +1318,44 @@ impl SimWorld {
         let now = inner.current_time;
         let ready_connections: Vec<ConnectionId> = inner
             .network
-            .cut_connections
+            .connections
             .iter()
-            .filter_map(|(id, state)| (now >= state.reconnect_at).then_some(*id))
+            .filter_map(|(id, conn)| {
+                if conn.is_cut && conn.cut_until.is_some_and(|cut_until| now >= cut_until) {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
             .collect();
 
         for connection_id in ready_connections {
-            if let Some(cut_state) = inner.network.cut_connections.remove(&connection_id) {
-                inner
-                    .network
-                    .connections
-                    .insert(connection_id, cut_state.connection_data);
-                Self::wake_all(&mut inner.wakers.cut_wakers, connection_id);
+            if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
+                conn.is_cut = false;
+                conn.cut_until = None;
+
+                // Process all queued messages by delivering them to the receive buffer
+                while let Some(data) = conn.queued_messages.pop_front() {
+                    tracing::debug!(
+                        "Restoring connection {}: delivering {} queued bytes",
+                        connection_id.0,
+                        data.len()
+                    );
+                    for &byte in &data {
+                        conn.receive_buffer.push_back(byte);
+                    }
+                }
+
+                // Wake any waiting readers
+                if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
+                    tracing::debug!(
+                        "Restoring connection {}: waking up read waker",
+                        connection_id.0
+                    );
+                    waker.wake();
+                }
+
+                tracing::debug!("Connection {} restored successfully", connection_id.0);
             }
         }
     }
@@ -1317,49 +1372,27 @@ impl SimWorld {
         let connection_ids: Vec<ConnectionId> = inner.network.connections.keys().copied().collect();
 
         for connection_id in connection_ids {
-            // Skip if already cut
-            if inner.network.cut_connections.contains_key(&connection_id) {
-                continue;
-            }
-
-            // Check max cuts limit
-            if let Some(max_cuts) = cutting_config.max_faults_per_connection {
-                let previous_cuts = inner
-                    .network
-                    .cut_connections
-                    .values()
-                    .filter(|cut_state| cut_state.connection_data.id == connection_id)
-                    .count() as u32;
-                if previous_cuts >= max_cuts {
+            if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
+                // Skip if already cut
+                if conn.is_cut {
                     continue;
                 }
-            }
 
-            // Probability check
-            if sim_random::<f64>() < cutting_config.fault_probability
-                && let Some(connection_state) = inner.network.connections.remove(&connection_id)
-            {
-                let reconnect_delay =
-                    crate::network::config::sample_duration(&cutting_config.fault_duration);
-                let reconnect_at = inner.current_time + reconnect_delay;
+                // Probability check
+                if sim_random::<f64>() < cutting_config.fault_probability {
+                    let reconnect_delay =
+                        crate::network::config::sample_duration(&cutting_config.fault_duration);
+                    let reconnect_at = inner.current_time + reconnect_delay;
 
-                let cut_count = inner
-                    .network
-                    .cut_connections
-                    .values()
-                    .filter(|cut_state| cut_state.connection_data.id == connection_id)
-                    .count() as u32;
+                    conn.is_cut = true;
+                    conn.cut_until = Some(reconnect_at);
 
-                let cut_state = CutState {
-                    connection_data: connection_state,
-                    reconnect_at,
-                    cut_count: cut_count + 1,
-                };
-
-                inner
-                    .network
-                    .cut_connections
-                    .insert(connection_id, cut_state);
+                    tracing::debug!(
+                        "Randomly cut connection {} until {:?}",
+                        connection_id.0,
+                        reconnect_at
+                    );
+                }
             }
         }
     }
