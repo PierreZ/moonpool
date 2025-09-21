@@ -114,10 +114,15 @@ where
     ///
     /// This delegates to the protocol and then processes any pending transmissions.
     pub fn send(&mut self, destination: &str, envelope: S::Envelope) -> Result<(), DriverError> {
+        tracing::debug!(
+            "TransportDriver::send called for destination: {}",
+            destination
+        );
         // Delegate to protocol (pure state transition)
         self.protocol.send(destination.to_string(), envelope);
 
         // Process transmissions (I/O operations)
+        tracing::debug!("TransportDriver::send calling process_transmissions");
         self.process_transmissions()
     }
 
@@ -125,16 +130,28 @@ where
     ///
     /// This polls the protocol for transmissions and sends them via peers.
     pub fn process_transmissions(&mut self) -> Result<(), DriverError> {
+        tracing::debug!("TransportDriver::process_transmissions called");
         while let Some(transmit) = self.protocol.poll_transmit() {
+            tracing::debug!(
+                "TransportDriver::process_transmissions got transmit for destination: {}, {} bytes",
+                transmit.destination,
+                transmit.data.len()
+            );
             // Get or create peer for this destination
             let peer = self.get_or_create_peer(&transmit.destination)?;
+            tracing::debug!("TransportDriver::process_transmissions got peer, calling peer.send()");
 
             // Send data via peer
             match peer.borrow_mut().send(transmit.data) {
                 Ok(_) => {
                     // Transmission successful
+                    tracing::debug!("TransportDriver::process_transmissions peer.send() succeeded");
                 }
                 Err(peer_error) => {
+                    tracing::debug!(
+                        "TransportDriver::process_transmissions peer.send() failed: {:?}",
+                        peer_error
+                    );
                     // Handle peer failure with reconnection tracking
                     self.handle_peer_failure(&transmit.destination);
 
@@ -146,16 +163,26 @@ where
             }
         }
 
+        tracing::debug!("TransportDriver::process_transmissions completed");
         Ok(())
     }
 
     /// Process received data from all peers
     ///
-    /// This is a placeholder for future implementation that will need async polling.
-    /// For Phase 11.3, we focus on basic send functionality.
+    /// Polls all peers for received data and feeds it into the protocol.
     pub fn process_peer_reads(&mut self) {
-        // TODO: Implement non-blocking receive polling when Peer API supports it
-        // For now, this is a no-op to maintain the driver interface
+        // Collect peer destinations first to avoid borrow checker issues
+        let peer_destinations: Vec<String> = self.peers.keys().cloned().collect();
+
+        for destination in peer_destinations {
+            if let Some(peer_handle) = self.peers.get(&destination) {
+                // Try to receive data from this peer
+                if let Some(data) = peer_handle.borrow_mut().try_receive() {
+                    // Feed received data into the protocol
+                    self.protocol.handle_received(destination.clone(), data);
+                }
+            }
+        }
     }
 
     /// Poll for the next received envelope from the protocol
@@ -268,10 +295,11 @@ where
     /// Check if we should attempt reconnection to a destination
     fn should_attempt_reconnect(&self, destination: &str) -> bool {
         if let Some(state) = self.reconnect_states.get(destination)
-            && let Some(last_failure) = state.last_failure {
-                // Check if enough time has passed since last failure
-                return last_failure.elapsed() >= state.reconnect_delay;
-            }
+            && let Some(last_failure) = state.last_failure
+        {
+            // Check if enough time has passed since last failure
+            return last_failure.elapsed() >= state.reconnect_delay;
+        }
         true // No previous failure recorded, can attempt connection
     }
 

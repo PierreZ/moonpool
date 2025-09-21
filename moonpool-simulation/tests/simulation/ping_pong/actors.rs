@@ -6,7 +6,6 @@ use moonpool_simulation::{
         ServerTransport,
     },
 };
-use std::time::Duration;
 use tracing::instrument;
 
 static MAX_PING: usize = 100;
@@ -30,7 +29,6 @@ impl<
 {
     pub fn new(network: N, time: T, task_provider: TP, topology: WorkloadTopology) -> Self {
         let serializer = RequestResponseSerializer::new();
-        let peer_config = PeerConfig::default();
         let transport = ServerTransport::new(network, time, task_provider, serializer);
 
         Self {
@@ -108,6 +106,17 @@ impl<
                             "Server: Completed {} ping-pong exchanges",
                             self.messages_handled
                         );
+
+                        // Give a moment for the final response to be delivered
+                        tracing::debug!("Server: Waiting for final response delivery");
+                        for _ in 0..10 {
+                            tokio::task::yield_now().await;
+                        }
+
+                        // Clean up transport resources
+                        self.transport.close().await;
+                        tracing::debug!("Server: Transport closed, exiting");
+
                         return Ok(SimulationMetrics::default());
                     }
                 } else {
@@ -216,19 +225,37 @@ impl<
             "Client: Completed {} ping-pong exchanges",
             self.messages_sent
         );
+
+        // Clean up transport resources
+        self.transport.close().await;
+        tracing::debug!("Client: Transport closed, exiting");
+
         Ok(SimulationMetrics::default())
     }
 
     /// Send a single ping and wait for pong response
     async fn send_ping(&mut self) -> SimulationResult<()> {
         tracing::debug!("Client: Sending PING to {}", self.server_address);
+        tracing::debug!("Client: About to call transport.get_reply()");
 
-        // Send PING using transport (without timeout for now to isolate issue)
-        let response = self
-            .transport
-            .get_reply::<RequestResponseEnvelopeFactory>(&self.server_address, b"PING".to_vec())
-            .await
-            .map_err(|e| SimulationError::IoError(format!("Transport error: {}", e)))?;
+        // Use tokio::select! to race between ping-pong and shutdown signal
+        let response = tokio::select! {
+            // Try to complete the ping-pong exchange
+            result = self.transport.get_reply::<RequestResponseEnvelopeFactory>(&self.server_address, b"PING".to_vec()) => {
+                result.map_err(|e| {
+                    tracing::debug!("Client: transport.get_reply() failed: {:?}", e);
+                    SimulationError::IoError(format!("Transport error: {}", e))
+                })?
+            }
+
+            // Check for shutdown signal
+            _ = self.topology.shutdown_signal.cancelled() => {
+                tracing::debug!("Client: Shutdown signal received during ping-pong");
+                return Err(SimulationError::IoError("Shutdown signal received".to_string()));
+            }
+        };
+
+        tracing::debug!("Client: transport.get_reply() succeeded");
 
         // Verify response
         let response_message = String::from_utf8_lossy(&response);

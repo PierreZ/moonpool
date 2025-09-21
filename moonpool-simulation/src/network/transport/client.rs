@@ -24,7 +24,7 @@ where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
-    S: EnvelopeSerializer,
+    S: EnvelopeSerializer + 'static,
     S::Envelope: EnvelopeReplyDetection + Envelope,
 {
     /// Transport driver for managing peer connections
@@ -42,7 +42,7 @@ where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
-    S: EnvelopeSerializer,
+    S: EnvelopeSerializer + 'static,
     S::Envelope: EnvelopeReplyDetection + Envelope,
 {
     /// Create a new ClientTransport with the given components
@@ -74,19 +74,34 @@ where
         E: EnvelopeFactory<S::Envelope> + 'static,
         S::Envelope: Clone,
     {
+        tracing::debug!(
+            "ClientTransport::get_reply called for destination: {}, payload size: {}",
+            destination,
+            payload.len()
+        );
         let correlation_id = self.next_correlation_id();
         let (tx, mut rx) = oneshot::channel();
+        tracing::debug!(
+            "ClientTransport::get_reply generated correlation_id: {}",
+            correlation_id
+        );
 
         // Store response channel indexed by correlation ID
         self.pending_requests.insert(correlation_id, tx);
 
         // Create request envelope using factory
         let envelope = E::create_request(correlation_id, payload);
+        tracing::debug!("ClientTransport::get_reply created envelope, calling driver.send()");
 
         // Send through driver
-        self.driver
-            .send(destination, envelope)
-            .map_err(|e| TransportError::PeerError(e.to_string()))?;
+        self.driver.send(destination, envelope).map_err(|e| {
+            tracing::debug!("ClientTransport::get_reply driver.send() failed: {:?}", e);
+            TransportError::PeerError(e.to_string())
+        })?;
+
+        tracing::debug!(
+            "ClientTransport::get_reply driver.send() succeeded, entering self-driving loop"
+        );
 
         // Self-driving loop to process responses
         loop {
