@@ -63,18 +63,32 @@ impl<
 
         // Main message handling loop
         loop {
-            // Check for shutdown signal
+            // Check for shutdown signal - this happens when the client completes successfully
             if self.topology.shutdown_signal.is_cancelled() {
                 tracing::debug!(
-                    "Server: Shutdown signal received, handled {} messages",
+                    "Server: Shutdown signal received (client completed), handled {} messages",
                     self.messages_handled
                 );
+                // Clean up transport resources before exiting
+                self.transport.close().await;
+                tracing::debug!("Server: Transport closed due to shutdown signal, exiting");
                 return Ok(SimulationMetrics::default());
             }
 
             // FIRST: Transport maintenance (accept connections, read data)
             tracing::debug!("Server: Calling tick() for transport maintenance");
             let _ = self.transport.tick().await;
+
+            // If we've completed all expected ping-pongs and client has disconnected, exit
+            if self.messages_handled >= MAX_PING && !self.transport.has_client() {
+                tracing::debug!(
+                    "Server: Completed {} ping-pongs and client disconnected, exiting",
+                    self.messages_handled
+                );
+                self.transport.close().await;
+                tracing::debug!("Server: Transport closed, exiting");
+                return Ok(SimulationMetrics::default());
+            }
 
             // THEN: Process incoming messages from buffer
             if let Some(received_envelope) = self.transport.poll_receive() {
@@ -103,14 +117,32 @@ impl<
                     // Check completion condition
                     if self.messages_handled >= MAX_PING {
                         tracing::debug!(
-                            "Server: Completed {} ping-pong exchanges",
+                            "Server: Completed {} ping-pong exchanges, will exit when client disconnects",
                             self.messages_handled
                         );
 
-                        // Give a moment for the final response to be delivered
-                        tracing::debug!("Server: Waiting for final response delivery");
-                        for _ in 0..10 {
+                        // Continue processing to allow final message delivery and detect client disconnect
+                        for i in 0..50 {
+                            tracing::debug!("Server: Post-completion tick #{}", i + 1);
+                            
+                            // Check for shutdown signal first (simulation framework)
+                            if self.topology.shutdown_signal.is_cancelled() {
+                                tracing::debug!(
+                                    "Server: Shutdown signal received during post-completion, exiting"
+                                );
+                                break;
+                            }
+                            
+                            let _ = self.transport.tick().await;
                             tokio::task::yield_now().await;
+
+                            // Check if client disconnected
+                            if !self.transport.has_client() {
+                                tracing::debug!(
+                                    "Server: Client disconnected after completing all ping-pongs, exiting"
+                                );
+                                break;
+                            }
                         }
 
                         // Clean up transport resources
@@ -125,7 +157,16 @@ impl<
             } else {
                 // No messages available, yield to allow other tasks to run
                 tracing::debug!("Server: No messages available, yielding");
-                tokio::task::yield_now().await;
+                tokio::select! {
+                    _ = tokio::task::yield_now() => {},
+                    _ = self.topology.shutdown_signal.cancelled() => {
+                        tracing::debug!("Server: Shutdown signal received while yielding");
+                        // Clean up transport resources before exiting
+                        self.transport.close().await;
+                        tracing::debug!("Server: Transport closed due to shutdown signal, exiting");
+                        return Ok(SimulationMetrics::default());
+                    }
+                }
             }
         }
     }

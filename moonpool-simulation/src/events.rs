@@ -24,6 +24,9 @@ pub enum Event {
         /// The state change type  
         state: ConnectionStateChange,
     },
+
+    /// Shutdown event to wake all tasks for graceful termination
+    Shutdown,
 }
 
 /// Network data operations

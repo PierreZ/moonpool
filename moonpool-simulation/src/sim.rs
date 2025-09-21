@@ -923,10 +923,11 @@ impl SimWorld {
                         if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
                             if conn.is_cut {
                                 // Connection is cut - queue message for delivery after restoration
+                                let data_len = data.len();
                                 conn.queued_messages.push_back(data);
                                 tracing::debug!(
                                     "DataDelivery queued {} bytes for cut connection {}, queue size now: {}",
-                                    conn.queued_messages.back().unwrap().len(),
+                                    data_len,
                                     connection_id.0,
                                     conn.queued_messages.len()
                                 );
@@ -1076,6 +1077,34 @@ impl SimWorld {
                         }
                     }
                 }
+            }
+            Event::Shutdown => {
+                // Wake all pending tasks to allow them to check shutdown conditions
+                tracing::debug!("Processing Shutdown event - waking all pending tasks");
+                
+                // Collect all task wakers (we need to drain to avoid double-borrow)
+                let task_wakers: Vec<_> = inner.wakers.task_wakers
+                    .drain()
+                    .map(|(task_id, waker)| (task_id, waker))
+                    .collect();
+                
+                // Wake all tasks
+                for (task_id, waker) in task_wakers {
+                    tracing::trace!("Waking task {}", task_id);
+                    waker.wake();
+                }
+                
+                // Also wake any read wakers that might be blocked
+                let read_wakers: Vec<_> = inner.wakers.read_wakers
+                    .drain()
+                    .map(|(_conn_id, waker)| waker)
+                    .collect();
+                    
+                for waker in read_wakers {
+                    waker.wake();
+                }
+                
+                tracing::debug!("Shutdown event processed - woke all pending tasks");
             }
         }
     }
