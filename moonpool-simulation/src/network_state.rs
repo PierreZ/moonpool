@@ -15,18 +15,6 @@ pub struct ClogState {
     pub expires_at: Duration,
 }
 
-/// Connection cutting state - tracks cut connections for restoration
-#[derive(Debug, Clone)]
-pub struct CutState {
-    /// Original connection data (for restoration)
-    pub connection_data: ConnectionState,
-    /// When connection can be restored (in simulation time)
-    pub reconnect_at: Duration,
-    /// Cut count for this connection
-    #[allow(dead_code)] // Will be used for cut statistics and limiting reconnection attempts
-    pub cut_count: u32,
-}
-
 /// Internal connection state for simulation
 #[derive(Debug, Clone)]
 pub struct ConnectionState {
@@ -52,6 +40,15 @@ pub struct ConnectionState {
 
     /// Next available time for sending messages from this connection.
     pub next_send_time: Duration,
+
+    /// Whether this connection is currently cut (temporarily disconnected)
+    pub is_cut: bool,
+
+    /// When the connection will be restored (if cut)
+    pub cut_until: Option<Duration>,
+
+    /// Messages queued during connection cut (for delivery after restoration)
+    pub queued_messages: VecDeque<Vec<u8>>,
 }
 
 /// Internal listener state for simulation
@@ -77,7 +74,6 @@ pub struct NetworkState {
 
     // Connection disruption state
     pub connection_clogs: HashMap<ConnectionId, ClogState>,
-    pub cut_connections: HashMap<ConnectionId, CutState>,
 }
 
 impl NetworkState {
@@ -90,7 +86,6 @@ impl NetworkState {
             listeners: HashMap::new(),
             pending_connections: HashMap::new(),
             connection_clogs: HashMap::new(),
-            cut_connections: HashMap::new(),
         }
     }
 }

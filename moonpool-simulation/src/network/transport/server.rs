@@ -226,24 +226,31 @@ where
 
             // Try to read incoming data (if writes didn't fail)
             if !connection_failed {
+                tracing::debug!("Server: Attempting to read from client stream");
                 let mut temp_buffer = [0u8; 4096];
                 match stream.read(&mut temp_buffer).await {
                     Ok(0) => {
                         // Connection closed by client
-                        tracing::debug!("Server: Client disconnected");
+                        tracing::debug!("Server: Client disconnected (read 0 bytes)");
                         connection_failed = true;
                     }
                     Ok(n) => {
                         // Got data, append to read buffer
+                        tracing::debug!("Server: Read {} bytes from client", n);
                         self.read_buffer.extend_from_slice(&temp_buffer[..n]);
-                        tracing::trace!("Server: Read {} bytes", n);
+                        tracing::debug!(
+                            "Server: Total read_buffer size now: {} bytes",
+                            self.read_buffer.len()
+                        );
                     }
                     Err(e) => {
-                        tracing::warn!("Server: Read failed: {}", e);
+                        tracing::debug!("Server: Read failed: {}", e);
                         // Connection failed, mark for reset
                         connection_failed = true;
                     }
                 }
+            } else {
+                tracing::debug!("Server: Skipping read due to connection failure");
             }
         }
 
