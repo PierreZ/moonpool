@@ -598,6 +598,7 @@ impl SimWorld {
                 is_cut: false,
                 cut_until: None,
                 queued_messages: VecDeque::new(),
+                is_closed: false,
             },
         );
 
@@ -614,6 +615,7 @@ impl SimWorld {
                 is_cut: false,
                 cut_until: None,
                 queued_messages: VecDeque::new(),
+                is_closed: false,
             },
         );
 
@@ -1320,6 +1322,57 @@ impl SimWorld {
             .connections
             .get(&connection_id)
             .is_some_and(|conn| conn.is_cut)
+    }
+
+    /// Check if a connection is permanently closed
+    pub fn is_connection_closed(&self, connection_id: ConnectionId) -> bool {
+        let inner = self.inner.borrow();
+        inner
+            .network
+            .connections
+            .get(&connection_id)
+            .is_some_and(|conn| conn.is_closed)
+    }
+
+    /// Close a connection permanently (connection endpoint closed)
+    pub fn close_connection(&self, connection_id: ConnectionId) {
+        let mut inner = self.inner.borrow_mut();
+        
+        // First, get the paired connection ID if it exists
+        let paired_connection_id = inner.network.connections
+            .get(&connection_id)
+            .and_then(|conn| conn.paired_connection);
+        
+        // Close the main connection
+        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
+            if !conn.is_closed {
+                conn.is_closed = true;
+                tracing::debug!("Connection {} closed permanently", connection_id.0);
+            }
+        }
+        
+        // Close the paired connection if it exists
+        if let Some(paired_id) = paired_connection_id {
+            if let Some(paired_conn) = inner.network.connections.get_mut(&paired_id) {
+                if !paired_conn.is_closed {
+                    paired_conn.is_closed = true;
+                    tracing::debug!("Paired connection {} also closed", paired_id.0);
+                }
+            }
+        }
+        
+        // Wake any read wakers on both connections (after connection modifications)
+        if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
+            tracing::debug!("Waking read waker for closed connection {}", connection_id.0);
+            waker.wake();
+        }
+        
+        if let Some(paired_id) = paired_connection_id {
+            if let Some(paired_waker) = inner.wakers.read_wakers.remove(&paired_id) {
+                tracing::debug!("Waking read waker for paired closed connection {}", paired_id.0);
+                paired_waker.wake();
+            }
+        }
     }
 
     /// Restore connections that are ready to be reconnected

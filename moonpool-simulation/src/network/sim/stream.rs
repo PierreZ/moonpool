@@ -129,6 +129,16 @@ impl SimTcpStream {
     }
 }
 
+impl Drop for SimTcpStream {
+    fn drop(&mut self) {
+        // Close the connection in the simulation when the stream is dropped
+        if let Ok(sim) = self.sim.upgrade() {
+            tracing::debug!("SimTcpStream dropping, closing connection {}", self.connection_id.0);
+            sim.close_connection(self.connection_id);
+        }
+    }
+}
+
 impl AsyncRead for SimTcpStream {
     #[instrument(skip(self, cx, buf))]
     fn poll_read(
@@ -168,7 +178,16 @@ impl AsyncRead for SimTcpStream {
             buf.put_slice(&temp_buf[..bytes_read]);
             Poll::Ready(Ok(()))
         } else {
-            // No data available - check if connection is cut
+            // No data available - check if connection is closed or cut
+            if sim.is_connection_closed(self.connection_id) {
+                tracing::info!(
+                    "SimTcpStream::poll_read connection_id={} is closed, returning EOF (0 bytes)",
+                    self.connection_id.0
+                );
+                // Connection closed normally - return EOF (0 bytes read)
+                return Poll::Ready(Ok(()));
+            }
+            
             if sim.is_connection_cut(self.connection_id) {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::ConnectionReset,
@@ -203,8 +222,15 @@ impl AsyncRead for SimTcpStream {
                 buf.put_slice(&temp_buf_recheck[..bytes_read_recheck]);
                 Poll::Ready(Ok(()))
             } else {
-                // Final check - if connection is cut and no data available, return error
-                if sim.is_connection_cut(self.connection_id) {
+                // Final check - if connection is closed or cut and no data available
+                if sim.is_connection_closed(self.connection_id) {
+                    tracing::info!(
+                        "SimTcpStream::poll_read connection_id={} is closed on recheck, returning EOF (0 bytes)",
+                        self.connection_id.0
+                    );
+                    // Connection closed normally - return EOF (0 bytes read)
+                    Poll::Ready(Ok(()))
+                } else if sim.is_connection_cut(self.connection_id) {
                     Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::ConnectionReset,
                         "Connection was cut",
@@ -229,7 +255,14 @@ impl AsyncWrite for SimTcpStream {
             .upgrade()
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown"))?;
 
-        // Phase 7b: Check if connection is cut
+        // Check if connection is closed or cut
+        if sim.is_connection_closed(self.connection_id) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Connection was closed",
+            )));
+        }
+        
         if sim.is_connection_cut(self.connection_id) {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::ConnectionReset,
@@ -271,6 +304,15 @@ impl AsyncWrite for SimTcpStream {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        let sim = self
+            .sim
+            .upgrade()
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown"))?;
+        
+        // Close the connection in the simulation when shutdown is called
+        tracing::debug!("SimTcpStream::poll_shutdown closing connection {}", self.connection_id.0);
+        sim.close_connection(self.connection_id);
+        
         Poll::Ready(Ok(()))
     }
 }

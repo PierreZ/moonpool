@@ -49,6 +49,9 @@ pub struct ConnectionState {
 
     /// Messages queued during connection cut (for delivery after restoration)
     pub queued_messages: VecDeque<Vec<u8>>,
+
+    /// Whether this connection has been permanently closed by one of the endpoints
+    pub is_closed: bool,
 }
 
 /// Internal listener state for simulation
