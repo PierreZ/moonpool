@@ -12,7 +12,7 @@ use super::actors::{PingPongClientActor, PingPongServerActor};
 fn test_ping_pong_with_simulation_builder() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
-        .with_max_level(Level::DEBUG)
+        .with_max_level(Level::ERROR)
         .try_init();
 
     let local_runtime = tokio::runtime::Builder::new_current_thread()
@@ -24,7 +24,7 @@ fn test_ping_pong_with_simulation_builder() {
             // Use default config (no random chaos) to test our fix works
             .register_workload("ping_pong_server", ping_pong_server)
             .register_workload("ping_pong_client", ping_pong_client)
-            .set_iteration_control(IterationControl::FixedCount(1))
+            .set_iteration_control(IterationControl::FixedCount(500))
             .set_debug_seeds(vec![42])
             .run()
             .await;
@@ -72,7 +72,7 @@ async fn ping_pong_client(
 fn test_ping_pong_with_tokio_runner() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
-        .with_max_level(Level::DEBUG)
+        .with_max_level(Level::ERROR)
         .try_init();
 
     // Create single-threaded Tokio runtime for deterministic execution
