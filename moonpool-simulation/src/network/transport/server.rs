@@ -264,12 +264,19 @@ where
 
     /// Close the server and clean up resources
     pub async fn close(&mut self) {
+        // Flush any pending writes before closing
+        if let Some((ref mut stream, _)) = self.client_stream {
+            while let Some(data) = self.pending_writes.pop_front() {
+                let _ = stream.write_all(&data).await;
+            }
+        }
+
         // Close client connection if active
         if let Some((mut stream, _)) = self.client_stream.take() {
             let _ = stream.shutdown().await;
         }
 
-        // Clear pending writes
+        // Clear any remaining pending writes (should be empty now)
         self.pending_writes.clear();
 
         // Clear read buffer
