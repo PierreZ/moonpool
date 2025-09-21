@@ -194,6 +194,7 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
     /// Queues the message immediately and triggers background writer.
     /// Returns without blocking on TCP I/O (matches FoundationDB pattern).
     pub fn send(&mut self, data: Vec<u8>) -> PeerResult<()> {
+        tracing::debug!("Peer::send called with {} bytes", data.len());
         // Queue message immediately (FoundationDB pattern)
         {
             let mut state = self.shared_state.borrow_mut();
@@ -215,6 +216,11 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
             let first_unsent = state.send_queue.is_empty();
             state.send_queue.push_back(data);
             state.metrics.record_message_queued();
+            tracing::debug!(
+                "Peer::send queued message, queue size now: {}, first_unsent: {}",
+                state.send_queue.len(),
+                first_unsent
+            );
 
             // Check if queue is growing with multiple messages
             sometimes_assert!(
@@ -225,10 +231,14 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
 
             // Wake connection task if this is first message (FoundationDB pattern)
             if first_unsent {
+                tracing::debug!("Peer::send notifying connection task to wake up");
                 self.data_to_send.notify_one();
+            } else {
+                tracing::debug!("Peer::send NOT notifying connection task (queue was not empty)");
             }
         }
 
+        tracing::debug!("Peer::send completed successfully");
         Ok(()) // Returns immediately - no async I/O!
     }
 
@@ -237,6 +247,13 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
     /// Waits for data from the background reader actor.
     pub async fn receive(&mut self) -> PeerResult<Vec<u8>> {
         self.receive_rx.recv().await.ok_or(PeerError::Disconnected)
+    }
+
+    /// Try to receive data from the peer without blocking.
+    ///
+    /// Returns immediately with data if available, or None if no data is ready.
+    pub fn try_receive(&mut self) -> Option<Vec<u8>> {
+        self.receive_rx.try_recv().ok()
     }
 
     /// Force reconnection by dropping current connection.
@@ -302,20 +319,28 @@ async fn connection_task<
 
             // Wait for data to send (FoundationDB pattern)
             _ = data_to_send.notified() => {
+                tracing::debug!("connection_task: notified to wake up, checking for messages");
                 // First, ensure we have messages to send
                 let has_messages = {
                     let state = shared_state.borrow();
+                    let queue_len = state.send_queue.len();
+                    tracing::debug!("connection_task: send_queue has {} messages", queue_len);
                     !state.send_queue.is_empty()
                 };
 
                 if !has_messages {
+                    tracing::debug!("connection_task: spurious wakeup, no messages to send");
                     continue; // Spurious wakeup, wait for real data
                 }
 
+                tracing::debug!("connection_task: has messages to send, proceeding");
+
                 // Ensure we have a connection
                 if current_connection.is_none() {
+                    tracing::debug!("connection_task: no connection, establishing new connection");
                     match establish_connection(&shared_state, &config).await {
                         Ok(stream) => {
+                            tracing::debug!("connection_task: successfully established connection");
                             current_connection = Some(stream);
                             {
                                 let mut state = shared_state.borrow_mut();
@@ -323,23 +348,32 @@ async fn connection_task<
                                 state.metrics.is_connected = true;
                             }
                         }
-                        Err(_) => {
+                        Err(e) => {
+                            tracing::debug!("connection_task: failed to establish connection: {:?}", e);
                             continue; // Will retry on next notification
                         }
                     }
+                } else {
+                    tracing::debug!("connection_task: using existing connection");
                 }
 
                 // Process send queue
+                tracing::debug!("connection_task: processing send queue");
                 while let Some(ref mut stream) = current_connection {
                     // Get next message from queue
                     let message = {
                         let mut state = shared_state.borrow_mut();
-                        state.send_queue.pop_front()
+                        let msg = state.send_queue.pop_front();
+                        tracing::debug!("connection_task: popped message from queue, remaining: {}", state.send_queue.len());
+                        msg
                     };
 
                     let Some(data) = message else {
+                        tracing::debug!("connection_task: queue empty, breaking");
                         break; // Queue empty
                     };
+
+                    tracing::debug!("connection_task: attempting to send {} bytes", data.len());
 
                     // Buggify: Sometimes force write failures to test requeuing
                     if crate::buggify_with_prob!(0.02) {
@@ -364,16 +398,19 @@ async fn connection_task<
                     }
 
                     // Send the message (no RefCell borrow held)
+                    tracing::debug!("connection_task: calling stream.write_all() with {} bytes", data.len());
                     match stream.write_all(&data).await {
                         Ok(_) => {
                             // Success
+                            tracing::debug!("connection_task: write_all succeeded");
                             {
                                 let mut state = shared_state.borrow_mut();
                                 state.metrics.record_message_sent(data.len());
                                 state.metrics.record_message_dequeued();
                             }
                         }
-                        Err(_) => {
+                        Err(e) => {
+                            tracing::debug!("connection_task: write_all failed: {:?}", e);
                             // Write failed - connection is bad
                             current_connection = None;
                             {
