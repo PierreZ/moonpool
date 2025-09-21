@@ -960,3 +960,160 @@ This 7-phase approach transforms Phase 11 from a risky 1000+ line implementation
 - **Risk mitigation:** Problems caught early, before integration complexity
 
 The approach acknowledges that transport layer complexity is inherent, but distributes it across phases to make each step manageable and verifiable.
+
+---
+
+## URGENT: Fix Connection Cut Resilience Issue
+
+### Problem Description
+
+With random config enabled, the server transport incorrectly treats temporarily cut connections as permanent failures, causing deadlocks. The issue manifests as:
+
+```
+2025-09-21T16:30:45.741981Z DEBUG run:step: moonpool_simulation::sim: Randomly cut connection 1 until 5.339934928s
+2025-09-21T16:30:45.742227Z  WARN run: moonpool_simulation::network::transport::server: Server: Write failed: Connection was cut
+2025-09-21T16:30:45.742252Z DEBUG run: moonpool_simulation::network::sim::stream: SimTcpStream dropping, closing connection 1
+2025-09-21T16:30:45.742265Z DEBUG run: moonpool_simulation::sim: Connection 1 closed permanently
+```
+
+### Root Cause Analysis
+
+**Issue 1: Server Transport Connection Cut Handling**
+Location: `moonpool-simulation/src/network/transport/server.rs:218-223`
+
+The server transport incorrectly treats `ConnectionReset` errors (from cut connections) as permanent failures:
+
+```rust
+// PROBLEM: Treats temporary cuts as permanent failures
+match stream.write_all(&data).await {
+    Ok(_) => { /* success */ }
+    Err(e) => {
+        tracing::warn!("Server: Write failed: {}", e);
+        // BUG: Marks connection as failed permanently
+        connection_failed = true;
+        break;
+    }
+}
+```
+
+When a connection is cut, `poll_write` returns `ConnectionReset` error, but the server immediately:
+1. Sets `connection_failed = true`
+2. Drops the stream (line 258: `self.client_stream = None`)
+3. This triggers `Drop::drop()` which permanently closes the connection
+4. The paired connection is also closed, preventing any recovery
+
+**Issue 2: No Retry Logic for Cut Connections**
+The server has no mechanism to:
+- Detect that an error is due to a temporary cut (vs permanent failure)
+- Wait for connection restoration
+- Retry operations after restoration
+
+**Issue 3: Conflicting Connection State Management**
+The simulation has two connection termination concepts that conflict:
+- **Connection cutting** (temporary, should be retried)
+- **Connection closing** (permanent, triggers cleanup)
+
+The server transport incorrectly converts cuts to closes.
+
+### Required Fix
+
+**Step 1: Distinguish Cut vs Permanent Errors in ServerTransport**
+
+Modify `moonpool-simulation/src/network/transport/server.rs`:
+
+```rust
+// In tick() method around line 218-223
+match stream.write_all(&data).await {
+    Ok(_) => {
+        tracing::trace!("Server: Sent {} bytes", data.len());
+    }
+    Err(e) => {
+        // NEW: Check if this is a temporary cut vs permanent failure
+        if e.kind() == io::ErrorKind::ConnectionReset {
+            // This is a cut connection - DO NOT mark as failed
+            tracing::debug!("Server: Write blocked due to connection cut, will retry");
+            // Put the data back in the queue for retry
+            self.pending_writes.push_front(data);
+            break; // Stop processing writes but don't mark as failed
+        } else {
+            // This is a real connection failure
+            tracing::warn!("Server: Write failed permanently: {}", e);
+            connection_failed = true;
+            break;
+        }
+    }
+}
+```
+
+**Step 2: Implement Similar Logic for Reads**
+
+```rust
+// Around line 247-250 for read handling
+match stream.read(&mut temp_buffer).await {
+    Ok(0) => {
+        // Connection closed by client
+        tracing::debug!("Server: Client disconnected (read 0 bytes)");
+        connection_failed = true;
+    }
+    Ok(n) => {
+        // Got data, append to read buffer
+        tracing::debug!("Server: Read {} bytes from client", n);
+        self.read_buffer.extend_from_slice(&temp_buffer[..n]);
+    }
+    Err(e) => {
+        // NEW: Distinguish cut vs permanent failure
+        if e.kind() == io::ErrorKind::ConnectionReset {
+            tracing::debug!("Server: Read blocked due to connection cut, will retry");
+            // Don't mark as failed - just break and try again next tick
+            break;
+        } else {
+            tracing::debug!("Server: Read failed permanently: {}", e);
+            connection_failed = true;
+        }
+    }
+}
+```
+
+**Step 3: Add Connection Cut Detection Helper**
+
+Add to ServerTransport:
+
+```rust
+/// Check if an error indicates a temporary connection cut vs permanent failure
+fn is_temporary_cut_error(error: &io::Error) -> bool {
+    matches!(error.kind(), io::ErrorKind::ConnectionReset)
+}
+```
+
+**Step 4: Update Error Handling Strategy**
+
+The key insight is that `ConnectionReset` from a cut connection should be treated as a temporary condition that will resolve when the connection is restored, not as a permanent failure requiring connection cleanup.
+
+### Expected Behavior After Fix
+
+1. **Connection Cut Events**: When a connection is cut during server operation:
+   - Server detects `ConnectionReset` on write/read operations
+   - Server logs debug message about temporary cut
+   - Server does NOT drop the stream or mark connection as failed
+   - Pending writes are re-queued for retry
+
+2. **Connection Restoration**: When the cut connection is restored:
+   - Simulation restores the connection and wakes read wakers
+   - Server retries pending writes on next tick()
+   - Server can successfully read incoming data
+   - Communication resumes normally
+
+3. **Test Success**: With this fix:
+   - Random connection cuts will be handled gracefully
+   - Ping-pong exchanges will complete despite temporary cuts
+   - Server will only close connections on genuine client disconnection
+   - Tests will pass with chaos/random config enabled
+
+### Implementation Priority
+
+This is a **critical fix** required for Phase 11.6 completion. Without this fix:
+- Tests fail with random config enabled
+- Transport layer appears unreliable under chaos conditions
+- Cannot proceed to advanced chaos testing scenarios
+
+The fix should be implemented immediately to enable proper chaos testing of the transport layer.
