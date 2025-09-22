@@ -1117,3 +1117,225 @@ This is a **critical fix** required for Phase 11.6 completion. Without this fix:
 - Cannot proceed to advanced chaos testing scenarios
 
 The fix should be implemented immediately to enable proper chaos testing of the transport layer.
+
+---
+
+## Phase 11.7: Developer Experience Improvements - FoundationDB-Inspired Patterns
+
+### Overview
+
+Based on analysis of FoundationDB's Flow implementation and the current transport layer complexity, this phase focuses on vastly improving developer experience by adopting FoundationDB-inspired patterns for handling concurrent events.
+
+### Current Problems
+
+The current ping-pong actors suffer from several developer experience issues:
+
+1. **Manual tick() calls** - Developers must manually drive the transport layer
+2. **Complex shutdown handling** - Multiple shutdown paths with different mechanisms  
+3. **Manual state tracking** - Developers manually track messages_handled, consecutive_failures
+4. **Nested conditionals** - Complex if/else chains that are hard to follow
+5. **Explicit yield management** - Manual yield_now() calls scattered throughout
+6. **Multiple exit points** - Return statements scattered throughout the loop
+7. **MAX_PING artificial limits** - Server has unnecessary message counting
+
+### FoundationDB-Inspired Solution
+
+#### 1. **Stream-based Message Reception (like RequestStream)**
+FoundationDB uses `waitNext()` on RequestStreams in choose/when blocks. We should provide a similar async stream API.
+
+**New Transport API:**
+```rust
+impl ServerTransport {
+    /// Returns a stream that yields Result for proper error handling
+    pub fn message_stream(&self) -> impl Stream<Item = Result<ReceivedEnvelope, TransportError>> {
+        // Yields Ok(envelope) for messages
+        // Yields Err(e) for connection errors, parse errors, etc.
+        // Stream continues after recoverable errors
+    }
+}
+
+impl ClientTransport {
+    /// Simple request-response - fully async, no manual loops
+    pub async fn request(&mut self, addr: &str, payload: Vec<u8>) -> Result<Vec<u8>, TransportError> {
+        // Self-driving, no manual tick() or poll_receive() calls
+    }
+}
+```
+
+#### 2. **Single tokio::select! Pattern**
+Replace entire complex loops with a single tokio::select! that handles all events, following FoundationDB's choose/when pattern.
+
+**Simplified Server (remove MAX_PING entirely):**
+```rust
+pub async fn run(&mut self) -> SimulationResult<SimulationMetrics> {
+    self.transport.bind(&self.topology.my_ip).await?;
+    let mut messages = self.transport.message_stream();
+    
+    loop {
+        tokio::select! {
+            // Handle incoming messages OR transport errors
+            Some(result) = messages.next() => {
+                match result {
+                    Ok(msg) if msg.payload() == b"PING" => {
+                        self.transport.send_reply(&msg, b"PONG").await?;
+                        // No counting, no MAX_PING check
+                    }
+                    Ok(_) => {
+                        // Ignore non-PING messages
+                    }
+                    Err(e) => {
+                        // Transport error - connection lost, read failed, etc.
+                        tracing::warn!("Transport error: {}", e);
+                        // Could reconnect or just continue for next connection
+                    }
+                }
+            }
+            
+            // Clean shutdown
+            _ = self.topology.shutdown_signal.cancelled() => {
+                self.transport.close().await;
+                return Ok(SimulationMetrics::default());
+            }
+        }
+    }
+}
+```
+
+**Simplified Client (keep MAX_PING for controlled termination):**
+```rust
+pub async fn run(&mut self) -> SimulationResult<SimulationMetrics> {
+    while self.messages_sent < MAX_PING {
+        tokio::select! {
+            result = self.transport.request(&self.server_address, b"PING") => {
+                match result {
+                    Ok(response) if response == b"PONG" => {
+                        self.messages_sent += 1;
+                    }
+                    Err(TransportError::ConnectionLost) => {
+                        // Retry with backoff
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(SimulationError::IoError(format!("Fatal: {}", e)));
+                    }
+                    _ => {
+                        return Err(SimulationError::IoError("Invalid response"));
+                    }
+                }
+            }
+            
+            _ = self.topology.shutdown_signal.cancelled() => {
+                return Ok(SimulationMetrics::default());
+            }
+        }
+    }
+    
+    Ok(SimulationMetrics::default())
+}
+```
+
+#### 3. **Self-Driving Transport with Internal Actors**
+Following FoundationDB's connectionReader/connectionWriter pattern, the transport should spawn internal actors to handle all I/O automatically.
+
+**No Manual Driving Required:**
+- Transport spawns background actors on bind/connect
+- These actors run independently like FoundationDB's connection actors
+- Developers never call tick() manually
+- All I/O happens transparently
+
+#### 4. **Error Handling (FDB-style Result Propagation)**
+Following FoundationDB's philosophy where errors propagate through futures/streams:
+
+**Stream Returns Result:**
+```rust
+// Transport errors are explicit and must be handled
+Some(result) = messages.next() => {
+    match result {
+        Ok(msg) => { /* handle message */ }
+        Err(TransportError::ConnectionLost) => { /* handle recoverable error */ }
+        Err(e) => { /* handle fatal error */ }
+    }
+}
+```
+
+**Error Types to Handle:**
+- `ConnectionLost` - Client disconnected (recoverable)
+- `ReadError` - I/O failure (may be recoverable)
+- `ParseError` - Invalid message format (protocol error)
+- `Timeout` - Operation timed out
+- `BindFailed` - Server bind error (fatal)
+
+### Benefits of This Approach
+
+1. **90% Code Reduction**: Server actor goes from 130+ lines to ~20 lines
+2. **Clear Control Flow**: Single tokio::select! handles all events
+3. **Type-Safe Error Handling**: Compiler ensures all errors are handled
+4. **FoundationDB-Proven Pattern**: Based on production-tested distributed systems code
+5. **No Manual Transport Driving**: Transport manages itself with internal actors
+6. **Testable**: Easy to mock transport streams for unit tests
+7. **Maintainable**: Clear separation between transport and application logic
+
+### Incremental Implementation Plan
+
+**CRITICAL**: The original "big bang" approach causes deadlocks when mixing manual tick() with stream consumption. This incremental plan avoids that issue.
+
+#### Step 1: Enhanced Error Types (✓ COMPLETED)
+- Add ConnectionLost, ReadError, ParseError to TransportError enum
+- Foundation for better error handling throughout
+
+#### Step 2: Simple API Rename
+- Rename `get_reply()` to `request()` in ClientTransport
+- Update all test references
+- **Safe, non-breaking change**
+- Test with tokio runner to verify
+
+#### Step 3: Simplify Actors WITHOUT Stream API
+- Keep using tick() and poll_receive() 
+- Restructure code for clarity:
+  - Single main loop
+  - Reduced nesting
+  - Centralized shutdown handling
+- Verify tests still pass
+
+#### Step 4: Add Parallel Stream API (Non-Breaking)
+- Add `message_stream()` as ALTERNATIVE to poll_receive()
+- Keep existing tick()/poll_receive() working
+- Stream uses internal buffer fed by tick()
+- Both APIs work independently
+
+#### Step 5: Migrate Server to Hybrid Approach
+- Server uses message_stream() 
+- Still calls tick() manually to drive I/O
+- Stream reads from buffer filled by tick()
+- Test with existing client
+
+#### Step 6: Simplify Client Pattern
+- Use renamed request() method
+- Simplify loop structure
+- Remove unnecessary error tracking
+
+#### Step 7: Self-Driving Transport (Final Goal)
+- Only after everything else works
+- Spawn internal actors in bind()/connect()
+- Remove manual tick() calls
+- Full FoundationDB-style automation
+
+### Files to Modify
+
+1. **Server Transport** (`moonpool-simulation/src/network/transport/server.rs`):
+   - Add `message_stream()` method returning `impl Stream<Item = Result<ReceivedEnvelope, TransportError>>`
+   - Spawn internal actors for I/O management
+   - Remove manual tick() requirement
+
+2. **Client Transport** (`moonpool-simulation/src/network/transport/client.rs`):
+   - Add simple `request()` method
+   - Make fully self-driving (no manual loops)
+   - Internal actors handle all I/O
+
+3. **Ping-Pong Actors** (`moonpool-simulation/tests/simulation/ping_pong/actors.rs`):
+   - Remove MAX_PING logic from server
+   - Convert both actors to single tokio::select! pattern
+   - Remove all manual tick() calls
+   - Implement proper error handling with Result types
+
+This approach follows FoundationDB's core philosophy: hide transport complexity behind clean async APIs, use select/choose patterns for concurrent event handling, and let errors propagate naturally through the type system.
