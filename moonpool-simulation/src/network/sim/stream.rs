@@ -132,8 +132,12 @@ impl SimTcpStream {
 impl Drop for SimTcpStream {
     fn drop(&mut self) {
         // Close the connection in the simulation when the stream is dropped
+        // This matches real TCP behavior where dropping a socket always closes it
         if let Ok(sim) = self.sim.upgrade() {
-            tracing::debug!("SimTcpStream dropping, closing connection {}", self.connection_id.0);
+            tracing::debug!(
+                "SimTcpStream dropping, closing connection {}",
+                self.connection_id.0
+            );
             sim.close_connection(self.connection_id);
         }
     }
@@ -187,12 +191,16 @@ impl AsyncRead for SimTcpStream {
                 // Connection closed normally - return EOF (0 bytes read)
                 return Poll::Ready(Ok(()));
             }
-            
+
             if sim.is_connection_cut(self.connection_id) {
-                return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::ConnectionReset,
-                    "Connection was cut",
-                )));
+                // Connection is cut - register waker and wait for restoration
+                tracing::debug!(
+                    "SimTcpStream::poll_read connection_id={} is cut, registering waker",
+                    self.connection_id.0
+                );
+                sim.register_read_waker(self.connection_id, cx.waker().clone())
+                    .map_err(|e| io::Error::other(format!("waker registration error: {}", e)))?;
+                return Poll::Pending;
             }
 
             // Register for notification when data arrives
@@ -231,10 +239,12 @@ impl AsyncRead for SimTcpStream {
                     // Connection closed normally - return EOF (0 bytes read)
                     Poll::Ready(Ok(()))
                 } else if sim.is_connection_cut(self.connection_id) {
-                    Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::ConnectionReset,
-                        "Connection was cut",
-                    )))
+                    // Connection is cut - already registered waker above, just wait
+                    tracing::debug!(
+                        "SimTcpStream::poll_read connection_id={} is cut on recheck, waiting",
+                        self.connection_id.0
+                    );
+                    Poll::Pending
                 } else {
                     Poll::Pending
                 }
@@ -262,12 +272,20 @@ impl AsyncWrite for SimTcpStream {
                 "Connection was closed",
             )));
         }
-        
+
         if sim.is_connection_cut(self.connection_id) {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::ConnectionReset,
-                "Connection was cut",
-            )));
+            // Connection is cut - register waker and wait for restoration
+            tracing::debug!(
+                "SimTcpStream::poll_write connection_id={} is cut, registering waker",
+                self.connection_id.0
+            );
+            sim.register_read_waker(self.connection_id, cx.waker().clone())
+                .map_err(|e| io::Error::other(format!("waker registration error: {}", e)))?;
+            tracing::debug!(
+                "SimTcpStream::poll_write connection_id={} registered waker for cut connection",
+                self.connection_id.0
+            );
+            return Poll::Pending;
         }
 
         // Phase 7: Check for write clogging
@@ -308,11 +326,14 @@ impl AsyncWrite for SimTcpStream {
             .sim
             .upgrade()
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown"))?;
-        
+
         // Close the connection in the simulation when shutdown is called
-        tracing::debug!("SimTcpStream::poll_shutdown closing connection {}", self.connection_id.0);
+        tracing::debug!(
+            "SimTcpStream::poll_shutdown closing connection {}",
+            self.connection_id.0
+        );
         sim.close_connection(self.connection_id);
-        
+
         Poll::Ready(Ok(()))
     }
 }

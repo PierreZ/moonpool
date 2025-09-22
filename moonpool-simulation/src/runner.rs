@@ -566,16 +566,18 @@ impl SimulationBuilder {
                                 );
                                 shutdown_signal.cancel();
                                 first_success_triggered = true;
-                                
+
                                 // Schedule a shutdown event to wake all tasks
                                 tracing::debug!("Scheduling Shutdown event to wake all tasks");
                                 sim.schedule_event(crate::Event::Shutdown, Duration::from_nanos(1));
-                                
+
                                 // Schedule many periodic wake events to ensure tasks can check shutdown
                                 for i in 1..100 {
                                     sim.schedule_event(
-                                        crate::Event::Timer { task_id: u64::MAX - i },
-                                        Duration::from_nanos(i)
+                                        crate::Event::Timer {
+                                            task_id: u64::MAX - i,
+                                        },
+                                        Duration::from_nanos(i),
                                     );
                                 }
                             }

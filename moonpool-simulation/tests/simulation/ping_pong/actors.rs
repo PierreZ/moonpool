@@ -124,7 +124,7 @@ impl<
                         // Continue processing to allow final message delivery and detect client disconnect
                         for i in 0..50 {
                             tracing::debug!("Server: Post-completion tick #{}", i + 1);
-                            
+
                             // Check for shutdown signal first (simulation framework)
                             if self.topology.shutdown_signal.is_cancelled() {
                                 tracing::debug!(
@@ -132,7 +132,7 @@ impl<
                                 );
                                 break;
                             }
-                            
+
                             let _ = self.transport.tick().await;
                             tokio::task::yield_now().await;
 

@@ -50,6 +50,8 @@ pub enum ConnectionStateChange {
     ConnectionReady,
     /// Clear clog for a connection
     ClogClear,
+    /// Restore a cut connection
+    ConnectionRestore,
 }
 
 /// An event scheduled for execution at a specific simulation time.
