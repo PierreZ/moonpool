@@ -278,6 +278,21 @@ where
         Ok(())
     }
 
+    /// Try to get the next message with self-driving behavior
+    ///
+    /// This method drives the transport once to handle I/O operations, then checks
+    /// for available messages. Returns Some(msg) if a message is available,
+    /// None if no message is ready, or an error if the transport operation failed.
+    pub async fn try_next_message(
+        &mut self,
+    ) -> Result<Option<ReceivedEnvelope<S::Envelope>>, TransportError> {
+        // Drive the transport to handle I/O
+        self.tick().await?;
+
+        // Return whatever poll_receive gives us (Some or None)
+        Ok(self.poll_receive())
+    }
+
     /// Close the server and clean up resources
     pub async fn close(&mut self) {
         // Flush any pending writes before closing

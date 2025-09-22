@@ -220,10 +220,28 @@ impl TokioRunner {
                 handles.push((workload.name.clone(), handle));
             }
 
-            // Wait for all workloads to complete
+            // Convert handles to boxed futures with names
+            let mut pending_futures: Vec<_> = handles
+                .into_iter()
+                .map(|(name, handle)| {
+                    Box::pin(async move {
+                        let result = handle.await;
+                        (name, result)
+                    })
+                })
+                .collect();
+
             let mut first_success_triggered = false;
-            for (name, handle) in handles {
-                let result = match handle.await {
+
+            // Wait for all workloads to complete, triggering shutdown on first success
+            while !pending_futures.is_empty() {
+                let (completed_result, _index, remaining_futures) =
+                    futures::future::select_all(pending_futures).await;
+
+                pending_futures = remaining_futures;
+
+                let (name, handle_result) = completed_result;
+                let result = match handle_result {
                     Ok(workload_result) => workload_result,
                     Err(_) => Err(crate::SimulationError::InvalidState(
                         "Task panicked".to_string(),
@@ -232,6 +250,10 @@ impl TokioRunner {
 
                 // If this is the first successful workload, trigger shutdown signal
                 if !first_success_triggered && result.is_ok() {
+                    tracing::debug!(
+                        "TokioRunner: Workload '{}' completed successfully, triggering shutdown",
+                        name
+                    );
                     shutdown_signal.cancel();
                     first_success_triggered = true;
                 }

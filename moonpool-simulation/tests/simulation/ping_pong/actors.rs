@@ -38,133 +38,64 @@ impl<
         }
     }
 
-    /// Main server loop using transport layer
+    /// Main server loop using FoundationDB-inspired tokio::select! pattern
     #[instrument(skip(self))]
     pub async fn run(&mut self) -> SimulationResult<SimulationMetrics> {
-        let server_addr = self.topology.my_ip.clone();
         tracing::debug!(
-            "Server: Starting transport-based server on {} for {} client(s): {:?}",
+            "Server: Starting on {} for {} client(s)",
             self.topology.my_ip,
-            self.topology.peer_ips.len(),
-            self.topology.peer_ips
+            self.topology.peer_ips.len()
         );
 
-        // Bind to server address using transport
-        tracing::debug!("Server: Attempting to bind to {}", server_addr);
-        self.transport
-            .bind(&server_addr)
-            .await
-            .map_err(|e| SimulationError::IoError(format!("Server bind failed: {}", e)))?;
+        // Bind to server address - fail immediately if this doesn't work
+        if let Err(e) = self.transport.bind(&self.topology.my_ip).await {
+            tracing::error!("Server: Failed to bind to {}: {}", self.topology.my_ip, e);
+            return Err(SimulationError::IoError(format!(
+                "Server bind failed: {}",
+                e
+            )));
+        }
 
-        tracing::warn!(
-            "Server: Successfully bound to {} and ready for connections",
-            server_addr
-        );
+        tracing::debug!("Server: Successfully bound and ready for connections");
 
-        // Main message handling loop
+        // FoundationDB-style single select loop handling all events
         loop {
-            // Check for shutdown signal - this happens when the client completes successfully
-            if self.topology.shutdown_signal.is_cancelled() {
-                tracing::debug!(
-                    "Server: Shutdown signal received (client completed), handled {} messages",
-                    self.messages_handled
-                );
-                // Clean up transport resources before exiting
-                self.transport.close().await;
-                tracing::debug!("Server: Transport closed due to shutdown signal, exiting");
-                return Ok(SimulationMetrics::default());
-            }
+            tokio::select! {
+                // Clean shutdown - prioritize this branch first
+                _ = self.topology.shutdown_signal.cancelled() => {
+                    tracing::debug!("Server: Shutdown signal received, handled {} messages", self.messages_handled);
+                    self.transport.close().await;
+                    return Ok(SimulationMetrics::default());
+                }
 
-            // FIRST: Transport maintenance (accept connections, read data)
-            tracing::debug!("Server: Calling tick() for transport maintenance");
-            let _ = self.transport.tick().await;
+                // Handle incoming messages OR transport errors
+                result = self.transport.try_next_message() => {
+                    match result {
+                        Ok(Some(msg)) if msg.envelope.payload() == b"PING" => {
+                            self.messages_handled += 1;
+                            tracing::debug!("Server: Handling ping #{}", self.messages_handled);
 
-            // If we've completed all expected ping-pongs and client has disconnected, exit
-            if self.messages_handled >= MAX_PING && !self.transport.has_client() {
-                tracing::debug!(
-                    "Server: Completed {} ping-pongs and client disconnected, exiting",
-                    self.messages_handled
-                );
-                self.transport.close().await;
-                tracing::debug!("Server: Transport closed, exiting");
-                return Ok(SimulationMetrics::default());
-            }
-
-            // THEN: Process incoming messages from buffer
-            if let Some(received_envelope) = self.transport.poll_receive() {
-                tracing::debug!("Server: poll_receive returned a message");
-                let payload = received_envelope.envelope.payload();
-                let message = String::from_utf8_lossy(payload);
-
-                tracing::debug!("Server: Received message: {}", message);
-
-                if message.trim() == "PING" {
-                    self.messages_handled += 1;
-                    tracing::debug!("Server: Handling ping #{}", self.messages_handled);
-
-                    // Send PONG response using transport
-                    let response = self.transport.send_reply::<RequestResponseEnvelopeFactory>(
-                        &received_envelope.envelope,
-                        b"PONG".to_vec(),
-                    );
-
-                    if let Err(e) = response {
-                        tracing::warn!("Server: Failed to send PONG: {}", e);
-                    } else {
-                        tracing::debug!("Server: Sent PONG response");
-                    }
-
-                    // Check completion condition
-                    if self.messages_handled >= MAX_PING {
-                        tracing::debug!(
-                            "Server: Completed {} ping-pong exchanges, will exit when client disconnects",
-                            self.messages_handled
-                        );
-
-                        // Continue processing to allow final message delivery and detect client disconnect
-                        for i in 0..50 {
-                            tracing::debug!("Server: Post-completion tick #{}", i + 1);
-
-                            // Check for shutdown signal first (simulation framework)
-                            if self.topology.shutdown_signal.is_cancelled() {
-                                tracing::debug!(
-                                    "Server: Shutdown signal received during post-completion, exiting"
-                                );
-                                break;
-                            }
-
-                            let _ = self.transport.tick().await;
-                            tokio::task::yield_now().await;
-
-                            // Check if client disconnected
-                            if !self.transport.has_client() {
-                                tracing::debug!(
-                                    "Server: Client disconnected after completing all ping-pongs, exiting"
-                                );
-                                break;
+                            // Send PONG response
+                            if let Err(e) = self.transport.send_reply::<RequestResponseEnvelopeFactory>(
+                                &msg.envelope,
+                                b"PONG".to_vec(),
+                            ) {
+                                tracing::warn!("Server: Failed to send PONG: {}", e);
                             }
                         }
-
-                        // Clean up transport resources
-                        self.transport.close().await;
-                        tracing::debug!("Server: Transport closed, exiting");
-
-                        return Ok(SimulationMetrics::default());
-                    }
-                } else {
-                    tracing::warn!("Server: Received unexpected message: {}", message);
-                }
-            } else {
-                // No messages available, yield to allow other tasks to run
-                tracing::debug!("Server: No messages available, yielding");
-                tokio::select! {
-                    _ = tokio::task::yield_now() => {},
-                    _ = self.topology.shutdown_signal.cancelled() => {
-                        tracing::debug!("Server: Shutdown signal received while yielding");
-                        // Clean up transport resources before exiting
-                        self.transport.close().await;
-                        tracing::debug!("Server: Transport closed due to shutdown signal, exiting");
-                        return Ok(SimulationMetrics::default());
+                        Ok(Some(_)) => {
+                            // Ignore non-PING messages
+                            tracing::debug!("Server: Received non-PING message, ignoring");
+                        }
+                        Ok(None) => {
+                            // No message ready - yield and continue
+                            tokio::task::yield_now().await;
+                        }
+                        Err(e) => {
+                            // Transport error - connection lost, read failed, etc.
+                            tracing::warn!("Server: Transport error: {}", e);
+                            // Continue for next connection
+                        }
                     }
                 }
             }
@@ -210,53 +141,33 @@ impl<
         }
     }
 
-    /// Main client loop using transport layer
+    /// Main client loop using FoundationDB-inspired tokio::select! pattern
     #[instrument(skip(self))]
     pub async fn run(&mut self) -> SimulationResult<SimulationMetrics> {
-        tracing::debug!(
-            "Client: Starting transport-based client connecting to {}",
-            self.server_address
-        );
-
-        // Server should be ready immediately in simulation
-
-        // Send ping-pong messages with failure handling
-        let mut consecutive_failures = 0;
-        const MAX_CONSECUTIVE_FAILURES: usize = 10;
+        tracing::debug!("Client: Starting, connecting to {}", self.server_address);
 
         while self.messages_sent < MAX_PING {
-            // Check for shutdown signal
-            if self.topology.shutdown_signal.is_cancelled() {
-                tracing::debug!(
-                    "Client: Shutdown signal received, sent {} messages",
-                    self.messages_sent
-                );
-                return Ok(SimulationMetrics::default());
-            }
-
-            // Send ping with timeout
-            match self.send_ping().await {
-                Ok(_) => {
-                    consecutive_failures = 0; // Reset on success
-                    self.messages_sent += 1;
-                    tracing::debug!(
-                        "Client: Successfully completed ping-pong #{}",
-                        self.messages_sent
-                    );
+            tokio::select! {
+                // Handle shutdown signal - prioritize this first
+                _ = self.topology.shutdown_signal.cancelled() => {
+                    tracing::debug!("Client: Shutdown signal received, sent {} messages", self.messages_sent);
+                    return Ok(SimulationMetrics::default());
                 }
-                Err(e) => {
-                    consecutive_failures += 1;
-                    tracing::warn!(
-                        "Client: Ping failed (attempt {}): {}",
-                        consecutive_failures,
-                        e
-                    );
 
-                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                        return Err(SimulationError::IoError(format!(
-                            "Too many consecutive failures: {}",
-                            consecutive_failures
-                        )));
+                // Send ping and wait for pong
+                result = self.transport.request::<RequestResponseEnvelopeFactory>(&self.server_address, b"PING".to_vec()) => {
+                    match result {
+                        Ok(response) if response == b"PONG" => {
+                            self.messages_sent += 1;
+                            tracing::debug!("Client: Successfully completed ping-pong #{}", self.messages_sent);
+                        }
+                        Ok(_) => {
+                            return Err(SimulationError::IoError("Invalid response".to_string()));
+                        }
+                        Err(e) => {
+                            tracing::warn!("Client: Ping failed: {}", e);
+                            // Continue trying - transport will handle reconnection
+                        }
                     }
                 }
             }
@@ -266,48 +177,7 @@ impl<
             "Client: Completed {} ping-pong exchanges",
             self.messages_sent
         );
-
-        // Clean up transport resources
         self.transport.close().await;
-        tracing::debug!("Client: Transport closed, exiting");
-
         Ok(SimulationMetrics::default())
-    }
-
-    /// Send a single ping and wait for pong response
-    async fn send_ping(&mut self) -> SimulationResult<()> {
-        tracing::debug!("Client: Sending PING to {}", self.server_address);
-        tracing::debug!("Client: About to call transport.get_reply()");
-
-        // Use tokio::select! to race between ping-pong and shutdown signal
-        let response = tokio::select! {
-            // Try to complete the ping-pong exchange
-            result = self.transport.get_reply::<RequestResponseEnvelopeFactory>(&self.server_address, b"PING".to_vec()) => {
-                result.map_err(|e| {
-                    tracing::debug!("Client: transport.get_reply() failed: {:?}", e);
-                    SimulationError::IoError(format!("Transport error: {}", e))
-                })?
-            }
-
-            // Check for shutdown signal
-            _ = self.topology.shutdown_signal.cancelled() => {
-                tracing::debug!("Client: Shutdown signal received during ping-pong");
-                return Err(SimulationError::IoError("Shutdown signal received".to_string()));
-            }
-        };
-
-        tracing::debug!("Client: transport.get_reply() succeeded");
-
-        // Verify response
-        let response_message = String::from_utf8_lossy(&response);
-        if response_message.trim() == "PONG" {
-            tracing::debug!("Client: Received expected PONG response");
-            Ok(())
-        } else {
-            Err(SimulationError::IoError(format!(
-                "Expected PONG, got: {}",
-                response_message
-            )))
-        }
     }
 }
