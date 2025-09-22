@@ -629,7 +629,14 @@ impl SimWorld {
         waker: Waker,
     ) -> SimulationResult<()> {
         let mut inner = self.inner.borrow_mut();
+        let is_replacement = inner.wakers.read_wakers.contains_key(&connection_id);
         inner.wakers.read_wakers.insert(connection_id, waker);
+        tracing::debug!(
+            "register_read_waker: connection_id={}, replacement={}, total_wakers={}",
+            connection_id.0,
+            is_replacement,
+            inner.wakers.read_wakers.len()
+        );
         Ok(())
     }
 
@@ -876,6 +883,64 @@ impl SimWorld {
                             }
                         }
                     }
+                    crate::ConnectionStateChange::ConnectionRestore => {
+                        // Restore a cut connection and wake any waiting tasks
+                        let connection_id = ConnectionId(id);
+                        tracing::debug!(
+                            "Processing ConnectionRestore event for connection {}",
+                            connection_id.0
+                        );
+
+                        // Restore the specific connection
+                        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
+                            if conn.is_cut {
+                                conn.is_cut = false;
+                                conn.cut_until = None;
+
+                                // Process all queued messages by delivering them to the receive buffer
+                                while let Some(data) = conn.queued_messages.pop_front() {
+                                    tracing::debug!(
+                                        "Restoring connection {}: delivering {} queued bytes",
+                                        connection_id.0,
+                                        data.len()
+                                    );
+                                    for &byte in &data {
+                                        conn.receive_buffer.push_back(byte);
+                                    }
+                                }
+
+                                // Wake any waiting readers and writers
+                                if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id)
+                                {
+                                    tracing::debug!(
+                                        "Restoring connection {}: waking up read/write waker",
+                                        connection_id.0
+                                    );
+                                    waker.wake();
+                                } else {
+                                    tracing::debug!(
+                                        "Restoring connection {}: no read/write wakers found",
+                                        connection_id.0
+                                    );
+                                }
+
+                                tracing::debug!(
+                                    "Connection {} restored successfully via event",
+                                    connection_id.0
+                                );
+                            } else {
+                                tracing::debug!(
+                                    "Connection {} was already restored",
+                                    connection_id.0
+                                );
+                            }
+                        } else {
+                            tracing::warn!(
+                                "ConnectionRestore event for non-existent connection {}",
+                                connection_id.0
+                            );
+                        }
+                    }
                 }
             }
             Event::Network {
@@ -1083,29 +1148,33 @@ impl SimWorld {
             Event::Shutdown => {
                 // Wake all pending tasks to allow them to check shutdown conditions
                 tracing::debug!("Processing Shutdown event - waking all pending tasks");
-                
+
                 // Collect all task wakers (we need to drain to avoid double-borrow)
-                let task_wakers: Vec<_> = inner.wakers.task_wakers
+                let task_wakers: Vec<_> = inner
+                    .wakers
+                    .task_wakers
                     .drain()
                     .map(|(task_id, waker)| (task_id, waker))
                     .collect();
-                
+
                 // Wake all tasks
                 for (task_id, waker) in task_wakers {
                     tracing::trace!("Waking task {}", task_id);
                     waker.wake();
                 }
-                
+
                 // Also wake any read wakers that might be blocked
-                let read_wakers: Vec<_> = inner.wakers.read_wakers
+                let read_wakers: Vec<_> = inner
+                    .wakers
+                    .read_wakers
                     .drain()
                     .map(|(_conn_id, waker)| waker)
                     .collect();
-                    
+
                 for waker in read_wakers {
                     waker.wake();
                 }
-                
+
                 tracing::debug!("Shutdown event processed - woke all pending tasks");
             }
         }
@@ -1305,11 +1374,23 @@ impl SimWorld {
             conn.is_cut = true;
             conn.cut_until = Some(reconnect_at);
 
+            // Schedule a connection restoration event
+            let restore_event = crate::events::Event::Connection {
+                id: connection_id.0,
+                state: crate::events::ConnectionStateChange::ConnectionRestore,
+            };
+            let sequence = inner.next_sequence;
+            inner.next_sequence += 1;
+            let scheduled_event =
+                crate::events::ScheduledEvent::new(reconnect_at, restore_event, sequence);
+            inner.event_queue.schedule(scheduled_event);
+
             tracing::debug!(
-                "Connection {} cut until {:?} (delay: {:?})",
+                "Connection {} cut until {:?} (delay: {:?}), restoration event scheduled with sequence {}",
                 connection_id.0,
                 reconnect_at,
-                reconnect_delay
+                reconnect_delay,
+                sequence
             );
         }
     }
@@ -1337,12 +1418,14 @@ impl SimWorld {
     /// Close a connection permanently (connection endpoint closed)
     pub fn close_connection(&self, connection_id: ConnectionId) {
         let mut inner = self.inner.borrow_mut();
-        
+
         // First, get the paired connection ID if it exists
-        let paired_connection_id = inner.network.connections
+        let paired_connection_id = inner
+            .network
+            .connections
             .get(&connection_id)
             .and_then(|conn| conn.paired_connection);
-        
+
         // Close the main connection
         if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
             if !conn.is_closed {
@@ -1350,7 +1433,7 @@ impl SimWorld {
                 tracing::debug!("Connection {} closed permanently", connection_id.0);
             }
         }
-        
+
         // Close the paired connection if it exists
         if let Some(paired_id) = paired_connection_id {
             if let Some(paired_conn) = inner.network.connections.get_mut(&paired_id) {
@@ -1360,16 +1443,22 @@ impl SimWorld {
                 }
             }
         }
-        
+
         // Wake any read wakers on both connections (after connection modifications)
         if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
-            tracing::debug!("Waking read waker for closed connection {}", connection_id.0);
+            tracing::debug!(
+                "Waking read waker for closed connection {}",
+                connection_id.0
+            );
             waker.wake();
         }
-        
+
         if let Some(paired_id) = paired_connection_id {
             if let Some(paired_waker) = inner.wakers.read_wakers.remove(&paired_id) {
-                tracing::debug!("Waking read waker for paired closed connection {}", paired_id.0);
+                tracing::debug!(
+                    "Waking read waker for paired closed connection {}",
+                    paired_id.0
+                );
                 paired_waker.wake();
             }
         }
@@ -1428,13 +1517,18 @@ impl SimWorld {
                     }
                 }
 
-                // Wake any waiting readers
+                // Wake any waiting readers and writers (both use read_wakers currently)
                 if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
                     tracing::debug!(
-                        "Restoring connection {}: waking up read waker",
+                        "Restoring connection {}: waking up read/write waker",
                         connection_id.0
                     );
                     waker.wake();
+                } else {
+                    tracing::debug!(
+                        "Restoring connection {}: no read/write wakers found",
+                        connection_id.0
+                    );
                 }
 
                 tracing::debug!("Connection {} restored successfully", connection_id.0);
@@ -1469,10 +1563,22 @@ impl SimWorld {
                     conn.is_cut = true;
                     conn.cut_until = Some(reconnect_at);
 
+                    // Schedule a connection restoration event
+                    let restore_event = crate::events::Event::Connection {
+                        id: connection_id.0,
+                        state: crate::events::ConnectionStateChange::ConnectionRestore,
+                    };
+                    let sequence = inner.next_sequence;
+                    inner.next_sequence += 1;
+                    let scheduled_event =
+                        crate::events::ScheduledEvent::new(reconnect_at, restore_event, sequence);
+                    inner.event_queue.schedule(scheduled_event);
+
                     tracing::debug!(
-                        "Randomly cut connection {} until {:?}",
+                        "Randomly cut connection {} until {:?}, restoration event scheduled with sequence {}",
                         connection_id.0,
-                        reconnect_at
+                        reconnect_at,
+                        sequence
                     );
                 }
             }
