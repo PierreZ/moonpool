@@ -22,12 +22,12 @@ fn slow_simulation_ping_pong_single_server() {
 
     local_runtime.block_on(async move {
         let report = SimulationBuilder::new()
-            // TODO: fix random config
             .use_random_config()
             .register_workload("ping_pong_server", ping_pong_server)
             .register_workload("ping_pong_client", ping_pong_client)
-            .set_iteration_control(IterationControl::FixedCount(1))
-            .set_debug_seeds(vec![7547131403598742190])
+            .set_iteration_control(IterationControl::UntilAllSometimesReached(1_000))
+            // Remove fixed seed to allow more variation
+            // .set_debug_seeds(vec![])
             .run()
             .await;
 
@@ -40,13 +40,13 @@ fn slow_simulation_ping_pong_single_server() {
         }
 
         // Validate assertion contracts using the helper function
-        // panic_on_assertion_violations(&report);
+        panic_on_assertion_violations(&report);
     });
 }
 
 /// Server workload for ping-pong communication
 async fn ping_pong_server(
-    _seed: u64,
+    _random: moonpool_simulation::random::sim::SimRandomProvider,
     provider: moonpool_simulation::SimNetworkProvider,
     time_provider: moonpool_simulation::SimTimeProvider,
     task_provider: moonpool_simulation::TokioTaskProvider,
@@ -59,15 +59,47 @@ async fn ping_pong_server(
 
 /// Client workload for ping-pong communication
 async fn ping_pong_client(
-    _seed: u64,
+    random: moonpool_simulation::random::sim::SimRandomProvider,
     provider: moonpool_simulation::SimNetworkProvider,
     time_provider: moonpool_simulation::SimTimeProvider,
     task_provider: moonpool_simulation::TokioTaskProvider,
     topology: moonpool_simulation::WorkloadTopology,
 ) -> SimulationResult<SimulationMetrics> {
-    let mut client_actor =
-        PingPongClientActor::new(provider, time_provider, task_provider, topology);
+    // Generate random PeerConfig to create back-pressure scenarios
+    let peer_config = generate_random_peer_config(&random);
+
+    let mut client_actor = PingPongClientActor::new(
+        provider,
+        time_provider,
+        task_provider,
+        topology,
+        peer_config,
+        random,
+    );
     client_actor.run().await
+}
+
+/// Generate random PeerConfig to create queue pressure and back-pressure scenarios
+fn generate_random_peer_config(
+    random: &moonpool_simulation::random::sim::SimRandomProvider,
+) -> moonpool_simulation::PeerConfig {
+    use moonpool_simulation::random::RandomProvider;
+    use std::time::Duration;
+
+    moonpool_simulation::PeerConfig {
+        // Very small queue sizes to trigger near_capacity assertions
+        max_queue_size: random.random_range(2..10),
+
+        // Variable connection timeouts
+        connection_timeout: Duration::from_millis(random.random_range(100..5000)),
+
+        // Random reconnect delays
+        initial_reconnect_delay: Duration::from_millis(random.random_range(10..500)),
+        max_reconnect_delay: Duration::from_secs(random.random_range(1..30)),
+
+        // Unlimited retries for simulation
+        max_connection_failures: None,
+    }
 }
 
 #[test]
@@ -125,7 +157,53 @@ async fn tokio_ping_pong_client(
     task_provider: TokioTaskProvider,
     topology: WorkloadTopology,
 ) -> SimulationResult<SimulationMetrics> {
-    let mut client_actor =
-        PingPongClientActor::new(provider, time_provider, task_provider, topology);
+    // For TokioRunner, use default PeerConfig since we don't have RandomProvider
+    let peer_config = moonpool_simulation::PeerConfig::default();
+
+    // Create a dummy random provider that uses thread_rng
+    struct TokioRandomProvider;
+    impl moonpool_simulation::random::RandomProvider for TokioRandomProvider {
+        fn random<T>(&self) -> T
+        where
+            rand::distributions::Standard: rand::distributions::Distribution<T>,
+        {
+            use rand::Rng;
+            rand::thread_rng().r#gen()
+        }
+
+        fn random_range<T>(&self, range: std::ops::Range<T>) -> T
+        where
+            T: rand::distributions::uniform::SampleUniform + PartialOrd,
+        {
+            use rand::Rng;
+            rand::thread_rng().gen_range(range)
+        }
+
+        fn random_ratio(&self) -> f64 {
+            use rand::Rng;
+            rand::thread_rng().r#gen()
+        }
+
+        fn random_bool(&self, probability: f64) -> bool {
+            use rand::Rng;
+            rand::thread_rng().gen_bool(probability)
+        }
+    }
+    impl Clone for TokioRandomProvider {
+        fn clone(&self) -> Self {
+            Self
+        }
+    }
+
+    let random = TokioRandomProvider;
+
+    let mut client_actor = PingPongClientActor::new(
+        provider,
+        time_provider,
+        task_provider,
+        topology,
+        peer_config,
+        random,
+    );
     client_actor.run().await
 }
