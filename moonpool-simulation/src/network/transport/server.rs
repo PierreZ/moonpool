@@ -81,12 +81,28 @@ where
 
     /// Bind to the specified address and start listening for connections
     pub async fn bind(&mut self, address: &str) -> Result<(), TransportError> {
-        let listener = self.network.bind(address).await.map_err(|e| {
-            TransportError::BindFailed(format!("Failed to bind to {}: {}", address, e))
-        })?;
+        tracing::debug!("ServerTransport::bind attempting to bind to {}", address);
+
+        let listener = match self.network.bind(address).await {
+            Ok(listener) => {
+                tracing::debug!("ServerTransport::bind successfully bound to {}", address);
+                listener
+            }
+            Err(e) => {
+                tracing::error!("ServerTransport::bind failed to bind to {}: {}", address, e);
+                return Err(TransportError::BindFailed(format!(
+                    "Failed to bind to {}: {}",
+                    address, e
+                )));
+            }
+        };
 
         self.listener = Some(listener);
         self.bind_address = Some(address.to_string());
+        tracing::debug!(
+            "ServerTransport::bind completed successfully for {}",
+            address
+        );
         Ok(())
     }
 
