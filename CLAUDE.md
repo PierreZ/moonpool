@@ -8,6 +8,8 @@
 - `nix develop --command cargo clippy`
 - `nix develop --command cargo nextest run`
 
+**Test timeouts**: Configured in `.config/nextest.toml` (1s default, 60s for tests with "slow_simulation" in name)
+
 **Validation**: Each phase/subphase must validate through:
 - Full compilation (code + tests)
 - All tests passing
