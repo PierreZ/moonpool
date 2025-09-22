@@ -65,7 +65,7 @@ where
     /// This method uses the turbofish pattern to specify the envelope type.
     /// It continuously drives the transport while waiting for the response
     /// to prevent deadlocks.
-    pub async fn get_reply<E>(
+    pub async fn request<E>(
         &mut self,
         destination: &str,
         payload: Vec<u8>,
@@ -75,14 +75,14 @@ where
         S::Envelope: Clone,
     {
         tracing::debug!(
-            "ClientTransport::get_reply called for destination: {}, payload size: {}",
+            "ClientTransport::request called for destination: {}, payload size: {}",
             destination,
             payload.len()
         );
         let correlation_id = self.next_correlation_id();
         let (tx, mut rx) = oneshot::channel();
         tracing::debug!(
-            "ClientTransport::get_reply generated correlation_id: {}",
+            "ClientTransport::request generated correlation_id: {}",
             correlation_id
         );
 
@@ -91,16 +91,16 @@ where
 
         // Create request envelope using factory
         let envelope = E::create_request(correlation_id, payload);
-        tracing::debug!("ClientTransport::get_reply created envelope, calling driver.send()");
+        tracing::debug!("ClientTransport::request created envelope, calling driver.send()");
 
         // Send through driver
         self.driver.send(destination, envelope).map_err(|e| {
-            tracing::debug!("ClientTransport::get_reply driver.send() failed: {:?}", e);
+            tracing::debug!("ClientTransport::request driver.send() failed: {:?}", e);
             TransportError::PeerError(e.to_string())
         })?;
 
         tracing::debug!(
-            "ClientTransport::get_reply driver.send() succeeded, entering self-driving loop"
+            "ClientTransport::request driver.send() succeeded, entering self-driving loop"
         );
 
         // Self-driving loop to process responses
@@ -159,9 +159,9 @@ where
 
     /// Send a request and wait for response with timeout
     ///
-    /// This method adds timeout functionality to get_reply using tokio::select!
+    /// This method adds timeout functionality to request using tokio::select!
     /// to race between the request completion and a timeout from TimeProvider::sleep.
-    pub async fn get_reply_with_timeout<E>(
+    pub async fn request_with_timeout<E>(
         &mut self,
         destination: &str,
         payload: Vec<u8>,
@@ -175,7 +175,7 @@ where
         let time_provider = self.driver.time().clone();
 
         tokio::select! {
-            result = self.get_reply::<E>(destination, payload) => {
+            result = self.request::<E>(destination, payload) => {
                 result
             }
             _ = time_provider.sleep(timeout_duration) => {
