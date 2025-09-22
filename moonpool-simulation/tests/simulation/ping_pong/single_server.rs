@@ -9,7 +9,7 @@ use tracing_subscriber;
 use super::actors::{PingPongClientActor, PingPongServerActor};
 
 #[test]
-fn test_ping_pong_with_simulation_builder() {
+fn slow_simulation_ping_pong_single_server() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
         // Level should always be ERROR when searching for seeds
@@ -26,7 +26,7 @@ fn test_ping_pong_with_simulation_builder() {
             .use_random_config()
             .register_workload("ping_pong_server", ping_pong_server)
             .register_workload("ping_pong_client", ping_pong_client)
-            .set_iteration_control(IterationControl::FixedCount(100))
+            .set_iteration_control(IterationControl::FixedCount(100_000))
             .set_debug_seeds(vec![7547131403598742190])
             .run()
             .await;
