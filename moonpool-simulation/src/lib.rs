@@ -42,6 +42,8 @@ pub mod events;
 pub mod network;
 /// Network state management for simulation.
 mod network_state;
+/// Random number generation provider abstraction.
+pub mod random;
 /// Thread-local random number generation for simulation.
 pub mod rng;
 /// Simulation runner and statistical analysis framework.
@@ -67,6 +69,8 @@ pub use network::{
     NetworkConfiguration, NetworkProvider, Peer, PeerConfig, PeerError, PeerMetrics,
     SimNetworkProvider, TcpListenerTrait, TokioNetworkProvider, sample_duration,
 };
+// Random provider exports
+pub use random::{RandomProvider, sim::SimRandomProvider};
 // Time provider exports
 pub use rng::{
     get_current_sim_seed, reset_sim_rng, set_sim_seed, sim_random, sim_random_range,

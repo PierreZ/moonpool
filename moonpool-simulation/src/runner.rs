@@ -157,7 +157,7 @@ pub struct WorkloadTopology {
 /// Type alias for workload function signature to reduce complexity.
 type WorkloadFn = Box<
     dyn Fn(
-        u64,
+        crate::random::sim::SimRandomProvider,
         crate::SimNetworkProvider,
         crate::SimTimeProvider,
         crate::task::tokio_provider::TokioTaskProvider,
@@ -214,12 +214,12 @@ impl SimulationBuilder {
     ///
     /// # Arguments
     /// * `name` - Name for the workload (for reporting purposes)
-    /// * `workload` - Async function that takes a seed, NetworkProvider, TimeProvider, and WorkloadTopology and returns simulation metrics
+    /// * `workload` - Async function that takes a RandomProvider, NetworkProvider, TimeProvider, TaskProvider, and WorkloadTopology and returns simulation metrics
     pub fn register_workload<S, F, Fut>(mut self, name: S, workload: F) -> Self
     where
         S: Into<String>,
         F: Fn(
-                u64,
+                crate::random::sim::SimRandomProvider,
                 crate::SimNetworkProvider,
                 crate::SimTimeProvider,
                 crate::task::tokio_provider::TokioTaskProvider,
@@ -233,8 +233,14 @@ impl SimulationBuilder {
         self.next_ip += 1;
 
         let boxed_workload = Box::new(
-            move |seed, provider, time_provider, task_provider, topology| {
-                let fut = workload(seed, provider, time_provider, task_provider, topology);
+            move |random_provider, provider, time_provider, task_provider, topology| {
+                let fut = workload(
+                    random_provider,
+                    provider,
+                    time_provider,
+                    task_provider,
+                    topology,
+                );
                 Box::pin(fut) as Pin<Box<dyn Future<Output = SimulationResult<SimulationMetrics>>>>
             },
         );
@@ -464,8 +470,10 @@ impl SimulationBuilder {
 
                 let time_provider = sim.time_provider();
                 let task_provider = sim.task_provider();
+                // Create random provider from seed
+                let random_provider = crate::random::sim::SimRandomProvider::new(seed);
                 let result = (self.workloads[0].workload)(
-                    seed,
+                    random_provider,
                     provider.clone(),
                     time_provider,
                     task_provider,
@@ -502,8 +510,10 @@ impl SimulationBuilder {
 
                     let time_provider = sim.time_provider();
                     let task_provider = sim.task_provider();
+                    // Create random provider from seed
+                    let random_provider = crate::random::sim::SimRandomProvider::new(seed);
                     let handle = tokio::task::spawn_local((workload.workload)(
-                        seed,
+                        random_provider,
                         provider.clone(),
                         time_provider,
                         task_provider,
@@ -760,6 +770,7 @@ impl SimulationBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::random::RandomProvider;
     use std::time::Duration;
 
     #[tokio::test]
@@ -767,10 +778,10 @@ mod tests {
         let report = SimulationBuilder::new()
             .register_workload(
                 "test_workload",
-                |seed, _provider, _time_provider, _task_provider, _topology| async move {
+                |random, _provider, _time_provider, _task_provider, _topology| async move {
                     let mut metrics = SimulationMetrics::default();
-                    metrics.simulated_time = Duration::from_millis(seed % 100);
-                    metrics.events_processed = seed % 10;
+                    metrics.simulated_time = Duration::from_millis(random.random_range(0..100));
+                    metrics.events_processed = random.random_range(0..10);
                     Ok(metrics)
                 },
             )
@@ -793,8 +804,10 @@ mod tests {
         let report = SimulationBuilder::new()
             .register_workload(
                 "failing_workload",
-                |seed, _provider, _time_provider, _task_provider, _topology| async move {
-                    if seed % 2 == 0 {
+                |random, _provider, _time_provider, _task_provider, _topology| async move {
+                    // Use deterministic approach: fail if random number is even, succeed if odd
+                    let random_num = random.random_range(0..100);
+                    if random_num % 2 == 0 {
                         Err(crate::SimulationError::InvalidState(
                             "Test failure".to_string(),
                         ))
@@ -807,7 +820,7 @@ mod tests {
                 },
             )
             .set_iterations(4)
-            .set_debug_seeds(vec![1, 2, 3, 4])
+            .set_debug_seeds(vec![1, 2, 5, 6]) // Try different seeds to get 2 even, 2 odd
             .run()
             .await;
 
@@ -883,19 +896,19 @@ mod tests {
             SimulationBuilder::new()
                 .register_workload(
                     "workload1",
-                    |seed, _provider, _time_provider, _task_provider, _topology| async move {
+                    |random, _provider, _time_provider, _task_provider, _topology| async move {
                         let mut metrics = SimulationMetrics::default();
-                        metrics.simulated_time = Duration::from_millis(seed % 50);
-                        metrics.events_processed = seed % 5;
+                        metrics.simulated_time = Duration::from_millis(random.random_range(0..50));
+                        metrics.events_processed = random.random_range(0..5);
                         Ok(metrics)
                     },
                 )
                 .register_workload(
                     "workload2",
-                    |seed, _provider, _time_provider, _task_provider, _topology| async move {
+                    |random, _provider, _time_provider, _task_provider, _topology| async move {
                         let mut metrics = SimulationMetrics::default();
-                        metrics.simulated_time = Duration::from_millis((seed * 2) % 50);
-                        metrics.events_processed = (seed * 2) % 5;
+                        metrics.simulated_time = Duration::from_millis(random.random_range(0..50));
+                        metrics.events_processed = random.random_range(0..5);
                         Ok(metrics)
                     },
                 )

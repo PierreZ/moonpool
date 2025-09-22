@@ -108,22 +108,31 @@ pub struct PingPongClientActor<
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
+    R: moonpool_simulation::random::RandomProvider,
 > {
     transport: ClientTransport<N, T, TP, RequestResponseSerializer>,
     server_address: String,
     topology: WorkloadTopology,
     messages_sent: usize,
+    random: R,
 }
 
 impl<
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
-> PingPongClientActor<N, T, TP>
+    R: moonpool_simulation::random::RandomProvider,
+> PingPongClientActor<N, T, TP, R>
 {
-    pub fn new(network: N, time: T, task_provider: TP, topology: WorkloadTopology) -> Self {
+    pub fn new(
+        network: N,
+        time: T,
+        task_provider: TP,
+        topology: WorkloadTopology,
+        peer_config: PeerConfig,
+        random: R,
+    ) -> Self {
         let serializer = RequestResponseSerializer::new();
-        let peer_config = PeerConfig::default();
         let transport = ClientTransport::new(serializer, network, time, task_provider, peer_config);
 
         // Get server address from peer_ips (assuming single server for now)
@@ -138,6 +147,7 @@ impl<
             server_address,
             topology,
             messages_sent: 0,
+            random,
         }
     }
 
@@ -154,8 +164,21 @@ impl<
                     return Ok(SimulationMetrics::default());
                 }
 
-                // Send ping and wait for pong
-                result = self.transport.request::<RequestResponseEnvelopeFactory>(&self.server_address, b"PING".to_vec()) => {
+                // Send ping with random timeout to create back-pressure
+                result = {
+                    // 50% chance of very short timeout to cause backlog
+                    let timeout_ms = if self.random.random_bool(0.5) {
+                        self.random.random_range(1..10)  // Very short: 1-10ms
+                    } else {
+                        self.random.random_range(100..5000)  // Normal: 100-5000ms
+                    };
+
+                    self.transport.request_with_timeout::<RequestResponseEnvelopeFactory>(
+                        &self.server_address,
+                        b"PING".to_vec(),
+                        std::time::Duration::from_millis(timeout_ms)
+                    )
+                } => {
                     match result {
                         Ok(response) if response == b"PONG" => {
                             self.messages_sent += 1;
@@ -163,6 +186,11 @@ impl<
                         }
                         Ok(_) => {
                             return Err(SimulationError::IoError("Invalid response".to_string()));
+                        }
+                        Err(moonpool_simulation::network::transport::TransportError::Timeout) => {
+                            tracing::warn!("Client: Request timed out, counting as failed attempt");
+                            // Still count this as a message attempt to avoid infinite loops
+                            self.messages_sent += 1;
                         }
                         Err(e) => {
                             tracing::warn!("Client: Ping failed: {}", e);
