@@ -184,6 +184,57 @@ impl<
         }
     }
 
+    /// Run a single ping operation
+    /// Returns Ok(true) if ping was sent, Ok(false) if shutdown signal received, Err on error
+    pub async fn run_single_ping(&mut self) -> Result<bool, SimulationError> {
+        // Select server based on strategy
+        let selected_server = self.select_next_server().to_string();
+
+        // 50% chance of very short timeout to cause backlog
+        let timeout_ms = if self.random.random_bool(0.5) {
+            self.random.random_range(1..10) // Very short: 1-10ms
+        } else {
+            self.random.random_range(100..5000) // Normal: 100-5000ms
+        };
+
+        tokio::select! {
+            // Handle shutdown signal - prioritize this first
+            _ = self.topology.shutdown_signal.cancelled() => {
+                tracing::debug!("Client: Shutdown signal received, sent {} messages", self.messages_sent);
+                return Ok(false);
+            }
+
+            // Send ping with random timeout to create back-pressure
+            result = self.transport.request_with_timeout::<RequestResponseEnvelopeFactory>(
+                &selected_server,
+                b"PING".to_vec(),
+                std::time::Duration::from_millis(timeout_ms)
+            ) => {
+                match result {
+                    Ok(response) if response == b"PONG" => {
+                        self.messages_sent += 1;
+                        tracing::debug!("Client: Successfully completed ping-pong #{}", self.messages_sent);
+                        Ok(true)
+                    }
+                    Ok(_) => {
+                        Err(SimulationError::IoError("Invalid response".to_string()))
+                    }
+                    Err(moonpool_simulation::network::transport::TransportError::Timeout) => {
+                        tracing::warn!("Client: Request timed out, counting as failed attempt");
+                        // Still count this as a message attempt to avoid infinite loops
+                        self.messages_sent += 1;
+                        Ok(true)
+                    }
+                    Err(e) => {
+                        tracing::warn!("Client: Ping failed: {}", e);
+                        // Continue trying - transport will handle reconnection
+                        Ok(true)
+                    }
+                }
+            }
+        }
+    }
+
     /// Main client loop using FoundationDB-inspired tokio::select! pattern
     #[instrument(skip(self))]
     pub async fn run(&mut self) -> SimulationResult<SimulationMetrics> {
@@ -194,47 +245,16 @@ impl<
         );
 
         while self.messages_sent < MAX_PING {
-            // Select server based on strategy
-            let selected_server = self.select_next_server().to_string();
-
-            // 50% chance of very short timeout to cause backlog
-            let timeout_ms = if self.random.random_bool(0.5) {
-                self.random.random_range(1..10) // Very short: 1-10ms
-            } else {
-                self.random.random_range(100..5000) // Normal: 100-5000ms
-            };
-
-            tokio::select! {
-                // Handle shutdown signal - prioritize this first
-                _ = self.topology.shutdown_signal.cancelled() => {
-                    tracing::debug!("Client: Shutdown signal received, sent {} messages", self.messages_sent);
+            match self.run_single_ping().await {
+                Ok(true) => {
+                    // Continue with next ping
+                }
+                Ok(false) => {
+                    // Shutdown signal received
                     return Ok(SimulationMetrics::default());
                 }
-
-                // Send ping with random timeout to create back-pressure
-                result = self.transport.request_with_timeout::<RequestResponseEnvelopeFactory>(
-                    &selected_server,
-                    b"PING".to_vec(),
-                    std::time::Duration::from_millis(timeout_ms)
-                ) => {
-                    match result {
-                        Ok(response) if response == b"PONG" => {
-                            self.messages_sent += 1;
-                            tracing::debug!("Client: Successfully completed ping-pong #{}", self.messages_sent);
-                        }
-                        Ok(_) => {
-                            return Err(SimulationError::IoError("Invalid response".to_string()));
-                        }
-                        Err(moonpool_simulation::network::transport::TransportError::Timeout) => {
-                            tracing::warn!("Client: Request timed out, counting as failed attempt");
-                            // Still count this as a message attempt to avoid infinite loops
-                            self.messages_sent += 1;
-                        }
-                        Err(e) => {
-                            tracing::warn!("Client: Ping failed: {}", e);
-                            // Continue trying - transport will handle reconnection
-                        }
-                    }
+                Err(e) => {
+                    return Err(e);
                 }
             }
         }

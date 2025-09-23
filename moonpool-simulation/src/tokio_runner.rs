@@ -171,9 +171,16 @@ impl TokioRunner {
             let workload = &self.workloads[0];
             let my_ip = workload.ip_address.clone();
             let peer_ips = all_ips.iter().filter(|ip| *ip != &my_ip).cloned().collect();
+            let peer_names = self
+                .workloads
+                .iter()
+                .filter(|w| w.ip_address != my_ip)
+                .map(|w| w.name.clone())
+                .collect();
             let topology = WorkloadTopology {
                 my_ip,
                 peer_ips,
+                peer_names,
                 shutdown_signal: shutdown_signal.clone(),
             };
 
@@ -201,9 +208,16 @@ impl TokioRunner {
             for workload in &self.workloads {
                 let my_ip = workload.ip_address.clone();
                 let peer_ips = all_ips.iter().filter(|ip| *ip != &my_ip).cloned().collect();
+                let peer_names = self
+                    .workloads
+                    .iter()
+                    .filter(|w| w.ip_address != my_ip)
+                    .map(|w| w.name.clone())
+                    .collect();
                 let topology = WorkloadTopology {
                     my_ip,
                     peer_ips,
+                    peer_names,
                     shutdown_signal: shutdown_signal.clone(),
                 };
 
