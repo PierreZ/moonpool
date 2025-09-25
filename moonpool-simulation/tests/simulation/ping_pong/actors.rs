@@ -9,7 +9,6 @@ use moonpool_simulation::{
 };
 use tracing::instrument;
 
-
 #[derive(Debug, Clone)]
 enum SelectionStrategy {
     RoundRobin,
@@ -320,5 +319,4 @@ impl<
             }
         }
     }
-
 }

@@ -206,11 +206,28 @@ impl SimWorld {
         }
     }
 
-    /// Processes all scheduled events until the queue is empty.
+    /// Processes all scheduled events until the queue is empty or only infrastructure events remain.
+    ///
+    /// This method processes all workload-related events but stops early if only infrastructure
+    /// events (like connection restoration) remain. This prevents infinite loops where
+    /// infrastructure events keep the simulation running indefinitely after workloads complete.
     #[instrument(skip(self))]
     pub fn run_until_empty(&mut self) {
         while self.step() {
-            // Continue processing events
+            // Periodically check if we should stop early (every 50 events for performance)
+            if self.inner.borrow().events_processed % 50 == 0 {
+                let has_workload_events = !self
+                    .inner
+                    .borrow()
+                    .event_queue
+                    .has_only_infrastructure_events();
+                if !has_workload_events {
+                    tracing::debug!(
+                        "Early termination: only infrastructure events remain in queue"
+                    );
+                    break;
+                }
+            }
         }
     }
 
@@ -1154,7 +1171,6 @@ impl SimWorld {
                     .wakers
                     .task_wakers
                     .drain()
-                    .map(|(task_id, waker)| (task_id, waker))
                     .collect();
 
                 // Wake all tasks
@@ -1427,22 +1443,19 @@ impl SimWorld {
             .and_then(|conn| conn.paired_connection);
 
         // Close the main connection
-        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-            if !conn.is_closed {
+        if let Some(conn) = inner.network.connections.get_mut(&connection_id)
+            && !conn.is_closed {
                 conn.is_closed = true;
                 tracing::debug!("Connection {} closed permanently", connection_id.0);
             }
-        }
 
         // Close the paired connection if it exists
-        if let Some(paired_id) = paired_connection_id {
-            if let Some(paired_conn) = inner.network.connections.get_mut(&paired_id) {
-                if !paired_conn.is_closed {
+        if let Some(paired_id) = paired_connection_id
+            && let Some(paired_conn) = inner.network.connections.get_mut(&paired_id)
+                && !paired_conn.is_closed {
                     paired_conn.is_closed = true;
                     tracing::debug!("Paired connection {} also closed", paired_id.0);
                 }
-            }
-        }
 
         // Wake any read wakers on both connections (after connection modifications)
         if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
@@ -1453,15 +1466,14 @@ impl SimWorld {
             waker.wake();
         }
 
-        if let Some(paired_id) = paired_connection_id {
-            if let Some(paired_waker) = inner.wakers.read_wakers.remove(&paired_id) {
+        if let Some(paired_id) = paired_connection_id
+            && let Some(paired_waker) = inner.wakers.read_wakers.remove(&paired_id) {
                 tracing::debug!(
                     "Waking read waker for paired closed connection {}",
                     paired_id.0
                 );
                 paired_waker.wake();
             }
-        }
     }
 
     /// Restore connections that are ready to be reconnected

@@ -29,6 +29,24 @@ pub enum Event {
     Shutdown,
 }
 
+impl Event {
+    /// Determines if this event is purely infrastructural (not workload-related).
+    ///
+    /// Infrastructure events maintain simulation state but don't represent actual
+    /// application work. These events can be safely ignored when determining if
+    /// a simulation should terminate after workloads complete.
+    pub fn is_infrastructure_event(&self) -> bool {
+        matches!(
+            self,
+            Event::Connection {
+                state: ConnectionStateChange::ConnectionRestore,
+                ..
+            } // Could add other infrastructure events here if needed:
+              // | Event::Connection { state: ConnectionStateChange::ClogClear, .. }
+        )
+    }
+}
+
 /// Network data operations
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetworkOperation {
@@ -150,6 +168,17 @@ impl EventQueue {
     pub fn len(&self) -> usize {
         self.heap.len()
     }
+
+    /// Checks if the queue contains only infrastructure events (no workload events).
+    ///
+    /// Infrastructure events are those that maintain simulation state but don't
+    /// represent actual application work (like connection restoration).
+    /// Returns true if empty or contains only infrastructure events.
+    pub fn has_only_infrastructure_events(&self) -> bool {
+        self.heap
+            .iter()
+            .all(|scheduled_event| scheduled_event.event().is_infrastructure_event())
+    }
 }
 
 impl Default for EventQueue {
@@ -161,6 +190,57 @@ impl Default for EventQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_infrastructure_event_detection() {
+        // Test Event::is_infrastructure_event() method
+        let restore_event = Event::Connection {
+            id: 1,
+            state: ConnectionStateChange::ConnectionRestore,
+        };
+        assert!(restore_event.is_infrastructure_event());
+
+        let timer_event = Event::Timer { task_id: 1 };
+        assert!(!timer_event.is_infrastructure_event());
+
+        let network_event = Event::Network {
+            connection_id: 1,
+            operation: NetworkOperation::DataDelivery {
+                data: vec![1, 2, 3],
+            },
+        };
+        assert!(!network_event.is_infrastructure_event());
+
+        let shutdown_event = Event::Shutdown;
+        assert!(!shutdown_event.is_infrastructure_event());
+
+        // Test EventQueue::has_only_infrastructure_events() method
+        let mut queue = EventQueue::new();
+
+        // Empty queue should be considered "only infrastructure"
+        assert!(queue.has_only_infrastructure_events());
+
+        // Queue with only ConnectionRestore events
+        queue.schedule(ScheduledEvent::new(
+            Duration::from_secs(1),
+            restore_event,
+            1,
+        ));
+        assert!(queue.has_only_infrastructure_events());
+
+        // Queue with workload events should return false
+        queue.schedule(ScheduledEvent::new(Duration::from_secs(2), timer_event, 2));
+        assert!(!queue.has_only_infrastructure_events());
+
+        // Queue with network events should return false
+        let mut queue2 = EventQueue::new();
+        queue2.schedule(ScheduledEvent::new(
+            Duration::from_secs(1),
+            network_event,
+            1,
+        ));
+        assert!(!queue2.has_only_infrastructure_events());
+    }
 
     #[test]
     fn event_queue_ordering() {

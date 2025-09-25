@@ -27,12 +27,12 @@ fn slow_simulation_ping_pong_2x2() {
         let report = SimulationBuilder::new()
             .use_random_config()
             // Uncomment to debug specific problematic seeds:
-            // .set_seed(12345) // Replace with problematic seed
+            // .set_debug_seeds(vec![12345]) // Replace with problematic seed
             .register_workload("ping_pong_server_1", ping_pong_server)
             .register_workload("ping_pong_server_2", ping_pong_server)
             .register_workload("ping_pong_client_1", ping_pong_client)
             .register_workload("ping_pong_client_2", ping_pong_client)
-            .set_iteration_control(IterationControl::FixedCount(1))
+            .set_iteration_control(IterationControl::UntilAllSometimesReached(10_000))
             .run()
             .await;
 
