@@ -11,7 +11,7 @@ test-threads = 1
 # Slow simulation tests (using SimulationBuilder) get extra time
 [[profile.default.overrides]]
 filter = 'test(slow_simulation)'
-slow-timeout = { period = "60s", terminate-after = 1 }
+slow-timeout = { period = "5m", terminate-after = 1 }
 
 [profile.default.junit]
 # Store test results

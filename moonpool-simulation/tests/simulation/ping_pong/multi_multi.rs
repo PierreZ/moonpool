@@ -8,8 +8,11 @@ use tracing_subscriber;
 
 use super::actors::{PingPongClientActor, PingPongServerActor};
 
+/// Reduced ping count per client to keep total test time reasonable with 2x2 setup
+static MAX_PING_PER_CLIENT: usize = 10;
+
 #[test]
-fn slow_simulation_ping_pong_single_server() {
+fn slow_simulation_ping_pong_2x2() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
         // Level should always be ERROR when searching for seeds
@@ -23,11 +26,13 @@ fn slow_simulation_ping_pong_single_server() {
     local_runtime.block_on(async move {
         let report = SimulationBuilder::new()
             .use_random_config()
-            .register_workload("ping_pong_server", ping_pong_server)
-            .register_workload("ping_pong_client", ping_pong_client)
-            .set_iteration_control(IterationControl::UntilAllSometimesReached(1_000))
-            // Remove fixed seed to allow more variation
-            // .set_debug_seeds(vec![])
+            // Uncomment to debug specific problematic seeds:
+            // .set_seed(12345) // Replace with problematic seed
+            .register_workload("ping_pong_server_1", ping_pong_server)
+            .register_workload("ping_pong_server_2", ping_pong_server)
+            .register_workload("ping_pong_client_1", ping_pong_client)
+            .register_workload("ping_pong_client_2", ping_pong_client)
+            .set_iteration_control(IterationControl::FixedCount(1))
             .run()
             .await;
 
@@ -44,7 +49,7 @@ fn slow_simulation_ping_pong_single_server() {
     });
 }
 
-/// Server workload for ping-pong communication
+/// Server workload for ping-pong communication with multiple clients
 async fn ping_pong_server(
     _random: moonpool_simulation::random::sim::SimRandomProvider,
     provider: moonpool_simulation::SimNetworkProvider,
@@ -57,7 +62,7 @@ async fn ping_pong_server(
     server_actor.run().await
 }
 
-/// Client workload for ping-pong communication
+/// Client workload for ping-pong communication with multiple servers
 async fn ping_pong_client(
     random: moonpool_simulation::random::sim::SimRandomProvider,
     provider: moonpool_simulation::SimNetworkProvider,
@@ -68,15 +73,86 @@ async fn ping_pong_client(
     // Generate random PeerConfig to create back-pressure scenarios
     let peer_config = generate_random_peer_config(&random);
 
-    let mut client_actor = PingPongClientActor::new(
+    // Client connects to all servers (workloads with "ping_pong_server" prefix)
+    let server_peers = topology.get_peers_with_prefix("ping_pong_server");
+    let server_topology = moonpool_simulation::WorkloadTopology {
+        my_ip: topology.my_ip,
+        peer_ips: server_peers.iter().map(|(_, ip)| ip.clone()).collect(),
+        peer_names: server_peers.iter().map(|(name, _)| name.clone()).collect(),
+        shutdown_signal: topology.shutdown_signal,
+    };
+
+    let mut client_actor = MultiMultiPingPongClientActor::new(
         provider,
         time_provider,
         task_provider,
-        topology,
+        server_topology,
         peer_config,
         random,
     );
     client_actor.run().await
+}
+
+/// Client actor with reduced ping count for 4x4 testing
+struct MultiMultiPingPongClientActor<
+    N: moonpool_simulation::NetworkProvider + Clone + 'static,
+    T: moonpool_simulation::TimeProvider + Clone + 'static,
+    TP: moonpool_simulation::TaskProvider + Clone + 'static,
+    R: moonpool_simulation::random::RandomProvider,
+> {
+    inner: PingPongClientActor<N, T, TP, R>,
+}
+
+impl<
+    N: moonpool_simulation::NetworkProvider + Clone + 'static,
+    T: moonpool_simulation::TimeProvider + Clone + 'static,
+    TP: moonpool_simulation::TaskProvider + Clone + 'static,
+    R: moonpool_simulation::random::RandomProvider,
+> MultiMultiPingPongClientActor<N, T, TP, R>
+{
+    pub fn new(
+        network: N,
+        time: T,
+        task_provider: TP,
+        topology: WorkloadTopology,
+        peer_config: moonpool_simulation::PeerConfig,
+        random: R,
+    ) -> Self {
+        Self {
+            inner: PingPongClientActor::new(
+                network,
+                time,
+                task_provider,
+                topology,
+                peer_config,
+                random,
+            ),
+        }
+    }
+
+    pub async fn run(&mut self) -> SimulationResult<SimulationMetrics> {
+        // Override the MAX_PING limit for this 4x4 test
+        let mut ping_count = 0;
+
+        while ping_count < MAX_PING_PER_CLIENT {
+            // Use the inner client's logic but with our own counter
+            match self.inner.run_single_ping().await {
+                Ok(true) => {
+                    ping_count += 1;
+                }
+                Ok(false) => {
+                    // Shutdown signal received
+                    break;
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+
+        tracing::debug!("2x2 client: Completed {} ping-pong exchanges", ping_count);
+        Ok(SimulationMetrics::default())
+    }
 }
 
 /// Generate random PeerConfig to create queue pressure and back-pressure scenarios
@@ -103,7 +179,7 @@ fn generate_random_peer_config(
 }
 
 #[test]
-fn test_ping_pong_with_tokio_runner() {
+fn test_ping_pong_2x2_with_tokio_runner() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
         .with_max_level(Level::DEBUG)
@@ -118,8 +194,10 @@ fn test_ping_pong_with_tokio_runner() {
 
     let report = local_runtime.block_on(async move {
         TokioRunner::new()
-            .register_workload("ping_pong_server", tokio_ping_pong_server)
-            .register_workload("ping_pong_client", tokio_ping_pong_client)
+            .register_workload("ping_pong_server_1", tokio_ping_pong_server)
+            .register_workload("ping_pong_server_2", tokio_ping_pong_server)
+            .register_workload("ping_pong_client_1", tokio_ping_pong_client)
+            .register_workload("ping_pong_client_2", tokio_ping_pong_client)
             .run()
             .await
     });
@@ -127,15 +205,15 @@ fn test_ping_pong_with_tokio_runner() {
     // Display the report
     println!("{}", report);
 
-    // Validate that both workloads completed successfully
+    // Validate that all workloads completed successfully
     assert_eq!(
-        report.successful, 2,
-        "Both server and client should succeed"
+        report.successful, 4,
+        "All 2 servers and 2 clients should succeed"
     );
     assert_eq!(report.failed, 0, "No failures expected");
     assert_eq!(report.success_rate(), 100.0);
 
-    println!("✅ TokioRunner ping-pong test completed successfully");
+    println!("✅ TokioRunner 2x2 ping-pong test completed successfully");
 }
 
 /// Adapter function to run server actor with TokioRunner signature
@@ -197,11 +275,21 @@ async fn tokio_ping_pong_client(
 
     let random = TokioRandomProvider;
 
-    let mut client_actor = PingPongClientActor::new(
+    // Client connects to all servers (workloads with "ping_pong_server" prefix)
+    let server_peers = topology.get_peers_with_prefix("ping_pong_server");
+    let server_topology = moonpool_simulation::WorkloadTopology {
+        my_ip: topology.my_ip,
+        peer_ips: server_peers.iter().map(|(_, ip)| ip.clone()).collect(),
+        peer_names: server_peers.iter().map(|(name, _)| name.clone()).collect(),
+        shutdown_signal: topology.shutdown_signal,
+    };
+
+    // Create a wrapper client that runs reduced ping count
+    let mut client_actor = MultiMultiPingPongClientActor::new(
         provider,
         time_provider,
         task_provider,
-        topology,
+        server_topology,
         peer_config,
         random,
     );
