@@ -52,7 +52,7 @@ assert_eq!(sim.current_time(), Duration::from_millis(50));
 
 ### 1. Sleep Future Implementation
 
-**File: `moonpool-simulation/src/sleep.rs`** (new)
+**File: `moonpool-foundation/src/sleep.rs`** (new)
 
 ```rust
 use std::future::Future;
@@ -107,7 +107,7 @@ impl Future for SleepFuture {
 
 ### 2. SimWorld Sleep Method
 
-**File: `moonpool-simulation/src/sim.rs`** (additions)
+**File: `moonpool-foundation/src/sim.rs`** (additions)
 
 ```rust
 use crate::sleep::SleepFuture;
@@ -149,7 +149,7 @@ impl SimWorld {
 
 ### 3. Enhanced SimInner State Management  
 
-**File: `moonpool-simulation/src/sim.rs`** (additions)
+**File: `moonpool-foundation/src/sim.rs`** (additions)
 
 ```rust
 use std::task::Waker;
@@ -180,7 +180,7 @@ impl SimInner {
 
 ### 3. Real Event Processing Implementation
 
-**File: `moonpool-simulation/src/sim.rs`** (updated process_event)
+**File: `moonpool-foundation/src/sim.rs`** (updated process_event)
 
 ```rust
 fn process_event(&self, event: Event) {
@@ -247,7 +247,7 @@ fn process_event(&self, event: Event) {
 
 ### 4. Enhanced Wake Event Processing
 
-**File: `moonpool-simulation/src/sim.rs`** (updated process_event_with_inner)
+**File: `moonpool-foundation/src/sim.rs`** (updated process_event_with_inner)
 
 ```rust
 fn process_event_with_inner(inner: &mut SimInner, event: Event) {
@@ -290,7 +290,7 @@ fn process_event_with_inner(inner: &mut SimInner, event: Event) {
 
 ### 5. Library Integration
 
-**File: `moonpool-simulation/src/lib.rs`** (updated)
+**File: `moonpool-foundation/src/lib.rs`** (updated)
 
 ```rust
 /// Sleep functionality for simulation time
@@ -300,7 +300,7 @@ pub mod sleep;
 pub use sleep::SleepFuture;
 ```
 
-**File: `moonpool-simulation/src/network/sim/stream.rs`** (updated)
+**File: `moonpool-foundation/src/network/sim/stream.rs`** (updated)
 
 ```rust
 use super::futures::{ConnectionFuture, DataDeliveryFuture};
@@ -369,7 +369,7 @@ impl AsyncWrite for SimTcpStream {
 
 ### 5. Enhanced Event System
 
-**File: `moonpool-simulation/src/events.rs`** (updated)
+**File: `moonpool-foundation/src/events.rs`** (updated)
 
 ```rust
 /// Events that can be scheduled in the simulation.
@@ -409,7 +409,7 @@ pub enum Event {
 
 ### Sleep Functionality Tests
 
-**File: `moonpool-simulation/tests/sleep_tests.rs`** (new)
+**File: `moonpool-foundation/tests/sleep_tests.rs`** (new)
 
 ```rust
 use moonpool_simulation::SimWorld;
@@ -509,7 +509,7 @@ fn test_event_ordering_and_processing() {
 
 ### Integration with Existing Tests
 
-**File: `moonpool-simulation/tests/simulation_integration.rs`** (updated)
+**File: `moonpool-foundation/tests/simulation_integration.rs`** (updated)
 
 ```rust
 // Existing tests should continue to work but now use real event processing

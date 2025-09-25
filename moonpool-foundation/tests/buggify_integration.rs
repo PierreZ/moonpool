@@ -1,0 +1,136 @@
+//! Integration tests for the buggify system
+
+use moonpool_foundation::{buggify_init, buggify_reset, reset_sim_rng, set_sim_seed};
+
+#[test]
+fn test_buggify_integration() {
+    println!("Testing buggify basic functionality...");
+
+    // Test with high probability to ensure we see buggify trigger
+    reset_sim_rng();
+    set_sim_seed(12345);
+    buggify_init(1.0, 1.0); // 100% activation, 100% firing
+
+    let mut fired_count = 0;
+    let mut total_tests = 0;
+
+    println!("Testing buggify! macro:");
+    for i in 0..20 {
+        total_tests += 1;
+        if moonpool_foundation::buggify!() {
+            println!("🐛 buggify!() FIRED at iteration {}", i);
+            fired_count += 1;
+        } else {
+            println!("   buggify!() did not fire at iteration {}", i);
+        }
+    }
+
+    println!("Fired {} out of {} tests", fired_count, total_tests);
+
+    // With 100% probabilities, we should see some firings
+    assert!(
+        fired_count > 0,
+        "Expected at least some buggify firings with 100% probability, got {}",
+        fired_count
+    );
+
+    // Test single-fire behavior: call the same buggify point multiple times
+    println!("\nTesting single-fire behavior at same location:");
+
+    // Define a function that calls buggify from the same location multiple times
+    fn test_single_fire() -> Vec<bool> {
+        let mut results = Vec::new();
+        for _ in 0..5 {
+            results.push(moonpool_foundation::buggify!()); // Same location each time
+        }
+        results
+    }
+
+    let single_fire_results = test_single_fire();
+    let fire_count = single_fire_results.iter().filter(|&&x| x).count();
+    println!("Single-fire test results: {:?}", single_fire_results);
+    println!("Fires: {}", fire_count);
+
+    // Should fire at most once
+    assert!(
+        fire_count <= 1,
+        "Single-fire violation: buggify fired {} times from same location",
+        fire_count
+    );
+
+    println!("\nTesting buggify_with_prob!(1.0) - should fire at least once:");
+    let mut prob_fired_count = 0;
+    for i in 0..20 {
+        if moonpool_foundation::buggify_with_prob!(1.0) {
+            println!("🐛 buggify_with_prob!(1.0) FIRED at iteration {}", i);
+            prob_fired_count += 1;
+        } else {
+            println!("   buggify_with_prob!(1.0) did not fire at iteration {}", i);
+        }
+    }
+
+    println!("Prob fired {} out of 20 tests", prob_fired_count);
+    assert!(
+        prob_fired_count > 0,
+        "Expected at least some buggify_with_prob!(1.0) firings, got {}",
+        prob_fired_count
+    );
+
+    buggify_reset();
+    println!("\nAfter reset, buggify should never fire:");
+    for i in 0..5 {
+        if moonpool_foundation::buggify!() {
+            panic!("❌ ERROR: buggify!() fired after reset at iteration {}!", i);
+        } else {
+            println!(
+                "✅ buggify!() correctly disabled after reset (iteration {})",
+                i
+            );
+        }
+    }
+
+    println!("✅ All buggify integration tests passed!");
+}
+
+#[test]
+fn test_buggify_determinism() {
+    println!("Testing buggify determinism...");
+
+    const TEST_SEED: u64 = 98765;
+
+    // Run the same test twice with the same seed
+    let mut results1 = Vec::new();
+    let mut results2 = Vec::new();
+
+    for run in 0..2 {
+        reset_sim_rng();
+        set_sim_seed(TEST_SEED);
+        buggify_init(0.8, 0.8); // High probability to get some hits
+
+        let results = if run == 0 {
+            &mut results1
+        } else {
+            &mut results2
+        };
+
+        // Test multiple different locations
+        for i in 0..10 {
+            let result = moonpool_foundation::buggify_with_prob!(0.7);
+            results.push(result);
+            println!("Run {}, iteration {}: {}", run + 1, i, result);
+        }
+
+        buggify_reset();
+    }
+
+    println!("Results 1: {:?}", results1);
+    println!("Results 2: {:?}", results2);
+
+    // Results should be identical for same seed
+    assert_eq!(
+        results1, results2,
+        "Buggify should be deterministic with same seed"
+    );
+
+    println!("✅ Buggify determinism test passed!");
+}

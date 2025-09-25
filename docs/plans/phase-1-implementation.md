@@ -92,7 +92,7 @@ impl SimWorld {
 ## Module Structure
 
 ```
-moonpool-simulation/src/
+moonpool-foundation/src/
 ├── lib.rs              # Public API exports
 ├── sim.rs              # Central SimWorld coordination
 ├── events.rs           # Event queue and processing

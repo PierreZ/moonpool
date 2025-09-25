@@ -9,7 +9,10 @@
       "WebFetch(domain:pierrezemb.fr)",
       "Bash(timeout 5s nix develop:*)",
       "Bash(timeout 10s nix develop:*)",
-      "Bash(timeout 15s nix develop:*)"
+      "Bash(timeout 15s nix develop:*)",
+      "Bash(git add:*)",
+      "Bash(mv:*)",
+      "Bash(rmdir:*)"
     ],
     "deny": [],
     "ask": [],
