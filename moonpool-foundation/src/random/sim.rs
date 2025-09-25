@@ -32,8 +32,8 @@ impl SimRandomProvider {
     /// # Example
     ///
     /// ```rust
-    /// use moonpool_simulation::random::sim::SimRandomProvider;
-    /// use moonpool_simulation::random::RandomProvider;
+    /// use moonpool_foundation::random::sim::SimRandomProvider;
+    /// use moonpool_foundation::random::RandomProvider;
     ///
     /// let provider = SimRandomProvider::new(42);
     /// let value: f64 = provider.random();

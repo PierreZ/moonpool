@@ -1,6 +1,6 @@
 //! Integration tests for the buggify system
 
-use moonpool_simulation::{buggify_init, buggify_reset, reset_sim_rng, set_sim_seed};
+use moonpool_foundation::{buggify_init, buggify_reset, reset_sim_rng, set_sim_seed};
 
 #[test]
 fn test_buggify_integration() {
@@ -17,7 +17,7 @@ fn test_buggify_integration() {
     println!("Testing buggify! macro:");
     for i in 0..20 {
         total_tests += 1;
-        if moonpool_simulation::buggify!() {
+        if moonpool_foundation::buggify!() {
             println!("🐛 buggify!() FIRED at iteration {}", i);
             fired_count += 1;
         } else {
@@ -41,7 +41,7 @@ fn test_buggify_integration() {
     fn test_single_fire() -> Vec<bool> {
         let mut results = Vec::new();
         for _ in 0..5 {
-            results.push(moonpool_simulation::buggify!()); // Same location each time
+            results.push(moonpool_foundation::buggify!()); // Same location each time
         }
         results
     }
@@ -61,7 +61,7 @@ fn test_buggify_integration() {
     println!("\nTesting buggify_with_prob!(1.0) - should fire at least once:");
     let mut prob_fired_count = 0;
     for i in 0..20 {
-        if moonpool_simulation::buggify_with_prob!(1.0) {
+        if moonpool_foundation::buggify_with_prob!(1.0) {
             println!("🐛 buggify_with_prob!(1.0) FIRED at iteration {}", i);
             prob_fired_count += 1;
         } else {
@@ -79,7 +79,7 @@ fn test_buggify_integration() {
     buggify_reset();
     println!("\nAfter reset, buggify should never fire:");
     for i in 0..5 {
-        if moonpool_simulation::buggify!() {
+        if moonpool_foundation::buggify!() {
             panic!("❌ ERROR: buggify!() fired after reset at iteration {}!", i);
         } else {
             println!(
@@ -115,7 +115,7 @@ fn test_buggify_determinism() {
 
         // Test multiple different locations
         for i in 0..10 {
-            let result = moonpool_simulation::buggify_with_prob!(0.7);
+            let result = moonpool_foundation::buggify_with_prob!(0.7);
             results.push(result);
             println!("Run {}, iteration {}: {}", run + 1, i, result);
         }

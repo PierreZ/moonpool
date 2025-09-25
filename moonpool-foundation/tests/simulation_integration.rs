@@ -1,4 +1,4 @@
-use moonpool_simulation::{NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait};
+use moonpool_foundation::{NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait};
 use tokio::io::AsyncWriteExt;
 
 #[test]

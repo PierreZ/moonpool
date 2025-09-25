@@ -1,4 +1,4 @@
-use moonpool_simulation::{NetworkProvider, TcpListenerTrait, TokioNetworkProvider};
+use moonpool_foundation::{NetworkProvider, TcpListenerTrait, TokioNetworkProvider};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 // Generic echo client that works with any NetworkProvider

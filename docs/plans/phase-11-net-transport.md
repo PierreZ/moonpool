@@ -168,7 +168,7 @@ With random config enabled, the server transport incorrectly treats temporarily 
 ### Root Cause Analysis
 
 **Issue 1: Server Transport Connection Cut Handling**
-Location: `moonpool-simulation/src/network/transport/server.rs:218-223`
+Location: `moonpool-foundation/src/network/transport/server.rs:218-223`
 
 The server transport incorrectly treats `ConnectionReset` errors (from cut connections) as permanent failures:
 
@@ -191,7 +191,7 @@ When a connection is cut, `poll_write` returns `ConnectionReset` error, but the 
 3. Never attempts to reconnect or retry
 
 **Issue 2: Stream Drop on Cut**
-Location: `moonpool-simulation/src/network/sim/stream.rs:402-413`
+Location: `moonpool-foundation/src/network/sim/stream.rs:402-413`
 
 When a connection is cut, the SimTcpStream gets dropped incorrectly:
 ```rust
@@ -468,17 +468,17 @@ Some(result) = messages.next() => {
 
 ### Files to Modify
 
-1. **Server Transport** (`moonpool-simulation/src/network/transport/server.rs`):
+1. **Server Transport** (`moonpool-foundation/src/network/transport/server.rs`):
    - Add `message_stream()` method returning `impl Stream<Item = Result<ReceivedEnvelope, TransportError>>`
    - Spawn internal actors for I/O management
    - Remove manual tick() requirement
 
-2. **Client Transport** (`moonpool-simulation/src/network/transport/client.rs`):
+2. **Client Transport** (`moonpool-foundation/src/network/transport/client.rs`):
    - Add simple `request()` method
    - Make fully self-driving (no manual loops)
    - Internal actors handle all I/O
 
-3. **Ping-Pong Actors** (`moonpool-simulation/tests/simulation/ping_pong/actors.rs`):
+3. **Ping-Pong Actors** (`moonpool-foundation/tests/simulation/ping_pong/actors.rs`):
    - Remove MAX_PING logic from server
    - Convert both actors to single tokio::select! pattern
    - Remove all manual tick() calls

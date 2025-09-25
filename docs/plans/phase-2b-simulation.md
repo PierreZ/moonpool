@@ -40,7 +40,7 @@ sim.run_until_empty(); // Process all simulation events
 
 ### 1. SimWorld Extensions
 
-**File: `moonpool-simulation/src/sim.rs`** (additions)
+**File: `moonpool-foundation/src/sim.rs`** (additions)
 
 ```rust
 use rand_chacha::ChaCha8Rng;
@@ -136,7 +136,7 @@ impl SimWorld {
 
 ### 2. Network Events
 
-**File: `moonpool-simulation/src/events.rs`** (additions)
+**File: `moonpool-foundation/src/events.rs`** (additions)
 
 ```rust
 /// Events that can be scheduled in the simulation.
@@ -157,7 +157,7 @@ pub enum Event {
 
 ### 3. Simulation Network Provider
 
-**File: `moonpool-simulation/src/network/sim/mod.rs`**
+**File: `moonpool-foundation/src/network/sim/mod.rs`**
 
 ```rust
 //! Simulated networking implementation.
@@ -172,7 +172,7 @@ pub use stream::{SimTcpStream, SimTcpListener};
 pub use types::{ConnectionId, ListenerId};
 ```
 
-**File: `moonpool-simulation/src/network/sim/types.rs`**
+**File: `moonpool-foundation/src/network/sim/types.rs`**
 
 ```rust
 use std::collections::VecDeque;
@@ -204,7 +204,7 @@ pub(crate) struct ListenerState {
 
 ### 4. Minimal Async Implementations
 
-**File: `moonpool-simulation/src/network/sim/stream.rs`**
+**File: `moonpool-foundation/src/network/sim/stream.rs`**
 
 ```rust
 use crate::{WeakSimWorld, SimulationResult};
@@ -337,7 +337,7 @@ impl TcpListenerTrait for SimTcpListener {
 
 ### 5. Library Integration
 
-**File: `moonpool-simulation/src/network/mod.rs`** (update)
+**File: `moonpool-foundation/src/network/mod.rs`** (update)
 
 ```rust
 /// Core networking traits and abstractions
@@ -357,7 +357,7 @@ pub use tokio::TokioNetworkProvider;
 pub use sim::SimNetworkProvider;
 ```
 
-**File: `moonpool-simulation/src/lib.rs`** (update)
+**File: `moonpool-foundation/src/lib.rs`** (update)
 
 ```rust
 // Add SimNetworkProvider export
@@ -379,7 +379,7 @@ thiserror = "1.0"
 
 ## Testing Strategy
 
-**File: `moonpool-simulation/tests/simulation_integration.rs`**
+**File: `moonpool-foundation/tests/simulation_integration.rs`**
 
 ```rust
 use moonpool_simulation::{SimWorld, SimNetworkProvider, TokioNetworkProvider, NetworkProvider};

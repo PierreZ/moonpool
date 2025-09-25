@@ -1,4 +1,4 @@
-use moonpool_simulation::{AssertionStats, SimWorld, always_assert, sometimes_assert};
+use moonpool_foundation::{AssertionStats, SimWorld, always_assert, sometimes_assert};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -354,7 +354,7 @@ fn run_deterministic_assertions(sim: &SimWorld) {
     // Use network config to get deterministic latencies
     for _i in 0..5 {
         let delay = sim.with_network_config(|config| {
-            moonpool_simulation::sample_duration(&config.connect_latency)
+            moonpool_foundation::sample_duration(&config.connect_latency)
         });
         let is_fast = delay.as_millis() < 10; // Some will be fast, some slow
 

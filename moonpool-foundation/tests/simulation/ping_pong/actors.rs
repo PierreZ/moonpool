@@ -1,4 +1,4 @@
-use moonpool_simulation::{
+use moonpool_foundation::{
     NetworkProvider, PeerConfig, SimulationError, SimulationMetrics, SimulationResult,
     TaskProvider, TimeProvider, WorkloadTopology,
     network::transport::{
@@ -145,7 +145,7 @@ pub struct PingPongClientActor<
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
-    R: moonpool_simulation::random::RandomProvider,
+    R: moonpool_foundation::random::RandomProvider,
 > {
     transport: ClientTransport<N, T, TP, RequestResponseSerializer>,
     server_addresses: Vec<String>,
@@ -161,7 +161,7 @@ impl<
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
-    R: moonpool_simulation::random::RandomProvider,
+    R: moonpool_foundation::random::RandomProvider,
 > PingPongClientActor<N, T, TP, R>
 {
     pub fn new(
@@ -290,7 +290,7 @@ impl<
                             Err(SimulationError::IoError(format!("Invalid response: {}", response_str)))
                         }
                     }
-                    Err(moonpool_simulation::network::transport::TransportError::Timeout) => {
+                    Err(moonpool_foundation::network::transport::TransportError::Timeout) => {
                         // Assert when timeout occurs
                         sometimes_assert!(
                             client_timeout_occurred,

@@ -13,7 +13,7 @@
 //! ## Example Usage
 //!
 //! ```rust
-//! use moonpool_simulation::{SimWorld, Event};
+//! use moonpool_foundation::{SimWorld, Event};
 //! use std::time::Duration;
 //!
 //! let mut sim = SimWorld::new();

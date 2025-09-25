@@ -13,7 +13,7 @@
 //! ## Usage
 //!
 //! ```rust
-//! use moonpool_simulation::{buggify, buggify_with_prob};
+//! use moonpool_foundation::{buggify, buggify_with_prob};
 //!
 //! // Default 25% activation probability
 //! if buggify!() {

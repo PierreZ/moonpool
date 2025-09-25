@@ -36,7 +36,7 @@ impl AssertionStats {
     /// # Example
     ///
     /// ```rust
-    /// use moonpool_simulation::assertions::AssertionStats;
+    /// use moonpool_foundation::assertions::AssertionStats;
     ///
     /// let mut stats = AssertionStats::new();
     /// stats.total_checks = 10;
@@ -103,7 +103,7 @@ pub fn record_assertion(name: &str, success: bool) {
 /// # Example
 ///
 /// ```rust
-/// use moonpool_simulation::assertions::{get_assertion_results, record_assertion};
+/// use moonpool_foundation::assertions::{get_assertion_results, record_assertion};
 ///
 /// // Simulate some assertion checks
 /// record_assertion("leader_exists", true);
@@ -129,7 +129,7 @@ pub fn get_assertion_results() -> HashMap<String, AssertionStats> {
 /// # Example
 ///
 /// ```rust
-/// use moonpool_simulation::assertions::{reset_assertion_results, record_assertion, get_assertion_results};
+/// use moonpool_foundation::assertions::{reset_assertion_results, record_assertion, get_assertion_results};
 ///
 /// // Record some assertions
 /// record_assertion("test", true);
@@ -193,7 +193,7 @@ pub fn panic_on_assertion_violations(_report: &crate::runner::SimulationReport) 
 /// # Example
 ///
 /// ```rust
-/// use moonpool_simulation::assertions::{validate_assertion_contracts, reset_assertion_results};
+/// use moonpool_foundation::assertions::{validate_assertion_contracts, reset_assertion_results};
 ///
 /// reset_assertion_results();
 /// // ... run simulation with assertions ...
@@ -234,7 +234,7 @@ pub fn validate_assertion_contracts() -> Vec<String> {
 /// # Example
 ///
 /// ```rust
-/// use moonpool_simulation::always_assert;
+/// use moonpool_foundation::always_assert;
 ///
 /// let leader_count = 1;
 /// always_assert!(unique_leader, leader_count == 1, "There must be exactly one leader");
@@ -278,7 +278,7 @@ macro_rules! always_assert {
 /// # Example
 ///
 /// ```rust
-/// use moonpool_simulation::sometimes_assert;
+/// use moonpool_foundation::sometimes_assert;
 /// use std::time::Duration;
 ///
 /// let consensus_time = Duration::from_millis(50);

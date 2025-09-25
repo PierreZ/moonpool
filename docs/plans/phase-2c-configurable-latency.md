@@ -27,7 +27,7 @@ Fix simulation time advancement by replacing `tokio::time::sleep` with proper ev
 
 ### 1. Network Configuration Structure
 
-**File: `moonpool-simulation/src/network/config.rs`**
+**File: `moonpool-foundation/src/network/config.rs`**
 
 ```rust
 use std::time::Duration;
@@ -131,7 +131,7 @@ impl NetworkConfiguration {
 
 ### 2. SimWorld Configuration Support
 
-**File: `moonpool-simulation/src/sim.rs`** (additions)
+**File: `moonpool-foundation/src/sim.rs`** (additions)
 
 ```rust
 struct SimInner {
@@ -163,7 +163,7 @@ impl SimWorld {
 
 ### 3. Proper Data Flow Implementation
 
-**File: `moonpool-simulation/src/network/sim/stream.rs`** (updates)
+**File: `moonpool-foundation/src/network/sim/stream.rs`** (updates)
 
 ```rust
 impl AsyncRead for SimTcpStream {
@@ -222,7 +222,7 @@ impl AsyncWrite for SimTcpStream {
 
 ### 4. Fixed Simulation Time Advancement
 
-**File: `moonpool-simulation/src/network/sim/provider.rs`** (updates)
+**File: `moonpool-foundation/src/network/sim/provider.rs`** (updates)
 
 ```rust
 #[async_trait(?Send)]
@@ -251,7 +251,7 @@ impl NetworkProvider for SimNetworkProvider {
 
 ### 5. Data Buffer Management
 
-**File: `moonpool-simulation/src/sim.rs`** (additions)
+**File: `moonpool-foundation/src/sim.rs`** (additions)
 
 ```rust
 impl SimWorld {
@@ -301,7 +301,7 @@ impl SimWorld {
 
 ### Configurable Latency Tests
 
-**File: `moonpool-simulation/tests/configurable_latency.rs`**
+**File: `moonpool-foundation/tests/configurable_latency.rs`**
 
 ```rust
 use moonpool_simulation::{
@@ -396,7 +396,7 @@ fn test_custom_latency_configuration() {
 
 ### Simulation Time Advancement Test
 
-**File: `moonpool-simulation/tests/simulation_integration.rs`** (updated)
+**File: `moonpool-foundation/tests/simulation_integration.rs`** (updated)
 
 ```rust
 #[test]
@@ -425,7 +425,7 @@ fn test_simple_echo_simulation() {
 
 ## Library Integration
 
-**File: `moonpool-simulation/src/lib.rs`** (updates)
+**File: `moonpool-foundation/src/lib.rs`** (updates)
 
 ```rust
 // Network exports

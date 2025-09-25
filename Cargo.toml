@@ -1,6 +1,6 @@
 [workspace]
 
-members = ["moonpool", "moonpool-simulation"]
+members = ["moonpool", "moonpool-foundation"]
 resolver = "2"
 
 [workspace.package]

@@ -40,7 +40,7 @@ thread_local! {
 /// # Example
 ///
 /// ```rust
-/// use moonpool_simulation::rng::{set_sim_seed, sim_random};
+/// use moonpool_foundation::rng::{set_sim_seed, sim_random};
 ///
 /// set_sim_seed(42);
 /// let value1: f64 = sim_random();
@@ -77,7 +77,7 @@ where
 /// # Example
 ///
 /// ```rust
-/// use moonpool_simulation::rng::{set_sim_seed, sim_random_range};
+/// use moonpool_foundation::rng::{set_sim_seed, sim_random_range};
 /// use std::time::Duration;
 ///
 /// set_sim_seed(42);
@@ -111,7 +111,7 @@ where
 /// # Example
 ///
 /// ```rust
-/// use moonpool_simulation::{set_sim_seed, sim_random_range_or_default};
+/// use moonpool_foundation::{set_sim_seed, sim_random_range_or_default};
 ///
 /// set_sim_seed(42);
 /// let value = sim_random_range_or_default(0.0..0.0); // Returns 0.0 (start value)
@@ -141,7 +141,7 @@ where
 /// # Example
 ///
 /// ```rust
-/// use moonpool_simulation::rng::{set_sim_seed, sim_random};
+/// use moonpool_foundation::rng::{set_sim_seed, sim_random};
 ///
 /// // Set a specific seed for reproducible randomness
 /// set_sim_seed(12345);
@@ -176,7 +176,7 @@ pub fn set_sim_seed(seed: u64) {
 /// # Example
 ///
 /// ```rust
-/// use moonpool_simulation::rng::{set_sim_seed, random_unique_id};
+/// use moonpool_foundation::rng::{set_sim_seed, random_unique_id};
 ///
 /// set_sim_seed(42);
 /// let id1 = random_unique_id();
@@ -208,7 +208,7 @@ pub fn random_unique_id() -> u128 {
 /// # Example
 ///
 /// ```rust
-/// use moonpool_simulation::rng::{set_sim_seed, get_current_sim_seed};
+/// use moonpool_foundation::rng::{set_sim_seed, get_current_sim_seed};
 ///
 /// set_sim_seed(12345);
 /// assert_eq!(get_current_sim_seed(), 12345);
@@ -226,7 +226,7 @@ pub fn get_current_sim_seed() -> u64 {
 /// # Example
 ///
 /// ```rust
-/// use moonpool_simulation::rng::{reset_sim_rng, set_sim_seed, sim_random};
+/// use moonpool_foundation::rng::{reset_sim_rng, set_sim_seed, sim_random};
 ///
 /// // Run first simulation
 /// set_sim_seed(42);
