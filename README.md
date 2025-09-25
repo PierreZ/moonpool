@@ -4,53 +4,142 @@
   <img src="images/logo.png" alt="Moonpool Logo" />
 </p>
 
-A Rust toolbox for building distributed systems with deterministic simulation testing, inspired by FoundationDB's simulation testing approach.
+A Rust framework for building distributed systems with deterministic simulation testing, featuring a Sans I/O transport layer and comprehensive chaos testing infrastructure, inspired by FoundationDB's simulation testing approach.
 
 > **Note:** This is currently a hobby-grade project under active development.
 
 ## Overview
 
-Moonpool provides a comprehensive framework for developing and testing distributed systems through deterministic simulation. Write your distributed system once and test it with simulated networking for predictable debugging, then deploy with real networking - all using the same code.
+Moonpool provides a comprehensive framework for developing and testing distributed systems through deterministic simulation. The framework features a sophisticated Sans I/O transport layer with request-response semantics, enabling you to write distributed system logic once and test it with simulated networking for predictable debugging, then deploy with real networking - all using identical application code.
 
 ## Features
 
+### Core Simulation Framework
 - **Deterministic Simulation** - Reproducible testing with controlled time and event ordering
-- **Network Abstraction** - Seamlessly swap between simulated and real networking
-- **Buggify Chaos Testing** - FoundationDB-style deterministic fault injection
-- **Actor-Based Architecture** - Event-driven peer networking with backoff and reliability
-- **Statistical Testing** - Run multiple iterations with comprehensive reporting
+- **Provider Pattern** - Seamlessly swap between simulated and real implementations (Network, Time, Task, Random)
+- **Event-Driven Architecture** - Logical time advancement with priority-based event processing
 - **Single-Core Design** - Simplified async without thread-safety complexity
+
+### Sans I/O Transport Layer
+- **Request-Response Semantics** - Type-safe envelope-based messaging with correlation IDs
+- **Self-Driving Futures** - Clean async/await API without manual transport ticking
+- **Connection Management** - Automatic reconnection, multi-connection servers, connection multiplexing
+- **Binary Protocol** - Efficient length-prefixed wire format with automatic serialization
+
+### Comprehensive Chaos Testing
+- **Buggify System** - FoundationDB-style deterministic fault injection at strategic points
+- **Sometimes Assertions** - Statistical validation with 100% coverage goals through chaos testing
+- **Multi-Seed Testing** - Comprehensive edge case exploration across multiple deterministic runs
+- **Hostile Infrastructure** - Network conditions 10x worse than production to expose bugs early
+
+## Architecture
+
+The framework follows a layered architecture with clear separation of concerns:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Application Code                         │
+├─────────────────────────────────────────────────────────────┤
+│                Transport Layer (Sans I/O)                  │
+│  ┌─────────────────┐  ┌─────────────────┐                 │
+│  │ ClientTransport │  │ ServerTransport │                 │
+│  │ • request()     │  │ • try_next_msg()│                 │
+│  │ • Self-driving  │  │ • Event-driven  │                 │
+│  └─────────────────┘  └─────────────────┘                 │
+├─────────────────────────────────────────────────────────────┤
+│            Provider Traits (Network, Time, Task)           │
+├─────────────────────────────────────────────────────────────┤
+│  Simulation Mode           │      Production Mode           │
+│  • Deterministic           │      • Real Tokio networking   │
+│  • Logical time            │      • Wall-clock time         │
+│  • Chaos testing           │      • System resources        │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## Current Status
 
-### Implementation Status
-- ✅ **Provider Traits** - Complete abstraction layer (Network, Time, Task)
-- ✅ **Buggify System** - Deterministic fault injection framework
-- ✅ **Sometimes Assert** - Statistical assertion coverage for chaos testing
-- ✅ **TCP with Buggify** - Connection management with chaos testing
-- ✅ **Actor-based Peer** - Event-driven networking with reliability
-- ✅ **Ping Pong Actor** - DST-enabled test actor for active bug discovery
+### Implementation Status (✅ COMPLETED)
+- ✅ **Phase 11: Sans I/O Transport Layer** - Complete request-response semantics with envelope system
+- ✅ **Provider Pattern** - Full abstraction layer (Network, Time, Task, Random providers)
+- ✅ **Buggify Chaos Testing** - Deterministic fault injection with strategic placement
+- ✅ **Sometimes Assertions** - Statistical validation system with coverage tracking
+- ✅ **Multi-Seed Testing** - Comprehensive edge case exploration infrastructure
+- ✅ **Connection Management** - Robust TCP layer with automatic reconnection and multiplexing
+- ✅ **Ping-Pong Test Actors** - Multi-client/multi-server validation with comprehensive coverage
 
 ## Getting Started
 
+### Development Environment
+
 ```bash
-# Enter development environment
+# Enter development environment (Nix required)
 nix develop
 
-# Run all validation checks
+# Run all validation checks (required for each phase completion)
 nix develop --command cargo fmt
-nix develop --command cargo clippy
+nix develop --command cargo clippy  
 nix develop --command cargo nextest run
 
 # Build the project
 nix develop --command cargo build
 ```
 
+### Test Execution
+
+Tests are configured with specific timeouts in `.config/nextest.toml`:
+- Default tests: 1 second timeout
+- Tests with "slow_simulation" in name: 60 second timeout
+
+### Usage Examples
+
+The transport layer provides clean async APIs for distributed system development:
+
+**Client Example (simplified):**
+```rust
+// Type-safe request-response with automatic correlation
+let response: PongMessage = client_transport
+    .request::<PingMessage, PongMessage>(ping_msg)
+    .await?;
+```
+
+**Server Example (simplified):**  
+```rust
+// Event-driven message handling across multiple connections
+while let Some((request, responder)) = server_transport.try_next_message().await? {
+    let response = handle_request(request).await;
+    responder.send(response).await?;
+}
+```
+
+## Testing Philosophy
+
+**Goal: 100% Sometimes Assertion Coverage**
+
+The framework uses "sometimes assertions" for statistical validation under chaos conditions:
+- `always_assert!` - Invariants that must never be violated  
+- `sometimes_assert!` - Behaviors that should occur under normal conditions
+- Target: Every sometimes assertion should trigger across multiple test seeds
+- Comprehensive chaos testing exposes edge cases and validates error handling
+
+**Multi-Seed Testing:**
+- Each test runs with multiple deterministic seeds
+- Same seed = identical behavior for bug reproduction
+- Statistical analysis across all seeds for comprehensive coverage
+
 ## Project Structure
 
-- `moonpool-simulation/` - Core simulation framework
-- `docs/specs/` - Technical specifications
-- `docs/plans/` - Implementation roadmaps
+- `moonpool-simulation/` - Core simulation framework and transport layer
+- `docs/specs/` - Comprehensive technical specifications split by component
+- `docs/plans/` - Implementation roadmaps and phase documentation  
+- `docs/analysis/` - FoundationDB reference implementations and architecture analysis
+
+## Documentation
+
+- **[Main Specification](docs/specs/moonpool-simulation-spec.md)** - Framework overview and architecture
+- **[Transport Layer](docs/specs/transport-layer-spec.md)** - Sans I/O transport architecture  
+- **[Testing Framework](docs/specs/testing-framework-spec.md)** - Chaos testing and assertion system
+- **[Simulation Core](docs/specs/simulation-core-spec.md)** - Core simulation infrastructure
+- **[Peer Networking](docs/specs/peer-networking-spec.md)** - TCP connection management
 
 ## License
 
