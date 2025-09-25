@@ -63,7 +63,7 @@ match self.time.timeout(timeout, receive_future).await? {
 ## Implementation Status
 
 ### ✅ Completed
-1. **Added `random_unique_id()` to rng module** (`moonpool-simulation/src/rng.rs:193`):
+1. **Added `random_unique_id()` to rng module** (`moonpool-foundation/src/rng.rs:193`):
    - `pub fn random_unique_id() -> u128`
    - Uses deterministic u128 UUIDs following FoundationDB pattern
 
@@ -109,7 +109,7 @@ match self.time.timeout(timeout, receive_future).await? {
 
 ## Files to Modify
 
-- `moonpool-simulation/src/rng.rs`: Add `generate_uuid()` function
+- `moonpool-foundation/src/rng.rs`: Add `generate_uuid()` function
 - `tests/simulation/ping_pong/actors.rs`: UUID-based protocol logic
 - `tests/simulation/ping_pong/single_server.rs`: Chaos-aware test expectations
 

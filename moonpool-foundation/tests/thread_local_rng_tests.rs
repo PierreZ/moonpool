@@ -1,4 +1,4 @@
-use moonpool_simulation::{
+use moonpool_foundation::{
     NetworkConfiguration, SimWorld, reset_sim_rng, sample_duration, set_sim_seed, sim_random,
     sim_random_range,
 };

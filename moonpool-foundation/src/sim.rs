@@ -118,7 +118,7 @@ impl SimWorld {
     /// # Example
     ///
     /// ```rust
-    /// use moonpool_simulation::SimWorld;
+    /// use moonpool_foundation::SimWorld;
     ///
     /// // Create simulation with specific seed for reproducible behavior
     /// let mut sim = SimWorld::new_with_seed(42);
@@ -156,7 +156,7 @@ impl SimWorld {
     /// # Example
     ///
     /// ```rust
-    /// use moonpool_simulation::{SimWorld, NetworkConfiguration};
+    /// use moonpool_foundation::{SimWorld, NetworkConfiguration};
     ///
     /// let config = NetworkConfiguration::default();
     /// let mut sim = SimWorld::new_with_network_config_and_seed(config, 42);
@@ -302,7 +302,7 @@ impl SimWorld {
     /// # Example
     ///
     /// ```rust
-    /// use moonpool_simulation::{SimWorld, sim_random_range};
+    /// use moonpool_foundation::{SimWorld, sim_random_range};
     /// use std::time::Duration;
     ///
     /// let sim = SimWorld::new();
@@ -715,7 +715,7 @@ impl SimWorld {
     /// # Example
     ///
     /// ```rust
-    /// use moonpool_simulation::SimWorld;
+    /// use moonpool_foundation::SimWorld;
     /// use std::time::Duration;
     ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -1201,7 +1201,7 @@ impl SimWorld {
     /// # Example
     ///
     /// ```rust
-    /// use moonpool_simulation::{SimWorld, always_assert, sometimes_assert};
+    /// use moonpool_foundation::{SimWorld, always_assert, sometimes_assert};
     /// use std::time::Duration;
     ///
     /// let sim = SimWorld::new_with_seed(42);
@@ -1230,7 +1230,7 @@ impl SimWorld {
     /// # Example
     ///
     /// ```rust
-    /// use moonpool_simulation::{SimWorld, sometimes_assert};
+    /// use moonpool_foundation::{SimWorld, sometimes_assert};
     ///
     /// let sim = SimWorld::new();
     /// sometimes_assert!(test_assertion, true, "Test assertion");
@@ -1252,7 +1252,7 @@ impl SimWorld {
     /// # Example
     ///
     /// ```rust
-    /// use moonpool_simulation::SimWorld;
+    /// use moonpool_foundation::SimWorld;
     ///
     /// let mut sim = SimWorld::new();
     /// sim.run_until_empty();

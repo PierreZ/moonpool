@@ -1,4 +1,4 @@
-use moonpool_simulation::{NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait};
+use moonpool_foundation::{NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
@@ -255,7 +255,7 @@ fn test_randomization_ranges_produce_variance() {
 
         // Run multiple iterations with different seeds to test variance
         for seed in [42, 123, 456, 789, 999] {
-            moonpool_simulation::set_sim_seed(seed);
+            moonpool_foundation::set_sim_seed(seed);
             let config = NetworkConfiguration::random_for_seed();
 
             let mut sim = SimWorld::new_with_network_config(config);

@@ -1,5 +1,5 @@
 [package]
-name = "moonpool-simulation"
+name = "moonpool-foundation"
 version.workspace = true
 repository.workspace = true
 license.workspace = true

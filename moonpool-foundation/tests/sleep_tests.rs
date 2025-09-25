@@ -1,4 +1,4 @@
-use moonpool_simulation::{Event, SimWorld};
+use moonpool_foundation::{Event, SimWorld};
 use std::time::Duration;
 
 #[tokio::test]

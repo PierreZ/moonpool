@@ -128,14 +128,14 @@ The framework uses "sometimes assertions" for statistical validation under chaos
 
 ## Project Structure
 
-- `moonpool-simulation/` - Core simulation framework and transport layer
+- `moonpool-foundation/` - Core simulation framework and transport layer
 - `docs/specs/` - Comprehensive technical specifications split by component
 - `docs/plans/` - Implementation roadmaps and phase documentation  
 - `docs/analysis/` - FoundationDB reference implementations and architecture analysis
 
 ## Documentation
 
-- **[Main Specification](docs/specs/moonpool-simulation-spec.md)** - Framework overview and architecture
+- **[Main Specification](docs/specs/moonpool-foundation-spec.md)** - Framework overview and architecture
 - **[Transport Layer](docs/specs/transport-layer-spec.md)** - Sans I/O transport architecture  
 - **[Testing Framework](docs/specs/testing-framework-spec.md)** - Chaos testing and assertion system
 - **[Simulation Core](docs/specs/simulation-core-spec.md)** - Core simulation infrastructure

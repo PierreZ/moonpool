@@ -68,7 +68,7 @@ assert_eq!(sim_responses, tokio_responses); // Identical behavior
 
 ### 1. Enhanced Connection Management
 
-**File: `moonpool-simulation/src/network/sim/stream.rs`** (enhancements)
+**File: `moonpool-foundation/src/network/sim/stream.rs`** (enhancements)
 
 The current implementation needs improvements for reliable bidirectional communication:
 
@@ -103,7 +103,7 @@ impl AsyncRead for SimTcpStream {
 
 ### 2. Connection Pairing for Bidirectional Communication  
 
-**File: `moonpool-simulation/src/network/sim/types.rs`** (additions)
+**File: `moonpool-foundation/src/network/sim/types.rs`** (additions)
 
 ```rust
 /// Represents a paired connection for bidirectional communication
@@ -125,7 +125,7 @@ pub(crate) struct ConnectionState {
 
 ### 3. SimWorld Connection Pairing
 
-**File: `moonpool-simulation/src/sim.rs`** (additions)
+**File: `moonpool-foundation/src/sim.rs`** (additions)
 
 ```rust
 impl SimWorld {
@@ -199,7 +199,7 @@ impl SimWorld {
 
 ### 4. Enhanced Write Implementation  
 
-**File: `moonpool-simulation/src/network/sim/stream.rs`** (updated AsyncWrite)
+**File: `moonpool-foundation/src/network/sim/stream.rs`** (updated AsyncWrite)
 
 ```rust
 impl AsyncWrite for SimTcpStream {
@@ -231,7 +231,7 @@ impl AsyncWrite for SimTcpStream {
 
 ### 5. Enhanced Event Processing
 
-**File: `moonpool-simulation/src/sim.rs`** (updated event processing)
+**File: `moonpool-foundation/src/sim.rs`** (updated event processing)
 
 ```rust
 fn process_event_with_inner(inner: &mut SimInner, event: Event) {
@@ -274,7 +274,7 @@ fn process_event_with_inner(inner: &mut SimInner, event: Event) {
 
 ### 6. Updated Provider Implementation
 
-**File: `moonpool-simulation/src/network/sim/provider.rs`** (enhanced connect method)
+**File: `moonpool-foundation/src/network/sim/provider.rs`** (enhanced connect method)
 
 ```rust
 #[async_trait(?Send)]
@@ -310,7 +310,7 @@ impl NetworkProvider for SimNetworkProvider {
 
 ### Core Ping-Pong Tests
 
-**File: `moonpool-simulation/tests/ping_pong_tests.rs`** (new)
+**File: `moonpool-foundation/tests/ping_pong_tests.rs`** (new)
 
 ```rust
 use moonpool_simulation::{NetworkConfiguration, NetworkProvider, SimWorld, TokioNetworkProvider};
@@ -506,7 +506,7 @@ fn test_concurrent_ping_pong() {
 
 ### Data Integrity Tests
 
-**File: `moonpool-simulation/tests/ping_pong_tests.rs`** (additions)
+**File: `moonpool-foundation/tests/ping_pong_tests.rs`** (additions)
 
 ```rust
 #[test]
@@ -608,7 +608,7 @@ fn test_deterministic_ping_pong() {
 
 ## Library Integration
 
-**File: `moonpool-simulation/src/lib.rs`** (no changes needed)
+**File: `moonpool-foundation/src/lib.rs`** (no changes needed)
 
 The existing public API already supports all ping-pong functionality through the existing traits.
 

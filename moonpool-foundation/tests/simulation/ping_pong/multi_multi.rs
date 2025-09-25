@@ -1,4 +1,4 @@
-use moonpool_simulation::{
+use moonpool_foundation::{
     SimulationBuilder, SimulationMetrics, SimulationResult, TokioNetworkProvider, TokioRunner,
     TokioTaskProvider, TokioTimeProvider, WorkloadTopology,
     assertions::panic_on_assertion_violations, runner::IterationControl,
@@ -51,11 +51,11 @@ fn slow_simulation_ping_pong_2x2() {
 
 /// Server workload for ping-pong communication with multiple clients
 async fn ping_pong_server(
-    _random: moonpool_simulation::random::sim::SimRandomProvider,
-    provider: moonpool_simulation::SimNetworkProvider,
-    time_provider: moonpool_simulation::SimTimeProvider,
-    task_provider: moonpool_simulation::TokioTaskProvider,
-    topology: moonpool_simulation::WorkloadTopology,
+    _random: moonpool_foundation::random::sim::SimRandomProvider,
+    provider: moonpool_foundation::SimNetworkProvider,
+    time_provider: moonpool_foundation::SimTimeProvider,
+    task_provider: moonpool_foundation::TokioTaskProvider,
+    topology: moonpool_foundation::WorkloadTopology,
 ) -> SimulationResult<SimulationMetrics> {
     let mut server_actor =
         PingPongServerActor::new(provider, time_provider, task_provider, topology);
@@ -64,18 +64,18 @@ async fn ping_pong_server(
 
 /// Client workload for ping-pong communication with multiple servers
 async fn ping_pong_client(
-    random: moonpool_simulation::random::sim::SimRandomProvider,
-    provider: moonpool_simulation::SimNetworkProvider,
-    time_provider: moonpool_simulation::SimTimeProvider,
-    task_provider: moonpool_simulation::TokioTaskProvider,
-    topology: moonpool_simulation::WorkloadTopology,
+    random: moonpool_foundation::random::sim::SimRandomProvider,
+    provider: moonpool_foundation::SimNetworkProvider,
+    time_provider: moonpool_foundation::SimTimeProvider,
+    task_provider: moonpool_foundation::TokioTaskProvider,
+    topology: moonpool_foundation::WorkloadTopology,
 ) -> SimulationResult<SimulationMetrics> {
     // Generate random PeerConfig to create back-pressure scenarios
     let peer_config = generate_random_peer_config(&random);
 
     // Client connects to all servers (workloads with "ping_pong_server" prefix)
     let server_peers = topology.get_peers_with_prefix("ping_pong_server");
-    let server_topology = moonpool_simulation::WorkloadTopology {
+    let server_topology = moonpool_foundation::WorkloadTopology {
         my_ip: topology.my_ip,
         peer_ips: server_peers.iter().map(|(_, ip)| ip.clone()).collect(),
         peer_names: server_peers.iter().map(|(name, _)| name.clone()).collect(),
@@ -95,19 +95,19 @@ async fn ping_pong_client(
 
 /// Client actor with reduced ping count for 4x4 testing
 struct MultiMultiPingPongClientActor<
-    N: moonpool_simulation::NetworkProvider + Clone + 'static,
-    T: moonpool_simulation::TimeProvider + Clone + 'static,
-    TP: moonpool_simulation::TaskProvider + Clone + 'static,
-    R: moonpool_simulation::random::RandomProvider,
+    N: moonpool_foundation::NetworkProvider + Clone + 'static,
+    T: moonpool_foundation::TimeProvider + Clone + 'static,
+    TP: moonpool_foundation::TaskProvider + Clone + 'static,
+    R: moonpool_foundation::random::RandomProvider,
 > {
     inner: PingPongClientActor<N, T, TP, R>,
 }
 
 impl<
-    N: moonpool_simulation::NetworkProvider + Clone + 'static,
-    T: moonpool_simulation::TimeProvider + Clone + 'static,
-    TP: moonpool_simulation::TaskProvider + Clone + 'static,
-    R: moonpool_simulation::random::RandomProvider,
+    N: moonpool_foundation::NetworkProvider + Clone + 'static,
+    T: moonpool_foundation::TimeProvider + Clone + 'static,
+    TP: moonpool_foundation::TaskProvider + Clone + 'static,
+    R: moonpool_foundation::random::RandomProvider,
 > MultiMultiPingPongClientActor<N, T, TP, R>
 {
     pub fn new(
@@ -115,7 +115,7 @@ impl<
         time: T,
         task_provider: TP,
         topology: WorkloadTopology,
-        peer_config: moonpool_simulation::PeerConfig,
+        peer_config: moonpool_foundation::PeerConfig,
         random: R,
     ) -> Self {
         Self {
@@ -157,12 +157,12 @@ impl<
 
 /// Generate random PeerConfig to create queue pressure and back-pressure scenarios
 fn generate_random_peer_config(
-    random: &moonpool_simulation::random::sim::SimRandomProvider,
-) -> moonpool_simulation::PeerConfig {
-    use moonpool_simulation::random::RandomProvider;
+    random: &moonpool_foundation::random::sim::SimRandomProvider,
+) -> moonpool_foundation::PeerConfig {
+    use moonpool_foundation::random::RandomProvider;
     use std::time::Duration;
 
-    moonpool_simulation::PeerConfig {
+    moonpool_foundation::PeerConfig {
         // Very small queue sizes to trigger near_capacity assertions
         max_queue_size: random.random_range(2..10),
 
@@ -236,11 +236,11 @@ async fn tokio_ping_pong_client(
     topology: WorkloadTopology,
 ) -> SimulationResult<SimulationMetrics> {
     // For TokioRunner, use default PeerConfig since we don't have RandomProvider
-    let peer_config = moonpool_simulation::PeerConfig::default();
+    let peer_config = moonpool_foundation::PeerConfig::default();
 
     // Create a dummy random provider that uses thread_rng
     struct TokioRandomProvider;
-    impl moonpool_simulation::random::RandomProvider for TokioRandomProvider {
+    impl moonpool_foundation::random::RandomProvider for TokioRandomProvider {
         fn random<T>(&self) -> T
         where
             rand::distributions::Standard: rand::distributions::Distribution<T>,
@@ -277,7 +277,7 @@ async fn tokio_ping_pong_client(
 
     // Client connects to all servers (workloads with "ping_pong_server" prefix)
     let server_peers = topology.get_peers_with_prefix("ping_pong_server");
-    let server_topology = moonpool_simulation::WorkloadTopology {
+    let server_topology = moonpool_foundation::WorkloadTopology {
         my_ip: topology.my_ip,
         peer_ips: server_peers.iter().map(|(_, ip)| ip.clone()).collect(),
         peer_names: server_peers.iter().map(|(name, _)| name.clone()).collect(),

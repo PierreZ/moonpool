@@ -3,7 +3,7 @@
 //! These tests verify that ClientTransport and ServerTransport work together
 //! to provide request-response messaging functionality.
 
-use moonpool_simulation::network::transport::{
+use moonpool_foundation::network::transport::{
     EnvelopeFactory, EnvelopeSerializer, RequestResponseEnvelopeFactory, RequestResponseSerializer,
     TransportError,
 };
@@ -64,7 +64,7 @@ fn test_serialization_roundtrip() {
 fn test_envelope_reply_detection() {
     // Test that envelope reply detection works correctly
 
-    use moonpool_simulation::network::transport::EnvelopeReplyDetection;
+    use moonpool_foundation::network::transport::EnvelopeReplyDetection;
 
     // Create a request
     let request = RequestResponseEnvelopeFactory::create_request(123, b"ping".to_vec());

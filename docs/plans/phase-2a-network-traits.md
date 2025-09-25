@@ -37,7 +37,7 @@ echo_server(provider, "127.0.0.1:8080").await?;
 
 ### Simple NetworkProvider Traits
 
-**File: `moonpool-simulation/src/network/traits.rs`**
+**File: `moonpool-foundation/src/network/traits.rs`**
 
 ```rust
 use async_trait::async_trait;
@@ -75,7 +75,7 @@ pub trait TcpListenerTrait {
 
 ### 1. Network Module Organization
 
-**File: `moonpool-simulation/src/network/mod.rs`**
+**File: `moonpool-foundation/src/network/mod.rs`**
 
 ```rust
 //! Network simulation and abstraction layer.
@@ -98,7 +98,7 @@ pub use tokio::TokioNetworkProvider;
 
 ### 2. Tokio Implementation
 
-**File: `moonpool-simulation/src/network/tokio/mod.rs`**
+**File: `moonpool-foundation/src/network/tokio/mod.rs`**
 
 ```rust
 //! Real Tokio networking implementation.
@@ -108,7 +108,7 @@ mod provider;
 pub use provider::{TokioNetworkProvider, TokioTcpListener};
 ```
 
-**File: `moonpool-simulation/src/network/tokio/provider.rs`**
+**File: `moonpool-foundation/src/network/tokio/provider.rs`**
 
 ```rust
 use crate::network::traits::{NetworkProvider, TcpListenerTrait};
@@ -170,7 +170,7 @@ impl TcpListenerTrait for TokioTcpListener {
 
 ### 3. Library Integration
 
-**File: `moonpool-simulation/src/lib.rs`** (update to add network module)
+**File: `moonpool-foundation/src/lib.rs`** (update to add network module)
 
 ```rust
 #![deny(missing_docs)]
@@ -196,7 +196,7 @@ pub use network::{NetworkProvider, TcpListenerTrait, TokioNetworkProvider};
 ## File Structure for Phase 2a
 
 ```
-moonpool-simulation/
+moonpool-foundation/
 ├── src/
 │   ├── lib.rs              # Add network module export
 │   ├── network/
@@ -228,7 +228,7 @@ thiserror = "1.0"
 
 ### Focus on Trait Validation
 
-**File: `moonpool-simulation/tests/network_traits.rs`**
+**File: `moonpool-foundation/tests/network_traits.rs`**
 
 ```rust
 use moonpool_simulation::{NetworkProvider, TokioNetworkProvider};

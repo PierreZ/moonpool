@@ -58,7 +58,7 @@ use tracing::instrument;
 ///
 /// ### Basic Client Usage
 /// ```rust,no_run
-/// use moonpool_simulation::SimNetworkProvider;
+/// use moonpool_foundation::SimNetworkProvider;
 ///
 /// let provider = sim.network_provider();
 /// let mut stream = provider.connect("10.0.0.1:8080").await?;
