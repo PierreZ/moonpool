@@ -56,6 +56,14 @@ Strategic placement: error handling, timeouts, retries, resource limits
 **Read first**: `docs/analysis/flow.md` (before any `actor.cpp` code)
 **Architecture**: `docs/analysis/fdb-network.md`
 
+**Available files in docs/references**:
+- foundationdb/: Buggify.h, FlowTransport.actor.cpp, FlowTransport.h, Net2.actor.cpp, Net2Packet.cpp, Net2Packet.h, Ping.actor.cpp, sim2.actor.cpp
+- tigerbeetle/: packet_simulator.zig
+
+**IMPORTANT**: Always read FoundationDB's implementation first before making changes
+- When working in simulation: always check Net2
+- When working around network stuff like peer and Transport: always check FlowTransport
+
 **Code mapping**:
 - Peer → FlowTransport.h:147-191, FlowTransport.actor.cpp:1016-1125
 - SimWorld → sim2.actor.cpp:1051+
