@@ -5,10 +5,10 @@ use moonpool_simulation::{
         ClientTransport, Envelope, RequestResponseEnvelopeFactory, RequestResponseSerializer,
         ServerTransport,
     },
+    sometimes_assert,
 };
 use tracing::instrument;
 
-static MAX_PING: usize = 100;
 
 #[derive(Debug, Clone)]
 enum SelectionStrategy {
@@ -86,10 +86,31 @@ impl<
 
                 // Handle incoming messages from ANY connection
                 Some(msg) = transport.next_message() => {
+                    // Assert when handling multiple connections
+                    sometimes_assert!(
+                        server_handles_multiple_connections,
+                        transport.connection_count() > 1,
+                        "Server handling multiple connections"
+                    );
+
+                    // Assert when connection is active
+                    sometimes_assert!(
+                        server_connection_active,
+                        true,
+                        "Server connection is active"
+                    );
                     let payload = String::from_utf8_lossy(msg.envelope.payload());
                     if payload.starts_with("PING:") {
                         let client_ip = payload.strip_prefix("PING:").unwrap_or("unknown");
                         self.messages_handled += 1;
+
+                        // Assert when handling high message rate
+                        sometimes_assert!(
+                            server_high_message_rate,
+                            self.messages_handled > 5,
+                            "Server handling high message rate"
+                        );
+
                         tracing::debug!(
                             "Server: Handling ping #{} from client {} (connection {})",
                             self.messages_handled,
@@ -134,6 +155,7 @@ pub struct PingPongClientActor<
     random: R,
     selection_strategy: SelectionStrategy,
     current_server_index: usize,
+    last_selected_server: Option<String>,
 }
 
 impl<
@@ -176,23 +198,46 @@ impl<
             random,
             selection_strategy,
             current_server_index: 0,
+            last_selected_server: None,
         }
     }
 
     /// Select the next server address based on the chosen strategy
     fn select_next_server(&mut self) -> &str {
-        match self.selection_strategy {
+        let selected_server = match self.selection_strategy {
             SelectionStrategy::RoundRobin => {
+                // Assert when using round-robin strategy
+                sometimes_assert!(
+                    client_uses_round_robin,
+                    true,
+                    "Client using round-robin strategy"
+                );
+
                 let server = &self.server_addresses[self.current_server_index];
                 self.current_server_index =
                     (self.current_server_index + 1) % self.server_addresses.len();
                 server
             }
             SelectionStrategy::Random => {
+                // Assert when using random strategy
+                sometimes_assert!(client_uses_random, true, "Client using random strategy");
+
                 let index = self.random.random_range(0..self.server_addresses.len());
                 &self.server_addresses[index]
             }
+        };
+
+        // Assert when switching servers
+        if let Some(ref last_server) = self.last_selected_server {
+            sometimes_assert!(
+                client_switches_servers,
+                selected_server != last_server,
+                "Client switching between servers"
+            );
         }
+
+        self.last_selected_server = Some(selected_server.to_string());
+        selected_server
     }
 
     /// Run a single ping operation
@@ -227,6 +272,14 @@ impl<
                         if response_str.starts_with("PONG:") {
                             let server_ip = response_str.strip_prefix("PONG:").unwrap_or("unknown");
                             self.messages_sent += 1;
+
+                            // Assert when completing rapid pings (quick succession)
+                            sometimes_assert!(
+                                client_rapid_success,
+                                self.messages_sent > 3 && timeout_ms < 1000,
+                                "Client completing rapid successful pings"
+                            );
+
                             tracing::debug!(
                                 "Client: Successfully completed ping-pong #{} with server {}",
                                 self.messages_sent,
@@ -239,12 +292,26 @@ impl<
                         }
                     }
                     Err(moonpool_simulation::network::transport::TransportError::Timeout) => {
+                        // Assert when timeout occurs
+                        sometimes_assert!(
+                            client_timeout_occurred,
+                            true,
+                            "Client request timeout occurred"
+                        );
+
                         tracing::warn!("Client: Request timed out, counting as failed attempt");
                         // Still count this as a message attempt to avoid infinite loops
                         self.messages_sent += 1;
                         Ok(true)
                     }
                     Err(e) => {
+                        // Assert when retrying after failure
+                        sometimes_assert!(
+                            client_retry_after_failure,
+                            true,
+                            "Client retrying after failure"
+                        );
+
                         tracing::warn!("Client: Ping failed: {}", e);
                         // Continue trying - transport will handle reconnection
                         Ok(true)
@@ -254,35 +321,4 @@ impl<
         }
     }
 
-    /// Main client loop using FoundationDB-inspired tokio::select! pattern
-    #[instrument(skip(self))]
-    pub async fn run(&mut self) -> SimulationResult<SimulationMetrics> {
-        tracing::debug!(
-            "Client: Starting with {} servers using {:?} strategy",
-            self.server_addresses.len(),
-            self.selection_strategy
-        );
-
-        while self.messages_sent < MAX_PING {
-            match self.run_single_ping().await {
-                Ok(true) => {
-                    // Continue with next ping
-                }
-                Ok(false) => {
-                    // Shutdown signal received
-                    return Ok(SimulationMetrics::default());
-                }
-                Err(e) => {
-                    return Err(e);
-                }
-            }
-        }
-
-        tracing::debug!(
-            "Client: Completed {} ping-pong exchanges",
-            self.messages_sent
-        );
-        self.transport.close().await;
-        Ok(SimulationMetrics::default())
-    }
 }
