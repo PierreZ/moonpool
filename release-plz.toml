@@ -1,0 +1,12 @@
+# Release-plz configuration
+# Only release when merging a release PR, not on every push to main
+release_always = false
+
+# Create draft releases for review
+git_release_draft = true
+
+# Create draft pull requests for review
+pr_draft = true
+
+# Add release label to PRs for easy identification
+pr_labels = ["release"]
