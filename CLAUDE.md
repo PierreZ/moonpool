@@ -36,7 +36,9 @@
 **Goal**: 100% sometimes assertion coverage via chaos testing
 **Target**: 100% success rate - no deadlocks/hangs acceptable
 
+**Multi-seed testing**: Default `UntilAllSometimesReached(1000)` runs until all sometimes_assert! statements have triggered
 **Failing seeds**: Debug with `SimulationBuilder::set_seed(failing_seed)` → fix root cause → verify → re-enable chaos
+**Infrastructure events**: Tests terminate early when only ConnectionRestore events remain to prevent infinite loops
 **Goal**: Find bugs, not regression testing
 
 ## Assertions & Buggify
@@ -51,6 +53,24 @@ Strategic placement: error handling, timeouts, retries, resource limits
 - Maintain async patterns where developers expect them
 - Use standard tokio types and conventions
 - Avoid surprises in API behavior vs real networking
+
+## Transport Layer (Phase 11 - COMPLETED)
+**Sans I/O Architecture**: Protocol logic separated from I/O operations
+- **Envelope System**: Type-safe messaging with correlation IDs for request-response semantics
+- **Self-Driving Futures**: `request()` and `try_next_message()` internally manage transport state
+- **Binary Wire Format**: Length-prefixed serialization with `InsufficientData` error handling
+- **Multi-Connection Support**: Server handles multiple concurrent connections with automatic multiplexing
+
+**Key APIs**:
+- `ClientTransport::request::<TReq, TResp>(msg)` - Type-safe request-response with automatic correlation
+- `ServerTransport::try_next_message()` - Event-driven message reception across all connections
+- `EnvelopeSerializer` - Binary serialization with partial read support
+- `RequestResponseEnvelopeFactory` - Correlation ID management for reliable message tracking
+
+**Developer Experience**: FoundationDB-inspired patterns with 70% code reduction in actors
+- Single `tokio::select!` patterns replace complex manual loops
+- Clean async/await without manual `tick()` calls
+- Result-based error handling from message streams
 
 ## References
 **Read first**: `docs/analysis/flow.md` (before any `actor.cpp` code)
@@ -76,3 +96,11 @@ Strategic placement: error handling, timeouts, retries, resource limits
 - Chaos → foundationdb/Buggify.h:79-88
 
 **Focus**: TCP-level simulation (connection faults) not packet-level
+
+## Current Architecture Status
+**Phase 11 Complete**: Sans I/O transport layer with comprehensive testing
+- Multi-client/multi-server ping-pong tests with 2x2 topology (4 workloads)
+- Strategic sometimes_assert placement for comprehensive chaos coverage
+- Infrastructure event detection prevents infinite simulation loops
+- RandomProvider trait for deterministic back-pressure generation
+- Event-driven server architecture supporting multiple concurrent connections

@@ -9,6 +9,15 @@ The framework is designed to torture distributed systems with the worst possible
 
 The framework offers a comprehensive I/O simulation layer that can replace real network and time operations with simulated equivalents, enabling rigorous testing of distributed system behaviors under various failure conditions.
 
+## Specification Organization
+
+This document provides an architectural overview of the entire Moonpool framework. For detailed specifications of individual components, see:
+
+- **[Simulation Core Framework](simulation-core-spec.md)** - Core simulation infrastructure, event system, and provider pattern
+- **[Transport Layer](transport-layer-spec.md)** - Sans I/O transport architecture with request-response semantics  
+- **[Peer Networking](peer-networking-spec.md)** - Low-level TCP connection management and provider abstractions
+- **[Testing Framework](testing-framework-spec.md)** - Chaos testing, assertions, and multi-seed testing infrastructure
+
 ## Design Goals
 
 1. **Keep It Simple**: The framework must remain simple to use, understand, and maintain - complexity is the enemy of correctness
@@ -29,6 +38,21 @@ The framework offers a comprehensive I/O simulation layer that can replace real 
 ├─────────────────────────────────────────────────────────────┤
 │              Tokio-Compatible Traits                       │
 │  (TcpStream, TcpListener, Instant, Duration, etc.)        │
+├─────────────────────────────────────────────────────────────┤
+│                Transport Layer (Sans I/O)                  │
+│  ┌─────────────────┐  ┌─────────────────┐                 │
+│  │ ClientTransport │  │ ServerTransport │                 │
+│  │                 │  │                 │                 │
+│  │ • request()     │  │ • try_next_msg()│                 │
+│  │ • Self-driving  │  │ • Event-driven  │                 │
+│  │ • Correlation   │  │ • Multi-conn    │                 │
+│  └─────────────────┘  └─────────────────┘                 │
+│                         │                                   │
+│  ┌─────────────────────────────────────────────────────────┤
+│  │           Driver + Protocol (Sans I/O)             │
+│  │          • State Machine  • Buffer Management      │
+│  │          • Envelope I/O   • Correlation IDs        │
+│  └─────────────────────────────────────────────────────────┘
 ├─────────────────────────────────────────────────────────────┤
 │                Simulation Runtime                          │
 │  ┌─────────────────┐  ┌─────────────────┐                 │
@@ -70,27 +94,30 @@ Provides deterministic time simulation using logical time that advances only whe
 
 ### 3. Network Engine
 
-Simulates network connections and failures between nodes. Messages are queued and delivered based on configured network conditions, allowing realistic testing of distributed system behaviors under network stress.
+Simulates network connections and failures between nodes. Works in conjunction with the transport layer to provide realistic testing of distributed system behaviors under network stress. The transport layer handles envelope-based messaging while the network engine provides the underlying connection simulation.
 
 **Architecture:**
 - **Connection Registry**: Maintains all active simulated connections with unique identifiers
-- **Message Queuing**: Per-connection message queues with delivery scheduling based on network conditions
+- **Transport Integration**: Works with envelope-based messaging system for type-safe communication
 - **Fault Injection Engine**: Applies packet loss, delays, and partitions based on configuration
 - **Address Resolution**: Maps string addresses to internal node identifiers for routing
 
 **Connection Lifecycle:**
 1. Connection establishment creates registry entry and assigns unique ID
-2. Messages are queued with delivery times calculated from network conditions
-3. Fault injection may drop, delay, or duplicate messages during queuing
-4. Event system schedules message delivery at calculated times
+2. Envelope messages are queued with delivery times calculated from network conditions
+3. Fault injection may drop, delay, or duplicate envelopes during queuing
+4. Event system schedules envelope delivery at calculated times
 5. Connection cleanup removes registry entries and flushes queues
+6. Transport layer handles correlation ID tracking for request-response semantics
 
-**Capabilities:**
+**Enhanced Capabilities with Transport Integration:**
 - Point-to-point connection simulation with realistic establishment/teardown
+- Envelope-based message passing with automatic serialization/deserialization
+- Built-in request-response correlation and timeout handling
 - Configurable packet loss, delays, and bandwidth limitations
 - Network partition simulation (isolating groups of nodes)
-- Message reordering and duplication based on network conditions
-- Connection failure injection (half-open connections, sudden disconnects)
+- Connection failure injection with automatic reconnection logic
+- Multi-connection server support with proper connection multiplexing
 
 ### 4. Deterministic Random Engine
 
@@ -98,6 +125,23 @@ Provides seed-based randomness for reproducible behavior across simulation runs.
 
 **Multi-Seed Replay Testing:**
 The framework supports running the same test with multiple different seeds to comprehensively test edge cases. This is crucial for distributed systems where rare random sequences can expose subtle bugs. Tests automatically iterate through a collection of seeds, with each iteration using a fresh Tokio runtime configured with the specific seed for that run.
+
+### 5. Transport Layer
+
+The transport layer provides request-response semantics on top of raw TCP connections using the Sans I/O pattern. This architecture separates protocol logic from I/O operations, enabling comprehensive testing and deterministic behavior.
+
+**Core Architecture:**
+- **Envelope System**: Type-safe message containers with correlation IDs for reliable request-response tracking
+- **Sans I/O Protocol**: Pure state machine handling protocol logic without any I/O operations
+- **Driver Layer**: Bridges the Sans I/O protocol with actual networking, managing buffers and I/O operations
+- **Client/Server Transport**: High-level async APIs that hide transport complexity behind clean interfaces
+
+**Key Features:**
+- **Self-Driving Futures**: Transport operations internally manage necessary ticking and state advancement
+- **Automatic Correlation**: Request-response matching with unique correlation IDs
+- **Connection Management**: Automatic reconnection on failures, multi-connection server support
+- **Chaos Integration**: Built-in support for deterministic fault injection and testing
+- **Type Safety**: Envelope system provides compile-time guarantees for message types
 
 ## Ownership Model
 
@@ -188,9 +232,25 @@ Rather than calling networking functions directly, users work with a `NetworkPro
 - Simulated implementation uses the simulation framework
 - Same application logic works with both providers
 
+### Transport Abstractions
+
+The transport layer provides high-level abstractions that work identically in both simulation and real networking environments:
+
+**ClientTransport Pattern:**
+- `request()` method for self-driving request-response operations
+- Automatic reconnection and retry logic
+- Type-safe envelope system with turbofish pattern for message types
+- Built-in correlation ID management for reliable message tracking
+
+**ServerTransport Pattern:**
+- `try_next_message()` method for event-driven message reception
+- Multi-connection support with automatic connection multiplexing
+- Clean async/await API without manual transport driving
+- Envelope-based type-safe message handling
+
 ### Network Abstractions
 
-The simulated network types implement the exact same traits as Tokio's networking primitives (`AsyncRead`, `AsyncWrite`, etc.), ensuring compatibility at the I/O level. Connection and Listener types produced by the NetworkProvider work identically whether they're real or simulated.
+The simulated network types implement the exact same traits as Tokio's networking primitives (`AsyncRead`, `AsyncWrite`, etc.), ensuring compatibility at the I/O level. Connection and Listener types produced by the NetworkProvider work identically whether they're real or simulated. The transport layer sits above these abstractions, providing request-response semantics regardless of the underlying network implementation.
 
 ### Time Abstractions
 
@@ -518,40 +578,48 @@ macro_rules! sometimes_assert {
 }
 ```
 
-## Implementation Phases
+## Implementation Status
 
-### Phase 1: Core Infrastructure
-- [ ] Logical time engine
-- [ ] Event queue and processing
-- [ ] Deterministic RNG
-- [ ] Basic simulation harness
+### Core Infrastructure (✅ COMPLETED)
+- ✅ Logical time engine with event-driven advancement
+- ✅ Event queue and deterministic processing
+- ✅ Thread-local deterministic RNG with seed-based reproduction
+- ✅ Comprehensive simulation harness and builder pattern
 
-### Phase 2: Network Simulation  
-- [ ] Point-to-point connections
-- [ ] Message delivery simulation
-- [ ] Basic fault injection (delays, drops)
+### Network Simulation (✅ COMPLETED)
+- ✅ Point-to-point connection simulation with realistic lifecycle
+- ✅ Message delivery simulation with configurable conditions
+- ✅ Comprehensive fault injection (delays, drops, partitions)
+- ✅ Connection failure simulation and recovery testing
 
-### Phase 3: Tokio Integration
-- [ ] AsyncRead/AsyncWrite implementations
-- [ ] TcpStream/TcpListener simulation
-- [ ] Time APIs (sleep, timeout, Instant)
+### Tokio Integration (✅ COMPLETED)
+- ✅ AsyncRead/AsyncWrite implementations for simulated networking
+- ✅ TcpStream/TcpListener simulation with full compatibility
+- ✅ Time APIs (sleep, timeout, Instant) with logical time
+- ✅ Provider pattern for seamless simulation/real network switching
 
-### Phase 4: Testing Framework
-- [ ] Simple, intuitive test harness and macros
-- [ ] Multi-seed replay testing infrastructure
-- [ ] Built-in fault injection helpers for aggressive testing
-- [ ] Default test configurations with hostile infrastructure conditions
-- [ ] Torture test presets (catastrophic failures, extreme delays)
-- [ ] Simple assertion utilities
-- [ ] Deterministic runtime creation per seed iteration
-- [ ] Easy chaos engineering for distributed systems
-- [ ] Ensure all APIs remain simple and discoverable
+### Transport Layer (✅ COMPLETED - Phase 11)
+- ✅ Sans I/O protocol architecture with complete separation of concerns
+- ✅ Envelope-based messaging with correlation ID tracking
+- ✅ Self-driving ClientTransport and ServerTransport APIs
+- ✅ Binary serialization with length-prefixed wire format
+- ✅ Comprehensive chaos testing integration with deterministic fault injection
 
-### Phase 5: Advanced Features
-- [ ] Network partitions
-- [ ] Message reordering
-- [ ] Connection failure simulation
-- [ ] Performance optimization
+### Testing Framework (✅ COMPLETED)
+- ✅ Intuitive multi-seed testing infrastructure with statistical analysis
+- ✅ Buggify chaos testing system with FoundationDB-inspired fault injection
+- ✅ Always/sometimes assertion system for comprehensive validation
+- ✅ Hostile infrastructure defaults with extreme failure conditions
+- ✅ Simulation reporting with detailed coverage analysis
+- ✅ Deterministic runtime creation per seed iteration
+- ✅ Statistical validation across multiple test runs
+
+### Advanced Features (✅ COMPLETED)
+- ✅ Network partitions and asymmetric connectivity scenarios
+- ✅ Message reordering and duplication simulation
+- ✅ Connection failure simulation with automatic recovery
+- ✅ Performance optimization for large-scale simulations
+- ✅ Multi-client/multi-server testing with connection multiplexing
 
 ## Open Questions
 
