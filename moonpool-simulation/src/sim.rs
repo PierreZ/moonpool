@@ -215,7 +215,7 @@ impl SimWorld {
     pub fn run_until_empty(&mut self) {
         while self.step() {
             // Periodically check if we should stop early (every 50 events for performance)
-            if self.inner.borrow().events_processed % 50 == 0 {
+            if self.inner.borrow().events_processed.is_multiple_of(50) {
                 let has_workload_events = !self
                     .inner
                     .borrow()
@@ -1167,11 +1167,7 @@ impl SimWorld {
                 tracing::debug!("Processing Shutdown event - waking all pending tasks");
 
                 // Collect all task wakers (we need to drain to avoid double-borrow)
-                let task_wakers: Vec<_> = inner
-                    .wakers
-                    .task_wakers
-                    .drain()
-                    .collect();
+                let task_wakers: Vec<_> = inner.wakers.task_wakers.drain().collect();
 
                 // Wake all tasks
                 for (task_id, waker) in task_wakers {
@@ -1444,18 +1440,20 @@ impl SimWorld {
 
         // Close the main connection
         if let Some(conn) = inner.network.connections.get_mut(&connection_id)
-            && !conn.is_closed {
-                conn.is_closed = true;
-                tracing::debug!("Connection {} closed permanently", connection_id.0);
-            }
+            && !conn.is_closed
+        {
+            conn.is_closed = true;
+            tracing::debug!("Connection {} closed permanently", connection_id.0);
+        }
 
         // Close the paired connection if it exists
         if let Some(paired_id) = paired_connection_id
             && let Some(paired_conn) = inner.network.connections.get_mut(&paired_id)
-                && !paired_conn.is_closed {
-                    paired_conn.is_closed = true;
-                    tracing::debug!("Paired connection {} also closed", paired_id.0);
-                }
+            && !paired_conn.is_closed
+        {
+            paired_conn.is_closed = true;
+            tracing::debug!("Paired connection {} also closed", paired_id.0);
+        }
 
         // Wake any read wakers on both connections (after connection modifications)
         if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
@@ -1467,13 +1465,14 @@ impl SimWorld {
         }
 
         if let Some(paired_id) = paired_connection_id
-            && let Some(paired_waker) = inner.wakers.read_wakers.remove(&paired_id) {
-                tracing::debug!(
-                    "Waking read waker for paired closed connection {}",
-                    paired_id.0
-                );
-                paired_waker.wake();
-            }
+            && let Some(paired_waker) = inner.wakers.read_wakers.remove(&paired_id)
+        {
+            tracing::debug!(
+                "Waking read waker for paired closed connection {}",
+                paired_id.0
+            );
+            paired_waker.wake();
+        }
     }
 
     /// Restore connections that are ready to be reconnected
