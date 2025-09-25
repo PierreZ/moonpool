@@ -13,6 +13,13 @@ pub enum EnvelopeError {
     SerializationFailed(String),
     /// Deserialization failed
     DeserializationFailed(String),
+    /// Buffer contains partial data, need more bytes to complete parsing
+    InsufficientData {
+        /// Number of bytes needed to complete parsing
+        needed: usize,
+        /// Number of bytes currently available in buffer
+        available: usize,
+    },
 }
 
 impl fmt::Display for EnvelopeError {
@@ -24,6 +31,13 @@ impl fmt::Display for EnvelopeError {
             EnvelopeError::SerializationFailed(msg) => write!(f, "Serialization failed: {}", msg),
             EnvelopeError::DeserializationFailed(msg) => {
                 write!(f, "Deserialization failed: {}", msg)
+            }
+            EnvelopeError::InsufficientData { needed, available } => {
+                write!(
+                    f,
+                    "Insufficient data: need {} bytes, have {} bytes",
+                    needed, available
+                )
             }
         }
     }
@@ -48,6 +62,10 @@ pub enum TransportError {
     SendFailed(String),
     /// Network I/O error
     IoError(String),
+    /// Connection not found (for multi-connection servers)
+    UnknownConnection,
+    /// Connection was closed or dropped
+    ConnectionClosed,
 }
 
 impl fmt::Display for TransportError {
@@ -60,6 +78,8 @@ impl fmt::Display for TransportError {
             TransportError::BindFailed(msg) => write!(f, "Bind failed: {}", msg),
             TransportError::SendFailed(msg) => write!(f, "Send failed: {}", msg),
             TransportError::IoError(msg) => write!(f, "I/O error: {}", msg),
+            TransportError::UnknownConnection => write!(f, "Connection not found"),
+            TransportError::ConnectionClosed => write!(f, "Connection was closed"),
         }
     }
 }
