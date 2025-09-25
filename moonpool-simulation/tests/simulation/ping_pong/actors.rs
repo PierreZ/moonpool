@@ -22,7 +22,9 @@ pub struct PingPongServerActor<
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
 > {
-    transport: ServerTransport<N, T, TP, RequestResponseSerializer>,
+    network: N,
+    time: T,
+    task_provider: TP,
     topology: WorkloadTopology,
     messages_handled: usize,
 }
@@ -34,17 +36,16 @@ impl<
 > PingPongServerActor<N, T, TP>
 {
     pub fn new(network: N, time: T, task_provider: TP, topology: WorkloadTopology) -> Self {
-        let serializer = RequestResponseSerializer::new();
-        let transport = ServerTransport::new(network, time, task_provider, serializer);
-
         Self {
-            transport,
+            network,
+            time,
+            task_provider,
             topology,
             messages_handled: 0,
         }
     }
 
-    /// Main server loop using FoundationDB-inspired tokio::select! pattern
+    /// Main server loop using event-driven async/await pattern
     #[instrument(skip(self))]
     pub async fn run(&mut self) -> SimulationResult<SimulationMetrics> {
         tracing::debug!(
@@ -53,55 +54,65 @@ impl<
             self.topology.peer_ips.len()
         );
 
-        // Bind to server address - fail immediately if this doesn't work
-        if let Err(e) = self.transport.bind(&self.topology.my_ip).await {
+        // Create and bind transport - this starts the accept loop automatically
+        let mut transport = ServerTransport::bind(
+            self.network.clone(),
+            self.time.clone(),
+            self.task_provider.clone(),
+            RequestResponseSerializer::new(),
+            &self.topology.my_ip,
+        )
+        .await
+        .map_err(|e| {
             tracing::error!("Server: Failed to bind to {}: {}", self.topology.my_ip, e);
-            return Err(SimulationError::IoError(format!(
-                "Server bind failed: {}",
-                e
-            )));
-        }
+            SimulationError::IoError(format!("Server bind failed: {}", e))
+        })?;
 
         tracing::debug!("Server: Successfully bound and ready for connections");
 
-        // FoundationDB-style single select loop handling all events
+        // Event-driven loop - no tick() or polling needed!
         loop {
             tokio::select! {
                 // Clean shutdown - prioritize this branch first
                 _ = self.topology.shutdown_signal.cancelled() => {
-                    tracing::debug!("Server: Shutdown signal received, handled {} messages", self.messages_handled);
-                    self.transport.close().await;
+                    tracing::debug!(
+                        "Server: Shutdown signal received, handled {} messages from {} connections",
+                        self.messages_handled,
+                        transport.connection_count()
+                    );
+                    // Transport cleanup is automatic when dropped
                     return Ok(SimulationMetrics::default());
                 }
 
-                // Handle incoming messages OR transport errors
-                result = self.transport.try_next_message() => {
-                    match result {
-                        Ok(Some(msg)) if msg.envelope.payload() == b"PING" => {
-                            self.messages_handled += 1;
-                            tracing::debug!("Server: Handling ping #{}", self.messages_handled);
+                // Handle incoming messages from ANY connection
+                Some(msg) = transport.next_message() => {
+                    let payload = String::from_utf8_lossy(msg.envelope.payload());
+                    if payload.starts_with("PING:") {
+                        let client_ip = payload.strip_prefix("PING:").unwrap_or("unknown");
+                        self.messages_handled += 1;
+                        tracing::debug!(
+                            "Server: Handling ping #{} from client {} (connection {})",
+                            self.messages_handled,
+                            client_ip,
+                            msg.connection_id
+                        );
 
-                            // Send PONG response
-                            if let Err(e) = self.transport.send_reply::<RequestResponseEnvelopeFactory>(
-                                &msg.envelope,
-                                b"PONG".to_vec(),
-                            ) {
-                                tracing::warn!("Server: Failed to send PONG: {}", e);
-                            }
+                        // Send PONG response with server IP included
+                        let pong_response = format!("PONG:{}", self.topology.my_ip);
+                        if let Err(e) = transport.send_reply::<RequestResponseEnvelopeFactory>(
+                            &msg.envelope,
+                            pong_response.into_bytes(),
+                            &msg,
+                        ) {
+                            tracing::warn!("Server: Failed to send PONG to connection {}: {}", msg.connection_id, e);
                         }
-                        Ok(Some(_)) => {
-                            // Ignore non-PING messages
-                            tracing::debug!("Server: Received non-PING message, ignoring");
-                        }
-                        Ok(None) => {
-                            // No message ready - yield and continue
-                            tokio::task::yield_now().await;
-                        }
-                        Err(e) => {
-                            // Transport error - connection lost, read failed, etc.
-                            tracing::warn!("Server: Transport error: {}", e);
-                            // Continue for next connection
-                        }
+                    } else {
+                        // Ignore non-PING messages
+                        tracing::debug!(
+                            "Server: Received non-PING message from connection {} (payload: {}), ignoring",
+                            msg.connection_id,
+                            payload
+                        );
                     }
                 }
             }
@@ -204,20 +215,28 @@ impl<
                 return Ok(false);
             }
 
-            // Send ping with random timeout to create back-pressure
+            // Send ping with source IP included in payload
             result = self.transport.request_with_timeout::<RequestResponseEnvelopeFactory>(
                 &selected_server,
-                b"PING".to_vec(),
+                format!("PING:{}", self.topology.my_ip).into_bytes(),
                 std::time::Duration::from_millis(timeout_ms)
             ) => {
                 match result {
-                    Ok(response) if response == b"PONG" => {
-                        self.messages_sent += 1;
-                        tracing::debug!("Client: Successfully completed ping-pong #{}", self.messages_sent);
-                        Ok(true)
-                    }
-                    Ok(_) => {
-                        Err(SimulationError::IoError("Invalid response".to_string()))
+                    Ok(response) => {
+                        let response_str = String::from_utf8_lossy(&response);
+                        if response_str.starts_with("PONG:") {
+                            let server_ip = response_str.strip_prefix("PONG:").unwrap_or("unknown");
+                            self.messages_sent += 1;
+                            tracing::debug!(
+                                "Client: Successfully completed ping-pong #{} with server {}",
+                                self.messages_sent,
+                                server_ip
+                            );
+                            Ok(true)
+                        } else {
+                            tracing::warn!("Client: Unexpected response: {}", response_str);
+                            Err(SimulationError::IoError(format!("Invalid response: {}", response_str)))
+                        }
                     }
                     Err(moonpool_simulation::network::transport::TransportError::Timeout) => {
                         tracing::warn!("Client: Request timed out, counting as failed attempt");

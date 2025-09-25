@@ -13,6 +13,18 @@ pub trait EnvelopeSerializer: Clone {
 
     /// Deserialize bytes from wire into an envelope
     fn deserialize(&self, data: &[u8]) -> Result<Self::Envelope, EnvelopeError>;
+
+    /// Try to deserialize an envelope from a buffer, consuming parsed data
+    ///
+    /// Returns:
+    /// - Ok(Some(envelope)) - Successfully parsed, data consumed from buffer
+    /// - Ok(None) - Buffer is empty
+    /// - Err(EnvelopeError::InsufficientData{needed, available}) - Need more bytes
+    /// - Err(other) - Parse error, malformed data
+    fn try_deserialize_from_buffer(
+        &self,
+        buffer: &mut Vec<u8>,
+    ) -> Result<Option<Self::Envelope>, EnvelopeError>;
 }
 
 /// Request-response envelope with correlation ID and payload
@@ -170,6 +182,56 @@ impl EnvelopeSerializer for RequestResponseSerializer {
         let payload = data[Self::HEADER_SIZE..].to_vec();
 
         Ok(RequestResponseEnvelope::new(correlation_id, payload))
+    }
+
+    fn try_deserialize_from_buffer(
+        &self,
+        buffer: &mut Vec<u8>,
+    ) -> Result<Option<Self::Envelope>, EnvelopeError> {
+        // Buffer is empty - normal case, not an error
+        if buffer.is_empty() {
+            return Ok(None);
+        }
+
+        // Need at least header size to proceed
+        if buffer.len() < Self::HEADER_SIZE {
+            return Err(EnvelopeError::InsufficientData {
+                needed: Self::HEADER_SIZE,
+                available: buffer.len(),
+            });
+        }
+
+        // Read payload length from header
+        let payload_len =
+            u32::from_le_bytes([buffer[8], buffer[9], buffer[10], buffer[11]]) as usize;
+
+        // Validate payload length
+        if payload_len > Self::MAX_PAYLOAD_SIZE {
+            return Err(EnvelopeError::DeserializationFailed(format!(
+                "Payload too large: {} bytes, max allowed: {}",
+                payload_len,
+                Self::MAX_PAYLOAD_SIZE
+            )));
+        }
+
+        let total_message_len = Self::HEADER_SIZE + payload_len;
+
+        // Check if we have the complete message
+        if buffer.len() < total_message_len {
+            return Err(EnvelopeError::InsufficientData {
+                needed: total_message_len,
+                available: buffer.len(),
+            });
+        }
+
+        // Extract the complete message data
+        let message_data: Vec<u8> = buffer.drain(0..total_message_len).collect();
+
+        // Deserialize the complete message
+        match self.deserialize(&message_data) {
+            Ok(envelope) => Ok(Some(envelope)),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -359,5 +421,66 @@ mod tests {
         let ser2 = serializer2.serialize(&envelope);
 
         assert_eq!(ser1, ser2);
+    }
+
+    #[test]
+    fn test_try_deserialize_from_buffer_insufficient_data() {
+        let serializer = RequestResponseSerializer::new();
+
+        // Test empty buffer
+        let mut empty_buffer = Vec::new();
+        let result = serializer.try_deserialize_from_buffer(&mut empty_buffer);
+        assert_eq!(result, Ok(None));
+
+        // Test partial header (only 6 bytes, need 12)
+        let mut partial_header = vec![1, 2, 3, 4, 5, 6];
+        let result = serializer.try_deserialize_from_buffer(&mut partial_header);
+        assert_eq!(
+            result,
+            Err(
+                crate::network::transport::types::EnvelopeError::InsufficientData {
+                    needed: 12,
+                    available: 6,
+                }
+            )
+        );
+
+        // Test complete header but incomplete message
+        let envelope = RequestResponseEnvelope::new(42, b"hello world".to_vec());
+        let complete_data = serializer.serialize(&envelope);
+        let mut partial_message = complete_data[0..15].to_vec(); // Header (12) + 3 bytes of payload
+
+        let result = serializer.try_deserialize_from_buffer(&mut partial_message);
+        assert_eq!(
+            result,
+            Err(
+                crate::network::transport::types::EnvelopeError::InsufficientData {
+                    needed: 23, // 12 header + 11 payload
+                    available: 15,
+                }
+            )
+        );
+
+        // Verify buffer was not consumed on error
+        assert_eq!(partial_message.len(), 15);
+    }
+
+    #[test]
+    fn test_try_deserialize_from_buffer_complete_message() {
+        let serializer = RequestResponseSerializer::new();
+        let envelope = RequestResponseEnvelope::new(123, b"test data".to_vec());
+        let serialized = serializer.serialize(&envelope);
+
+        let mut buffer = serialized.clone();
+        let result = serializer.try_deserialize_from_buffer(&mut buffer);
+
+        match result {
+            Ok(Some(deserialized)) => {
+                assert_eq!(deserialized.correlation_id, 123);
+                assert_eq!(deserialized.payload, b"test data");
+                assert!(buffer.is_empty()); // Buffer should be consumed
+            }
+            _ => panic!("Expected successful deserialization"),
+        }
     }
 }
