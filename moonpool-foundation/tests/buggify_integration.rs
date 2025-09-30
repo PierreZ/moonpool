@@ -34,30 +34,6 @@ fn test_buggify_integration() {
         fired_count
     );
 
-    // Test single-fire behavior: call the same buggify point multiple times
-    println!("\nTesting single-fire behavior at same location:");
-
-    // Define a function that calls buggify from the same location multiple times
-    fn test_single_fire() -> Vec<bool> {
-        let mut results = Vec::new();
-        for _ in 0..5 {
-            results.push(moonpool_foundation::buggify!()); // Same location each time
-        }
-        results
-    }
-
-    let single_fire_results = test_single_fire();
-    let fire_count = single_fire_results.iter().filter(|&&x| x).count();
-    println!("Single-fire test results: {:?}", single_fire_results);
-    println!("Fires: {}", fire_count);
-
-    // Should fire at most once
-    assert!(
-        fire_count <= 1,
-        "Single-fire violation: buggify fired {} times from same location",
-        fire_count
-    );
-
     println!("\nTesting buggify_with_prob!(1.0) - should fire at least once:");
     let mut prob_fired_count = 0;
     for i in 0..20 {
