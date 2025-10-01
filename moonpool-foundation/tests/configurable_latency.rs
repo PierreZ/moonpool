@@ -104,9 +104,10 @@ fn test_custom_latency_configuration() {
             connect_latency: Duration::from_millis(1)..Duration::from_millis(1),
             read_latency: Duration::from_micros(10)..Duration::from_micros(10),
             write_latency: Duration::from_millis(2)..Duration::from_millis(2),
-            fault_probability: 0.0,
-            fault_duration: Duration::ZERO..Duration::ZERO,
-            max_faults_per_connection: None,
+            clog_probability: 0.0,
+            clog_duration: Duration::ZERO..Duration::ZERO,
+            partition_probability: 0.0,
+            partition_duration: Duration::ZERO..Duration::ZERO,
         };
 
         let mut sim = SimWorld::new_with_network_config(config);
@@ -151,9 +152,10 @@ fn test_latency_range_sampling() {
             connect_latency: Duration::from_millis(1)..Duration::from_millis(6),
             read_latency: Duration::from_micros(10)..Duration::from_micros(10),
             write_latency: Duration::from_millis(1)..Duration::from_millis(6),
-            fault_probability: 0.0,
-            fault_duration: Duration::ZERO..Duration::ZERO,
-            max_faults_per_connection: None,
+            clog_probability: 0.0,
+            clog_duration: Duration::ZERO..Duration::ZERO,
+            partition_probability: 0.0,
+            partition_duration: Duration::ZERO..Duration::ZERO,
         };
 
         let mut execution_times = Vec::new();
@@ -207,9 +209,10 @@ fn test_network_randomization_ranges() {
             connect_latency: Duration::from_millis(3)..Duration::from_millis(3),
             read_latency: Duration::from_micros(100)..Duration::from_micros(100),
             write_latency: Duration::from_micros(500)..Duration::from_micros(500),
-            fault_probability: 0.0,
-            fault_duration: Duration::ZERO..Duration::ZERO,
-            max_faults_per_connection: None,
+            clog_probability: 0.0,
+            clog_duration: Duration::ZERO..Duration::ZERO,
+            partition_probability: 0.0,
+            partition_duration: Duration::ZERO..Duration::ZERO,
         };
 
         let mut sim = SimWorld::new_with_network_config(config);

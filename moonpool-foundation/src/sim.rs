@@ -115,15 +115,7 @@ impl SimWorld {
     ///
     /// * `seed` - The seed value for deterministic randomness
     ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use moonpool_foundation::SimWorld;
-    ///
-    /// // Create simulation with specific seed for reproducible behavior
-    /// let mut sim = SimWorld::new_with_seed(42);
-    /// // All random operations will be deterministic based on seed 42
-    /// ```
+    /// Create simulation with specific seed for reproducible behavior.
     pub fn new_with_seed(seed: u64) -> Self {
         reset_sim_rng();
         set_sim_seed(seed);
@@ -153,14 +145,7 @@ impl SimWorld {
     /// * `network_config` - Network configuration for latency and fault simulation
     /// * `seed` - The seed value for deterministic randomness
     ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use moonpool_foundation::{SimWorld, NetworkConfiguration};
-    ///
-    /// let config = NetworkConfiguration::default();
-    /// let mut sim = SimWorld::new_with_network_config_and_seed(config, 42);
-    /// ```
+    /// Create simulation with specific network configuration and seed.
     pub fn new_with_network_config_and_seed(
         network_config: NetworkConfiguration,
         seed: u64,
@@ -189,11 +174,8 @@ impl SimWorld {
             // Phase 7: Clear expired clogs after time advancement
             Self::clear_expired_clogs_with_inner(&mut inner);
 
-            // Phase 7b: Restore cut connections after time advancement
-            Self::restore_cut_connections_with_inner(&mut inner);
-
-            // Phase 7b: Randomly cut connections based on probability
-            Self::randomly_cut_connections_with_inner(&mut inner);
+            // Trigger random partitions based on configuration
+            Self::randomly_trigger_partitions_with_inner(&mut inner);
 
             // Process the event with the mutable reference
             Self::process_event_with_inner(&mut inner, scheduled_event.into_event());
@@ -299,20 +281,7 @@ impl SimWorld {
     /// latencies and other network parameters. Random values should be generated
     /// using the thread-local RNG functions like `sim_random()`.
     ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use moonpool_foundation::{SimWorld, sim_random_range};
-    /// use std::time::Duration;
-    ///
-    /// let sim = SimWorld::new();
-    /// let delay = sim.with_network_config(|config| {
-    ///     // Use thread-local RNG for random delay
-    ///     let base_latency = config.latency.connect_latency.base;
-    ///     let jitter_ms = sim_random_range(0..100);
-    ///     base_latency + Duration::from_millis(jitter_ms)
-    /// });
-    /// ```
+    /// Access the network configuration for this simulation.
     pub fn with_network_config<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&NetworkConfiguration) -> R,
@@ -428,13 +397,7 @@ impl SimWorld {
     ///
     /// This method is called by `SimTcpStream::poll_write()` for every write operation:
     ///
-    /// ```rust
-    /// // Application code
-    /// stream.write_all(b"message1").await?;  // Calls buffer_send("message1")
-    /// stream.write_all(b"message2").await?;  // Calls buffer_send("message2")
-    ///
-    /// // Results in ordered delivery: message1 then message2
-    /// ```
+    /// Application write operations call this method to queue data for sending.
     ///
     /// ## Event Flow
     ///
@@ -545,19 +508,7 @@ impl SimWorld {
     ///
     /// This method is called by `SimNetworkProvider::connect()`:
     ///
-    /// ```rust
-    /// // Client initiates connection
-    /// let stream = provider.connect("10.0.0.1:8080").await?;
-    ///
-    /// // Internally calls:
-    /// let (client_id, server_id) = sim.create_connection_pair(
-    ///     "client-addr".to_string(),
-    ///     "10.0.0.1:8080".to_string()
-    /// )?;
-    ///
-    /// // Client gets stream with client_id
-    /// // Server gets stream with server_id via accept()
-    /// ```
+    /// Called by the network provider to establish bidirectional TCP connections.
     ///
     /// ## Connection ID Management
     ///
@@ -601,20 +552,23 @@ impl SimWorld {
         // Capture current time to avoid borrow conflicts
         let current_time = inner.current_time;
 
+        // Parse IP addresses for partition tracking
+        let client_ip = crate::network_state::NetworkState::parse_ip_from_addr(&client_addr);
+        let server_ip = crate::network_state::NetworkState::parse_ip_from_addr(&server_addr);
+
         // Create paired connections
         inner.network.connections.insert(
             client_id,
             ConnectionState {
                 id: client_id,
                 addr: client_addr,
+                local_ip: client_ip,
+                remote_ip: server_ip,
                 receive_buffer: VecDeque::new(),
                 paired_connection: Some(server_id),
                 send_buffer: VecDeque::new(),
                 send_in_progress: false,
                 next_send_time: current_time,
-                is_cut: false,
-                cut_until: None,
-                queued_messages: VecDeque::new(),
                 is_closed: false,
             },
         );
@@ -624,14 +578,13 @@ impl SimWorld {
             ConnectionState {
                 id: server_id,
                 addr: server_addr,
+                local_ip: server_ip,
+                remote_ip: client_ip,
                 receive_buffer: VecDeque::new(),
                 paired_connection: Some(client_id),
                 send_buffer: VecDeque::new(),
                 send_in_progress: false,
                 next_send_time: current_time,
-                is_cut: false,
-                cut_until: None,
-                queued_messages: VecDeque::new(),
                 is_closed: false,
             },
         );
@@ -712,25 +665,7 @@ impl SimWorld {
     /// by the specified duration. This integrates with the event system by
     /// scheduling a Wake event and coordinating with the async runtime.
     ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use moonpool_foundation::SimWorld;
-    /// use std::time::Duration;
-    ///
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut sim = SimWorld::new();
-    ///
-    /// // Sleep for 100ms in simulation time
-    /// sim.sleep(Duration::from_millis(100)).await?;
-    ///
-    /// // Advance simulation until the sleep completes
-    /// sim.run_until_empty();
-    ///
-    /// assert_eq!(sim.current_time(), Duration::from_millis(100));
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// Sleep for a specified duration in simulation time.
     #[instrument(skip(self))]
     pub fn sleep(&self, duration: Duration) -> SleepFuture {
         let task_id = self.generate_task_id();
@@ -900,62 +835,63 @@ impl SimWorld {
                             }
                         }
                     }
-                    crate::ConnectionStateChange::ConnectionRestore => {
-                        // Restore a cut connection and wake any waiting tasks
-                        let connection_id = ConnectionId(id);
-                        tracing::debug!(
-                            "Processing ConnectionRestore event for connection {}",
-                            connection_id.0
-                        );
-
-                        // Restore the specific connection
-                        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-                            if conn.is_cut {
-                                conn.is_cut = false;
-                                conn.cut_until = None;
-
-                                // Process all queued messages by delivering them to the receive buffer
-                                while let Some(data) = conn.queued_messages.pop_front() {
-                                    tracing::debug!(
-                                        "Restoring connection {}: delivering {} queued bytes",
-                                        connection_id.0,
-                                        data.len()
-                                    );
-                                    for &byte in &data {
-                                        conn.receive_buffer.push_back(byte);
-                                    }
-                                }
-
-                                // Wake any waiting readers and writers
-                                if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id)
-                                {
-                                    tracing::debug!(
-                                        "Restoring connection {}: waking up read/write waker",
-                                        connection_id.0
-                                    );
-                                    waker.wake();
+                    crate::ConnectionStateChange::PartitionRestore => {
+                        // Clear expired IP partitions
+                        let now = inner.current_time;
+                        let expired_partitions: Vec<_> = inner
+                            .network
+                            .ip_partitions
+                            .iter()
+                            .filter_map(|(pair, state)| {
+                                if now >= state.expires_at {
+                                    Some(*pair)
                                 } else {
-                                    tracing::debug!(
-                                        "Restoring connection {}: no read/write wakers found",
-                                        connection_id.0
-                                    );
+                                    None
                                 }
+                            })
+                            .collect();
 
-                                tracing::debug!(
-                                    "Connection {} restored successfully via event",
-                                    connection_id.0
-                                );
-                            } else {
-                                tracing::debug!(
-                                    "Connection {} was already restored",
-                                    connection_id.0
-                                );
-                            }
-                        } else {
-                            tracing::warn!(
-                                "ConnectionRestore event for non-existent connection {}",
-                                connection_id.0
-                            );
+                        for pair in expired_partitions {
+                            inner.network.ip_partitions.remove(&pair);
+                            tracing::debug!("Restored IP partition {} -> {}", pair.0, pair.1);
+                        }
+                    }
+                    crate::ConnectionStateChange::SendPartitionClear => {
+                        // Clear expired send partitions
+                        let now = inner.current_time;
+                        let expired_ips: Vec<_> = inner
+                            .network
+                            .send_partitions
+                            .iter()
+                            .filter_map(
+                                |(ip, &expires_at)| {
+                                    if now >= expires_at { Some(*ip) } else { None }
+                                },
+                            )
+                            .collect();
+
+                        for ip in expired_ips {
+                            inner.network.send_partitions.remove(&ip);
+                            tracing::debug!("Cleared send partition for {}", ip);
+                        }
+                    }
+                    crate::ConnectionStateChange::RecvPartitionClear => {
+                        // Clear expired receive partitions
+                        let now = inner.current_time;
+                        let expired_ips: Vec<_> = inner
+                            .network
+                            .recv_partitions
+                            .iter()
+                            .filter_map(
+                                |(ip, &expires_at)| {
+                                    if now >= expires_at { Some(*ip) } else { None }
+                                },
+                            )
+                            .collect();
+
+                        for ip in expired_ips {
+                            inner.network.recv_partitions.remove(&ip);
+                            tracing::debug!("Cleared receive partition for {}", ip);
                         }
                     }
                 }
@@ -1003,43 +939,30 @@ impl SimWorld {
 
                         let connection_id = ConnectionId(connection_id);
 
-                        // Write data to the specified connection's receive buffer or queue if cut
+                        // Write data to the specified connection's receive buffer
                         if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-                            if conn.is_cut {
-                                // Connection is cut - queue message for delivery after restoration
-                                let data_len = data.len();
-                                conn.queued_messages.push_back(data);
+                            // Normal delivery to receive buffer
+                            tracing::debug!(
+                                "DataDelivery writing {} bytes to connection {} receive_buffer",
+                                data.len(),
+                                connection_id.0
+                            );
+                            for &byte in &data {
+                                conn.receive_buffer.push_back(byte);
+                            }
+
+                            // Wake any futures waiting to read from this connection
+                            if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
                                 tracing::debug!(
-                                    "DataDelivery queued {} bytes for cut connection {}, queue size now: {}",
-                                    data_len,
-                                    connection_id.0,
-                                    conn.queued_messages.len()
-                                );
-                            } else {
-                                // Normal delivery to receive buffer
-                                tracing::debug!(
-                                    "DataDelivery writing {} bytes to connection {} receive_buffer",
-                                    data.len(),
+                                    "DataDelivery waking up read waker for connection_id={}",
                                     connection_id.0
                                 );
-                                for &byte in &data {
-                                    conn.receive_buffer.push_back(byte);
-                                }
-
-                                // Wake any futures waiting to read from this connection
-                                if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id)
-                                {
-                                    tracing::debug!(
-                                        "DataDelivery waking up read waker for connection_id={}",
-                                        connection_id.0
-                                    );
-                                    waker.wake();
-                                } else {
-                                    tracing::debug!(
-                                        "DataDelivery no waker found for connection_id={}",
-                                        connection_id.0
-                                    );
-                                }
+                                waker.wake();
+                            } else {
+                                tracing::debug!(
+                                    "DataDelivery no waker found for connection_id={}",
+                                    connection_id.0
+                                );
                             }
                         } else {
                             tracing::warn!(
@@ -1081,8 +1004,46 @@ impl SimWorld {
                     crate::NetworkOperation::ProcessSendBuffer => {
                         let connection_id = ConnectionId(connection_id);
 
+                        // Check if this connection is partitioned before processing
+                        let is_partitioned = inner
+                            .network
+                            .is_connection_partitioned(connection_id, inner.current_time);
+
                         if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-                            if let Some(data) = conn.send_buffer.pop_front() {
+                            if is_partitioned {
+                                // Connection is partitioned - fail sends immediately (like FoundationDB simulation)
+                                // The peer layer should handle reliability via retries and reconnection
+                                if let Some(data) = conn.send_buffer.pop_front() {
+                                    tracing::debug!(
+                                        "Connection {} partitioned, failing send of {} bytes",
+                                        connection_id.0,
+                                        data.len()
+                                    );
+
+                                    // Continue processing remaining messages (they'll also fail)
+                                    if !conn.send_buffer.is_empty() {
+                                        let scheduled_time = inner.current_time;
+                                        let sequence = inner.next_sequence;
+                                        inner.next_sequence += 1;
+
+                                        let scheduled_event = ScheduledEvent::new(
+                                            scheduled_time,
+                                            Event::Network {
+                                                connection_id: connection_id.0,
+                                                operation:
+                                                    crate::NetworkOperation::ProcessSendBuffer,
+                                            },
+                                            sequence,
+                                        );
+                                        inner.event_queue.schedule(scheduled_event);
+                                    } else {
+                                        conn.send_in_progress = false;
+                                    }
+                                } else {
+                                    // No messages to process
+                                    conn.send_in_progress = false;
+                                }
+                            } else if let Some(data) = conn.send_buffer.pop_front() {
                                 // For TCP ordering, we need to maintain connection-level delays
                                 // Check if there are more messages AFTER popping the current one
                                 let has_more_messages = !conn.send_buffer.is_empty();
@@ -1198,23 +1159,7 @@ impl SimWorld {
     /// This provides access to both `always_assert!` and `sometimes_assert!` results
     /// for statistical analysis of distributed system properties.
     ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use moonpool_foundation::{SimWorld, always_assert, sometimes_assert};
-    /// use std::time::Duration;
-    ///
-    /// let sim = SimWorld::new_with_seed(42);
-    ///
-    /// // Example assertions (these would be in simulation logic)
-    /// always_assert!(system_running, true, "System should be running");
-    /// sometimes_assert!(fast_response, Duration::from_millis(50) < Duration::from_millis(100), "Responses should be fast");
-    ///
-    /// // Access results
-    /// let results = sim.assertion_results();
-    /// println!("System running: {:.2}% success", results.get("system_running").map_or(0.0, |s| s.success_rate()));
-    /// println!("Fast response rate: {:.2}%", results.get("fast_response").map_or(0.0, |s| s.success_rate()));
-    /// ```
+    /// Access assertion statistics from the simulation.
     pub fn assertion_results(
         &self,
     ) -> std::collections::HashMap<String, crate::assertions::AssertionStats> {
@@ -1227,18 +1172,7 @@ impl SimWorld {
     /// between consecutive simulations. It is automatically called by
     /// `new_with_seed()` and related methods.
     ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use moonpool_foundation::{SimWorld, sometimes_assert};
-    ///
-    /// let sim = SimWorld::new();
-    /// sometimes_assert!(test_assertion, true, "Test assertion");
-    /// assert_eq!(sim.assertion_results()["test_assertion"].total_checks, 1);
-    ///
-    /// sim.reset_assertion_results();
-    /// assert!(sim.assertion_results().is_empty());
-    /// ```
+    /// Reset all assertion statistics.
     pub fn reset_assertion_results(&self) {
         crate::assertions::reset_assertion_results();
     }
@@ -1249,18 +1183,7 @@ impl SimWorld {
     /// events processed, and custom metrics. This is useful for integration
     /// with the simulation reporting framework.
     ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use moonpool_foundation::SimWorld;
-    ///
-    /// let mut sim = SimWorld::new();
-    /// sim.run_until_empty();
-    ///
-    /// let metrics = sim.extract_metrics();
-    /// println!("Simulated time: {:?}", metrics.simulated_time);
-    /// println!("Events processed: {}", metrics.events_processed);
-    /// ```
+    /// Extract simulation metrics including timing and event statistics.
     pub fn extract_metrics(&self) -> crate::runner::SimulationMetrics {
         let inner = self.inner.borrow();
 
@@ -1284,7 +1207,7 @@ impl SimWorld {
         }
 
         // Check probability
-        config.fault_probability > 0.0 && sim_random::<f64>() < config.fault_probability
+        config.clog_probability > 0.0 && sim_random::<f64>() < config.clog_probability
     }
 
     /// Clog a connection's write operations
@@ -1292,7 +1215,7 @@ impl SimWorld {
         let mut inner = self.inner.borrow_mut();
         let config = &inner.network.config;
 
-        let clog_duration = crate::network::config::sample_duration(&config.fault_duration);
+        let clog_duration = crate::network::config::sample_duration(&config.clog_duration);
         let expires_at = inner.current_time + clog_duration;
         inner
             .network
@@ -1348,73 +1271,6 @@ impl SimWorld {
             inner.network.connection_clogs.remove(&id);
             Self::wake_all(&mut inner.wakers.clog_wakers, id);
         }
-    }
-
-    // Phase 7b: Connection cutting methods
-
-    /// Check if a connection should be cut based on probability and limits
-    pub fn should_cut_connection(&self, connection_id: ConnectionId) -> bool {
-        let inner = self.inner.borrow();
-        let config = &inner.network.config;
-
-        // Skip if already cut
-        if let Some(conn) = inner.network.connections.get(&connection_id) {
-            if conn.is_cut {
-                return false;
-            }
-        } else {
-            // Connection doesn't exist
-            return false;
-        }
-
-        // Probability check (removed max_cuts limit for simplicity)
-        sim_random::<f64>() < config.fault_probability
-    }
-
-    /// Cut a connection by marking it as temporarily disconnected
-    pub fn cut_connection(&self, connection_id: ConnectionId) {
-        let mut inner = self.inner.borrow_mut();
-        let reconnect_delay_range = inner.network.config.fault_duration.clone();
-        let current_time = inner.current_time;
-
-        if let Some(conn) = inner.network.connections.get_mut(&connection_id)
-            && !conn.is_cut
-        {
-            let reconnect_delay = crate::network::config::sample_duration(&reconnect_delay_range);
-            let reconnect_at = current_time + reconnect_delay;
-
-            conn.is_cut = true;
-            conn.cut_until = Some(reconnect_at);
-
-            // Schedule a connection restoration event
-            let restore_event = crate::events::Event::Connection {
-                id: connection_id.0,
-                state: crate::events::ConnectionStateChange::ConnectionRestore,
-            };
-            let sequence = inner.next_sequence;
-            inner.next_sequence += 1;
-            let scheduled_event =
-                crate::events::ScheduledEvent::new(reconnect_at, restore_event, sequence);
-            inner.event_queue.schedule(scheduled_event);
-
-            tracing::debug!(
-                "Connection {} cut until {:?} (delay: {:?}), restoration event scheduled with sequence {}",
-                connection_id.0,
-                reconnect_at,
-                reconnect_delay,
-                sequence
-            );
-        }
-    }
-
-    /// Check if a connection is currently cut
-    pub fn is_connection_cut(&self, connection_id: ConnectionId) -> bool {
-        let inner = self.inner.borrow();
-        inner
-            .network
-            .connections
-            .get(&connection_id)
-            .is_some_and(|conn| conn.is_cut)
     }
 
     /// Check if a connection is permanently closed
@@ -1475,123 +1331,180 @@ impl SimWorld {
         }
     }
 
-    /// Restore connections that are ready to be reconnected
-    pub fn restore_cut_connections(&self) {
+    // Network Partition Control Methods (following FoundationDB patterns)
+
+    /// Partition communication between two IP addresses for a specified duration
+    /// Sends will fail immediately during partition (like FoundationDB simulation layer)
+    /// The peer layer should handle reliability via retries and reconnection
+    pub fn partition_pair(
+        &self,
+        from_ip: std::net::IpAddr,
+        to_ip: std::net::IpAddr,
+        duration: Duration,
+    ) -> SimulationResult<()> {
         let mut inner = self.inner.borrow_mut();
-        Self::restore_cut_connections_with_inner(&mut inner);
-    }
+        let expires_at = inner.current_time + duration;
 
-    /// Randomly cut connections based on configuration probability
-    pub fn randomly_cut_connections(&self) {
-        let connection_ids: Vec<ConnectionId> = {
-            let inner = self.inner.borrow();
-            inner.network.connections.keys().copied().collect()
+        inner.network.ip_partitions.insert(
+            (from_ip, to_ip),
+            crate::network_state::PartitionState { expires_at },
+        );
+
+        // Schedule partition restore event
+        let restore_event = crate::events::Event::Connection {
+            id: 0, // Not connection-specific for IP partitions
+            state: crate::events::ConnectionStateChange::PartitionRestore,
         };
+        let sequence = inner.next_sequence;
+        inner.next_sequence += 1;
+        let scheduled_event =
+            crate::events::ScheduledEvent::new(expires_at, restore_event, sequence);
+        inner.event_queue.schedule(scheduled_event);
 
-        for connection_id in connection_ids {
-            if self.should_cut_connection(connection_id) {
-                self.cut_connection(connection_id);
-            }
-        }
+        tracing::debug!(
+            "Partitioned {} -> {} until {:?}",
+            from_ip,
+            to_ip,
+            expires_at
+        );
+        Ok(())
     }
 
-    /// Helper method for use with SimInner - restore cut connections
-    fn restore_cut_connections_with_inner(inner: &mut SimInner) {
-        let now = inner.current_time;
-        let ready_connections: Vec<ConnectionId> = inner
+    /// Block all outgoing communication from an IP address
+    pub fn partition_send_from(
+        &self,
+        ip: std::net::IpAddr,
+        duration: Duration,
+    ) -> SimulationResult<()> {
+        let mut inner = self.inner.borrow_mut();
+        let expires_at = inner.current_time + duration;
+
+        inner.network.send_partitions.insert(ip, expires_at);
+
+        // Schedule partition clear event
+        let clear_event = crate::events::Event::Connection {
+            id: 0,
+            state: crate::events::ConnectionStateChange::SendPartitionClear,
+        };
+        let sequence = inner.next_sequence;
+        inner.next_sequence += 1;
+        let scheduled_event = crate::events::ScheduledEvent::new(expires_at, clear_event, sequence);
+        inner.event_queue.schedule(scheduled_event);
+
+        tracing::debug!("Partitioned sends from {} until {:?}", ip, expires_at);
+        Ok(())
+    }
+
+    /// Block all incoming communication to an IP address  
+    pub fn partition_recv_to(
+        &self,
+        ip: std::net::IpAddr,
+        duration: Duration,
+    ) -> SimulationResult<()> {
+        let mut inner = self.inner.borrow_mut();
+        let expires_at = inner.current_time + duration;
+
+        inner.network.recv_partitions.insert(ip, expires_at);
+
+        // Schedule partition clear event
+        let clear_event = crate::events::Event::Connection {
+            id: 0,
+            state: crate::events::ConnectionStateChange::RecvPartitionClear,
+        };
+        let sequence = inner.next_sequence;
+        inner.next_sequence += 1;
+        let scheduled_event = crate::events::ScheduledEvent::new(expires_at, clear_event, sequence);
+        inner.event_queue.schedule(scheduled_event);
+
+        tracing::debug!("Partitioned receives to {} until {:?}", ip, expires_at);
+        Ok(())
+    }
+
+    /// Immediately restore communication between two IP addresses
+    pub fn restore_partition(
+        &self,
+        from_ip: std::net::IpAddr,
+        to_ip: std::net::IpAddr,
+    ) -> SimulationResult<()> {
+        let mut inner = self.inner.borrow_mut();
+        inner.network.ip_partitions.remove(&(from_ip, to_ip));
+        tracing::debug!("Restored partition {} -> {}", from_ip, to_ip);
+        Ok(())
+    }
+
+    /// Check if communication between two IP addresses is currently partitioned
+    pub fn is_partitioned(
+        &self,
+        from_ip: std::net::IpAddr,
+        to_ip: std::net::IpAddr,
+    ) -> SimulationResult<bool> {
+        let inner = self.inner.borrow();
+        Ok(inner
+            .network
+            .is_partitioned(from_ip, to_ip, inner.current_time))
+    }
+
+    /// Helper method for use with SimInner - randomly trigger partitions
+    fn randomly_trigger_partitions_with_inner(inner: &mut SimInner) {
+        let partition_config = &inner.network.config;
+
+        // Skip if partition triggering is disabled
+        if partition_config.partition_probability == 0.0 {
+            return;
+        }
+
+        // Get all unique IP pairs from existing connections
+        let ip_pairs: Vec<(std::net::IpAddr, std::net::IpAddr)> = inner
             .network
             .connections
-            .iter()
-            .filter_map(|(id, conn)| {
-                if conn.is_cut && conn.cut_until.is_some_and(|cut_until| now >= cut_until) {
-                    Some(*id)
+            .values()
+            .filter_map(|conn| {
+                if let (Some(local), Some(remote)) = (conn.local_ip, conn.remote_ip) {
+                    Some((local, remote))
                 } else {
                     None
                 }
             })
             .collect();
 
-        for connection_id in ready_connections {
-            if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-                conn.is_cut = false;
-                conn.cut_until = None;
-
-                // Process all queued messages by delivering them to the receive buffer
-                while let Some(data) = conn.queued_messages.pop_front() {
-                    tracing::debug!(
-                        "Restoring connection {}: delivering {} queued bytes",
-                        connection_id.0,
-                        data.len()
-                    );
-                    for &byte in &data {
-                        conn.receive_buffer.push_back(byte);
-                    }
-                }
-
-                // Wake any waiting readers and writers (both use read_wakers currently)
-                if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
-                    tracing::debug!(
-                        "Restoring connection {}: waking up read/write waker",
-                        connection_id.0
-                    );
-                    waker.wake();
-                } else {
-                    tracing::debug!(
-                        "Restoring connection {}: no read/write wakers found",
-                        connection_id.0
-                    );
-                }
-
-                tracing::debug!("Connection {} restored successfully", connection_id.0);
+        for (from_ip, to_ip) in ip_pairs {
+            // Skip if already partitioned
+            if inner
+                .network
+                .is_partitioned(from_ip, to_ip, inner.current_time)
+            {
+                continue;
             }
-        }
-    }
 
-    /// Helper method for use with SimInner - randomly cut connections
-    fn randomly_cut_connections_with_inner(inner: &mut SimInner) {
-        let cutting_config = &inner.network.config;
+            // Probability check
+            if sim_random::<f64>() < partition_config.partition_probability {
+                let partition_duration =
+                    crate::network::config::sample_duration(&partition_config.partition_duration);
+                let expires_at = inner.current_time + partition_duration;
 
-        // Skip if cutting is disabled
-        if cutting_config.fault_probability == 0.0 {
-            return;
-        }
+                inner.network.ip_partitions.insert(
+                    (from_ip, to_ip),
+                    crate::network_state::PartitionState { expires_at },
+                );
 
-        let connection_ids: Vec<ConnectionId> = inner.network.connections.keys().copied().collect();
+                // Schedule partition restore event
+                let restore_event = crate::events::Event::Connection {
+                    id: 0, // Not connection-specific for IP partitions
+                    state: crate::events::ConnectionStateChange::PartitionRestore,
+                };
+                let sequence = inner.next_sequence;
+                inner.next_sequence += 1;
+                let scheduled_event =
+                    crate::events::ScheduledEvent::new(expires_at, restore_event, sequence);
+                inner.event_queue.schedule(scheduled_event);
 
-        for connection_id in connection_ids {
-            if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-                // Skip if already cut
-                if conn.is_cut {
-                    continue;
-                }
-
-                // Probability check
-                if sim_random::<f64>() < cutting_config.fault_probability {
-                    let reconnect_delay =
-                        crate::network::config::sample_duration(&cutting_config.fault_duration);
-                    let reconnect_at = inner.current_time + reconnect_delay;
-
-                    conn.is_cut = true;
-                    conn.cut_until = Some(reconnect_at);
-
-                    // Schedule a connection restoration event
-                    let restore_event = crate::events::Event::Connection {
-                        id: connection_id.0,
-                        state: crate::events::ConnectionStateChange::ConnectionRestore,
-                    };
-                    let sequence = inner.next_sequence;
-                    inner.next_sequence += 1;
-                    let scheduled_event =
-                        crate::events::ScheduledEvent::new(reconnect_at, restore_event, sequence);
-                    inner.event_queue.schedule(scheduled_event);
-
-                    tracing::debug!(
-                        "Randomly cut connection {} until {:?}, restoration event scheduled with sequence {}",
-                        connection_id.0,
-                        reconnect_at,
-                        sequence
-                    );
-                }
+                tracing::debug!(
+                    "Randomly triggered partition {} -> {} until {:?}, restoration event scheduled with sequence {}",
+                    from_ip,
+                    to_ip,
+                    expires_at,
+                    sequence
+                );
             }
         }
     }

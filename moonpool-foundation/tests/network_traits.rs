@@ -67,7 +67,7 @@ fn test_provider_default() {
 
     local_runtime.block_on(async move {
         // Test that TokioNetworkProvider implements Default
-        let provider = TokioNetworkProvider::default();
+        let provider = TokioNetworkProvider;
 
         // This should work without issues
         let listener = provider.bind("127.0.0.1:0").await.unwrap();

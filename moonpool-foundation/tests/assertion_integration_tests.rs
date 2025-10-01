@@ -220,7 +220,7 @@ fn test_parallel_assertion_isolation() {
 fn test_assertion_with_complex_conditions() {
     let sim = SimWorld::new_with_seed(456);
 
-    let data = vec![1, 2, 3, 4, 5];
+    let data = [1, 2, 3, 4, 5];
     let sum: i32 = data.iter().sum();
     let avg = sum as f64 / data.len() as f64;
 
@@ -233,7 +233,7 @@ fn test_assertion_with_complex_conditions() {
 
     sometimes_assert!(
         performance_target,
-        avg >= 2.0 && avg <= 4.0 && sum == 15,
+        (2.0..=4.0).contains(&avg) && sum == 15,
         "Should meet performance targets"
     );
 

@@ -39,7 +39,9 @@ impl Event {
         matches!(
             self,
             Event::Connection {
-                state: ConnectionStateChange::ConnectionRestore,
+                state: ConnectionStateChange::PartitionRestore
+                    | ConnectionStateChange::SendPartitionClear
+                    | ConnectionStateChange::RecvPartitionClear,
                 ..
             } // Could add other infrastructure events here if needed:
               // | Event::Connection { state: ConnectionStateChange::ClogClear, .. }
@@ -68,8 +70,12 @@ pub enum ConnectionStateChange {
     ConnectionReady,
     /// Clear clog for a connection
     ClogClear,
-    /// Restore a cut connection
-    ConnectionRestore,
+    /// Restore network partition between IPs
+    PartitionRestore,
+    /// Clear send partition for an IP
+    SendPartitionClear,
+    /// Clear receive partition for an IP
+    RecvPartitionClear,
 }
 
 /// An event scheduled for execution at a specific simulation time.
@@ -196,7 +202,7 @@ mod tests {
         // Test Event::is_infrastructure_event() method
         let restore_event = Event::Connection {
             id: 1,
-            state: ConnectionStateChange::ConnectionRestore,
+            state: ConnectionStateChange::PartitionRestore,
         };
         assert!(restore_event.is_infrastructure_event());
 
