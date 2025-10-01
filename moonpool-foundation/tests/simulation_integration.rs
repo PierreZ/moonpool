@@ -130,7 +130,7 @@ fn test_network_provider_trait_usage() {
             addr: &str,
         ) -> std::io::Result<String> {
             let listener = provider.bind(addr).await?;
-            Ok(listener.local_addr()?)
+            listener.local_addr()
         }
 
         let addr = use_provider_generically(provider, "dynamic-test")

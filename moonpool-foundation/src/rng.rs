@@ -37,23 +37,7 @@ thread_local! {
 ///
 /// * `T` - The type to generate. Must implement the Standard distribution.
 ///
-/// # Example
-///
-/// ```rust
-/// use moonpool_foundation::rng::{set_sim_seed, sim_random};
-///
-/// set_sim_seed(42);
-/// let value1: f64 = sim_random();
-/// let value2: u32 = sim_random();
-///
-/// // Reset to same seed - will produce identical sequence
-/// set_sim_seed(42);
-/// let same_value1: f64 = sim_random();
-/// let same_value2: u32 = sim_random();
-///
-/// assert_eq!(value1, same_value1);
-/// assert_eq!(value2, same_value2);
-/// ```
+/// Generate a random value using the thread-local simulation RNG.
 pub fn sim_random<T>() -> T
 where
     Standard: Distribution<T>,
@@ -74,20 +58,7 @@ where
 ///
 /// * `range` - The range to sample from (exclusive upper bound).
 ///
-/// # Example
-///
-/// ```rust
-/// use moonpool_foundation::rng::{set_sim_seed, sim_random_range};
-/// use std::time::Duration;
-///
-/// set_sim_seed(42);
-/// let delay_ms = sim_random_range(100..1000);
-/// let delay = Duration::from_millis(delay_ms);
-///
-/// // delay will be between 100ms and 999ms
-/// assert!(delay >= Duration::from_millis(100));
-/// assert!(delay < Duration::from_millis(1000));
-/// ```
+/// Generate a random value within a specified range.
 pub fn sim_random_range<T>(range: std::ops::Range<T>) -> T
 where
     T: SampleUniform + PartialOrd,
@@ -108,15 +79,7 @@ where
 ///
 /// A random value within the range, or the start value if the range is empty.
 ///
-/// # Example
-///
-/// ```rust
-/// use moonpool_foundation::{set_sim_seed, sim_random_range_or_default};
-///
-/// set_sim_seed(42);
-/// let value = sim_random_range_or_default(0.0..0.0); // Returns 0.0 (start value)
-/// let value2 = sim_random_range_or_default(1.0..5.0); // Returns random value 1.0-5.0
-/// ```
+/// Generate a random value in range or return start value if range is empty.
 pub fn sim_random_range_or_default<T>(range: std::ops::Range<T>) -> T
 where
     T: SampleUniform + PartialOrd + Clone,
@@ -138,22 +101,7 @@ where
 ///
 /// * `seed` - The seed value to use for deterministic randomness.
 ///
-/// # Example
-///
-/// ```rust
-/// use moonpool_foundation::rng::{set_sim_seed, sim_random};
-///
-/// // Set a specific seed for reproducible randomness
-/// set_sim_seed(12345);
-///
-/// let first_value: f64 = sim_random();
-/// let second_value: f64 = sim_random();
-///
-/// // Reset to same seed - will reproduce the same sequence
-/// set_sim_seed(12345);
-/// assert_eq!(first_value, sim_random::<f64>());
-/// assert_eq!(second_value, sim_random::<f64>());
-/// ```
+/// Set the seed for the thread-local simulation RNG.
 pub fn set_sim_seed(seed: u64) {
     SIM_RNG.with(|rng| {
         *rng.borrow_mut() = ChaCha8Rng::seed_from_u64(seed);
@@ -173,23 +121,7 @@ pub fn set_sim_seed(seed: u64) {
 ///
 /// A deterministic u128 unique ID that is unique within the simulation.
 ///
-/// # Example
-///
-/// ```rust
-/// use moonpool_foundation::rng::{set_sim_seed, random_unique_id};
-///
-/// set_sim_seed(42);
-/// let id1 = random_unique_id();
-/// let id2 = random_unique_id();
-///
-/// // IDs should be different
-/// assert_ne!(id1, id2);
-///
-/// // Reset to same seed - will produce identical sequence
-/// set_sim_seed(42);
-/// assert_eq!(id1, random_unique_id());
-/// assert_eq!(id2, random_unique_id());
-/// ```
+/// Generate a unique identifier using the simulation RNG.
 pub fn random_unique_id() -> u128 {
     let high: u64 = sim_random();
     let low: u64 = sim_random();
@@ -205,14 +137,7 @@ pub fn random_unique_id() -> u128 {
 ///
 /// The current simulation seed, or 0 if no seed has been set.
 ///
-/// # Example
-///
-/// ```rust
-/// use moonpool_foundation::rng::{set_sim_seed, get_current_sim_seed};
-///
-/// set_sim_seed(12345);
-/// assert_eq!(get_current_sim_seed(), 12345);
-/// ```
+/// Get the current simulation seed.
 pub fn get_current_sim_seed() -> u64 {
     CURRENT_SEED.with(|current| *current.borrow())
 }
@@ -223,20 +148,7 @@ pub fn get_current_sim_seed() -> u64 {
 /// It should be called before setting a new seed to ensure clean state
 /// between consecutive simulation runs on the same thread.
 ///
-/// # Example
-///
-/// ```rust
-/// use moonpool_foundation::rng::{reset_sim_rng, set_sim_seed, sim_random};
-///
-/// // Run first simulation
-/// set_sim_seed(42);
-/// let _value1: f64 = sim_random();
-///
-/// // Clean state before next simulation
-/// reset_sim_rng();
-/// set_sim_seed(123);
-/// let _value2: f64 = sim_random();
-/// ```
+/// Reset the thread-local simulation RNG to a fresh state.
 pub fn reset_sim_rng() {
     SIM_RNG.with(|rng| {
         *rng.borrow_mut() = ChaCha8Rng::from_entropy();

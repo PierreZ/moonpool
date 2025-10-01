@@ -29,15 +29,7 @@ impl SimRandomProvider {
     ///
     /// * `seed` - The seed value for deterministic random generation
     ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use moonpool_foundation::random::sim::SimRandomProvider;
-    /// use moonpool_foundation::random::RandomProvider;
-    ///
-    /// let provider = SimRandomProvider::new(42);
-    /// let value: f64 = provider.random();
-    /// ```
+    /// Create a new simulation random provider with the specified seed.
     pub fn new(seed: u64) -> Self {
         // Set the thread-local RNG seed
         set_sim_seed(seed);

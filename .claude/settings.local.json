@@ -12,7 +12,9 @@
       "Bash(timeout 15s nix develop:*)",
       "Bash(git add:*)",
       "Bash(mv:*)",
-      "Bash(rmdir:*)"
+      "Bash(rmdir:*)",
+      "Bash(cargo:*)",
+      "Bash(cargo doc:*)"
     ],
     "deny": [],
     "ask": [],
