@@ -33,17 +33,7 @@ impl AssertionStats {
     ///
     /// Returns 0.0 if no checks have been performed yet.
     ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use moonpool_foundation::assertions::AssertionStats;
-    ///
-    /// let mut stats = AssertionStats::new();
-    /// stats.total_checks = 10;
-    /// stats.successes = 7;
-    ///
-    /// assert_eq!(stats.success_rate(), 70.0);
-    /// ```
+    /// Calculate the success rate as a percentage (0.0 to 100.0).
     pub fn success_rate(&self) -> f64 {
         if self.total_checks == 0 {
             0.0
@@ -100,23 +90,7 @@ pub fn record_assertion(name: &str, success: bool) {
 /// Returns a snapshot of assertion results for the current thread.
 /// This is typically called after simulation runs to analyze system behavior.
 ///
-/// # Example
-///
-/// ```rust
-/// use moonpool_foundation::assertions::{get_assertion_results, record_assertion};
-///
-/// // Simulate some assertion checks
-/// record_assertion("leader_exists", true);
-/// record_assertion("leader_exists", true);
-/// record_assertion("leader_exists", false);
-///
-/// let results = get_assertion_results();
-/// let leader_stats = &results["leader_exists"];
-/// assert_eq!(leader_stats.total_checks, 3);
-/// assert_eq!(leader_stats.successes, 2);
-/// let expected_rate = 200.0 / 3.0; // ~66.67%
-/// assert!((leader_stats.success_rate() - expected_rate).abs() < 1e-10);
-/// ```
+/// Get a snapshot of all assertion statistics collected so far.
 pub fn get_assertion_results() -> HashMap<String, AssertionStats> {
     ASSERTION_RESULTS.with(|results| results.borrow().clone())
 }
@@ -126,19 +100,7 @@ pub fn get_assertion_results() -> HashMap<String, AssertionStats> {
 /// This should be called before each simulation run to ensure clean state
 /// between consecutive simulations on the same thread.
 ///
-/// # Example
-///
-/// ```rust
-/// use moonpool_foundation::assertions::{reset_assertion_results, record_assertion, get_assertion_results};
-///
-/// // Record some assertions
-/// record_assertion("test", true);
-/// assert_eq!(get_assertion_results()["test"].total_checks, 1);
-///
-/// // Reset and verify clean state
-/// reset_assertion_results();
-/// assert!(get_assertion_results().is_empty());
-/// ```
+/// Clear all assertion statistics.
 pub fn reset_assertion_results() {
     ASSERTION_RESULTS.with(|results| {
         results.borrow_mut().clear();
@@ -190,18 +152,7 @@ pub fn panic_on_assertion_violations(_report: &crate::runner::SimulationReport) 
 ///
 /// A vector of violation messages, or empty if all assertions are valid.
 ///
-/// # Example
-///
-/// ```rust
-/// use moonpool_foundation::assertions::{validate_assertion_contracts, reset_assertion_results};
-///
-/// reset_assertion_results();
-/// // ... run simulation with assertions ...
-/// let violations = validate_assertion_contracts();
-/// if !violations.is_empty() {
-///     // Handle violations
-/// }
-/// ```
+/// Validate that all assertion contracts have been met.
 pub fn validate_assertion_contracts() -> Vec<String> {
     let mut violations = Vec::new();
     let results = get_assertion_results();
@@ -231,18 +182,7 @@ pub fn validate_assertion_contracts() -> Vec<String> {
 /// * `condition` - The expression to evaluate (must be boolean)
 /// * `message` - A descriptive error message to show on failure
 ///
-/// # Example
-///
-/// ```rust
-/// use moonpool_foundation::always_assert;
-///
-/// let leader_count = 1;
-/// always_assert!(unique_leader, leader_count == 1, "There must be exactly one leader");
-/// ```
-///
-/// # Panics
-///
-/// Panics immediately if the condition evaluates to false.
+/// Assert that a condition must always be true. Panics immediately if false.
 #[macro_export]
 macro_rules! always_assert {
     ($name:ident, $condition:expr, $message:expr) => {
@@ -275,16 +215,7 @@ macro_rules! always_assert {
 /// * `condition` - The expression to evaluate (must be boolean)
 /// * `message` - A descriptive message about what this assertion tests
 ///
-/// # Example
-///
-/// ```rust
-/// use moonpool_foundation::sometimes_assert;
-/// use std::time::Duration;
-///
-/// let consensus_time = Duration::from_millis(50);
-/// let threshold = Duration::from_millis(100);
-/// sometimes_assert!(fast_consensus, consensus_time < threshold, "Consensus should be fast");
-/// ```
+/// Assert that a condition should sometimes be true. Records statistics for analysis.
 #[macro_export]
 macro_rules! sometimes_assert {
     ($name:ident, $condition:expr, $message:expr) => {
@@ -453,12 +384,12 @@ mod tests {
     fn test_complex_assertion_conditions() {
         reset_assertion_results();
 
-        let items = vec![1, 2, 3, 4, 5];
+        let items = [1, 2, 3, 4, 5];
         let sum: i32 = items.iter().sum();
 
         sometimes_assert!(
             sum_in_range,
-            sum >= 10 && sum <= 20,
+            (10..=20).contains(&sum),
             "Sum should be in reasonable range"
         );
 

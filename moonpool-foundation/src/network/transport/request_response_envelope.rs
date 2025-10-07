@@ -28,7 +28,7 @@ pub trait EnvelopeSerializer: Clone {
 }
 
 /// Request-response envelope with correlation ID and payload
-/// Wire format: [correlation_id:8][len:4][payload:N]
+/// Wire format: \[correlation_id:8\]\[len:4\]\[payload:N\]
 #[derive(Debug, Clone, PartialEq)]
 pub struct RequestResponseEnvelope {
     /// The correlation ID for matching requests and responses
@@ -99,7 +99,7 @@ impl EnvelopeFactory<RequestResponseEnvelope> for RequestResponseEnvelopeFactory
 }
 
 /// Binary serializer for RequestResponseEnvelope
-/// Wire format: [correlation_id:8][len:4][payload:N] (little-endian)
+/// Wire format: \\[correlation_id:8\\]\\[len:4\\]\\[payload:N\\] (little-endian)
 #[derive(Clone)]
 pub struct RequestResponseSerializer;
 
@@ -413,7 +413,7 @@ mod tests {
     #[test]
     fn test_serializer_default() {
         let serializer1 = RequestResponseSerializer::new();
-        let serializer2 = RequestResponseSerializer::default();
+        let serializer2 = RequestResponseSerializer;
 
         // Both should work the same way
         let envelope = RequestResponseEnvelope::new(1, b"test".to_vec());

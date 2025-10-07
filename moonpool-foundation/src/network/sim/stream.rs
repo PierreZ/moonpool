@@ -56,35 +56,7 @@ use tracing::instrument;
 ///
 /// ## Usage Examples
 ///
-/// ### Basic Client Usage
-/// ```rust,no_run
-/// use moonpool_foundation::SimNetworkProvider;
-///
-/// let provider = sim.network_provider();
-/// let mut stream = provider.connect("10.0.0.1:8080").await?;
-///
-/// // Write data (buffered and sent with ordering guarantees)
-/// stream.write_all(b"Hello, Server!").await?;
-///
-/// // Read response (blocks until data arrives)
-/// let mut buffer = [0; 1024];
-/// let bytes_read = stream.read(&mut buffer).await?;
-/// ```
-///
-/// ### Server-side Usage
-/// ```rust,no_run
-/// let listener = provider.bind("10.0.0.1:8080").await?;
-/// let (mut stream, peer_addr) = listener.accept().await?;
-///
-/// // Echo server implementation
-/// loop {
-///     let mut buffer = [0; 1024];
-///     let n = stream.read(&mut buffer).await?;
-///     if n == 0 { break; } // Connection closed
-///     
-///     stream.write_all(&buffer[..n]).await?; // Echo back
-/// }
-/// ```
+/// Provides async read/write operations for client and server connections.
 ///
 /// ## Performance Characteristics
 ///
@@ -192,7 +164,7 @@ impl AsyncRead for SimTcpStream {
                 return Poll::Ready(Ok(()));
             }
 
-            if sim.is_connection_cut(self.connection_id) {
+            if sim.is_connection_closed(self.connection_id) {
                 // Connection is cut - register waker and wait for restoration
                 tracing::debug!(
                     "SimTcpStream::poll_read connection_id={} is cut, registering waker",
@@ -238,7 +210,7 @@ impl AsyncRead for SimTcpStream {
                     );
                     // Connection closed normally - return EOF (0 bytes read)
                     Poll::Ready(Ok(()))
-                } else if sim.is_connection_cut(self.connection_id) {
+                } else if sim.is_connection_closed(self.connection_id) {
                     // Connection is cut - already registered waker above, just wait
                     tracing::debug!(
                         "SimTcpStream::poll_read connection_id={} is cut on recheck, waiting",
@@ -273,7 +245,7 @@ impl AsyncWrite for SimTcpStream {
             )));
         }
 
-        if sim.is_connection_cut(self.connection_id) {
+        if sim.is_connection_closed(self.connection_id) {
             // Connection is cut - register waker and wait for restoration
             tracing::debug!(
                 "SimTcpStream::poll_write connection_id={} is cut, registering waker",

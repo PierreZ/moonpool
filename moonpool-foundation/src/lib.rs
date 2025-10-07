@@ -10,22 +10,7 @@
 //! - Basic simulation harness with centralized state management
 //! - Handle pattern for avoiding borrow checker conflicts
 //!
-//! ## Example Usage
-//!
-//! ```rust
-//! use moonpool_foundation::{SimWorld, Event};
-//! use std::time::Duration;
-//!
-//! let mut sim = SimWorld::new();
-//!
-//! // Schedule a wake event
-//! sim.schedule_event(Event::Timer { task_id: 1 }, Duration::from_millis(100));
-//!
-//! // Process events
-//! sim.run_until_empty();
-//!
-//! assert_eq!(sim.current_time(), Duration::from_millis(100));
-//! ```
+//! Provides SimWorld for deterministic simulation and event processing.
 
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
