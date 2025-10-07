@@ -24,6 +24,138 @@ fn slow_simulation_ping_pong_2x2() {
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
+        // Invariant: Message conservation across distributed ping-pong system
+        // Catches bugs like: message duplication, phantom messages, send/receive accounting errors
+        let message_conservation: moonpool_foundation::InvariantCheck =
+            Box::new(|states, _time| {
+                let mut total_pings_sent = 0u64;
+                let mut total_pongs_received = 0u64;
+                let mut total_pings_received = 0u64;
+                let mut total_pongs_sent = 0u64;
+
+                for (_ip, state) in states {
+                    if let Some(role) = state.get("role").and_then(|r| r.as_str()) {
+                        match role {
+                            "client" => {
+                                total_pings_sent += state
+                                    .get("pings_sent")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                total_pongs_received += state
+                                    .get("pongs_received")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                            }
+                            "server" => {
+                                total_pings_received += state
+                                    .get("pings_received")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                total_pongs_sent += state
+                                    .get("pongs_sent")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                // BUG DETECTOR 1: Servers can't receive more pings than clients sent
+                // Catches: message duplication in network, phantom message creation
+                assert!(
+                    total_pings_received <= total_pings_sent,
+                    "Message duplication detected: {} pings received by servers > {} pings sent by clients",
+                    total_pings_received,
+                    total_pings_sent
+                );
+
+                // BUG DETECTOR 2: Servers can't send more pongs than pings they received
+                // Catches: server sending duplicate responses, broken request/response correlation
+                assert!(
+                    total_pongs_sent <= total_pings_received,
+                    "Server duplication bug: {} pongs sent > {} pings received by servers",
+                    total_pongs_sent,
+                    total_pings_received
+                );
+
+                // BUG DETECTOR 3: Clients can't receive more pongs than servers sent
+                // Catches: response duplication, phantom responses in transport layer
+                assert!(
+                    total_pongs_received <= total_pongs_sent,
+                    "Response duplication detected: {} pongs received > {} pongs sent by servers",
+                    total_pongs_received,
+                    total_pongs_sent
+                );
+
+                // BUG DETECTOR 4: Clients can't receive more pongs than pings they sent
+                // Catches: broken correlation IDs, receiving responses for requests never made
+                assert!(
+                    total_pongs_received <= total_pings_sent,
+                    "Correlation bug: {} pongs received > {} pings sent by clients",
+                    total_pongs_received,
+                    total_pings_sent
+                );
+
+                // BUG DETECTOR 5: Per-peer accounting must be consistent
+                // Catches: misattributed messages, peer identity confusion
+                for (_ip, state) in states {
+                    if let Some(role) = state.get("role").and_then(|r| r.as_str()) {
+                        if role == "client" {
+                            // Check: sum of per-peer pings == total pings
+                            if let Some(per_peer) = state.get("pings_per_peer").and_then(|p| p.as_object()) {
+                                let sum_per_peer: u64 = per_peer.values()
+                                    .filter_map(|v| v.as_u64())
+                                    .sum();
+                                let total = state.get("pings_sent").and_then(|v| v.as_u64()).unwrap_or(0);
+                                assert_eq!(
+                                    sum_per_peer, total,
+                                    "Client per-peer ping accounting broken: sum={} != total={}",
+                                    sum_per_peer, total
+                                );
+                            }
+                            // Check: sum of per-peer pongs == total pongs
+                            if let Some(per_peer) = state.get("pongs_per_peer").and_then(|p| p.as_object()) {
+                                let sum_per_peer: u64 = per_peer.values()
+                                    .filter_map(|v| v.as_u64())
+                                    .sum();
+                                let total = state.get("pongs_received").and_then(|v| v.as_u64()).unwrap_or(0);
+                                assert_eq!(
+                                    sum_per_peer, total,
+                                    "Client per-peer pong accounting broken: sum={} != total={}",
+                                    sum_per_peer, total
+                                );
+                            }
+                        } else if role == "server" {
+                            // Check: sum of per-peer pings received == total
+                            if let Some(per_peer) = state.get("pings_per_peer").and_then(|p| p.as_object()) {
+                                let sum_per_peer: u64 = per_peer.values()
+                                    .filter_map(|v| v.as_u64())
+                                    .sum();
+                                let total = state.get("pings_received").and_then(|v| v.as_u64()).unwrap_or(0);
+                                assert_eq!(
+                                    sum_per_peer, total,
+                                    "Server per-peer ping accounting broken: sum={} != total={}",
+                                    sum_per_peer, total
+                                );
+                            }
+                            // Check: sum of per-peer pongs sent == total
+                            if let Some(per_peer) = state.get("pongs_per_peer").and_then(|p| p.as_object()) {
+                                let sum_per_peer: u64 = per_peer.values()
+                                    .filter_map(|v| v.as_u64())
+                                    .sum();
+                                let total = state.get("pongs_sent").and_then(|v| v.as_u64()).unwrap_or(0);
+                                assert_eq!(
+                                    sum_per_peer, total,
+                                    "Server per-peer pong accounting broken: sum={} != total={}",
+                                    sum_per_peer, total
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+
         let report = SimulationBuilder::new()
             .use_random_config()
             // Uncomment to debug specific problematic seeds:
@@ -32,6 +164,7 @@ fn slow_simulation_ping_pong_2x2() {
             .register_workload("ping_pong_server_2", ping_pong_server)
             .register_workload("ping_pong_client_1", ping_pong_client)
             .register_workload("ping_pong_client_2", ping_pong_client)
+            .with_invariants(vec![message_conservation])
             .set_iteration_control(IterationControl::UntilAllSometimesReached(10_000))
             .run()
             .await;
