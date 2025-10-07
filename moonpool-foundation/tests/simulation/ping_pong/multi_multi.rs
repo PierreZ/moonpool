@@ -80,6 +80,7 @@ async fn ping_pong_client(
         peer_ips: server_peers.iter().map(|(_, ip)| ip.clone()).collect(),
         peer_names: server_peers.iter().map(|(name, _)| name.clone()).collect(),
         shutdown_signal: topology.shutdown_signal,
+        state_registry: topology.state_registry.clone(),
     };
 
     let mut client_actor = MultiMultiPingPongClientActor::new(
@@ -282,6 +283,7 @@ async fn tokio_ping_pong_client(
         peer_ips: server_peers.iter().map(|(_, ip)| ip.clone()).collect(),
         peer_names: server_peers.iter().map(|(name, _)| name.clone()).collect(),
         shutdown_signal: topology.shutdown_signal,
+        state_registry: topology.state_registry.clone(),
     };
 
     // Create a wrapper client that runs reduced ping count
