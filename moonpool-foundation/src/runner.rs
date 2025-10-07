@@ -70,9 +70,14 @@ impl WorkloadOrchestrator {
         mut sim: crate::SimWorld,
         shutdown_signal: tokio_util::sync::CancellationToken,
         iteration_count: usize,
+        invariants: &[crate::InvariantCheck],
     ) -> Result<(Vec<SimulationResult<SimulationMetrics>>, SimulationMetrics), (Vec<u64>, usize)>
     {
         tracing::debug!("Spawning {} workload(s) with spawn_local", workloads.len());
+
+        // Create shared state registry for invariant checking
+        let state_registry = crate::StateRegistry::new();
+
         let mut handles = Vec::new();
         for (idx, workload) in workloads.iter().enumerate() {
             tracing::debug!("Spawning workload {}: {}", idx, workload.name);
@@ -81,6 +86,7 @@ impl WorkloadOrchestrator {
                 &workload.ip_address,
                 workloads,
                 shutdown_signal.clone(),
+                state_registry.clone(),
             );
 
             let time_provider = sim.time_provider();
@@ -123,6 +129,10 @@ impl WorkloadOrchestrator {
                     sim.pending_event_count()
                 );
                 sim.step();
+
+                // Check invariants after processing event
+                let current_time_ms = sim.current_time().as_millis() as u64;
+                Self::check_invariants(&state_registry, current_time_ms, invariants);
             }
 
             // Check if any handles are ready
@@ -221,6 +231,25 @@ impl WorkloadOrchestrator {
                 },
                 Duration::from_nanos(i),
             );
+        }
+    }
+
+    /// Check all registered invariants against current actor states.
+    ///
+    /// If any invariant check panics, the simulation will immediately terminate with that panic.
+    /// This implements the "crash early" philosophy inspired by FoundationDB.
+    fn check_invariants(
+        state_registry: &crate::StateRegistry,
+        sim_time_ms: u64,
+        invariants: &[crate::InvariantCheck],
+    ) {
+        if invariants.is_empty() {
+            return;
+        }
+
+        let all_states = state_registry.get_all_states();
+        for invariant in invariants {
+            invariant(&all_states, sim_time_ms);
         }
     }
 }
@@ -472,6 +501,7 @@ impl TopologyFactory {
         workload_ip: &str,
         all_workloads: &[Workload],
         shutdown_signal: tokio_util::sync::CancellationToken,
+        state_registry: crate::StateRegistry,
     ) -> WorkloadTopology {
         let peer_ips = all_workloads
             .iter()
@@ -490,6 +520,7 @@ impl TopologyFactory {
             peer_ips,
             peer_names,
             shutdown_signal,
+            state_registry,
         }
     }
 }
@@ -631,6 +662,8 @@ pub struct WorkloadTopology {
     pub peer_names: Vec<String>,
     /// Shutdown signal that gets triggered when the first workload exits with Ok
     pub shutdown_signal: tokio_util::sync::CancellationToken,
+    /// State registry for cross-workload invariant checking
+    pub state_registry: crate::StateRegistry,
 }
 
 impl WorkloadTopology {
@@ -682,13 +715,13 @@ impl fmt::Debug for Workload {
 }
 
 /// Builder pattern for configuring and running simulation experiments.
-#[derive(Debug)]
 pub struct SimulationBuilder {
     iteration_control: IterationControl,
     workloads: Vec<Workload>,
     seeds: Vec<u64>,
     next_ip: u32, // For auto-assigning IP addresses starting from 10.0.0.1
     use_random_config: bool,
+    invariants: Vec<crate::InvariantCheck>,
 }
 
 impl Default for SimulationBuilder {
@@ -706,6 +739,7 @@ impl SimulationBuilder {
             seeds: Vec::new(),
             next_ip: 1, // Start from 10.0.0.1
             use_random_config: false,
+            invariants: Vec::new(),
         }
     }
 
@@ -806,6 +840,34 @@ impl SimulationBuilder {
         self
     }
 
+    /// Register invariant check functions to be executed after every simulation event.
+    ///
+    /// Invariants receive a snapshot of all actor states and the current simulation time,
+    /// and should panic if any global property is violated.
+    ///
+    /// # Arguments
+    /// * `invariants` - Vector of invariant check functions
+    ///
+    /// # Example
+    /// ```ignore
+    /// SimulationBuilder::new()
+    ///     .with_invariants(vec![
+    ///         Box::new(|states, _time| {
+    ///             let total_sent: u64 = states.values()
+    ///                 .filter_map(|v| v.get("messages_sent").and_then(|s| s.as_u64()))
+    ///                 .sum();
+    ///             let total_received: u64 = states.values()
+    ///                 .filter_map(|v| v.get("messages_received").and_then(|r| r.as_u64()))
+    ///                 .sum();
+    ///             assert!(total_received <= total_sent, "Message conservation violated");
+    ///         })
+    ///     ])
+    /// ```
+    pub fn with_invariants(mut self, invariants: Vec<crate::InvariantCheck>) -> Self {
+        self.invariants = invariants;
+        self
+    }
+
     #[instrument(skip_all)]
     /// Run the simulation and generate a report.
     pub async fn run(self) -> SimulationReport {
@@ -864,6 +926,7 @@ impl SimulationBuilder {
                 sim,
                 shutdown_signal,
                 iteration_count,
+                &self.invariants,
             )
             .await;
 
