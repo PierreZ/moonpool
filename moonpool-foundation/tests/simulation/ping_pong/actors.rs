@@ -53,6 +53,16 @@ impl<
 
     /// Update state in registry for invariant checking
     fn update_state(&self) {
+        // Recalculate in_transit for each peer: pings received but not yet ponged
+        let mut in_transit_per_peer = HashMap::new();
+        for (peer, pings) in &self.pings_per_peer {
+            let pongs = self.pongs_per_peer.get(peer).copied().unwrap_or(0);
+            let in_transit = pings.saturating_sub(pongs);
+            if in_transit > 0 {
+                in_transit_per_peer.insert(peer.clone(), in_transit);
+            }
+        }
+
         self.topology.state_registry.register_state(
             &self.topology.my_ip,
             serde_json::json!({
@@ -61,6 +71,7 @@ impl<
                 "pongs_sent": self.pongs_sent,
                 "pings_per_peer": self.pings_per_peer,
                 "pongs_per_peer": self.pongs_per_peer,
+                "in_transit_per_peer": in_transit_per_peer,
             }),
         );
     }
@@ -310,7 +321,10 @@ impl<
 
         // Increment sent count BEFORE sending to maintain invariant
         self.messages_sent += 1;
-        *self.pings_per_peer.entry(selected_server.to_string()).or_insert(0) += 1;
+        *self
+            .pings_per_peer
+            .entry(selected_server.to_string())
+            .or_insert(0) += 1;
         self.update_state();
 
         tokio::select! {
