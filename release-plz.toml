@@ -1,8 +1,10 @@
 # Release-plz configuration
+[workspace]
 # Only release when merging a release PR, not on every push to main
 release_always = false
 
-# Create draft releases for review
+# Enable git releases with draft mode
+git_release_enable = true
 git_release_draft = true
 
 # Create draft pull requests for review
@@ -10,3 +12,92 @@ pr_draft = true
 
 # Add release label to PRs for easy identification
 pr_labels = ["release"]
+
+# Enable changelog updates
+changelog_update = true
+
+# Update dependencies during release
+dependencies_update = true
+
+# Package-specific configurations
+[[package]]
+name = "moonpool"
+# Custom changelog path for main package
+changelog_path = "moonpool/CHANGELOG.md"
+
+[[package]]
+name = "moonpool-foundation"
+# Custom changelog path for foundation package
+changelog_path = "moonpool-foundation/CHANGELOG.md"
+
+# Changelog configuration
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+"""
+
+body = """
+{% if version -%}
+    ## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else -%}
+    ## [unreleased]
+{% endif -%}
+{% for group, commits in commits | group_by(attribute="group") %}
+    ### {{ group | striptags | trim | upper_first }}
+    {% for commit in commits %}
+        - {% if commit.scope %}**{{commit.scope}}**: {% endif %}{{ commit.message | upper_first }}
+    {%- endfor %}
+{% endfor %}\n
+"""
+
+# Parse conventional commits and group them
+[[changelog.commit_parsers]]
+message = "^feat"
+group = "<!-- 0 -->🚀 Features"
+
+[[changelog.commit_parsers]]
+message = "^fix"
+group = "<!-- 1 -->🐛 Bug Fixes"
+
+[[changelog.commit_parsers]]
+message = "^doc"
+group = "<!-- 2 -->📚 Documentation"
+
+[[changelog.commit_parsers]]
+message = "^perf"
+group = "<!-- 3 -->⚡ Performance"
+
+[[changelog.commit_parsers]]
+message = "^refactor"
+group = "<!-- 4 -->🚜 Refactor"
+
+[[changelog.commit_parsers]]
+message = "^style"
+group = "<!-- 5 -->🎨 Styling"
+
+[[changelog.commit_parsers]]
+message = "^test"
+group = "<!-- 6 -->🧪 Testing"
+
+[[changelog.commit_parsers]]
+message = "^chore\\(release\\): prepare for"
+skip = true
+
+[[changelog.commit_parsers]]
+message = "^chore\\(deps.*\\)"
+skip = true
+
+[[changelog.commit_parsers]]
+message = "^chore|^ci"
+group = "<!-- 7 -->⚙️ Miscellaneous Tasks"
+
+# Anything that doesn't match above parsers
+[[changelog.commit_parsers]]
+message = ".*"
+group = "<!-- 8 -->📦 Other"

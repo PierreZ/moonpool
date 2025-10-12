@@ -31,6 +31,7 @@ Moonpool provides a comprehensive framework for developing and testing distribut
 - **Sometimes Assertions** - Statistical validation with 100% coverage goals through chaos testing
 - **Multi-Seed Testing** - Comprehensive edge case exploration across multiple deterministic runs
 - **Hostile Infrastructure** - Network conditions 10x worse than production to expose bugs early
+- **Cross-Workload Invariant Checking** - JSON-based system for validating global distributed system properties across multiple actors with 7 comprehensive bug detectors
 
 ## Architecture
 
@@ -65,7 +66,9 @@ The framework follows a layered architecture with clear separation of concerns:
 - ✅ **Sometimes Assertions** - Statistical validation system with coverage tracking
 - ✅ **Multi-Seed Testing** - Comprehensive edge case exploration infrastructure
 - ✅ **Connection Management** - Robust TCP layer with automatic reconnection and multiplexing
-- ✅ **Ping-Pong Test Actors** - Multi-client/multi-server validation with comprehensive coverage
+- ✅ **Cross-Workload Invariant System** - JSON-based state registry with global property validation
+- ✅ **Multi-Topology Testing** - Support for 1x1 through 10x10 client-server topologies with comprehensive bug detection
+- ✅ **Per-Peer Message Tracking** - Detailed accounting for message routing and load distribution validation
 
 ## Getting Started
 
@@ -88,7 +91,7 @@ nix develop --command cargo build
 
 Tests are configured with specific timeouts in `.config/nextest.toml`:
 - Default tests: 1 second timeout
-- Tests with "slow_simulation" in name: 60 second timeout
+- Tests with "slow_simulation" in name: 4 minute timeout (for multi-topology chaos testing)
 
 ### Usage Examples
 
@@ -113,12 +116,14 @@ while let Some((request, responder)) = server_transport.try_next_message().await
 
 ## Testing Philosophy
 
-**Goal: 100% Sometimes Assertion Coverage**
+**Goal: 100% Sometimes Assertion Coverage + Comprehensive Invariant Validation**
 
 The framework uses "sometimes assertions" for statistical validation under chaos conditions:
-- `always_assert!` - Invariants that must never be violated  
+- `always_assert!` - Invariants that must never be violated
 - `sometimes_assert!` - Behaviors that should occur under normal conditions
+- **Cross-workload invariants** - Global properties validated after every simulation event
 - Target: Every sometimes assertion should trigger across multiple test seeds
+- **7 Bug Detectors**: Message conservation, per-peer accounting, in-transit tracking, and correlation validation
 - Comprehensive chaos testing exposes edge cases and validates error handling
 
 **Multi-Seed Testing:**

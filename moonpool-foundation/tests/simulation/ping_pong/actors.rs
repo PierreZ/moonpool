@@ -7,6 +7,7 @@ use moonpool_foundation::{
     },
     sometimes_assert,
 };
+use std::collections::HashMap;
 use tracing::instrument;
 
 #[derive(Debug, Clone)]
@@ -25,7 +26,10 @@ pub struct PingPongServerActor<
     time: T,
     task_provider: TP,
     topology: WorkloadTopology,
-    messages_handled: usize,
+    pings_received: usize,
+    pongs_sent: usize,
+    pings_per_peer: HashMap<String, usize>,
+    pongs_per_peer: HashMap<String, usize>,
 }
 
 impl<
@@ -40,8 +44,36 @@ impl<
             time,
             task_provider,
             topology,
-            messages_handled: 0,
+            pings_received: 0,
+            pongs_sent: 0,
+            pings_per_peer: HashMap::new(),
+            pongs_per_peer: HashMap::new(),
         }
+    }
+
+    /// Update state in registry for invariant checking
+    fn update_state(&self) {
+        // Recalculate in_transit for each peer: pings received but not yet ponged
+        let mut in_transit_per_peer = HashMap::new();
+        for (peer, pings) in &self.pings_per_peer {
+            let pongs = self.pongs_per_peer.get(peer).copied().unwrap_or(0);
+            let in_transit = pings.saturating_sub(pongs);
+            if in_transit > 0 {
+                in_transit_per_peer.insert(peer.clone(), in_transit);
+            }
+        }
+
+        self.topology.state_registry.register_state(
+            &self.topology.my_ip,
+            serde_json::json!({
+                "role": "server",
+                "pings_received": self.pings_received,
+                "pongs_sent": self.pongs_sent,
+                "pings_per_peer": self.pings_per_peer,
+                "pongs_per_peer": self.pongs_per_peer,
+                "in_transit_per_peer": in_transit_per_peer,
+            }),
+        );
     }
 
     /// Main server loop using event-driven async/await pattern
@@ -75,8 +107,9 @@ impl<
                 // Clean shutdown - prioritize this branch first
                 _ = self.topology.shutdown_signal.cancelled() => {
                     tracing::debug!(
-                        "Server: Shutdown signal received, handled {} messages from {} connections",
-                        self.messages_handled,
+                        "Server: Shutdown signal received, received {} pings, sent {} pongs from {} connections",
+                        self.pings_received,
+                        self.pongs_sent,
                         transport.connection_count()
                     );
                     // Transport cleanup is automatic when dropped
@@ -100,31 +133,41 @@ impl<
                     );
                     let payload = String::from_utf8_lossy(msg.envelope.payload());
                     if payload.starts_with("PING:") {
-                        let client_ip = payload.strip_prefix("PING:").unwrap_or("unknown");
-                        self.messages_handled += 1;
+                        let client_ip = payload.strip_prefix("PING:").unwrap_or("unknown").to_string();
+                        self.pings_received += 1;
+                        *self.pings_per_peer.entry(client_ip.clone()).or_insert(0) += 1;
+                        self.update_state();
 
                         // Assert when handling high message rate
                         sometimes_assert!(
                             server_high_message_rate,
-                            self.messages_handled > 5,
+                            self.pings_received > 5,
                             "Server handling high message rate"
                         );
 
                         tracing::debug!(
                             "Server: Handling ping #{} from client {} (connection {})",
-                            self.messages_handled,
-                            client_ip,
+                            self.pings_received,
+                            &client_ip,
                             msg.connection_id
                         );
 
                         // Send PONG response with server IP included
                         let pong_response = format!("PONG:{}", self.topology.my_ip);
-                        if let Err(e) = transport.send_reply::<RequestResponseEnvelopeFactory>(
+                        match transport.send_reply::<RequestResponseEnvelopeFactory>(
                             &msg.envelope,
                             pong_response.into_bytes(),
                             &msg,
                         ) {
-                            tracing::warn!("Server: Failed to send PONG to connection {}: {}", msg.connection_id, e);
+                            Ok(_) => {
+                                self.pongs_sent += 1;
+                                *self.pongs_per_peer.entry(client_ip).or_insert(0) += 1;
+                                self.update_state();
+                            }
+                            Err(e) => {
+                                tracing::warn!("Server: Failed to send PONG to connection {}: {}", msg.connection_id, e);
+                                // Don't increment pongs_sent if send failed
+                            }
                         }
                     } else {
                         // Ignore non-PING messages
@@ -151,6 +194,9 @@ pub struct PingPongClientActor<
     server_addresses: Vec<String>,
     topology: WorkloadTopology,
     messages_sent: usize,
+    pongs_received: usize,
+    pings_per_peer: HashMap<String, usize>,
+    pongs_per_peer: HashMap<String, usize>,
     random: R,
     selection_strategy: SelectionStrategy,
     current_server_index: usize,
@@ -194,11 +240,32 @@ impl<
             server_addresses,
             topology,
             messages_sent: 0,
+            pongs_received: 0,
+            pings_per_peer: HashMap::new(),
+            pongs_per_peer: HashMap::new(),
             random,
             selection_strategy,
             current_server_index: 0,
             last_selected_server: None,
         }
+    }
+
+    /// Update state in registry for invariant checking
+    fn update_state(&self) {
+        // Calculate in-transit messages: sent but not yet received
+        let in_transit = self.messages_sent.saturating_sub(self.pongs_received);
+
+        self.topology.state_registry.register_state(
+            &self.topology.my_ip,
+            serde_json::json!({
+                "role": "client",
+                "pings_sent": self.messages_sent,
+                "pongs_received": self.pongs_received,
+                "in_transit": in_transit,
+                "pings_per_peer": self.pings_per_peer,
+                "pongs_per_peer": self.pongs_per_peer,
+            }),
+        );
     }
 
     /// Select the next server address based on the chosen strategy
@@ -252,6 +319,14 @@ impl<
             self.random.random_range(100..5000) // Normal: 100-5000ms
         };
 
+        // Increment sent count BEFORE sending to maintain invariant
+        self.messages_sent += 1;
+        *self
+            .pings_per_peer
+            .entry(selected_server.to_string())
+            .or_insert(0) += 1;
+        self.update_state();
+
         tokio::select! {
             // Handle shutdown signal - prioritize this first
             _ = self.topology.shutdown_signal.cancelled() => {
@@ -269,8 +344,10 @@ impl<
                     Ok(response) => {
                         let response_str = String::from_utf8_lossy(&response);
                         if response_str.starts_with("PONG:") {
-                            let server_ip = response_str.strip_prefix("PONG:").unwrap_or("unknown");
-                            self.messages_sent += 1;
+                            let server_ip = response_str.strip_prefix("PONG:").unwrap_or("unknown").to_string();
+                            self.pongs_received += 1;
+                            *self.pongs_per_peer.entry(server_ip.clone()).or_insert(0) += 1;
+                            self.update_state();
 
                             // Assert when completing rapid pings (quick succession)
                             sometimes_assert!(
@@ -282,7 +359,7 @@ impl<
                             tracing::debug!(
                                 "Client: Successfully completed ping-pong #{} with server {}",
                                 self.messages_sent,
-                                server_ip
+                                &server_ip
                             );
                             Ok(true)
                         } else {
@@ -298,9 +375,8 @@ impl<
                             "Client request timeout occurred"
                         );
 
-                        tracing::warn!("Client: Request timed out, counting as failed attempt");
-                        // Still count this as a message attempt to avoid infinite loops
-                        self.messages_sent += 1;
+                        tracing::warn!("Client: Request timed out, counted as sent but no response");
+                        // Already counted as sent above
                         Ok(true)
                     }
                     Err(e) => {

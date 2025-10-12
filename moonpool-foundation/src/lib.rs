@@ -23,6 +23,8 @@ pub mod buggify;
 pub mod error;
 /// Event scheduling and processing for the simulation engine.
 pub mod events;
+/// Invariant checking for cross-workload validation.
+pub mod invariants;
 /// Network simulation and abstraction layer.
 pub mod network;
 /// Network state management for simulation.
@@ -37,6 +39,8 @@ pub mod runner;
 pub mod sim;
 /// Sleep functionality for simulation time.
 pub mod sleep;
+/// State registry for actor observability and debugging.
+pub mod state_registry;
 /// Task provider abstraction for spawning local tasks.
 pub mod task;
 /// Time provider abstraction for simulation and real time.
@@ -49,6 +53,8 @@ pub use assertions::{AssertionStats, get_assertion_results, validate_assertion_c
 pub use buggify::{buggify_init, buggify_reset};
 pub use error::{SimulationError, SimulationResult};
 pub use events::{ConnectionStateChange, Event, EventQueue, NetworkOperation, ScheduledEvent};
+pub use invariants::InvariantCheck;
+pub use state_registry::StateRegistry;
 // Network exports
 pub use network::{
     NetworkConfiguration, NetworkProvider, Peer, PeerConfig, PeerError, PeerMetrics,
