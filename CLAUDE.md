@@ -8,7 +8,7 @@
 - `nix develop --command cargo clippy`
 - `nix develop --command cargo nextest run`
 
-**Test timeouts**: Configured in `.config/nextest.toml` (1s default, 60s for tests with "slow_simulation" in name)
+**Test timeouts**: Configured in `.config/nextest.toml` (1s default, 4m for tests with "slow_simulation" in name)
 
 **Validation**: Each phase/subphase must validate through:
 - Full compilation (code + tests)
@@ -33,12 +33,13 @@
   - Required: `time.sleep()`, `time.timeout()`, `task_provider.spawn_task()`
 
 ## Testing Philosophy
-**Goal**: 100% sometimes assertion coverage via chaos testing
+**Goal**: 100% sometimes assertion coverage via chaos testing + comprehensive invariant validation
 **Target**: 100% success rate - no deadlocks/hangs acceptable
 
 **Multi-seed testing**: Default `UntilAllSometimesReached(1000)` runs until all sometimes_assert! statements have triggered
 **Failing seeds**: Debug with `SimulationBuilder::set_seed(failing_seed)` → fix root cause → verify → re-enable chaos
 **Infrastructure events**: Tests terminate early when only ConnectionRestore events remain to prevent infinite loops
+**Invariant checking**: Cross-workload properties validated after every simulation event
 **Goal**: Find bugs, not regression testing
 
 ## Assertions & Buggify
@@ -99,8 +100,17 @@ Strategic placement: error handling, timeouts, retries, resource limits
 
 ## Current Architecture Status
 **Phase 11 Complete**: Sans I/O transport layer with comprehensive testing
-- Multi-client/multi-server ping-pong tests with 2x2 topology (4 workloads)
+- **Multi-topology support**: 1x1, 1x2, 1x10, 2x2, 10x10 client-server configurations
+- **JSON-based invariant system**: Cross-workload state registry with global property validation
+- **7 comprehensive bug detectors**: Message conservation, per-peer accounting, in-transit tracking
+- **Per-peer message tracking**: Detailed accounting for routing bugs and load distribution
 - Strategic sometimes_assert placement for comprehensive chaos coverage
 - Infrastructure event detection prevents infinite simulation loops
 - RandomProvider trait for deterministic back-pressure generation
 - Event-driven server architecture supporting multiple concurrent connections
+
+## Invariant System
+**When to use invariants**: Cross-actor properties, global system constraints, deterministic bug detection
+**When to use assertions**: Per-actor validation (`always_assert!` in actor code)
+**Performance**: Invariants run after every simulation event - design accordingly
+**Architecture**: Actors expose state via JSON → StateRegistry → InvariantCheck functions → panic on violation
