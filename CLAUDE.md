@@ -1,116 +1,183 @@
-# Moonpool: Deterministic Simulation Framework
+# Moonpool Workspace
 
-## Environment & Commands
-**Nix shell required**: `nix develop --command <cargo-command>`
+Rust workspace for deterministic distributed systems testing and actor-based programming.
 
-**Phase completion**: All must pass:
-- `nix develop --command cargo fmt`
-- `nix develop --command cargo clippy`
-- `nix develop --command cargo nextest run`
+## Workspace Structure
 
-**Test timeouts**: Configured in `.config/nextest.toml` (1s default, 4m for tests with "slow_simulation" in name)
+```
+moonpool/
+├── moonpool-foundation/    # Core simulation & transport layer (Phases 1-11 COMPLETED)
+│   └── CLAUDE.md          # Foundation-specific development guide
+├── moonpool/              # Actor system (Phase 12+ IN PROGRESS)
+│   └── CLAUDE.md          # Actor system development guide
+└── docs/                  # Comprehensive documentation
+    ├── specs/             # Technical specifications
+    ├── plans/             # Phase-by-phase implementation plans
+    ├── analysis/          # Reference architecture analysis
+    └── references/        # Source code from FDB, Orleans, TigerBeetle
+```
 
-**Validation**: Each phase/subphase must validate through:
-- Full compilation (code + tests)
-- All tests passing
-- No test timeouts or hangs
+## Crate-Specific Instructions
 
-**Debug testing**: 
-- Default: `UntilAllSometimesReached(1000)` for comprehensive chaos testing
-- Debug faulty seeds: `FixedCount(1)` with specific seed and ERROR log level
+- **Working on simulation/transport/networking?** → See `moonpool-foundation/CLAUDE.md`
+- **Working on actors/MessageBus/ActorCatalog?** → See `moonpool/CLAUDE.md`
 
-## Core Constraints
-- Single-core execution (no Send/Sync)
-- No `unwrap()` - use `Result<T, E>` with `?`
-- Document all public items
-- Networking: `#[async_trait(?Send)]`
-- Use traits, not concrete types
-- KISS principle
-- Use LocalRuntime, not LocalSet (spawn_local without Builder)
-- **No LocalSet usage**: Use `tokio::runtime::Builder::new_current_thread().build_local()` only
-- **No direct tokio calls**: Use Provider traits (`TimeProvider::sleep()`, not `tokio::time::sleep()`)
-  - Forbidden: `tokio::time::sleep()`, `tokio::time::timeout()`, `tokio::spawn()`
-  - Required: `time.sleep()`, `time.timeout()`, `task_provider.spawn_task()`
+## Environment Setup
+
+### Nix Development Environment
+**Required**: All cargo commands must run within Nix shell
+
+```bash
+nix develop --command <cargo-command>
+```
+
+### Common Commands
+```bash
+# Format code
+nix develop --command cargo fmt
+
+# Check for issues
+nix develop --command cargo clippy
+
+# Run all tests
+nix develop --command cargo nextest run
+
+# Build workspace
+nix develop --command cargo build
+
+# Check specific crate
+nix develop --command cargo check -p moonpool-foundation
+nix develop --command cargo check -p moonpool
+```
+
+## Phase Completion Criteria
+
+Before completing any phase or major feature:
+
+1. **Code Quality**:
+   - `cargo fmt` passes
+   - `cargo clippy` produces no warnings
+   - No `unwrap()` calls (use `Result` with `?`)
+   - All public items documented
+
+2. **Testing**:
+   - `cargo nextest run` - all tests pass
+   - No test timeouts or hangs
+   - All `sometimes_assert!` triggered in chaos tests
+   - 100% success rate across test iterations
+
+3. **Validation**:
+   - Full compilation (code + tests)
+   - Multi-topology tests pass (1x1, 2x2, 10x10)
+   - Invariants validated across workloads
+   - Documentation updated
+
+## Test Configuration
+
+**Location**: `.config/nextest.toml`
+
+**Timeouts**:
+- Default: 1 second
+- Slow simulation tests (name contains "slow_simulation"): 4 minutes
+
+**Debug Testing**:
+- Default: `UntilAllSometimesReached(1000)` for comprehensive chaos coverage
+- Debug failing seeds: `FixedCount(1)` with specific seed and ERROR log level
+
+## Git Workflow
+
+### Creating Commits
+Only commit when explicitly requested by the user.
+
+**Before committing**:
+1. Run `git status` to see untracked files
+2. Run `git diff` to see changes
+3. Run `git log` to check commit message style
+4. Analyze changes and draft message
+
+**Commit Message Format**:
+```
+<type>: <concise summary>
+
+<optional detailed description>
+```
+
+**Types**: feat, fix, docs, test, refactor, chore
+
+**Important**:
+- Focus on "why" rather than "what"
+- DO NOT push unless explicitly requested
+- Use HEREDOC for multi-line messages
+- Never skip hooks (no --no-verify)
+
+## Cross-Cutting Constraints
+
+Apply to all crates in workspace:
+
+- **Single-core execution**: No Send/Sync requirements
+- **No unwrap()**: Use `Result<T, E>` with `?` operator
+- **Document public APIs**: All public items need docs
+- **Async traits**: Use `#[async_trait(?Send)]` for networking
+- **Trait-based design**: Depend on traits, not concrete types
+- **KISS principle**: Simplicity over features
+- **Provider pattern**: Use TimeProvider, NetworkProvider, TaskProvider traits
+
+### Forbidden Patterns
+❌ `tokio::time::sleep()` → ✅ `time.sleep()`
+❌ `tokio::time::timeout()` → ✅ `time.timeout()`
+❌ `tokio::spawn()` → ✅ `task_provider.spawn_task()`
+❌ `unwrap()` / `expect()` → ✅ `?` operator
+❌ `LocalSet` → ✅ `Builder::new_current_thread().build_local()`
+
+## Documentation Index
+
+Comprehensive documentation organized by purpose:
+
+### Specifications (`docs/specs/`)
+Technical architecture and design documents:
+- `moonpool-foundation-spec.md` - Framework overview
+- `simulation-core-spec.md` - Core simulation infrastructure
+- `transport-layer-spec.md` - Sans I/O transport layer
+- `peer-networking-spec.md` - TCP connection management
+- `testing-framework-spec.md` - Chaos testing and assertions
+
+### Implementation Plans (`docs/plans/`)
+Phase-by-phase roadmaps (see `docs/INDEX.md` for complete listing):
+- Phases 1-11: Foundation layer (COMPLETED)
+- Phase 12+: Actor system (IN PROGRESS)
+
+### Analysis Documents (`docs/analysis/`)
+Deep dives into reference architectures:
+- `foundationdb/flow.md` - **READ FIRST** before touching actor.cpp
+- `foundationdb/fdb-network.md` - Network architecture
+- `orleans/` - Actor system patterns
+
+### Reference Code (`docs/references/`)
+Source code from production systems:
+- `foundationdb/` - Simulation, networking, chaos testing
+- `orleans/` - Actor system implementation
+- `tigerbeetle/` - Packet simulation
+
+**See `docs/INDEX.md` for complete file listing with descriptions**
+
+## Current Status
+
+- ✅ **moonpool-foundation** (Phases 1-11): Core simulation framework with Sans I/O transport layer
+- 🚧 **moonpool** (Phase 12+): Actor system implementation beginning
 
 ## Testing Philosophy
-**Goal**: 100% sometimes assertion coverage via chaos testing + comprehensive invariant validation
-**Target**: 100% success rate - no deadlocks/hangs acceptable
 
-**Multi-seed testing**: Default `UntilAllSometimesReached(1000)` runs until all sometimes_assert! statements have triggered
-**Failing seeds**: Debug with `SimulationBuilder::set_seed(failing_seed)` → fix root cause → verify → re-enable chaos
-**Infrastructure events**: Tests terminate early when only ConnectionRestore events remain to prevent infinite loops
-**Invariant checking**: Cross-workload properties validated after every simulation event
-**Goal**: Find bugs, not regression testing
+**Goal**: Find bugs before production through hostile infrastructure simulation
 
-## Assertions & Buggify
-**Always**: Guard invariants (never fail)
-**Sometimes**: Test error paths (statistical coverage)
-**Buggify**: Deterministic fault injection (25% probability when enabled)
+- **Deterministic**: Same seed = identical behavior
+- **Chaos by default**: 10x worse than production conditions
+- **Comprehensive coverage**: All error paths tested via `sometimes_assert!`
+- **Invariant validation**: Cross-workload properties checked after every event
+- **100% success rate**: No deadlocks or hangs acceptable
 
-Strategic placement: error handling, timeouts, retries, resource limits
+## Getting Help
 
-## API Design Principles
-**Keep APIs familiar**: APIs should match what developers expect from tokio objects
-- Maintain async patterns where developers expect them
-- Use standard tokio types and conventions
-- Avoid surprises in API behavior vs real networking
-
-## Transport Layer (Phase 11 - COMPLETED)
-**Sans I/O Architecture**: Protocol logic separated from I/O operations
-- **Envelope System**: Type-safe messaging with correlation IDs for request-response semantics
-- **Self-Driving Futures**: `request()` and `try_next_message()` internally manage transport state
-- **Binary Wire Format**: Length-prefixed serialization with `InsufficientData` error handling
-- **Multi-Connection Support**: Server handles multiple concurrent connections with automatic multiplexing
-
-**Key APIs**:
-- `ClientTransport::request::<TReq, TResp>(msg)` - Type-safe request-response with automatic correlation
-- `ServerTransport::try_next_message()` - Event-driven message reception across all connections
-- `EnvelopeSerializer` - Binary serialization with partial read support
-- `RequestResponseEnvelopeFactory` - Correlation ID management for reliable message tracking
-
-**Developer Experience**: FoundationDB-inspired patterns with 70% code reduction in actors
-- Single `tokio::select!` patterns replace complex manual loops
-- Clean async/await without manual `tick()` calls
-- Result-based error handling from message streams
-
-## References
-**Read first**: `docs/analysis/flow.md` (before any `actor.cpp` code)
-**Architecture**: `docs/analysis/fdb-network.md`
-
-**Available files in docs/references**:
-- foundationdb/: Buggify.h, FlowTransport.actor.cpp, FlowTransport.h, Net2.actor.cpp, Net2Packet.cpp, Net2Packet.h, Ping.actor.cpp, sim2.actor.cpp
-- tigerbeetle/: packet_simulator.zig
-
-**IMPORTANT**: Always read FoundationDB's implementation first before making changes
-- When working in simulation: always check Net2
-- When working around network stuff like peer and Transport: always check FlowTransport
-
-**Code mapping**:
-- Peer → FlowTransport.h:147-191, FlowTransport.actor.cpp:1016-1125
-- SimWorld → sim2.actor.cpp:1051+
-- Config → tigerbeetle/packet_simulator.zig:12-488
-- Connection → FlowTransport.actor.cpp:760-900
-- Backoff → FlowTransport.actor.cpp:892-897
-- Reliability → Net2Packet.h:30-111
-- Ping → Ping.actor.cpp:29-38,147-169
-- Queuing → Net2Packet.h:43-91
-- Chaos → foundationdb/Buggify.h:79-88
-
-**Focus**: TCP-level simulation (connection faults) not packet-level
-
-## Current Architecture Status
-**Phase 11 Complete**: Sans I/O transport layer with comprehensive testing
-- **Multi-topology support**: 1x1, 1x2, 1x10, 2x2, 10x10 client-server configurations
-- **JSON-based invariant system**: Cross-workload state registry with global property validation
-- **7 comprehensive bug detectors**: Message conservation, per-peer accounting, in-transit tracking
-- **Per-peer message tracking**: Detailed accounting for routing bugs and load distribution
-- Strategic sometimes_assert placement for comprehensive chaos coverage
-- Infrastructure event detection prevents infinite simulation loops
-- RandomProvider trait for deterministic back-pressure generation
-- Event-driven server architecture supporting multiple concurrent connections
-
-## Invariant System
-**When to use invariants**: Cross-actor properties, global system constraints, deterministic bug detection
-**When to use assertions**: Per-actor validation (`always_assert!` in actor code)
-**Performance**: Invariants run after every simulation event - design accordingly
-**Architecture**: Actors expose state via JSON → StateRegistry → InvariantCheck functions → panic on violation
+- **Foundation questions?** → Read `moonpool-foundation/CLAUDE.md` and `docs/specs/`
+- **Actor system questions?** → Read `moonpool/CLAUDE.md` and `docs/analysis/orleans/`
+- **Architecture questions?** → Start with `docs/INDEX.md`
+- **Reference implementations?** → Check `docs/references/` and analysis docs

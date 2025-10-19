@@ -133,18 +133,25 @@ The framework uses "sometimes assertions" for statistical validation under chaos
 
 ## Project Structure
 
-- `moonpool-foundation/` - Core simulation framework and transport layer
-- `docs/specs/` - Comprehensive technical specifications split by component
-- `docs/plans/` - Implementation roadmaps and phase documentation  
-- `docs/analysis/` - FoundationDB reference implementations and architecture analysis
+- **moonpool-foundation/** - Simulation framework and transport layer (✅ Complete)
+- **moonpool/** - Actor system implementation (🚧 In Progress)
+- **docs/** - Comprehensive documentation ([INDEX.md](docs/INDEX.md))
+  - specs/ - Technical specifications
+  - plans/ - Phase implementation roadmaps
+  - analysis/ - Reference architecture analysis
+  - references/ - Source code from FoundationDB, Orleans, TigerBeetle
 
 ## Documentation
 
-- **[Main Specification](docs/specs/moonpool-foundation-spec.md)** - Framework overview and architecture
-- **[Transport Layer](docs/specs/transport-layer-spec.md)** - Sans I/O transport architecture  
-- **[Testing Framework](docs/specs/testing-framework-spec.md)** - Chaos testing and assertion system
-- **[Simulation Core](docs/specs/simulation-core-spec.md)** - Core simulation infrastructure
-- **[Peer Networking](docs/specs/peer-networking-spec.md)** - TCP connection management
+**Start here**: [Main Specification](docs/specs/moonpool-foundation-spec.md) for framework overview
+
+**Key specs**:
+- [Transport Layer](docs/specs/transport-layer-spec.md) - Sans I/O architecture
+- [Testing Framework](docs/specs/testing-framework-spec.md) - Chaos testing
+- [Simulation Core](docs/specs/simulation-core-spec.md) - Core infrastructure
+- [Peer Networking](docs/specs/peer-networking-spec.md) - TCP management
+
+**Complete index**: See [docs/INDEX.md](docs/INDEX.md) for all documentation
 
 ## License
 
