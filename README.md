@@ -4,13 +4,42 @@
   <img src="images/logo.png" alt="Moonpool Logo" />
 </p>
 
-A Rust framework for building distributed systems with deterministic simulation testing, featuring a Sans I/O transport layer and comprehensive chaos testing infrastructure, inspired by FoundationDB's simulation testing approach.
+A Rust workspace containing two distinct projects:
+- **moonpool-foundation**: A standalone deterministic simulation framework (✅ COMPLETE)
+- **moonpool**: A virtual actor system similar to Orleans (❌ NOT BUILT YET)
 
-> **Note:** This is currently a hobby-grade project under active development.
+> **Note:** This is currently a hobby-grade project. Only **moonpool-foundation** is implemented and production-ready. The actor system is in the planning phase.
+
+## Project Components
+
+### moonpool-foundation (✅ COMPLETE - Standalone Framework)
+
+A production-ready **deterministic simulation framework** inspired by FoundationDB's simulation testing approach. This is a **standalone library** that can be used independently to test any distributed system.
+
+**Key Features:**
+- Sans I/O transport layer with request-response semantics
+- Comprehensive chaos testing infrastructure (Buggify, sometimes assertions)
+- Provider pattern for seamless simulation/production switching
+- Complete TCP connection management with automatic reconnection
+- Cross-workload invariant validation system
+
+**Status:** Fully implemented, all tests passing, ready for use.
+
+### moonpool (❌ NOT BUILT YET - Actor System)
+
+A planned **virtual actor system** similar to Microsoft Orleans, featuring location transparency and automatic lifecycle management.
+
+**Planned Features:**
+- Location-transparent actor addressing
+- Automatic activation, deactivation, and migration
+- MessageBus and ActorCatalog runtime infrastructure
+- Built on top of moonpool-foundation
+
+**Status:** Phase 12+ planning only - no implementation yet. Design documents and Orleans analysis available in `docs/`.
 
 ## Overview
 
-Moonpool provides a comprehensive framework for developing and testing distributed systems through deterministic simulation. The framework features a sophisticated Sans I/O transport layer with request-response semantics, enabling you to write distributed system logic once and test it with simulated networking for predictable debugging, then deploy with real networking - all using identical application code.
+**The current implementation is moonpool-foundation**, a comprehensive framework for developing and testing distributed systems through deterministic simulation. The framework features a sophisticated Sans I/O transport layer with request-response semantics, enabling you to write distributed system logic once and test it with simulated networking for predictable debugging, then deploy with real networking - all using identical application code.
 
 ## Features
 
@@ -59,7 +88,8 @@ The framework follows a layered architecture with clear separation of concerns:
 
 ## Current Status
 
-### Implementation Status (✅ COMPLETED)
+### moonpool-foundation: ✅ COMPLETE (Phases 1-11)
+**Standalone deterministic simulation framework - production ready:**
 - ✅ **Phase 11: Sans I/O Transport Layer** - Complete request-response semantics with envelope system
 - ✅ **Provider Pattern** - Full abstraction layer (Network, Time, Task, Random providers)
 - ✅ **Buggify Chaos Testing** - Deterministic fault injection with strategic placement
@@ -69,6 +99,12 @@ The framework follows a layered architecture with clear separation of concerns:
 - ✅ **Cross-Workload Invariant System** - JSON-based state registry with global property validation
 - ✅ **Multi-Topology Testing** - Support for 1x1 through 10x10 client-server topologies with comprehensive bug detection
 - ✅ **Per-Peer Message Tracking** - Detailed accounting for message routing and load distribution validation
+
+### moonpool: ❌ NOT IMPLEMENTED (Phase 12+)
+**Virtual actor system - planning phase only:**
+- Phase 12+ design documents and Orleans reference analysis available
+- No code implementation yet
+- Will build on moonpool-foundation when ready
 
 ## Getting Started
 
@@ -133,12 +169,12 @@ The framework uses "sometimes assertions" for statistical validation under chaos
 
 ## Project Structure
 
-- **moonpool-foundation/** - Simulation framework and transport layer (✅ Complete)
-- **moonpool/** - Actor system implementation (🚧 In Progress)
+- **moonpool-foundation/** - ✅ **COMPLETE**: Standalone deterministic simulation framework (FDB-inspired)
+- **moonpool/** - ❌ **NOT BUILT**: Virtual actor system (Orleans-like, planning only)
 - **docs/** - Comprehensive documentation ([INDEX.md](docs/INDEX.md))
-  - specs/ - Technical specifications
-  - plans/ - Phase implementation roadmaps
-  - analysis/ - Reference architecture analysis
+  - specs/ - Technical specifications (foundation layer complete)
+  - plans/ - Phase implementation roadmaps (Phases 1-11 complete, 12+ planning)
+  - analysis/ - Reference architecture analysis (FDB, Orleans)
   - references/ - Source code from FoundationDB, Orleans, TigerBeetle
 
 ## Documentation
