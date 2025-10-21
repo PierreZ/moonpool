@@ -928,6 +928,541 @@ impl MessageBus {
 
 ---
 
+---
+
+## Message Routing and Delivery
+
+### InsideRuntimeClient (Request Lifecycle)
+
+**File**: `InsideRuntimeClient.cs:27-646`
+
+InsideRuntimeClient manages the full lifecycle of request-response messaging: creating requests, tracking callbacks, handling responses, and executing local invocations.
+
+#### Sending Requests
+
+**InsideRuntimeClient.cs:119-185**:
+
+```csharp
+public void SendRequest(
+    GrainReference target,
+    IInvokable request,
+    IResponseCompletionSource context,
+    InvokeMethodOptions options)
+{
+    var message = this.messageFactory.CreateMessage(request, options);
+    message.InterfaceType = target.InterfaceType;
+    message.InterfaceVersion = target.InterfaceVersion;
+
+    // Fill in sender
+    message.SendingSilo = MySilo;
+    IGrainContext sendingActivation = RuntimeContext.Current;
+    message.SendingGrain = sendingActivation?.GrainId ?? this.HostedClient.Address.GrainId;
+
+    // Fill in destination
+    message.TargetGrain = target.GrainId;
+
+    // SystemTarget - set TargetSilo explicitly
+    if (SystemTargetGrainId.TryParse(message.TargetGrain, out var systemTargetGrainId))
+    {
+        message.TargetSilo = systemTargetGrainId.GetSiloAddress();
+        message.IsSystemMessage = true;
+    }
+
+    // Set TTL for expirable messages
+    if (this.messagingOptions.DropExpiredMessages && message.IsExpirableMessage())
+    {
+        message.TimeToLive = request.GetDefaultResponseTimeout() ?? sharedData.ResponseTimeout;
+    }
+
+    var oneWay = (options & InvokeMethodOptions.OneWay) != 0;
+    if (!oneWay)
+    {
+        // Register a callback for the response
+        var callbackData = new CallbackData(sharedData, context, message);
+        callbacks.TryAdd((message.SendingGrain, message.Id), callbackData);
+        callbackData.SubscribeForCancellation(cancellationToken);
+    }
+    else
+    {
+        context?.Complete();  // OneWay completes immediately
+    }
+
+    this.MessageCenter.AddressAndSendMessage(message);  // Route to MessageCenter
+}
+```
+
+**Key Design Decisions**:
+- **Callback Registration Before Sending**: Ensures we're ready for response
+- **OneWay Optimization**: No callback registration, immediate completion
+- **SystemTarget Fast Path**: TargetSilo set directly (no placement/directory lookup)
+- **TTL Based on Response Timeout**: Enables expiration checking
+
+#### Handling Responses
+
+**InsideRuntimeClient.cs:367-453**:
+
+```csharp
+public void ReceiveResponse(Message message)
+{
+    if (message.Result is Message.ResponseTypes.Rejection)
+    {
+        var rejection = (RejectionResponse)message.BodyObject;
+        switch (rejection.RejectionType)
+        {
+            case Message.RejectionTypes.Unrecoverable:
+            case Message.RejectionTypes.Transient:
+                if (message.CacheInvalidationHeader is null)
+                {
+                    // Remove from local directory cache
+                    this.GrainLocator.InvalidateCache(message.SendingGrain);
+                }
+                break;
+
+            case Message.RejectionTypes.CacheInvalidation when message.HasCacheInvalidationHeader:
+                // The message targeted an invalid activation - no callback to complete
+                return;
+        }
+    }
+    else if (message.Result == Message.ResponseTypes.Status)
+    {
+        // Status update (e.g., "still processing") - don't complete callback
+        callbacks.TryGetValue((message.TargetGrain, message.Id), out var callback);
+        callback?.OnStatusUpdate(status);
+        return;
+    }
+
+    // Normal response - lookup and complete callback
+    bool found = callbacks.TryRemove((message.TargetGrain, message.Id), out var callbackData);
+    if (found)
+    {
+        callbackData.DoCallback(message);
+    }
+}
+```
+
+**Response Flow**:
+1. Check if rejection → handle cache invalidation
+2. Check if status update → update callback, don't complete
+3. Normal response → lookup callback by `(TargetGrain, MessageId)`, complete
+
+#### Local Invocation
+
+**InsideRuntimeClient.cs:250-332**:
+
+```csharp
+public async Task Invoke(IGrainContext target, Message message)
+{
+    try
+    {
+        // Don't process expired messages
+        if (message.IsExpired)
+        {
+            this.messagingTrace.OnDropExpiredMessage(message, MessagingInstruments.Phase.Invoke);
+            return;
+        }
+
+        // Import request context (ambient data)
+        if (message.RequestContextData is { Count: > 0 })
+        {
+            RequestContextExtensions.Import(message.RequestContextData);
+        }
+
+        Response response;
+        try
+        {
+            switch (message.BodyObject)
+            {
+                case IInvokable invokable:
+                    {
+                        invokable.SetTarget(target);
+                        CancellationSourcesExtension.RegisterCancellationTokens(target, invokable);
+
+                        // Apply filters if present
+                        if (GrainCallFilters is { Count: > 0 })
+                        {
+                            var invoker = new GrainMethodInvoker(message, target, invokable, GrainCallFilters, ...);
+                            await invoker.Invoke();
+                            response = invoker.Response;
+                        }
+                        else
+                        {
+                            // Direct invocation (no filters)
+                            response = await invokable.Invoke();
+                            response = this.responseCopier.Copy(response);
+                        }
+                        break;
+                    }
+            }
+        }
+        catch (Exception exc)
+        {
+            response = Response.FromException(exc);
+        }
+
+        // Special handling for InconsistentStateException → deactivate grain
+        if (response.Exception is InconsistentStateException ise && ise.IsSourceActivation)
+        {
+            ise.IsSourceActivation = false;
+            logger.LogWarning("Deactivating {Target} due to inconsistent state.", target);
+            target.Deactivate(new DeactivationReason(DeactivationReasonCode.ApplicationError, ...));
+        }
+
+        if (message.Direction != Message.Directions.OneWay)
+        {
+            SafeSendResponse(message, response);
+        }
+    }
+    catch (Exception exc)
+    {
+        if (message.Direction != Message.Directions.OneWay)
+        {
+            SafeSendExceptionResponse(message, exc);
+        }
+    }
+}
+```
+
+**Invocation Flow**:
+1. Check expiration → drop if expired
+2. Import RequestContext (ambient data propagation)
+3. Set invokable target to activation
+4. Apply filter pipeline (or direct invoke)
+5. Handle exceptions → create error response
+6. Special: InconsistentStateException → deactivate grain
+7. Send response (unless OneWay)
+
+#### Cache Snooping
+
+**InsideRuntimeClient.cs:209-248**:
+
+```csharp
+public void SniffIncomingMessage(Message message)
+{
+    try
+    {
+        if (message.CacheInvalidationHeader != null)
+        {
+            foreach (var update in message.CacheInvalidationHeader)
+            {
+                GrainLocator.UpdateCache(update);
+            }
+        }
+    }
+    catch (Exception exc)
+    {
+        logger.LogWarning(exc, "SniffIncomingMessage has thrown exception.");
+    }
+}
+```
+
+**Called by MessageCenter for every incoming message**. Proactively updates the directory cache based on information piggybacked in message headers.
+
+---
+
+### MessageCenter (Routing and Delivery)
+
+**File**: `MessageCenter.cs:16-632`
+
+MessageCenter handles routing decisions, connection management, forwarding, and message delivery.
+
+#### AddressAndSendMessage (Placement Integration)
+
+**MessageCenter.cs:463-502**:
+
+```csharp
+internal Task AddressAndSendMessage(Message message)
+{
+    try
+    {
+        // Ask PlacementService to determine TargetSilo
+        var messageAddressingTask = placementService.AddressMessage(message);
+        if (messageAddressingTask.Status != TaskStatus.RanToCompletion)
+        {
+            return SendMessageAsync(messageAddressingTask, message);
+        }
+
+        SendMessage(message);
+    }
+    catch (Exception ex)
+    {
+        OnAddressingFailure(message, ex);
+    }
+
+    return Task.CompletedTask;
+}
+```
+
+**Placement Integration**: `PlacementService.AddressMessage()` determines `TargetSilo` by:
+1. Check if SystemTarget → use explicit address
+2. Check directory cache → use cached address
+3. No cache hit → query directory, potentially trigger placement
+
+#### SendMessage (Routing Decision)
+
+**MessageCenter.cs:144-245**:
+
+```csharp
+public void SendMessage(Message msg)
+{
+    msg.SendingSilo ??= _siloAddress;
+
+    if (stopped)
+    {
+        SendRejection(msg, Message.RejectionTypes.Unrecoverable, "Outbound queue stopped");
+        return;
+    }
+
+    // Don't process expired messages
+    if (msg.IsExpired)
+    {
+        this.messagingTrace.OnDropExpiredMessage(msg, MessagingInstruments.Phase.Send);
+        return;
+    }
+
+    // Check if destined for proxy (gateway or hosted client)
+    if (TryDeliverToProxy(msg))
+    {
+        return;
+    }
+
+    if (msg.TargetSilo is not { } targetSilo)
+    {
+        SendRejection(msg, Message.RejectionTypes.Unrecoverable, "No target silo.");
+        return;
+    }
+
+    messagingTrace.OnSendMessage(msg);
+
+    // LOCAL OPTIMIZATION: Same-silo delivery
+    if (targetSilo.Matches(_siloAddress))
+    {
+        MessagingInstruments.LocalMessagesSentCounterAggregator.Add(1);
+        this.ReceiveMessage(msg);  // Direct delivery, no network
+    }
+    else
+    {
+        // REMOTE DELIVERY: Get connection and send
+        if (this.connectionManager.TryGetConnection(targetSilo, out var existingConnection))
+        {
+            existingConnection.Send(msg);
+            return;
+        }
+        else if (this.siloStatusOracle.IsDeadSilo(targetSilo))
+        {
+            // Do not try to establish connection to dead silo
+            this.SendRejection(msg, Message.RejectionTypes.Transient, "Target silo is dead", ...);
+            return;
+        }
+        else
+        {
+            // Establish new connection
+            var connectionTask = this.connectionManager.GetConnection(targetSilo);
+            if (connectionTask.IsCompletedSuccessfully)
+            {
+                connectionTask.Result.Send(msg);
+            }
+            else
+            {
+                _ = SendAsync(this, connectionTask, msg);
+            }
+        }
+    }
+}
+```
+
+**Routing Decision Tree**:
+1. **Expiration check**: Drop if TTL exceeded
+2. **Proxy check**: Client messages go to gateway/hosted client
+3. **Local optimization**: Same-silo → call `ReceiveMessage()` directly (99% latency reduction)
+4. **Remote delivery**: Get connection → send over network
+5. **Dead silo check**: Reject if target is known dead
+6. **Connection establishment**: Async connection creation if needed
+
+#### ReceiveMessage (Dispatch)
+
+**MessageCenter.cs:518-567**:
+
+```csharp
+public void ReceiveMessage(Message msg)
+{
+    try
+    {
+        this.messagingTrace.OnIncomingMessageAgentReceiveMessage(msg);
+
+        // Try proxy delivery first (client message)
+        if (TryDeliverToProxy(msg))
+        {
+            return;
+        }
+        else if (msg.Direction == Message.Directions.Response)
+        {
+            // Response message → route to InsideRuntimeClient
+            this.catalog.RuntimeClient.ReceiveResponse(msg);
+        }
+        else
+        {
+            // Request message → get or create activation
+            var targetActivation = catalog.GetOrCreateActivation(
+                msg.TargetGrain,
+                msg.RequestContextData,
+                rehydrationContext: null);
+
+            if (targetActivation is null)
+            {
+                ProcessMessageToNonExistentActivation(msg);
+                return;
+            }
+
+            targetActivation.ReceiveMessage(msg);  // Enqueue to activation's WorkItemGroup
+        }
+    }
+    catch (Exception ex)
+    {
+        this.RejectMessage(msg, Message.RejectionTypes.Transient, ex);
+    }
+}
+```
+
+**Dispatch Logic**:
+1. Try proxy delivery → gateway/hosted client
+2. Response → `InsideRuntimeClient.ReceiveResponse()`
+3. Request → `Catalog.GetOrCreateActivation()` → `activation.ReceiveMessage()`
+
+**Integration**: `activation.ReceiveMessage()` enqueues in the activation's WorkItemGroup (see task-scheduling.md).
+
+#### Forwarding (Stale Address Handling)
+
+**MessageCenter.cs:358-406**:
+
+```csharp
+private void TryForwardRequest(Message message, GrainAddress? oldAddress, GrainAddress? destination, ...)
+{
+    bool forwardingSucceeded = false;
+    try
+    {
+        this.messagingTrace.OnDispatcherForwarding(message, oldAddress, destination, ...);
+
+        // Add cache invalidation header
+        if (oldAddress != null)
+        {
+            message.AddToCacheInvalidationHeader(oldAddress, validAddress: destination);
+        }
+
+        forwardingSucceeded = this.TryForwardMessage(message, destination?.SiloAddress);
+    }
+    catch (Exception exc)
+    {
+        forwardingSucceeded = false;
+    }
+    finally
+    {
+        var sentRejection = false;
+
+        // OneWay: Send cache invalidation response even if forwarding succeeded
+        if (message.Direction == Message.Directions.OneWay)
+        {
+            this.RejectMessage(message, Message.RejectionTypes.CacheInvalidation, ...);
+            sentRejection = true;
+        }
+
+        if (!forwardingSucceeded && !sentRejection)
+        {
+            RejectMessage(message, Message.RejectionTypes.Transient, ...);
+        }
+    }
+}
+
+private bool TryForwardMessage(Message message, SiloAddress? forwardingAddress)
+{
+    if (message.ForwardCount >= messagingOptions.MaxForwardCount) return false;
+
+    message.ForwardCount = message.ForwardCount + 1;
+    ResendMessageImpl(message, forwardingAddress);
+    return true;
+}
+```
+
+**Forwarding Protocol**:
+1. Check `ForwardCount < MaxForwardCount` (default 2)
+2. Increment `ForwardCount`
+3. Add cache invalidation header with old and new addresses
+4. Resend message to new address (or null to trigger placement)
+5. OneWay messages: Send cache invalidation rejection even if forwarding succeeds
+
+**Why forward?** When a message arrives for an activation that:
+- No longer exists (deactivated)
+- Moved to another silo (migration)
+- Was never created (directory race)
+
+---
+
+### Cache Invalidation Protocol
+
+#### Message Header Structure
+
+Messages include `List<GrainAddressCacheUpdate>` for proactive cache updates:
+
+```csharp
+public struct GrainAddressCacheUpdate
+{
+    public GrainAddress InvalidGrainAddress { get; set; }
+    public GrainAddress? ValidGrainAddress { get; set; }
+}
+```
+
+#### Update Flow
+
+```
+Sender                    Wrong Silo                Correct Silo
+  |                            |                          |
+  |-- Request (GrainX) ------->| (X not here)             |
+  |                            | Forward to Correct Silo  |
+  |                            |--- Request + Header ---->|
+  |                            |    InvalidAddr: WrongSilo|
+  |                            |    ValidAddr: CorrectSilo|
+  |                            |                          |
+  |                            |<-------- Response -------|
+  |<-- Response + Header ------|                          |
+  |    (SniffIncomingMessage)  |                          |
+  |    Update cache:           |                          |
+  |      Invalidate WrongSilo  |                          |
+  |      Cache CorrectSilo     |                          |
+```
+
+**Benefits**:
+- **Proactive**: Sender learns about stale cache without explicit query
+- **Piggyback**: No extra messages needed
+- **Propagation**: Headers flow back through forwarding chain
+
+---
+
+### Rejection Types
+
+**Message.RejectionTypes**:
+- **Overloaded** - Silo overloaded, retry later
+- **Transient** - Temporary failure (activation moved, not found), retry with fresh address
+- **Unrecoverable** - Permanent failure (SystemTarget doesn't exist, silo stopped), don't retry
+- **CacheInvalidation** - OneWay to invalid activation, update cache but don't complete callback
+
+---
+
+### Local vs Remote Optimization
+
+**Performance Characteristics**:
+
+**Local Call** (same silo):
+- Directly calls `ReceiveMessage()`
+- No serialization, no network, no deserialization
+- ~100ns overhead
+
+**Remote Call** (different silo):
+- Serializes message → Network send/receive → Deserializes
+- ~1-10ms overhead (LAN)
+
+**Optimization Impact**: **99% latency reduction** for same-silo calls
+
+---
+
 ## Summary
 
 Orleans message system is built on:
@@ -936,11 +1471,16 @@ Orleans message system is built on:
 - **CallbackData**: Track pending responses with timeout/cancellation
 - **Message flags**: Control routing, reentrancy, lifecycle
 - **Time-to-live**: Efficient expiration checking
+- **InsideRuntimeClient**: Request lifecycle, callback management, local invocation
+- **MessageCenter**: Routing decisions, local optimization, forwarding
+- **Cache invalidation**: Proactive updates via message headers
+- **Forwarding**: Bounded retries with MaxForwardCount
 
 Key architectural principles:
 - Exactly-once completion via Interlocked
+- Local optimization (same-silo fast path)
+- Automatic forwarding with bounded retries
+- Proactive cache invalidation propagation
 - Separate timeout, cancellation, silo failure paths
-- Flexible per-request configuration
-- Comprehensive instrumentation
 
-For Moonpool Phase 12: Use correlation-based pattern, embed channels for type safety, implement timeout via Provider traits, track all pending requests in registry.
+For Moonpool Phase 12: Use correlation-based pattern, embed channels for type safety, implement local optimization, track all pending requests in registry.

@@ -294,14 +294,19 @@ Deep dives into reference architectures from production systems.
 ---
 
 #### [message-system.md](analysis/orleans/message-system.md)
-**Messaging architecture in Orleans**
-- Message structure and routing
-- Correlation ID management
-- Request-response patterns
-- Message center architecture
+**Comprehensive messaging architecture and routing**
+- Message structure (packed headers, correlation IDs, TTL tracking)
+- CallbackData (response tracking, timeout/cancellation management)
+- InsideRuntimeClient (request lifecycle, callback management, local invocation)
+- MessageCenter (routing decisions, local vs remote optimization, forwarding)
+- Request-response patterns with exactly-once completion
+- Cache invalidation protocol (proactive updates via message headers)
+- Rejection types (Transient, Unrecoverable, CacheInvalidation)
+- Local optimization (same-silo fast path with 99% latency reduction)
+- Bounded forwarding with MaxForwardCount limit
 
-**Relevant for**: Phase 12 Steps 5-7
-**References**: `Message.cs`, `MessageCenter.cs`, `CallbackData.cs`
+**Relevant for**: Phase 12 Steps 5-7 (MessageBus, request-response)
+**References**: `Message.cs`, `CallbackData.cs`, `InsideRuntimeClient.cs`, `MessageCenter.cs`
 
 ---
 
@@ -341,6 +346,77 @@ Deep dives into reference architectures from production systems.
 
 **Relevant for**: Phase 12 Steps 1-2 (ActorCatalog lifecycle, bootstrap)
 **References**: `Silo.cs`, `SystemTarget.cs`, `GrainService.cs`, `ISiloLifecycle.cs`
+
+---
+
+#### [membership-service.md](analysis/orleans/membership-service.md)
+**Distributed membership and failure detection**
+- ClusterMembershipSnapshot (immutable cluster state with versioning)
+- MembershipTableManager (storage orchestration, optimistic concurrency)
+- MembershipAgent (local silo status lifecycle: Joining → Active → Dead)
+- SiloHealthMonitor (per-silo failure detection, direct/indirect probing)
+- ClusterHealthMonitor (expander graph monitoring topology)
+- Voting-based eviction (prevents false positives)
+- Gossip protocol (low-latency propagation)
+- IAmAlive heartbeats (liveness proof)
+- Storage abstraction with ETags (write conflict handling)
+
+**Note for Moonpool**: Early iterations will use simple static membership where cluster members are declared statically. Full dynamic membership features (failure detection, voting, gossip) can be added incrementally as the actor system matures.
+
+**Relevant for**: Future distributed cluster features, failure detection
+**References**: `ClusterMembershipSnapshot.cs`, `MembershipTableManager.cs`, `MembershipAgent.cs`, `SiloHealthMonitor.cs`, `ClusterHealthMonitor.cs`, `SiloStatusOracle.cs`
+
+---
+
+#### [grain-directory.md](analysis/orleans/grain-directory.md)
+**Distributed location service for virtual actors**
+- GrainLocator (facade pattern for directory operations)
+- GrainDirectoryResolver (per-grain-type directory selection)
+- DistributedGrainDirectory (consistent ring DHT with 30 partitions per silo)
+- GrainDirectoryPartition (range ownership with view changes)
+- Virtual Synchrony protocol (normal operation + view change phases)
+- Snapshot-based partition handoff during membership changes
+- Recovery mechanism (collect registrations from all silos after crashes)
+- Cache invalidation protocol (proactive updates via message headers)
+- Versioned range locks (wedges) for view change coordination
+
+**Note for Moonpool**: Start with StaticDirectory (all actors local) for Phase 12. Add distributed features incrementally.
+
+**Relevant for**: Phase 12 location transparency, message routing
+**References**: `GrainLocator.cs`, `GrainDirectoryResolver.cs`, `DistributedGrainDirectory.cs`, `GrainDirectoryPartition.cs`, `IGrainDirectory.cs`
+
+---
+
+#### [grain-references.md](analysis/orleans/grain-references.md)
+**Type-safe remote object references**
+- GrainReference (base class with identity, equality, invocation)
+- GrainReferenceShared (Flyweight pattern for shared state)
+- GrainReferenceActivator (factory with provider chain)
+- RpcProvider (interface type to proxy type mapping)
+- Dynamic proxy generation (DynamicMethod for fast construction)
+- Surrogate serialization (compact wire format: GrainId + InterfaceType only)
+- Request base types (Request, Request<T>, TaskRequest, VoidRequest)
+- Interface versioning support
+
+**Relevant for**: Phase 12 ActorRef, factory pattern, serialization
+**References**: `GrainReference.cs`, `GrainReferenceActivator.cs`, `GrainFactory.cs`
+
+---
+
+#### [state-persistence.md](analysis/orleans/state-persistence.md)
+**Durable state management for virtual actors**
+- IPersistentState<T> (grain-facing interface with State, Etag, RecordExists)
+- PersistentState<T> (lifecycle integration: automatic loading, migration)
+- StateStorageBridge<T> (storage bridge with error handling, instrumentation)
+- IGrainStorage (provider interface for pluggable backends)
+- Optimistic concurrency (ETag-based conflict detection)
+- InconsistentStateException (automatic deactivation on write conflicts)
+- Migration support (Dehydrate/Rehydrate for state transfer)
+- Lifecycle integration (SetupState stage for automatic loading)
+- Multi-state support (multiple persistent state properties per grain)
+
+**Relevant for**: Phase 12 state persistence, future distributed state
+**References**: `IPersistentState.cs`, `StateStorageBridge.cs`, `IGrainStorage.cs`, `PersistentStateStorageFactory.cs`
 
 ---
 
