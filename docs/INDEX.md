@@ -329,6 +329,21 @@ Deep dives into reference architectures from production systems.
 
 ---
 
+#### [silo-bootstrap.md](analysis/orleans/silo-bootstrap.md)
+**Silo bootstrap and SystemTarget infrastructure**
+- Lifecycle-based actor runtime initialization
+- Lifecycle stages (RuntimeInitialize → Active)
+- Lifecycle participant pattern
+- SystemTargets as static infrastructure actors
+- GrainServices with consistent ring participation
+- Ordered execution via WorkItemGroup
+- Symmetric shutdown and cleanup
+
+**Relevant for**: Phase 12 Steps 1-2 (ActorCatalog lifecycle, bootstrap)
+**References**: `Silo.cs`, `SystemTarget.cs`, `GrainService.cs`, `ISiloLifecycle.cs`
+
+---
+
 ## Reference Source Code
 
 Production-quality code from established systems.
@@ -380,7 +395,11 @@ Located in `references/orleans/`:
 - **ActivationTaskScheduler.cs** - Task scheduling
 - **WorkQueue.cs** - Queue implementation
 
-#### Lifecycle
+#### Lifecycle and Bootstrap
+- **Silo.cs** - Actor runtime bootstrap, lifecycle orchestration
+- **SystemTarget.cs** - Static infrastructure actors
+- **GrainService.cs** - Partitioned infrastructure services
+- **ISiloLifecycle.cs** - Lifecycle interface and stages
 - **GrainCollectionOptions.cs** - Virtual actor configuration
 - **DeactivationReason.cs** - Deactivation triggers
 - **SiloLifecycle.cs** - Catalog lifecycle (equivalent to ActorCatalog state machine)
