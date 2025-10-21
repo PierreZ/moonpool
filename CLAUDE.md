@@ -1,19 +1,39 @@
 # Moonpool Workspace
 
-Rust workspace for deterministic distributed systems testing and actor-based programming.
+Rust workspace containing two distinct projects:
+- **moonpool-foundation**: A standalone deterministic simulation framework (inspired by FoundationDB)
+- **moonpool**: A virtual actor system similar to Orleans
+
+## What is Moonpool?
+
+This workspace contains **two separate projects** with different purposes and completion status:
+
+### moonpool-foundation (✅ COMPLETED - Standalone Framework)
+A production-ready deterministic simulation framework inspired by FoundationDB's simulation testing approach:
+- **Sans I/O transport layer** with request-response semantics
+- **Comprehensive chaos testing** infrastructure (Buggify, sometimes assertions, invariant validation)
+- **Provider pattern** for seamless simulation/production switching
+- **Complete and usable independently** for testing any distributed system
+
+### moonpool (❌ NOT BUILT YET - Actor System)
+A planned virtual actor system similar to Microsoft Orleans:
+- **Location transparency** - actors addressable by ID regardless of physical location
+- **Automatic lifecycle management** - activation, deactivation, migration
+- **MessageBus and ActorCatalog** - core actor runtime infrastructure
+- **Currently in Phase 12 planning** - implementation not started
 
 ## Workspace Structure
 
 ```
 moonpool/
-├── moonpool-foundation/    # Core simulation & transport layer (Phases 1-11 COMPLETED)
+├── moonpool-foundation/    # ✅ STANDALONE simulation framework (FDB-inspired, COMPLETED)
 │   └── CLAUDE.md          # Foundation-specific development guide
-├── moonpool/              # Actor system (Phase 12+ IN PROGRESS)
-│   └── CLAUDE.md          # Actor system development guide
+├── moonpool/              # ❌ Virtual actor system (Orleans-like, NOT BUILT YET)
+│   └── CLAUDE.md          # Actor system development guide (planning only)
 └── docs/                  # Comprehensive documentation
     ├── specs/             # Technical specifications
     ├── plans/             # Phase-by-phase implementation plans
-    ├── analysis/          # Reference architecture analysis
+    ├── analysis/          # Reference architecture analysis (FDB, Orleans)
     └── references/        # Source code from FDB, Orleans, TigerBeetle
 ```
 
@@ -121,6 +141,25 @@ Apply to all crates in workspace:
 - **Trait-based design**: Depend on traits, not concrete types
 - **KISS principle**: Simplicity over features
 - **Provider pattern**: Use TimeProvider, NetworkProvider, TaskProvider traits
+- **State machines**: Use explicit enum-based state machines for protocols and complex lifecycle management
+
+### State Machine Pattern
+
+For any protocol implementation or component with complex lifecycle, use explicit enum-based state machines.
+
+**Benefits**:
+- **Type safety**: Invalid state transitions become compile errors
+- **Clarity**: All possible states are explicit and documented
+- **Testability**: Easy to test specific state transitions
+- **Debuggability**: Clear current state in logs and debugging
+
+**When to use**:
+- Network protocols (connection lifecycle, request-response)
+- Actor lifecycle (activation, deactivation, migration)
+- Multi-step workflows (cluster formation, leader election)
+- Any component with 3+ distinct states
+
+**Avoid**: Boolean soup (multiple boolean flags where valid combinations are unclear)
 
 ### Forbidden Patterns
 ❌ `tokio::time::sleep()` → ✅ `time.sleep()`
@@ -162,8 +201,20 @@ Source code from production systems:
 
 ## Current Status
 
-- ✅ **moonpool-foundation** (Phases 1-11): Core simulation framework with Sans I/O transport layer
-- 🚧 **moonpool** (Phase 12+): Actor system implementation beginning
+### moonpool-foundation: ✅ COMPLETE & PRODUCTION-READY
+**Standalone deterministic simulation framework** (inspired by FoundationDB):
+- Phases 1-11 fully implemented and tested
+- Sans I/O transport layer with request-response semantics
+- Comprehensive chaos testing infrastructure
+- **Can be used independently** for testing any distributed system
+- All tests passing, 100% coverage of sometimes assertions
+
+### moonpool: ❌ NOT BUILT YET
+**Virtual actor system** (similar to Microsoft Orleans):
+- Phase 12+ planning in progress
+- **No code implementation yet** - only design documents and analysis
+- Will build on moonpool-foundation when ready
+- See `docs/analysis/orleans/` for reference architecture research
 
 ## Testing Philosophy
 
