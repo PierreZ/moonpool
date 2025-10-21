@@ -749,6 +749,126 @@ public abstract partial class SystemTarget : ISystemTarget, ISystemTargetBase, I
 | **Use Case** | Infrastructure services | Application logic |
 | **Examples** | GrainDirectory, Membership | User-defined grains |
 
+### Location Transparency: The Critical Difference
+
+**Regular grains** enjoy full location transparency, while **SystemTargets** are explicitly silo-bound. This is the most important architectural distinction between the two.
+
+#### Regular Grains: Full Location Transparency
+
+**From application developer perspective**:
+
+```csharp
+// Get grain reference - NO silo address specified
+var account = grainFactory.GetGrain<IAccountGrain>("alice");
+
+// Call the grain - developer doesn't know or care where it runs
+var balance = await account.GetBalance();
+```
+
+**What Orleans does automatically**:
+1. **Grain directory lookup**: Which silo (if any) has this grain activated?
+2. **Placement decision** (if not activated): Pick best silo based on placement strategy
+3. **Activation** (if needed): Create grain instance, run `OnActivateAsync()`
+4. **Message routing**: Send call to correct silo (may be local or remote)
+5. **Migration** (if needed): Move grain to different silo, update directory
+
+**Developer sees**: Just a grain ID (`"alice"`), no silo address
+**Orleans provides**: Automatic location discovery and routing
+
+#### SystemTargets: Silo-Specific Addressing
+
+**From code perspective**:
+
+```csharp
+// SystemTarget constructor - GrainId INCLUDES silo address
+internal SystemTarget(GrainType grainType, SystemTargetShared shared)
+    : this(SystemTargetGrainId.Create(grainType, shared.SiloAddress), shared)
+{
+    // ActivationId is deterministic: same type + same silo = same ActivationId
+    ActivationId = ActivationId.GetDeterministic(grainId.GrainId);
+    ActivationAddress = GrainAddress.GetAddress(Silo, _id.GrainId, ActivationId);
+}
+```
+
+**Key insight**: `SystemTargetGrainId.Create(grainType, shared.SiloAddress)`
+
+The SystemTarget's grain ID **includes the silo address**. This means:
+
+**To call a SystemTarget, you must specify**:
+1. The SystemTarget type
+2. **Which silo it's on**
+
+**Example** (conceptual - this is internal Orleans code):
+```csharp
+// Regular grain - no silo specified
+var grain = grainFactory.GetGrain<IAccountGrain>("alice");
+
+// SystemTarget - MUST specify target silo
+var catalog = GetSystemTarget<ICatalog>(targetSiloAddress);
+```
+
+**Why no location transparency?**
+1. **No grain directory**: SystemTargets aren't in the grain directory
+2. **No placement**: No decision about where to create them - they're created at silo startup
+3. **No migration**: They can't move (`Migrate()` is a no-op)
+4. **Silo-local state**: They manage silo-specific resources
+
+#### Practical Implications
+
+**Regular Grain Call Flow**:
+```
+Developer: grainFactory.GetGrain<IAccount>("alice").GetBalance()
+    ↓
+1. Grain directory: Lookup "alice" → find silo address (or null)
+2. If not activated: Pick silo, activate grain
+3. Route message to target silo
+4. Execute on grain's WorkItemGroup
+5. Return result
+```
+
+**SystemTarget Call Flow**:
+```
+Orleans internal code: GetSystemTarget<Catalog>(siloX).GetOrCreateActivation(...)
+    ↓
+1. NO directory lookup - caller already knows silo
+2. Directly route to siloX
+3. Execute on SystemTarget's WorkItemGroup
+4. Return result
+```
+
+#### Why This Design?
+
+SystemTargets are **infrastructure services that manage silo-local resources**:
+
+**Examples**:
+- **Catalog** - Manages activations **on this silo**
+- **ActivationDirectory** - Registry of activations **on this silo**
+- **MessageCenter** - Routes messages **for this silo**
+- **GrainDirectory** (partition) - Manages directory entries **owned by this silo**
+
+These services are **inherently silo-specific**. Making them location-transparent would be:
+- **Unnecessary**: They always run locally on their silo
+- **Incorrect**: You need to call the Catalog **on the specific silo** you care about
+- **Inefficient**: Would require directory lookups for infrastructure calls
+
+**When you need to call another silo's Catalog**: You explicitly address it by silo address, because you're asking "What activations does **silo X** have?"
+
+**When you call an account grain**: You don't care which silo it's on, you just want "Alice's account" - Orleans figures out the location.
+
+### Location Transparency Summary
+
+| Aspect | Regular Grains | SystemTargets |
+|--------|---------------|---------------|
+| **Developer specifies** | Grain ID only | Grain type + Silo address |
+| **Grain directory** | Yes - dynamic lookup | No - deterministic addressing |
+| **Placement** | Dynamic (placement strategy) | Static (created at silo startup) |
+| **Migration** | Supported | Not supported |
+| **Call routing** | Orleans finds location | Caller specifies location |
+| **Typical callers** | Applications, other grains | Orleans internal infrastructure |
+| **Example** | `GetGrain<IAccount>("alice")` | `GetSystemTarget<Catalog>(siloAddress)` |
+
+**For Moonpool**: This distinction is critical. System actors (like Catalog) should require node-address specification, while regular actors should be fully location-transparent. This matches Orleans' design and prevents confusion about what's happening under the hood.
+
 ### SystemTargetShared: Shared Dependencies
 
 **Code**: `SystemTargetShared.cs:12-41`
