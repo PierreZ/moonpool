@@ -734,7 +734,465 @@ callback_data.response_sender.send(Ok(response))?;
 
 ---
 
+### 16. StateSerializer (Trait)
+
+**Purpose**: Pluggable serialization strategy for actor state persistence.
+
+**Trait Definition**:
+```rust
+pub trait StateSerializer: Clone {
+    fn serialize<T: Serialize>(&self, value: &T) -> Result<Vec<u8>, StorageError>;
+    fn deserialize<T: DeserializeOwned>(&self, data: &[u8]) -> Result<T, StorageError>;
+}
+```
+
+**Default Implementation (JSON)**:
+```rust
+#[derive(Clone, Copy)]
+pub struct JsonSerializer;
+
+impl StateSerializer for JsonSerializer {
+    fn serialize<T: Serialize>(&self, value: &T) -> Result<Vec<u8>, StorageError> {
+        serde_json::to_vec(value).map_err(StorageError::from)
+    }
+
+    fn deserialize<T: DeserializeOwned>(&self, data: &[u8]) -> Result<T, StorageError> {
+        serde_json::from_slice(data).map_err(StorageError::from)
+    }
+}
+```
+
+**Validation Rules**:
+- MUST be Clone (for provider pattern)
+- MUST handle serialization errors gracefully
+- SHOULD use deterministic format for testing (JSON default)
+
+**Use Cases**:
+- **JSON** (default): Human-readable, debuggable, zero configuration
+- **Bincode** (future): Compact binary format for performance
+- **Protobuf** (future): Schema evolution support
+
+---
+
+### 17. StorageProvider (Trait)
+
+**Purpose**: Abstract interface for actor state persistence with pluggable serializer.
+
+**Trait Definition**:
+```rust
+#[async_trait(?Send)]
+pub trait StorageProvider: Clone {
+    /// Load raw state bytes for an actor. Returns None if no state exists.
+    ///
+    /// **Key**: Derived from ActorId as "namespace::actor_type/key"
+    /// **Example**: load_state(ActorId("prod", "BankAccount", "alice"))
+    async fn load_state(&self, actor_id: &ActorId) -> Result<Option<Vec<u8>>, StorageError>;
+
+    /// Save raw state bytes for an actor. Overwrites existing state.
+    ///
+    /// **Atomicity**: Implementation-defined (naive storage may not be atomic)
+    /// **Key**: Same as load_state
+    async fn save_state(&self, actor_id: &ActorId, data: Vec<u8>) -> Result<(), StorageError>;
+}
+```
+
+**Validation Rules**:
+- Implementations MUST support Clone (for provider pattern)
+- Keys MUST use format: `"namespace::actor_type/key"`
+- Keys MUST NOT exceed 512 characters total (namespace + actor_type + key + delimiters)
+- Reserved delimiters `::` and `/` MUST NOT appear in namespace, actor_type, or key fields
+- MUST return None for non-existent state (not error)
+- Save MUST overwrite existing state completely
+- MUST be single-threaded compatible (`#[async_trait(?Send)]`)
+
+**Invariants**:
+- save_state followed by load_state returns same data (unless buggify injects failure)
+- Namespace isolation: Cannot load state from different namespace
+- Actor type isolation: Keys include actor_type for natural partitioning
+- Single activation: No concurrency control needed (actor only active on one node)
+
+**Concurrency Guarantees**:
+- **Reads**: Multiple nodes MAY read same storage key during activation race (eventual consistency)
+- **Writes**: Only one node writes to storage key (single activation guarantee)
+- **Race Scenario**: Node A and Node B both read state during activation, but only winner writes
+- **No TOCTOU issues**: Lost activation race triggers deactivation before message processing
+
+**Error Handling**:
+- Return Result<T, StorageError> for all operations
+- No automatic retry (caller decides strategy)
+- Framework handles serialization, storage only deals with bytes
+
+---
+
+### 18. ActorState<T>
+
+**Purpose**: Wrapper for actor persistent state with automatic persistence on mutation.
+
+**Structure**:
+```rust
+pub struct ActorState<T> {
+    data: T,
+    storage_handle: Box<dyn StateStorage>,  // Internal framework-managed storage
+}
+
+// Internal trait for storage abstraction (not public API)
+#[async_trait(?Send)]
+trait StateStorage {
+    async fn persist(&self, data: &[u8]) -> Result<(), StorageError>;
+}
+```
+
+**Public API**:
+```rust
+impl<T: Serialize + DeserializeOwned + Clone> ActorState<T> {
+    /// Get immutable reference to state
+    pub fn get(&self) -> &T {
+        &self.data
+    }
+
+    /// Update state and persist immediately
+    ///
+    /// **Persistence**: Serializes state and saves to storage automatically
+    /// **Atomicity**: Depends on storage implementation
+    /// **Error Handling**: Returns StorageError if persistence fails
+    pub async fn persist(&mut self, new_data: T) -> Result<(), StorageError> {
+        // Serialize state
+        let bytes = serde_json::to_vec(&new_data)?;
+
+        // Save to storage
+        self.storage_handle.persist(&bytes).await?;
+
+        // Update in-memory state only after successful save
+        self.data = new_data;
+
+        Ok(())
+    }
+}
+```
+
+**Framework Construction** (internal, not exposed to actor):
+```rust
+impl<T> ActorState<T> {
+    // Used by framework during activation
+    pub(crate) fn new_with_storage<S: StateSerializer>(
+        data: T,
+        actor_id: ActorId,
+        storage: Arc<dyn StorageProvider>,
+        serializer: S,
+    ) -> Self {
+        Self {
+            data,
+            storage_handle: Box::new(ProductionStateStorage {
+                actor_id,
+                storage,
+                serializer,
+            }),
+        }
+    }
+
+    // Used in tests to capture persistence calls
+    pub(crate) fn new_with_test_storage(
+        data: T,
+        saves: Rc<RefCell<Vec<Vec<u8>>>>,
+    ) -> Self {
+        Self {
+            data,
+            storage_handle: Box::new(TestStateStorage { saves }),
+        }
+    }
+
+    // Stateless actor (no persistence)
+    pub(crate) fn new_without_storage(data: T) -> Self {
+        Self {
+            data,
+            storage_handle: Box::new(NoOpStorage),
+        }
+    }
+}
+```
+
+**Validation Rules**:
+- State type `T` MUST implement `Serialize + DeserializeOwned + Clone`
+- `persist()` MUST serialize before saving (framework responsibility)
+- `persist()` MUST update in-memory state only after successful save
+- Actor MUST NOT access `storage_handle` directly
+
+**Invariants**:
+- In-memory state matches persisted state after successful `persist()` call
+- Failed `persist()` leaves in-memory state unchanged
+- `get()` returns immutable reference (prevents mutation without persistence)
+
+**Error Handling**:
+- `persist()` returns `StorageError` on serialization failure
+- `persist()` returns `StorageError` on storage backend failure
+- Actor code must handle storage errors explicitly
+
+**Usage Pattern**:
+```rust
+pub struct BankAccountActor {
+    actor_id: ActorId,
+    state: ActorState<BankAccountState>,  // Persistent state
+    cache: HashMap<String, String>,        // Ephemeral (not persisted)
+}
+
+impl BankAccountActor {
+    pub async fn deposit(&mut self, amount: u64) -> Result<u64, ActorError> {
+        // Clone current state
+        let mut data = self.state.get().clone();
+
+        // Mutate cloned state
+        data.balance += amount;
+
+        // Persist (serialize + save + update in-memory)
+        self.state.persist(data).await?;
+
+        Ok(self.state.get().balance)
+    }
+}
+```
+
+---
+
+### 19. StorageError
+
+**Purpose**: Error types for storage operations.
+
+**Structure**:
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum StorageError {
+    /// Serialization/deserialization failed
+    #[error("Serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
+
+    /// Underlying I/O error (file, network, etc.)
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// Storage system unavailable
+    #[error("Storage unavailable")]
+    Unavailable,
+
+    /// Key not found (only for operations that require existence)
+    #[error("Key not found: {0}")]
+    NotFound(String),
+
+    /// Generic operation failure
+    #[error("Storage operation failed: {0}")]
+    OperationFailed(String),
+}
+```
+
+**Usage**:
+```rust
+// In actor method
+match storage.save_state(&self.actor_id, data).await {
+    Ok(()) => { /* Success */ }
+    Err(StorageError::Unavailable) => {
+        // Storage down - retry later or fail gracefully
+    }
+    Err(StorageError::Io(e)) => {
+        // Disk full, network error, etc.
+    }
+    Err(e) => {
+        // Other errors
+    }
+}
+```
+
+---
+
+### 18. InMemoryStorage
+
+**Purpose**: In-memory storage implementation for testing and simulation.
+
+**Structure**:
+```rust
+#[derive(Clone)]
+pub struct InMemoryStorage {
+    data: Rc<RefCell<HashMap<String, Vec<u8>>>>,
+}
+
+impl InMemoryStorage {
+    pub fn new() -> Self {
+        Self {
+            data: Rc::new(RefCell::new(HashMap::new())),
+        }
+    }
+
+    fn storage_key(actor_id: &ActorId) -> String {
+        format!("{}::{}/{}", actor_id.namespace, actor_id.actor_type, actor_id.key)
+    }
+}
+```
+
+**Fields**:
+- `data` - Shared HashMap via Rc<RefCell<>> (single-threaded)
+
+**Validation Rules**:
+- Keys MUST be unique per ActorId
+- Data MUST be cloned on load (immutable after return)
+- MUST support buggify injection for failure testing
+
+**Invariants**:
+- Thread-safe in single-threaded context (RefCell ensures no overlapping borrows)
+- Clone creates shallow copy (shared HashMap)
+- Deterministic (no async I/O, immediate completion)
+
+**Buggify Integration**:
+```rust
+#[async_trait(?Send)]
+impl StorageProvider for InMemoryStorage {
+    async fn save_state(&self, actor_id: &ActorId, data: Vec<u8>) -> Result<(), StorageError> {
+        // Inject random failures in simulation
+        if buggify_with_prob!(0.1) {
+            return Err(StorageError::OperationFailed("Simulated failure".into()));
+        }
+
+        let key = Self::storage_key(actor_id);
+        self.data.borrow_mut().insert(key, data);
+        Ok(())
+    }
+}
+```
+
+---
+
+### 20. Actor Trait (with Typed State)
+
+**Purpose**: Actor lifecycle interface with type-safe state management.
+
+**Trait Definition**:
+```rust
+#[async_trait(?Send)]
+pub trait Actor: Sized {
+    /// Persistent state type (default: () for stateless actors)
+    type State: Serialize + DeserializeOwned = ();
+
+    /// Get this actor's ID
+    fn actor_id(&self) -> &ActorId;
+
+    /// Called when actor is activated (before first message).
+    ///
+    /// **state**: Previously persisted state loaded by framework (None if first activation)
+    /// **Timing**: SetupState stage (Orleans model)
+    /// **Failure**: Returns error → actor transitions to Deactivating
+    async fn on_activate(&mut self, state: Option<Self::State>) -> Result<(), ActorError>;
+
+    /// Called when actor is deactivated (after last message).
+    ///
+    /// **Reason**: Why deactivation triggered (idle, shutdown, error)
+    async fn on_deactivate(&mut self, reason: DeactivationReason) -> Result<(), ActorError>;
+}
+```
+
+**Activation with State Example**:
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BankAccountState {
+    balance: u64,
+}
+
+pub struct BankAccountActor {
+    actor_id: ActorId,
+    state: ActorState<BankAccountState>,  // Persistent state wrapper
+    cache: HashMap<String, String>,        // Ephemeral data (not persisted)
+}
+
+#[async_trait(?Send)]
+impl Actor for BankAccountActor {
+    type State = BankAccountState;  // ✅ Type-safe state
+
+    fn actor_id(&self) -> &ActorId {
+        &self.actor_id
+    }
+
+    async fn on_activate(&mut self, state: Option<BankAccountState>) -> Result<(), ActorError> {
+        // Framework loads state from storage, deserializes, and passes here
+        let initial_state = state.unwrap_or(BankAccountState { balance: 0 });
+
+        // Initialize ActorState wrapper (framework provides storage handle internally)
+        self.state = ActorState::new_with_storage(
+            initial_state,
+            self.actor_id.clone(),
+            storage,  // Injected by framework
+            JsonSerializer,
+        );
+
+        tracing::info!("Activated with balance: {}", self.state.get().balance);
+        Ok(())
+    }
+
+    async fn on_deactivate(&mut self, reason: DeactivationReason) -> Result<(), ActorError> {
+        tracing::info!("Deactivating: {:?}, final balance: {}",
+                      reason, self.state.get().balance);
+        Ok(())
+    }
+}
+```
+
+**Actor Methods with Persistence**:
+```rust
+impl BankAccountActor {
+    pub async fn deposit(&mut self, amount: u64) -> Result<u64, ActorError> {
+        // Clone current state
+        let mut data = self.state.get().clone();
+
+        // Mutate
+        data.balance += amount;
+
+        // Persist (serialize + save + update in-memory)
+        self.state.persist(data).await?;
+
+        Ok(self.state.get().balance)
+    }
+}
+```
+
+**Validation Rules**:
+- `State` type MUST implement `Serialize + DeserializeOwned`
+- Actor MUST handle `None` state (first activation)
+- Actor MUST store `ActorState<T>` wrapper, not raw state
+- Framework handles all serialization/deserialization
+- Actors call `persist()` explicitly when state changes
+
+**Stateless Actor Example**:
+```rust
+pub struct CalculatorActor {
+    actor_id: ActorId,
+}
+
+#[async_trait(?Send)]
+impl Actor for CalculatorActor {
+    // No State type = default () = stateless
+
+    fn actor_id(&self) -> &ActorId {
+        &self.actor_id
+    }
+
+    async fn on_activate(&mut self, _state: Option<()>) -> Result<(), ActorError> {
+        Ok(())  // No state to load
+    }
+
+    async fn on_deactivate(&mut self, _reason: DeactivationReason) -> Result<(), ActorError> {
+        Ok(())
+    }
+}
+```
+
+---
+
 ## Relationships
+
+### Actor ↔ Storage
+- **Zero-to-One**: Actor has at most one StorageProvider
+- **Optional**: Not all actors use persistent storage
+- Relationship injected at activation time via ActorContext
+
+### Storage ↔ ActorId
+- **One-to-Many**: One StorageProvider serves many ActorIds
+- **Key-based**: Storage keys derived from ActorId structure
+- **Isolation**: Namespace and actor_type provide natural partitioning
 
 ### Actor ↔ Node
 - **One-to-Many**: One Node hosts many Actors
@@ -1332,9 +1790,13 @@ Trade-offs:
 - `moonpool/src/messaging/message.rs` - Message, Direction, MessageFlags
 - `moonpool/src/messaging/address.rs` - ActorAddress
 - `moonpool/src/actor/lifecycle.rs` - ActivationState
-- `moonpool/src/actor/context.rs` - ActorContext
+- `moonpool/src/actor/context.rs` - ActorContext (with optional storage)
+- `moonpool/src/actor/traits.rs` - Actor trait (with storage parameter)
 - `moonpool/src/directory/traits.rs` - Directory trait
 - `moonpool/src/directory/simple.rs` - SimpleDirectory
 - `moonpool/src/actor/catalog.rs` - ActorCatalog
 - `moonpool/src/messaging/bus.rs` - MessageBus
 - `moonpool/src/messaging/correlation.rs` - CallbackData
+- `moonpool/src/storage/traits.rs` - StorageProvider trait
+- `moonpool/src/storage/error.rs` - StorageError
+- `moonpool/src/storage/memory.rs` - InMemoryStorage

@@ -73,30 +73,62 @@ impl BankAccountActor {
 
 ## Step 2: Implement Lifecycle Hooks
 
-Add activation and deactivation logic:
+Add activation and deactivation logic with typed state:
 
 ```rust
+// Define your persistent state type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BankAccountState {
+    balance: u64,
+}
+
+pub struct BankAccountActor {
+    actor_id: ActorId,
+    state: ActorState<BankAccountState>,  // Persistent state wrapper
+}
+
 #[async_trait(?Send)]
 impl Actor for BankAccountActor {
-    async fn on_activate(&mut self) -> Result<(), ActorError> {
-        tracing::info!("BankAccount {} activated with balance {}",
-                      self.actor_id, self.balance);
-        // Initialize resources here (e.g., load state from storage)
+    type State = BankAccountState;  // ✅ Declare state type
+
+    fn actor_id(&self) -> &ActorId {
+        &self.actor_id
+    }
+
+    async fn on_activate(&mut self, state: Option<BankAccountState>) -> Result<(), ActorError> {
+        tracing::info!("BankAccount {} activating", self.actor_id);
+
+        // Framework loads and deserializes state automatically
+        let initial_state = state.unwrap_or(BankAccountState { balance: 0 });
+
+        // Framework provides storage handle internally
+        self.state = ActorState::new_with_storage(
+            initial_state,
+            self.actor_id.clone(),
+            storage,  // Injected by framework
+            JsonSerializer,
+        );
+
+        tracing::info!("Activated with balance: {}", self.state.get().balance);
         Ok(())
     }
 
     async fn on_deactivate(&mut self, reason: DeactivationReason) -> Result<(), ActorError> {
-        tracing::info!("BankAccount {} deactivated: {:?} (balance: {})",
-                      self.actor_id, reason, self.balance);
-        // Clean up resources here (e.g., persist state)
+        tracing::info!("BankAccount {} deactivated: {:?} (final balance: {})",
+                      self.actor_id, reason, self.state.get().balance);
         Ok(())
     }
 }
 ```
 
 **When Hooks Are Called**:
-- `on_activate()`: Before processing first message
-- `on_deactivate()`: After processing last message before removal
+- `on_activate(state)`: Before processing first message, with typed state loaded by framework
+- `on_deactivate(reason)`: After processing last message before removal
+
+**State Parameter**:
+- `Some(state)` - Previously persisted state (deserialized by framework)
+- `None` - First activation (no state exists yet)
+- Type-safe: Compiler enforces correct state type
 
 **Deactivation Triggers**:
 - Idle timeout (no messages for 10 minutes)
@@ -386,7 +418,114 @@ let alice_globex = globex_runtime.get_actor("BankAccount", "alice");
 
 ---
 
-## Complete Example
+## Step 11: Persistence (Automatic with ActorState)
+
+State persistence is handled automatically through `ActorState<T>` wrapper:
+
+### Configure Runtime with Storage
+
+```rust
+use moonpool::storage::InMemoryStorage;
+
+// Create storage provider
+let storage = InMemoryStorage::new();
+
+// Start runtime with storage
+let runtime = ActorRuntime::with_storage(
+    "dev",
+    storage.clone(),
+).await?;
+```
+
+### Actor Methods with Persistence
+
+```rust
+impl BankAccountActor {
+    /// Deposit money and persist new balance
+    pub async fn deposit(&mut self, amount: u64) -> Result<u64, ActorError> {
+        // Clone current state
+        let mut data = self.state.get().clone();
+
+        // Mutate
+        data.balance += amount;
+
+        // Persist (serialize + save + update in-memory automatically)
+        self.state.persist(data).await?;
+
+        Ok(self.state.get().balance)
+    }
+
+    /// Withdraw money and persist new balance
+    pub async fn withdraw(&mut self, amount: u64) -> Result<u64, ActorError> {
+        let mut data = self.state.get().clone();
+
+        if data.balance < amount {
+            return Err(ActorError::InsufficientFunds {
+                available: data.balance,
+                requested: amount,
+            });
+        }
+
+        // Mutate
+        data.balance -= amount;
+
+        // Persist
+        self.state.persist(data).await?;
+
+        Ok(self.state.get().balance)
+    }
+
+    /// Get balance (read from memory - no storage access)
+    pub async fn get_balance(&self) -> Result<u64, ActorError> {
+        Ok(self.state.get().balance)
+    }
+}
+```
+
+### Key Differences from Manual Storage
+
+- ✅ **No manual serialization** - Framework handles serde
+- ✅ **Type-safe** - Compiler checks state type
+- ✅ **Clean API** - `persist(data)` instead of manual `save_state()`
+- ✅ **Automatic deserialization** - State loaded in `on_activate()`
+- ✅ **Atomic updates** - In-memory state updated only after successful save
+
+### Handle Storage Errors
+
+```rust
+match alice.call(DepositRequest { amount: 100 }).await {
+    Ok(balance) => {
+        println!("Deposit successful, new balance: ${}", balance);
+    }
+    Err(ActorError::StorageFailed(StorageError::Unavailable)) => {
+        println!("Storage temporarily unavailable - retry later");
+    }
+    Err(ActorError::StorageFailed(e)) => {
+        println!("Storage error: {}", e);
+    }
+    Err(e) => {
+        println!("Other error: {:?}", e);
+    }
+}
+```
+
+### Test State Persistence
+
+```rust
+// Deposit money
+alice.call(DepositRequest { amount: 500 }).await?;
+
+// Deactivate actor
+runtime.deactivate_actor(&alice.actor_id()).await?;
+
+// Reactivate by sending new message (framework loads persisted state)
+let balance = alice.call(GetBalanceRequest).await?;
+assert_eq!(balance, 500); // State persisted!
+```
+
+---
+
+## Complete Example (Without Persistence)
 
 ```rust
 use moonpool::prelude::*;
@@ -431,14 +570,19 @@ impl BankAccountActor {
 // 2. Implement lifecycle hooks
 #[async_trait(?Send)]
 impl Actor for BankAccountActor {
-    async fn on_activate(&mut self) -> Result<(), ActorError> {
-        // String format: "default::BankAccount/alice"
+    fn actor_id(&self) -> &ActorId {
+        &self.actor_id
+    }
+
+    async fn on_activate(
+        &mut self,
+        _storage: Option<&dyn StorageProvider>,
+    ) -> Result<(), ActorError> {
         tracing::info!("BankAccount {} activated", self.actor_id.to_string());
         Ok(())
     }
 
     async fn on_deactivate(&mut self, reason: DeactivationReason) -> Result<(), ActorError> {
-        // String format: "default::BankAccount/alice"
         tracing::info!("BankAccount {} deactivated: {:?}", self.actor_id.to_string(), reason);
         Ok(())
     }
@@ -493,18 +637,157 @@ async fn main() -> Result<(), ActorError> {
 }
 ```
 
+---
+
+## Complete Example (With Persistence)
+
+```rust
+use moonpool::prelude::*;
+use moonpool::storage::InMemoryStorage;
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+// 1. Define persistent state type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BankAccountState {
+    balance: u64,
+}
+
+// 2. Define actor with ActorState wrapper
+pub struct BankAccountActor {
+    actor_id: ActorId,
+    state: ActorState<BankAccountState>,
+}
+
+impl BankAccountActor {
+    /// Deposit with automatic persistence
+    pub async fn deposit(&mut self, amount: u64) -> Result<u64, ActorError> {
+        let mut data = self.state.get().clone();
+        data.balance += amount;
+        self.state.persist(data).await?;
+        Ok(self.state.get().balance)
+    }
+
+    /// Withdraw with automatic persistence
+    pub async fn withdraw(&mut self, amount: u64) -> Result<u64, ActorError> {
+        let mut data = self.state.get().clone();
+
+        if data.balance < amount {
+            return Err(ActorError::InsufficientFunds {
+                available: data.balance,
+                requested: amount,
+            });
+        }
+
+        data.balance -= amount;
+        self.state.persist(data).await?;
+        Ok(self.state.get().balance)
+    }
+
+    pub async fn get_balance(&self) -> Result<u64, ActorError> {
+        Ok(self.state.get().balance)
+    }
+}
+
+// 3. Implement lifecycle hooks with typed state
+#[async_trait(?Send)]
+impl Actor for BankAccountActor {
+    type State = BankAccountState;
+
+    fn actor_id(&self) -> &ActorId {
+        &self.actor_id
+    }
+
+    async fn on_activate(&mut self, state: Option<BankAccountState>) -> Result<(), ActorError> {
+        let initial_state = state.unwrap_or(BankAccountState { balance: 0 });
+
+        self.state = ActorState::new_with_storage(
+            initial_state,
+            self.actor_id.clone(),
+            storage,  // Injected by framework
+            JsonSerializer,
+        );
+
+        tracing::info!("Activated with balance: {}", self.state.get().balance);
+        Ok(())
+    }
+
+    async fn on_deactivate(&mut self, reason: DeactivationReason) -> Result<(), ActorError> {
+        tracing::info!("Deactivated: {:?}, final balance: {}",
+                      reason, self.state.get().balance);
+        Ok(())
+    }
+}
+
+// 4. Define message types
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DepositRequest {
+    pub amount: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WithdrawRequest {
+    pub amount: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetBalanceRequest;
+
+// 5. Main function with storage
+#[tokio::main]
+async fn main() -> Result<(), ActorError> {
+    tracing_subscriber::fmt::init();
+
+    // Create storage provider
+    let storage = InMemoryStorage::new();
+
+    // Start actor runtime with storage
+    let runtime = ActorRuntime::with_storage("dev", storage).await?;
+
+    // Get actor references
+    let alice = runtime.get_actor::<BankAccountActor>("BankAccount", "alice");
+
+    // Perform operations (state persisted automatically)
+    let balance = alice.call(DepositRequest { amount: 100 }).await?;
+    println!("After deposit: ${}", balance);
+
+    let balance = alice.call(DepositRequest { amount: 200 }).await?;
+    println!("After second deposit: ${}", balance);
+
+    // Force deactivation to test persistence
+    runtime.deactivate_actor(&alice.actor_id()).await?;
+    println!("Actor deactivated");
+
+    // Reactivate by sending new message (framework loads persisted state)
+    let balance = alice.call(GetBalanceRequest).await?;
+    println!("After reactivation: ${}", balance); // Should be 300!
+
+    // Graceful shutdown
+    runtime.shutdown(Duration::from_secs(30)).await?;
+
+    Ok(())
+}
+```
+
 **Expected Output**:
 ```
-INFO BankAccount dev::BankAccount/alice activated
-INFO BankAccount dev::BankAccount/bob activated
-Alice deposited $100, balance: $100
-Bob deposited $200, balance: $200
-Alice withdrew $30, balance: $70
-Alice final balance: $70
-Bob final balance: $200
-INFO BankAccount dev::BankAccount/alice deactivated: NodeShutdown
-INFO BankAccount dev::BankAccount/bob deactivated: NodeShutdown
+INFO Activated with balance: 0
+After deposit: $100
+After second deposit: $300
+INFO Deactivated: ExplicitRequest, final balance: 300
+Actor deactivated
+INFO Activated with balance: 300
+After reactivation: $300
+INFO Deactivated: NodeShutdown, final balance: 300
 ```
+
+**Key Differences from Non-Persistent Version**:
+1. Separate `BankAccountState` type with `#[derive(Serialize, Deserialize)]`
+2. Actor stores `ActorState<BankAccountState>` wrapper instead of raw fields
+3. `type State = BankAccountState` declares state type in Actor trait
+4. Framework loads/deserializes state, passes to `on_activate(state)`
+5. `persist()` called explicitly in methods (serialize + save + update)
+6. No manual serde calls - framework handles all serialization
 
 ---
 
