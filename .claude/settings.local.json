@@ -14,7 +14,10 @@
       "Bash(mv:*)",
       "Bash(rmdir:*)",
       "Bash(cargo:*)",
-      "Bash(cargo doc:*)"
+      "Bash(cargo doc:*)",
+      "Bash(find:*)",
+      "Bash(.specify/scripts/bash/check-prerequisites.sh:*)",
+      "Bash(.specify/scripts/bash/setup-plan.sh:*)"
     ],
     "deny": [],
     "ask": [],
