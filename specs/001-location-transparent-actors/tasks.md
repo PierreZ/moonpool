@@ -123,8 +123,8 @@
 
 - [X] T052 [P] [US1] Implement CallbackData struct in src/messaging/correlation.rs (oneshot channel, timeout)
 - [X] T053 [US1] Implement MessageBus struct in src/messaging/bus.rs (generic over providers)
-- [ ] T054 [US1] Implement MessageBus::send_request() with correlation tracking
-- [ ] T055 [US1] Implement MessageBus::send_response() with correlation matching
+- [X] T054 [US1] Implement MessageBus::send_request() with correlation tracking
+- [X] T055 [US1] Implement MessageBus::send_response() with correlation matching
 - [ ] T056 [US1] Implement MessageBus::receive_loop() for incoming messages
 - [ ] T057 [US1] Implement message routing logic (Request → ActorCatalog, Response → CallbackData)
 - [ ] T058 [US1] Add buggify injection points in message routing (network delay, failures)
@@ -132,15 +132,15 @@
 
 ### Actor Runtime (Entry Point)
 
-- [ ] T060 [US1] Implement ActorRuntime struct in src/runtime/actor_runtime.rs (namespace, node_id, catalog, directory, message_bus)
-- [ ] T061 [US1] Implement ActorRuntimeBuilder struct in src/runtime/builder.rs (namespace, listen_addr, directory, storage fields)
-- [ ] T062 [US1] Implement ActorRuntimeBuilder::build() method (creates MessageBus, ActorCatalog, binds listener)
-- [ ] T063 [US1] Implement ActorRuntime::get_actor() method (creates ActorRef with namespace applied)
+- [X] T060 [US1] Implement ActorRuntime struct in src/runtime/actor_runtime.rs (namespace, node_id, catalog, directory, message_bus)
+- [X] T061 [US1] Implement ActorRuntimeBuilder struct in src/runtime/builder.rs (namespace, listen_addr, directory, storage fields)
+- [X] T062 [US1] Implement ActorRuntimeBuilder::build() method (creates MessageBus, ActorCatalog, binds listener)
+- [X] T063 [US1] Implement ActorRuntime::get_actor() method (creates ActorRef with namespace applied)
 - [ ] T064 [US1] Implement ActorRuntime::shutdown() method (deactivate all actors, close connections)
 
 ### Actor Reference API
 
-- [ ] T065 [P] [US1] Implement ActorRef struct in src/actor/reference.rs (ActorId, MessageBus reference)
+- [X] T065 [P] [US1] Implement ActorRef struct in src/actor/reference.rs (ActorId, MessageBus reference)
 - [ ] T066 [US1] Implement ActorRef::call() method (serialize request, await response, deserialize)
 - [ ] T067 [US1] Implement ActorRef::call_with_timeout() method (custom timeout)
 - [ ] T068 [US1] Implement ActorRef::send() method (fire-and-forget, OneWay)

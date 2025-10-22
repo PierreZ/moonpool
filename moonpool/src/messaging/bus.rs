@@ -246,6 +246,153 @@ impl MessageBus {
     pub fn pending_count(&self) -> usize {
         self.pending_requests.borrow().len()
     }
+
+    /// Send a request message and await the response.
+    ///
+    /// This is the primary method for request-response messaging. It:
+    /// 1. Generates a correlation ID
+    /// 2. Registers a callback for the response
+    /// 3. Sends the request (currently a no-op, will be wired to network later)
+    /// 4. Returns a receiver channel to await the response
+    ///
+    /// # Parameters
+    ///
+    /// - `message`: The request message to send (must have Direction::Request)
+    ///
+    /// # Returns
+    ///
+    /// A receiver channel that will deliver the response message or an error.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let request = Message::request(
+    ///     target_actor,
+    ///     sender_actor,
+    ///     target_node,
+    ///     sender_node,
+    ///     "deposit",
+    ///     payload,
+    /// );
+    ///
+    /// let rx = bus.send_request(request).await?;
+    /// let response = rx.await??;
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// Phase 3 (current): Returns channel but doesn't actually send over network.
+    /// Future phases will integrate with PeerTransport for actual network sending.
+    pub async fn send_request(
+        &self,
+        mut message: Message,
+    ) -> Result<oneshot::Receiver<Result<Message, ActorError>>, ActorError> {
+        // Generate correlation ID
+        let correlation_id = self.next_correlation_id();
+        message.correlation_id = correlation_id;
+
+        // Create oneshot channel for response
+        let (tx, rx) = oneshot::channel();
+
+        // Register pending request
+        self.register_pending_request(correlation_id, message.clone(), tx);
+
+        // TODO (Phase 3+): Actually send the message over the network
+        // For now, this is a placeholder - the message bus will be wired
+        // to PeerTransport in later tasks (T069)
+        tracing::debug!(
+            "send_request: corr_id={}, target={}, method={}",
+            correlation_id,
+            message.target_actor,
+            message.method_name
+        );
+
+        Ok(rx)
+    }
+
+    /// Send a response message back to a waiting request.
+    ///
+    /// This method handles sending response messages that complete pending requests.
+    /// It looks up the correlation ID and completes the associated callback.
+    ///
+    /// # Parameters
+    ///
+    /// - `message`: The response message (must have Direction::Response)
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())`: Response delivered successfully
+    /// - `Err(ActorError::UnknownCorrelationId)`: No pending request for this correlation ID
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let response = Message::response(
+    ///     correlation_id,
+    ///     target_actor,
+    ///     sender_actor,
+    ///     target_node,
+    ///     sender_node,
+    ///     result_payload,
+    /// );
+    ///
+    /// bus.send_response(response).await?;
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// Phase 3 (current): Completes local callback only.
+    /// Future phases will also send over network if response is for remote node.
+    pub async fn send_response(&self, message: Message) -> Result<(), ActorError> {
+        tracing::debug!(
+            "send_response: corr_id={}, target={}",
+            message.correlation_id,
+            message.target_actor
+        );
+
+        // Complete the pending request with the response
+        self.complete_pending_request(message.correlation_id, Ok(message))?;
+
+        // TODO (Phase 3+): If target is remote, send over network via PeerTransport
+        // For now, we only handle local responses
+
+        Ok(())
+    }
+
+    /// Send a one-way message (fire-and-forget).
+    ///
+    /// OneWay messages don't expect a response and don't register callbacks.
+    ///
+    /// # Parameters
+    ///
+    /// - `message`: The one-way message (must have Direction::OneWay)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let oneway = Message::oneway(
+    ///     target_actor,
+    ///     sender_actor,
+    ///     target_node,
+    ///     sender_node,
+    ///     "log_event",
+    ///     payload,
+    /// );
+    ///
+    /// bus.send_oneway(oneway).await?;
+    /// ```
+    pub async fn send_oneway(&self, message: Message) -> Result<(), ActorError> {
+        tracing::debug!(
+            "send_oneway: target={}, method={}",
+            message.target_actor,
+            message.method_name
+        );
+
+        // TODO (Phase 3+): Actually send over network via PeerTransport
+        // For now, this is a placeholder
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

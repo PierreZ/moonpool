@@ -1,8 +1,10 @@
 //! Actor runtime - main entry point for actor system.
 
-use crate::actor::{Actor, ActorId, NodeId};
+use crate::actor::{Actor, ActorId, ActorRef, NodeId};
 use crate::error::ActorError;
+use crate::messaging::MessageBus;
 use crate::runtime::ActorRuntimeBuilder;
+use std::rc::Rc;
 use std::time::Duration;
 
 /// Main actor runtime coordinating catalog, directory, and message bus.
@@ -40,10 +42,12 @@ pub struct ActorRuntime {
     /// This node's identifier.
     node_id: NodeId,
 
+    /// Message bus for routing messages.
+    message_bus: Rc<MessageBus>,
+
     // TODO: Add fields as we integrate components
     // catalog: Rc<ActorCatalog<A>>,  // Challenge: Generic over all actor types
     // directory: Rc<SimpleDirectory>,
-    // message_bus: Rc<MessageBus>,
 }
 
 impl ActorRuntime {
@@ -63,11 +67,17 @@ impl ActorRuntime {
     }
 
     /// Create a new ActorRuntime (internal, used by builder).
-    pub(crate) fn new(namespace: String, node_id: NodeId) -> Result<Self, ActorError> {
+    pub(crate) fn new(namespace: String, node_id: NodeId, message_bus: Rc<MessageBus>) -> Result<Self, ActorError> {
         Ok(Self {
             namespace,
             node_id,
+            message_bus,
         })
+    }
+
+    /// Get a reference to the message bus.
+    pub(crate) fn message_bus(&self) -> &Rc<MessageBus> {
+        &self.message_bus
     }
 
     /// Get namespace for this runtime.
@@ -94,17 +104,17 @@ impl ActorRuntime {
     ///
     /// ```rust,ignore
     /// // Namespace "prod" automatically applied from runtime
-    /// let alice = runtime.get_actor::<BankAccountActor>("BankAccount", "alice");
+    /// let alice = runtime.get_actor::<BankAccountActor>("BankAccount", "alice")?;
     /// // Creates ActorId: "prod::BankAccount/alice"
     ///
-    /// let bob = runtime.get_actor::<BankAccountActor>("BankAccount", "bob");
+    /// let bob = runtime.get_actor::<BankAccountActor>("BankAccount", "bob")?;
     /// // Creates ActorId: "prod::BankAccount/bob"
     /// ```
     pub fn get_actor<A: Actor>(
         &self,
         actor_type: impl Into<String>,
         key: impl Into<String>,
-    ) -> Result<ActorId, ActorError> {
+    ) -> Result<ActorRef<A>, ActorError> {
         // Create ActorId with runtime's namespace
         let actor_id = ActorId::from_parts(
             self.namespace.clone(),
@@ -112,10 +122,8 @@ impl ActorRuntime {
             key.into(),
         )?;
 
-        Ok(actor_id)
-
-        // TODO: Return ActorRef<A> instead of ActorId
-        // This requires implementing ActorRef in next task (T065-T068)
+        // Create ActorRef with MessageBus reference
+        Ok(ActorRef::with_message_bus(actor_id, self.message_bus.clone()))
     }
 
     /// Shutdown the runtime gracefully.

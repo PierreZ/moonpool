@@ -228,6 +228,78 @@ impl<A: Actor> ActorContext<A> {
     pub fn set_processing(&self, value: bool) {
         *self.is_processing.borrow_mut() = value;
     }
+
+    /// Activate the actor by calling its on_activate hook.
+    ///
+    /// Transitions through: Creating → Activating → Valid
+    ///
+    /// # Parameters
+    ///
+    /// - `state`: Optional persisted state to pass to actor
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let context = catalog.get_or_create_activation(actor_id, actor)?;
+    /// context.activate(None).await?;
+    /// // Actor is now Valid and ready to process messages
+    /// ```
+    pub async fn activate(&self, state: Option<A::State>) -> Result<(), crate::error::ActorError> {
+        // Transition to Activating
+        self.set_state(ActivationState::Activating)?;
+
+        // Call actor's on_activate hook
+        let result = {
+            let mut actor = self.actor_instance.borrow_mut();
+            actor.on_activate(state).await
+        };
+
+        // Transition based on result
+        match result {
+            Ok(()) => {
+                self.set_state(ActivationState::Valid)?;
+                Ok(())
+            }
+            Err(e) => {
+                // Activation failed, transition to Deactivating
+                self.set_state(ActivationState::Deactivating)?;
+                Err(e)
+            }
+        }
+    }
+
+    /// Deactivate the actor by calling its on_deactivate hook.
+    ///
+    /// Transitions through: Valid → Deactivating → Invalid
+    ///
+    /// # Parameters
+    ///
+    /// - `reason`: Why the actor is being deactivated
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// context.deactivate(DeactivationReason::IdleTimeout).await?;
+    /// catalog.remove(&actor_id)?;
+    /// ```
+    pub async fn deactivate(
+        &self,
+        reason: crate::actor::DeactivationReason,
+    ) -> Result<(), crate::error::ActorError> {
+        // Transition to Deactivating
+        self.set_state(ActivationState::Deactivating)?;
+
+        // Call actor's on_deactivate hook
+        let result = {
+            let mut actor = self.actor_instance.borrow_mut();
+            actor.on_deactivate(reason).await
+        };
+
+        // Transition to Invalid regardless of result
+        self.set_state(ActivationState::Invalid)?;
+
+        result
+    }
 }
 
 // Manual Debug implementation (actor_instance may not be Debug)
