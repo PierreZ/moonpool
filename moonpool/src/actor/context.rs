@@ -300,6 +300,38 @@ impl<A: Actor> ActorContext<A> {
 
         result
     }
+
+    /// Process a single message by dispatching to the actor.
+    ///
+    /// This is a placeholder that will be overridden by actor-specific dispatch logic.
+    /// For Phase 3, each actor type will have manual dispatch implementation.
+    /// For Phase 4, this will use the MessageHandler trait.
+    ///
+    /// # Parameters
+    ///
+    /// - `message`: The message to process
+    /// - `message_bus`: MessageBus for sending responses
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())`: Message processed successfully
+    /// - `Err(ActorError)`: Message processing failed
+    ///
+    /// # Note
+    ///
+    /// This method is meant to be called by the message processing loop.
+    /// It will be replaced by proper method dispatch in Phase 4.
+    pub async fn dispatch_message(
+        &self,
+        _message: Message,
+        _message_bus: &crate::messaging::MessageBus,
+    ) -> Result<(), crate::error::ActorError> {
+        // TODO: This will be implemented per-actor in Phase 3
+        // For now, return error indicating not implemented
+        Err(crate::error::ActorError::ProcessingFailed(
+            "dispatch_message not yet implemented for this actor type".to_string(),
+        ))
+    }
 }
 
 // Manual Debug implementation (actor_instance may not be Debug)

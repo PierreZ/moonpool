@@ -67,10 +67,7 @@ impl ActorRuntimeBuilder {
     pub fn listen_addr(mut self, addr: impl AsRef<str>) -> Result<Self, ActorError> {
         let addr_str = addr.as_ref();
         let socket_addr: SocketAddr = addr_str.parse().map_err(|e| {
-            ActorError::InvalidConfiguration(format!(
-                "Invalid listen_addr '{}': {}",
-                addr_str, e
-            ))
+            ActorError::InvalidConfiguration(format!("Invalid listen_addr '{}': {}", addr_str, e))
         })?;
         self.listen_addr = Some(socket_addr);
         Ok(self)
@@ -85,9 +82,9 @@ impl ActorRuntimeBuilder {
     /// Returns error if required fields are missing or invalid.
     pub async fn build(self) -> Result<ActorRuntime, ActorError> {
         // Validate required fields
-        let namespace = self.namespace.ok_or_else(|| {
-            ActorError::InvalidConfiguration("namespace is required".to_string())
-        })?;
+        let namespace = self
+            .namespace
+            .ok_or_else(|| ActorError::InvalidConfiguration("namespace is required".to_string()))?;
 
         let listen_addr = self.listen_addr.ok_or_else(|| {
             ActorError::InvalidConfiguration("listen_addr is required".to_string())

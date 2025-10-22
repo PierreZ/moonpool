@@ -1,7 +1,7 @@
 // BankAccount simulation test module
 
 pub mod actor;
+pub mod workload;
 
-// Workload and test modules will be added as implementation progresses
-// pub mod workload;
-// pub mod tests;
+#[cfg(test)]
+mod tests;

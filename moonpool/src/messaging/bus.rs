@@ -48,9 +48,10 @@
 
 use crate::actor::{CorrelationId, NodeId};
 use crate::error::ActorError;
-use crate::messaging::{CallbackData, Message};
+use crate::messaging::{ActorRouter, CallbackData, Direction, Message};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 use tokio::sync::oneshot;
 
 /// Message bus for routing messages to actors.
@@ -95,6 +96,12 @@ pub struct MessageBus {
     /// Maps correlation_id → CallbackData.
     /// Uses RefCell for interior mutability.
     pending_requests: RefCell<HashMap<CorrelationId, CallbackData>>,
+
+    /// Router for delivering messages to local actors.
+    ///
+    /// Type-erased to avoid generic parameter on MessageBus.
+    /// Set by ActorRuntime during initialization.
+    actor_router: RefCell<Option<Rc<dyn ActorRouter>>>,
 }
 
 impl MessageBus {
@@ -115,7 +122,28 @@ impl MessageBus {
             node_id,
             next_correlation_id: Cell::new(1),
             pending_requests: RefCell::new(HashMap::new()),
+            actor_router: RefCell::new(None),
         }
+    }
+
+    /// Set the actor router for local message delivery.
+    ///
+    /// This should be called by ActorRuntime after creating the MessageBus
+    /// to enable routing messages to local actors.
+    ///
+    /// # Parameters
+    ///
+    /// - `router`: The ActorRouter implementation (typically ActorCatalog)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let bus = MessageBus::new(node_id);
+    /// let catalog = ActorCatalog::new(node_id);
+    /// bus.set_actor_router(Rc::new(catalog));
+    /// ```
+    pub fn set_actor_router(&self, router: Rc<dyn ActorRouter>) {
+        *self.actor_router.borrow_mut() = Some(router);
     }
 
     /// Get this node's ID.
@@ -392,6 +420,85 @@ impl MessageBus {
         // For now, this is a placeholder
 
         Ok(())
+    }
+
+    /// Route a message to the appropriate handler.
+    ///
+    /// This is the central routing logic that determines where a message should go
+    /// based on its direction:
+    /// - Request/OneWay → route to local actor via ActorRouter
+    /// - Response → complete pending request callback
+    ///
+    /// # Parameters
+    ///
+    /// - `message`: The message to route
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())`: Message successfully routed
+    /// - `Err(ActorError)`: Routing failed
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // In receive loop:
+    /// loop {
+    ///     let message = receive_from_network().await?;
+    ///     bus.route_message(message).await?;
+    /// }
+    /// ```
+    pub async fn route_message(&self, message: Message) -> Result<(), ActorError> {
+        match message.direction {
+            Direction::Request | Direction::OneWay => self.route_to_actor(message).await,
+            Direction::Response => self.route_to_callback(message).await,
+        }
+    }
+
+    /// Route request/oneway message to target actor.
+    ///
+    /// # Parameters
+    ///
+    /// - `message`: The request or oneway message to route
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())`: Message successfully delivered to actor
+    /// - `Err(ActorError::ProcessingFailed)`: No actor router configured
+    /// - `Err(ActorError)`: Actor routing failed
+    async fn route_to_actor(&self, message: Message) -> Result<(), ActorError> {
+        tracing::debug!(
+            "Routing message to actor: target={}, method={}",
+            message.target_actor,
+            message.method_name
+        );
+
+        // Get router
+        let router = self.actor_router.borrow().clone().ok_or_else(|| {
+            ActorError::ProcessingFailed("No actor router configured".to_string())
+        })?;
+
+        // Delegate to router
+        router.route_message(message).await
+    }
+
+    /// Route response message to waiting callback.
+    ///
+    /// # Parameters
+    ///
+    /// - `message`: The response message to route
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())`: Response delivered to callback
+    /// - `Err(ActorError::UnknownCorrelationId)`: No pending request for this correlation ID
+    async fn route_to_callback(&self, message: Message) -> Result<(), ActorError> {
+        tracing::debug!(
+            "Routing response to callback: corr_id={}",
+            message.correlation_id
+        );
+
+        // Complete the pending request with the response
+        self.complete_pending_request(message.correlation_id, Ok(message))
     }
 }
 
