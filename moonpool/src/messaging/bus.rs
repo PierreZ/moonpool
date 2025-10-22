@@ -1,12 +1,12 @@
-//! Message bus for routing messages to local actors.
+//! Message bus for routing messages to local and remote actors.
 //!
 //! This module provides the `MessageBus` which routes incoming messages to
-//! the appropriate local actors via the ActorCatalog.
+//! either local actors via the ActorCatalog or remote actors via network transport.
 //!
-//! # Architecture (Simplified for Phase 3)
+//! # Architecture
 //!
-//! This is a simplified MessageBus for local message routing. Full network
-//! integration with PeerTransport will be added in later phases.
+//! MessageBus integrates with foundation's transport layer to enable actor-to-actor
+//! communication across nodes.
 //!
 //! ```text
 //! ┌────────────────────────────────────┐
@@ -48,7 +48,7 @@
 
 use crate::actor::{CorrelationId, NodeId};
 use crate::error::ActorError;
-use crate::messaging::{ActorRouter, CallbackData, Direction, Message};
+use crate::messaging::{ActorRouter, CallbackData, Direction, Message, NetworkTransport};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -57,8 +57,7 @@ use tokio::sync::oneshot;
 /// Message bus for routing messages to actors.
 ///
 /// `MessageBus` handles correlation ID generation, pending request tracking,
-/// and message routing. This is a simplified version for Phase 3 that focuses
-/// on local routing. Full network integration will be added later.
+/// and message routing to both local and remote actors.
 ///
 /// # Single-Threaded Design
 ///
@@ -68,7 +67,7 @@ use tokio::sync::oneshot;
 /// # Example
 ///
 /// ```rust,ignore
-/// let bus = MessageBus::new(node_id);
+/// let bus = MessageBus::new(node_id, network, time, task_provider, peer_config);
 ///
 /// // Generate correlation ID for request
 /// let corr_id = bus.next_correlation_id();
@@ -77,7 +76,8 @@ use tokio::sync::oneshot;
 /// let (tx, rx) = oneshot::channel();
 /// bus.register_pending_request(corr_id, request, tx);
 ///
-/// // ... send message over network ...
+/// // Send message (routes locally or remotely based on target_node)
+/// bus.send_request(message).await?;
 ///
 /// // When response arrives:
 /// bus.complete_pending_request(corr_id, Ok(response));
@@ -102,10 +102,19 @@ pub struct MessageBus {
     /// Type-erased to avoid generic parameter on MessageBus.
     /// Set by ActorRuntime during initialization.
     actor_router: RefCell<Option<Rc<dyn ActorRouter>>>,
+
+    /// Network transport for sending messages to remote nodes.
+    ///
+    /// None means network is not configured (local-only mode).
+    /// Uses trait object to avoid generic parameters.
+    network_transport: RefCell<Option<Box<dyn NetworkTransport>>>,
 }
 
 impl MessageBus {
-    /// Create a new MessageBus for this node.
+    /// Create a new MessageBus for this node (local-only mode).
+    ///
+    /// This creates a MessageBus without network capabilities.
+    /// Use `set_network_transport` to enable remote actor communication.
     ///
     /// # Parameters
     ///
@@ -123,7 +132,30 @@ impl MessageBus {
             next_correlation_id: Cell::new(1),
             pending_requests: RefCell::new(HashMap::new()),
             actor_router: RefCell::new(None),
+            network_transport: RefCell::new(None),
         }
+    }
+
+    /// Set the network transport for remote message delivery.
+    ///
+    /// This enables the MessageBus to send and receive messages over the network.
+    ///
+    /// # Parameters
+    ///
+    /// - `transport`: Network transport implementation
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let node_id = NodeId::from("127.0.0.1:8001")?;
+    /// let bus = MessageBus::new(node_id);
+    ///
+    /// // Create foundation transport
+    /// let foundation_transport = FoundationTransport::new(client_transport);
+    /// bus.set_network_transport(Box::new(foundation_transport));
+    /// ```
+    pub fn set_network_transport(&self, transport: Box<dyn NetworkTransport>) {
+        *self.network_transport.borrow_mut() = Some(transport);
     }
 
     /// Set the actor router for local message delivery.
@@ -280,7 +312,7 @@ impl MessageBus {
     /// This is the primary method for request-response messaging. It:
     /// 1. Generates a correlation ID
     /// 2. Registers a callback for the response
-    /// 3. Sends the request (currently a no-op, will be wired to network later)
+    /// 3. Sends the request to remote node via network transport
     /// 4. Returns a receiver channel to await the response
     ///
     /// # Parameters
@@ -306,11 +338,6 @@ impl MessageBus {
     /// let rx = bus.send_request(request).await?;
     /// let response = rx.await??;
     /// ```
-    ///
-    /// # Note
-    ///
-    /// Phase 3 (current): Returns channel but doesn't actually send over network.
-    /// Future phases will integrate with PeerTransport for actual network sending.
     pub async fn send_request(
         &self,
         mut message: Message,
@@ -325,15 +352,41 @@ impl MessageBus {
         // Register pending request
         self.register_pending_request(correlation_id, message.clone(), tx);
 
-        // TODO (Phase 3+): Actually send the message over the network
-        // For now, this is a placeholder - the message bus will be wired
-        // to PeerTransport in later tasks (T069)
-        tracing::debug!(
-            "send_request: corr_id={}, target={}, method={}",
-            correlation_id,
-            message.target_actor,
-            message.method_name
-        );
+        // Determine if message is local or remote
+        if message.target_node == self.node_id {
+            // Local delivery - route to actor directly
+            tracing::debug!(
+                "send_request (local): corr_id={}, target={}, method={}",
+                correlation_id,
+                message.target_actor,
+                message.method_name
+            );
+            // Message will be routed by the caller or through route_message
+        } else {
+            // Remote delivery - send over network
+            tracing::debug!(
+                "send_request (remote): corr_id={}, target={}, target_node={}, method={}",
+                correlation_id,
+                message.target_actor,
+                message.target_node,
+                message.method_name
+            );
+
+            if let Some(ref mut transport) = *self.network_transport.borrow_mut() {
+                // Serialize message to JSON
+                let payload = serde_json::to_vec(&message).map_err(|e| {
+                    ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
+                })?;
+
+                // Send over network using network transport
+                let destination = message.target_node.as_str();
+                transport.send(destination, payload).await?;
+            } else {
+                return Err(ActorError::ProcessingFailed(
+                    "Network not configured for remote message".to_string(),
+                ));
+            }
+        }
 
         Ok((message, rx))
     }
@@ -341,7 +394,7 @@ impl MessageBus {
     /// Send a response message back to a waiting request.
     ///
     /// This method handles sending response messages that complete pending requests.
-    /// It looks up the correlation ID and completes the associated callback.
+    /// It either completes a local callback or sends over the network.
     ///
     /// # Parameters
     ///
@@ -350,7 +403,7 @@ impl MessageBus {
     /// # Returns
     ///
     /// - `Ok(())`: Response delivered successfully
-    /// - `Err(ActorError::UnknownCorrelationId)`: No pending request for this correlation ID
+    /// - `Err(ActorError)`: Response delivery failed
     ///
     /// # Example
     ///
@@ -366,23 +419,41 @@ impl MessageBus {
     ///
     /// bus.send_response(response).await?;
     /// ```
-    ///
-    /// # Note
-    ///
-    /// Phase 3 (current): Completes local callback only.
-    /// Future phases will also send over network if response is for remote node.
     pub async fn send_response(&self, message: Message) -> Result<(), ActorError> {
         tracing::debug!(
-            "send_response: corr_id={}, target={}",
+            "send_response: corr_id={}, target={}, target_node={}",
             message.correlation_id,
-            message.target_actor
+            message.target_actor,
+            message.target_node
         );
 
-        // Complete the pending request with the response
-        self.complete_pending_request(message.correlation_id, Ok(message))?;
+        // Determine if response is for local or remote requester
+        if message.target_node == self.node_id {
+            // Local callback completion
+            self.complete_pending_request(message.correlation_id, Ok(message))?;
+        } else {
+            // Remote response - send over network
+            tracing::debug!(
+                "send_response (remote): corr_id={}, target_node={}",
+                message.correlation_id,
+                message.target_node
+            );
 
-        // TODO (Phase 3+): If target is remote, send over network via PeerTransport
-        // For now, we only handle local responses
+            if let Some(ref mut transport) = *self.network_transport.borrow_mut() {
+                // Serialize message to JSON
+                let payload = serde_json::to_vec(&message).map_err(|e| {
+                    ActorError::ProcessingFailed(format!("Failed to serialize response: {}", e))
+                })?;
+
+                // Send over network using network transport
+                let destination = message.target_node.as_str();
+                transport.send(destination, payload).await?;
+            } else {
+                return Err(ActorError::ProcessingFailed(
+                    "Network not configured for remote response".to_string(),
+                ));
+            }
+        }
 
         Ok(())
     }
@@ -411,15 +482,88 @@ impl MessageBus {
     /// ```
     pub async fn send_oneway(&self, message: Message) -> Result<(), ActorError> {
         tracing::debug!(
-            "send_oneway: target={}, method={}",
+            "send_oneway: target={}, target_node={}, method={}",
             message.target_actor,
+            message.target_node,
             message.method_name
         );
 
-        // TODO (Phase 3+): Actually send over network via PeerTransport
-        // For now, this is a placeholder
+        // Determine if message is local or remote
+        if message.target_node == self.node_id {
+            // Local delivery - route directly
+            self.route_to_actor(message).await?;
+        } else {
+            // Remote delivery - send over network
+            tracing::debug!(
+                "send_oneway (remote): target={}, target_node={}",
+                message.target_actor,
+                message.target_node
+            );
+
+            if let Some(ref mut transport) = *self.network_transport.borrow_mut() {
+                // Serialize message to JSON
+                let payload = serde_json::to_vec(&message).map_err(|e| {
+                    ActorError::ProcessingFailed(format!("Failed to serialize oneway: {}", e))
+                })?;
+
+                // Send over network using network transport
+                let destination = message.target_node.as_str();
+                transport.send(destination, payload).await?;
+            } else {
+                return Err(ActorError::ProcessingFailed(
+                    "Network not configured for remote oneway".to_string(),
+                ));
+            }
+        }
 
         Ok(())
+    }
+
+    /// Receive and process messages from the network.
+    ///
+    /// This method polls the transport for incoming messages and routes them appropriately.
+    /// Should be called periodically to process network traffic.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(true)`: Message received and processed
+    /// - `Ok(false)`: No message available
+    /// - `Err(ActorError)`: Processing error
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // In message processing loop:
+    /// loop {
+    ///     if bus.poll_network().await? {
+    ///         // Message was processed
+    ///     } else {
+    ///         // No messages, can yield or do other work
+    ///         tokio::task::yield_now().await;
+    ///     }
+    /// }
+    /// ```
+    pub async fn poll_network(&self) -> Result<bool, ActorError> {
+        if let Some(ref mut transport) = *self.network_transport.borrow_mut() {
+            if let Some(payload) = transport.poll_receive() {
+                // Deserialize the message from payload
+                let message: Message = serde_json::from_slice(&payload).map_err(|e| {
+                    ActorError::ProcessingFailed(format!("Failed to deserialize message: {}", e))
+                })?;
+
+                tracing::debug!(
+                    "poll_network: received message corr_id={}, direction={:?}, target={}",
+                    message.correlation_id,
+                    message.direction,
+                    message.target_actor
+                );
+
+                // Route the message
+                self.route_message(message).await?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Route a message to the appropriate handler.
