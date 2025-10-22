@@ -4,7 +4,7 @@ pub mod traits;
 pub mod simple;
 pub mod placement;
 
-// Re-exports
-pub use traits::Directory;
-pub use simple::SimpleDirectory;
-pub use placement::{PlacementDecision, TwoRandomChoices};
+// Re-exports (placeholders for now, will be implemented in Phase 3)
+// pub use traits::Directory;
+// pub use simple::SimpleDirectory;
+// pub use placement::{PlacementDecision, TwoRandomChoices};

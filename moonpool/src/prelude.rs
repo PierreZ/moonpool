@@ -2,12 +2,10 @@
 //!
 //! This module provides a convenient prelude for importing commonly used types and traits.
 
-// Re-export core types
-pub use crate::actor::{Actor, ActorContext, ActorId, NodeId};
+// Re-export core types (only what exists now)
+pub use crate::actor::{ActorId, CorrelationId, NodeId, ActivationState, DeactivationReason};
 pub use crate::error::{ActorError, DirectoryError, MessageError, StorageError};
-pub use crate::messaging::{ActorAddress, ActorRef, Direction, Message, MessageFlags};
-pub use crate::runtime::ActorRuntime;
-pub use crate::storage::{ActorState, StorageProvider, StateSerializer};
+pub use crate::messaging::{ActorAddress, Direction, Message, MessageFlags};
 
 // Re-export commonly used external types
 pub use async_trait::async_trait;

@@ -39,35 +39,35 @@
 
 ### Core Identifiers
 
-- [ ] T006 [P] Implement ActorId struct in src/actor/id.rs (namespace, actor_type, key fields)
-- [ ] T007 [P] Implement NodeId struct in src/actor/id.rs (address:port format)
-- [ ] T008 [P] Implement CorrelationId struct in src/messaging/message.rs (u64 wrapper)
-- [ ] T009 [P] Unit tests for ActorId parsing and validation in tests/unit/actor/id_test.rs
-- [ ] T010 [P] Unit tests for NodeId parsing in tests/unit/actor/id_test.rs
+- [X] T006 [P] Implement ActorId struct in src/actor/id.rs (namespace, actor_type, key fields)
+- [X] T007 [P] Implement NodeId struct in src/actor/id.rs (address:port format)
+- [X] T008 [P] Implement CorrelationId struct in src/messaging/message.rs (u64 wrapper)
+- [X] T009 [P] Unit tests for ActorId parsing and validation in tests/unit/actor/id_test.rs
+- [X] T010 [P] Unit tests for NodeId parsing in tests/unit/actor/id_test.rs
 
 ### Core Enums and State Machines
 
-- [ ] T011 [P] Implement Direction enum in src/messaging/message.rs (Request, Response, OneWay)
-- [ ] T012 [P] Implement MessageFlags bitflags in src/messaging/message.rs
-- [ ] T013 [P] Implement ActivationState enum in src/actor/lifecycle.rs with guarded transitions
-- [ ] T014 [P] Implement DeactivationReason enum in src/actor/lifecycle.rs
-- [ ] T015 [P] Unit tests for ActivationState transitions in tests/unit/actor/lifecycle_test.rs
+- [X] T011 [P] Implement Direction enum in src/messaging/message.rs (Request, Response, OneWay)
+- [X] T012 [P] Implement MessageFlags bitflags in src/messaging/message.rs
+- [X] T013 [P] Implement ActivationState enum in src/actor/lifecycle.rs with guarded transitions
+- [X] T014 [P] Implement DeactivationReason enum in src/actor/lifecycle.rs
+- [X] T015 [P] Unit tests for ActivationState transitions in tests/unit/actor/lifecycle_test.rs
 
 ### Message Types
 
-- [ ] T016 Implement Message struct in src/messaging/message.rs (all fields from data-model.md)
-- [ ] T017 Implement Message::request(), Message::response(), Message::oneway() constructors
-- [ ] T018 [P] Implement ActorAddress struct in src/messaging/address.rs
-- [ ] T019 [P] Implement CacheUpdate struct in src/messaging/message.rs
-- [ ] T020 [P] Unit tests for Message creation in tests/unit/messaging/message_test.rs
+- [X] T016 Implement Message struct in src/messaging/message.rs (all fields from data-model.md)
+- [X] T017 Implement Message::request(), Message::response(), Message::oneway() constructors
+- [X] T018 [P] Implement ActorAddress struct in src/messaging/address.rs
+- [X] T019 [P] Implement CacheUpdate struct in src/messaging/message.rs
+- [X] T020 [P] Unit tests for Message creation in tests/unit/messaging/message_test.rs
 
 ### Wire Protocol
 
-- [ ] T021 Implement ActorEnvelope::serialize() in src/messaging/envelope.rs (binary format from contracts/message.rs)
-- [ ] T022 Implement ActorEnvelope::deserialize() in src/messaging/envelope.rs
-- [ ] T023 Implement ActorEnvelope::try_deserialize() for streaming reception
-- [ ] T024 [P] Unit tests for envelope round-trip in tests/unit/messaging/envelope_test.rs
-- [ ] T025 [P] Property tests for envelope max size handling
+- [X] T021 Implement ActorEnvelope::serialize() in src/messaging/envelope.rs (binary format from contracts/message.rs)
+- [X] T022 Implement ActorEnvelope::deserialize() in src/messaging/envelope.rs
+- [X] T023 Implement ActorEnvelope::try_deserialize() for streaming reception
+- [X] T024 [P] Unit tests for envelope round-trip in tests/unit/messaging/envelope_test.rs
+- [X] T025 [P] Property tests for envelope max size handling
 
 **Checkpoint**: Foundation ready - all core types available, user story implementation can begin in parallel
 
