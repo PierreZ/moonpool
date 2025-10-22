@@ -2,8 +2,10 @@
 
 use crate::actor::NodeId;
 use crate::error::ActorError;
+use crate::messaging::MessageBus;
 use crate::runtime::ActorRuntime;
 use std::net::SocketAddr;
+use std::rc::Rc;
 
 /// Builder for ActorRuntime with fluent API.
 ///
@@ -94,10 +96,21 @@ impl ActorRuntimeBuilder {
         // Create NodeId from listen address
         let node_id = NodeId::from_socket_addr(listen_addr);
 
-        // TODO: Create ActorCatalog, SimpleDirectory, MessageBus
-        // TODO: Start listening for incoming connections
+        // Create MessageBus
+        let message_bus = Rc::new(MessageBus::new(node_id.clone()));
 
-        ActorRuntime::new(namespace, node_id)
+        // TODO: Create ActorCatalog, SimpleDirectory
+        // TODO: Start listening for incoming connections
+        // TODO: Wire MessageBus to PeerTransport (T069)
+
+        tracing::info!(
+            "ActorRuntime created: namespace={}, node_id={}, listen_addr={}",
+            namespace,
+            node_id,
+            listen_addr
+        );
+
+        ActorRuntime::new(namespace, node_id, message_bus)
     }
 }
 

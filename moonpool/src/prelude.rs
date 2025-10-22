@@ -4,10 +4,12 @@
 
 // Re-export core types (only what exists now)
 pub use crate::actor::{
-    ActivationState, Actor, ActorId, CorrelationId, DeactivationReason, MessageHandler, NodeId,
+    ActivationState, Actor, ActorContext, ActorId, ActorRef, CorrelationId, DeactivationReason,
+    MessageHandler, NodeId,
 };
 pub use crate::error::{ActorError, DirectoryError, MessageError, StorageError};
 pub use crate::messaging::{ActorAddress, Direction, Message, MessageFlags};
+pub use crate::runtime::{ActorRuntime, ActorRuntimeBuilder};
 
 // Re-export commonly used external types
 pub use async_trait::async_trait;
