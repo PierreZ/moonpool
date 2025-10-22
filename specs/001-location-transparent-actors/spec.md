@@ -130,6 +130,7 @@ Developers can define activation and deactivation hooks that run when an actor i
 - **FR-016**: System MUST enforce configurable maximum message size limits and reject messages exceeding the threshold
 - **FR-017**: System MUST allow developers to provide custom serialization methods for message bus operations
 - **FR-018**: When an actor throws an exception during message processing, the system MUST propagate the error to the caller and keep the actor active for subsequent messages
+- **FR-019**: System MUST limit message forwarding to prevent infinite loops (maximum 2 forwards per message)
 
 ### Key Entities
 

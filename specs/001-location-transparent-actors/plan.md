@@ -140,7 +140,7 @@ moonpool/                          # New crate for actor system
 │   │   ├── simple.rs              # Simple in-memory directory (eventual consistency)
 │   │   └── placement.rs           # Two-random-choices placement algorithm
 │   ├── runtime/
-│   │   ├── mod.rs                 # ActorSystem (main entry point)
+│   │   ├── mod.rs                 # ActorRuntime (main entry point)
 │   │   └── node.rs                # Node-level coordination
 │   └── error.rs                   # ActorError types
 │
@@ -240,7 +240,7 @@ State transitions:
 ### API Contracts (contracts/)
 
 From functional requirements:
-- **FR-001**: `ActorSystem::get_actor<T>(id) -> ActorRef<T>` - Obtain actor reference by ID
+- **FR-001**: `ActorRuntime::get_actor<T>(id) -> ActorRef<T>` - Obtain actor reference by ID
 - **FR-002**: First message triggers automatic activation via `ActorCatalog::get_or_create()`
 - **FR-003**: `MessageBus::route(message)` - Route to correct node via directory lookup
 - **FR-004**: Sequential processing via per-actor message queue
@@ -257,7 +257,7 @@ Contract files:
 Minimal BankAccount example demonstrating:
 1. Define actor with state and methods
 2. Implement lifecycle hooks (activation/deactivation)
-3. Start actor system with single-node cluster
+3. Start actor runtime with single-node cluster
 4. Obtain actor reference and send messages
 5. Request-response pattern with timeout
 6. Error handling
@@ -268,10 +268,35 @@ Minimal BankAccount example demonstrating:
 
 Tasks will be ordered by dependency and grouped into logical phases:
 1. Core message types and serialization
+   - **NEW**: Design and implement method dispatch mechanism (trait-based MessageHandler)
+   - ActorId, NodeId, CorrelationId types
+   - Message struct with method_name field
+   - ActorEnvelope wire format with method routing
 2. Actor lifecycle state machine
+   - ActivationState enum with guarded transitions
+   - ActorContext with lifecycle hooks
+   - Actor trait with MessageHandler implementations
 3. Message bus with correlation
+   - MessageBus with request-response correlation
+   - CallbackData for pending requests
+   - Timeout enforcement
+   - **NEW**: Method dispatch routing (match method_name → MessageHandler trait)
 4. Directory with placement
+   - Directory trait and SimpleDirectory implementation
+   - Two-random-choices placement algorithm
+   - Cache invalidation piggybacked on responses
 5. ActorCatalog with double-check locking
+   - ActivationDirectory local registry
+   - Double-check locking pattern for get-or-create
+   - Integration with Directory for placement decisions
 6. Integration and end-to-end tests
+   - BankAccount actor example
+   - **NEW**: Test MessageHandler trait implementations
+   - Request-response flow tests
 7. Multi-topology simulation tests
+   - 1x1, 2x2, 10x10 cluster tests
+   - **NEW**: Test method routing across nodes
 8. Chaos testing with invariant validation
+   - Buggify injection for concurrent activation races
+   - Banking invariants (balance consistency)
+   - Message delivery guarantees

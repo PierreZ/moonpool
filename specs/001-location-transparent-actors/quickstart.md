@@ -10,7 +10,7 @@ This guide demonstrates building a simple BankAccount actor that processes depos
 **Learning Goals**:
 - Define an actor with state and methods
 - Implement lifecycle hooks (activation/deactivation)
-- Start an actor system (single-node and multi-node)
+- Start an actor runtime (single-node and multi-node)
 - Obtain actor references and send messages
 - Handle request-response patterns with timeouts
 - Error handling for actor operations
@@ -106,26 +106,26 @@ impl Actor for BankAccountActor {
 
 ---
 
-## Step 3: Start Actor System (Single Node)
+## Step 3: Start Actor Runtime (Single Node)
 
 For local development and testing:
 
 ```rust
-use moonpool::ActorSystem;
+use moonpool::ActorRuntime;
 
 #[tokio::main]
 async fn main() -> Result<(), ActorError> {
     // Initialize tracing
     tracing_subscriber::fmt::init();
 
-    // Create single-node actor system with namespace
-    let system = ActorSystem::single_node("dev").await?;
-    // All actors in this system will have namespace "dev"
+    // Create single-node actor runtime with namespace
+    let runtime = ActorRuntime::single_node("dev").await?;
+    // All actors in this runtime will have namespace "dev"
 
-    // Use actor system...
+    // Use actor runtime...
 
     // Graceful shutdown
-    system.shutdown(Duration::from_secs(30)).await?;
+    runtime.shutdown(Duration::from_secs(30)).await?;
 
     Ok(())
 }
@@ -144,12 +144,12 @@ async fn main() -> Result<(), ActorError> {
 Get a reference to an actor by type and key:
 
 ```rust
-// Namespace "dev" automatically applied from system bootstrap
-let alice: ActorRef<BankAccountActor> = system.get_actor("BankAccount", "alice");
+// Namespace "dev" automatically applied from runtime bootstrap
+let alice: ActorRef<BankAccountActor> = runtime.get_actor("BankAccount", "alice");
 // Internally creates: ActorId { namespace: "dev", actor_type: "BankAccount", key: "alice" }
 // String format: "dev::BankAccount/alice"
 
-let bob: ActorRef<BankAccountActor> = system.get_actor("BankAccount", "bob");
+let bob: ActorRef<BankAccountActor> = runtime.get_actor("BankAccount", "bob");
 // String format: "dev::BankAccount/bob"
 
 // Reference is valid even if actor not yet activated
@@ -157,7 +157,7 @@ let bob: ActorRef<BankAccountActor> = system.get_actor("BankAccount", "bob");
 ```
 
 **ActorId Structure** (internal):
-- `namespace` - Set at ActorSystem bootstrap (e.g., "dev", "prod", "tenant-123")
+- `namespace` - Set at ActorRuntime bootstrap (e.g., "dev", "prod", "tenant-123")
 - `actor_type` - Specified in `get_actor()` (e.g., "BankAccount")
 - `key` - Specified in `get_actor()` (e.g., "alice", "account-456")
 
@@ -324,36 +324,33 @@ match alice.call(WithdrawRequest { amount: 1000 }).await {
 Start a 3-node cluster (all nodes must use same namespace):
 
 ```rust
-// Node 0
-let system = ActorSystem::multi_node(
+// Node at 127.0.0.1:5000
+let runtime = ActorRuntime::multi_node(
     "prod",  // Namespace - same across all nodes in cluster
-    NodeId(0),
+    NodeId::from("127.0.0.1:5000")?,  // This node's address
     vec![
-        "127.0.0.1:5000",  // Node 0 (this node)
-        "127.0.0.1:5001",  // Node 1
-        "127.0.0.1:5002",  // Node 2
+        NodeId::from("127.0.0.1:5001")?,  // Peer nodes
+        NodeId::from("127.0.0.1:5002")?,
     ],
 ).await?;
 
-// Node 1 (separate process) - SAME namespace "prod"
-let system = ActorSystem::multi_node(
+// Node at 127.0.0.1:5001 (separate process) - SAME namespace "prod"
+let runtime = ActorRuntime::multi_node(
     "prod",  // Must match!
-    NodeId(1),
+    NodeId::from("127.0.0.1:5001")?,  // This node's address
     vec![
-        "127.0.0.1:5000",
-        "127.0.0.1:5001",  // Node 1 (this node)
-        "127.0.0.1:5002",
+        NodeId::from("127.0.0.1:5000")?,  // Peer nodes
+        NodeId::from("127.0.0.1:5002")?,
     ],
 ).await?;
 
-// Node 2 (separate process) - SAME namespace "prod"
-let system = ActorSystem::multi_node(
+// Node at 127.0.0.1:5002 (separate process) - SAME namespace "prod"
+let runtime = ActorRuntime::multi_node(
     "prod",  // Must match!
-    NodeId(2),
+    NodeId::from("127.0.0.1:5002")?,  // This node's address
     vec![
-        "127.0.0.1:5000",
-        "127.0.0.1:5001",
-        "127.0.0.1:5002",  // Node 2 (this node)
+        NodeId::from("127.0.0.1:5000")?,  // Peer nodes
+        NodeId::from("127.0.0.1:5001")?,
     ],
 ).await?;
 ```
@@ -361,10 +358,10 @@ let system = ActorSystem::multi_node(
 **Location Transparency**:
 ```rust
 // On any node, call any actor (namespace "prod" automatic)
-let alice = system.get_actor("BankAccount", "alice");
+let alice = runtime.get_actor("BankAccount", "alice");
 // Creates: "prod::BankAccount/alice"
 
-let bob = system.get_actor("BankAccount", "bob");
+let bob = runtime.get_actor("BankAccount", "bob");
 // Creates: "prod::BankAccount/bob"
 
 // Actors automatically placed across nodes
@@ -375,13 +372,13 @@ let bob = system.get_actor("BankAccount", "bob");
 **Multi-Tenant Deployment**:
 ```rust
 // Tenant ACME gets own cluster with "tenant-acme" namespace
-let acme_system = ActorSystem::single_node("tenant-acme").await?;
-let alice_acme = acme_system.get_actor("BankAccount", "alice");
+let acme_runtime = ActorRuntime::single_node("tenant-acme").await?;
+let alice_acme = acme_runtime.get_actor("BankAccount", "alice");
 // Creates: "tenant-acme::BankAccount/alice"
 
 // Tenant Globex gets own cluster with "tenant-globex" namespace
-let globex_system = ActorSystem::single_node("tenant-globex").await?;
-let alice_globex = globex_system.get_actor("BankAccount", "alice");
+let globex_runtime = ActorRuntime::single_node("tenant-globex").await?;
+let alice_globex = globex_runtime.get_actor("BankAccount", "alice");
 // Creates: "tenant-globex::BankAccount/alice"
 
 // These are DIFFERENT actors - namespace provides isolation
@@ -466,12 +463,12 @@ pub struct GetBalanceRequest;
 async fn main() -> Result<(), ActorError> {
     tracing_subscriber::fmt::init();
 
-    // Start actor system with "dev" namespace
-    let system = ActorSystem::single_node("dev").await?;
+    // Start actor runtime with "dev" namespace
+    let runtime = ActorRuntime::single_node("dev").await?;
 
     // Get actor references (namespace "dev" automatically applied)
-    let alice = system.get_actor::<BankAccountActor>("BankAccount", "alice");
-    let bob = system.get_actor::<BankAccountActor>("BankAccount", "bob");
+    let alice = runtime.get_actor::<BankAccountActor>("BankAccount", "alice");
+    let bob = runtime.get_actor::<BankAccountActor>("BankAccount", "bob");
 
     // Perform operations
     let balance = alice.call(DepositRequest { amount: 100 }).await?;
@@ -490,7 +487,7 @@ async fn main() -> Result<(), ActorError> {
     println!("Bob final balance: ${}", balance);
 
     // Graceful shutdown
-    system.shutdown(Duration::from_secs(30)).await?;
+    runtime.shutdown(Duration::from_secs(30)).await?;
 
     Ok(())
 }

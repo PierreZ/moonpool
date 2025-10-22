@@ -33,6 +33,9 @@ pub trait Directory {
     /// If multiple nodes attempt concurrent registration for same actor_id,
     /// directory MUST serialize and return placement decision.
     ///
+    /// ## Interior Mutability
+    /// Uses `&self` for Arc compatibility. Implementations use RefCell/RwLock internally.
+    ///
     /// ## Returns
     /// - `PlaceOnNode(node_id)` - Registration succeeded, activate on this node
     /// - `AlreadyRegistered(node_id)` - Actor already active elsewhere, forward message
@@ -58,7 +61,7 @@ pub trait Directory {
     /// }
     /// ```
     async fn register(
-        &mut self,
+        &self,
         actor_id: ActorId,
         node_id: NodeId,
     ) -> Result<PlacementDecision, DirectoryError>;
@@ -70,11 +73,14 @@ pub trait Directory {
     /// - Idempotent: no error if not registered
     /// - Invalidates local caches
     ///
+    /// ## Interior Mutability
+    /// Uses `&self` for Arc compatibility. Implementations use RefCell/RwLock internally.
+    ///
     /// ## Example
     /// ```ignore
     /// directory.unregister(&actor_id).await?;
     /// ```
-    async fn unregister(&mut self, actor_id: &ActorId) -> Result<(), DirectoryError>;
+    async fn unregister(&self, actor_id: &ActorId) -> Result<(), DirectoryError>;
 
     /// Get current load for node (for placement algorithm).
     ///
@@ -124,21 +130,24 @@ pub enum DirectoryError {
 ///
 /// Provides eventual consistency with local caching.
 /// Suitable for static cluster topology (no node joins/leaves).
+///
+/// ## Single-Threaded Pattern
+/// Uses RefCell for interior mutability (current_thread runtime, no Send/Sync needed).
 pub struct SimpleDirectory {
     /// Authoritative mapping: ActorId → NodeId
-    entries: RwLock<HashMap<ActorId, NodeId>>,
+    entries: RefCell<HashMap<ActorId, NodeId>>,
 
     /// Local cache: ActorId → (NodeId, cached_at)
-    local_cache: RwLock<HashMap<ActorId, (NodeId, Instant)>>,
+    local_cache: RefCell<HashMap<ActorId, (NodeId, Instant)>>,
 
     /// Node load tracking: NodeId → actor count
-    node_load: RwLock<HashMap<NodeId, usize>>,
+    node_load: RefCell<HashMap<NodeId, usize>>,
 
     /// List of all nodes in cluster (for placement algorithm)
     cluster_nodes: Vec<NodeId>,
 
-    /// Random number generator for placement
-    rng: Mutex<Box<dyn RngCore>>,
+    /// Random number generator for placement (single-threaded, RefCell is sufficient)
+    rng: RefCell<Box<dyn RngCore>>,
 }
 
 impl SimpleDirectory {
@@ -149,17 +158,21 @@ impl SimpleDirectory {
     ///
     /// ## Example
     /// ```ignore
-    /// let directory = SimpleDirectory::new(vec![NodeId(0), NodeId(1), NodeId(2)]);
+    /// let directory = SimpleDirectory::new(vec![
+    ///     NodeId::from("127.0.0.1:5000")?,
+    ///     NodeId::from("127.0.0.1:5001")?,
+    ///     NodeId::from("127.0.0.1:5002")?,
+    /// ]);
     /// ```
     pub fn new(cluster_nodes: Vec<NodeId>) -> Self {
         Self {
-            entries: RwLock::new(HashMap::new()),
-            local_cache: RwLock::new(HashMap::new()),
-            node_load: RwLock::new(
+            entries: RefCell::new(HashMap::new()),
+            local_cache: RefCell::new(HashMap::new()),
+            node_load: RefCell::new(
                 cluster_nodes.iter().map(|&id| (id, 0)).collect()
             ),
             cluster_nodes,
-            rng: Mutex::new(Box::new(rand::thread_rng())),
+            rng: RefCell::new(Box::new(rand::thread_rng())),
         }
     }
 
@@ -180,10 +193,10 @@ impl SimpleDirectory {
     /// let chosen_node = directory.choose_node_for_placement();
     /// ```
     fn choose_node_for_placement(&self) -> NodeId {
-        let node_load = self.node_load.read().unwrap();
+        let node_load = self.node_load.borrow();
 
-        // Pick two random nodes
-        let mut rng = self.rng.lock().unwrap();
+        // Pick two random nodes (single-threaded, RefCell borrow_mut)
+        let mut rng = self.rng.borrow_mut();
         let idx1 = rng.gen_range(0..self.cluster_nodes.len());
         let idx2 = rng.gen_range(0..self.cluster_nodes.len());
 
@@ -204,7 +217,7 @@ impl SimpleDirectory {
     ///
     /// Called when stale address detected (message forwarded).
     pub fn invalidate_cache(&self, actor_id: &ActorId) {
-        self.local_cache.write().unwrap().remove(actor_id);
+        self.local_cache.borrow_mut().remove(actor_id);
     }
 
     /// Update local cache with known-good address.
@@ -212,8 +225,7 @@ impl SimpleDirectory {
     /// Called when message successfully delivered or cache invalidation header received.
     pub fn update_cache(&self, actor_id: ActorId, node_id: NodeId) {
         self.local_cache
-            .write()
-            .unwrap()
+            .borrow_mut()
             .insert(actor_id, (node_id, Instant::now()));
     }
 }
@@ -222,12 +234,12 @@ impl SimpleDirectory {
 impl Directory for SimpleDirectory {
     async fn lookup(&self, actor_id: &ActorId) -> Option<NodeId> {
         // Check local cache first (fast path)
-        if let Some((node_id, _cached_at)) = self.local_cache.read().unwrap().get(actor_id) {
+        if let Some((node_id, _cached_at)) = self.local_cache.borrow().get(actor_id) {
             return Some(*node_id);
         }
 
         // Query authoritative registry
-        let node_id = self.entries.read().unwrap().get(actor_id).copied();
+        let node_id = self.entries.borrow().get(actor_id).copied();
 
         // Update cache if found
         if let Some(node_id) = node_id {
@@ -238,11 +250,11 @@ impl Directory for SimpleDirectory {
     }
 
     async fn register(
-        &mut self,
+        &self,
         actor_id: ActorId,
         node_id: NodeId,
     ) -> Result<PlacementDecision, DirectoryError> {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.borrow_mut();
 
         // Check if already registered
         if let Some(&existing_node) = entries.get(&actor_id) {
@@ -262,7 +274,7 @@ impl Directory for SimpleDirectory {
         entries.insert(actor_id.clone(), node_id);
 
         // Update load tracking
-        let mut node_load = self.node_load.write().unwrap();
+        let mut node_load = self.node_load.borrow_mut();
         *node_load.entry(node_id).or_insert(0) += 1;
 
         // Update local cache
@@ -271,12 +283,12 @@ impl Directory for SimpleDirectory {
         Ok(PlacementDecision::PlaceOnNode(node_id))
     }
 
-    async fn unregister(&mut self, actor_id: &ActorId) -> Result<(), DirectoryError> {
-        let mut entries = self.entries.write().unwrap();
+    async fn unregister(&self, actor_id: &ActorId) -> Result<(), DirectoryError> {
+        let mut entries = self.entries.borrow_mut();
 
         if let Some(node_id) = entries.remove(actor_id) {
             // Decrement load tracking
-            let mut node_load = self.node_load.write().unwrap();
+            let mut node_load = self.node_load.borrow_mut();
             if let Some(load) = node_load.get_mut(&node_id) {
                 *load = load.saturating_sub(1);
             }
@@ -290,44 +302,15 @@ impl Directory for SimpleDirectory {
 
     async fn get_node_load(&self, node_id: NodeId) -> usize {
         self.node_load
-            .read()
-            .unwrap()
+            .borrow()
             .get(&node_id)
             .copied()
             .unwrap_or(0)
     }
 }
 
-/// Cache invalidation update.
-///
-/// Piggybacked on message responses to proactively update caches.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CacheUpdate {
-    /// Stale address to invalidate.
-    pub invalid_address: ActorAddress,
-
-    /// New valid address (if known).
-    pub valid_address: Option<ActorAddress>,
-}
-
-impl CacheUpdate {
-    /// Create cache invalidation update.
-    ///
-    /// ## Example
-    /// ```ignore
-    /// // Actor moved from node_1 to node_2
-    /// let update = CacheUpdate::new(
-    ///     ActorAddress { actor_id: "alice".into(), node_id: NodeId(1), ... },
-    ///     Some(ActorAddress { actor_id: "alice".into(), node_id: NodeId(2), ... }),
-    /// );
-    /// ```
-    pub fn new(invalid_address: ActorAddress, valid_address: Option<ActorAddress>) -> Self {
-        Self {
-            invalid_address,
-            valid_address,
-        }
-    }
-}
+// Note: CacheUpdate and ActorAddress are defined in message.rs
+// They are part of the message protocol for cache invalidation.
 
 /// Example usage in message forwarding.
 ///
