@@ -87,7 +87,11 @@ impl ActorId {
 **Examples**:
 ```rust
 // ActorRuntime bootstrapped with namespace "prod"
-let runtime = ActorRuntime::new("prod").await?;
+let runtime = ActorRuntime::builder()
+    .namespace("prod")
+    .listen_addr("127.0.0.1:5000")
+    .build()
+    .await?;
 
 // get_actor() automatically applies "prod" namespace
 let alice = runtime.get_actor("BankAccount", "alice");
@@ -95,7 +99,11 @@ let alice = runtime.get_actor("BankAccount", "alice");
 // String format: "prod::BankAccount/alice"
 
 // Different cluster with different namespace
-let staging_runtime = ActorRuntime::new("staging").await?;
+let staging_runtime = ActorRuntime::builder()
+    .namespace("staging")
+    .listen_addr("127.0.0.1:6000")
+    .build()
+    .await?;
 let alice_staging = staging_runtime.get_actor("BankAccount", "alice");
 // String format: "staging::BankAccount/alice"
 // This is a DIFFERENT actor than "prod::BankAccount/alice"

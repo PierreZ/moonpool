@@ -182,64 +182,45 @@ pub struct ActorRuntime {
     catalog: Arc<ActorCatalog>,
     directory: Arc<dyn Directory>,
     message_bus: Arc<dyn MessageBus>,
+    storage: Option<Arc<dyn StorageProvider>>,
 }
 
 impl ActorRuntime {
-    /// Create actor runtime for single-node cluster.
+    /// Create builder for configuring actor runtime.
     ///
-    /// ## Parameters
-    /// - `namespace` - Cluster namespace (e.g., "prod", "staging", "tenant-acme")
-    ///
-    /// ## Example
-    /// ```ignore
-    /// // Production cluster
-    /// let runtime = ActorRuntime::single_node("prod").await?;
-    ///
-    /// // Staging cluster (isolated from prod)
-    /// let staging = ActorRuntime::single_node("staging").await?;
-    ///
-    /// // Multi-tenant: each tenant gets own cluster
-    /// let acme_runtime = ActorRuntime::single_node("tenant-acme").await?;
-    /// ```
-    pub async fn single_node(namespace: impl Into<String>) -> Result<Self, ActorError> {
-        unimplemented!("see runtime/mod.rs")
-    }
-
-    /// Create actor runtime for multi-node cluster.
-    ///
-    /// ## Parameters
-    /// - `namespace` - Cluster namespace (all nodes must use same namespace)
-    /// - `node_id` - This node's network address (host:port)
-    /// - `peer_nodes` - List of peer node addresses in cluster (excluding this node)
+    /// See `contracts/runtime_builder.rs` for complete builder API with provider injection.
     ///
     /// ## Example
     /// ```ignore
-    /// // Node at 127.0.0.1:5000 joins production cluster
-    /// let runtime = ActorRuntime::multi_node(
-    ///     "prod",
-    ///     NodeId::from("127.0.0.1:5000")?,
-    ///     vec![
-    ///         NodeId::from("127.0.0.1:5001")?,
-    ///         NodeId::from("127.0.0.1:5002")?,
-    ///     ],
-    /// ).await?;
+    /// // Single-node runtime with defaults
+    /// let runtime = ActorRuntime::builder()
+    ///     .namespace("prod")
+    ///     .listen_addr("127.0.0.1:5000")
+    ///     .build()
+    ///     .await?;
     ///
-    /// // Node with hostname
-    /// let runtime = ActorRuntime::multi_node(
-    ///     "prod",
-    ///     NodeId::from("node1.cluster:8080")?,
-    ///     vec![
-    ///         NodeId::from("node2.cluster:8080")?,
-    ///         NodeId::from("node3.cluster:8080")?,
-    ///     ],
-    /// ).await?;
+    /// // Multi-node runtime with shared directory and storage
+    /// let directory = Arc::new(SimpleDirectory::new());
+    /// let storage = Arc::new(InMemoryStorage::new());
+    ///
+    /// let node1 = ActorRuntime::builder()
+    ///     .namespace("prod")
+    ///     .listen_addr("127.0.0.1:5000")
+    ///     .directory(directory.clone())
+    ///     .storage(storage.clone())
+    ///     .build()
+    ///     .await?;
+    ///
+    /// let node2 = ActorRuntime::builder()
+    ///     .namespace("prod")
+    ///     .listen_addr("127.0.0.1:5001")
+    ///     .directory(directory.clone())
+    ///     .storage(storage.clone())
+    ///     .build()
+    ///     .await?;
     /// ```
-    pub async fn multi_node(
-        namespace: impl Into<String>,
-        node_id: NodeId,
-        peer_nodes: Vec<NodeId>,
-    ) -> Result<Self, ActorError> {
-        unimplemented!("see runtime/mod.rs")
+    pub fn builder() -> ActorRuntimeBuilder<TokioNetworkProvider, TokioTimeProvider, TokioTaskProvider> {
+        ActorRuntimeBuilder::new()
     }
 
     /// Obtain reference to actor by type and key.
@@ -258,7 +239,11 @@ impl ActorRuntime {
     /// ## Example
     /// ```ignore
     /// // Runtime bootstrapped with namespace "prod"
-    /// let runtime = ActorRuntime::single_node("prod").await?;
+    /// let runtime = ActorRuntime::builder()
+    ///     .namespace("prod")
+    ///     .listen_addr("127.0.0.1:5000")
+    ///     .build()
+    ///     .await?;
     ///
     /// // get_actor automatically creates: ActorId { namespace: "prod", actor_type: "BankAccount", key: "alice" }
     /// let account: ActorRef<BankAccountActor> = runtime.get_actor("BankAccount", "alice");
@@ -283,6 +268,161 @@ impl ActorRuntime {
     /// ## Timeout
     /// If shutdown exceeds timeout, forcibly terminates remaining actors.
     pub async fn shutdown(self, timeout: Duration) -> Result<(), ActorError> {
+        unimplemented!("see runtime/mod.rs")
+    }
+}
+
+/// Builder for configuring ActorRuntime.
+///
+/// ## Required Fields
+/// - `namespace` - Cluster namespace (e.g., "prod", "staging", "tenant-acme")
+/// - `listen_addr` - Network address for this node (e.g., "127.0.0.1:5000")
+///
+/// ## Optional Fields
+/// - `directory` - Shared directory for actor location (default: creates new SimpleDirectory)
+/// - `storage` - Shared storage for actor state (default: creates new InMemoryStorage)
+///
+/// ## Example: Single Node
+/// ```ignore
+/// let runtime = ActorRuntime::builder()
+///     .namespace("dev")
+///     .listen_addr("127.0.0.1:5000")
+///     .build()
+///     .await?;
+/// ```
+///
+/// ## Example: Multi-Node Cluster
+/// ```ignore
+/// // Create shared infrastructure
+/// let directory = Arc::new(SimpleDirectory::new());
+/// let storage = Arc::new(InMemoryStorage::new());
+///
+/// // Start node 1
+/// let node1 = ActorRuntime::builder()
+///     .namespace("prod")
+///     .listen_addr("127.0.0.1:5000")
+///     .directory(directory.clone())
+///     .storage(storage.clone())
+///     .build()
+///     .await?;
+///
+/// // Start node 2 (shares same directory and storage)
+/// let node2 = ActorRuntime::builder()
+///     .namespace("prod")
+///     .listen_addr("127.0.0.1:5001")
+///     .directory(directory.clone())
+///     .storage(storage.clone())
+///     .build()
+///     .await?;
+/// ```
+pub struct ActorRuntimeBuilder {
+    namespace: Option<String>,
+    listen_addr: Option<String>,
+    directory: Option<Arc<dyn Directory>>,
+    storage: Option<Arc<dyn StorageProvider>>,
+}
+
+impl ActorRuntimeBuilder {
+    /// Create new builder with default values.
+    pub fn new() -> Self {
+        Self {
+            namespace: None,
+            listen_addr: None,
+            directory: None,
+            storage: None,
+        }
+    }
+
+    /// Set cluster namespace (required).
+    ///
+    /// ## Use Cases
+    /// - **Environment isolation**: "prod", "staging", "dev"
+    /// - **Multi-tenancy**: "tenant-{id}"
+    /// - **Testing**: "test-{run-id}"
+    ///
+    /// ## Example
+    /// ```ignore
+    /// builder.namespace("prod")
+    /// ```
+    pub fn namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.namespace = Some(namespace.into());
+        self
+    }
+
+    /// Set listening address for this node (required).
+    ///
+    /// ## Format
+    /// - IPv4: "127.0.0.1:5000"
+    /// - IPv6: "[::1]:5000"
+    /// - Hostname: "node1.cluster:5000"
+    ///
+    /// ## Example
+    /// ```ignore
+    /// builder.listen_addr("127.0.0.1:5000")
+    /// ```
+    pub fn listen_addr(mut self, addr: impl Into<String>) -> Self {
+        self.listen_addr = Some(addr.into());
+        self
+    }
+
+    /// Set shared directory for actor location (optional).
+    ///
+    /// If not provided, creates a new SimpleDirectory instance.
+    /// For multi-node clusters, pass the same directory instance to all nodes.
+    ///
+    /// ## Example
+    /// ```ignore
+    /// let directory = Arc::new(SimpleDirectory::new());
+    /// builder.directory(directory.clone())
+    /// ```
+    pub fn directory(mut self, directory: Arc<dyn Directory>) -> Self {
+        self.directory = Some(directory);
+        self
+    }
+
+    /// Set shared storage for actor state (optional).
+    ///
+    /// If not provided, creates a new InMemoryStorage instance.
+    /// For multi-node clusters, pass the same storage instance to all nodes.
+    ///
+    /// ## Example
+    /// ```ignore
+    /// let storage = Arc::new(InMemoryStorage::new());
+    /// builder.storage(storage.clone())
+    /// ```
+    pub fn storage(mut self, storage: Arc<dyn StorageProvider>) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
+    /// Build the ActorRuntime.
+    ///
+    /// ## Errors
+    /// - Returns error if required fields (namespace, listen_addr) not set
+    /// - Returns error if listen_addr cannot be parsed or bound
+    ///
+    /// ## Example
+    /// ```ignore
+    /// let runtime = ActorRuntime::builder()
+    ///     .namespace("prod")
+    ///     .listen_addr("127.0.0.1:5000")
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub async fn build(self) -> Result<ActorRuntime, ActorError> {
+        let namespace = self.namespace.ok_or(ActorError::MissingConfiguration("namespace"))?;
+        let listen_addr = self.listen_addr.ok_or(ActorError::MissingConfiguration("listen_addr"))?;
+
+        // Create or use provided directory
+        let directory = self.directory.unwrap_or_else(|| Arc::new(SimpleDirectory::new()));
+
+        // Create or use provided storage
+        let storage = self.storage;
+
+        // Parse listen address to NodeId
+        let node_id = NodeId::from(listen_addr)?;
+
+        // TODO: Initialize MessageBus, ActorCatalog, bind network listener
         unimplemented!("see runtime/mod.rs")
     }
 }
@@ -354,8 +494,10 @@ impl Actor for BankAccountActor {
 /// // For each message type, copy-paste and fill in:
 /// #[async_trait(?Send)]
 /// impl MessageHandler<RequestType, ResponseType> for YourActor {
-///     async fn handle(&mut self, req: RequestType) -> Result<ResponseType, ActorError> {
+///     async fn handle(&mut self, ctx: &ActorContext, req: RequestType) -> Result<ResponseType, ActorError> {
 ///         self.your_method(req.field).await
+///         // Or pass ctx if method needs to call other actors:
+///         // self.your_method(ctx, req.field).await
 ///     }
 /// }
 /// ```
@@ -372,25 +514,39 @@ impl Actor for BankAccountActor {
 /// #[derive(Serialize, Deserialize)]
 /// pub struct GetBalanceRequest;
 ///
+/// #[derive(Serialize, Deserialize)]
+/// pub struct TransferRequest {
+///     pub recipient_key: String,
+///     pub amount: u64,
+/// }
+///
 /// // Handler implementations (copy-paste pattern for each message)
 /// #[async_trait(?Send)]
 /// impl MessageHandler<DepositRequest, u64> for BankAccountActor {
-///     async fn handle(&mut self, req: DepositRequest) -> Result<u64, ActorError> {
+///     async fn handle(&mut self, _ctx: &ActorContext, req: DepositRequest) -> Result<u64, ActorError> {
 ///         self.deposit(req.amount).await
 ///     }
 /// }
 ///
 /// #[async_trait(?Send)]
 /// impl MessageHandler<WithdrawRequest, u64> for BankAccountActor {
-///     async fn handle(&mut self, req: WithdrawRequest) -> Result<u64, ActorError> {
+///     async fn handle(&mut self, _ctx: &ActorContext, req: WithdrawRequest) -> Result<u64, ActorError> {
 ///         self.withdraw(req.amount).await
 ///     }
 /// }
 ///
 /// #[async_trait(?Send)]
 /// impl MessageHandler<GetBalanceRequest, u64> for BankAccountActor {
-///     async fn handle(&mut self, _req: GetBalanceRequest) -> Result<u64, ActorError> {
+///     async fn handle(&mut self, _ctx: &ActorContext, _req: GetBalanceRequest) -> Result<u64, ActorError> {
 ///         self.get_balance().await
+///     }
+/// }
+///
+/// // Handler that needs ActorContext to call other actors
+/// #[async_trait(?Send)]
+/// impl MessageHandler<TransferRequest, ()> for BankAccountActor {
+///     async fn handle(&mut self, ctx: &ActorContext, req: TransferRequest) -> Result<(), ActorError> {
+///         self.transfer_to(ctx, &req.recipient_key, req.amount).await
 ///     }
 /// }
 /// ```
@@ -398,21 +554,23 @@ impl Actor for BankAccountActor {
 /// ## MessageBus Integration
 /// When MessageBus receives a message for an actor:
 /// 1. Deserialize `Message.payload` to concrete request type (e.g., `DepositRequest`)
-/// 2. Look up handler via trait dispatch: `<BankAccountActor as MessageHandler<DepositRequest, u64>>::handle()`
-/// 3. Execute handler method
-/// 4. Serialize response back to `Vec<u8>` for return message
+/// 2. Create ActorContext from runtime state
+/// 3. Look up handler via trait dispatch: `<BankAccountActor as MessageHandler<DepositRequest, u64>>::handle()`
+/// 4. Execute handler method (passing context)
+/// 5. Serialize response back to `Vec<u8>` for return message
 ///
 /// ## Type Safety
 /// Compile-time guarantees that:
 /// - Request type matches handler input
 /// - Response type matches handler output
 /// - All actor methods have corresponding handlers
+/// - ActorContext is available when needed
 ///
 /// ## Future: Automatic Derivation
 /// Planned proc macro for automatic implementation (design TBD).
 #[async_trait(?Send)]
 pub trait MessageHandler<Req, Res>: Actor {
-    async fn handle(&mut self, request: Req) -> Result<Res, ActorError>;
+    async fn handle(&mut self, ctx: &ActorContext, request: Req) -> Result<Res, ActorError>;
 }
 
 /// Message method registry for dynamic dispatch.
