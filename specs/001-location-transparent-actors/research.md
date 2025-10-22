@@ -705,6 +705,156 @@ fn test_all_transitions() {
 
 ---
 
+## 7. Concurrency Patterns Research
+
+### Decision: Double-Check Locking for Activation Creation
+
+**Rationale**: Prevents duplicate activations while minimizing lock contention (Orleans pattern from `Catalog.cs:106-195`).
+
+### Pattern: Get-or-Create with Race Protection
+
+```rust
+pub struct ActorCatalog<A: Actor> {
+    activation_directory: ActivationDirectory<A>,
+    activation_lock: RefCell<()>,  // Coarse lock for get-or-create
+    node_id: NodeId,
+    directory: Arc<dyn Directory>,
+}
+
+impl<A: Actor> ActorCatalog<A> {
+    pub fn get_or_create_activation(&self, actor_id: ActorId) -> Result<Arc<ActorContext<A>>> {
+        // FAST PATH: Check without lock (99% case - activation exists)
+        if let Some(activation) = self.activation_directory.find_activation(&actor_id) {
+            return Ok(activation);
+        }
+
+        // SLOW PATH: Acquire lock (only on first access per actor)
+        let _guard = self.activation_lock.borrow_mut();
+
+        // DOUBLE-CHECK under lock (protect against TOCTOU race)
+        if let Some(activation) = self.activation_directory.find_activation(&actor_id) {
+            return Ok(activation);  // Another task created while we waited
+        }
+
+        // Create new activation (while holding lock)
+        let context = Arc::new(ActorContext::new(actor_id.clone(), self.node_id.clone()));
+        self.activation_directory.record_activation(context.clone());
+
+        // Return for activation outside lock
+        Ok(context)
+    }
+}
+```
+
+### Why This Pattern?
+
+1. **Fast Path Optimization** (99% case)
+   - Activation already exists → no lock needed
+   - Read-only operation on HashMap via RefCell
+   - Minimal overhead (~10ns)
+
+2. **Race-Safe** (1% case - first access)
+   - Coarse lock serializes all activation creation
+   - Double-check prevents TOCTOU (Time-Of-Check-Time-Of-Use) races
+   - Two tasks requesting same actor: first creates, second uses
+
+3. **Deadlock-Free**
+   - Activation happens **outside** lock (after returning from get_or_create)
+   - Lock only held during HashMap operations
+   - No nested lock acquisitions
+
+4. **Single-Threaded Adaptation** (Moonpool-specific)
+   - Orleans uses `lock(activations)` (multi-threaded)
+   - Moonpool uses `RefCell` (single-threaded, no Send/Sync)
+   - Same semantics, lower overhead
+
+### Race Scenario Example
+
+```rust
+// Timeline: Two nodes receive message for "alice" simultaneously
+
+// Node 1 Thread              | Node 2 Thread
+// ---------------------------|---------------------------
+// get_or_create("alice")     | get_or_create("alice")
+// → Fast check: None         | → Fast check: None
+// → Acquire lock             | → Wait for lock...
+// → Double-check: None       |
+// → Create activation        |
+// → Record in directory      |
+// → Release lock             | → Acquire lock
+// → Return context           | → Double-check: Some!
+//                            | → Release lock
+//                            | → Return existing context
+```
+
+**Result**: Node 1 creates activation, Node 2 reuses it. No duplicates!
+
+### Activation Outside Lock (Critical Detail)
+
+```rust
+// CALLER of get_or_create
+let context = catalog.get_or_create_activation(actor_id)?;
+
+// Activate AFTER releasing lock (avoid I/O while holding lock)
+context.activate(message).await?;
+```
+
+**Why activate outside lock**:
+- `on_activate()` may perform I/O (load state, connect to DB)
+- Holding lock during I/O blocks all other activation creation
+- Lock only protects HashMap mutation, not actor initialization
+
+### Testing Strategy
+
+**Buggify injection points**:
+```rust
+pub fn get_or_create_activation(&self, actor_id: ActorId) -> Result<Arc<ActorContext<A>>> {
+    if let Some(activation) = self.activation_directory.find_activation(&actor_id) {
+        return Ok(activation);
+    }
+
+    // BUGGIFY: Inject delay before acquiring lock (increase race probability)
+    if buggify_with_prob!(0.5) {
+        time_provider.sleep(Duration::from_millis(10)).await?;
+    }
+
+    let _guard = self.activation_lock.borrow_mut();
+
+    // BUGGIFY: Inject delay after lock (test double-check effectiveness)
+    if buggify_with_prob!(0.3) {
+        time_provider.sleep(Duration::from_millis(5)).await?;
+    }
+
+    if let Some(activation) = self.activation_directory.find_activation(&actor_id) {
+        return Ok(activation);
+    }
+
+    let context = Arc::new(ActorContext::new(actor_id.clone(), self.node_id.clone()));
+    self.activation_directory.record_activation(context.clone());
+    Ok(context)
+}
+```
+
+**Invariant to test**:
+```rust
+always_assert!(
+    activation_directory.count() == unique_actor_ids.len(),
+    "No duplicate activations created"
+);
+```
+
+### Alternatives Considered
+
+**Fine-grained locking** (per-actor locks):
+- Rejected: Complex, requires lock management
+- Orleans uses coarse lock - simple and sufficient
+
+**Lock-free data structures**:
+- Rejected: Not needed in single-threaded runtime
+- RefCell provides same guarantees with less complexity
+
+---
+
 ## Summary: Research Decisions
 
 | Area | Decision | Key Insight |

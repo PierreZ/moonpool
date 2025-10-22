@@ -107,7 +107,7 @@ impl<A: Actor> ActorRef<A> {
     ///
     /// ## Example
     /// ```ignore
-    /// let account = actor_system.get_actor::<BankAccountActor>("alice");
+    /// let account = runtime.get_actor::<BankAccountActor>("alice");
     /// let balance = account.call(GetBalanceRequest).await?;
     /// ```
     pub async fn call<Req, Res>(&self, request: Req) -> Result<Res, ActorError>
@@ -173,10 +173,10 @@ impl<A: Actor> ActorRef<A> {
     }
 }
 
-/// Actor system entry point.
+/// Actor runtime entry point.
 ///
 /// Manages cluster-wide actor lifecycle and message routing.
-pub struct ActorSystem {
+pub struct ActorRuntime {
     namespace: String,
     node_id: NodeId,
     catalog: Arc<ActorCatalog>,
@@ -184,8 +184,8 @@ pub struct ActorSystem {
     message_bus: Arc<dyn MessageBus>,
 }
 
-impl ActorSystem {
-    /// Create actor system for single-node cluster.
+impl ActorRuntime {
+    /// Create actor runtime for single-node cluster.
     ///
     /// ## Parameters
     /// - `namespace` - Cluster namespace (e.g., "prod", "staging", "tenant-acme")
@@ -193,45 +193,58 @@ impl ActorSystem {
     /// ## Example
     /// ```ignore
     /// // Production cluster
-    /// let system = ActorSystem::single_node("prod").await?;
+    /// let runtime = ActorRuntime::single_node("prod").await?;
     ///
     /// // Staging cluster (isolated from prod)
-    /// let staging = ActorSystem::single_node("staging").await?;
+    /// let staging = ActorRuntime::single_node("staging").await?;
     ///
     /// // Multi-tenant: each tenant gets own cluster
-    /// let acme_system = ActorSystem::single_node("tenant-acme").await?;
+    /// let acme_runtime = ActorRuntime::single_node("tenant-acme").await?;
     /// ```
     pub async fn single_node(namespace: impl Into<String>) -> Result<Self, ActorError> {
         unimplemented!("see runtime/mod.rs")
     }
 
-    /// Create actor system for multi-node cluster.
+    /// Create actor runtime for multi-node cluster.
     ///
     /// ## Parameters
     /// - `namespace` - Cluster namespace (all nodes must use same namespace)
-    /// - `node_id` - This node's unique identifier
-    /// - `cluster_nodes` - List of all node addresses in cluster
+    /// - `node_id` - This node's network address (host:port)
+    /// - `peer_nodes` - List of peer node addresses in cluster (excluding this node)
     ///
     /// ## Example
     /// ```ignore
-    /// // All nodes in production cluster use "prod" namespace
-    /// let system = ActorSystem::multi_node(
+    /// // Node at 127.0.0.1:5000 joins production cluster
+    /// let runtime = ActorRuntime::multi_node(
     ///     "prod",
-    ///     NodeId(0),
-    ///     vec!["127.0.0.1:5000", "127.0.0.1:5001"],
+    ///     NodeId::from("127.0.0.1:5000")?,
+    ///     vec![
+    ///         NodeId::from("127.0.0.1:5001")?,
+    ///         NodeId::from("127.0.0.1:5002")?,
+    ///     ],
+    /// ).await?;
+    ///
+    /// // Node with hostname
+    /// let runtime = ActorRuntime::multi_node(
+    ///     "prod",
+    ///     NodeId::from("node1.cluster:8080")?,
+    ///     vec![
+    ///         NodeId::from("node2.cluster:8080")?,
+    ///         NodeId::from("node3.cluster:8080")?,
+    ///     ],
     /// ).await?;
     /// ```
     pub async fn multi_node(
         namespace: impl Into<String>,
         node_id: NodeId,
-        cluster_nodes: Vec<String>,
+        peer_nodes: Vec<NodeId>,
     ) -> Result<Self, ActorError> {
         unimplemented!("see runtime/mod.rs")
     }
 
     /// Obtain reference to actor by type and key.
     ///
-    /// Namespace is automatically applied from ActorSystem configuration.
+    /// Namespace is automatically applied from ActorRuntime configuration.
     ///
     /// ## Behavior
     /// - Returns immediately (does not activate actor)
@@ -244,11 +257,11 @@ impl ActorSystem {
     ///
     /// ## Example
     /// ```ignore
-    /// // System bootstrapped with namespace "prod"
-    /// let system = ActorSystem::single_node("prod").await?;
+    /// // Runtime bootstrapped with namespace "prod"
+    /// let runtime = ActorRuntime::single_node("prod").await?;
     ///
     /// // get_actor automatically creates: ActorId { namespace: "prod", actor_type: "BankAccount", key: "alice" }
-    /// let account: ActorRef<BankAccountActor> = system.get_actor("BankAccount", "alice");
+    /// let account: ActorRef<BankAccountActor> = runtime.get_actor("BankAccount", "alice");
     /// ```
     pub fn get_actor<A: Actor>(
         &self,
@@ -259,7 +272,7 @@ impl ActorSystem {
         unimplemented!("see runtime/mod.rs")
     }
 
-    /// Gracefully shutdown actor system.
+    /// Gracefully shutdown actor runtime.
     ///
     /// ## Behavior
     /// - Deactivates all actors (calls `on_deactivate()`)
@@ -328,6 +341,132 @@ impl Actor for BankAccountActor {
     }
 }
 
-// Note: Message routing from ActorRef methods to actor methods happens via
-// serde serialization + dynamic dispatch based on method name or enum variant.
-// Implementation details in messaging/protocol.rs.
+/// Message handler trait for type-safe method dispatch.
+///
+/// **Manual Implementation Required**: Each actor must manually implement this trait
+/// for each message type it handles. Future: proc macro for automatic derivation.
+///
+/// ## Pattern: Trait-Based Dispatch
+/// Each (Actor, RequestType, ResponseType) triple gets a handler implementation.
+///
+/// ## Copy-Paste Template
+/// ```ignore
+/// // For each message type, copy-paste and fill in:
+/// #[async_trait(?Send)]
+/// impl MessageHandler<RequestType, ResponseType> for YourActor {
+///     async fn handle(&mut self, req: RequestType) -> Result<ResponseType, ActorError> {
+///         self.your_method(req.field).await
+///     }
+/// }
+/// ```
+///
+/// ## Complete Example (BankAccountActor)
+/// ```ignore
+/// // Message types
+/// #[derive(Serialize, Deserialize)]
+/// pub struct DepositRequest { pub amount: u64 }
+///
+/// #[derive(Serialize, Deserialize)]
+/// pub struct WithdrawRequest { pub amount: u64 }
+///
+/// #[derive(Serialize, Deserialize)]
+/// pub struct GetBalanceRequest;
+///
+/// // Handler implementations (copy-paste pattern for each message)
+/// #[async_trait(?Send)]
+/// impl MessageHandler<DepositRequest, u64> for BankAccountActor {
+///     async fn handle(&mut self, req: DepositRequest) -> Result<u64, ActorError> {
+///         self.deposit(req.amount).await
+///     }
+/// }
+///
+/// #[async_trait(?Send)]
+/// impl MessageHandler<WithdrawRequest, u64> for BankAccountActor {
+///     async fn handle(&mut self, req: WithdrawRequest) -> Result<u64, ActorError> {
+///         self.withdraw(req.amount).await
+///     }
+/// }
+///
+/// #[async_trait(?Send)]
+/// impl MessageHandler<GetBalanceRequest, u64> for BankAccountActor {
+///     async fn handle(&mut self, _req: GetBalanceRequest) -> Result<u64, ActorError> {
+///         self.get_balance().await
+///     }
+/// }
+/// ```
+///
+/// ## MessageBus Integration
+/// When MessageBus receives a message for an actor:
+/// 1. Deserialize `Message.payload` to concrete request type (e.g., `DepositRequest`)
+/// 2. Look up handler via trait dispatch: `<BankAccountActor as MessageHandler<DepositRequest, u64>>::handle()`
+/// 3. Execute handler method
+/// 4. Serialize response back to `Vec<u8>` for return message
+///
+/// ## Type Safety
+/// Compile-time guarantees that:
+/// - Request type matches handler input
+/// - Response type matches handler output
+/// - All actor methods have corresponding handlers
+///
+/// ## Future: Automatic Derivation
+/// Planned proc macro for automatic implementation (design TBD).
+#[async_trait(?Send)]
+pub trait MessageHandler<Req, Res>: Actor {
+    async fn handle(&mut self, request: Req) -> Result<Res, ActorError>;
+}
+
+/// Message method registry for dynamic dispatch.
+///
+/// Maps method names to handler functions for runtime routing.
+///
+/// ## Alternative Pattern: Enum-Based Dispatch
+/// Instead of traits, use an enum to represent all possible messages:
+///
+/// ```ignore
+/// #[derive(Serialize, Deserialize)]
+/// pub enum BankAccountMessage {
+///     Deposit { amount: u64 },
+///     Withdraw { amount: u64 },
+///     GetBalance,
+/// }
+///
+/// impl BankAccountActor {
+///     async fn handle_message(&mut self, msg: BankAccountMessage) -> Result<BankAccountResponse, ActorError> {
+///         match msg {
+///             BankAccountMessage::Deposit { amount } => {
+///                 let balance = self.deposit(amount).await?;
+///                 Ok(BankAccountResponse::Balance(balance))
+///             }
+///             BankAccountMessage::Withdraw { amount } => {
+///                 let balance = self.withdraw(amount).await?;
+///                 Ok(BankAccountResponse::Balance(balance))
+///             }
+///             BankAccountMessage::GetBalance => {
+///                 let balance = self.get_balance().await?;
+///                 Ok(BankAccountResponse::Balance(balance))
+///             }
+///         }
+///     }
+/// }
+/// ```
+///
+/// ## Trade-offs
+/// **Trait-based** (recommended):
+/// - ✅ Type-safe at compile time
+/// - ✅ Each request/response pair is distinct type
+/// - ✅ Easy to add new messages without changing enum
+/// - ❌ Requires trait implementation boilerplate
+///
+/// **Enum-based**:
+/// - ✅ Centralized message definition
+/// - ✅ Exhaustiveness checking via match
+/// - ❌ Less type-safe (single response enum for all methods)
+/// - ❌ Harder to extend (need to modify enum)
+///
+/// ## Decision
+/// Use **trait-based dispatch** for initial implementation (aligns with Orleans model).
+/// Enum-based can be added later as an alternative pattern for specific use cases.
+
+// Note: MessageBus routes incoming messages to actor methods via MessageHandler trait.
+// See data-model.md "Message Flow: End-to-End" for complete routing flow.
+// Implementation details in messaging/protocol.rs and actor/catalog.rs.
