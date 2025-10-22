@@ -95,6 +95,18 @@ pub struct ActorContext<A: Actor> {
     /// Set by ActorCatalog when processing messages. Required for
     /// message dispatch to send responses back to callers.
     pub message_bus: RefCell<Option<Rc<MessageBus>>>,
+
+    /// Last error that occurred during message processing.
+    ///
+    /// For debugging and monitoring. Actors can continue processing
+    /// messages even after errors (error isolation).
+    pub last_error: RefCell<Option<ActorError>>,
+
+    /// Total count of errors encountered during this activation's lifetime.
+    ///
+    /// Useful for health monitoring and deciding when to deactivate
+    /// a misbehaving actor.
+    pub error_count: RefCell<usize>,
 }
 
 impl<A: Actor> ActorContext<A> {
@@ -125,6 +137,8 @@ impl<A: Actor> ActorContext<A> {
             last_message_time: RefCell::new(now),
             is_processing: RefCell::new(false),
             message_bus: RefCell::new(None),
+            last_error: RefCell::new(None),
+            error_count: RefCell::new(0),
         }
     }
 
@@ -253,6 +267,53 @@ impl<A: Actor> ActorContext<A> {
     /// Get the MessageBus reference.
     pub fn get_message_bus(&self) -> Option<Rc<MessageBus>> {
         self.message_bus.borrow().clone()
+    }
+
+    /// Record an error that occurred during message processing.
+    ///
+    /// Updates `last_error` and increments `error_count` for monitoring.
+    ///
+    /// # Parameters
+    ///
+    /// - `error`: The error that occurred
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// if let Err(e) = actor.handle(request, ctx).await {
+    ///     ctx.record_error(e.clone());
+    ///     // Send error response to caller
+    /// }
+    /// ```
+    pub fn record_error(&self, error: ActorError) {
+        *self.last_error.borrow_mut() = Some(error);
+        *self.error_count.borrow_mut() += 1;
+    }
+
+    /// Get the last error that occurred during message processing.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(error)`: Last error recorded
+    /// - `None`: No errors have occurred
+    pub fn get_last_error(&self) -> Option<ActorError> {
+        self.last_error.borrow().as_ref().cloned()
+    }
+
+    /// Get the total number of errors encountered.
+    ///
+    /// Useful for health monitoring and circuit breaker patterns.
+    pub fn get_error_count(&self) -> usize {
+        *self.error_count.borrow()
+    }
+
+    /// Clear error tracking state.
+    ///
+    /// Can be called after successful recovery or when error monitoring
+    /// window resets.
+    pub fn clear_errors(&self) {
+        *self.last_error.borrow_mut() = None;
+        *self.error_count.borrow_mut() = 0;
     }
 
     /// Get a reference to another actor for actor-to-actor communication.
@@ -476,6 +537,8 @@ impl<A: Actor> ActorContext<A> {
                     self.actor_id,
                     e
                 );
+                // Record error for monitoring
+                self.record_error(e);
                 // Continue processing remaining messages even if one fails
             }
 
@@ -498,6 +561,8 @@ impl<A: Actor> std::fmt::Debug for ActorContext<A> {
             .field("activation_time", &self.activation_time)
             .field("last_message_time", &self.last_message_time)
             .field("is_processing", &self.is_processing.borrow())
+            .field("error_count", &self.error_count.borrow())
+            .field("last_error", &self.last_error.borrow())
             .finish()
     }
 }

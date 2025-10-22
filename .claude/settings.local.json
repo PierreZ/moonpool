@@ -25,7 +25,10 @@
       "Bash(test:*)",
       "Bash(git rev-parse:*)",
       "Bash(timeout 60s nix develop:*)",
-      "Bash(git log -1 --format='%an %ae')"
+      "Bash(git log -1 --format='%an %ae')",
+      "Bash(git -C /home/pierrez/workspace/rust/moonpool diff)",
+      "Bash(git -C /home/pierrez/workspace/rust/moonpool log -1 --format='%an %ae')",
+      "Bash(git -C /home/pierrez/workspace/rust/moonpool diff --stat)"
     ],
     "deny": [],
     "ask": [],

@@ -4,7 +4,7 @@ use crate::actor::{ActivationState, NodeId};
 use thiserror::Error;
 
 /// Errors related to actor operations and lifecycle.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum ActorError {
     /// Actor activation failed.
     #[error("Actor activation failed: {0}")]
@@ -79,11 +79,11 @@ pub enum ActorError {
 }
 
 /// Errors related to message handling.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum MessageError {
     /// Message serialization failed.
     #[error("Serialization error: {0}")]
-    Serialization(#[from] serde_json::Error),
+    Serialization(String),
 
     /// Message deserialization failed.
     #[error("Deserialization failed: {0}")]
@@ -103,18 +103,24 @@ pub enum MessageError {
 
     /// Network I/O error.
     #[error("Network I/O error: {0}")]
-    IoError(std::io::Error),
+    IoError(String),
 }
 
-// Manual From implementation for io::Error to avoid conflict with serde_json::Error
+// Manual From implementations
 impl From<std::io::Error> for MessageError {
     fn from(err: std::io::Error) -> Self {
-        MessageError::IoError(err)
+        MessageError::IoError(err.to_string())
+    }
+}
+
+impl From<serde_json::Error> for MessageError {
+    fn from(err: serde_json::Error) -> Self {
+        MessageError::Serialization(err.to_string())
     }
 }
 
 /// Errors related to directory operations.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum DirectoryError {
     /// Actor already registered on a different node.
     #[error("Actor already registered on node: {0:?}")]
@@ -138,15 +144,15 @@ pub enum DirectoryError {
 }
 
 /// Errors related to storage operations.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum StorageError {
     /// Serialization/deserialization failed.
     #[error("Serialization error: {0}")]
-    Serialization(#[from] serde_json::Error),
+    Serialization(String),
 
     /// Underlying I/O error (file, network, etc.).
     #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(String),
 
     /// Storage system unavailable.
     #[error("Storage unavailable")]
@@ -162,7 +168,7 @@ pub enum StorageError {
 }
 
 /// Errors related to ActorId parsing.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum ActorIdError {
     /// Invalid ActorId format.
     #[error("Invalid ActorId format (expected 'namespace::actor_type/key')")]
@@ -174,7 +180,7 @@ pub enum ActorIdError {
 }
 
 /// Errors related to NodeId parsing.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum NodeIdError {
     /// Invalid NodeId format.
     #[error("Invalid NodeId format (expected 'host:port')")]
@@ -183,4 +189,17 @@ pub enum NodeIdError {
     /// Invalid network address.
     #[error("Invalid network address")]
     InvalidAddress,
+}
+
+// Manual From implementations for StorageError
+impl From<std::io::Error> for StorageError {
+    fn from(err: std::io::Error) -> Self {
+        StorageError::Io(err.to_string())
+    }
+}
+
+impl From<serde_json::Error> for StorageError {
+    fn from(err: serde_json::Error) -> Self {
+        StorageError::Serialization(err.to_string())
+    }
 }
