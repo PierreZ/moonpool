@@ -81,10 +81,10 @@
 
 ### Simulation Tests for User Story 1 (Write Tests FIRST)
 
-- [ ] T026 [P] [US1] Create BankAccountActor example in tests/simulation/bank_account/actor.rs (stateless version, deposit/withdraw/balance methods)
-- [ ] T027 [P] [US1] Implement MessageHandler<DepositRequest, u64> for BankAccountActor
-- [ ] T028 [P] [US1] Implement MessageHandler<WithdrawRequest, u64> for BankAccountActor
-- [ ] T029 [P] [US1] Implement MessageHandler<GetBalanceRequest, u64> for BankAccountActor
+- [X] T026 [P] [US1] Create BankAccountActor example in tests/simulation/bank_account/actor.rs (stateless version, deposit/withdraw/balance methods)
+- [X] T027 [P] [US1] Implement MessageHandler<DepositRequest, u64> for BankAccountActor
+- [X] T028 [P] [US1] Implement MessageHandler<WithdrawRequest, u64> for BankAccountActor
+- [X] T029 [P] [US1] Implement MessageHandler<GetBalanceRequest, u64> for BankAccountActor
 - [ ] T030 [US1] Create single-node workload in tests/simulation/bank_account/workload.rs (1x1 topology)
 - [ ] T031 [US1] Create multi-node workload in tests/simulation/bank_account/workload.rs (2x2 topology)
 - [ ] T032 [US1] Write simulation test shell in tests/simulation/bank_account/tests.rs (WILL FAIL until implementation)
@@ -93,42 +93,42 @@
 
 ### Actor Trait and Context
 
-- [ ] T033 [P] [US1] Define Actor trait in src/actor/traits.rs (on_activate, on_deactivate hooks, no State type yet)
-- [ ] T034 [P] [US1] Define MessageHandler trait in src/actor/traits.rs (handle method with ActorContext param)
-- [ ] T035 [P] [US1] Implement ActorContext struct in src/actor/context.rs (per-actor state container)
-- [ ] T036 [P] [US1] Implement ActorContext methods (actor_id, node_id, state transitions)
+- [X] T033 [P] [US1] Define Actor trait in src/actor/traits.rs (on_activate, on_deactivate hooks, State type)
+- [X] T034 [P] [US1] Define MessageHandler trait in src/actor/traits.rs (handle method with ActorContext param)
+- [X] T035 [P] [US1] Implement ActorContext struct in src/actor/context.rs (per-actor state container)
+- [X] T036 [P] [US1] Implement ActorContext methods (actor_id, node_id, state transitions)
 - [ ] T037 [P] [US1] Unit tests for ActorContext lifecycle in tests/unit/actor/context_test.rs
 
 ### Directory Service
 
-- [ ] T038 [P] [US1] Define Directory trait in src/directory/traits.rs (lookup, register, unregister methods)
-- [ ] T039 [P] [US1] Define PlacementDecision enum in src/directory/placement.rs (PlaceOnNode, AlreadyRegistered, Race)
-- [ ] T040 [US1] Implement SimpleDirectory struct in src/directory/simple.rs (RefCell-based, single-threaded)
-- [ ] T041 [US1] Implement SimpleDirectory::lookup() with local caching
-- [ ] T042 [US1] Implement SimpleDirectory::register() with placement decision logic
-- [ ] T043 [US1] Implement SimpleDirectory::unregister() with cache invalidation
-- [ ] T044 [US1] Implement two-random-choices placement algorithm in src/directory/placement.rs
+- [X] T038 [P] [US1] Define Directory trait in src/directory/traits.rs (lookup, register, unregister methods)
+- [X] T039 [P] [US1] Define PlacementDecision enum in src/directory/placement.rs (PlaceOnNode, AlreadyRegistered, Race)
+- [X] T040 [US1] Implement SimpleDirectory struct in src/directory/simple.rs (RefCell-based, single-threaded)
+- [X] T041 [US1] Implement SimpleDirectory::lookup() with local caching
+- [X] T042 [US1] Implement SimpleDirectory::register() with placement decision logic
+- [X] T043 [US1] Implement SimpleDirectory::unregister() with cache invalidation
+- [X] T044 [US1] Implement two-random-choices placement algorithm in src/directory/placement.rs
 - [ ] T045 [P] [US1] Unit tests for SimpleDirectory operations in tests/unit/directory/simple_test.rs
 - [ ] T046 [P] [US1] Unit tests for placement algorithm in tests/unit/directory/placement_test.rs
 
 ### Actor Catalog (Activation Management)
 
-- [ ] T047 [P] [US1] Implement ActivationDirectory struct in src/actor/catalog.rs (local registry)
-- [ ] T048 [US1] Implement ActorCatalog struct in src/actor/catalog.rs (double-check locking pattern)
-- [ ] T049 [US1] Implement ActorCatalog::get_or_create_activation() (Orleans pattern from research.md)
+- [X] T047 [P] [US1] Implement ActivationDirectory struct in src/actor/catalog.rs (local registry)
+- [X] T048 [US1] Implement ActorCatalog struct in src/actor/catalog.rs (double-check locking pattern)
+- [X] T049 [US1] Implement ActorCatalog::get_or_create_activation() (Orleans pattern from research.md)
 - [ ] T050 [US1] Add buggify injection points in get_or_create_activation (race condition testing)
-- [ ] T051 [P] [US1] Unit tests for ActorCatalog double-check locking in tests/unit/actor/catalog_test.rs
+- [X] T051 [P] [US1] Unit tests for ActorCatalog double-check locking in tests/unit/actor/catalog_test.rs
 
 ### Message Routing Infrastructure
 
-- [ ] T052 [P] [US1] Implement CallbackData struct in src/messaging/correlation.rs (oneshot channel, timeout)
-- [ ] T053 [US1] Implement MessageBus struct in src/messaging/bus.rs (generic over providers)
+- [X] T052 [P] [US1] Implement CallbackData struct in src/messaging/correlation.rs (oneshot channel, timeout)
+- [X] T053 [US1] Implement MessageBus struct in src/messaging/bus.rs (generic over providers)
 - [ ] T054 [US1] Implement MessageBus::send_request() with correlation tracking
 - [ ] T055 [US1] Implement MessageBus::send_response() with correlation matching
 - [ ] T056 [US1] Implement MessageBus::receive_loop() for incoming messages
 - [ ] T057 [US1] Implement message routing logic (Request → ActorCatalog, Response → CallbackData)
 - [ ] T058 [US1] Add buggify injection points in message routing (network delay, failures)
-- [ ] T059 [P] [US1] Unit tests for CallbackData in tests/unit/messaging/correlation_test.rs
+- [X] T059 [P] [US1] Unit tests for CallbackData in tests/unit/messaging/correlation_test.rs
 
 ### Actor Runtime (Entry Point)
 
