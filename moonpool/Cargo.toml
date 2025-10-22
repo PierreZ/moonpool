@@ -9,3 +9,29 @@ repository.workspace = true
 edition.workspace = true
 
 [dependencies]
+# Core async runtime
+tokio = { version = "1.40", features = ["rt", "macros", "time", "sync", "net", "io-util"] }
+
+# Async trait support (single-threaded)
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "2.0"
+
+# Bitflags for MessageFlags
+bitflags = "2.6"
+
+# Logging
+tracing = "0.1"
+
+# Foundation framework (deterministic simulation)
+moonpool-foundation = { path = "../moonpool-foundation" }
+
+[dev-dependencies]
+# Testing
+tracing-subscriber = "0.3"
+tokio-test = "0.4"

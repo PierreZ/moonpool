@@ -23,11 +23,11 @@
 
 **Purpose**: Project initialization and core type definitions
 
-- [ ] T001 Create moonpool/ crate directory structure per plan.md (src/, tests/)
-- [ ] T002 Configure moonpool/Cargo.toml with dependencies (tokio, serde, async-trait, moonpool-foundation)
-- [ ] T003 [P] Create src/prelude.rs for common imports
-- [ ] T004 [P] Create src/error.rs with ActorError, MessageError, DirectoryError, StorageError types
-- [ ] T005 [P] Create moonpool/src/lib.rs with module declarations
+- [X] T001 Create moonpool/ crate directory structure per plan.md (src/, tests/)
+- [X] T002 Configure moonpool/Cargo.toml with dependencies (tokio, serde, async-trait, moonpool-foundation)
+- [X] T003 [P] Create src/prelude.rs for common imports
+- [X] T004 [P] Create src/error.rs with ActorError, MessageError, DirectoryError, StorageError types
+- [X] T005 [P] Create moonpool/src/lib.rs with module declarations
 
 ---
 
