@@ -79,6 +79,7 @@ impl ActorRuntime {
     }
 
     /// Get a reference to the message bus.
+    #[allow(dead_code)]
     pub(crate) fn message_bus(&self) -> &Rc<MessageBus> {
         &self.message_bus
     }

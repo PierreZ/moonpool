@@ -23,7 +23,9 @@
       "Bash(else echo \"no_checklists\")",
       "Bash(fi)",
       "Bash(test:*)",
-      "Bash(git rev-parse:*)"
+      "Bash(git rev-parse:*)",
+      "Bash(timeout 60s nix develop:*)",
+      "Bash(git log -1 --format='%an %ae')"
     ],
     "deny": [],
     "ask": [],

@@ -162,6 +162,7 @@ impl Message {
     /// - `method_name`: Method being invoked
     /// - `payload`: Serialized request data
     /// - `timeout`: Request timeout
+    #[allow(clippy::too_many_arguments)]
     pub fn request(
         correlation_id: CorrelationId,
         target_actor: ActorId,

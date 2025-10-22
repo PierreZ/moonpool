@@ -43,6 +43,7 @@ impl ActorId {
     /// # Panics
     ///
     /// Panics if any field is empty.
+    #[allow(dead_code)]
     pub(crate) fn new(
         namespace: impl Into<String>,
         actor_type: impl Into<String>,

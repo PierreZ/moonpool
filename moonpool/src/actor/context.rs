@@ -3,9 +3,11 @@
 //! This module provides the `ActorContext` which holds per-actor state and metadata.
 
 use crate::actor::{ActivationState, Actor, ActorId, NodeId};
-use crate::messaging::Message;
+use crate::error::ActorError;
+use crate::messaging::{Message, MessageBus};
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 use std::time::Instant;
 
 /// Per-actor execution context holding state and message queue.
@@ -87,6 +89,12 @@ pub struct ActorContext<A: Actor> {
     ///
     /// Prevents spawning multiple processing tasks for the same actor.
     pub is_processing: RefCell<bool>,
+
+    /// MessageBus reference for sending responses.
+    ///
+    /// Set by ActorCatalog when processing messages. Required for
+    /// message dispatch to send responses back to callers.
+    pub message_bus: RefCell<Option<Rc<MessageBus>>>,
 }
 
 impl<A: Actor> ActorContext<A> {
@@ -116,6 +124,7 @@ impl<A: Actor> ActorContext<A> {
             activation_time: now,
             last_message_time: RefCell::new(now),
             is_processing: RefCell::new(false),
+            message_bus: RefCell::new(None),
         }
     }
 
@@ -186,6 +195,11 @@ impl<A: Actor> ActorContext<A> {
     /// # Parameters
     ///
     /// - `message`: The message to enqueue
+    ///
+    /// # Note
+    ///
+    /// This does NOT automatically spawn a processing task. The caller
+    /// (typically ActorCatalog) must call `spawn_message_processor()` if needed.
     pub fn enqueue_message(&self, message: Message) {
         self.message_queue.borrow_mut().push_back(message);
     }
@@ -229,6 +243,18 @@ impl<A: Actor> ActorContext<A> {
         *self.is_processing.borrow_mut() = value;
     }
 
+    /// Set the MessageBus reference for sending responses.
+    ///
+    /// This is called by ActorCatalog when routing messages.
+    pub fn set_message_bus(&self, message_bus: Rc<MessageBus>) {
+        *self.message_bus.borrow_mut() = Some(message_bus);
+    }
+
+    /// Get the MessageBus reference.
+    pub fn get_message_bus(&self) -> Option<Rc<MessageBus>> {
+        self.message_bus.borrow().clone()
+    }
+
     /// Activate the actor by calling its on_activate hook.
     ///
     /// Transitions through: Creating → Activating → Valid
@@ -244,6 +270,7 @@ impl<A: Actor> ActorContext<A> {
     /// context.activate(None).await?;
     /// // Actor is now Valid and ready to process messages
     /// ```
+    #[allow(clippy::await_holding_refcell_ref)]
     pub async fn activate(&self, state: Option<A::State>) -> Result<(), crate::error::ActorError> {
         // Transition to Activating
         self.set_state(ActivationState::Activating)?;
@@ -282,6 +309,7 @@ impl<A: Actor> ActorContext<A> {
     /// context.deactivate(DeactivationReason::IdleTimeout).await?;
     /// catalog.remove(&actor_id)?;
     /// ```
+    #[allow(clippy::await_holding_refcell_ref)]
     pub async fn deactivate(
         &self,
         reason: crate::actor::DeactivationReason,
@@ -301,36 +329,95 @@ impl<A: Actor> ActorContext<A> {
         result
     }
 
-    /// Process a single message by dispatching to the actor.
+    /// Process messages from the queue until empty.
     ///
-    /// This is a placeholder that will be overridden by actor-specific dispatch logic.
-    /// For Phase 3, each actor type will have manual dispatch implementation.
-    /// For Phase 4, this will use the MessageHandler trait.
+    /// This method dequeues and processes messages sequentially using the
+    /// provided dispatch function. It's designed to be called by ActorCatalog
+    /// when messages are enqueued.
+    ///
+    /// # Type Parameters
+    ///
+    /// - `F`: Async dispatch function that processes a single message
     ///
     /// # Parameters
     ///
-    /// - `message`: The message to process
-    /// - `message_bus`: MessageBus for sending responses
+    /// - `dispatch_fn`: Function that dispatches message to actor's handlers
     ///
     /// # Returns
     ///
-    /// - `Ok(())`: Message processed successfully
-    /// - `Err(ActorError)`: Message processing failed
+    /// - `Ok(count)`: Number of messages processed
+    /// - `Err(ActorError)`: Processing failed
     ///
-    /// # Note
+    /// # Example
     ///
-    /// This method is meant to be called by the message processing loop.
-    /// It will be replaced by proper method dispatch in Phase 4.
-    pub async fn dispatch_message(
-        &self,
-        _message: Message,
-        _message_bus: &crate::messaging::MessageBus,
-    ) -> Result<(), crate::error::ActorError> {
-        // TODO: This will be implemented per-actor in Phase 3
-        // For now, return error indicating not implemented
-        Err(crate::error::ActorError::ProcessingFailed(
-            "dispatch_message not yet implemented for this actor type".to_string(),
-        ))
+    /// ```rust,ignore
+    /// // In ActorCatalog, provide dispatch closure
+    /// context.process_message_queue(|ctx, msg, bus| async move {
+    ///     ctx.dispatch_message_impl(msg, bus).await
+    /// }).await?;
+    /// ```
+    pub async fn process_message_queue<F, Fut>(
+        self: &Rc<Self>,
+        dispatch_fn: F,
+    ) -> Result<usize, ActorError>
+    where
+        F: Fn(Rc<Self>, Message, Rc<MessageBus>) -> Fut,
+        Fut: std::future::Future<Output = Result<(), ActorError>>,
+    {
+        let mut count = 0;
+
+        loop {
+            // Check if we should continue processing
+            if self.get_state() != ActivationState::Valid {
+                tracing::warn!(
+                    "Actor {} not in Valid state, stopping message processing",
+                    self.actor_id
+                );
+                break;
+            }
+
+            // Dequeue next message
+            let message = match self.dequeue_message() {
+                Some(msg) => msg,
+                None => break, // Queue empty
+            };
+
+            // Get message bus
+            let message_bus = match self.get_message_bus() {
+                Some(bus) => bus,
+                None => {
+                    tracing::error!(
+                        "No MessageBus set for actor {}, cannot process messages",
+                        self.actor_id
+                    );
+                    return Err(ActorError::ProcessingFailed(
+                        "MessageBus not configured".to_string(),
+                    ));
+                }
+            };
+
+            // Dispatch message using provided function
+            tracing::debug!(
+                "Processing message for actor {}: {} (correlation: {})",
+                self.actor_id,
+                message.method_name,
+                message.correlation_id
+            );
+
+            if let Err(e) = dispatch_fn(self.clone(), message, message_bus).await {
+                tracing::error!(
+                    "Message processing failed for actor {}: {:?}",
+                    self.actor_id,
+                    e
+                );
+                // Continue processing remaining messages even if one fails
+            }
+
+            count += 1;
+        }
+
+        tracing::debug!("Processed {} messages for actor {}", count, self.actor_id);
+        Ok(count)
     }
 }
 

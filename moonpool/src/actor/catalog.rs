@@ -285,6 +285,12 @@ pub struct ActorCatalog<A: Actor> {
 
     /// This node's ID.
     node_id: NodeId,
+
+    /// MessageBus reference for message processing.
+    ///
+    /// Set by ActorRuntime when connecting the catalog to the bus.
+    /// Required for actors to send responses.
+    message_bus: RefCell<Option<Rc<crate::messaging::MessageBus>>>,
 }
 
 impl<A: Actor> ActorCatalog<A> {
@@ -305,7 +311,15 @@ impl<A: Actor> ActorCatalog<A> {
             activation_directory: ActivationDirectory::new(),
             activation_lock: RefCell::new(()),
             node_id,
+            message_bus: RefCell::new(None),
         }
+    }
+
+    /// Set the MessageBus reference for this catalog.
+    ///
+    /// This is called by ActorRuntime when initializing the system.
+    pub fn set_message_bus(&self, message_bus: Rc<crate::messaging::MessageBus>) {
+        *self.message_bus.borrow_mut() = Some(message_bus);
     }
 
     /// Get an existing activation by ActorId.
@@ -533,12 +547,17 @@ impl<A: Actor> ActorRouter for ActorCatalog<A> {
             ))
         })?;
 
+        // Set MessageBus reference on context if we have one
+        if let Some(bus) = self.message_bus.borrow().as_ref() {
+            context.set_message_bus(bus.clone());
+        }
+
         // Enqueue message in actor's context
         context.enqueue_message(message);
 
-        // Note: Message processing loop would be spawned here in a full implementation
-        // For Phase 3, we're doing manual message processing in tests
-        // For Phase 4, this will spawn a processing task if not already running
+        // Note: Message processing loop would be spawned here in a full implementation.
+        // For Phase 3, tests will manually call context.process_message_queue().
+        // For Phase 4, this will spawn a processing task if not already running.
 
         Ok(())
     }

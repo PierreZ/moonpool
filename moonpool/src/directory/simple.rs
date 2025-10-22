@@ -155,6 +155,7 @@ impl SimpleDirectory {
     /// Get current load for a node.
     ///
     /// Returns 0 if node not found (defensive).
+    #[allow(dead_code)]
     fn get_node_load(&self, node_id: &NodeId) -> usize {
         self.state
             .borrow()
