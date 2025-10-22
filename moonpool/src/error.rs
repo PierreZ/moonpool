@@ -64,6 +64,18 @@ pub enum ActorError {
     /// Requested resource not found.
     #[error("Not found: {0}")]
     NotFound(String),
+
+    /// Invalid runtime configuration.
+    #[error("Invalid configuration: {0}")]
+    InvalidConfiguration(String),
+
+    /// ActorId parsing error.
+    #[error("ActorId error: {0}")]
+    ActorId(#[from] ActorIdError),
+
+    /// NodeId parsing error.
+    #[error("NodeId error: {0}")]
+    NodeId(#[from] NodeIdError),
 }
 
 /// Errors related to message handling.

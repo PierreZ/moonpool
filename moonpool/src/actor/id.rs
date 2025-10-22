@@ -63,6 +63,43 @@ impl ActorId {
         }
     }
 
+    /// Create ActorId from individual parts (public API for ActorRuntime).
+    ///
+    /// # Errors
+    ///
+    /// Returns error if any field is empty.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let actor_id = ActorId::from_parts("prod", "BankAccount", "alice")?;
+    /// ```
+    pub fn from_parts(
+        namespace: impl Into<String>,
+        actor_type: impl Into<String>,
+        key: impl Into<String>,
+    ) -> Result<Self, ActorIdError> {
+        let namespace = namespace.into();
+        let actor_type = actor_type.into();
+        let key = key.into();
+
+        if namespace.is_empty() {
+            return Err(ActorIdError::EmptyField("namespace".to_string()));
+        }
+        if actor_type.is_empty() {
+            return Err(ActorIdError::EmptyField("actor_type".to_string()));
+        }
+        if key.is_empty() {
+            return Err(ActorIdError::EmptyField("key".to_string()));
+        }
+
+        Ok(Self {
+            namespace,
+            actor_type,
+            key,
+        })
+    }
+
     /// Parse ActorId from string format: `namespace::actor_type/key`
     ///
     /// # Errors
