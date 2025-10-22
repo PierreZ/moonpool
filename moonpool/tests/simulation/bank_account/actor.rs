@@ -141,13 +141,34 @@ impl MessageHandler<GetBalanceRequest, u64> for BankAccountActor {
 // This extension trait provides method dispatch for BankAccountActor.
 // In Phase 4, this will be replaced by automatic dispatch via MessageHandler trait.
 use moonpool::messaging::{Message, MessageBus};
+use std::rc::Rc;
 
 pub trait BankAccountActorDispatch {
-    async fn dispatch_message_impl(
-        &self,
+    fn dispatch_message_impl<'life0, 'life1, 'async_trait>(
+        &'life0 self,
         message: Message,
-        message_bus: &MessageBus,
-    ) -> std::result::Result<(), ActorError>;
+        message_bus: &'life1 MessageBus,
+    ) -> ::core::pin::Pin<
+        Box<
+            dyn ::core::future::Future<Output = std::result::Result<(), ActorError>> + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
+}
+
+/// Helper function for use with ActorContext::process_message_queue.
+///
+/// This function has the correct signature expected by process_message_queue
+/// and delegates to the BankAccountActorDispatch trait.
+pub async fn dispatch_bank_account_message(
+    context: Rc<ActorContext<BankAccountActor>>,
+    message: Message,
+    message_bus: Rc<MessageBus>,
+) -> std::result::Result<(), ActorError> {
+    context.dispatch_message_impl(message, &*message_bus).await
 }
 
 #[async_trait(?Send)]
@@ -224,7 +245,7 @@ impl BankAccountActorDispatch for ActorContext<BankAccountActor> {
         };
 
         // Send response if this was a Request (not OneWay)
-        if message.direction == crate::messaging::Direction::Request {
+        if message.direction == Direction::Request {
             let response_msg = Message::response(&message, response_payload);
             message_bus.route_message(response_msg).await?;
         }

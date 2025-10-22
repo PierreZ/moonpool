@@ -6,6 +6,8 @@
 //! - Actor instance management
 //! - Node ID and actor ID accessors
 
+#![allow(clippy::await_holding_refcell_ref)]
+
 use async_trait::async_trait;
 use moonpool::actor::traits::Actor;
 use moonpool::actor::{ActivationState, ActorContext, ActorId, DeactivationReason, NodeId};

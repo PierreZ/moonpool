@@ -4,7 +4,7 @@
 //! using moonpool-foundation's simulation framework.
 
 use super::workload::{multi_node_workload, single_node_workload};
-use moonpool_foundation::prelude::*;
+use moonpool_foundation::{SimulationBuilder, WorkloadTopology};
 
 /// Test configuration for bank account simulations.
 const SIMULATION_SEED: u64 = 42;

@@ -314,7 +314,7 @@ impl MessageBus {
     pub async fn send_request(
         &self,
         mut message: Message,
-    ) -> Result<oneshot::Receiver<Result<Message, ActorError>>, ActorError> {
+    ) -> Result<(Message, oneshot::Receiver<Result<Message, ActorError>>), ActorError> {
         // Generate correlation ID
         let correlation_id = self.next_correlation_id();
         message.correlation_id = correlation_id;
@@ -335,7 +335,7 @@ impl MessageBus {
             message.method_name
         );
 
-        Ok(rx)
+        Ok((message, rx))
     }
 
     /// Send a response message back to a waiting request.

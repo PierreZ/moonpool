@@ -83,8 +83,11 @@ impl<A: Actor> ActorRef<A> {
         }
     }
 
-    /// Create a new ActorRef with MessageBus (internal, called by ActorRuntime).
-    pub(crate) fn with_message_bus(actor_id: ActorId, message_bus: Rc<MessageBus>) -> Self {
+    /// Create a new ActorRef with MessageBus.
+    ///
+    /// This is the recommended way to create ActorRef instances outside of ActorRuntime.
+    /// For tests and manual actor system setup.
+    pub fn with_message_bus(actor_id: ActorId, message_bus: Rc<MessageBus>) -> Self {
         Self {
             actor_id,
             message_bus: Some(message_bus),
@@ -204,10 +207,13 @@ impl<A: Actor> ActorRef<A> {
             timeout,                             // timeout
         );
 
-        // 6. Send and get response receiver
-        let rx = message_bus.send_request(message).await?;
+        // 6. Send request and get response receiver (returns mutated message with real correlation ID)
+        let (message, rx) = message_bus.send_request(message).await?;
 
-        // 7. Await with timeout
+        // 7. Route the message to the actor (use the mutated message with correct correlation ID!)
+        message_bus.route_message(message).await?;
+
+        // 8. Await response with timeout
         let response_message = tokio::time::timeout(timeout, rx)
             .await
             .map_err(|_| ActorError::Timeout)?
@@ -215,10 +221,10 @@ impl<A: Actor> ActorRef<A> {
                 ActorError::ProcessingFailed("Response channel closed unexpectedly".to_string())
             })?;
 
-        // 8. Check if response is error
+        // 9. Check if response is error
         let response_message = response_message?;
 
-        // 9. Deserialize response
+        // 10. Deserialize response
         let response: Resp = serde_json::from_slice(&response_message.payload)
             .map_err(|e| ActorError::Message(crate::error::MessageError::Serialization(e)))?;
 

@@ -4,6 +4,8 @@
 //! that wrap the generic `call()` and `send()` methods.
 //!
 //! # Quick Start
+
+#![allow(clippy::empty_line_after_doc_comments)]
 //!
 //! Copy this template and replace with your actor's methods:
 //!
@@ -130,13 +132,12 @@
 /// | Generic, verbose | Typed, concise |
 /// | Manual request construction | Automatic |
 /// | No IDE hints for actor methods | Full autocomplete |
-
 // No public trait here - this module is purely documentation.
 // See the tests below for a working example of the pattern.
 
 #[cfg(test)]
 mod tests {
-    use crate::actor::{Actor, ActorContext, ActorId, ActorRef, DeactivationReason};
+    use crate::actor::{Actor, ActorId, ActorRef, DeactivationReason};
     use crate::error::ActorError;
     use async_trait::async_trait;
     use serde::{Deserialize, Serialize};
@@ -165,12 +166,14 @@ mod tests {
 
     // Example request type
     #[derive(Debug, Serialize, Deserialize)]
+    #[allow(dead_code)]
     struct ExampleRequest {
         value: u64,
     }
 
     // Example extension trait
     #[async_trait(?Send)]
+    #[allow(dead_code)]
     trait ExampleActorRef {
         async fn example_method(&self, value: u64) -> Result<u64, ActorError>;
     }
