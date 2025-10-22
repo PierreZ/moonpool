@@ -255,6 +255,72 @@ impl<A: Actor> ActorContext<A> {
         self.message_bus.borrow().clone()
     }
 
+    /// Get a reference to another actor for actor-to-actor communication.
+    ///
+    /// This allows actors to obtain references to other actors within the same
+    /// namespace for sending messages.
+    ///
+    /// # Parameters
+    ///
+    /// - `actor_type`: The type of the target actor (e.g., "BankAccount")
+    /// - `key`: The unique key for the target actor (e.g., "alice")
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(ActorRef<B>)`: Reference to the target actor
+    /// - `Err(ActorError::ProcessingFailed)`: MessageBus not configured
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// impl BankAccountActor {
+    ///     pub async fn transfer_to(
+    ///         &mut self,
+    ///         ctx: &ActorContext<Self>,
+    ///         recipient_key: &str,
+    ///         amount: u64,
+    ///     ) -> Result<(), ActorError> {
+    ///         // Withdraw from self
+    ///         self.balance -= amount;
+    ///
+    ///         // Get reference to recipient
+    ///         let recipient: ActorRef<BankAccountActor> =
+    ///             ctx.get_actor("BankAccount", recipient_key)?;
+    ///
+    ///         // Send deposit message
+    ///         recipient.call(DepositRequest { amount }).await?;
+    ///         Ok(())
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// The namespace is automatically derived from the current actor's ActorId.
+    /// Actors can only communicate with other actors in the same namespace.
+    pub fn get_actor<B: Actor>(
+        &self,
+        actor_type: impl Into<String>,
+        key: impl Into<String>,
+    ) -> Result<crate::actor::ActorRef<B>, ActorError> {
+        // Get MessageBus reference
+        let message_bus = self.message_bus.borrow().clone().ok_or_else(|| {
+            ActorError::ProcessingFailed("MessageBus not configured in ActorContext".to_string())
+        })?;
+
+        // Extract namespace from current actor's ID
+        let namespace = self.actor_id.namespace.clone();
+
+        // Create ActorId for target actor
+        let target_actor_id = ActorId::from_parts(namespace, actor_type.into(), key.into())?;
+
+        // Create ActorRef with MessageBus reference
+        Ok(crate::actor::ActorRef::with_message_bus(
+            target_actor_id,
+            message_bus,
+        ))
+    }
+
     /// Activate the actor by calling its on_activate hook.
     ///
     /// Transitions through: Creating → Activating → Valid
