@@ -855,6 +855,366 @@ always_assert!(
 
 ---
 
+## 8. Storage Provider Research
+
+### Decision: Typed State with ActorState<T> Wrapper
+
+**UPDATE (2025-10-22)**: The final design uses `ActorState<T>` wrapper for type-safe persistence. See data-model.md for complete implementation. The analysis below documents the original research that led to this design.
+
+**Rationale**: Simple load/save interface without concurrency control, relying on single-activation guarantee. Framework manages serialization through ActorState<T> wrapper. Matches Orleans philosophy but intentionally simpler (no ETags, transactions, or automatic persistence).
+
+### Storage Provider Trait
+
+**Pattern**: Async trait with Result-based error handling
+
+```rust
+#[async_trait(?Send)]
+pub trait StorageProvider: Clone {
+    /// Load state for an actor. Returns None if no state exists.
+    ///
+    /// **Key Format**: Includes namespace/actor_type::key for natural isolation
+    /// **Example**: "prod::BankAccount/alice" → Some(Vec<u8>)
+    async fn load_state(&self, actor_id: &ActorId) -> Result<Option<Vec<u8>>, StorageError>;
+
+    /// Save state for an actor.
+    ///
+    /// **Overwrites**: Existing state is completely replaced (no merging)
+    /// **Atomicity**: Implementation-defined (naive storage may not be atomic)
+    async fn save_state(&self, actor_id: &ActorId, data: Vec<u8>) -> Result<(), StorageError>;
+}
+```
+
+**Key Design Choices**:
+- **No clear_state()**: Actors save empty state or delete via implementation-specific means
+- **No ETags**: No optimistic concurrency control (assumes single activation per actor)
+- **No transactions**: Each operation independent (no multi-key atomic updates)
+- **Opaque data**: Storage sees Vec<u8>, actor handles serialization
+
+### Error Types
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum StorageError {
+    #[error("Serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Storage unavailable")]
+    Unavailable,
+
+    #[error("Key not found: {0}")]
+    NotFound(String),
+
+    #[error("Storage operation failed: {0}")]
+    OperationFailed(String),
+}
+```
+
+**Error Handling Philosophy**:
+- **No automatic retry**: Caller decides retry strategy
+- **Explicit propagation**: Actor methods return Result, caller handles errors
+- **Fail-visible**: Storage failures surface to actor logic, not hidden
+
+### Integration with Actor Lifecycle
+
+**Pattern**: Load on activation, explicit save during message processing
+
+```rust
+#[async_trait(?Send)]
+pub trait Actor {
+    async fn on_activate(
+        &mut self,
+        storage: Option<&dyn StorageProvider>,
+    ) -> Result<(), ActorError> {
+        // Actor decides whether to load state
+        if let Some(storage) = storage {
+            if let Some(data) = storage.load_state(&self.actor_id()).await? {
+                self.deserialize_state(&data)?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn on_deactivate(&mut self, reason: DeactivationReason) -> Result<(), ActorError>;
+}
+```
+
+**Actor Method with Save**:
+```rust
+impl BankAccountActor {
+    pub async fn deposit(
+        &mut self,
+        amount: u64,
+        storage: &dyn StorageProvider,
+    ) -> Result<u64, ActorError> {
+        // Update in-memory state
+        self.balance += amount;
+
+        // Explicitly save to storage
+        let state_data = serde_json::to_vec(&self.balance)?;
+        storage.save_state(&self.actor_id, state_data).await
+            .map_err(|e| ActorError::StorageFailed(e))?;
+
+        Ok(self.balance)
+    }
+}
+```
+
+### InMemoryStorage Implementation
+
+**For Testing** (deterministic, fast):
+
+```rust
+#[derive(Clone)]
+pub struct InMemoryStorage {
+    data: Rc<RefCell<HashMap<String, Vec<u8>>>>,
+}
+
+impl InMemoryStorage {
+    pub fn new() -> Self {
+        Self {
+            data: Rc::new(RefCell::new(HashMap::new())),
+        }
+    }
+
+    fn storage_key(actor_id: &ActorId) -> String {
+        // Format: "namespace::actor_type/key"
+        format!("{}::{}/{}", actor_id.namespace, actor_id.actor_type, actor_id.key)
+    }
+}
+
+#[async_trait(?Send)]
+impl StorageProvider for InMemoryStorage {
+    async fn load_state(&self, actor_id: &ActorId) -> Result<Option<Vec<u8>>, StorageError> {
+        let key = Self::storage_key(actor_id);
+        Ok(self.data.borrow().get(&key).cloned())
+    }
+
+    async fn save_state(&self, actor_id: &ActorId, data: Vec<u8>) -> Result<(), StorageError> {
+        let key = Self::storage_key(actor_id);
+        self.data.borrow_mut().insert(key, data);
+        Ok(())
+    }
+}
+```
+
+**Simulation Support** (for Buggify):
+```rust
+#[async_trait(?Send)]
+impl StorageProvider for InMemoryStorage {
+    async fn save_state(&self, actor_id: &ActorId, data: Vec<u8>) -> Result<(), StorageError> {
+        // BUGGIFY: Inject random save failures
+        if buggify_with_prob!(0.1) {
+            return Err(StorageError::OperationFailed("Simulated storage failure".to_string()));
+        }
+
+        let key = Self::storage_key(actor_id);
+        self.data.borrow_mut().insert(key, data);
+        Ok(())
+    }
+}
+```
+
+### File-Based Storage (Optional)
+
+**For Persistent Testing**:
+
+```rust
+#[derive(Clone)]
+pub struct FileStorage {
+    base_path: PathBuf,
+}
+
+impl FileStorage {
+    fn file_path(&self, actor_id: &ActorId) -> PathBuf {
+        // Create directory per namespace/actor_type
+        self.base_path
+            .join(&actor_id.namespace)
+            .join(&actor_id.actor_type)
+            .join(format!("{}.json", actor_id.key))
+    }
+}
+
+#[async_trait(?Send)]
+impl StorageProvider for FileStorage {
+    async fn load_state(&self, actor_id: &ActorId) -> Result<Option<Vec<u8>>, StorageError> {
+        let path = self.file_path(actor_id);
+
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let data = tokio::fs::read(&path).await?;
+        Ok(Some(data))
+    }
+
+    async fn save_state(&self, actor_id: &ActorId, data: Vec<u8>) -> Result<(), StorageError> {
+        let path = self.file_path(actor_id);
+
+        // Create parent directories
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        // Write atomically (temp file + rename)
+        let temp_path = path.with_extension("tmp");
+        tokio::fs::write(&temp_path, data).await?;
+        tokio::fs::rename(&temp_path, &path).await?;
+
+        Ok(())
+    }
+}
+```
+
+### Key Isolation via ActorId Structure
+
+**Storage Key Format**: `namespace::actor_type/key`
+
+**Examples**:
+- `"prod::BankAccount/alice"` → Different from `"staging::BankAccount/alice"`
+- `"tenant-acme::User/bob"` → Isolated from `"tenant-globex::User/bob"`
+- `"dev::Session/session-123"` → Different type than `"dev::User/session-123"`
+
+**Benefits**:
+- Natural multi-tenancy (namespace isolation)
+- Type safety (different actor types use different directories/tables)
+- Debuggability (human-readable keys in logs)
+- Cluster boundary enforcement (cannot access cross-namespace state)
+
+### Comparison with Orleans
+
+| Feature | Orleans | Moonpool (This Phase) |
+|---------|---------|----------------------|
+| **Interface** | IPersistentState<T> | StorageProvider trait |
+| **Operations** | Read, Write, Clear | load_state, save_state |
+| **Concurrency** | ETags (optimistic locking) | None (single activation) |
+| **Lifecycle** | Automatic load on activation | Explicit load in on_activate() |
+| **Persistence** | Automatic via attribute | Explicit save_state() calls |
+| **Transactions** | Support via providers | Not supported (future) |
+| **Migration** | Dehydrate/rehydrate | Not supported (future) |
+| **Multiple states** | Multiple [PersistentState] | Multiple storage keys per actor |
+
+**Key Simplifications**:
+1. No automatic loading (actor calls load explicitly in on_activate)
+2. No automatic saving (actor calls save_state after mutations)
+3. No ETags (trust single activation guarantee)
+4. No migration support (state not transferred during deactivation)
+5. No transactions (each save independent)
+
+**Rationale for Simplifications**:
+- Focus on core distributed pattern first
+- Single activation eliminates concurrency races
+- Explicit operations make control flow clear
+- Transactions/migration can be added later without breaking changes
+
+### Testing Strategy
+
+**Unit Tests** (storage implementations):
+```rust
+#[tokio::test]
+async fn test_save_and_load() {
+    let storage = InMemoryStorage::new();
+    let actor_id = ActorId::new("test", "BankAccount", "alice");
+
+    // Save state
+    let state = serde_json::to_vec(&100u64).unwrap();
+    storage.save_state(&actor_id, state.clone()).await.unwrap();
+
+    // Load state
+    let loaded = storage.load_state(&actor_id).await.unwrap();
+    assert_eq!(loaded, Some(state));
+}
+
+#[tokio::test]
+async fn test_namespace_isolation() {
+    let storage = InMemoryStorage::new();
+
+    // Save to prod namespace
+    let prod_actor = ActorId::new("prod", "BankAccount", "alice");
+    storage.save_state(&prod_actor, vec![1, 2, 3]).await.unwrap();
+
+    // Load from staging namespace (different actor)
+    let staging_actor = ActorId::new("staging", "BankAccount", "alice");
+    let loaded = storage.load_state(&staging_actor).await.unwrap();
+    assert_eq!(loaded, None); // No cross-namespace access
+}
+```
+
+**Simulation Tests** (with Buggify):
+```rust
+async fn storage_chaos_workload(
+    random: SimRandomProvider,
+    network: SimNetworkProvider,
+    time: SimTimeProvider,
+    task_provider: TokioTaskProvider,
+    topology: WorkloadTopology,
+) -> SimulationResult<SimulationMetrics> {
+    // Use InMemoryStorage with Buggify injection
+    let storage = InMemoryStorage::new();
+
+    // Create actor runtime with storage
+    let runtime = ActorRuntime::with_storage(
+        "test",
+        network,
+        time,
+        task_provider,
+        storage,
+    ).await?;
+
+    // Perform operations that save state
+    let alice = runtime.get_actor::<BankAccountActor>("BankAccount", "alice");
+
+    // Some saves will fail due to buggify
+    for i in 0..100 {
+        match alice.call(DepositRequest { amount: 100 }).await {
+            Ok(_) => { /* Success */ }
+            Err(ActorError::StorageFailed(_)) => {
+                // Expected under chaos - retry or handle
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    Ok(SimulationMetrics::default())
+}
+```
+
+**Invariant: State Consistency** (if actor saves state):
+```rust
+// After deactivation and reactivation, state should match
+let balance_before = alice.call(GetBalanceRequest).await?;
+runtime.deactivate_actor(&alice.actor_id()).await?;
+
+// Reactivate by sending new message
+let balance_after = alice.call(GetBalanceRequest).await?;
+
+always_assert!(
+    balance_before == balance_after,
+    "State persisted correctly across deactivation"
+);
+```
+
+### Alternatives Considered
+
+**Automatic persistence** (Orleans model):
+- Rejected: Adds complexity (when to save? on every mutation?)
+- Explicit save gives actors control over persistence timing
+- Reduces storage I/O (actor can batch mutations)
+
+**Optimistic locking with ETags**:
+- Rejected: Single activation guarantee eliminates concurrent writers
+- No need for conflict detection if only one instance active
+- Can be added later if multi-activation support needed
+
+**Transactional storage**:
+- Rejected: Out of scope for naive storage phase
+- Adds complexity (rollback, commit, isolation levels)
+- Focus on core distributed pattern first
+
+---
+
 ## Summary: Research Decisions
 
 | Area | Decision | Key Insight |
@@ -866,6 +1226,7 @@ always_assert!(
 | **Runtime** | new_current_thread + build_local | Single-threaded, deterministic, no LocalSet |
 | **Consistency** | Eventual with cache invalidation | Matches Orleans, suitable for virtual actors |
 | **State** | Explicit enum with guarded transitions | Type-safe, compile-time validation |
+| **Storage** | Trait with load/save only | Naive shared storage, no concurrency control |
 
 ---
 
