@@ -15,4 +15,5 @@ pub use context::ActorContext;
 pub use id::{ActorId, CorrelationId, NodeId};
 pub use lifecycle::{ActivationState, DeactivationReason};
 pub use reference::ActorRef;
+pub use state::ActorState;
 pub use traits::{Actor, MessageHandler};

@@ -173,8 +173,9 @@ impl<A: Actor> ActorRef<A> {
         })?;
 
         // 2. Serialize request
-        let payload = serde_json::to_vec(&request)
-            .map_err(|e| ActorError::Message(crate::error::MessageError::Serialization(e)))?;
+        let payload = serde_json::to_vec(&request).map_err(|e| {
+            ActorError::Message(crate::error::MessageError::Serialization(e.to_string()))
+        })?;
 
         // 3. Extract method name from type
         let method_name = std::any::type_name::<Req>()
@@ -225,8 +226,9 @@ impl<A: Actor> ActorRef<A> {
         let response_message = response_message?;
 
         // 10. Deserialize response
-        let response: Resp = serde_json::from_slice(&response_message.payload)
-            .map_err(|e| ActorError::Message(crate::error::MessageError::Serialization(e)))?;
+        let response: Resp = serde_json::from_slice(&response_message.payload).map_err(|e| {
+            ActorError::Message(crate::error::MessageError::Serialization(e.to_string()))
+        })?;
 
         Ok(response)
     }
@@ -266,8 +268,9 @@ impl<A: Actor> ActorRef<A> {
         })?;
 
         // 2. Serialize message
-        let payload = serde_json::to_vec(&msg)
-            .map_err(|e| ActorError::Message(crate::error::MessageError::Serialization(e)))?;
+        let payload = serde_json::to_vec(&msg).map_err(|e| {
+            ActorError::Message(crate::error::MessageError::Serialization(e.to_string()))
+        })?;
 
         // 3. Extract method name from type
         let method_name = std::any::type_name::<Msg>()

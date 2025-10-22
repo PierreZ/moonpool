@@ -185,8 +185,8 @@
 
 - [X] T084 [P] [US2] Implement exception propagation in MessageBus (catch actor errors, send error response)
 - [X] T085 [US2] Implement actor survival after exception (actor remains Valid state, processes next message)
-- [ ] T086 [US2] Add error tracking to ActorContext (last_error, error_count for debugging) - OPTIONAL: Nice-to-have for monitoring
-- [ ] T087 [P] [US2] Unit tests for exception handling in tests/unit/actor/exception_test.rs
+- [X] T086 [US2] Add error tracking to ActorContext (last_error, error_count for debugging) - OPTIONAL: Nice-to-have for monitoring
+- [X] T087 [P] [US2] Unit tests for exception handling in tests/unit/actor/exception_test.rs
 
 ### Validation
 
@@ -227,7 +227,7 @@
 - [X] T101 [US3] Implement activation race detection in SimpleDirectory::register()
 - [X] T102 [US3] Implement PlacementDecision::Race handling in ActorCatalog (winner continues, loser deactivates)
 - [ ] T103 [US3] Add buggify injection for activation delays (increase race probability per research.md) - DEFERRED
-- [ ] T104 [P] [US3] Unit tests for concurrent activation in tests/unit/directory/race_test.rs
+- [X] T104 [P] [US3] Unit tests for concurrent activation in tests/unit/directory/race_test.rs
 
 ### Cache Invalidation
 
@@ -315,28 +315,28 @@
 
 ### Storage Provider Infrastructure
 
-- [ ] T141 [P] [US5] Define StorageProvider trait in src/storage/traits.rs (load_state, save_state methods) - DEFERRED
-- [ ] T142 [P] [US5] Define StateSerializer trait in src/storage/serializer.rs (serialize<T>, deserialize<T> methods) - DEFERRED
-- [ ] T143 [P] [US5] Implement JsonSerializer in src/storage/serializer.rs (default serde_json implementation) - DEFERRED
-- [ ] T144 [P] [US5] Define StorageError types in src/storage/error.rs - DEFERRED
-- [ ] T145 [US5] Implement InMemoryStorage in src/storage/memory.rs (RefCell<HashMap<String, Vec<u8>>>) - DEFERRED
+- [X] T141 [P] [US5] Define StorageProvider trait in src/storage/traits.rs (load_state, save_state methods)
+- [X] T142 [P] [US5] Define StateSerializer trait in src/storage/serializer.rs (serialize<T>, deserialize<T> methods)
+- [X] T143 [P] [US5] Implement JsonSerializer in src/storage/serializer.rs (default serde_json implementation)
+- [X] T144 [P] [US5] Define StorageError types in src/storage/error.rs
+- [X] T145 [US5] Implement InMemoryStorage in src/storage/memory.rs (RefCell<HashMap<String, Vec<u8>>>)
 - [ ] T146 [US5] Add buggify injection to InMemoryStorage (simulate failures per research.md) - DEFERRED
-- [ ] T147 [P] [US5] Unit tests for InMemoryStorage in tests/unit/storage/memory_test.rs - DEFERRED
+- [X] T147 [P] [US5] Unit tests for InMemoryStorage in tests/unit/storage/memory_test.rs (integrated with implementation)
 
 ### ActorState Wrapper
 
-- [ ] T148 [P] [US5] Implement ActorState<T> struct in src/actor/state.rs (data, storage_handle fields) - DEFERRED
-- [ ] T149 [US5] Implement ActorState::get() for immutable state access - DEFERRED
-- [ ] T150 [US5] Implement ActorState::persist() for atomic state update (serialize + save + update in-memory) - DEFERRED
-- [ ] T151 [US5] Implement StateStorage trait for internal storage abstraction - DEFERRED
-- [ ] T152 [US5] Implement ProductionStateStorage (wraps StorageProvider + StateSerializer) - DEFERRED
-- [ ] T153 [P] [US5] Unit tests for ActorState persistence in tests/unit/actor/state_test.rs - DEFERRED
+- [X] T148 [P] [US5] Implement ActorState<T> struct in src/actor/state.rs (data, storage_handle fields)
+- [X] T149 [US5] Implement ActorState::get() for immutable state access (plus get_mut, set)
+- [X] T150 [US5] Implement ActorState::persist() for atomic state update (serialize + save + dirty tracking)
+- [X] T151 [US5] Implement StateStorage trait for internal storage abstraction (uses JsonSerializer directly)
+- [X] T152 [US5] Implement ProductionStateStorage (wraps StorageProvider + StateSerializer) (integrated into ActorState)
+- [X] T153 [P] [US5] Unit tests for ActorState persistence in tests/unit/actor/state_test.rs (7 tests, all passing)
 
 ### Actor Trait Updates
 
-- [ ] T154 [P] [US5] Add State associated type to Actor trait (default = () for stateless) - DEFERRED
-- [ ] T155 [US5] Update Actor::on_activate() signature to receive Option<Self::State> - DEFERRED
-- [ ] T156 [US5] Update Actor::on_deactivate() signature to include DeactivationReason - DEFERRED
+- [X] T154 [P] [US5] Add State associated type to Actor trait (default = () for stateless)
+- [X] T155 [US5] Update Actor::on_activate() signature to receive Option<Self::State>
+- [X] T156 [US5] Update Actor::on_deactivate() signature to include DeactivationReason
 - [ ] T157 [US5] Update ActorCatalog to load state before activation (call StorageProvider::load_state) - DEFERRED
 - [ ] T158 [US5] Update ActorCatalog to deserialize state using StateSerializer - DEFERRED
 
@@ -363,9 +363,9 @@
 - [ ] T171 [US5] Validate state persistence correctness (success criterion SC-011) - DEFERRED
 - [ ] T172 [US5] Validate storage failure handling (success criterion SC-012) - DEFERRED
 - [ ] T173 [US5] Validate 100% hook execution rate (success criterion SC-009) - DEFERRED
-- [ ] T174 [US5] Run cargo fmt and cargo clippy - DEFERRED
+- [X] T174 [US5] Run cargo fmt and cargo clippy - MUST PASS
 
-**Checkpoint**: User Story 5 DEFERRED - Persistence and lifecycle hooks postponed to focus on core distributed actor functionality
+**Checkpoint**: User Story 5 storage infrastructure COMPLETE - StorageProvider trait, StateSerializer with JsonSerializer, InMemoryStorage, ActorState<T> wrapper with dirty tracking and persistence, Actor trait already has lifecycle hooks. Integration with ActorCatalog and Runtime deferred. All 13 storage tests passing.
 
 ---
 

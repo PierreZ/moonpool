@@ -194,7 +194,7 @@ impl BankAccountActorDispatch for ActorContext<BankAccountActor> {
             "DepositRequest" => {
                 // Deserialize request
                 let request: DepositRequest = serde_json::from_slice(&message.payload)
-                    .map_err(|e| ActorError::Message(MessageError::Serialization(e)))?;
+                    .map_err(|e| ActorError::Message(MessageError::Serialization(e.to_string())))?;
 
                 // Call handler
                 let response = {
@@ -205,12 +205,12 @@ impl BankAccountActorDispatch for ActorContext<BankAccountActor> {
 
                 // Serialize response
                 serde_json::to_vec(&response)
-                    .map_err(|e| ActorError::Message(MessageError::Serialization(e)))?
+                    .map_err(|e| ActorError::Message(MessageError::Serialization(e.to_string())))?
             }
             "WithdrawRequest" => {
                 // Deserialize request
                 let request: WithdrawRequest = serde_json::from_slice(&message.payload)
-                    .map_err(|e| ActorError::Message(MessageError::Serialization(e)))?;
+                    .map_err(|e| ActorError::Message(MessageError::Serialization(e.to_string())))?;
 
                 // Call handler
                 let response = {
@@ -221,12 +221,12 @@ impl BankAccountActorDispatch for ActorContext<BankAccountActor> {
 
                 // Serialize response
                 serde_json::to_vec(&response)
-                    .map_err(|e| ActorError::Message(MessageError::Serialization(e)))?
+                    .map_err(|e| ActorError::Message(MessageError::Serialization(e.to_string())))?
             }
             "GetBalanceRequest" => {
                 // Deserialize request
                 let request: GetBalanceRequest = serde_json::from_slice(&message.payload)
-                    .map_err(|e| ActorError::Message(MessageError::Serialization(e)))?;
+                    .map_err(|e| ActorError::Message(MessageError::Serialization(e.to_string())))?;
 
                 // Call handler
                 let response = {
@@ -237,7 +237,7 @@ impl BankAccountActorDispatch for ActorContext<BankAccountActor> {
 
                 // Serialize response
                 serde_json::to_vec(&response)
-                    .map_err(|e| ActorError::Message(MessageError::Serialization(e)))?
+                    .map_err(|e| ActorError::Message(MessageError::Serialization(e.to_string())))?
             }
             _ => {
                 return Err(ActorError::UnknownMethod(method_name.clone()));
