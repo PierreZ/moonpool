@@ -18,6 +18,13 @@
 - Q: Can developers provide custom serialization methods for the message bus? → A: Yes - users can include their own serialization methods for the message bus.
 - Q: When an actor throws an exception during message processing, should the actor remain active for subsequent messages or be deactivated? → A: Actor remains active - Exception only fails the single message, actor continues processing subsequent messages (Orleans model).
 
+### Session 2025-10-22
+
+- Q: When should actors persist their state to the shared storage? → A: State injected during activation for loading, then explicit save calls
+- Q: How should the storage trait handle save operation failures? → A: Return Result, caller handles error
+- Q: What is the key namespace isolation model for the shared storage? → A: Data isolation per namespace/actor_type::key (as defined in data-model.md)
+- Q: What operations should the naive storage trait provide? → A: Load and save only
+
 ## User Scenarios & Testing
 
 ### User Story 1 - Basic Actor Interaction (Priority: P1)
@@ -86,19 +93,21 @@ When a caller sends a message to an actor and expects a response, the system cor
 
 ---
 
-### User Story 5 - Actor Lifecycle Hooks (Priority: P3)
+### User Story 5 - Actor Lifecycle Hooks with Simple Persistence (Priority: P3)
 
-Developers can define activation and deactivation hooks that run when an actor is created or destroyed, allowing initialization and cleanup logic without manual lifecycle management.
+Developers can define activation and deactivation hooks that run when an actor is created or destroyed, allowing initialization and cleanup logic without manual lifecycle management. Actors can load persisted state during activation and explicitly save state during message processing via a simple shared storage interface.
 
-**Why this priority**: Lifecycle hooks are important for resource management but are less critical than core message delivery. They enhance the developer experience but aren't required for basic functionality.
+**Why this priority**: Lifecycle hooks are important for resource management but are less critical than core message delivery. They enhance the developer experience but aren't required for basic functionality. Persistence is kept intentionally simple (naive shared storage) to focus on the core distributed pattern.
 
-**Independent Test**: Can be fully tested by defining an actor with activation/deactivation hooks, triggering activation through messaging, and verifying hooks execute at the correct times. Delivers developer convenience for resource management.
+**Independent Test**: Can be fully tested by defining an actor with activation/deactivation hooks, triggering activation through messaging, and verifying hooks execute at the correct times. Persistence can be tested by saving state during message processing, deactivating the actor, then reactivating and verifying state was loaded. Delivers developer convenience for resource management and simple stateful actors.
 
 **Acceptance Scenarios**:
 
-1. **Given** an actor defines an activation hook, **When** the first message arrives, **Then** the activation hook executes before any message processing
+1. **Given** an actor defines an activation hook, **When** the first message arrives, **Then** the activation hook executes before any message processing and can load persisted state from shared storage
 2. **Given** an actor defines a deactivation hook, **When** the actor is cleaned up due to inactivity, **Then** the deactivation hook executes before the actor is removed
 3. **Given** an actor fails during activation hook execution, **When** activation fails, **Then** the system reports an error and the actor is not marked as active
+4. **Given** an actor has processed messages and explicitly saved state, **When** the actor is deactivated and later reactivated, **Then** the activation hook can load the previously saved state from shared storage
+5. **Given** an actor attempts to save state, **When** the storage operation fails, **Then** the actor receives a Result error and can handle the failure appropriately
 
 ---
 
@@ -107,6 +116,9 @@ Developers can define activation and deactivation hooks that run when an actor i
 - How does the system handle messages sent to an actor that is in the middle of being deactivated?
 - How does the system handle multiple actors that map to the same node?
 - What happens when a response arrives after the request has already timed out?
+- What happens if an actor's activation hook successfully loads state but then the actor fails to fully activate?
+- How does the system handle storage save failures during critical operations (e.g., after processing a withdrawal)?
+- What happens if storage returns corrupted or invalid state during actor activation?
 
 ## Requirements
 
@@ -131,15 +143,21 @@ Developers can define activation and deactivation hooks that run when an actor i
 - **FR-017**: System MUST allow developers to provide custom serialization methods for message bus operations
 - **FR-018**: When an actor throws an exception during message processing, the system MUST propagate the error to the caller and keep the actor active for subsequent messages
 - **FR-019**: System MUST limit message forwarding to prevent infinite loops (maximum 2 forwards per message)
+- **FR-020**: System MUST provide a shared storage interface with load and save operations for actor state persistence
+- **FR-021**: Storage operations MUST return Result types, allowing actors to explicitly handle storage failures
+- **FR-022**: Storage MUST isolate data per namespace/actor_type::key (following the ActorId structure defined in data-model.md)
+- **FR-023**: Activation hooks MUST support loading persisted state from shared storage before message processing begins
+- **FR-024**: Actors MUST be able to explicitly save state to shared storage during message processing via storage interface calls
 
 ### Key Entities
 
-- **Actor**: A computational entity identified by a unique ID and type, hosting state and behavior, processing messages one-at-a-time with single-threaded guarantees
+- **Actor**: A computational entity identified by a unique ID and type, hosting state and behavior, processing messages one-at-a-time with single-threaded guarantees. Actors can optionally persist state via shared storage.
 - **Actor Reference**: A handle to an actor that allows sending messages without knowing the actor's physical location
 - **Message**: A unit of communication sent to an actor, containing either a one-way command or a request expecting a response, with pluggable serialization support for custom formats
 - **Directory**: A shared structure across nodes that maps actor IDs to node locations and provides placement algorithms (initial: two-random-choices with load balancing), with eventual consistency by default and architecture supporting future strong consistency extensions
 - **Node**: A participant in the cluster that can host actors and route messages
 - **Cluster**: The collection of all nodes that work together to provide the actor system
+- **Shared Storage**: A simple storage interface providing load and save operations for actor state persistence, with data isolation per namespace/actor_type::key. Operations return Result types for explicit error handling. No concurrency control is provided (relies on single-activation guarantees).
 
 ## Success Criteria
 
@@ -155,20 +173,25 @@ Developers can define activation and deactivation hooks that run when an actor i
 - **SC-008**: Directory achieves eventual consistency (all nodes converge to consistent actor location view within measurable time window)
 - **SC-009**: Activation and deactivation hooks execute reliably (100% hook execution rate during lifecycle transitions)
 - **SC-010**: Actor exceptions are isolated to individual messages (actors remain active and process subsequent messages after throwing exceptions)
+- **SC-011**: Actor state persistence works reliably (actors can save state during processing, deactivate, then reactivate and load previously saved state with 100% correctness)
+- **SC-012**: Storage failures are handled explicitly (actors receive Result errors for failed save operations and can implement appropriate error handling)
 
 ## Assumptions
 
-- Actors are stateless within their in-memory lifecycle (no persistence between activations)
+- Actors can optionally persist state via shared storage interface, loaded during activation and saved explicitly during processing
+- Shared storage provides simple load/save operations without concurrency control (relies on single-activation guarantee per actor)
+- Storage interface returns Result types, requiring explicit error handling by actor code
 - Network communication is reliable within the static cluster (no network partitions or node failures)
 - Cluster topology is static (fixed set of nodes that do not join or leave during operation)
 - Nodes have roughly similar computational capabilities (no specialized hardware requirements)
-- Actor IDs are unique strings or numeric identifiers provided by developers
+- Actor IDs follow the namespace/actor_type::key structure defined in data-model.md, providing natural storage key isolation
 - Default message timeout is 30 seconds unless otherwise specified
 - Default maximum message size is 1MB unless otherwise configured
 - Inactive actors are cleaned up after 10 minutes of no message activity
 - Directory uses in-memory data structures (no persistence of directory state)
 - System does not support actor mobility (moving running actors between nodes) in this phase
 - Developers are responsible for ensuring actor state fits in memory (no automatic partitioning)
+- Storage implementations are responsible for serialization/deserialization of actor state
 
 ## Out of Scope
 
@@ -177,13 +200,14 @@ The following features are explicitly excluded from this specification:
 - **Automatic Failure Recovery**: No node crash detection, actor reactivation on surviving nodes, or membership protocol (will be a separate specification)
 - **Dynamic Cluster Membership**: No support for nodes joining or leaving the cluster during operation
 - **Network Partition Handling**: No split-brain resolution or partition tolerance mechanisms
-- **Persistence**: Actors do not save state to disk or databases
+- **Advanced Persistence Features**: No transactions, optimistic locking, versioning, or automatic conflict resolution in storage layer (naive shared storage only)
 - **Transactions**: No multi-actor transactional operations or two-phase commit
 - **Actor Migration**: No live migration of running actors between nodes
 - **Reentrancy**: Actors cannot process multiple messages concurrently
 - **Streams**: No streaming message delivery or backpressure mechanisms
 - **State Partitioning**: Large actor state must fit in single-node memory
-- **External Integrations**: No built-in database, message queue, or external service connectors
-- **Multi-Tenancy**: No isolation between different actor namespaces or tenants
+- **External Integrations**: No built-in database, message queue, or external service connectors beyond the simple storage interface
+- **Multi-Tenancy**: No isolation between different actor namespaces or tenants (though namespace field in ActorId supports future multi-tenancy)
 - **Security**: No authentication, authorization, or encryption (assumed trusted cluster)
 - **Monitoring**: No built-in metrics, tracing, or observability infrastructure
+- **Storage Implementations**: No specific storage backend implementations (interface only, implementations are pluggable)
