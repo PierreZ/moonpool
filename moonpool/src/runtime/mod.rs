@@ -2,9 +2,7 @@
 
 pub mod actor_runtime;
 pub mod config;
-pub mod builder;
 
-// Re-exports
-pub use actor_runtime::ActorRuntime;
-pub use config::RuntimeConfig;
-pub use builder::ActorRuntimeBuilder;
+// Re-exports (placeholders for now, will be implemented in Phase 3)
+// pub use actor_runtime::ActorRuntime;
+// pub use config::RuntimeConfig;

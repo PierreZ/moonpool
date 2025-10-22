@@ -69,6 +69,10 @@ pub enum MessageError {
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
+    /// Message deserialization failed.
+    #[error("Deserialization failed: {0}")]
+    DeserializationFailed(String),
+
     /// Message exceeds maximum size.
     #[error("Message too large: {size} bytes (max: {max} bytes)")]
     MessageTooLarge { size: usize, max: usize },
@@ -83,7 +87,14 @@ pub enum MessageError {
 
     /// Network I/O error.
     #[error("Network I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    IoError(std::io::Error),
+}
+
+// Manual From implementation for io::Error to avoid conflict with serde_json::Error
+impl From<std::io::Error> for MessageError {
+    fn from(err: std::io::Error) -> Self {
+        MessageError::IoError(err)
+    }
 }
 
 /// Errors related to directory operations.
