@@ -6,10 +6,10 @@
 //! - Actor instance management
 //! - Node ID and actor ID accessors
 
-use moonpool::actor::{ActorContext, ActorId, ActivationState, DeactivationReason, NodeId};
-use moonpool::actor::traits::Actor;
-use moonpool::error::ActorError;
 use async_trait::async_trait;
+use moonpool::actor::traits::Actor;
+use moonpool::actor::{ActivationState, ActorContext, ActorId, DeactivationReason, NodeId};
+use moonpool::error::ActorError;
 
 /// Simple test actor for context lifecycle testing
 struct TestActor {
@@ -30,7 +30,7 @@ impl TestActor {
 
 #[async_trait(?Send)]
 impl Actor for TestActor {
-    type State = ();  // Stateless
+    type State = (); // Stateless
 
     fn actor_id(&self) -> &ActorId {
         &self.actor_id
@@ -125,7 +125,10 @@ async fn test_deactivation_lifecycle() {
     context.set_state(ActivationState::Deactivating).unwrap();
     {
         let mut actor = context.actor_instance.borrow_mut();
-        actor.on_deactivate(DeactivationReason::IdleTimeout).await.unwrap();
+        actor
+            .on_deactivate(DeactivationReason::IdleTimeout)
+            .await
+            .unwrap();
     }
     context.set_state(ActivationState::Invalid).unwrap();
 

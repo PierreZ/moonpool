@@ -44,7 +44,6 @@ pub struct ActorRuntime {
 
     /// Message bus for routing messages.
     message_bus: Rc<MessageBus>,
-
     // TODO: Add fields as we integrate components
     // catalog: Rc<ActorCatalog<A>>,  // Challenge: Generic over all actor types
     // directory: Rc<SimpleDirectory>,
@@ -67,7 +66,11 @@ impl ActorRuntime {
     }
 
     /// Create a new ActorRuntime (internal, used by builder).
-    pub(crate) fn new(namespace: String, node_id: NodeId, message_bus: Rc<MessageBus>) -> Result<Self, ActorError> {
+    pub(crate) fn new(
+        namespace: String,
+        node_id: NodeId,
+        message_bus: Rc<MessageBus>,
+    ) -> Result<Self, ActorError> {
         Ok(Self {
             namespace,
             node_id,
@@ -116,14 +119,13 @@ impl ActorRuntime {
         key: impl Into<String>,
     ) -> Result<ActorRef<A>, ActorError> {
         // Create ActorId with runtime's namespace
-        let actor_id = ActorId::from_parts(
-            self.namespace.clone(),
-            actor_type.into(),
-            key.into(),
-        )?;
+        let actor_id = ActorId::from_parts(self.namespace.clone(), actor_type.into(), key.into())?;
 
         // Create ActorRef with MessageBus reference
-        Ok(ActorRef::with_message_bus(actor_id, self.message_bus.clone()))
+        Ok(ActorRef::with_message_bus(
+            actor_id,
+            self.message_bus.clone(),
+        ))
     }
 
     /// Shutdown the runtime gracefully.

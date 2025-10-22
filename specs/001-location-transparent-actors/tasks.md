@@ -85,9 +85,9 @@
 - [X] T027 [P] [US1] Implement MessageHandler<DepositRequest, u64> for BankAccountActor
 - [X] T028 [P] [US1] Implement MessageHandler<WithdrawRequest, u64> for BankAccountActor
 - [X] T029 [P] [US1] Implement MessageHandler<GetBalanceRequest, u64> for BankAccountActor
-- [ ] T030 [US1] Create single-node workload in tests/simulation/bank_account/workload.rs (1x1 topology)
-- [ ] T031 [US1] Create multi-node workload in tests/simulation/bank_account/workload.rs (2x2 topology)
-- [ ] T032 [US1] Write simulation test shell in tests/simulation/bank_account/tests.rs (WILL FAIL until implementation)
+- [X] T030 [US1] Create single-node workload in tests/simulation/bank_account/workload.rs (1x1 topology)
+- [X] T031 [US1] Create multi-node workload in tests/simulation/bank_account/workload.rs (2x2 topology)
+- [X] T032 [US1] Write simulation test shell in tests/simulation/bank_account/tests.rs (WILL FAIL until implementation)
 
 **NOTE**: Tests T026-T032 MUST be written and MUST FAIL before proceeding to implementation
 
@@ -125,8 +125,8 @@
 - [X] T053 [US1] Implement MessageBus struct in src/messaging/bus.rs (generic over providers)
 - [X] T054 [US1] Implement MessageBus::send_request() with correlation tracking
 - [X] T055 [US1] Implement MessageBus::send_response() with correlation matching
-- [ ] T056 [US1] Implement MessageBus::receive_loop() for incoming messages
-- [ ] T057 [US1] Implement message routing logic (Request → ActorCatalog, Response → CallbackData)
+- [X] T056 [US1] Implement MessageBus::receive_loop() for incoming messages
+- [X] T057 [US1] Implement message routing logic (Request → ActorCatalog, Response → CallbackData)
 - [ ] T058 [US1] Add buggify injection points in message routing (network delay, failures)
 - [X] T059 [P] [US1] Unit tests for CallbackData in tests/unit/messaging/correlation_test.rs
 
@@ -141,15 +141,15 @@
 ### Actor Reference API
 
 - [X] T065 [P] [US1] Implement ActorRef struct in src/actor/reference.rs (ActorId, MessageBus reference)
-- [ ] T066 [US1] Implement ActorRef::call() method (serialize request, await response, deserialize)
-- [ ] T067 [US1] Implement ActorRef::call_with_timeout() method (custom timeout)
-- [ ] T068 [US1] Implement ActorRef::send() method (fire-and-forget, OneWay)
+- [X] T066 [US1] Implement ActorRef::call() method (serialize request, await response, deserialize)
+- [X] T067 [US1] Implement ActorRef::call_with_timeout() method (custom timeout)
+- [X] T068 [US1] Implement ActorRef::send() method (fire-and-forget, OneWay)
 
 ### Integration and Validation
 
 - [ ] T069 [US1] Integrate MessageBus with PeerTransport from moonpool-foundation (Peer::send, Peer::receive)
 - [ ] T070 [US1] Implement ActorContext::get_actor() method for actor-to-actor communication
-- [ ] T071 [US1] Wire up method dispatch (MessageHandler trait lookup based on method_name)
+- [X] T071 [US1] Wire up method dispatch (MessageHandler trait lookup based on method_name)
 - [ ] T072 [US1] Run simulation tests from T032 (1x1 topology) - MUST PASS
 - [ ] T073 [US1] Run simulation tests (2x2 topology) - MUST PASS
 - [ ] T074 [US1] Validate 100% message delivery in static cluster (success criterion SC-003)

@@ -2,7 +2,7 @@
 
 use crate::actor::{Actor, ActorId};
 use crate::error::ActorError;
-use crate::messaging::MessageBus;
+use crate::messaging::{Message, MessageBus};
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::time::Duration;
@@ -125,22 +125,14 @@ impl<A: Actor> ActorRef<A> {
     /// let balance = alice.call(DepositRequest { amount: 100 }).await?;
     /// println!("New balance: {}", balance);
     /// ```
-    pub async fn call<Req, Resp>(&self, _request: Req) -> Result<Resp, ActorError>
+    pub async fn call<Req, Resp>(&self, request: Req) -> Result<Resp, ActorError>
     where
         Req: serde::Serialize,
         Resp: serde::de::DeserializeOwned,
     {
-        // TODO: Implement actual message sending
-        // 1. Serialize request
-        // 2. Create Message with correlation ID
-        // 3. Look up actor location via directory
-        // 4. Send message via MessageBus
-        // 5. Await response via oneshot channel
-        // 6. Deserialize response
-
-        Err(ActorError::ProcessingFailed(
-            "ActorRef::call not yet implemented".to_string(),
-        ))
+        // Delegate to call_with_timeout with default 30-second timeout
+        self.call_with_timeout(request, Duration::from_secs(30))
+            .await
     }
 
     /// Send a request with custom timeout.
@@ -164,15 +156,73 @@ impl<A: Actor> ActorRef<A> {
     pub async fn call_with_timeout<Req, Resp>(
         &self,
         request: Req,
-        _timeout: Duration,
+        timeout: Duration,
     ) -> Result<Resp, ActorError>
     where
         Req: serde::Serialize,
         Resp: serde::de::DeserializeOwned,
     {
-        // TODO: Implement with custom timeout
-        // For now, just delegate to call() (which has default timeout)
-        self.call(request).await
+        // 1. Get message bus reference
+        let message_bus = self.message_bus.as_ref().ok_or_else(|| {
+            ActorError::ProcessingFailed(
+                "ActorRef created without MessageBus (use ActorRuntime::get_actor())".to_string(),
+            )
+        })?;
+
+        // 2. Serialize request
+        let payload = serde_json::to_vec(&request)
+            .map_err(|e| ActorError::Message(crate::error::MessageError::Serialization(e)))?;
+
+        // 3. Extract method name from type
+        let method_name = std::any::type_name::<Req>()
+            .rsplit("::")
+            .next()
+            .unwrap_or("unknown")
+            .to_string();
+
+        // 4. Create sender actor ID (use system actor for now)
+        // TODO: In Phase 4, this will be the current actor's ID from ActorContext
+        let sender_actor = ActorId::from_string("system::System/root")
+            .map_err(|e| ActorError::ProcessingFailed(format!("Invalid sender ID: {}", e)))?;
+
+        // 5. Send request via MessageBus (it will handle correlation ID and routing)
+        // For now, we create the Message directly. In Phase 5, directory lookup will
+        // determine target_node and sender_node. For now, use placeholder nodes.
+        let target_node = crate::actor::NodeId::from("127.0.0.1:5000")
+            .map_err(|e| ActorError::ProcessingFailed(format!("Invalid node: {}", e)))?;
+        let sender_node = target_node.clone(); // Same node for local testing
+
+        // Create request message with all required parameters
+        let message = Message::request(
+            crate::actor::CorrelationId::new(0), // MessageBus will assign real correlation ID
+            self.actor_id.clone(),               // target_actor
+            sender_actor,                        // sender_actor
+            target_node,                         // target_node
+            sender_node,                         // sender_node
+            method_name,                         // method_name
+            payload,                             // payload
+            timeout,                             // timeout
+        );
+
+        // 6. Send and get response receiver
+        let rx = message_bus.send_request(message).await?;
+
+        // 7. Await with timeout
+        let response_message = tokio::time::timeout(timeout, rx)
+            .await
+            .map_err(|_| ActorError::Timeout)?
+            .map_err(|_| {
+                ActorError::ProcessingFailed("Response channel closed unexpectedly".to_string())
+            })?;
+
+        // 8. Check if response is error
+        let response_message = response_message?;
+
+        // 9. Deserialize response
+        let response: Resp = serde_json::from_slice(&response_message.payload)
+            .map_err(|e| ActorError::Message(crate::error::MessageError::Serialization(e)))?;
+
+        Ok(response)
     }
 
     /// Send a one-way message without waiting for response.
@@ -198,19 +248,53 @@ impl<A: Actor> ActorRef<A> {
     ///     amount: 10000,
     /// }).await?;
     /// ```
-    pub async fn send<Msg>(&self, _message: Msg) -> Result<(), ActorError>
+    pub async fn send<Msg>(&self, msg: Msg) -> Result<(), ActorError>
     where
         Msg: serde::Serialize,
     {
-        // TODO: Implement one-way messaging
-        // 1. Serialize message
-        // 2. Create Message with OneWay direction
-        // 3. Look up actor location
-        // 4. Send message (no correlation ID needed)
+        // 1. Get message bus reference
+        let message_bus = self.message_bus.as_ref().ok_or_else(|| {
+            ActorError::ProcessingFailed(
+                "ActorRef created without MessageBus (use ActorRuntime::get_actor())".to_string(),
+            )
+        })?;
 
-        Err(ActorError::ProcessingFailed(
-            "ActorRef::send not yet implemented".to_string(),
-        ))
+        // 2. Serialize message
+        let payload = serde_json::to_vec(&msg)
+            .map_err(|e| ActorError::Message(crate::error::MessageError::Serialization(e)))?;
+
+        // 3. Extract method name from type
+        let method_name = std::any::type_name::<Msg>()
+            .rsplit("::")
+            .next()
+            .unwrap_or("unknown")
+            .to_string();
+
+        // 4. Create sender actor ID (use system actor for now)
+        // TODO: In Phase 4, this will be the current actor's ID from ActorContext
+        let sender_actor = ActorId::from_string("system::System/root")
+            .map_err(|e| ActorError::ProcessingFailed(format!("Invalid sender ID: {}", e)))?;
+
+        // 5. For now, use placeholder nodes. In Phase 5, directory lookup will
+        // determine target_node and sender_node.
+        let target_node = crate::actor::NodeId::from("127.0.0.1:5000")
+            .map_err(|e| ActorError::ProcessingFailed(format!("Invalid node: {}", e)))?;
+        let sender_node = target_node.clone(); // Same node for local testing
+
+        // 6. Create one-way message
+        let message = Message::oneway(
+            self.actor_id.clone(), // target_actor
+            sender_actor,          // sender_actor
+            target_node,           // target_node
+            sender_node,           // sender_node
+            method_name,           // method_name
+            payload,               // payload
+        );
+
+        // 7. Route the message (no response expected)
+        message_bus.route_message(message).await?;
+
+        Ok(())
     }
 }
 
