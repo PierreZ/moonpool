@@ -150,8 +150,12 @@ async fn main() -> Result<(), ActorError> {
     // Initialize tracing
     tracing_subscriber::fmt::init();
 
-    // Create single-node actor runtime with namespace
-    let runtime = ActorRuntime::single_node("dev").await?;
+    // Create single-node actor runtime with namespace and listening address
+    let runtime = ActorRuntime::builder()
+        .namespace("dev")
+        .listen_addr("127.0.0.1:5000")
+        .build()
+        .await?;
     // All actors in this runtime will have namespace "dev"
 
     // Use actor runtime...
@@ -163,11 +167,12 @@ async fn main() -> Result<(), ActorError> {
 }
 ```
 
-**Namespace**:
-- Defines cluster boundary (cannot send messages across namespaces)
-- Use "dev" for local development
-- Use "prod", "staging" for different environments
-- Use "tenant-{id}" for multi-tenant deployments
+**Configuration**:
+- `namespace` - Defines cluster boundary (cannot send messages across namespaces)
+  - Use "dev" for local development
+  - Use "prod", "staging" for different environments
+  - Use "tenant-{id}" for multi-tenant deployments
+- `listen_addr` - Network address this node binds to for receiving messages
 
 ---
 
@@ -353,47 +358,56 @@ match alice.call(WithdrawRequest { amount: 1000 }).await {
 
 ## Step 10: Multi-Node Cluster
 
-Start a 3-node cluster (all nodes must use same namespace):
+Start a 3-node cluster sharing the same directory and storage:
 
 ```rust
-// Node at 127.0.0.1:5000
-let runtime = ActorRuntime::multi_node(
-    "prod",  // Namespace - same across all nodes in cluster
-    NodeId::from("127.0.0.1:5000")?,  // This node's address
-    vec![
-        NodeId::from("127.0.0.1:5001")?,  // Peer nodes
-        NodeId::from("127.0.0.1:5002")?,
-    ],
-).await?;
+use moonpool::storage::InMemoryStorage;
+use moonpool::directory::SimpleDirectory;
 
-// Node at 127.0.0.1:5001 (separate process) - SAME namespace "prod"
-let runtime = ActorRuntime::multi_node(
-    "prod",  // Must match!
-    NodeId::from("127.0.0.1:5001")?,  // This node's address
-    vec![
-        NodeId::from("127.0.0.1:5000")?,  // Peer nodes
-        NodeId::from("127.0.0.1:5002")?,
-    ],
-).await?;
+// Create shared infrastructure
+let directory = Arc::new(SimpleDirectory::new());
+let storage = Arc::new(InMemoryStorage::new());
 
-// Node at 127.0.0.1:5002 (separate process) - SAME namespace "prod"
-let runtime = ActorRuntime::multi_node(
-    "prod",  // Must match!
-    NodeId::from("127.0.0.1:5002")?,  // This node's address
-    vec![
-        NodeId::from("127.0.0.1:5000")?,  // Peer nodes
-        NodeId::from("127.0.0.1:5001")?,
-    ],
-).await?;
+// Node 1 at 127.0.0.1:5000
+let node1 = ActorRuntime::builder()
+    .namespace("prod")
+    .listen_addr("127.0.0.1:5000")
+    .directory(directory.clone())
+    .storage(storage.clone())
+    .build()
+    .await?;
+
+// Node 2 at 127.0.0.1:5001 (separate process or task)
+let node2 = ActorRuntime::builder()
+    .namespace("prod")
+    .listen_addr("127.0.0.1:5001")
+    .directory(directory.clone())  // Same directory
+    .storage(storage.clone())       // Same storage
+    .build()
+    .await?;
+
+// Node 3 at 127.0.0.1:5002 (separate process or task)
+let node3 = ActorRuntime::builder()
+    .namespace("prod")
+    .listen_addr("127.0.0.1:5002")
+    .directory(directory.clone())  // Same directory
+    .storage(storage.clone())       // Same storage
+    .build()
+    .await?;
 ```
+
+**Why Share Directory and Storage?**:
+- **Directory**: All nodes need to know where actors are located
+- **Storage**: All nodes need access to the same actor state
+- **Namespace**: Defines cluster boundary (all nodes use "prod")
 
 **Location Transparency**:
 ```rust
 // On any node, call any actor (namespace "prod" automatic)
-let alice = runtime.get_actor("BankAccount", "alice");
+let alice = node1.get_actor("BankAccount", "alice");
 // Creates: "prod::BankAccount/alice"
 
-let bob = runtime.get_actor("BankAccount", "bob");
+let bob = node2.get_actor("BankAccount", "bob");
 // Creates: "prod::BankAccount/bob"
 
 // Actors automatically placed across nodes
@@ -404,12 +418,20 @@ let bob = runtime.get_actor("BankAccount", "bob");
 **Multi-Tenant Deployment**:
 ```rust
 // Tenant ACME gets own cluster with "tenant-acme" namespace
-let acme_runtime = ActorRuntime::single_node("tenant-acme").await?;
+let acme_runtime = ActorRuntime::builder()
+    .namespace("tenant-acme")
+    .listen_addr("127.0.0.1:6000")
+    .build()
+    .await?;
 let alice_acme = acme_runtime.get_actor("BankAccount", "alice");
 // Creates: "tenant-acme::BankAccount/alice"
 
 // Tenant Globex gets own cluster with "tenant-globex" namespace
-let globex_runtime = ActorRuntime::single_node("tenant-globex").await?;
+let globex_runtime = ActorRuntime::builder()
+    .namespace("tenant-globex")
+    .listen_addr("127.0.0.1:7000")
+    .build()
+    .await?;
 let alice_globex = globex_runtime.get_actor("BankAccount", "alice");
 // Creates: "tenant-globex::BankAccount/alice"
 
@@ -428,13 +450,15 @@ State persistence is handled automatically through `ActorState<T>` wrapper:
 use moonpool::storage::InMemoryStorage;
 
 // Create storage provider
-let storage = InMemoryStorage::new();
+let storage = Arc::new(InMemoryStorage::new());
 
 // Start runtime with storage
-let runtime = ActorRuntime::with_storage(
-    "dev",
-    storage.clone(),
-).await?;
+let runtime = ActorRuntime::builder()
+    .namespace("dev")
+    .listen_addr("127.0.0.1:5000")
+    .storage(storage)
+    .build()
+    .await?;
 ```
 
 ### Actor Methods with Persistence
@@ -608,7 +632,11 @@ async fn main() -> Result<(), ActorError> {
     tracing_subscriber::fmt::init();
 
     // Start actor runtime with "dev" namespace
-    let runtime = ActorRuntime::single_node("dev").await?;
+    let runtime = ActorRuntime::builder()
+        .namespace("dev")
+        .listen_addr("127.0.0.1:5000")
+        .build()
+        .await?;
 
     // Get actor references (namespace "dev" automatically applied)
     let alice = runtime.get_actor::<BankAccountActor>("BankAccount", "alice");
@@ -739,10 +767,15 @@ async fn main() -> Result<(), ActorError> {
     tracing_subscriber::fmt::init();
 
     // Create storage provider
-    let storage = InMemoryStorage::new();
+    let storage = Arc::new(InMemoryStorage::new());
 
     // Start actor runtime with storage
-    let runtime = ActorRuntime::with_storage("dev", storage).await?;
+    let runtime = ActorRuntime::builder()
+        .namespace("dev")
+        .listen_addr("127.0.0.1:5000")
+        .storage(storage)
+        .build()
+        .await?;
 
     // Get actor references
     let alice = runtime.get_actor::<BankAccountActor>("BankAccount", "alice");
@@ -845,11 +878,16 @@ transfer(alice, bob, 50).await?;
 **Note**: This is not atomic. For transactional transfers, see future persistence/transactions feature.
 
 ### Actor-to-Actor Communication
+
+When an actor needs to call another actor, it can accept an `ActorContext` parameter to obtain actor references:
+
 ```rust
 impl BankAccountActor {
+    /// Transfer money to another account (actor obtains recipient reference)
     pub async fn transfer_to(
         &mut self,
-        recipient: ActorRef<BankAccountActor>,
+        ctx: &ActorContext,
+        recipient_key: &str,
         amount: u64,
     ) -> Result<(), ActorError> {
         // Withdraw from self
@@ -861,13 +899,50 @@ impl BankAccountActor {
         }
         self.balance -= amount;
 
+        // Get reference to recipient actor via context
+        let recipient: ActorRef<BankAccountActor> = ctx.get_actor("BankAccount", recipient_key);
+
         // Deposit to recipient
         recipient.call(DepositRequest { amount }).await?;
 
         Ok(())
     }
 }
+
+// Usage
+let alice = runtime.get_actor::<BankAccountActor>("BankAccount", "alice");
+alice.call(TransferRequest {
+    recipient_key: "bob".to_string(),
+    amount: 50,
+}).await?;
 ```
+
+**Alternative: Pass ActorRef directly** (when caller already has reference):
+```rust
+impl BankAccountActor {
+    pub async fn transfer_to_ref(
+        &mut self,
+        recipient: ActorRef<BankAccountActor>,
+        amount: u64,
+    ) -> Result<(), ActorError> {
+        if self.balance < amount {
+            return Err(ActorError::InsufficientFunds {
+                available: self.balance,
+                requested: amount,
+            });
+        }
+        self.balance -= amount;
+        recipient.call(DepositRequest { amount }).await?;
+        Ok(())
+    }
+}
+```
+
+**ActorContext API**:
+- `get_actor<A>(actor_type, key)` - Get reference to any actor in the cluster
+- Automatically uses the runtime's namespace
+- Lightweight (no storage overhead in actor struct)
+- Testable (can pass mock context in tests)
 
 ### Timeout Strategies
 ```rust
