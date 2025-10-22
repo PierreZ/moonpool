@@ -60,6 +60,10 @@ pub enum ActorError {
     /// Too many message forwards (routing loop protection).
     #[error("Too many forwards (max: {max})")]
     TooManyForwards { max: u8 },
+
+    /// Requested resource not found.
+    #[error("Not found: {0}")]
+    NotFound(String),
 }
 
 /// Errors related to message handling.

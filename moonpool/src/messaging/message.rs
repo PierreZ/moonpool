@@ -351,7 +351,8 @@ impl<'de> serde::Deserialize<'de> for ActorAddress {
                     }
                 }
 
-                let actor_id = actor_id.ok_or_else(|| serde::de::Error::missing_field("actor_id"))?;
+                let actor_id =
+                    actor_id.ok_or_else(|| serde::de::Error::missing_field("actor_id"))?;
                 let node_id = node_id.ok_or_else(|| serde::de::Error::missing_field("node_id"))?;
 
                 Ok(ActorAddress {

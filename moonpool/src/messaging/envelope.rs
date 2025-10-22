@@ -5,8 +5,8 @@
 
 use crate::actor::{ActorId, CorrelationId, NodeId};
 use crate::error::MessageError;
-use crate::messaging::{Direction, Message, MessageFlags};
 use crate::messaging::message::{ActorAddress, CacheUpdate};
+use crate::messaging::{Direction, Message, MessageFlags};
 use std::io::{Cursor, Read, Write};
 
 /// Maximum message size: 1MB
@@ -144,7 +144,7 @@ impl ActorEnvelope {
                 return Err(MessageError::DeserializationFailed(format!(
                     "Invalid direction: {}",
                     buf[0]
-                )))
+                )));
             }
         };
 
@@ -314,7 +314,10 @@ impl ActorEnvelope {
     }
 
     /// Write an ActorAddress.
-    fn write_actor_address(buffer: &mut Vec<u8>, address: &ActorAddress) -> Result<(), MessageError> {
+    fn write_actor_address(
+        buffer: &mut Vec<u8>,
+        address: &ActorAddress,
+    ) -> Result<(), MessageError> {
         Self::write_string(buffer, &address.actor_id.to_string_format())?;
         Self::write_string(buffer, address.node_id.as_str())?;
         Ok(())
@@ -487,7 +490,10 @@ mod tests {
         // Should fail serialization
         let result = ActorEnvelope::serialize(&message);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), MessageError::MessageTooLarge { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            MessageError::MessageTooLarge { .. }
+        ));
     }
 
     #[test]
@@ -539,6 +545,11 @@ mod tests {
         assert!(deserialized.cache_invalidation.is_some());
         let updates = deserialized.cache_invalidation.unwrap();
         assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].invalid_address.actor_id, message.cache_invalidation.as_ref().unwrap()[0].invalid_address.actor_id);
+        assert_eq!(
+            updates[0].invalid_address.actor_id,
+            message.cache_invalidation.as_ref().unwrap()[0]
+                .invalid_address
+                .actor_id
+        );
     }
 }

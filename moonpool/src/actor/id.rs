@@ -178,9 +178,7 @@ impl NodeId {
 
     /// Convert to SocketAddr for binding/connecting.
     pub fn to_socket_addr(&self) -> Result<SocketAddr, NodeIdError> {
-        self.0
-            .parse()
-            .map_err(|_| NodeIdError::InvalidAddress)
+        self.0.parse().map_err(|_| NodeIdError::InvalidAddress)
     }
 
     /// Get the raw address string.

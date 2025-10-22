@@ -17,7 +17,13 @@
       "Bash(cargo doc:*)",
       "Bash(find:*)",
       "Bash(.specify/scripts/bash/check-prerequisites.sh:*)",
-      "Bash(.specify/scripts/bash/setup-plan.sh:*)"
+      "Bash(.specify/scripts/bash/setup-plan.sh:*)",
+      "Bash(if [ -d \"/home/pierrez/workspace/rust/moonpool/specs/001-location-transparent-actors/checklists\" ])",
+      "Bash(then find \"/home/pierrez/workspace/rust/moonpool/specs/001-location-transparent-actors/checklists\" -name \"*.md\" -type f)",
+      "Bash(else echo \"no_checklists\")",
+      "Bash(fi)",
+      "Bash(test:*)",
+      "Bash(git rev-parse:*)"
     ],
     "deny": [],
     "ask": [],
