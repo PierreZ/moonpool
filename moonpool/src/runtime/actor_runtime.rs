@@ -1,7 +1,7 @@
 //! Actor runtime - main entry point for actor system.
 
 use crate::actor::{Actor, ActorFactory, ActorId, ActorRef, NodeId};
-use crate::directory::SimpleDirectory;
+use crate::directory::Directory;
 use crate::error::ActorError;
 use crate::messaging::{ActorRouter, MessageBus};
 use crate::runtime::ActorRuntimeBuilder;
@@ -52,6 +52,11 @@ pub struct ActorRuntime<T: TaskProvider> {
     /// Message bus for routing messages.
     message_bus: Rc<MessageBus>,
 
+    /// Directory for actor placement and location tracking.
+    ///
+    /// Stored as trait object to support any Directory implementation.
+    directory: Rc<dyn Directory>,
+
     /// Task provider for spawning actor message loops.
     task_provider: T,
 
@@ -86,12 +91,14 @@ impl<T: TaskProvider + 'static> ActorRuntime<T> {
         namespace: String,
         node_id: NodeId,
         message_bus: Rc<MessageBus>,
+        directory: Rc<dyn Directory>,
         task_provider: T,
     ) -> std::result::Result<Self, ActorError> {
         Ok(Self {
             namespace,
             node_id,
             message_bus,
+            directory,
             task_provider,
             routers: RefCell::new(HashMap::new()),
         })
@@ -158,11 +165,13 @@ impl<T: TaskProvider + 'static> ActorRuntime<T> {
             )));
         }
 
-        // Create catalog for this actor type
+        // Create catalog for this actor type with shared directory
+        // Use Rc::clone to share the directory reference
         let catalog = Rc::new(ActorCatalog::new(
             self.node_id.clone(),
             self.task_provider.clone(),
             factory,
+            self.directory.clone(), // Clone the Rc<dyn Directory>
         ));
 
         // Set message bus on catalog

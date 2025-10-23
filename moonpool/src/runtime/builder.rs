@@ -220,8 +220,11 @@ where
         // Create NodeId from listen address
         let node_id = NodeId::from_socket_addr(listen_addr);
 
+        // Wrap directory in Rc<dyn Directory> as trait object for sharing
+        let directory_rc: Rc<dyn crate::directory::Directory> = Rc::new(directory);
+
         // Create MessageBus with directory
-        let message_bus = Rc::new(MessageBus::new(node_id.clone(), Rc::new(directory)));
+        let message_bus = Rc::new(MessageBus::new(node_id.clone(), directory_rc.clone()));
 
         // Create network transport using foundation layer
         // ClientTransport for outgoing requests
@@ -293,7 +296,7 @@ where
             listen_addr
         );
 
-        ActorRuntime::new(namespace, node_id, message_bus, self.task_provider)
+        ActorRuntime::new(namespace, node_id, message_bus, directory_rc, self.task_provider)
     }
 }
 

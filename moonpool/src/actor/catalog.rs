@@ -274,8 +274,7 @@ fn storage_key(actor_id: &ActorId) -> String {
 const ACTOR_MESSAGE_QUEUE_SIZE: usize = 128;
 const ACTOR_CONTROL_QUEUE_SIZE: usize = 8;
 
-pub struct ActorCatalog<A: Actor, T: moonpool_foundation::TaskProvider, F: ActorFactory<Actor = A>>
-{
+pub struct ActorCatalog<A: Actor, T: moonpool_foundation::TaskProvider, F: ActorFactory<Actor = A>> {
     /// Local activation directory (ActorId → ActorContext).
     activation_directory: ActivationDirectory<A>,
 
@@ -296,6 +295,13 @@ pub struct ActorCatalog<A: Actor, T: moonpool_foundation::TaskProvider, F: Actor
     /// Set by ActorRuntime when connecting the catalog to the bus.
     /// Required for actors to send responses.
     message_bus: RefCell<Option<Rc<crate::messaging::MessageBus>>>,
+
+    /// Directory for actor placement and location tracking.
+    ///
+    /// Used to register actors with the cluster-wide directory during activation.
+    /// Enables location-transparent routing across nodes.
+    /// Stored as trait object to support any Directory implementation.
+    directory: std::rc::Rc<dyn crate::directory::Directory>,
 
     /// TaskProvider for spawning message loop tasks.
     ///
@@ -320,6 +326,7 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
     /// - `node_id`: The NodeId of this node
     /// - `task_provider`: The TaskProvider for spawning message loop tasks
     /// - `actor_factory`: The ActorFactory for creating actor instances
+    /// - `directory`: The Directory for cluster-wide actor placement (as trait object)
     ///
     /// # Example
     ///
@@ -327,14 +334,21 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
     /// let node_id = NodeId::from("127.0.0.1:8001")?;
     /// let task_provider = TokioTaskProvider;
     /// let factory = BankAccountFactory;
-    /// let catalog = ActorCatalog::new(node_id, task_provider, factory);
+    /// let directory = Rc::new(SimpleDirectory::new(cluster_nodes)) as Rc<dyn Directory>;
+    /// let catalog = ActorCatalog::new(node_id, task_provider, factory, directory);
     /// ```
-    pub fn new(node_id: NodeId, task_provider: T, actor_factory: F) -> Self {
+    pub fn new(
+        node_id: NodeId,
+        task_provider: T,
+        actor_factory: F,
+        directory: std::rc::Rc<dyn crate::directory::Directory>,
+    ) -> Self {
         Self {
             activation_directory: ActivationDirectory::new(),
             activation_lock: RefCell::new(()),
             node_id,
             message_bus: RefCell::new(None),
+            directory,
             task_provider,
             actor_factory,
         }
@@ -489,8 +503,92 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
         // Store task handle in context
         context.set_message_loop_task(task_handle);
 
-        // REGISTER IN DIRECTORY
+        // REGISTER IN LOCAL DIRECTORY
         self.activation_directory.record_new_target(context.clone());
+
+        // REGISTER IN CLUSTER-WIDE DIRECTORY (T105)
+        // This enables location-transparent routing across nodes
+        use crate::directory::PlacementDecision;
+        match self
+            .directory
+            .register(actor_id.clone(), self.node_id.clone())
+            .await
+        {
+            Ok(PlacementDecision::PlaceOnNode(_)) => {
+                // We won the placement - proceed with activation
+                tracing::debug!(
+                    actor_id = %actor_id,
+                    node_id = %self.node_id,
+                    "✅ Registered actor in directory"
+                );
+            }
+            Ok(PlacementDecision::AlreadyRegistered(existing_node)) => {
+                // Actor already exists elsewhere - this shouldn't happen often
+                // due to double-check locking, but can occur in distributed races
+                tracing::warn!(
+                    actor_id = %actor_id,
+                    existing_node = %existing_node,
+                    our_node = %self.node_id,
+                    "⚠️  Actor already registered on different node"
+                );
+
+                // Clean up: remove from local directory
+                self.activation_directory.remove_target(&actor_id);
+
+                // Return error indicating actor exists elsewhere
+                return Err(ActorError::ProcessingFailed(format!(
+                    "Actor {} already activated on node {}",
+                    actor_id, existing_node
+                )));
+            }
+            Ok(PlacementDecision::Race { winner, loser }) => {
+                // Concurrent activation race detected
+                tracing::warn!(
+                    actor_id = %actor_id,
+                    winner = %winner,
+                    loser = %loser,
+                    "⚠️  Placement race detected"
+                );
+
+                if loser == self.node_id {
+                    // We lost the race - clean up and fail
+                    tracing::info!(
+                        actor_id = %actor_id,
+                        "🧹 Cleaning up losing activation"
+                    );
+
+                    // Remove from local directory
+                    self.activation_directory.remove_target(&actor_id);
+
+                    return Err(ActorError::ProcessingFailed(format!(
+                        "Lost activation race for {} to node {}",
+                        actor_id, winner
+                    )));
+                } else {
+                    // We won the race - proceed with activation
+                    tracing::debug!(
+                        actor_id = %actor_id,
+                        "✅ Won activation race"
+                    );
+                }
+            }
+            Err(e) => {
+                // Directory error - clean up and fail
+                tracing::error!(
+                    actor_id = %actor_id,
+                    error = ?e,
+                    "❌ Failed to register in directory"
+                );
+
+                // Remove from local directory
+                self.activation_directory.remove_target(&actor_id);
+
+                return Err(ActorError::ProcessingFailed(format!(
+                    "Directory registration failed: {}",
+                    e
+                )));
+            }
+        }
 
         // SEND ACTIVATION COMMAND (auto-activate Orleans pattern)
         // Create oneshot channel for activation result
@@ -829,10 +927,10 @@ mod tests {
             let node_id = NodeId::from("127.0.0.1:8001").unwrap();
             let task_provider = TokioTaskProvider;
             let factory = DummyFactory;
-            let catalog = ActorCatalog::new(node_id.clone(), task_provider, factory);
+            let directory = create_test_directory();
+            let catalog = ActorCatalog::new(node_id.clone(), task_provider, factory, directory.clone());
 
             // Set MessageBus (required for spawning message loop task)
-            let directory = create_test_directory();
             let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id, directory));
             catalog.set_message_bus(message_bus);
 
@@ -884,10 +982,10 @@ mod tests {
             let node_id = NodeId::from("127.0.0.1:8001").unwrap();
             let task_provider = TokioTaskProvider;
             let factory = DummyFactory;
-            let catalog = ActorCatalog::new(node_id.clone(), task_provider, factory);
+            let directory = create_test_directory();
+            let catalog = ActorCatalog::new(node_id.clone(), task_provider, factory, directory.clone());
 
             // Set MessageBus (required for spawning message loop task)
-            let directory = create_test_directory();
             let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id, directory));
             catalog.set_message_bus(message_bus);
 
@@ -923,10 +1021,10 @@ mod tests {
             let node_id = NodeId::from("127.0.0.1:8001").unwrap();
             let task_provider = TokioTaskProvider;
             let factory = DummyFactory;
-            let catalog = ActorCatalog::new(node_id.clone(), task_provider, factory);
+            let directory = create_test_directory();
+            let catalog = ActorCatalog::new(node_id.clone(), task_provider, factory, directory.clone());
 
             // Set MessageBus (required for spawning message loop task)
-            let directory = create_test_directory();
             let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id, directory));
             catalog.set_message_bus(message_bus);
 
