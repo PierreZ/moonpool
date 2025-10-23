@@ -53,7 +53,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,moonpool=debug".into()),
+                .unwrap_or_else(|_| "info".into()),
         )
         .with(tracing_subscriber::fmt::layer().with_target(false))
         .init();
@@ -181,10 +181,7 @@ async fn run_cluster(ports: Vec<u16>) -> std::result::Result<(), ActorError> {
     println!("  📬 ALICE (2nd call): {}", greeting);
 
     println!();
-    tracing::info!("🎉 Example complete! Press Ctrl+C to exit");
+    tracing::info!("🎉 Example complete!");
 
-    // Keep all runtimes alive
-    loop {
-        tokio::time::sleep(Duration::from_secs(10)).await;
-    }
+    Ok(())
 }

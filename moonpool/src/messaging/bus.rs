@@ -46,7 +46,7 @@
 //! let response = rx.await?;
 //! ```
 
-use crate::actor::{ActorId, CorrelationId, NodeId};
+use crate::actor::{CorrelationId, NodeId};
 use crate::directory::Directory;
 use crate::error::ActorError;
 use crate::messaging::{ActorRouter, CallbackData, Direction, Message, NetworkTransport};
@@ -621,6 +621,11 @@ impl MessageBus {
 
     /// Route request/oneway message to target actor.
     ///
+    /// This implements location-transparent routing:
+    /// 1. Check directory for actor location
+    /// 2. If on remote node, forward message there
+    /// 3. If not found or local, route to local catalog (which may activate)
+    ///
     /// # Parameters
     ///
     /// - `message`: The request or oneway message to route
@@ -630,17 +635,103 @@ impl MessageBus {
     /// - `Ok(())`: Message successfully delivered to actor
     /// - `Err(ActorError::ProcessingFailed)`: No router for actor type
     /// - `Err(ActorError)`: Actor routing failed
-    async fn route_to_actor(&self, message: Message) -> Result<(), ActorError> {
+    async fn route_to_actor(&self, mut message: Message) -> Result<(), ActorError> {
         tracing::debug!(
             "Routing message to actor: target={}, method={}",
             message.target_actor,
             message.method_name
         );
 
-        // Extract actor type from ActorId
+        // DIRECTORY LOOKUP: Check if actor exists elsewhere (T105)
+        match self.directory.lookup(&message.target_actor).await {
+            Ok(Some(node_id)) if node_id != self.node_id => {
+                // Actor exists on remote node - forward message there
+                tracing::debug!(
+                    "Actor {} found on remote node {}, forwarding",
+                    message.target_actor,
+                    node_id
+                );
+
+                // Update target_node to remote location
+                message.target_node = node_id.clone();
+
+                // Send over network
+                if let Some(ref mut transport) = *self.network_transport.borrow_mut() {
+                    let payload = serde_json::to_vec(&message).map_err(|e| {
+                        ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
+                    })?;
+
+                    transport.send(node_id.as_str(), payload).await?;
+                    return Ok(());
+                } else {
+                    return Err(ActorError::ProcessingFailed(
+                        "Network not configured for remote forwarding".to_string(),
+                    ));
+                }
+            }
+            Ok(Some(_)) => {
+                // Actor registered locally, proceed with local routing
+                tracing::debug!(
+                    "Actor {} registered locally, routing to catalog",
+                    message.target_actor
+                );
+            }
+            Ok(None) => {
+                // Actor not registered anywhere - ask directory where to place it
+                match self.directory.choose_placement_node().await {
+                    Ok(chosen_node) if chosen_node != self.node_id => {
+                        // Directory chose a remote node - send ActivationRequest
+                        tracing::info!(
+                            "Directory chose remote node {} for actor {}, sending ActivationRequest",
+                            chosen_node,
+                            message.target_actor
+                        );
+
+                        // TODO: Send ActivationRequest to remote node
+                        // For now, forward the message directly (which will trigger remote activation)
+                        message.target_node = chosen_node.clone();
+
+                        if let Some(ref mut transport) = *self.network_transport.borrow_mut() {
+                            let payload = serde_json::to_vec(&message).map_err(|e| {
+                                ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
+                            })?;
+
+                            transport.send(chosen_node.as_str(), payload).await?;
+                            return Ok(());
+                        } else {
+                            return Err(ActorError::ProcessingFailed(
+                                "Network not configured for remote activation".to_string(),
+                            ));
+                        }
+                    }
+                    Ok(_) => {
+                        // Directory chose this node - proceed with local activation
+                        tracing::debug!(
+                            "Directory chose local node for actor {}, will auto-activate locally",
+                            message.target_actor
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Directory placement decision failed for {}: {:?}, activating locally as fallback",
+                            message.target_actor,
+                            e
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Directory lookup failed for {}: {:?}, proceeding with local routing",
+                    message.target_actor,
+                    e
+                );
+            }
+        }
+
+        // LOCATE ROUTING: Find the local catalog for this actor type
         let actor_type = message.target_actor.actor_type();
 
-        // Lookup router for this actor type
         let router = self
             .actor_routers
             .borrow()
