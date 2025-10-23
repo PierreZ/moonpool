@@ -272,15 +272,19 @@ where
                         if let Ok(message) =
                             serde_json::from_slice::<crate::messaging::Message>(&payload)
                         {
-                            tracing::debug!(
-                                "Received network message: target={}, method={}",
+                            tracing::info!(
+                                "Received network message: target={}, method={}, direction={:?}, corr_id={}",
                                 message.target_actor,
-                                message.method_name
+                                message.method_name,
+                                message.direction,
+                                message.correlation_id
                             );
 
                             // Route to local actor
                             if let Err(e) = message_bus_for_recv.route_message(message).await {
                                 tracing::error!("Failed to route network message: {}", e);
+                            } else {
+                                tracing::info!("Successfully routed network message");
                             }
                         } else {
                             tracing::warn!("Failed to deserialize network message");

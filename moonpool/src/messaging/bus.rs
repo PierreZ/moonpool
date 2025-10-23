@@ -441,21 +441,26 @@ impl MessageBus {
     /// bus.send_response(response).await?;
     /// ```
     pub async fn send_response(&self, message: Message) -> Result<(), ActorError> {
-        tracing::debug!(
-            "send_response: corr_id={}, target={}, target_node={}",
+        tracing::info!(
+            "send_response: corr_id={}, target={}, target_node={}, my_node={}",
             message.correlation_id,
             message.target_actor,
-            message.target_node
+            message.target_node,
+            self.node_id
         );
 
         // Determine if response is for local or remote requester
         if message.target_node == self.node_id {
             // Local callback completion
+            tracing::info!(
+                "send_response (LOCAL): corr_id={}, completing pending request",
+                message.correlation_id
+            );
             self.complete_pending_request(message.correlation_id, Ok(message))?;
         } else {
             // Remote response - send over network
-            tracing::debug!(
-                "send_response (remote): corr_id={}, target_node={}",
+            tracing::info!(
+                "send_response (REMOTE): corr_id={}, target_node={}, sending over network",
                 message.correlation_id,
                 message.target_node
             );
@@ -468,7 +473,14 @@ impl MessageBus {
 
                 // Send over network using network transport
                 let destination = message.target_node.as_str();
+                tracing::info!(
+                    "send_response: Sending to destination={}",
+                    destination
+                );
                 transport.send(destination, payload).await?;
+                tracing::info!(
+                    "send_response: Successfully sent response over network"
+                );
             } else {
                 return Err(ActorError::ProcessingFailed(
                     "Network not configured for remote response".to_string(),
@@ -677,46 +689,64 @@ impl MessageBus {
                 );
             }
             Ok(None) => {
-                // Actor not registered anywhere - ask directory where to place it
-                match self.directory.choose_placement_node().await {
-                    Ok(chosen_node) if chosen_node != self.node_id => {
-                        // Directory chose a remote node - send ActivationRequest
-                        tracing::info!(
-                            "Directory chose remote node {} for actor {}, sending ActivationRequest",
-                            chosen_node,
-                            message.target_actor
-                        );
+                // Actor not registered anywhere
+                // Check if this message was forwarded to us (forward_count > 0)
+                // If so, activate locally (sender already made placement decision)
+                // Otherwise, ask directory where to place it
+                if message.forward_count > 0 {
+                    // Message was forwarded to us - activate locally
+                    tracing::info!(
+                        "Actor {} not found, but message was forwarded to us (forward_count={}), activating locally",
+                        message.target_actor,
+                        message.forward_count
+                    );
+                } else {
+                    // Original message - consult directory for placement
+                    match self.directory.choose_placement_node().await {
+                        Ok(chosen_node) if chosen_node != self.node_id => {
+                            // Directory chose a remote node - forward message there
+                            tracing::info!(
+                                "Directory chose remote node {} for actor {}, forwarding message",
+                                chosen_node,
+                                message.target_actor
+                            );
 
-                        // TODO: Send ActivationRequest to remote node
-                        // For now, forward the message directly (which will trigger remote activation)
-                        message.target_node = chosen_node.clone();
+                            // Update target_node and increment forward count
+                            message.target_node = chosen_node.clone();
+                            if let Err(e) = message.increment_forward_count(2) {
+                                return Err(ActorError::ProcessingFailed(format!(
+                                    "Failed to forward message: {}",
+                                    e
+                                )));
+                            }
 
-                        if let Some(ref mut transport) = *self.network_transport.borrow_mut() {
-                            let payload = serde_json::to_vec(&message).map_err(|e| {
-                                ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
-                            })?;
+                            if let Some(ref mut transport) = *self.network_transport.borrow_mut() {
+                                let payload = serde_json::to_vec(&message).map_err(|e| {
+                                    ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
+                                })?;
 
-                            transport.send(chosen_node.as_str(), payload).await?;
-                            return Ok(());
-                        } else {
-                            return Err(ActorError::ProcessingFailed(
-                                "Network not configured for remote activation".to_string(),
-                            ));
+                                transport.send(chosen_node.as_str(), payload).await?;
+                                return Ok(());
+                            } else {
+                                return Err(ActorError::ProcessingFailed(
+                                    "Network not configured for remote activation".to_string(),
+                                ));
+                            }
                         }
-                    }
-                    Ok(_) => {
-                        // Directory chose this node - proceed with local activation
-                        tracing::debug!(
-                            "Directory chose local node for actor {}, will auto-activate locally",
-                            message.target_actor
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Directory placement decision failed for {}: {:?}, activating locally as fallback",
-                            message.target_actor,
-                            e
-                        );
+                        Ok(_) => {
+                            // Directory chose this node - proceed with local activation
+                            tracing::info!(
+                                "Directory chose local node for actor {}, will auto-activate locally",
+                                message.target_actor
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Directory placement decision failed for {}: {:?}, activating locally as fallback",
+                                message.target_actor,
+                                e
+                            );
+                        }
                     }
                 }
             }
@@ -759,13 +789,31 @@ impl MessageBus {
     /// - `Ok(())`: Response delivered to callback
     /// - `Err(ActorError::UnknownCorrelationId)`: No pending request for this correlation ID
     async fn route_to_callback(&self, message: Message) -> Result<(), ActorError> {
-        tracing::debug!(
-            "Routing response to callback: corr_id={}",
-            message.correlation_id
+        let correlation_id = message.correlation_id;
+        tracing::info!(
+            "route_to_callback: corr_id={}, pending_count={}",
+            correlation_id,
+            self.pending_count()
         );
 
         // Complete the pending request with the response
-        self.complete_pending_request(message.correlation_id, Ok(message))
+        match self.complete_pending_request(correlation_id, Ok(message)) {
+            Ok(()) => {
+                tracing::info!(
+                    "route_to_callback: Successfully completed pending request corr_id={}",
+                    correlation_id
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!(
+                    "route_to_callback: Failed to complete pending request corr_id={}: {:?}",
+                    correlation_id,
+                    e
+                );
+                Err(e)
+            }
+        }
     }
 }
 
