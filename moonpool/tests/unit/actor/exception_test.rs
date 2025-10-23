@@ -63,7 +63,12 @@ fn test_error_tracking_initialization() {
     let node_id = moonpool::actor::NodeId::from("127.0.0.1:5000").unwrap();
     let actor = FailingActor::new(actor_id.clone(), false);
 
-    let context = ActorContext::new(actor_id, node_id, actor);
+    // Create channels for message loop
+    use tokio::sync::mpsc;
+    let (msg_tx, _msg_rx) = mpsc::channel(128);
+    let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+
+    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx);
 
     assert_eq!(context.get_error_count(), 0);
     assert!(context.get_last_error().is_none());
@@ -76,7 +81,12 @@ fn test_error_tracking_record() {
     let node_id = moonpool::actor::NodeId::from("127.0.0.1:5000").unwrap();
     let actor = FailingActor::new(actor_id.clone(), false);
 
-    let context = ActorContext::new(actor_id, node_id, actor);
+    // Create channels for message loop
+    use tokio::sync::mpsc;
+    let (msg_tx, _msg_rx) = mpsc::channel(128);
+    let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+
+    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx);
 
     // Record an error
     let error = ActorError::ProcessingFailed("Test error".to_string());
@@ -99,7 +109,12 @@ fn test_error_tracking_clear() {
     let node_id = moonpool::actor::NodeId::from("127.0.0.1:5000").unwrap();
     let actor = FailingActor::new(actor_id.clone(), false);
 
-    let context = ActorContext::new(actor_id, node_id, actor);
+    // Create channels for message loop
+    use tokio::sync::mpsc;
+    let (msg_tx, _msg_rx) = mpsc::channel(128);
+    let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+
+    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx);
 
     // Record some errors
     context.record_error(ActorError::ProcessingFailed("Error 1".to_string()));

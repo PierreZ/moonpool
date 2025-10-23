@@ -209,6 +209,37 @@ impl Message {
         }
     }
 
+    /// Create an error response message.
+    ///
+    /// Used when message processing fails. Serializes the error as JSON payload.
+    #[allow(clippy::too_many_arguments)]
+    pub fn error_response(
+        correlation_id: CorrelationId,
+        target_actor: ActorId,
+        sender_actor: ActorId,
+        target_node: NodeId,
+        sender_node: NodeId,
+        error: crate::error::ActorError,
+    ) -> Self {
+        // Serialize error to JSON for payload
+        let payload = serde_json::to_vec(&format!("{:?}", error)).unwrap_or_default();
+
+        Self {
+            correlation_id,
+            direction: Direction::Response,
+            target_actor,
+            sender_actor,
+            target_node,
+            sender_node,
+            method_name: "ERROR".to_string(),
+            payload,
+            flags: MessageFlags::empty(),
+            time_to_expiry: None,
+            forward_count: 0,
+            cache_invalidation: None,
+        }
+    }
+
     /// Create a one-way message (fire-and-forget).
     pub fn oneway(
         target_actor: ActorId,

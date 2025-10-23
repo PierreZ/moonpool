@@ -2,13 +2,33 @@
 //!
 //! This module provides the `ActorContext` which holds per-actor state and metadata.
 
-use crate::actor::{ActivationState, Actor, ActorId, NodeId};
+use crate::actor::{ActivationState, Actor, ActorId, DeactivationReason, NodeId};
+
+/// Lifecycle commands sent via control channel.
+///
+/// These commands control the actor's lifecycle independently from business logic messages.
+/// Follows Orleans pattern where lifecycle operations are processed separately.
+#[derive(Debug)]
+pub enum LifecycleCommand<A: Actor> {
+    /// Activate the actor with optional persisted state.
+    ///
+    /// The result is sent back via the oneshot channel.
+    Activate {
+        state: Option<A::State>,
+        result_tx: oneshot::Sender<Result<(), ActorError>>,
+    },
+
+    /// Deactivate the actor with the given reason.
+    ///
+    /// After handling this command, the message loop will exit.
+    Deactivate { reason: DeactivationReason },
+}
 use crate::error::ActorError;
 use crate::messaging::{Message, MessageBus};
 use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::Instant;
+use tokio::sync::{mpsc, oneshot};
 
 /// Per-actor execution context holding state and message queue.
 ///
@@ -27,7 +47,8 @@ use std::time::Instant;
 /// - `actor_id`: Unique identifier for this actor
 /// - `node_id`: Physical node hosting this activation
 /// - `state`: Current lifecycle state (interior mutability via RefCell)
-/// - `message_queue`: FIFO queue for incoming messages
+/// - `message_sender`: Channel sender for actor messages (primary mailbox)
+/// - `control_sender`: Channel sender for lifecycle commands
 /// - `actor_instance`: The user-defined actor implementation
 /// - `activation_time`: When this actor was activated
 /// - `last_message_time`: For idle timeout detection
@@ -52,7 +73,7 @@ use std::time::Instant;
 /// # Invariants
 ///
 /// - Single message processed at a time (sequential processing)
-/// - Queue never drops messages (unbounded, monitored)
+/// - Messages delivered via bounded channel (capacity: 128)
 /// - `last_message_time` updated on every message processing
 /// - Actor only removed from catalog when state == Invalid
 pub struct ActorContext<A: Actor> {
@@ -65,11 +86,17 @@ pub struct ActorContext<A: Actor> {
     /// Current lifecycle state (interior mutability via RefCell).
     pub state: RefCell<ActivationState>,
 
-    /// Unbounded FIFO queue for incoming messages.
+    /// Channel sender for actor messages (primary mailbox).
     ///
-    /// Messages are enqueued when actor is in any state, but only
-    /// dequeued and processed when state == Valid.
-    pub message_queue: RefCell<VecDeque<Message>>,
+    /// Messages are sent to this channel and received by the message loop.
+    /// Bounded capacity provides natural backpressure.
+    pub message_sender: mpsc::Sender<Message>,
+
+    /// Channel sender for lifecycle commands.
+    ///
+    /// Used for activation and deactivation commands processed separately
+    /// from business logic messages.
+    pub control_sender: mpsc::Sender<LifecycleCommand<A>>,
 
     /// User-defined actor implementation.
     ///
@@ -85,10 +112,10 @@ pub struct ActorContext<A: Actor> {
     /// If `Instant::now() - last_message_time > idle_timeout`, trigger deactivation.
     pub last_message_time: RefCell<Instant>,
 
-    /// Flag indicating whether message processing loop is running.
+    /// Message loop task handle (spawned once during creation).
     ///
-    /// Prevents spawning multiple processing tasks for the same actor.
-    pub is_processing: RefCell<bool>,
+    /// Stored for debugging and to ensure task is not dropped prematurely.
+    pub message_loop_task: RefCell<Option<tokio::task::JoinHandle<()>>>,
 
     /// MessageBus reference for sending responses.
     ///
@@ -121,21 +148,32 @@ impl<A: Actor> ActorContext<A> {
     /// # Initial State
     ///
     /// - `state`: `ActivationState::Creating`
-    /// - `message_queue`: Empty
     /// - `activation_time`: Current time
     /// - `last_message_time`: Current time
-    /// - `is_processing`: `false`
-    pub fn new(actor_id: ActorId, node_id: NodeId, actor_instance: A) -> Self {
+    /// - `message_loop_task`: `None` (set after spawning)
+    ///
+    /// # Parameters
+    ///
+    /// - `message_sender`: Sender for actor messages (from message channel)
+    /// - `control_sender`: Sender for lifecycle commands (from control channel)
+    pub fn new(
+        actor_id: ActorId,
+        node_id: NodeId,
+        actor_instance: A,
+        message_sender: mpsc::Sender<Message>,
+        control_sender: mpsc::Sender<LifecycleCommand<A>>,
+    ) -> Self {
         let now = Instant::now();
         Self {
             actor_id,
             node_id,
             state: RefCell::new(ActivationState::Creating),
-            message_queue: RefCell::new(VecDeque::new()),
+            message_sender,
+            control_sender,
             actor_instance: RefCell::new(actor_instance),
             activation_time: now,
             last_message_time: RefCell::new(now),
-            is_processing: RefCell::new(false),
+            message_loop_task: RefCell::new(None),
             message_bus: RefCell::new(None),
             last_error: RefCell::new(None),
             error_count: RefCell::new(0),
@@ -201,36 +239,36 @@ impl<A: Actor> ActorContext<A> {
         Ok(())
     }
 
-    /// Enqueue a message for processing.
+    /// Enqueue a message for processing (async send to channel).
     ///
-    /// Messages are added to the queue regardless of actor state.
-    /// The message processing loop will handle them when actor is Valid.
+    /// Sends the message to the actor's message channel. The message loop
+    /// will receive and process it asynchronously.
     ///
     /// # Parameters
     ///
     /// - `message`: The message to enqueue
     ///
-    /// # Note
-    ///
-    /// This does NOT automatically spawn a processing task. The caller
-    /// (typically ActorCatalog) must call `spawn_message_processor()` if needed.
-    pub fn enqueue_message(&self, message: Message) {
-        self.message_queue.borrow_mut().push_back(message);
-    }
-
-    /// Dequeue the next message for processing.
-    ///
     /// # Returns
     ///
-    /// - `Some(message)`: Next message in queue
-    /// - `None`: Queue is empty
-    pub fn dequeue_message(&self) -> Option<Message> {
-        self.message_queue.borrow_mut().pop_front()
+    /// - `Ok(())`: Message successfully enqueued
+    /// - `Err(ActorError)`: Channel closed (actor deactivated)
+    ///
+    /// # Backpressure
+    ///
+    /// If the channel is full (128 messages), this will wait asynchronously
+    /// until space is available.
+    pub async fn enqueue_message(&self, message: Message) -> Result<(), ActorError> {
+        self.message_sender
+            .send(message)
+            .await
+            .map_err(|_| ActorError::ProcessingFailed("Actor mailbox closed".to_string()))
     }
 
-    /// Get the number of queued messages.
-    pub fn queue_length(&self) -> usize {
-        self.message_queue.borrow().len()
+    /// Set the message loop task handle.
+    ///
+    /// Called once after spawning the message loop task.
+    pub fn set_message_loop_task(&self, handle: tokio::task::JoinHandle<()>) {
+        *self.message_loop_task.borrow_mut() = Some(handle);
     }
 
     /// Update last message processing time.
@@ -245,16 +283,6 @@ impl<A: Actor> ActorContext<A> {
     /// Used for idle timeout detection.
     pub fn time_since_last_message(&self) -> std::time::Duration {
         Instant::now() - *self.last_message_time.borrow()
-    }
-
-    /// Check if message processing loop is running.
-    pub fn is_processing(&self) -> bool {
-        *self.is_processing.borrow()
-    }
-
-    /// Set message processing flag.
-    pub fn set_processing(&self, value: bool) {
-        *self.is_processing.borrow_mut() = value;
     }
 
     /// Set the MessageBus reference for sending responses.
@@ -456,98 +484,154 @@ impl<A: Actor> ActorContext<A> {
         result
     }
 
-    /// Process messages from the queue until empty.
-    ///
-    /// This method dequeues and processes messages sequentially using the
-    /// provided dispatch function. It's designed to be called by ActorCatalog
-    /// when messages are enqueued.
-    ///
-    /// # Type Parameters
-    ///
-    /// - `F`: Async dispatch function that processes a single message
-    ///
-    /// # Parameters
-    ///
-    /// - `dispatch_fn`: Function that dispatches message to actor's handlers
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(count)`: Number of messages processed
-    /// - `Err(ActorError)`: Processing failed
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// // In ActorCatalog, provide dispatch closure
-    /// context.process_message_queue(|ctx, msg, bus| async move {
-    ///     ctx.dispatch_message_impl(msg, bus).await
-    /// }).await?;
-    /// ```
-    pub async fn process_message_queue<F, Fut>(
-        self: &Rc<Self>,
-        dispatch_fn: F,
-    ) -> Result<usize, ActorError>
-    where
-        F: Fn(Rc<Self>, Message, Rc<MessageBus>) -> Fut,
-        Fut: std::future::Future<Output = Result<(), ActorError>>,
-    {
-        let mut count = 0;
+}
 
-        loop {
-            // Check if we should continue processing
-            if self.get_state() != ActivationState::Valid {
-                tracing::warn!(
-                    "Actor {} not in Valid state, stopping message processing",
-                    self.actor_id
+/// Never-ending message loop for an actor (Orleans pattern adapted to Rust).
+///
+/// This function runs continuously until deactivation, processing messages
+/// from two channels using `tokio::select!`:
+/// - Message channel: Business logic messages
+/// - Control channel: Lifecycle commands (Activate, Deactivate)
+///
+/// # Parameters
+///
+/// - `context`: Actor context (shared via Rc)
+/// - `msg_rx`: Receiver for actor messages
+/// - `ctrl_rx`: Receiver for lifecycle commands
+/// - `message_bus`: MessageBus for sending responses
+///
+/// # Loop Exit Conditions
+///
+/// - `Deactivate` command received → exit after calling `on_deactivate()`
+/// - Both channels closed → exit (all senders dropped)
+///
+/// # Orleans Pattern
+///
+/// This adapts Orleans' `RunMessageLoop()` which uses:
+/// - `while(true)` loop + `_workSignal.WaitAsync()`
+/// - Separate command queue for lifecycle operations
+/// - Never exits (GC'd when dereferenced)
+///
+/// Moonpool adaptation:
+/// - `loop` + `tokio::select!` on two channels
+/// - Explicit exit via `Deactivate` command
+/// - Channels provide implicit wake mechanism
+pub async fn run_message_loop<A: Actor>(
+    context: Rc<ActorContext<A>>,
+    mut msg_rx: mpsc::Receiver<Message>,
+    mut ctrl_rx: mpsc::Receiver<LifecycleCommand<A>>,
+    message_bus: Rc<MessageBus>,
+) {
+    let actor_id = context.actor_id.clone();
+    tracing::info!("Message loop started: {}", actor_id);
+
+    loop {
+        tokio::select! {
+            // Process actor messages (one at a time)
+            Some(message) = msg_rx.recv() => {
+                // Only process if actor is Valid
+                if context.get_state() != ActivationState::Valid {
+                    tracing::warn!(
+                        "Discarding message for {} - state: {:?}",
+                        actor_id,
+                        context.get_state()
+                    );
+                    continue;
+                }
+
+                tracing::debug!(
+                    "Processing: {} -> {} (corr_id: {})",
+                    message.method_name,
+                    actor_id,
+                    message.correlation_id
                 );
+
+                // Dispatch to actor handler
+                let result = {
+                    let mut actor = context.actor_instance.borrow_mut();
+                    dispatch_message_to_actor(
+                        &mut *actor,
+                        &message,
+                        &context,
+                        &message_bus,
+                    ).await
+                };
+
+                match result {
+                    Ok(()) => {
+                        context.update_last_message_time();
+                    }
+                    Err(e) => {
+                        tracing::error!("Processing failed for {}: {:?}", actor_id, e);
+                        context.record_error(e.clone());
+
+                        // Send error response for requests
+                        if message.direction == crate::messaging::Direction::Request {
+                            use crate::messaging::Message;
+                            let error_response = Message::error_response(
+                                message.correlation_id,
+                                message.sender_actor.clone(),
+                                message.target_actor.clone(),
+                                message.sender_node.clone(),
+                                message.target_node.clone(),
+                                e,
+                            );
+                            let _ = message_bus.send_response(error_response).await;
+                        }
+                    }
+                }
+            }
+
+            // Process lifecycle commands
+            Some(cmd) = ctrl_rx.recv() => {
+                match cmd {
+                    LifecycleCommand::Activate { state, result_tx } => {
+                        tracing::info!("Activating: {}", actor_id);
+
+                        let result = context.activate(state).await;
+                        let _ = result_tx.send(result);
+                    }
+
+                    LifecycleCommand::Deactivate { reason } => {
+                        tracing::info!("Deactivating: {} ({:?})", actor_id, reason);
+
+                        let _ = context.deactivate(reason).await;
+                        break;  // Exit loop after deactivation
+                    }
+                }
+            }
+
+            // Both channels closed - exit gracefully
+            else => {
+                tracing::info!("All channels closed for: {}", actor_id);
                 break;
             }
-
-            // Dequeue next message
-            let message = match self.dequeue_message() {
-                Some(msg) => msg,
-                None => break, // Queue empty
-            };
-
-            // Get message bus
-            let message_bus = match self.get_message_bus() {
-                Some(bus) => bus,
-                None => {
-                    tracing::error!(
-                        "No MessageBus set for actor {}, cannot process messages",
-                        self.actor_id
-                    );
-                    return Err(ActorError::ProcessingFailed(
-                        "MessageBus not configured".to_string(),
-                    ));
-                }
-            };
-
-            // Dispatch message using provided function
-            tracing::debug!(
-                "Processing message for actor {}: {} (correlation: {})",
-                self.actor_id,
-                message.method_name,
-                message.correlation_id
-            );
-
-            if let Err(e) = dispatch_fn(self.clone(), message, message_bus).await {
-                tracing::error!(
-                    "Message processing failed for actor {}: {:?}",
-                    self.actor_id,
-                    e
-                );
-                // Record error for monitoring
-                self.record_error(e);
-                // Continue processing remaining messages even if one fails
-            }
-
-            count += 1;
         }
-
-        tracing::debug!("Processed {} messages for actor {}", count, self.actor_id);
-        Ok(count)
     }
+
+    tracing::info!("Message loop exited: {}", actor_id);
+}
+
+/// Dispatch a message to the actor's handler.
+///
+/// Dispatch a message to the actor's handler.
+///
+/// This function is called by the message loop for each message.
+/// It's a placeholder that will be implemented fully in later phases.
+async fn dispatch_message_to_actor<A: Actor>(
+    _actor: &mut A,
+    message: &Message,
+    context: &ActorContext<A>,
+    _message_bus: &MessageBus,
+) -> Result<(), ActorError> {
+    // TODO: Implement proper message dispatching
+    // For now, just log and return Ok
+    tracing::debug!(
+        "Dispatching message '{}' to actor {}",
+        message.method_name,
+        context.actor_id
+    );
+    Ok(())
 }
 
 // Manual Debug implementation (actor_instance may not be Debug)
@@ -557,10 +641,9 @@ impl<A: Actor> std::fmt::Debug for ActorContext<A> {
             .field("actor_id", &self.actor_id)
             .field("node_id", &self.node_id)
             .field("state", &self.state)
-            .field("queue_length", &self.queue_length())
             .field("activation_time", &self.activation_time)
             .field("last_message_time", &self.last_message_time)
-            .field("is_processing", &self.is_processing.borrow())
+            .field("has_message_loop_task", &self.message_loop_task.borrow().is_some())
             .field("error_count", &self.error_count.borrow())
             .field("last_error", &self.last_error.borrow())
             .finish()

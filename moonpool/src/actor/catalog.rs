@@ -270,7 +270,11 @@ fn storage_key(actor_id: &ActorId) -> String {
 /// // Deactivate
 /// catalog.remove(&actor_id)?;
 /// ```
-pub struct ActorCatalog<A: Actor> {
+/// Queue size constants for actor channels.
+const ACTOR_MESSAGE_QUEUE_SIZE: usize = 128;
+const ACTOR_CONTROL_QUEUE_SIZE: usize = 8;
+
+pub struct ActorCatalog<A: Actor, T: moonpool_foundation::TaskProvider> {
     /// Local activation directory (ActorId → ActorContext).
     activation_directory: ActivationDirectory<A>,
 
@@ -291,27 +295,35 @@ pub struct ActorCatalog<A: Actor> {
     /// Set by ActorRuntime when connecting the catalog to the bus.
     /// Required for actors to send responses.
     message_bus: RefCell<Option<Rc<crate::messaging::MessageBus>>>,
+
+    /// TaskProvider for spawning message loop tasks.
+    ///
+    /// Generic type parameter allows compile-time dispatch.
+    task_provider: T,
 }
 
-impl<A: Actor> ActorCatalog<A> {
+impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider> ActorCatalog<A, T> {
     /// Create a new ActorCatalog for this node.
     ///
     /// # Parameters
     ///
     /// - `node_id`: The NodeId of this node
+    /// - `task_provider`: The TaskProvider for spawning message loop tasks
     ///
     /// # Example
     ///
     /// ```rust,ignore
     /// let node_id = NodeId::from("127.0.0.1:8001")?;
-    /// let catalog = ActorCatalog::<BankAccountActor>::new(node_id);
+    /// let task_provider = LocalTaskProvider::new();
+    /// let catalog = ActorCatalog::<BankAccountActor, _>::new(node_id, task_provider);
     /// ```
-    pub fn new(node_id: NodeId) -> Self {
+    pub fn new(node_id: NodeId, task_provider: T) -> Self {
         Self {
             activation_directory: ActivationDirectory::new(),
             activation_lock: RefCell::new(()),
             node_id,
             message_bus: RefCell::new(None),
+            task_provider,
         }
     }
 
@@ -421,12 +433,41 @@ impl<A: Actor> ActorCatalog<A> {
             return Ok(activation); // Another task created while we waited
         }
 
-        // Create new activation (while holding lock)
+        // Get required dependencies
+        let message_bus = self.message_bus.borrow().clone().ok_or_else(|| {
+            ActorError::ProcessingFailed("MessageBus not set in ActorCatalog".to_string())
+        })?;
+
+        // CREATE CHANNELS (message channel + control channel)
+        use tokio::sync::mpsc;
+        let (msg_tx, msg_rx) = mpsc::channel::<Message>(ACTOR_MESSAGE_QUEUE_SIZE);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel::<crate::actor::LifecycleCommand<A>>(ACTOR_CONTROL_QUEUE_SIZE);
+
+        // CREATE ACTOR CONTEXT (while holding lock)
         let context = Rc::new(ActorContext::new(
-            actor_id,
+            actor_id.clone(),
             self.node_id.clone(),
             actor_instance,
+            msg_tx,
+            ctrl_tx,
         ));
+
+        // Set MessageBus reference on context
+        context.set_message_bus(message_bus.clone());
+
+        // SPAWN MESSAGE LOOP TASK (Orleans pattern: spawned once, runs forever until deactivation)
+        let ctx_clone = context.clone();
+        let bus_clone = message_bus.clone();
+
+        let task_name = format!("actor_loop_{}", actor_id);
+        let task_handle = self.task_provider.spawn_task(&task_name, async move {
+            crate::actor::run_message_loop(ctx_clone, msg_rx, ctrl_rx, bus_clone).await
+        });
+
+        // Store task handle in context
+        context.set_message_loop_task(task_handle);
+
+        // REGISTER IN DIRECTORY
         self.activation_directory.record_new_target(context.clone());
 
         // Return for activation outside lock
@@ -507,7 +548,7 @@ use crate::messaging::{ActorRouter, Message};
 use async_trait::async_trait;
 
 #[async_trait(?Send)]
-impl<A: Actor> ActorRouter for ActorCatalog<A> {
+impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider> ActorRouter for ActorCatalog<A, T> {
     /// Route a message to the appropriate local actor.
     ///
     /// This implementation:
@@ -536,10 +577,9 @@ impl<A: Actor> ActorRouter for ActorCatalog<A> {
     /// router.route_message(message).await?;
     /// ```
     async fn route_message(&self, message: Message) -> Result<(), ActorError> {
-        // TODO: For now, we can't create actor instances automatically.
-        // In Phase 4, we'll have an ActorFactory trait to create instances.
+        // Get the actor context
+        // TODO: In Phase 4, we'll have an ActorFactory trait to auto-create actors.
         // For now, return NotFound if actor doesn't exist.
-
         let context = self.get(&message.target_actor).ok_or_else(|| {
             ActorError::NotFound(format!(
                 "Actor not found (and auto-activation not yet implemented): {}",
@@ -547,17 +587,9 @@ impl<A: Actor> ActorRouter for ActorCatalog<A> {
             ))
         })?;
 
-        // Set MessageBus reference on context if we have one
-        if let Some(bus) = self.message_bus.borrow().as_ref() {
-            context.set_message_bus(bus.clone());
-        }
-
-        // Enqueue message in actor's context
-        context.enqueue_message(message);
-
-        // Note: Message processing loop would be spawned here in a full implementation.
-        // For Phase 3, tests will manually call context.process_message_queue().
-        // For Phase 4, this will spawn a processing task if not already running.
+        // Enqueue message in actor's channel (async send)
+        // This automatically wakes the message loop task
+        context.enqueue_message(message).await?;
 
         Ok(())
     }
@@ -569,6 +601,7 @@ mod tests {
     use crate::actor::{ActorId, NodeId};
     use async_trait::async_trait;
     use serde::{Deserialize, Serialize};
+    use moonpool_foundation::TokioTaskProvider;
 
     // Dummy actor type for testing
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -600,20 +633,28 @@ mod tests {
         }
     }
 
+
     #[test]
     fn test_activation_directory_basic_operations() {
+        use tokio::sync::mpsc;
+
         let directory = ActivationDirectory::<DummyActor>::new();
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
 
         // Initially empty
         assert_eq!(directory.count(), 0);
 
-        // Create and record activation
+        // Create channels and record activation
         let actor_id = ActorId::from_string("test::Counter/alice").unwrap();
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+
         let context = Rc::new(ActorContext::new(
             actor_id.clone(),
             node_id.clone(),
             DummyActor,
+            msg_tx,
+            ctrl_tx,
         ));
         directory.record_new_target(context.clone());
 
@@ -632,6 +673,8 @@ mod tests {
 
     #[test]
     fn test_activation_directory_storage_key_isolation() {
+        use tokio::sync::mpsc;
+
         let directory = ActivationDirectory::<DummyActor>::new();
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
 
@@ -639,15 +682,24 @@ mod tests {
         let prod_actor = ActorId::from_string("prod::Counter/alice").unwrap();
         let staging_actor = ActorId::from_string("staging::Counter/alice").unwrap();
 
+        let (msg_tx1, _) = mpsc::channel(128);
+        let (ctrl_tx1, _) = mpsc::channel(8);
+        let (msg_tx2, _) = mpsc::channel(128);
+        let (ctrl_tx2, _) = mpsc::channel(8);
+
         let prod_context = Rc::new(ActorContext::new(
             prod_actor.clone(),
             node_id.clone(),
             DummyActor,
+            msg_tx1,
+            ctrl_tx1,
         ));
         let staging_context = Rc::new(ActorContext::new(
             staging_actor.clone(),
             node_id.clone(),
             DummyActor,
+            msg_tx2,
+            ctrl_tx2,
         ));
 
         directory.record_new_target(prod_context);
@@ -662,15 +714,24 @@ mod tests {
         let counter_actor = ActorId::from_string("prod::Counter/bob").unwrap();
         let account_actor = ActorId::from_string("prod::BankAccount/bob").unwrap();
 
+        let (msg_tx3, _) = mpsc::channel(128);
+        let (ctrl_tx3, _) = mpsc::channel(8);
+        let (msg_tx4, _) = mpsc::channel(128);
+        let (ctrl_tx4, _) = mpsc::channel(8);
+
         let counter_context = Rc::new(ActorContext::new(
             counter_actor.clone(),
             node_id.clone(),
             DummyActor,
+            msg_tx3,
+            ctrl_tx3,
         ));
         let account_context = Rc::new(ActorContext::new(
             account_actor.clone(),
             node_id,
             DummyActor,
+            msg_tx4,
+            ctrl_tx4,
         ));
 
         directory.record_new_target(counter_context);
@@ -684,10 +745,20 @@ mod tests {
 
     #[test]
     fn test_actor_catalog_get_or_create() {
-        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
-        let catalog = ActorCatalog::<DummyActor>::new(node_id);
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
 
-        let actor_id = ActorId::from_string("test::Counter/charlie").unwrap();
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let task_provider = TokioTaskProvider;
+            let catalog = ActorCatalog::<DummyActor, _>::new(node_id.clone(), task_provider);
+
+            // Set MessageBus (required for spawning message loop task)
+            let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id));
+            catalog.set_message_bus(message_bus);
+
+            let actor_id = ActorId::from_string("test::Counter/charlie").unwrap();
 
         // Initially not exists
         assert!(!catalog.exists(&actor_id));
@@ -718,16 +789,27 @@ mod tests {
         assert_eq!(catalog.count(), 0);
         assert!(!catalog.exists(&actor_id));
 
-        // Remove again (should fail)
-        assert!(catalog.remove(&actor_id).is_err());
+            // Remove again (should fail)
+            assert!(catalog.remove(&actor_id).is_err());
+        });
     }
 
     #[test]
     fn test_actor_catalog_double_check_prevents_duplicates() {
-        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
-        let catalog = ActorCatalog::<DummyActor>::new(node_id);
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
 
-        let actor_id = ActorId::from_string("test::Counter/dave").unwrap();
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let task_provider = TokioTaskProvider;
+            let catalog = ActorCatalog::<DummyActor, _>::new(node_id.clone(), task_provider);
+
+            // Set MessageBus (required for spawning message loop task)
+            let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id));
+            catalog.set_message_bus(message_bus);
+
+            let actor_id = ActorId::from_string("test::Counter/dave").unwrap();
 
         // Simulate concurrent calls (single-threaded simulation)
         let context1 = catalog
@@ -744,14 +826,25 @@ mod tests {
         assert!(Rc::ptr_eq(&context1, &context2));
         assert!(Rc::ptr_eq(&context1, &context3));
 
-        // Only one activation created
-        assert_eq!(catalog.count(), 1);
+            // Only one activation created
+            assert_eq!(catalog.count(), 1);
+        });
     }
 
     #[test]
     fn test_actor_catalog_multiple_actors() {
-        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
-        let catalog = ActorCatalog::<DummyActor>::new(node_id);
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let task_provider = TokioTaskProvider;
+            let catalog = ActorCatalog::<DummyActor, _>::new(node_id.clone(), task_provider);
+
+            // Set MessageBus (required for spawning message loop task)
+            let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id));
+            catalog.set_message_bus(message_bus);
 
         // Create multiple actors
         let alice = ActorId::from_string("test::Counter/alice").unwrap();
@@ -777,10 +870,11 @@ mod tests {
         assert_eq!(catalog.count(), 3);
 
         // Remove one
-        catalog.remove(&bob).unwrap();
-        assert_eq!(catalog.count(), 2);
-        assert!(!catalog.exists(&bob));
-        assert!(catalog.exists(&alice));
-        assert!(catalog.exists(&charlie));
+            catalog.remove(&bob).unwrap();
+            assert_eq!(catalog.count(), 2);
+            assert!(!catalog.exists(&bob));
+            assert!(catalog.exists(&alice));
+            assert!(catalog.exists(&charlie));
+        });
     }
 }
