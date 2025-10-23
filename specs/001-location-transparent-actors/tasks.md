@@ -242,24 +242,40 @@
 - [ ] T103 [US3] Add buggify injection for activation delays (increase race probability per research.md) - DEFERRED
 - [X] T104 [P] [US3] Unit tests for concurrent activation in tests/unit/directory/race_test.rs
 
-### Cache Invalidation
+### Directory-Catalog Integration
 
-- [ ] T105 [P] [US3] Implement cache invalidation in SimpleDirectory (invalidate_cache, update_cache methods) - DEFERRED: Requires network integration
-- [ ] T106 [US3] Implement stale cache detection in MessageBus (actor not found → forward) - DEFERRED: Requires network integration
-- [ ] T107 [US3] Implement message forwarding with forward_count tracking (MAX_FORWARD_COUNT = 2) - DEFERRED: Requires network integration
-- [ ] T108 [US3] Add cache_invalidation header to response messages - DEFERRED: Requires network integration
-- [ ] T109 [P] [US3] Unit tests for cache invalidation in tests/unit/directory/cache_test.rs - DEFERRED: Requires network integration
+- [ ] T105 [US3] Integrate SimpleDirectory with ActorCatalog activation flow
+  - Call directory.register(actor_id, node_id) in ActorCatalog::get_or_create_activation() after actor instantiation
+  - Add directory.lookup(actor_id) check in MessageBus::route_message() before routing to local catalog
+  - Implement cross-node message forwarding when actor is on different node (directory lookup returns remote NodeId)
+  - Handle PlacementDecision::Race by deactivating losing activation and forwarding to winner
+  - Location: moonpool/src/actor/catalog.rs (get_or_create_activation method, line ~493)
+  - Location: moonpool/src/messaging/bus.rs (route_message method)
+  - Reference: docs/analysis/orleans/activation-lifecycle.md (lines 210-214 - registration during activation)
+
+- [ ] T106 [US3] Implement Orleans-style remote activation request messages
+  - Define ActivationRequest message type in src/messaging/activation.rs for cross-node activation
+  - Define ActivationResponse message type with success/failure status and placed NodeId
+  - Implement remote activation handler on receiving node: lookup in directory → activate if not exists → return placement decision
+  - Add activation request routing in MessageBus: if directory.lookup() returns None, send ActivationRequest to chosen node (via directory.choose_placement_node())
+  - Handle ActivationResponse: update local directory cache with placement result, forward original message to correct node
+  - Handle activation failures: retry on different node if PlacementDecision::Race detected, return error after MAX_RETRIES
+  - Location: moonpool/src/messaging/activation.rs (new file)
+  - Location: moonpool/src/messaging/bus.rs (add activation request handling)
+  - Reference: docs/analysis/orleans/grain-directory.md (lines 541-556 - registration during activation)
+  - Reference: docs/analysis/orleans/message-system.md (lines 1173-1199 - AddressMessage and placement integration)
+  - Reference: docs/analysis/orleans/activation-lifecycle.md (lines 36-82 - GetOrCreateActivation pattern)
 
 ### Validation
 
-- [ ] T110 [US3] Run placement distribution tests from T094 - DEFERRED
-- [ ] T111 [US3] Run concurrent activation race tests from T095 with buggify - DEFERRED
-- [ ] T112 [US3] Validate balanced distribution (within 20% variance, success criterion SC-005) - DEFERRED
-- [ ] T113 [US3] Run 10x10 topology test (100+ actors) - DEFERRED
-- [ ] T114 [US3] Validate no duplicate activations under chaos (always_assert! check) - DEFERRED
-- [X] T115 [US3] Run cargo fmt and cargo clippy - MUST PASS
+- [ ] T107 [US3] Run placement distribution tests from T094 - DEFERRED
+- [ ] T108 [US3] Run concurrent activation race tests from T095 with buggify - DEFERRED
+- [ ] T109 [US3] Validate balanced distribution (within 20% variance, success criterion SC-005) - DEFERRED
+- [ ] T110 [US3] Run 10x10 topology test (100+ actors) - DEFERRED
+- [ ] T111 [US3] Validate no duplicate activations under chaos (always_assert! check) - DEFERRED
+- [X] T112 [US3] Run cargo fmt and cargo clippy - MUST PASS
 
-**Checkpoint**: User Story 3 core implementation complete - directory tracks locations, placement algorithm works, race detection implemented, cache invalidation deferred pending network integration
+**Checkpoint**: User Story 3 core implementation complete - directory tracks locations, placement algorithm works, race detection implemented, directory-catalog integration tasks defined for cross-node activation
 
 ---
 
@@ -271,41 +287,41 @@
 
 ### Simulation Tests for User Story 4 (Write Tests FIRST)
 
-- [ ] T116 [P] [US4] Create timeout test workload in tests/simulation/bank_account/workload.rs (slow actor responses) - DEFERRED
-- [ ] T117 [US4] Create correlation test in tests/simulation/bank_account/tests.rs (1000+ concurrent requests) - DEFERRED
-- [ ] T118 [US4] Write test shell for timeout enforcement in tests/simulation/bank_account/tests.rs (WILL FAIL until implementation) - DEFERRED
+- [ ] T113 [P] [US4] Create timeout test workload in tests/simulation/bank_account/workload.rs (slow actor responses) - DEFERRED
+- [ ] T114 [US4] Create correlation test in tests/simulation/bank_account/tests.rs (1000+ concurrent requests) - DEFERRED
+- [ ] T115 [US4] Write test shell for timeout enforcement in tests/simulation/bank_account/tests.rs (WILL FAIL until implementation) - DEFERRED
 
-**NOTE**: Tests T116-T118 DEFERRED - Focus on feature implementation
+**NOTE**: Tests T113-T115 DEFERRED - Focus on feature implementation
 
 ### Correlation Infrastructure
 
-- [X] T119 [P] [US4] Add next_correlation_id counter to MessageBus (Cell<u64> for single-threaded)
-- [X] T120 [P] [US4] Add pending_requests map to MessageBus (RefCell<HashMap<CorrelationId, CallbackData>>)
-- [X] T121 [US4] Implement correlation ID generation in MessageBus (CorrelationId::next)
-- [X] T122 [US4] Implement CallbackData registration before send
-- [X] T123 [US4] Implement response matching in receive_loop (correlation_id lookup)
+- [X] T116 [P] [US4] Add next_correlation_id counter to MessageBus (Cell<u64> for single-threaded)
+- [X] T117 [P] [US4] Add pending_requests map to MessageBus (RefCell<HashMap<CorrelationId, CallbackData>>)
+- [X] T118 [US4] Implement correlation ID generation in MessageBus (CorrelationId::next)
+- [X] T119 [US4] Implement CallbackData registration before send
+- [X] T120 [US4] Implement response matching in receive_loop (correlation_id lookup)
 
 ### Timeout Enforcement
 
-- [X] T124 [P] [US4] Add timeout task spawning to CallbackData creation (via TaskProvider)
-- [X] T125 [US4] Implement timeout handler (complete CallbackData with ActorError::Timeout)
-- [X] T126 [US4] Add completed flag to CallbackData (Cell<bool>, prevent double completion)
-- [X] T127 [US4] Implement timeout cleanup (remove from pending_requests)
-- [ ] T128 [P] [US4] Unit tests for timeout enforcement in tests/unit/messaging/timeout_test.rs - DEFERRED
+- [X] T121 [P] [US4] Add timeout task spawning to CallbackData creation (via TaskProvider)
+- [X] T122 [US4] Implement timeout handler (complete CallbackData with ActorError::Timeout)
+- [X] T123 [US4] Add completed flag to CallbackData (Cell<bool>, prevent double completion)
+- [X] T124 [US4] Implement timeout cleanup (remove from pending_requests)
+- [ ] T125 [P] [US4] Unit tests for timeout enforcement in tests/unit/messaging/timeout_test.rs - DEFERRED
 
 ### Late Response Handling
 
-- [X] T129 [P] [US4] Implement late response detection (correlation_id not found in pending_requests)
-- [X] T130 [US4] Add metrics for late responses (log warning, increment counter)
-- [ ] T131 [P] [US4] Unit tests for late response handling in tests/unit/messaging/late_response_test.rs - DEFERRED
+- [X] T126 [P] [US4] Implement late response detection (correlation_id not found in pending_requests)
+- [X] T127 [US4] Add metrics for late responses (log warning, increment counter)
+- [ ] T128 [P] [US4] Unit tests for late response handling in tests/unit/messaging/late_response_test.rs - DEFERRED
 
 ### Validation
 
-- [ ] T132 [US4] Run timeout test from T118 - DEFERRED
-- [ ] T133 [US4] Run correlation test from T117 (1000+ concurrent requests) - DEFERRED
-- [ ] T134 [US4] Validate 100% response match rate (success criterion SC-006) - DEFERRED
-- [ ] T135 [US4] Validate timeout accuracy within 10% (success criterion SC-007) - DEFERRED
-- [X] T136 [US4] Run cargo fmt and cargo clippy - MUST PASS
+- [ ] T129 [US4] Run timeout test from T115 - DEFERRED
+- [ ] T130 [US4] Run correlation test from T114 (1000+ concurrent requests) - DEFERRED
+- [ ] T131 [US4] Validate 100% response match rate (success criterion SC-006) - DEFERRED
+- [ ] T132 [US4] Validate timeout accuracy within 10% (success criterion SC-007) - DEFERRED
+- [X] T133 [US4] Run cargo fmt and cargo clippy - MUST PASS
 
 **Checkpoint**: User Story 4 core implementation complete - request-response correlation working, timeouts enforced, validation tests deferred
 
@@ -319,64 +335,64 @@
 
 ### Simulation Tests for User Story 5 (Write Tests FIRST)
 
-- [ ] T137 [P] [US5] Create persistent BankAccountActor in tests/simulation/bank_account/actor.rs (with BankAccountState type) - DEFERRED
-- [ ] T138 [US5] Update BankAccountActor to use ActorState<BankAccountState> wrapper - DEFERRED
-- [ ] T139 [US5] Create persistence workload in tests/simulation/bank_account/workload.rs (deposit, deactivate, reactivate, verify balance) - DEFERRED
-- [ ] T140 [US5] Write test shell for storage failures in tests/simulation/bank_account/tests.rs (WILL FAIL until implementation) - DEFERRED
+- [ ] T134 [P] [US5] Create persistent BankAccountActor in tests/simulation/bank_account/actor.rs (with BankAccountState type) - DEFERRED
+- [ ] T135 [US5] Update BankAccountActor to use ActorState<BankAccountState> wrapper - DEFERRED
+- [ ] T136 [US5] Create persistence workload in tests/simulation/bank_account/workload.rs (deposit, deactivate, reactivate, verify balance) - DEFERRED
+- [ ] T137 [US5] Write test shell for storage failures in tests/simulation/bank_account/tests.rs (WILL FAIL until implementation) - DEFERRED
 
 **NOTE**: User Story 5 DEFERRED - Focus on foundational features first
 
 ### Storage Provider Infrastructure
 
-- [X] T141 [P] [US5] Define StorageProvider trait in src/storage/traits.rs (load_state, save_state methods)
-- [X] T142 [P] [US5] Define StateSerializer trait in src/storage/serializer.rs (serialize<T>, deserialize<T> methods)
-- [X] T143 [P] [US5] Implement JsonSerializer in src/storage/serializer.rs (default serde_json implementation)
-- [X] T144 [P] [US5] Define StorageError types in src/storage/error.rs
-- [X] T145 [US5] Implement InMemoryStorage in src/storage/memory.rs (RefCell<HashMap<String, Vec<u8>>>)
-- [ ] T146 [US5] Add buggify injection to InMemoryStorage (simulate failures per research.md) - DEFERRED
-- [X] T147 [P] [US5] Unit tests for InMemoryStorage in tests/unit/storage/memory_test.rs (integrated with implementation)
+- [X] T138 [P] [US5] Define StorageProvider trait in src/storage/traits.rs (load_state, save_state methods)
+- [X] T139 [P] [US5] Define StateSerializer trait in src/storage/serializer.rs (serialize<T>, deserialize<T> methods)
+- [X] T140 [P] [US5] Implement JsonSerializer in src/storage/serializer.rs (default serde_json implementation)
+- [X] T141 [P] [US5] Define StorageError types in src/storage/error.rs
+- [X] T142 [US5] Implement InMemoryStorage in src/storage/memory.rs (RefCell<HashMap<String, Vec<u8>>>)
+- [ ] T143 [US5] Add buggify injection to InMemoryStorage (simulate failures per research.md) - DEFERRED
+- [X] T144 [P] [US5] Unit tests for InMemoryStorage in tests/unit/storage/memory_test.rs (integrated with implementation)
 
 ### ActorState Wrapper
 
-- [X] T148 [P] [US5] Implement ActorState<T> struct in src/actor/state.rs (data, storage_handle fields)
-- [X] T149 [US5] Implement ActorState::get() for immutable state access (plus get_mut, set)
-- [X] T150 [US5] Implement ActorState::persist() for atomic state update (serialize + save + dirty tracking)
-- [X] T151 [US5] Implement StateStorage trait for internal storage abstraction (uses JsonSerializer directly)
-- [X] T152 [US5] Implement ProductionStateStorage (wraps StorageProvider + StateSerializer) (integrated into ActorState)
-- [X] T153 [P] [US5] Unit tests for ActorState persistence in tests/unit/actor/state_test.rs (7 tests, all passing)
+- [X] T145 [P] [US5] Implement ActorState<T> struct in src/actor/state.rs (data, storage_handle fields)
+- [X] T146 [US5] Implement ActorState::get() for immutable state access (plus get_mut, set)
+- [X] T147 [US5] Implement ActorState::persist() for atomic state update (serialize + save + dirty tracking)
+- [X] T148 [US5] Implement StateStorage trait for internal storage abstraction (uses JsonSerializer directly)
+- [X] T149 [US5] Implement ProductionStateStorage (wraps StorageProvider + StateSerializer) (integrated into ActorState)
+- [X] T150 [P] [US5] Unit tests for ActorState persistence in tests/unit/actor/state_test.rs (7 tests, all passing)
 
 ### Actor Trait Updates
 
-- [X] T154 [P] [US5] Add State associated type to Actor trait (default = () for stateless)
-- [X] T155 [US5] Update Actor::on_activate() signature to receive Option<Self::State>
-- [X] T156 [US5] Update Actor::on_deactivate() signature to include DeactivationReason
-- [ ] T157 [US5] Update ActorCatalog to load state before activation (call StorageProvider::load_state) - DEFERRED
-- [ ] T158 [US5] Update ActorCatalog to deserialize state using StateSerializer - DEFERRED
+- [X] T151 [P] [US5] Add State associated type to Actor trait (default = () for stateless)
+- [X] T152 [US5] Update Actor::on_activate() signature to receive Option<Self::State>
+- [X] T153 [US5] Update Actor::on_deactivate() signature to include DeactivationReason
+- [ ] T154 [US5] Update ActorCatalog to load state before activation (call StorageProvider::load_state) - DEFERRED
+- [ ] T155 [US5] Update ActorCatalog to deserialize state using StateSerializer - DEFERRED
 
 ### Lifecycle Integration
 
-- [ ] T159 [US5] Implement activation hook execution in ActorCatalog (call on_activate with loaded state) - DEFERRED
-- [ ] T160 [US5] Implement deactivation hook execution in ActorCatalog (call on_deactivate with reason) - DEFERRED
-- [ ] T161 [US5] Add activation failure handling (5-second delay before removal per contracts/actor.rs) - DEFERRED
-- [ ] T162 [US5] Add idle timeout detection (10 minutes default, trigger deactivation) - DEFERRED
-- [ ] T163 [US5] Update last_message_time on every message processing - DEFERRED
-- [ ] T164 [P] [US5] Integration tests for lifecycle hooks in tests/integration/lifecycle.rs - DEFERRED
+- [ ] T156 [US5] Implement activation hook execution in ActorCatalog (call on_activate with loaded state) - DEFERRED
+- [ ] T157 [US5] Implement deactivation hook execution in ActorCatalog (call on_deactivate with reason) - DEFERRED
+- [ ] T158 [US5] Add activation failure handling (5-second delay before removal per contracts/actor.rs) - DEFERRED
+- [ ] T159 [US5] Add idle timeout detection (10 minutes default, trigger deactivation) - DEFERRED
+- [ ] T160 [US5] Update last_message_time on every message processing - DEFERRED
+- [ ] T161 [P] [US5] Integration tests for lifecycle hooks in tests/integration/lifecycle.rs - DEFERRED
 
 ### Storage Integration with Runtime
 
-- [ ] T165 [P] [US5] Add storage field to ActorRuntimeBuilder (Option<Arc<dyn StorageProvider>>) - DEFERRED
-- [ ] T166 [US5] Update ActorRuntime::build() to pass storage to ActorCatalog - DEFERRED
-- [ ] T167 [US5] Update ActorCatalog to inject storage into ActorState during activation - DEFERRED
-- [ ] T168 [P] [US5] Integration tests for storage in tests/integration/persistence.rs - DEFERRED
+- [ ] T162 [P] [US5] Add storage field to ActorRuntimeBuilder (Option<Arc<dyn StorageProvider>>) - DEFERRED
+- [ ] T163 [US5] Update ActorRuntime::build() to pass storage to ActorCatalog - DEFERRED
+- [ ] T164 [US5] Update ActorCatalog to inject storage into ActorState during activation - DEFERRED
+- [ ] T165 [P] [US5] Integration tests for storage in tests/integration/persistence.rs - DEFERRED
 
 ### Validation
 
-- [ ] T169 [US5] Run persistence workload from T139 - DEFERRED
-- [ ] T170 [US5] Run storage failure test from T140 with buggify - DEFERRED
-- [ ] T171 [US5] Validate state persistence correctness (success criterion SC-011) - DEFERRED
-- [ ] T172 [US5] Validate storage failure handling (success criterion SC-012) - DEFERRED
-- [ ] T173 [US5] Validate 100% hook execution rate (success criterion SC-009) - DEFERRED
-- [X] T174 [US5] Run cargo fmt and cargo clippy - MUST PASS
+- [ ] T166 [US5] Run persistence workload from T136 - DEFERRED
+- [ ] T167 [US5] Run storage failure test from T137 with buggify - DEFERRED
+- [ ] T168 [US5] Validate state persistence correctness (success criterion SC-011) - DEFERRED
+- [ ] T169 [US5] Validate storage failure handling (success criterion SC-012) - DEFERRED
+- [ ] T170 [US5] Validate 100% hook execution rate (success criterion SC-009) - DEFERRED
+- [X] T171 [US5] Run cargo fmt and cargo clippy - MUST PASS
 
 **Checkpoint**: User Story 5 storage infrastructure COMPLETE - StorageProvider trait, StateSerializer with JsonSerializer, InMemoryStorage, ActorState<T> wrapper with dirty tracking and persistence, Actor trait already has lifecycle hooks. Integration with ActorCatalog and Runtime deferred. All 13 storage tests passing.
 
@@ -388,45 +404,45 @@
 
 ### Comprehensive Simulation Testing
 
-- [ ] T175 [P] Run all simulation tests with default buggify (0.5/0.25) - DEFERRED
-- [ ] T176 [P] Run all simulation tests with aggressive buggify (0.9/0.9) - DEFERRED
-- [ ] T177 [P] Run multi-topology tests (1x1, 2x2, 10x10) - DEFERRED
-- [ ] T178 Validate 100% sometimes_assert! coverage (no unreached assertions) - DEFERRED
-- [ ] T179 Run deterministic seed tests (same seed → identical behavior) - DEFERRED
+- [ ] T172 [P] Run all simulation tests with default buggify (0.5/0.25) - DEFERRED
+- [ ] T173 [P] Run all simulation tests with aggressive buggify (0.9/0.9) - DEFERRED
+- [ ] T174 [P] Run multi-topology tests (1x1, 2x2, 10x10) - DEFERRED
+- [ ] T175 Validate 100% sometimes_assert! coverage (no unreached assertions) - DEFERRED
+- [ ] T176 Run deterministic seed tests (same seed → identical behavior) - DEFERRED
 
 ### Banking Invariant Validation
 
-- [ ] T180 [P] Validate banking invariant across all workloads (sum of balances constant) - DEFERRED
-- [ ] T181 Validate no message loss (100% delivery in static cluster) - DEFERRED
-- [ ] T182 Validate no deadlocks (no permanent hangs) - DEFERRED
+- [ ] T177 [P] Validate banking invariant across all workloads (sum of balances constant) - DEFERRED
+- [ ] T178 Validate no message loss (100% delivery in static cluster) - DEFERRED
+- [ ] T179 Validate no deadlocks (no permanent hangs) - DEFERRED
 
 ### Performance Validation
 
-- [ ] T183 [P] Measure reference retrieval latency (target <100ms P95, success criterion SC-001) - DEFERRED
-- [ ] T184 [P] Measure actor activation latency (target <500ms P95 including storage) - DEFERRED
-- [ ] T185 [P] Measure storage operation latency (target <50ms P95) - DEFERRED
-- [ ] T186 Measure message throughput (target 1000+ msg/sec per node) - DEFERRED
+- [ ] T180 [P] Measure reference retrieval latency (target <100ms P95, success criterion SC-001) - DEFERRED
+- [ ] T181 [P] Measure actor activation latency (target <500ms P95 including storage) - DEFERRED
+- [ ] T182 [P] Measure storage operation latency (target <50ms P95) - DEFERRED
+- [ ] T183 Measure message throughput (target 1000+ msg/sec per node) - DEFERRED
 
 ### Documentation
 
-- [ ] T187 [P] Update quickstart.md with persistence examples - DEFERRED
-- [ ] T188 [P] Add inline documentation to all public APIs (per constitution) - DEFERRED
-- [ ] T189 [P] Create examples/ directory with BankAccount full example - DEFERRED
-- [ ] T190 Validate quickstart.md examples compile and run - DEFERRED
+- [ ] T184 [P] Update quickstart.md with persistence examples - DEFERRED
+- [ ] T185 [P] Add inline documentation to all public APIs (per constitution) - DEFERRED
+- [ ] T186 [P] Create examples/ directory with BankAccount full example - DEFERRED
+- [ ] T187 Validate quickstart.md examples compile and run - DEFERRED
 
 ### Code Quality
 
-- [ ] T191 [P] Final cargo fmt pass - DEFERRED
-- [ ] T192 [P] Final cargo clippy pass (zero warnings) - DEFERRED
-- [ ] T193 [P] Search codebase for unwrap() calls (replace with ? operator) - DEFERRED
-- [ ] T194 Verify all provider traits used (no direct tokio::time::sleep, etc.) - DEFERRED
-- [ ] T195 Verify all public APIs documented - DEFERRED
+- [ ] T188 [P] Final cargo fmt pass - DEFERRED
+- [ ] T189 [P] Final cargo clippy pass (zero warnings) - DEFERRED
+- [ ] T190 [P] Search codebase for unwrap() calls (replace with ? operator) - DEFERRED
+- [ ] T191 Verify all provider traits used (no direct tokio::time::sleep, etc.) - DEFERRED
+- [ ] T192 Verify all public APIs documented - DEFERRED
 
 ### Integration Testing
 
-- [ ] T196 [P] Single-node integration tests in tests/integration/single_node.rs - DEFERRED
-- [ ] T197 [P] Multi-node integration tests in tests/integration/multi_node.rs - DEFERRED
-- [ ] T198 [P] Persistence integration tests in tests/integration/persistence.rs - DEFERRED
+- [ ] T193 [P] Single-node integration tests in tests/integration/single_node.rs - DEFERRED
+- [ ] T194 [P] Multi-node integration tests in tests/integration/multi_node.rs - DEFERRED
+- [ ] T195 [P] Persistence integration tests in tests/integration/persistence.rs - DEFERRED
 
 **Checkpoint**: Phase 8 DEFERRED - Polish and comprehensive testing postponed to focus on core feature implementation
 
@@ -579,13 +595,13 @@ Per plan.md:
 
 ---
 
-**Total Tasks**: 198
+**Total Tasks**: 195
 **Task Count by User Story**:
 - Setup (Phase 1): 5 tasks
 - Foundational (Phase 2): 20 tasks
 - US1 (Phase 3): 50 tasks
 - US2 (Phase 4): 17 tasks
-- US3 (Phase 5): 23 tasks
+- US3 (Phase 5): 20 tasks (added 2 directory integration tasks, removed 5 cache invalidation tasks, net -3)
 - US4 (Phase 6): 18 tasks
 - US5 (Phase 7): 34 tasks
 - Polish (Phase 8): 21 tasks
