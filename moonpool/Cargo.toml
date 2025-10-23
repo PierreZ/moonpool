@@ -36,9 +36,16 @@ moonpool-foundation = { path = "../moonpool-foundation" }
 
 [dev-dependencies]
 # Testing
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio-test = "0.4"
+
+# Examples
+clap = { version = "4.5", features = ["derive"] }
 
 [[test]]
 name = "unit"
 path = "tests/unit/mod.rs"
+
+[[example]]
+name = "hello_actor"
+path = "examples/hello_actor_example/main.rs"

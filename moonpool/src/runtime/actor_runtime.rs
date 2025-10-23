@@ -1,6 +1,7 @@
 //! Actor runtime - main entry point for actor system.
 
 use crate::actor::{Actor, ActorFactory, ActorId, ActorRef, NodeId};
+use crate::directory::SimpleDirectory;
 use crate::error::ActorError;
 use crate::messaging::{ActorRouter, MessageBus};
 use crate::runtime::ActorRuntimeBuilder;
@@ -86,7 +87,7 @@ impl<T: TaskProvider + 'static> ActorRuntime<T> {
         node_id: NodeId,
         message_bus: Rc<MessageBus>,
         task_provider: T,
-    ) -> Result<Self, ActorError> {
+    ) -> std::result::Result<Self, ActorError> {
         Ok(Self {
             namespace,
             node_id,

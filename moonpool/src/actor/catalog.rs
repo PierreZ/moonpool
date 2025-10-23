@@ -423,14 +423,28 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
     ) -> Result<Rc<ActorContext<A>>, ActorError> {
         // FAST PATH: Check without lock (99% case - activation exists)
         if let Some(activation) = self.activation_directory.find_target(&actor_id) {
+            tracing::debug!(
+                actor_id = %actor_id,
+                "Actor already activated (fast path)"
+            );
             return Ok(activation);
         }
 
         // SLOW PATH: Acquire lock for creation (1% case - first access per actor)
+        tracing::info!(
+            actor_id = %actor_id,
+            node_id = %self.node_id,
+            "🎭 Auto-activating actor (Orleans pattern)"
+        );
+
         let _guard = self.activation_lock.borrow_mut();
 
         // DOUBLE-CHECK under lock (protect against TOCTOU race)
         if let Some(activation) = self.activation_directory.find_target(&actor_id) {
+            tracing::debug!(
+                actor_id = %actor_id,
+                "Actor created by concurrent request (double-check)"
+            );
             return Ok(activation); // Another task created while we waited
         }
 
@@ -474,7 +488,27 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
         // REGISTER IN DIRECTORY
         self.activation_directory.record_new_target(context.clone());
 
-        // Return for activation outside lock
+        // SEND ACTIVATION COMMAND (auto-activate Orleans pattern)
+        // Create oneshot channel for activation result
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let activate_cmd = crate::actor::LifecycleCommand::Activate {
+            state: None,
+            result_tx,
+        };
+
+        // Send activation command to message loop
+        context
+            .control_sender
+            .send(activate_cmd)
+            .await
+            .map_err(|_| ActorError::ProcessingFailed("Failed to send activation command".to_string()))?;
+
+        // Wait for activation to complete
+        result_rx
+            .await
+            .map_err(|_| ActorError::ProcessingFailed("Activation response channel closed".to_string()))??;
+
+        // Return activated context
         Ok(context)
     }
 
@@ -654,6 +688,14 @@ mod tests {
         }
     }
 
+    fn create_test_directory() -> std::rc::Rc<dyn crate::directory::Directory> {
+        use crate::directory::SimpleDirectory;
+        let nodes = vec![
+            NodeId::from("127.0.0.1:8001").unwrap(),
+            NodeId::from("127.0.0.1:8002").unwrap(),
+        ];
+        std::rc::Rc::new(SimpleDirectory::new(nodes))
+    }
 
     #[test]
     fn test_activation_directory_basic_operations() {
@@ -777,7 +819,8 @@ mod tests {
             let catalog = ActorCatalog::new(node_id.clone(), task_provider, factory);
 
             // Set MessageBus (required for spawning message loop task)
-            let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id));
+            let directory = create_test_directory();
+            let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id, directory));
             catalog.set_message_bus(message_bus);
 
             let actor_id = ActorId::from_string("test::Counter/charlie").unwrap();
@@ -831,7 +874,8 @@ mod tests {
             let catalog = ActorCatalog::new(node_id.clone(), task_provider, factory);
 
             // Set MessageBus (required for spawning message loop task)
-            let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id));
+            let directory = create_test_directory();
+            let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id, directory));
             catalog.set_message_bus(message_bus);
 
             let actor_id = ActorId::from_string("test::Counter/dave").unwrap();
@@ -872,7 +916,8 @@ mod tests {
             let catalog = ActorCatalog::new(node_id.clone(), task_provider, factory);
 
             // Set MessageBus (required for spawning message loop task)
-            let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id));
+            let directory = create_test_directory();
+            let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id, directory));
             catalog.set_message_bus(message_bus);
 
             // Create multiple actors
