@@ -274,7 +274,8 @@ fn storage_key(actor_id: &ActorId) -> String {
 const ACTOR_MESSAGE_QUEUE_SIZE: usize = 128;
 const ACTOR_CONTROL_QUEUE_SIZE: usize = 8;
 
-pub struct ActorCatalog<A: Actor, T: moonpool_foundation::TaskProvider, F: ActorFactory<Actor = A>> {
+pub struct ActorCatalog<A: Actor, T: moonpool_foundation::TaskProvider, F: ActorFactory<Actor = A>>
+{
     /// Local activation directory (ActorId → ActorContext).
     activation_directory: ActivationDirectory<A>,
 
@@ -928,7 +929,8 @@ mod tests {
             let task_provider = TokioTaskProvider;
             let factory = DummyFactory;
             let directory = create_test_directory();
-            let catalog = ActorCatalog::new(node_id.clone(), task_provider, factory, directory.clone());
+            let catalog =
+                ActorCatalog::new(node_id.clone(), task_provider, factory, directory.clone());
 
             // Set MessageBus (required for spawning message loop task)
             let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id, directory));
@@ -983,7 +985,8 @@ mod tests {
             let task_provider = TokioTaskProvider;
             let factory = DummyFactory;
             let directory = create_test_directory();
-            let catalog = ActorCatalog::new(node_id.clone(), task_provider, factory, directory.clone());
+            let catalog =
+                ActorCatalog::new(node_id.clone(), task_provider, factory, directory.clone());
 
             // Set MessageBus (required for spawning message loop task)
             let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id, directory));
@@ -1022,7 +1025,8 @@ mod tests {
             let task_provider = TokioTaskProvider;
             let factory = DummyFactory;
             let directory = create_test_directory();
-            let catalog = ActorCatalog::new(node_id.clone(), task_provider, factory, directory.clone());
+            let catalog =
+                ActorCatalog::new(node_id.clone(), task_provider, factory, directory.clone());
 
             // Set MessageBus (required for spawning message loop task)
             let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id, directory));

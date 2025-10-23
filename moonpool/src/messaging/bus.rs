@@ -377,6 +377,7 @@ impl MessageBus {
         if message.target_node == self.node_id {
             // Local delivery - route to actor directly
             tracing::debug!(
+                node_id = %self.node_id,
                 "send_request (local): corr_id={}, target={}, method={}",
                 correlation_id,
                 message.target_actor,
@@ -386,6 +387,7 @@ impl MessageBus {
         } else {
             // Remote delivery - send over network
             tracing::debug!(
+                node_id = %self.node_id,
                 "send_request (remote): corr_id={}, target={}, target_node={}, method={}",
                 correlation_id,
                 message.target_actor,
@@ -442,17 +444,18 @@ impl MessageBus {
     /// ```
     pub async fn send_response(&self, message: Message) -> Result<(), ActorError> {
         tracing::info!(
-            "send_response: corr_id={}, target={}, target_node={}, my_node={}",
+            node_id = %self.node_id,
+            "send_response: corr_id={}, target={}, target_node={}",
             message.correlation_id,
             message.target_actor,
-            message.target_node,
-            self.node_id
+            message.target_node
         );
 
         // Determine if response is for local or remote requester
         if message.target_node == self.node_id {
             // Local callback completion
             tracing::info!(
+                node_id = %self.node_id,
                 "send_response (LOCAL): corr_id={}, completing pending request",
                 message.correlation_id
             );
@@ -460,6 +463,7 @@ impl MessageBus {
         } else {
             // Remote response - send over network
             tracing::info!(
+                node_id = %self.node_id,
                 "send_response (REMOTE): corr_id={}, target_node={}, sending over network",
                 message.correlation_id,
                 message.target_node
@@ -474,11 +478,13 @@ impl MessageBus {
                 // Send over network using network transport
                 let destination = message.target_node.as_str();
                 tracing::info!(
+                    node_id = %self.node_id,
                     "send_response: Sending to destination={}",
                     destination
                 );
                 transport.send(destination, payload).await?;
                 tracing::info!(
+                    node_id = %self.node_id,
                     "send_response: Successfully sent response over network"
                 );
             } else {
@@ -515,6 +521,7 @@ impl MessageBus {
     /// ```
     pub async fn send_oneway(&self, message: Message) -> Result<(), ActorError> {
         tracing::debug!(
+            node_id = %self.node_id,
             "send_oneway: target={}, target_node={}, method={}",
             message.target_actor,
             message.target_node,
@@ -528,6 +535,7 @@ impl MessageBus {
         } else {
             // Remote delivery - send over network
             tracing::debug!(
+                node_id = %self.node_id,
                 "send_oneway (remote): target={}, target_node={}",
                 message.target_actor,
                 message.target_node
@@ -585,6 +593,7 @@ impl MessageBus {
                 })?;
 
                 tracing::debug!(
+                    node_id = %self.node_id,
                     "poll_network: received message corr_id={}, direction={:?}, target={}",
                     message.correlation_id,
                     message.direction,
@@ -649,16 +658,19 @@ impl MessageBus {
     /// - `Err(ActorError)`: Actor routing failed
     async fn route_to_actor(&self, mut message: Message) -> Result<(), ActorError> {
         tracing::debug!(
+            node_id = %self.node_id,
             "Routing message to actor: target={}, method={}",
             message.target_actor,
             message.method_name
         );
 
-        // DIRECTORY LOOKUP: Check if actor exists elsewhere (T105)
+        // ORLEANS ROUTING PATTERN (as shown in architecture diagram):
+        // Check directory only for actors that are ALREADY ACTIVATED elsewhere
         match self.directory.lookup(&message.target_actor).await {
             Ok(Some(node_id)) if node_id != self.node_id => {
                 // Actor exists on remote node - forward message there
                 tracing::debug!(
+                    node_id = %self.node_id,
                     "Actor {} found on remote node {}, forwarding",
                     message.target_actor,
                     node_id
@@ -684,74 +696,24 @@ impl MessageBus {
             Ok(Some(_)) => {
                 // Actor registered locally, proceed with local routing
                 tracing::debug!(
+                    node_id = %self.node_id,
                     "Actor {} registered locally, routing to catalog",
                     message.target_actor
                 );
             }
             Ok(None) => {
-                // Actor not registered anywhere
-                // Check if this message was forwarded to us (forward_count > 0)
-                // If so, activate locally (sender already made placement decision)
-                // Otherwise, ask directory where to place it
-                if message.forward_count > 0 {
-                    // Message was forwarded to us - activate locally
-                    tracing::info!(
-                        "Actor {} not found, but message was forwarded to us (forward_count={}), activating locally",
-                        message.target_actor,
-                        message.forward_count
-                    );
-                } else {
-                    // Original message - consult directory for placement
-                    match self.directory.choose_placement_node().await {
-                        Ok(chosen_node) if chosen_node != self.node_id => {
-                            // Directory chose a remote node - forward message there
-                            tracing::info!(
-                                "Directory chose remote node {} for actor {}, forwarding message",
-                                chosen_node,
-                                message.target_actor
-                            );
-
-                            // Update target_node and increment forward count
-                            message.target_node = chosen_node.clone();
-                            if let Err(e) = message.increment_forward_count(2) {
-                                return Err(ActorError::ProcessingFailed(format!(
-                                    "Failed to forward message: {}",
-                                    e
-                                )));
-                            }
-
-                            if let Some(ref mut transport) = *self.network_transport.borrow_mut() {
-                                let payload = serde_json::to_vec(&message).map_err(|e| {
-                                    ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
-                                })?;
-
-                                transport.send(chosen_node.as_str(), payload).await?;
-                                return Ok(());
-                            } else {
-                                return Err(ActorError::ProcessingFailed(
-                                    "Network not configured for remote activation".to_string(),
-                                ));
-                            }
-                        }
-                        Ok(_) => {
-                            // Directory chose this node - proceed with local activation
-                            tracing::info!(
-                                "Directory chose local node for actor {}, will auto-activate locally",
-                                message.target_actor
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Directory placement decision failed for {}: {:?}, activating locally as fallback",
-                                message.target_actor,
-                                e
-                            );
-                        }
-                    }
-                }
+                // Actor NOT in directory - ORLEANS PATTERN: Always activate locally!
+                // The catalog will optimistically activate and register with directory.
+                // If another node already registered (race), catalog handles it.
+                tracing::debug!(
+                    node_id = %self.node_id,
+                    "Actor {} not in directory, will activate locally (Orleans optimistic activation)",
+                    message.target_actor
+                );
             }
             Err(e) => {
                 tracing::warn!(
+                    node_id = %self.node_id,
                     "Directory lookup failed for {}: {:?}, proceeding with local routing",
                     message.target_actor,
                     e
@@ -791,29 +753,36 @@ impl MessageBus {
     async fn route_to_callback(&self, message: Message) -> Result<(), ActorError> {
         let correlation_id = message.correlation_id;
         tracing::info!(
+            node_id = %self.node_id,
             "route_to_callback: corr_id={}, pending_count={}",
             correlation_id,
             self.pending_count()
         );
 
-        // Complete the pending request with the response
-        match self.complete_pending_request(correlation_id, Ok(message)) {
-            Ok(()) => {
-                tracing::info!(
-                    "route_to_callback: Successfully completed pending request corr_id={}",
-                    correlation_id
-                );
-                Ok(())
-            }
-            Err(e) => {
-                tracing::error!(
-                    "route_to_callback: Failed to complete pending request corr_id={}: {:?}",
-                    correlation_id,
-                    e
-                );
-                Err(e)
-            }
-        }
+        // Extract the callback BEFORE completing it
+        // This is critical: we need to release the RefCell borrow before calling complete()
+        let callback = self
+            .pending_requests
+            .borrow_mut()
+            .remove(&correlation_id)
+            .ok_or(ActorError::UnknownCorrelationId)?;
+
+        tracing::info!(
+            node_id = %self.node_id,
+            "route_to_callback: Successfully extracted pending request corr_id={}",
+            correlation_id
+        );
+
+        // Complete the callback directly (spawning doesn't help with LocalSet waker issues)
+        callback.complete(Ok(message));
+
+        tracing::info!(
+            node_id = %self.node_id,
+            "route_to_callback: Successfully completed pending request corr_id={}",
+            correlation_id
+        );
+
+        Ok(())
     }
 }
 
