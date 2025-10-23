@@ -127,9 +127,9 @@ impl ActorRuntimeBuilder {
             ActorError::InvalidConfiguration("listen_addr is required".to_string())
         })?;
 
-        let directory = self.directory.ok_or_else(|| {
-            ActorError::InvalidConfiguration("directory is required".to_string())
-        })?;
+        let directory = self
+            .directory
+            .ok_or_else(|| ActorError::InvalidConfiguration("directory is required".to_string()))?;
 
         // Create NodeId from listen address
         let node_id = NodeId::from_socket_addr(listen_addr);

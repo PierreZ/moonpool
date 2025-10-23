@@ -47,7 +47,10 @@ impl Actor for HelloActor {
         Ok(())
     }
 
-    async fn on_deactivate(&mut self, reason: DeactivationReason) -> std::result::Result<(), ActorError> {
+    async fn on_deactivate(
+        &mut self,
+        reason: DeactivationReason,
+    ) -> std::result::Result<(), ActorError> {
         tracing::info!(
             actor_id = %self.actor_id,
             key = self.key(),
@@ -55,6 +58,11 @@ impl Actor for HelloActor {
             "HelloActor deactivating"
         );
         Ok(())
+    }
+
+    // Register message handlers for dynamic dispatch
+    fn register_handlers(registry: &mut HandlerRegistry<Self>) {
+        registry.register::<SayHelloRequest, String>();
     }
 }
 

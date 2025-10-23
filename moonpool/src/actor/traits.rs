@@ -155,6 +155,73 @@ pub trait Actor: Sized {
     /// }
     /// ```
     async fn on_deactivate(&mut self, reason: DeactivationReason) -> Result<(), ActorError>;
+
+    /// Register message handlers for this actor type.
+    ///
+    /// Override this method to register handlers for each `MessageHandler` implementation.
+    /// The framework calls this once during `ActorContext` initialization to build
+    /// the handler registry for dynamic message dispatch.
+    ///
+    /// # Default Implementation
+    ///
+    /// The default implementation does nothing (no handlers registered).
+    /// This is appropriate for system actors that don't handle user messages.
+    ///
+    /// # Handler Registration
+    ///
+    /// For each `MessageHandler<Req, Res>` trait implementation, call:
+    /// ```rust,ignore
+    /// registry.register::<RequestType, ResponseType>();
+    /// ```
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use moonpool::prelude::*;
+    ///
+    /// struct BankAccountActor {
+    ///     actor_id: ActorId,
+    ///     balance: u64,
+    /// }
+    ///
+    /// #[async_trait(?Send)]
+    /// impl Actor for BankAccountActor {
+    ///     type State = ();
+    ///     const ACTOR_TYPE: &'static str = "BankAccount";
+    ///
+    ///     fn actor_id(&self) -> &ActorId {
+    ///         &self.actor_id
+    ///     }
+    ///
+    ///     async fn on_activate(&mut self, _state: Option<()>) -> Result<(), ActorError> {
+    ///         Ok(())
+    ///     }
+    ///
+    ///     async fn on_deactivate(&mut self, _reason: DeactivationReason) -> Result<(), ActorError> {
+    ///         Ok(())
+    ///     }
+    ///
+    ///     // Register all handlers
+    ///     fn register_handlers(registry: &mut HandlerRegistry<Self>) {
+    ///         registry.register::<DepositRequest, u64>();
+    ///         registry.register::<WithdrawRequest, u64>();
+    ///         registry.register::<GetBalanceRequest, u64>();
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// # Future: Derive Macro
+    ///
+    /// In the future, this can be auto-generated via `#[derive(ActorDispatch)]`:
+    /// ```rust,ignore
+    /// #[derive(ActorDispatch)]  // Scans for MessageHandler impls
+    /// impl Actor for BankAccountActor {
+    ///     // No need to write register_handlers() manually!
+    /// }
+    /// ```
+    fn register_handlers(_registry: &mut crate::actor::HandlerRegistry<Self>) {
+        // Default: no handlers (for system actors)
+    }
 }
 
 /// Message handler trait for processing typed requests.
