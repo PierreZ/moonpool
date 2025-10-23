@@ -56,7 +56,7 @@
 //! context.activate().await?;
 //! ```
 
-use crate::actor::{Actor, ActorContext, ActorId, NodeId};
+use crate::actor::{Actor, ActorContext, ActorFactory, ActorId, NodeId};
 use crate::error::ActorError;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -274,7 +274,7 @@ fn storage_key(actor_id: &ActorId) -> String {
 const ACTOR_MESSAGE_QUEUE_SIZE: usize = 128;
 const ACTOR_CONTROL_QUEUE_SIZE: usize = 8;
 
-pub struct ActorCatalog<A: Actor, T: moonpool_foundation::TaskProvider> {
+pub struct ActorCatalog<A: Actor, T: moonpool_foundation::TaskProvider, F: ActorFactory<Actor = A>> {
     /// Local activation directory (ActorId → ActorContext).
     activation_directory: ActivationDirectory<A>,
 
@@ -300,30 +300,40 @@ pub struct ActorCatalog<A: Actor, T: moonpool_foundation::TaskProvider> {
     ///
     /// Generic type parameter allows compile-time dispatch.
     task_provider: T,
+
+    /// ActorFactory for creating actor instances on-demand.
+    ///
+    /// The factory is called inside the activation lock to create new actor
+    /// instances. This enables dependency injection and ensures actor instances
+    /// are never discarded (Orleans pattern).
+    actor_factory: F,
 }
 
-impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider> ActorCatalog<A, T> {
+impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<Actor = A>> ActorCatalog<A, T, F> {
     /// Create a new ActorCatalog for this node.
     ///
     /// # Parameters
     ///
     /// - `node_id`: The NodeId of this node
     /// - `task_provider`: The TaskProvider for spawning message loop tasks
+    /// - `actor_factory`: The ActorFactory for creating actor instances
     ///
     /// # Example
     ///
     /// ```rust,ignore
     /// let node_id = NodeId::from("127.0.0.1:8001")?;
-    /// let task_provider = LocalTaskProvider::new();
-    /// let catalog = ActorCatalog::<BankAccountActor, _>::new(node_id, task_provider);
+    /// let task_provider = TokioTaskProvider;
+    /// let factory = BankAccountFactory;
+    /// let catalog = ActorCatalog::new(node_id, task_provider, factory);
     /// ```
-    pub fn new(node_id: NodeId, task_provider: T) -> Self {
+    pub fn new(node_id: NodeId, task_provider: T, actor_factory: F) -> Self {
         Self {
             activation_directory: ActivationDirectory::new(),
             activation_lock: RefCell::new(()),
             node_id,
             message_bus: RefCell::new(None),
             task_provider,
+            actor_factory,
         }
     }
 
@@ -358,42 +368,34 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider> ActorCatalog<A, T
         self.activation_directory.find_target(actor_id)
     }
 
-    /// Get or create an activation using double-check locking.
+    /// Get or create an activation using double-check locking with factory.
     ///
-    /// This method implements the Orleans double-check locking pattern to prevent
-    /// duplicate activations while minimizing lock contention:
+    /// This method implements the Orleans double-check locking pattern with
+    /// auto-activation via ActorFactory:
     ///
     /// 1. **Fast path** (no lock): Check if activation exists → return if found
-    /// 2. **Slow path** (with lock): Double-check → create if needed → return
+    /// 2. **Slow path** (with lock): Double-check → factory.create() → spawn task → return
     ///
-    /// The returned `ActorContext` is ready to be activated. The caller must
-    /// call `context.activate()` **outside** this method to avoid holding the
-    /// lock during potentially slow I/O operations.
+    /// The returned `ActorContext` is created with the factory **inside the lock**,
+    /// ensuring no actor instances are ever discarded (Orleans pattern).
     ///
     /// # Parameters
     ///
     /// - `actor_id`: The ActorId to get or create
-    /// - `actor_instance`: The actor implementation to use if creating new activation
     ///
     /// # Returns
     ///
     /// - `Ok(context)`: The ActorContext (either existing or newly created)
-    /// - `Err(ActorError)`: If creation fails
+    /// - `Err(ActorError)`: If creation or factory call fails
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// // Create actor instance
-    /// let actor = BankAccountActor::new(actor_id.clone());
+    /// // No need to create actor manually!
+    /// let context = catalog.get_or_create_activation(actor_id).await?;
     ///
-    /// // Get or create activation
-    /// let context = catalog.get_or_create_activation(actor_id, actor)?;
-    ///
-    /// // IMPORTANT: Activate outside lock
-    /// context.activate().await?;
-    ///
-    /// // Now ready to process messages
-    /// context.enqueue_message(message);
+    /// // Context ready with message loop running
+    /// context.enqueue_message(message).await?;
     /// ```
     ///
     /// # Race Handling
@@ -402,22 +404,22 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider> ActorCatalog<A, T
     /// ActorId, the double-check pattern ensures only one ActorContext is created:
     ///
     /// ```text
-    /// Thread 1                    | Thread 2
+    /// Task 1                     | Task 2
     /// ---------------------------|---------------------------
     /// Fast check: None           | Fast check: None
     /// Acquire lock               | Wait for lock...
     /// Double-check: None         |
-    /// Create activation          |
+    /// factory.create() (ONCE)    |
+    /// Spawn message loop         |
     /// Record in directory        |
     /// Release lock               | Acquire lock
     /// Return new context         | Double-check: Some!
     ///                            | Release lock
-    ///                            | Return existing context (actor instance discarded)
+    ///                            | Return existing context (no factory call)
     /// ```
-    pub fn get_or_create_activation(
+    pub async fn get_or_create_activation(
         &self,
         actor_id: ActorId,
-        actor_instance: A,
     ) -> Result<Rc<ActorContext<A>>, ActorError> {
         // FAST PATH: Check without lock (99% case - activation exists)
         if let Some(activation) = self.activation_directory.find_target(&actor_id) {
@@ -429,7 +431,6 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider> ActorCatalog<A, T
 
         // DOUBLE-CHECK under lock (protect against TOCTOU race)
         if let Some(activation) = self.activation_directory.find_target(&actor_id) {
-            // Actor instance that was passed in will be dropped (race loser)
             return Ok(activation); // Another task created while we waited
         }
 
@@ -437,6 +438,9 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider> ActorCatalog<A, T
         let message_bus = self.message_bus.borrow().clone().ok_or_else(|| {
             ActorError::ProcessingFailed("MessageBus not set in ActorCatalog".to_string())
         })?;
+
+        // CREATE ACTOR VIA FACTORY (inside lock, so never discarded!)
+        let actor_instance = self.actor_factory.create(actor_id.clone()).await?;
 
         // CREATE CHANNELS (message channel + control channel)
         use tokio::sync::mpsc;
@@ -548,13 +552,13 @@ use crate::messaging::{ActorRouter, Message};
 use async_trait::async_trait;
 
 #[async_trait(?Send)]
-impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider> ActorRouter for ActorCatalog<A, T> {
-    /// Route a message to the appropriate local actor.
+impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<Actor = A>> ActorRouter for ActorCatalog<A, T, F> {
+    /// Route a message to the appropriate local actor with auto-activation.
     ///
     /// This implementation:
-    /// 1. Gets or creates the actor activation (with double-check locking)
+    /// 1. **Auto-activates** the actor if not already active (via factory)
     /// 2. Enqueues the message in the actor's message queue
-    /// 3. Spawns message processing task if not already running
+    /// 3. Message loop processes asynchronously
     ///
     /// # Parameters
     ///
@@ -563,29 +567,33 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider> ActorRouter for A
     /// # Returns
     ///
     /// - `Ok(())`: Message successfully routed to actor's queue
-    /// - `Err(ActorError)`: Routing failed (activation failed, etc.)
+    /// - `Err(ActorError)`: Routing failed (activation or factory failed)
+    ///
+    /// # Auto-Activation (Orleans Pattern)
+    ///
+    /// If the actor doesn't exist, it's automatically created via the factory:
+    /// ```text
+    /// Message arrives → catalog.get_or_create_activation(actor_id)
+    ///                 → factory.create(actor_id)
+    ///                 → spawn message loop
+    ///                 → enqueue message
+    ///                 → return (actor processing in background)
+    /// ```
     ///
     /// # Example
     ///
     /// ```rust,ignore
     /// use moonpool::messaging::ActorRouter;
     ///
-    /// let catalog = ActorCatalog::<BankAccountActor>::new(node_id);
+    /// let catalog = ActorCatalog::new(node_id, task_provider, factory);
     /// let router: Rc<dyn ActorRouter> = Rc::new(catalog);
     ///
-    /// // Route message to actor
+    /// // Route message to actor (auto-activates if needed!)
     /// router.route_message(message).await?;
     /// ```
     async fn route_message(&self, message: Message) -> Result<(), ActorError> {
-        // Get the actor context
-        // TODO: In Phase 4, we'll have an ActorFactory trait to auto-create actors.
-        // For now, return NotFound if actor doesn't exist.
-        let context = self.get(&message.target_actor).ok_or_else(|| {
-            ActorError::NotFound(format!(
-                "Actor not found (and auto-activation not yet implemented): {}",
-                message.target_actor
-            ))
-        })?;
+        // Get or auto-create the actor activation (Orleans pattern!)
+        let context = self.get_or_create_activation(message.target_actor.clone()).await?;
 
         // Enqueue message in actor's channel (async send)
         // This automatically wakes the message loop task
@@ -613,6 +621,7 @@ mod tests {
     #[async_trait(?Send)]
     impl Actor for DummyActor {
         type State = DummyState;
+        const ACTOR_TYPE: &'static str = "Dummy";
 
         fn actor_id(&self) -> &ActorId {
             unimplemented!("Not used in catalog tests")
@@ -630,6 +639,18 @@ mod tests {
             _reason: crate::actor::DeactivationReason,
         ) -> Result<(), crate::error::ActorError> {
             Ok(())
+        }
+    }
+
+    // Dummy factory for testing
+    struct DummyFactory;
+
+    #[async_trait(?Send)]
+    impl ActorFactory for DummyFactory {
+        type Actor = DummyActor;
+
+        async fn create(&self, _actor_id: ActorId) -> Result<Self::Actor, crate::error::ActorError> {
+            Ok(DummyActor)
         }
     }
 
@@ -752,7 +773,8 @@ mod tests {
         local_runtime.block_on(async move {
             let node_id = NodeId::from("127.0.0.1:8001").unwrap();
             let task_provider = TokioTaskProvider;
-            let catalog = ActorCatalog::<DummyActor, _>::new(node_id.clone(), task_provider);
+            let factory = DummyFactory;
+            let catalog = ActorCatalog::new(node_id.clone(), task_provider, factory);
 
             // Set MessageBus (required for spawning message loop task)
             let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id));
@@ -760,34 +782,36 @@ mod tests {
 
             let actor_id = ActorId::from_string("test::Counter/charlie").unwrap();
 
-        // Initially not exists
-        assert!(!catalog.exists(&actor_id));
-        assert_eq!(catalog.count(), 0);
+            // Initially not exists
+            assert!(!catalog.exists(&actor_id));
+            assert_eq!(catalog.count(), 0);
 
-        // Get or create (first time - creates)
-        let context1 = catalog
-            .get_or_create_activation(actor_id.clone(), DummyActor)
-            .unwrap();
-        assert_eq!(catalog.count(), 1);
-        assert!(catalog.exists(&actor_id));
+            // Get or create (first time - creates via factory)
+            let context1 = catalog
+                .get_or_create_activation(actor_id.clone())
+                .await
+                .unwrap();
+            assert_eq!(catalog.count(), 1);
+            assert!(catalog.exists(&actor_id));
 
-        // Get or create (second time - returns existing)
-        let context2 = catalog
-            .get_or_create_activation(actor_id.clone(), DummyActor)
-            .unwrap();
-        assert_eq!(catalog.count(), 1); // Still 1, not 2
+            // Get or create (second time - returns existing)
+            let context2 = catalog
+                .get_or_create_activation(actor_id.clone())
+                .await
+                .unwrap();
+            assert_eq!(catalog.count(), 1); // Still 1, not 2
 
-        // Same instance
-        assert!(Rc::ptr_eq(&context1, &context2));
+            // Same instance
+            assert!(Rc::ptr_eq(&context1, &context2));
 
-        // Get (without create)
-        let context3 = catalog.get(&actor_id).unwrap();
-        assert!(Rc::ptr_eq(&context1, &context3));
+            // Get (without create)
+            let context3 = catalog.get(&actor_id).unwrap();
+            assert!(Rc::ptr_eq(&context1, &context3));
 
-        // Remove
-        catalog.remove(&actor_id).unwrap();
-        assert_eq!(catalog.count(), 0);
-        assert!(!catalog.exists(&actor_id));
+            // Remove
+            catalog.remove(&actor_id).unwrap();
+            assert_eq!(catalog.count(), 0);
+            assert!(!catalog.exists(&actor_id));
 
             // Remove again (should fail)
             assert!(catalog.remove(&actor_id).is_err());
@@ -803,7 +827,8 @@ mod tests {
         local_runtime.block_on(async move {
             let node_id = NodeId::from("127.0.0.1:8001").unwrap();
             let task_provider = TokioTaskProvider;
-            let catalog = ActorCatalog::<DummyActor, _>::new(node_id.clone(), task_provider);
+            let factory = DummyFactory;
+            let catalog = ActorCatalog::new(node_id.clone(), task_provider, factory);
 
             // Set MessageBus (required for spawning message loop task)
             let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id));
@@ -811,20 +836,23 @@ mod tests {
 
             let actor_id = ActorId::from_string("test::Counter/dave").unwrap();
 
-        // Simulate concurrent calls (single-threaded simulation)
-        let context1 = catalog
-            .get_or_create_activation(actor_id.clone(), DummyActor)
-            .unwrap();
-        let context2 = catalog
-            .get_or_create_activation(actor_id.clone(), DummyActor)
-            .unwrap();
-        let context3 = catalog
-            .get_or_create_activation(actor_id, DummyActor)
-            .unwrap();
+            // Simulate concurrent calls (single-threaded simulation)
+            let context1 = catalog
+                .get_or_create_activation(actor_id.clone())
+                .await
+                .unwrap();
+            let context2 = catalog
+                .get_or_create_activation(actor_id.clone())
+                .await
+                .unwrap();
+            let context3 = catalog
+                .get_or_create_activation(actor_id)
+                .await
+                .unwrap();
 
-        // All should be the same instance
-        assert!(Rc::ptr_eq(&context1, &context2));
-        assert!(Rc::ptr_eq(&context1, &context3));
+            // All should be the same instance
+            assert!(Rc::ptr_eq(&context1, &context2));
+            assert!(Rc::ptr_eq(&context1, &context3));
 
             // Only one activation created
             assert_eq!(catalog.count(), 1);
@@ -840,36 +868,40 @@ mod tests {
         local_runtime.block_on(async move {
             let node_id = NodeId::from("127.0.0.1:8001").unwrap();
             let task_provider = TokioTaskProvider;
-            let catalog = ActorCatalog::<DummyActor, _>::new(node_id.clone(), task_provider);
+            let factory = DummyFactory;
+            let catalog = ActorCatalog::new(node_id.clone(), task_provider, factory);
 
             // Set MessageBus (required for spawning message loop task)
             let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id));
             catalog.set_message_bus(message_bus);
 
-        // Create multiple actors
-        let alice = ActorId::from_string("test::Counter/alice").unwrap();
-        let bob = ActorId::from_string("test::Counter/bob").unwrap();
-        let charlie = ActorId::from_string("test::BankAccount/charlie").unwrap();
+            // Create multiple actors
+            let alice = ActorId::from_string("test::Counter/alice").unwrap();
+            let bob = ActorId::from_string("test::Counter/bob").unwrap();
+            let charlie = ActorId::from_string("test::BankAccount/charlie").unwrap();
 
-        let context_alice = catalog
-            .get_or_create_activation(alice.clone(), DummyActor)
-            .unwrap();
-        let context_bob = catalog
-            .get_or_create_activation(bob.clone(), DummyActor)
-            .unwrap();
-        let context_charlie = catalog
-            .get_or_create_activation(charlie.clone(), DummyActor)
-            .unwrap();
+            let context_alice = catalog
+                .get_or_create_activation(alice.clone())
+                .await
+                .unwrap();
+            let context_bob = catalog
+                .get_or_create_activation(bob.clone())
+                .await
+                .unwrap();
+            let context_charlie = catalog
+                .get_or_create_activation(charlie.clone())
+                .await
+                .unwrap();
 
-        // All should be different instances
-        assert!(!Rc::ptr_eq(&context_alice, &context_bob));
-        assert!(!Rc::ptr_eq(&context_alice, &context_charlie));
-        assert!(!Rc::ptr_eq(&context_bob, &context_charlie));
+            // All should be different instances
+            assert!(!Rc::ptr_eq(&context_alice, &context_bob));
+            assert!(!Rc::ptr_eq(&context_alice, &context_charlie));
+            assert!(!Rc::ptr_eq(&context_bob, &context_charlie));
 
-        // Count should be 3
-        assert_eq!(catalog.count(), 3);
+            // Count should be 3
+            assert_eq!(catalog.count(), 3);
 
-        // Remove one
+            // Remove one
             catalog.remove(&bob).unwrap();
             assert_eq!(catalog.count(), 2);
             assert!(!catalog.exists(&bob));

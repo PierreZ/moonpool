@@ -97,11 +97,14 @@ pub struct MessageBus {
     /// Uses RefCell for interior mutability.
     pending_requests: RefCell<HashMap<CorrelationId, CallbackData>>,
 
-    /// Router for delivering messages to local actors.
+    /// Router registry mapping actor type names to their catalogs.
     ///
-    /// Type-erased to avoid generic parameter on MessageBus.
-    /// Set by ActorRuntime during initialization.
-    actor_router: RefCell<Option<Rc<dyn ActorRouter>>>,
+    /// Maps actor type name (e.g., "BankAccount") → ActorCatalog<A, T, F>
+    /// stored as trait object Rc<dyn ActorRouter>.
+    ///
+    /// Set by ActorRuntime during initialization to enable routing messages
+    /// to the correct catalog based on target actor type.
+    actor_routers: RefCell<HashMap<String, Rc<dyn ActorRouter>>>,
 
     /// Network transport for sending messages to remote nodes.
     ///
@@ -131,7 +134,7 @@ impl MessageBus {
             node_id,
             next_correlation_id: Cell::new(1),
             pending_requests: RefCell::new(HashMap::new()),
-            actor_router: RefCell::new(None),
+            actor_routers: RefCell::new(HashMap::new()),
             network_transport: RefCell::new(None),
         }
     }
@@ -158,24 +161,29 @@ impl MessageBus {
         *self.network_transport.borrow_mut() = Some(transport);
     }
 
-    /// Set the actor router for local message delivery.
+    /// Set the actor router registry for local message delivery.
     ///
-    /// This should be called by ActorRuntime after creating the MessageBus
-    /// to enable routing messages to local actors.
+    /// This should be called by ActorRuntime after registering actor types
+    /// to enable routing messages to the correct catalog based on actor type.
     ///
     /// # Parameters
     ///
-    /// - `router`: The ActorRouter implementation (typically ActorCatalog)
+    /// - `routers`: HashMap mapping actor type names to their catalog routers
     ///
     /// # Example
     ///
     /// ```rust,ignore
     /// let bus = MessageBus::new(node_id);
-    /// let catalog = ActorCatalog::new(node_id);
-    /// bus.set_actor_router(Rc::new(catalog));
+    ///
+    /// // Build router registry
+    /// let mut routers = HashMap::new();
+    /// routers.insert("BankAccount".to_string(), Rc::new(bank_catalog) as Rc<dyn ActorRouter>);
+    /// routers.insert("OrderProcessor".to_string(), Rc::new(order_catalog) as Rc<dyn ActorRouter>);
+    ///
+    /// bus.set_actor_routers(routers);
     /// ```
-    pub fn set_actor_router(&self, router: Rc<dyn ActorRouter>) {
-        *self.actor_router.borrow_mut() = Some(router);
+    pub fn set_actor_routers(&self, routers: HashMap<String, Rc<dyn ActorRouter>>) {
+        *self.actor_routers.borrow_mut() = routers;
     }
 
     /// Get this node's ID.
@@ -607,7 +615,7 @@ impl MessageBus {
     /// # Returns
     ///
     /// - `Ok(())`: Message successfully delivered to actor
-    /// - `Err(ActorError::ProcessingFailed)`: No actor router configured
+    /// - `Err(ActorError::ProcessingFailed)`: No router for actor type
     /// - `Err(ActorError)`: Actor routing failed
     async fn route_to_actor(&self, message: Message) -> Result<(), ActorError> {
         tracing::debug!(
@@ -616,12 +624,23 @@ impl MessageBus {
             message.method_name
         );
 
-        // Get router
-        let router = self.actor_router.borrow().clone().ok_or_else(|| {
-            ActorError::ProcessingFailed("No actor router configured".to_string())
-        })?;
+        // Extract actor type from ActorId
+        let actor_type = message.target_actor.actor_type();
 
-        // Delegate to router
+        // Lookup router for this actor type
+        let router = self
+            .actor_routers
+            .borrow()
+            .get(actor_type)
+            .cloned()
+            .ok_or_else(|| {
+                ActorError::ProcessingFailed(format!(
+                    "No router registered for actor type '{}'",
+                    actor_type
+                ))
+            })?;
+
+        // Delegate to router (which will auto-activate if needed)
         router.route_message(message).await
     }
 

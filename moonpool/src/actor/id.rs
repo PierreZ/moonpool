@@ -143,6 +143,18 @@ impl ActorId {
     pub fn to_string_format(&self) -> String {
         format!("{}::{}/{}", self.namespace, self.actor_type, self.key)
     }
+
+    /// Get the actor type.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let actor_id = ActorId::from_parts("prod", "BankAccount", "alice")?;
+    /// assert_eq!(actor_id.actor_type(), "BankAccount");
+    /// ```
+    pub fn actor_type(&self) -> &str {
+        &self.actor_type
+    }
 }
 
 impl fmt::Display for ActorId {

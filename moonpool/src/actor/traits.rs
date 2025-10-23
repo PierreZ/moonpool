@@ -64,6 +64,28 @@ pub trait Actor: Sized {
     /// to `on_activate()`.
     type State: Serialize + DeserializeOwned;
 
+    /// Actor type name for routing and catalog registration.
+    ///
+    /// This constant identifies the actor type across the cluster and is used by:
+    /// - **ActorRuntime** to register catalogs for this actor type
+    /// - **MessageBus** to route messages to the correct catalog
+    /// - **Directory** to track actor placements by type
+    ///
+    /// # Naming Convention
+    ///
+    /// Use PascalCase matching the struct name (e.g., "BankAccount", "OrderProcessor").
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// impl Actor for BankAccountActor {
+    ///     type State = BankAccountState;
+    ///     const ACTOR_TYPE: &'static str = "BankAccount";
+    ///     // ...
+    /// }
+    /// ```
+    const ACTOR_TYPE: &'static str;
+
     /// Get this actor's unique identifier.
     fn actor_id(&self) -> &ActorId;
 
