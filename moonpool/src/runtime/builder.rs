@@ -4,6 +4,7 @@ use crate::actor::NodeId;
 use crate::error::ActorError;
 use crate::messaging::MessageBus;
 use crate::runtime::ActorRuntime;
+use moonpool_foundation::TokioTaskProvider;
 use std::net::SocketAddr;
 use std::rc::Rc;
 
@@ -80,7 +81,7 @@ impl ActorRuntimeBuilder {
     /// # Errors
     ///
     /// Returns error if required fields are missing or invalid.
-    pub async fn build(self) -> Result<ActorRuntime, ActorError> {
+    pub async fn build(self) -> Result<ActorRuntime<TokioTaskProvider>, ActorError> {
         // Validate required fields
         let namespace = self
             .namespace
@@ -96,7 +97,9 @@ impl ActorRuntimeBuilder {
         // Create MessageBus
         let message_bus = Rc::new(MessageBus::new(node_id.clone()));
 
-        // TODO: Create ActorCatalog, SimpleDirectory
+        // Create TaskProvider (production uses Tokio)
+        let task_provider = TokioTaskProvider;
+
         // TODO: Start listening for incoming connections
         // TODO: Wire MessageBus to PeerTransport (T069)
 
@@ -107,7 +110,7 @@ impl ActorRuntimeBuilder {
             listen_addr
         );
 
-        ActorRuntime::new(namespace, node_id, message_bus)
+        ActorRuntime::new(namespace, node_id, message_bus, task_provider)
     }
 }
 

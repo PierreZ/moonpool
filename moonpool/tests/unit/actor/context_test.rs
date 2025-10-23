@@ -33,6 +33,7 @@ impl TestActor {
 #[async_trait(?Send)]
 impl Actor for TestActor {
     type State = (); // Stateless
+    const ACTOR_TYPE: &'static str = "TestActor";
 
     fn actor_id(&self) -> &ActorId {
         &self.actor_id

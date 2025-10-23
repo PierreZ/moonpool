@@ -32,6 +32,7 @@ impl FailingActor {
 #[async_trait(?Send)]
 impl Actor for FailingActor {
     type State = ();
+    const ACTOR_TYPE: &'static str = "FailingActor";
 
     fn actor_id(&self) -> &ActorId {
         &self.actor_id

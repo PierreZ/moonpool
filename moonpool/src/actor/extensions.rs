@@ -150,6 +150,7 @@ mod tests {
     #[async_trait(?Send)]
     impl Actor for ExampleActor {
         type State = ();
+        const ACTOR_TYPE: &'static str = "ExampleActor";
 
         fn actor_id(&self) -> &ActorId {
             &self.actor_id

@@ -1,9 +1,12 @@
 //! Actor runtime - main entry point for actor system.
 
-use crate::actor::{Actor, ActorId, ActorRef, NodeId};
+use crate::actor::{Actor, ActorFactory, ActorId, ActorRef, NodeId};
 use crate::error::ActorError;
-use crate::messaging::MessageBus;
+use crate::messaging::{ActorRouter, MessageBus};
 use crate::runtime::ActorRuntimeBuilder;
+use moonpool_foundation::task::TaskProvider;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -26,6 +29,9 @@ use std::time::Duration;
 ///     .build()
 ///     .await?;
 ///
+/// // Register actor type
+/// runtime.register_actor::<BankAccountActor, _>(BankAccountFactory)?;
+///
 /// // Get actor reference
 /// let actor = runtime.get_actor::<BankAccountActor>("BankAccount", "alice");
 ///
@@ -35,7 +41,7 @@ use std::time::Duration;
 /// // Shutdown
 /// runtime.shutdown(Duration::from_secs(30)).await?;
 /// ```
-pub struct ActorRuntime {
+pub struct ActorRuntime<T: TaskProvider> {
     /// Cluster namespace (all actors in this runtime share this namespace).
     namespace: String,
 
@@ -44,12 +50,21 @@ pub struct ActorRuntime {
 
     /// Message bus for routing messages.
     message_bus: Rc<MessageBus>,
-    // TODO: Add fields as we integrate components
-    // catalog: Rc<ActorCatalog<A>>,  // Challenge: Generic over all actor types
-    // directory: Rc<SimpleDirectory>,
+
+    /// Task provider for spawning actor message loops.
+    task_provider: T,
+
+    /// Router registry mapping actor type names to their catalogs.
+    ///
+    /// Maps actor type name (e.g., "BankAccount") → ActorCatalog<A, T, F>
+    /// stored as trait object Rc<dyn ActorRouter>.
+    ///
+    /// This enables MessageBus to route messages to the correct catalog
+    /// without knowing the concrete actor types at compile time.
+    routers: RefCell<HashMap<String, Rc<dyn ActorRouter>>>,
 }
 
-impl ActorRuntime {
+impl<T: TaskProvider + 'static> ActorRuntime<T> {
     /// Create a new runtime builder.
     ///
     /// # Example
@@ -70,12 +85,104 @@ impl ActorRuntime {
         namespace: String,
         node_id: NodeId,
         message_bus: Rc<MessageBus>,
+        task_provider: T,
     ) -> Result<Self, ActorError> {
         Ok(Self {
             namespace,
             node_id,
             message_bus,
+            task_provider,
+            routers: RefCell::new(HashMap::new()),
         })
+    }
+
+    /// Register an actor type with the runtime.
+    ///
+    /// This creates an ActorCatalog for the actor type and registers it with
+    /// the MessageBus for automatic routing and activation.
+    ///
+    /// # Type Parameters
+    ///
+    /// - `A`: The actor type implementing the Actor trait
+    /// - `F`: The factory type implementing ActorFactory<Actor = A>
+    ///
+    /// # Parameters
+    ///
+    /// - `factory`: Factory instance used to create actor instances on-demand
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())`: Actor type registered successfully
+    /// - `Err(ActorError::InvalidConfiguration)`: Actor type already registered
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use moonpool::prelude::*;
+    ///
+    /// // Create factory
+    /// struct BankAccountFactory;
+    ///
+    /// #[async_trait(?Send)]
+    /// impl ActorFactory for BankAccountFactory {
+    ///     type Actor = BankAccountActor;
+    ///
+    ///     async fn create(&self, actor_id: ActorId) -> Result<Self::Actor, ActorError> {
+    ///         Ok(BankAccountActor::new(actor_id))
+    ///     }
+    /// }
+    ///
+    /// // Register with runtime
+    /// let factory = BankAccountFactory;
+    /// runtime.register_actor::<BankAccountActor, _>(factory)?;
+    ///
+    /// // Actors now auto-activate on first message!
+    /// let alice = runtime.get_actor::<BankAccountActor>("BankAccount", "alice")?;
+    /// alice.call(DepositRequest { amount: 100 }).await?;
+    /// ```
+    pub fn register_actor<A, F>(&self, factory: F) -> Result<(), ActorError>
+    where
+        A: Actor + 'static,
+        F: ActorFactory<Actor = A> + 'static,
+    {
+        use crate::actor::ActorCatalog;
+
+        let actor_type = A::ACTOR_TYPE;
+
+        // Check if already registered
+        if self.routers.borrow().contains_key(actor_type) {
+            return Err(ActorError::InvalidConfiguration(format!(
+                "Actor type '{}' already registered",
+                actor_type
+            )));
+        }
+
+        // Create catalog for this actor type
+        let catalog = Rc::new(ActorCatalog::new(
+            self.node_id.clone(),
+            self.task_provider.clone(),
+            factory,
+        ));
+
+        // Set message bus on catalog
+        catalog.set_message_bus(self.message_bus.clone());
+
+        // Store in router registry as trait object
+        self.routers
+            .borrow_mut()
+            .insert(actor_type.to_string(), catalog);
+
+        // Update MessageBus with new router registry
+        self.message_bus
+            .set_actor_routers(self.routers.borrow().clone());
+
+        tracing::info!(
+            "Registered actor type '{}' on node {}",
+            actor_type,
+            self.node_id
+        );
+
+        Ok(())
     }
 
     /// Get a reference to the message bus.
