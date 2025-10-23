@@ -71,7 +71,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let is_distributed = args.ports.is_some();
-    let mode = if is_distributed { "distributed" } else { "standalone" };
+    let mode = if is_distributed {
+        "distributed"
+    } else {
+        "standalone"
+    };
 
     tracing::info!(
         port = args.port,
@@ -99,14 +103,11 @@ async fn run_node(args: Args) -> std::result::Result<(), ActorError> {
     // Parse cluster nodes from --ports argument
     let cluster_nodes = if let Some(ports_str) = args.ports {
         // Distributed mode: parse comma-separated port list
-        let ports: std::result::Result<Vec<u16>, _> = ports_str
-            .split(',')
-            .map(|s| s.trim().parse())
-            .collect();
+        let ports: std::result::Result<Vec<u16>, _> =
+            ports_str.split(',').map(|s| s.trim().parse()).collect();
 
-        let ports = ports.map_err(|e| {
-            ActorError::InvalidConfiguration(format!("Invalid ports list: {}", e))
-        })?;
+        let ports = ports
+            .map_err(|e| ActorError::InvalidConfiguration(format!("Invalid ports list: {}", e)))?;
 
         ports
             .into_iter()
@@ -117,7 +118,11 @@ async fn run_node(args: Args) -> std::result::Result<(), ActorError> {
         vec![NodeId::from(format!("127.0.0.1:{}", port))?]
     };
 
-    let mode = if cluster_nodes.len() > 1 { "distributed" } else { "standalone" };
+    let mode = if cluster_nodes.len() > 1 {
+        "distributed"
+    } else {
+        "standalone"
+    };
 
     tracing::info!(
         port = port,

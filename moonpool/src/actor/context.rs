@@ -134,6 +134,12 @@ pub struct ActorContext<A: Actor> {
     /// Useful for health monitoring and deciding when to deactivate
     /// a misbehaving actor.
     pub error_count: RefCell<usize>,
+
+    /// Handler registry for dynamic message dispatch.
+    ///
+    /// Maps method names (e.g., "SayHelloRequest") to type-erased handler closures.
+    /// Initialized once during ActorContext creation via `A::register_handlers()`.
+    pub handlers: crate::actor::HandlerRegistry<A>,
 }
 
 impl<A: Actor> ActorContext<A> {
@@ -164,6 +170,17 @@ impl<A: Actor> ActorContext<A> {
         control_sender: mpsc::Sender<LifecycleCommand<A>>,
     ) -> Self {
         let now = Instant::now();
+
+        // Initialize handler registry by calling the actor's register_handlers() method
+        let mut handlers = crate::actor::HandlerRegistry::new();
+        A::register_handlers(&mut handlers);
+
+        tracing::debug!(
+            "Initialized ActorContext for {} with {} handlers",
+            actor_id,
+            handlers.handler_count()
+        );
+
         Self {
             actor_id,
             node_id,
@@ -177,6 +194,7 @@ impl<A: Actor> ActorContext<A> {
             message_bus: RefCell::new(None),
             last_error: RefCell::new(None),
             error_count: RefCell::new(0),
+            handlers,
         }
     }
 
@@ -483,7 +501,6 @@ impl<A: Actor> ActorContext<A> {
 
         result
     }
-
 }
 
 /// Never-ending message loop for an actor (Orleans pattern adapted to Rust).
@@ -614,23 +631,43 @@ pub async fn run_message_loop<A: Actor>(
 
 /// Dispatch a message to the actor's handler.
 ///
-/// Dispatch a message to the actor's handler.
+/// This function implements dynamic message dispatch by:
+/// 1. Looking up the handler in the registry by method name
+/// 2. Calling the type-erased handler closure (deserialize → handle → serialize)
+/// 3. Sending the response back to the caller (for request messages)
 ///
-/// This function is called by the message loop for each message.
-/// It's a placeholder that will be implemented fully in later phases.
+/// # Parameters
+///
+/// - `actor`: Mutable reference to the actor instance
+/// - `message`: Incoming message with method name and payload
+/// - `context`: Actor execution context (contains handler registry)
+/// - `message_bus`: MessageBus for sending responses
+///
+/// # Returns
+///
+/// - `Ok(())`: Message dispatched successfully, response sent
+/// - `Err(ActorError)`: Handler not found, execution failed, or response send failed
 async fn dispatch_message_to_actor<A: Actor>(
-    _actor: &mut A,
+    actor: &mut A,
     message: &Message,
     context: &ActorContext<A>,
-    _message_bus: &MessageBus,
+    message_bus: &MessageBus,
 ) -> Result<(), ActorError> {
-    // TODO: Implement proper message dispatching
-    // For now, just log and return Ok
     tracing::debug!(
         "Dispatching message '{}' to actor {}",
         message.method_name,
         context.actor_id
     );
+
+    // Dispatch via handler registry
+    let response_payload = context.handlers.dispatch(actor, message, context).await?;
+
+    // Send response for request messages
+    if message.direction == crate::messaging::Direction::Request {
+        let response = crate::messaging::Message::response(message, response_payload);
+        message_bus.send_response(response).await?;
+    }
+
     Ok(())
 }
 
@@ -643,7 +680,10 @@ impl<A: Actor> std::fmt::Debug for ActorContext<A> {
             .field("state", &self.state)
             .field("activation_time", &self.activation_time)
             .field("last_message_time", &self.last_message_time)
-            .field("has_message_loop_task", &self.message_loop_task.borrow().is_some())
+            .field(
+                "has_message_loop_task",
+                &self.message_loop_task.borrow().is_some(),
+            )
             .field("error_count", &self.error_count.borrow())
             .field("last_error", &self.last_error.borrow())
             .finish()

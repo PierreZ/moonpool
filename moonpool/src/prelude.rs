@@ -5,7 +5,7 @@
 // Re-export core types (only what exists now)
 pub use crate::actor::{
     ActivationState, Actor, ActorCatalog, ActorContext, ActorFactory, ActorId, ActorRef,
-    CorrelationId, DeactivationReason, MessageHandler, NodeId,
+    CorrelationId, DeactivationReason, HandlerRegistry, MessageHandler, NodeId,
 };
 pub use crate::error::{ActorError, DirectoryError, MessageError, StorageError};
 pub use crate::messaging::{ActorAddress, Direction, Message, MessageFlags};

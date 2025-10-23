@@ -274,7 +274,8 @@ fn storage_key(actor_id: &ActorId) -> String {
 const ACTOR_MESSAGE_QUEUE_SIZE: usize = 128;
 const ACTOR_CONTROL_QUEUE_SIZE: usize = 8;
 
-pub struct ActorCatalog<A: Actor, T: moonpool_foundation::TaskProvider, F: ActorFactory<Actor = A>> {
+pub struct ActorCatalog<A: Actor, T: moonpool_foundation::TaskProvider, F: ActorFactory<Actor = A>>
+{
     /// Local activation directory (ActorId → ActorContext).
     activation_directory: ActivationDirectory<A>,
 
@@ -309,7 +310,9 @@ pub struct ActorCatalog<A: Actor, T: moonpool_foundation::TaskProvider, F: Actor
     actor_factory: F,
 }
 
-impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<Actor = A>> ActorCatalog<A, T, F> {
+impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<Actor = A>>
+    ActorCatalog<A, T, F>
+{
     /// Create a new ActorCatalog for this node.
     ///
     /// # Parameters
@@ -459,7 +462,8 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
         // CREATE CHANNELS (message channel + control channel)
         use tokio::sync::mpsc;
         let (msg_tx, msg_rx) = mpsc::channel::<Message>(ACTOR_MESSAGE_QUEUE_SIZE);
-        let (ctrl_tx, ctrl_rx) = mpsc::channel::<crate::actor::LifecycleCommand<A>>(ACTOR_CONTROL_QUEUE_SIZE);
+        let (ctrl_tx, ctrl_rx) =
+            mpsc::channel::<crate::actor::LifecycleCommand<A>>(ACTOR_CONTROL_QUEUE_SIZE);
 
         // CREATE ACTOR CONTEXT (while holding lock)
         let context = Rc::new(ActorContext::new(
@@ -501,12 +505,14 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
             .control_sender
             .send(activate_cmd)
             .await
-            .map_err(|_| ActorError::ProcessingFailed("Failed to send activation command".to_string()))?;
+            .map_err(|_| {
+                ActorError::ProcessingFailed("Failed to send activation command".to_string())
+            })?;
 
         // Wait for activation to complete
-        result_rx
-            .await
-            .map_err(|_| ActorError::ProcessingFailed("Activation response channel closed".to_string()))??;
+        result_rx.await.map_err(|_| {
+            ActorError::ProcessingFailed("Activation response channel closed".to_string())
+        })??;
 
         // Return activated context
         Ok(context)
@@ -586,7 +592,9 @@ use crate::messaging::{ActorRouter, Message};
 use async_trait::async_trait;
 
 #[async_trait(?Send)]
-impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<Actor = A>> ActorRouter for ActorCatalog<A, T, F> {
+impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<Actor = A>>
+    ActorRouter for ActorCatalog<A, T, F>
+{
     /// Route a message to the appropriate local actor with auto-activation.
     ///
     /// This implementation:
@@ -627,7 +635,9 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
     /// ```
     async fn route_message(&self, message: Message) -> Result<(), ActorError> {
         // Get or auto-create the actor activation (Orleans pattern!)
-        let context = self.get_or_create_activation(message.target_actor.clone()).await?;
+        let context = self
+            .get_or_create_activation(message.target_actor.clone())
+            .await?;
 
         // Enqueue message in actor's channel (async send)
         // This automatically wakes the message loop task
@@ -642,8 +652,8 @@ mod tests {
     use super::*;
     use crate::actor::{ActorId, NodeId};
     use async_trait::async_trait;
-    use serde::{Deserialize, Serialize};
     use moonpool_foundation::TokioTaskProvider;
+    use serde::{Deserialize, Serialize};
 
     // Dummy actor type for testing
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -683,7 +693,10 @@ mod tests {
     impl ActorFactory for DummyFactory {
         type Actor = DummyActor;
 
-        async fn create(&self, _actor_id: ActorId) -> Result<Self::Actor, crate::error::ActorError> {
+        async fn create(
+            &self,
+            _actor_id: ActorId,
+        ) -> Result<Self::Actor, crate::error::ActorError> {
             Ok(DummyActor)
         }
     }
@@ -889,10 +902,7 @@ mod tests {
                 .get_or_create_activation(actor_id.clone())
                 .await
                 .unwrap();
-            let context3 = catalog
-                .get_or_create_activation(actor_id)
-                .await
-                .unwrap();
+            let context3 = catalog.get_or_create_activation(actor_id).await.unwrap();
 
             // All should be the same instance
             assert!(Rc::ptr_eq(&context1, &context2));
@@ -929,10 +939,7 @@ mod tests {
                 .get_or_create_activation(alice.clone())
                 .await
                 .unwrap();
-            let context_bob = catalog
-                .get_or_create_activation(bob.clone())
-                .await
-                .unwrap();
+            let context_bob = catalog.get_or_create_activation(bob.clone()).await.unwrap();
             let context_charlie = catalog
                 .get_or_create_activation(charlie.clone())
                 .await
