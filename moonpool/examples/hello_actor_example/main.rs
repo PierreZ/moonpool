@@ -1,36 +1,27 @@
 //! Hello Actor Example - Virtual actor demonstration.
 //!
 //! This example demonstrates Orleans-inspired virtual actors with auto-activation.
-//! Can run in standalone mode (single node) or distributed mode (multiple nodes).
+//! Can run in standalone mode (single node) or multi-node mode (multiple nodes in same process).
 //!
 //! # Usage
 //!
 //! Standalone (single node):
 //! ```bash
-//! cargo run --example hello_actor -- --port 5000
+//! cargo run --example hello_actor
 //! ```
 //!
-//! Distributed (two nodes, terminal 1):
+//! Multi-node (2 nodes with shared directory):
 //! ```bash
-//! cargo run --example hello_actor -- --port 5000 --ports 5000,5001
-//! ```
-//!
-//! Distributed (two nodes, terminal 2):
-//! ```bash
-//! cargo run --example hello_actor -- --port 5001 --ports 5000,5001
+//! cargo run --example hello_actor -- --ports 5000,5001
 //! ```
 //!
 //! # What You'll See
 //!
 //! - Auto-activation of virtual actors on first message
-//! - Directory-based placement decisions
+//! - Directory-based placement decisions (shared across all nodes)
+//! - Cross-node actor calls via network transport
 //! - Rich tracing showing actor instantiation
 //! - Clean extension trait API
-//!
-//! # Note
-//!
-//! Distributed mode requires network transport (not yet wired up).
-//! Use standalone mode to see virtual actors working locally.
 
 mod hello_actor;
 
@@ -38,6 +29,7 @@ use clap::Parser;
 use hello_actor::{HelloActor, HelloActorFactory, HelloActorRef};
 use moonpool::directory::SimpleDirectory;
 use moonpool::prelude::*;
+use std::rc::Rc;
 use std::time::Duration;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -46,14 +38,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[command(name = "hello_actor")]
 #[command(about = "Virtual actor example with auto-activation", long_about = None)]
 struct Args {
-    /// Port to listen on for this node
-    #[arg(short, long, default_value = "5000")]
-    port: u16,
-
-    /// Comma-separated list of all ports in the cluster (optional, defaults to single-node)
+    /// Comma-separated list of all ports in the cluster (defaults to single node on 5000)
     /// Example: --ports 5000,5001,5002
-    #[arg(long)]
-    ports: Option<String>,
+    #[arg(long, default_value = "5000")]
+    ports: String,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -70,15 +58,22 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer().with_target(false))
         .init();
 
-    let is_distributed = args.ports.is_some();
-    let mode = if is_distributed {
-        "distributed"
+    // Parse ports list
+    let ports: Vec<u16> = args
+        .ports
+        .split(',')
+        .map(|s| s.trim().parse())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| format!("Invalid port number: {}", e))?;
+
+    let mode = if ports.len() > 1 {
+        "multi-node"
     } else {
         "standalone"
     };
 
     tracing::info!(
-        port = args.port,
+        ports = ?ports,
         mode = mode,
         "🚀 Starting virtual actor hello example"
     );
@@ -88,8 +83,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     local
         .run_until(async move {
-            if let Err(e) = run_node(args).await {
-                tracing::error!(error = ?e, "Node failed");
+            if let Err(e) = run_cluster(ports).await {
+                tracing::error!(error = ?e, "Cluster failed");
             }
         })
         .await;
@@ -97,87 +92,72 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn run_node(args: Args) -> std::result::Result<(), ActorError> {
-    let port = args.port;
-
-    // Parse cluster nodes from --ports argument
-    let cluster_nodes = if let Some(ports_str) = args.ports {
-        // Distributed mode: parse comma-separated port list
-        let ports: std::result::Result<Vec<u16>, _> =
-            ports_str.split(',').map(|s| s.trim().parse()).collect();
-
-        let ports = ports
-            .map_err(|e| ActorError::InvalidConfiguration(format!("Invalid ports list: {}", e)))?;
-
-        ports
-            .into_iter()
-            .map(|p| NodeId::from(format!("127.0.0.1:{}", p)))
-            .collect::<std::result::Result<Vec<_>, _>>()?
-    } else {
-        // Standalone mode: single node
-        vec![NodeId::from(format!("127.0.0.1:{}", port))?]
-    };
-
-    let mode = if cluster_nodes.len() > 1 {
-        "distributed"
-    } else {
-        "standalone"
-    };
+async fn run_cluster(ports: Vec<u16>) -> std::result::Result<(), ActorError> {
+    // Create cluster node IDs from ports
+    let cluster_nodes: Vec<NodeId> = ports
+        .iter()
+        .map(|p| NodeId::from(format!("127.0.0.1:{}", p)))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| ActorError::InvalidConfiguration(format!("Invalid node ID: {}", e)))?;
 
     tracing::info!(
-        port = port,
         cluster_size = cluster_nodes.len(),
-        mode = mode,
-        "Initializing ActorRuntime with SimpleDirectory"
+        "Creating shared directory for all nodes"
     );
 
-    // Create shared directory
-    let directory = SimpleDirectory::new(cluster_nodes);
+    // Create ONE shared directory instance that all runtimes will use
+    let shared_directory = Rc::new(SimpleDirectory::new(cluster_nodes.clone()));
 
-    let runtime = ActorRuntime::<moonpool_foundation::TokioTaskProvider>::builder()
-        .namespace("example")
-        .listen_addr(format!("127.0.0.1:{}", port))?
-        .directory(directory)
-        .build()
-        .await?;
+    // Create a runtime for each port, all sharing the same directory
+    let mut runtimes = Vec::new();
+    for port in &ports {
+        tracing::info!(port = port, "Creating ActorRuntime");
 
-    tracing::info!(
-        node_id = %runtime.node_id(),
-        namespace = runtime.namespace(),
-        "✅ ActorRuntime started"
-    );
+        let runtime = ActorRuntime::<moonpool_foundation::TokioTaskProvider>::builder()
+            .namespace("example")
+            .listen_addr(format!("127.0.0.1:{}", port))?
+            .directory((*shared_directory).clone()) // Clone the Rc, not the directory
+            .with_providers(
+                moonpool_foundation::TokioNetworkProvider,
+                moonpool_foundation::TokioTimeProvider,
+                moonpool_foundation::TokioTaskProvider,
+            )
+            .build()
+            .await?;
 
-    // Register HelloActor with factory
-    tracing::info!("Registering HelloActor type with factory");
-    runtime.register_actor::<HelloActor, _>(HelloActorFactory)?;
-    tracing::info!("✅ HelloActor registered (auto-activation enabled)");
+        tracing::info!(
+            node_id = %runtime.node_id(),
+            namespace = runtime.namespace(),
+            "✅ ActorRuntime started"
+        );
+
+        // Register HelloActor with factory on each runtime
+        runtime.register_actor::<HelloActor, _>(HelloActorFactory)?;
+        tracing::info!(node_id = %runtime.node_id(), "✅ HelloActor registered");
+
+        runtimes.push(runtime);
+    }
 
     // Small delay for startup
     tokio::time::sleep(Duration::from_secs(1)).await;
 
+    // Use the first runtime to make actor calls
+    let runtime = &runtimes[0];
+
     // Demonstrate calling multiple virtual actors
-    // Each actor will auto-activate on first message
-    tracing::info!("🎭 Demonstrating virtual actor calls...");
+    tracing::info!(
+        "🎭 Demonstrating virtual actor calls from node {}...",
+        runtime.node_id()
+    );
     println!();
 
-    // Define actor keys - these will be placed by the directory
+    // Define actor keys - these will be placed by the shared directory
     let actor_keys = ["alice", "bob", "charlie", "david", "eve"];
 
     // Call each actor using the extension trait
     for key in &actor_keys {
-        tracing::info!(key = key, "Getting ActorRef (no activation yet)");
-
-        // Get actor reference - this is lightweight, no network call
         let actor = runtime.get_actor::<HelloActor>("HelloActor", *key)?;
 
-        tracing::info!(
-            key = key,
-            actor_id = %actor.actor_id(),
-            "Got ActorRef, sending first message (will trigger auto-activation)"
-        );
-
-        // First message triggers auto-activation!
-        // The extension trait makes this look like a regular async method call
         match actor.say_hello().await {
             Ok(greeting) => {
                 println!("  📬 {}: {}", key.to_uppercase(), greeting);
@@ -187,13 +167,11 @@ async fn run_node(args: Args) -> std::result::Result<(), ActorError> {
             }
         }
 
-        // Small delay for readability
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
     println!();
     tracing::info!("✅ All actor calls completed");
-    tracing::info!("💡 Virtual actors are now activated and ready for more messages");
 
     // Call alice again to show it's still activated
     println!();
@@ -205,7 +183,7 @@ async fn run_node(args: Args) -> std::result::Result<(), ActorError> {
     println!();
     tracing::info!("🎉 Example complete! Press Ctrl+C to exit");
 
-    // Keep runtime alive
+    // Keep all runtimes alive
     loop {
         tokio::time::sleep(Duration::from_secs(10)).await;
     }

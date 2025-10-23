@@ -169,6 +169,14 @@ impl SimpleDirectory {
     fn increment_node_load(&self, node_id: &NodeId) {
         let mut state = self.state.borrow_mut();
         *state.node_load.entry(node_id.clone()).or_insert(0) += 1;
+
+        // Log current load distribution
+        let load_summary: Vec<_> = state
+            .node_load
+            .iter()
+            .map(|(node, load)| format!("{}={}", node, load))
+            .collect();
+        tracing::debug!("Directory load: [{}]", load_summary.join(", "));
     }
 
     /// Decrement node load counter.
@@ -247,10 +255,16 @@ impl Directory for SimpleDirectory {
         match state.location_map.get(&key) {
             None => {
                 // No existing registration - place on requesting node
-                state.location_map.insert(key, node_id.clone());
+                state.location_map.insert(key.clone(), node_id.clone());
                 drop(state); // Release borrow before calling increment
 
                 self.increment_node_load(&node_id);
+
+                tracing::info!(
+                    actor_id = %actor_id,
+                    node_id = %node_id,
+                    "📍 Directory: Placed actor on node"
+                );
 
                 Ok(PlacementDecision::PlaceOnNode(node_id))
             }
