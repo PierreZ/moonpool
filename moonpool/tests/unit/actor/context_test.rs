@@ -55,7 +55,12 @@ fn test_context_creation() {
     let node_id = NodeId::from("127.0.0.1:8001").unwrap();
     let actor = TestActor::new(actor_id.clone());
 
-    let context = ActorContext::new(actor_id.clone(), node_id.clone(), actor);
+    // Create channels for message loop
+    use tokio::sync::mpsc;
+    let (msg_tx, _msg_rx) = mpsc::channel(128);
+    let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+
+    let context = ActorContext::new(actor_id.clone(), node_id.clone(), actor, msg_tx, ctrl_tx);
 
     // Verify initial state
     assert_eq!(context.actor_id, actor_id);
@@ -69,7 +74,12 @@ fn test_state_transition_to_activating() {
     let node_id = NodeId::from("127.0.0.1:8001").unwrap();
     let actor = TestActor::new(actor_id.clone());
 
-    let context = ActorContext::new(actor_id, node_id, actor);
+    // Create channels for message loop
+    use tokio::sync::mpsc;
+    let (msg_tx, _msg_rx) = mpsc::channel(128);
+    let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+
+    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx);
 
     // Transition to Activating
     context.set_state(ActivationState::Activating).unwrap();
@@ -82,7 +92,12 @@ async fn test_activation_lifecycle() {
     let node_id = NodeId::from("127.0.0.1:8001").unwrap();
     let actor = TestActor::new(actor_id.clone());
 
-    let context = ActorContext::new(actor_id, node_id, actor);
+    // Create channels for message loop
+    use tokio::sync::mpsc;
+    let (msg_tx, _msg_rx) = mpsc::channel(128);
+    let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+
+    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx);
 
     // Initial state
     assert_eq!(context.get_state(), ActivationState::Creating);
@@ -113,7 +128,12 @@ async fn test_deactivation_lifecycle() {
     let node_id = NodeId::from("127.0.0.1:8001").unwrap();
     let actor = TestActor::new(actor_id.clone());
 
-    let context = ActorContext::new(actor_id, node_id, actor);
+    // Create channels for message loop
+    use tokio::sync::mpsc;
+    let (msg_tx, _msg_rx) = mpsc::channel(128);
+    let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+
+    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx);
 
     // Setup: activate the actor
     context.set_state(ActivationState::Activating).unwrap();
@@ -149,7 +169,12 @@ fn test_actor_id_accessor() {
     let node_id = NodeId::from("127.0.0.1:8001").unwrap();
     let actor = TestActor::new(actor_id.clone());
 
-    let context = ActorContext::new(actor_id.clone(), node_id, actor);
+    // Create channels for message loop
+    use tokio::sync::mpsc;
+    let (msg_tx, _msg_rx) = mpsc::channel(128);
+    let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+
+    let context = ActorContext::new(actor_id.clone(), node_id, actor, msg_tx, ctrl_tx);
 
     assert_eq!(context.actor_id, actor_id);
     assert_eq!(context.actor_id.namespace, "test");
@@ -163,7 +188,12 @@ fn test_node_id_accessor() {
     let node_id = NodeId::from("127.0.0.1:8001").unwrap();
     let actor = TestActor::new(actor_id.clone());
 
-    let context = ActorContext::new(actor_id, node_id.clone(), actor);
+    // Create channels for message loop
+    use tokio::sync::mpsc;
+    let (msg_tx, _msg_rx) = mpsc::channel(128);
+    let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+
+    let context = ActorContext::new(actor_id, node_id.clone(), actor, msg_tx, ctrl_tx);
 
     assert_eq!(context.node_id, node_id);
 }
@@ -174,7 +204,12 @@ fn test_multiple_state_transitions() {
     let node_id = NodeId::from("127.0.0.1:8001").unwrap();
     let actor = TestActor::new(actor_id.clone());
 
-    let context = ActorContext::new(actor_id, node_id, actor);
+    // Create channels for message loop
+    use tokio::sync::mpsc;
+    let (msg_tx, _msg_rx) = mpsc::channel(128);
+    let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+
+    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx);
 
     // Valid state transition sequence
     assert_eq!(context.get_state(), ActivationState::Creating);
@@ -198,7 +233,12 @@ async fn test_activation_time_tracking() {
     let node_id = NodeId::from("127.0.0.1:8001").unwrap();
     let actor = TestActor::new(actor_id.clone());
 
-    let context = ActorContext::new(actor_id, node_id, actor);
+    // Create channels for message loop
+    use tokio::sync::mpsc;
+    let (msg_tx, _msg_rx) = mpsc::channel(128);
+    let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+
+    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx);
 
     let activation_time = context.activation_time;
 

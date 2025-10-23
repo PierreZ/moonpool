@@ -11,7 +11,7 @@ pub mod traits;
 
 // Re-exports (only what exists now)
 pub use catalog::{ActivationDirectory, ActorCatalog};
-pub use context::ActorContext;
+pub use context::{ActorContext, LifecycleCommand, run_message_loop};
 pub use id::{ActorId, CorrelationId, NodeId};
 pub use lifecycle::{ActivationState, DeactivationReason};
 pub use reference::ActorRef;
