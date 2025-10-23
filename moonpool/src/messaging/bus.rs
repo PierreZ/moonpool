@@ -46,13 +46,17 @@
 //! let response = rx.await?;
 //! ```
 
-use crate::actor::{CorrelationId, NodeId};
+use crate::actor::{ActorId, CorrelationId, NodeId};
+use crate::directory::Directory;
 use crate::error::ActorError;
 use crate::messaging::{ActorRouter, CallbackData, Direction, Message, NetworkTransport};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use tokio::sync::oneshot;
+
+// Type alias for shared directory reference
+type SharedDirectory = Rc<dyn Directory>;
 
 /// Message bus for routing messages to actors.
 ///
@@ -111,6 +115,12 @@ pub struct MessageBus {
     /// None means network is not configured (local-only mode).
     /// Uses trait object to avoid generic parameters.
     network_transport: RefCell<Option<Box<dyn NetworkTransport>>>,
+
+    /// Directory for actor placement and location tracking.
+    ///
+    /// Used to determine which node should host an actor and to look up
+    /// actor locations for message routing.
+    directory: SharedDirectory,
 }
 
 impl MessageBus {
@@ -122,20 +132,23 @@ impl MessageBus {
     /// # Parameters
     ///
     /// - `node_id`: This node's identifier
+    /// - `directory`: Directory for actor placement and location tracking
     ///
     /// # Example
     ///
     /// ```rust,ignore
     /// let node_id = NodeId::from("127.0.0.1:8001")?;
-    /// let bus = MessageBus::new(node_id);
+    /// let directory = SimpleDirectory::new(cluster_nodes);
+    /// let bus = MessageBus::new(node_id, Rc::new(directory) as SharedDirectory);
     /// ```
-    pub fn new(node_id: NodeId) -> Self {
+    pub fn new(node_id: NodeId, directory: SharedDirectory) -> Self {
         Self {
             node_id,
             next_correlation_id: Cell::new(1),
             pending_requests: RefCell::new(HashMap::new()),
             actor_routers: RefCell::new(HashMap::new()),
             network_transport: RefCell::new(None),
+            directory,
         }
     }
 
@@ -693,10 +706,20 @@ mod tests {
         }
     }
 
+    fn create_test_directory() -> SharedDirectory {
+        use crate::directory::SimpleDirectory;
+        let nodes = vec![
+            NodeId::from("127.0.0.1:8001").unwrap(),
+            NodeId::from("127.0.0.1:8002").unwrap(),
+        ];
+        Rc::new(SimpleDirectory::new(nodes))
+    }
+
     #[test]
     fn test_message_bus_creation() {
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
-        let bus = MessageBus::new(node_id.clone());
+        let directory = create_test_directory();
+        let bus = MessageBus::new(node_id.clone(), directory);
 
         assert_eq!(bus.node_id(), &node_id);
         assert_eq!(bus.pending_count(), 0);
@@ -705,7 +728,8 @@ mod tests {
     #[test]
     fn test_correlation_id_generation() {
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
-        let bus = MessageBus::new(node_id);
+        let directory = create_test_directory();
+        let bus = MessageBus::new(node_id, directory);
 
         let id1 = bus.next_correlation_id();
         let id2 = bus.next_correlation_id();
@@ -719,7 +743,8 @@ mod tests {
     #[test]
     fn test_register_and_complete_request() {
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
-        let bus = MessageBus::new(node_id);
+        let directory = create_test_directory();
+        let bus = MessageBus::new(node_id, directory);
 
         let corr_id = bus.next_correlation_id();
         let request = create_test_message(corr_id);
@@ -743,7 +768,8 @@ mod tests {
     #[test]
     fn test_complete_unknown_correlation_id() {
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
-        let bus = MessageBus::new(node_id);
+        let directory = create_test_directory();
+        let bus = MessageBus::new(node_id, directory);
 
         let corr_id = CorrelationId::new(999);
         let response = create_test_message(corr_id);
@@ -756,7 +782,8 @@ mod tests {
     #[test]
     fn test_handle_timeout() {
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
-        let bus = MessageBus::new(node_id);
+        let directory = create_test_directory();
+        let bus = MessageBus::new(node_id, directory);
 
         let corr_id = bus.next_correlation_id();
         let request = create_test_message(corr_id);
@@ -778,7 +805,8 @@ mod tests {
     #[test]
     fn test_multiple_pending_requests() {
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
-        let bus = MessageBus::new(node_id);
+        let directory = create_test_directory();
+        let bus = MessageBus::new(node_id, directory);
 
         // Register 3 requests
         let mut receivers = vec![];

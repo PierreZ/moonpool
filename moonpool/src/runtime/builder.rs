@@ -1,6 +1,7 @@
 //! Actor runtime builder for configuration.
 
 use crate::actor::NodeId;
+use crate::directory::SimpleDirectory;
 use crate::error::ActorError;
 use crate::messaging::MessageBus;
 use crate::runtime::ActorRuntime;
@@ -14,10 +15,19 @@ use std::rc::Rc;
 ///
 /// ```rust,ignore
 /// use moonpool::ActorRuntime;
+/// use moonpool::directory::SimpleDirectory;
+///
+/// // Create directory with cluster nodes
+/// let nodes = vec![
+///     NodeId::from("127.0.0.1:5000")?,
+///     NodeId::from("127.0.0.1:5001")?,
+/// ];
+/// let directory = SimpleDirectory::new(nodes);
 ///
 /// let runtime = ActorRuntime::builder()
 ///     .namespace("prod")
 ///     .listen_addr("127.0.0.1:5000")
+///     .directory(directory)
 ///     .build()
 ///     .await?;
 /// ```
@@ -27,6 +37,9 @@ pub struct ActorRuntimeBuilder {
 
     /// Listening address for incoming actor messages (required).
     pub(crate) listen_addr: Option<SocketAddr>,
+
+    /// Directory for actor placement (required).
+    pub(crate) directory: Option<SimpleDirectory>,
 }
 
 impl ActorRuntimeBuilder {
@@ -35,6 +48,7 @@ impl ActorRuntimeBuilder {
         Self {
             namespace: None,
             listen_addr: None,
+            directory: None,
         }
     }
 
@@ -65,13 +79,35 @@ impl ActorRuntimeBuilder {
     /// builder.listen_addr("127.0.0.1:5000")
     /// builder.listen_addr("0.0.0.0:8001")
     /// ```
-    pub fn listen_addr(mut self, addr: impl AsRef<str>) -> Result<Self, ActorError> {
+    pub fn listen_addr(mut self, addr: impl AsRef<str>) -> std::result::Result<Self, ActorError> {
         let addr_str = addr.as_ref();
         let socket_addr: SocketAddr = addr_str.parse().map_err(|e| {
             ActorError::InvalidConfiguration(format!("Invalid listen_addr '{}': {}", addr_str, e))
         })?;
         self.listen_addr = Some(socket_addr);
         Ok(self)
+    }
+
+    /// Set the directory for actor placement.
+    ///
+    /// The directory tracks which nodes host which actors and provides
+    /// placement decisions for new activations.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use moonpool::directory::SimpleDirectory;
+    ///
+    /// let nodes = vec![
+    ///     NodeId::from("127.0.0.1:5000")?,
+    ///     NodeId::from("127.0.0.1:5001")?,
+    /// ];
+    /// let directory = SimpleDirectory::new(nodes);
+    /// builder.directory(directory)
+    /// ```
+    pub fn directory(mut self, directory: SimpleDirectory) -> Self {
+        self.directory = Some(directory);
+        self
     }
 
     /// Build the ActorRuntime.
@@ -81,7 +117,7 @@ impl ActorRuntimeBuilder {
     /// # Errors
     ///
     /// Returns error if required fields are missing or invalid.
-    pub async fn build(self) -> Result<ActorRuntime<TokioTaskProvider>, ActorError> {
+    pub async fn build(self) -> std::result::Result<ActorRuntime<TokioTaskProvider>, ActorError> {
         // Validate required fields
         let namespace = self
             .namespace
@@ -91,11 +127,15 @@ impl ActorRuntimeBuilder {
             ActorError::InvalidConfiguration("listen_addr is required".to_string())
         })?;
 
+        let directory = self.directory.ok_or_else(|| {
+            ActorError::InvalidConfiguration("directory is required".to_string())
+        })?;
+
         // Create NodeId from listen address
         let node_id = NodeId::from_socket_addr(listen_addr);
 
-        // Create MessageBus
-        let message_bus = Rc::new(MessageBus::new(node_id.clone()));
+        // Create MessageBus with directory
+        let message_bus = Rc::new(MessageBus::new(node_id.clone(), Rc::new(directory)));
 
         // Create TaskProvider (production uses Tokio)
         let task_provider = TokioTaskProvider;

@@ -61,7 +61,7 @@ use async_trait::async_trait;
 /// }
 /// ```
 #[async_trait(?Send)]
-pub trait Directory: Clone {
+pub trait Directory {
     /// Look up the current location of an actor.
     ///
     /// # Parameters
