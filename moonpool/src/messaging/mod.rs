@@ -1,5 +1,6 @@
 //! Message routing and correlation.
 
+pub mod activation;
 pub mod address;
 pub mod bus;
 pub mod correlation;
@@ -9,6 +10,7 @@ pub mod network;
 pub mod router;
 
 // Re-exports
+pub use activation::{ActivationRequest, ActivationResponse, ActivationResult};
 pub use address::ActorAddress;
 pub use bus::MessageBus;
 pub use correlation::{CallbackConfig, CallbackData, CallbackResponse, CorrelationIdFactory};
