@@ -77,7 +77,7 @@ impl<T: TaskProvider + 'static> ActorRuntime<T> {
     ///     .build()
     ///     .await?;
     /// ```
-    pub fn builder() -> ActorRuntimeBuilder {
+    pub fn builder() -> ActorRuntimeBuilder<(), (), ()> {
         ActorRuntimeBuilder::new()
     }
 
