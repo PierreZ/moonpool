@@ -219,8 +219,19 @@ impl CallbackData {
 
         // Send result through oneshot channel
         if let Some(sender) = self.sender.take() {
-            // Ignore error if receiver was dropped
-            let _ = sender.send(result);
+            // Send and log any errors (receiver might have been dropped)
+            match sender.send(result) {
+                Ok(()) => {
+                    tracing::debug!("CallbackData::complete: oneshot send succeeded");
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "CallbackData::complete: oneshot send failed - receiver dropped"
+                    );
+                }
+            }
+        } else {
+            tracing::warn!("CallbackData::complete: sender already taken (double completion?)");
         }
     }
 

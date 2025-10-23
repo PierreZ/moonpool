@@ -189,12 +189,11 @@ impl<A: Actor> ActorRef<A> {
         let sender_actor = ActorId::from_string("system::System/root")
             .map_err(|e| ActorError::ProcessingFailed(format!("Invalid sender ID: {}", e)))?;
 
-        // 5. Send request via MessageBus (it will handle correlation ID and routing)
-        // For now, we create the Message directly. In Phase 5, directory lookup will
-        // determine target_node and sender_node. For now, use placeholder nodes.
-        let target_node = crate::actor::NodeId::from("127.0.0.1:5000")
-            .map_err(|e| ActorError::ProcessingFailed(format!("Invalid node: {}", e)))?;
-        let sender_node = target_node.clone(); // Same node for local testing
+        // 5. Get sender's node ID from MessageBus
+        // Both target_node and sender_node initially set to sender (MessageBus routing will
+        // determine actual target location via directory lookup)
+        let sender_node = message_bus.node_id().clone();
+        let target_node = sender_node.clone(); // Will be updated by routing logic
 
         // Create request message with all required parameters
         let message = Message::request(
@@ -209,21 +208,53 @@ impl<A: Actor> ActorRef<A> {
         );
 
         // 6. Send request and get response receiver (returns mutated message with real correlation ID)
-        let (message, rx) = message_bus.send_request(message).await?;
+        let (message, mut rx) = message_bus.send_request(message).await?;
+        let correlation_id = message.correlation_id; // Save for logging
 
         // 7. Route the message to the actor (use the mutated message with correct correlation ID!)
         message_bus.route_message(message).await?;
 
-        // 8. Await response with timeout
-        let response_message = tokio::time::timeout(timeout, rx)
-            .await
-            .map_err(|_| ActorError::Timeout)?
-            .map_err(|_| {
-                ActorError::ProcessingFailed("Response channel closed unexpectedly".to_string())
-            })?;
+        // 8. Poll for response with busy loop and timeout (workaround for LocalSet/oneshot waker issue)
+        // The oneshot waker doesn't properly trigger in LocalSet, so we manually poll
+        tracing::info!(
+            "ActorRef: Starting busy loop for corr_id={}, timeout={:?}",
+            correlation_id,
+            timeout
+        );
+        let start = std::time::Instant::now();
+        let response_message = loop {
+            tokio::task::yield_now().await;
 
-        // 9. Check if response is error
-        let response_message = response_message?;
+            // Check timeout
+            if start.elapsed() >= timeout {
+                tracing::warn!(
+                    "ActorRef: Timeout waiting for response, corr_id={}",
+                    correlation_id
+                );
+                return Err(ActorError::Timeout);
+            }
+
+            match rx.try_recv() {
+                Ok(result) => {
+                    tracing::info!(
+                        "ActorRef: Received response in busy loop, corr_id={}",
+                        correlation_id
+                    );
+                    // result is Result<Message, ActorError>
+                    break result?;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    // Not ready yet, continue polling
+                    tracing::debug!("ActorRef: try_recv() returned Empty, continuing...");
+                    continue;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    return Err(ActorError::ProcessingFailed(
+                        "Response channel closed unexpectedly".to_string(),
+                    ));
+                }
+            }
+        };
 
         // 10. Deserialize response
         let response: Resp = serde_json::from_slice(&response_message.payload).map_err(|e| {
@@ -284,11 +315,11 @@ impl<A: Actor> ActorRef<A> {
         let sender_actor = ActorId::from_string("system::System/root")
             .map_err(|e| ActorError::ProcessingFailed(format!("Invalid sender ID: {}", e)))?;
 
-        // 5. For now, use placeholder nodes. In Phase 5, directory lookup will
-        // determine target_node and sender_node.
-        let target_node = crate::actor::NodeId::from("127.0.0.1:5000")
-            .map_err(|e| ActorError::ProcessingFailed(format!("Invalid node: {}", e)))?;
-        let sender_node = target_node.clone(); // Same node for local testing
+        // 5. Get sender's node ID from MessageBus
+        // Both target_node and sender_node initially set to sender (MessageBus routing will
+        // determine actual target location via directory lookup)
+        let sender_node = message_bus.node_id().clone();
+        let target_node = sender_node.clone(); // Will be updated by routing logic
 
         // 6. Create one-way message
         let message = Message::oneway(

@@ -286,6 +286,12 @@ where
                             } else {
                                 tracing::info!("Successfully routed network message");
                             }
+
+                            // Yield to scheduler to allow waiting tasks to run
+                            // This is critical in LocalSet: after completing a oneshot channel,
+                            // we must yield before polling next_message() to ensure the waiting
+                            // task gets scheduled and can observe the completion
+                            tokio::task::yield_now().await;
                         } else {
                             tracing::warn!("Failed to deserialize network message");
                         }
@@ -300,7 +306,13 @@ where
             listen_addr
         );
 
-        ActorRuntime::new(namespace, node_id, message_bus, directory_rc, self.task_provider)
+        ActorRuntime::new(
+            namespace,
+            node_id,
+            message_bus,
+            directory_rc,
+            self.task_provider,
+        )
     }
 }
 

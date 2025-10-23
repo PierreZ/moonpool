@@ -52,8 +52,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing with nice formatting
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with(tracing_subscriber::fmt::layer().with_target(false))
         .init();
@@ -141,20 +140,16 @@ async fn run_cluster(ports: Vec<u16>) -> std::result::Result<(), ActorError> {
     // Small delay for startup
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    // Use the first runtime to make actor calls
+    // Demonstrate virtual actor calls from first node
     let runtime = &runtimes[0];
-
-    // Demonstrate calling multiple virtual actors
     tracing::info!(
         "🎭 Demonstrating virtual actor calls from node {}...",
         runtime.node_id()
     );
     println!();
 
-    // Define actor keys - these will be placed by the shared directory
-    let actor_keys = ["alice", "bob", "charlie", "david", "eve"];
+    let actor_keys = ["alice", "bob", "charlie"];
 
-    // Call each actor using the extension trait
     for key in &actor_keys {
         let actor = runtime.get_actor::<HelloActor>("HelloActor", *key)?;
 
@@ -171,17 +166,10 @@ async fn run_cluster(ports: Vec<u16>) -> std::result::Result<(), ActorError> {
     }
 
     println!();
-    tracing::info!("✅ All actor calls completed");
-
-    // Call alice again to show it's still activated
-    println!();
-    tracing::info!("Calling alice again (already activated, no new instance)");
-    let alice = runtime.get_actor::<HelloActor>("HelloActor", "alice")?;
-    let greeting = alice.say_hello().await?;
-    println!("  📬 ALICE (2nd call): {}", greeting);
-
-    println!();
     tracing::info!("🎉 Example complete!");
+
+    // Give tasks time to clean up
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     Ok(())
 }
