@@ -59,23 +59,33 @@ impl NetworkConfiguration {
 
     /// Create a randomized network configuration for chaos testing
     pub fn random_for_seed() -> Self {
+        // Helper to create valid ranges where start < end
+        fn random_duration_range(
+            min_start: u64,
+            max_start: u64,
+            min_end: u64,
+            max_end: u64,
+        ) -> Range<Duration> {
+            let start = Duration::from_micros(sim_random_range(min_start..max_start));
+            let end = Duration::from_micros(sim_random_range(min_end..max_end));
+            // Ensure start <= end by swapping if needed
+            if start <= end { start..end } else { end..start }
+        }
+
         Self {
-            bind_latency: Duration::from_micros(sim_random_range(10..200))
-                ..Duration::from_micros(sim_random_range(50..300)),
-            accept_latency: Duration::from_micros(sim_random_range(1000..10000))
-                ..Duration::from_micros(sim_random_range(5000..15000)),
-            connect_latency: Duration::from_micros(sim_random_range(1000..50000))
-                ..Duration::from_micros(sim_random_range(10000..100000)),
-            read_latency: Duration::from_micros(sim_random_range(5..100))
-                ..Duration::from_micros(sim_random_range(50..200)),
-            write_latency: Duration::from_micros(sim_random_range(50..1000))
-                ..Duration::from_micros(sim_random_range(200..2000)),
+            bind_latency: random_duration_range(10, 200, 50, 300),
+            accept_latency: random_duration_range(1000, 10000, 5000, 15000),
+            connect_latency: random_duration_range(1000, 50000, 10000, 100000),
+            read_latency: random_duration_range(5, 100, 50, 200),
+            write_latency: random_duration_range(50, 1000, 200, 2000),
             clog_probability: sim_random_range(0..20) as f64 / 100.0, // 0-20% for clogging
-            clog_duration: Duration::from_micros(sim_random_range(50000..300000))
-                ..Duration::from_micros(sim_random_range(100000..500000)),
+            clog_duration: random_duration_range(50000, 300000, 100000, 500000),
             partition_probability: sim_random_range(0..15) as f64 / 100.0, // 0-15% (lower than faults)
-            partition_duration: Duration::from_millis(sim_random_range(100..1000))
-                ..Duration::from_millis(sim_random_range(500..3000)),
+            partition_duration: {
+                let start = Duration::from_millis(sim_random_range(100..1000));
+                let end = Duration::from_millis(sim_random_range(500..3000));
+                if start <= end { start..end } else { end..start }
+            },
         }
     }
 

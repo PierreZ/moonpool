@@ -42,6 +42,7 @@
             pkg-config
             openssl
             cargo-nextest
+            cargo-edit
 
             # Python and uv for spec-kit CLI
             python3

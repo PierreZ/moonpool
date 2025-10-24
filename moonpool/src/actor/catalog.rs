@@ -455,23 +455,26 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
             "🎭 Auto-activating actor (Orleans pattern)"
         );
 
-        let _guard = self.activation_lock.borrow_mut();
+        // Acquire lock and do double-check, but drop before async operations
+        {
+            let _guard = self.activation_lock.borrow_mut();
 
-        // DOUBLE-CHECK under lock (protect against TOCTOU race)
-        if let Some(activation) = self.activation_directory.find_target(&actor_id) {
-            tracing::debug!(
-                actor_id = %actor_id,
-                "Actor created by concurrent request (double-check)"
-            );
-            return Ok(activation); // Another task created while we waited
-        }
+            // DOUBLE-CHECK under lock (protect against TOCTOU race)
+            if let Some(activation) = self.activation_directory.find_target(&actor_id) {
+                tracing::debug!(
+                    actor_id = %actor_id,
+                    "Actor created by concurrent request (double-check)"
+                );
+                return Ok(activation); // Another task created while we waited
+            }
+        } // Drop lock before async operations
 
-        // Get required dependencies
+        // Get required dependencies (outside lock)
         let message_bus = self.message_bus.borrow().clone().ok_or_else(|| {
             ActorError::ProcessingFailed("MessageBus not set in ActorCatalog".to_string())
         })?;
 
-        // CREATE ACTOR VIA FACTORY (inside lock, so never discarded!)
+        // CREATE ACTOR VIA FACTORY (outside lock to avoid holding RefCell across await)
         let actor_instance = self.actor_factory.create(actor_id.clone()).await?;
 
         // CREATE CHANNELS (message channel + control channel)

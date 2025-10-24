@@ -2,7 +2,7 @@
 
 use super::RandomProvider;
 use crate::rng::{set_sim_seed, sim_random, sim_random_range};
-use rand::distributions::{Distribution, Standard, uniform::SampleUniform};
+use rand::distr::{Distribution, StandardUniform, uniform::SampleUniform};
 use std::ops::Range;
 
 /// Random provider for simulation that uses the thread-local deterministic RNG.
@@ -43,7 +43,7 @@ impl SimRandomProvider {
 impl RandomProvider for SimRandomProvider {
     fn random<T>(&self) -> T
     where
-        Standard: Distribution<T>,
+        StandardUniform: Distribution<T>,
     {
         sim_random()
     }

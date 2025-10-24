@@ -10,7 +10,7 @@ edition.workspace = true
 
 [dependencies]
 # Core async runtime
-tokio = { version = "1.40", features = ["rt", "macros", "time", "sync", "net", "io-util"] }
+tokio = { version = "1.48", features = ["rt", "macros", "time", "sync", "net", "io-util"] }
 
 # Async trait support (single-threaded)
 async-trait = "0.1"
@@ -23,13 +23,13 @@ serde_json = "1.0"
 thiserror = "2.0"
 
 # Bitflags for MessageFlags
-bitflags = "2.6"
+bitflags = "2.10"
 
 # Logging
 tracing = "0.1"
 
 # Random number generation (for placement algorithm)
-rand = "0.8"
+rand = "0.9"
 
 # Foundation framework (deterministic simulation)
 moonpool-foundation = { path = "../moonpool-foundation" }
@@ -41,7 +41,7 @@ tokio-test = "0.4"
 
 # Examples
 clap = { version = "4.5", features = ["derive"] }
-fake = { version = "3.0", features = ["derive"] }
+fake = { version = "4.4", features = ["derive"] }
 
 [[test]]
 name = "unit"

@@ -124,11 +124,14 @@ where
     ///
     /// - `Ok(())`: State successfully persisted
     /// - `Err(ActorError)`: Failed to persist state
+    #[allow(clippy::await_holding_refcell_ref)]
     pub async fn persist(&self) -> Result<(), ActorError> {
         if !self.is_dirty() {
             return Ok(()); // No changes to persist
         }
 
+        // Note: We serialize while holding the borrow, then await. This is safe
+        // in single-threaded context as no other code can access the RefCell.
         let state = self.state.borrow();
         let bytes = self.serializer.serialize(&*state).map_err(|e| {
             ActorError::ProcessingFailed(format!("State serialization failed: {}", e))
