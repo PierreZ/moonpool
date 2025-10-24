@@ -59,10 +59,10 @@ pub trait Actor: Sized {
     /// Persistent state type.
     ///
     /// For stateless actors, use `type State = ()`.
-    /// For stateful actors, use a custom type implementing `Serialize + DeserializeOwned`.
+    /// For stateful actors, use a custom type implementing `Serialize + DeserializeOwned + Clone + Default`.
     /// The framework will automatically load this state on activation and pass it
-    /// to `on_activate()`.
-    type State: Serialize + DeserializeOwned;
+    /// to `on_activate()` wrapped in `ActorState<T>`.
+    type State: Serialize + DeserializeOwned + Clone + Default;
 
     /// Actor type name for routing and catalog registration.
     ///
@@ -191,19 +191,16 @@ pub trait Actor: Sized {
     /// # Example
     ///
     /// ```rust,ignore
-    /// async fn on_activate(&mut self, state: Option<MyState>) -> Result<(), ActorError> {
-    ///     let initial_state = state.unwrap_or_default();
-    ///     self.state = ActorState::new_with_storage(
-    ///         initial_state,
-    ///         self.actor_id.clone(),
-    ///         storage,
-    ///         JsonSerializer,
-    ///     );
+    /// async fn on_activate(&mut self, state: ActorState<Self::State>) -> Result<(), ActorError> {
+    ///     self.state = state;
     ///     tracing::info!("Activated with balance: {}", self.state.get().balance);
     ///     Ok(())
     /// }
     /// ```
-    async fn on_activate(&mut self, state: Option<Self::State>) -> Result<(), ActorError>;
+    async fn on_activate(
+        &mut self,
+        state: crate::actor::ActorState<Self::State>,
+    ) -> Result<(), ActorError>;
 
     /// Called when actor is deactivated (after last message).
     ///

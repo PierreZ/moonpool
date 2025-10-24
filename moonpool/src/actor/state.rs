@@ -14,7 +14,7 @@ use std::rc::Rc;
 ///
 /// # Type Parameters
 ///
-/// - `T`: The state type (must implement Serialize + Deserialize)
+/// - `T`: The state type (must implement Serialize + Deserialize + Clone)
 ///
 /// # Example
 ///
@@ -50,6 +50,19 @@ where
     storage: Rc<dyn StorageProvider>,
     serializer: JsonSerializer,
     dirty: RefCell<bool>,
+}
+
+impl<T> std::fmt::Debug for ActorState<T>
+where
+    T: Serialize + for<'de> Deserialize<'de> + Clone + std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActorState")
+            .field("actor_id", &self.actor_id)
+            .field("state", &self.state)
+            .field("dirty", &self.dirty)
+            .finish()
+    }
 }
 
 impl<T> ActorState<T>

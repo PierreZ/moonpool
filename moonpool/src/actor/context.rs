@@ -12,11 +12,11 @@ use crate::actor::{
 /// Follows Orleans pattern where lifecycle operations are processed separately.
 #[derive(Debug)]
 pub enum LifecycleCommand<A: Actor> {
-    /// Activate the actor with optional persisted state.
+    /// Activate the actor with ActorState wrapper.
     ///
     /// The result is sent back via the oneshot channel.
     Activate {
-        state: Option<A::State>,
+        state: crate::actor::ActorState<A::State>,
         result_tx: oneshot::Sender<Result<(), ActorError>>,
     },
 
@@ -142,6 +142,12 @@ pub struct ActorContext<A: Actor> {
     /// Maps method names (e.g., "SayHelloRequest") to type-erased handler closures.
     /// Initialized once during ActorContext creation via `A::register_handlers()`.
     pub handlers: crate::actor::HandlerRegistry<A>,
+
+    /// Storage provider for actor state persistence.
+    ///
+    /// Actors can use this to persist state changes via `ActorState<T>` wrapper.
+    /// Shared across all actors in the same runtime.
+    pub storage: Rc<dyn crate::storage::StorageProvider>,
 }
 
 impl<A: Actor> ActorContext<A> {
@@ -164,12 +170,14 @@ impl<A: Actor> ActorContext<A> {
     ///
     /// - `message_sender`: Sender for actor messages (from message channel)
     /// - `control_sender`: Sender for lifecycle commands (from control channel)
+    /// - `storage`: Storage provider for actor state persistence
     pub fn new(
         actor_id: ActorId,
         node_id: NodeId,
         actor_instance: A,
         message_sender: mpsc::Sender<Message>,
         control_sender: mpsc::Sender<LifecycleCommand<A>>,
+        storage: Rc<dyn crate::storage::StorageProvider>,
     ) -> Self {
         let now = Instant::now();
 
@@ -197,6 +205,7 @@ impl<A: Actor> ActorContext<A> {
             last_error: RefCell::new(None),
             error_count: RefCell::new(0),
             handlers,
+            storage,
         }
     }
 
@@ -446,11 +455,14 @@ impl<A: Actor> ActorContext<A> {
     /// // Actor is now Valid and ready to process messages
     /// ```
     #[allow(clippy::await_holding_refcell_ref)]
-    pub async fn activate(&self, state: Option<A::State>) -> Result<(), crate::error::ActorError> {
+    pub async fn activate(
+        &self,
+        state: crate::actor::ActorState<A::State>,
+    ) -> Result<(), crate::error::ActorError> {
         // Transition to Activating
         self.set_state(ActivationState::Activating)?;
 
-        // Call actor's on_activate hook
+        // Call actor's on_activate hook with ActorState wrapper
         let result = {
             let mut actor = self.actor_instance.borrow_mut();
             actor.on_activate(state).await
@@ -474,6 +486,13 @@ impl<A: Actor> ActorContext<A> {
     ///
     /// Transitions through: Valid → Deactivating → Invalid
     ///
+    /// This method follows the Orleans pattern by:
+    /// 1. Calling on_deactivate() hook
+    /// 2. Unregistering from the local catalog (so next message creates fresh activation)
+    /// 3. Transitioning to Invalid state
+    ///
+    /// Note: Directory unregistration happens in DeactivationGuard when message loop exits.
+    ///
     /// # Parameters
     ///
     /// - `reason`: Why the actor is being deactivated
@@ -482,7 +501,7 @@ impl<A: Actor> ActorContext<A> {
     ///
     /// ```rust,ignore
     /// context.deactivate(DeactivationReason::IdleTimeout).await?;
-    /// catalog.remove(&actor_id)?;
+    /// // Actor is now Invalid and removed from catalog
     /// ```
     #[allow(clippy::await_holding_refcell_ref)]
     pub async fn deactivate(
@@ -499,9 +518,55 @@ impl<A: Actor> ActorContext<A> {
         };
 
         // Transition to Invalid regardless of result
+        // Note: Catalog unregistration happens in the message loop's Deactivate handler
+        // (see run_message_loop), following Orleans ActivationData.cs:1812 pattern
         self.set_state(ActivationState::Invalid)?;
 
         result
+    }
+}
+
+/// RAII guard that automatically removes actor from catalog and directory on drop.
+///
+/// When the message loop exits (either via deactivation or channel closure),
+/// this guard's `Drop` implementation ensures the actor is removed from:
+/// 1. Local ActorCatalog (so it can be reactivated with fresh channels)
+/// 2. Cluster-wide Directory (so placement can happen on another node)
+///
+/// This enables the Orleans pattern where actors automatically reactivate
+/// on the next message after deactivation.
+struct DeactivationGuard {
+    actor_id: ActorId,
+    message_bus: Rc<MessageBus>,
+}
+
+impl Drop for DeactivationGuard {
+    fn drop(&mut self) {
+        tracing::info!(
+            "DeactivationGuard: Cleaning up actor {} from catalog and directory",
+            self.actor_id
+        );
+
+        // Schedule async cleanup task
+        // We can't await in Drop, so we spawn a detached task
+        let actor_id = self.actor_id.clone();
+        let message_bus = self.message_bus.clone();
+
+        tokio::task::spawn_local(async move {
+            // Remove from directory first (cluster-wide)
+            if let Err(e) = message_bus.directory().unregister(&actor_id).await {
+                tracing::warn!(
+                    "Failed to unregister actor {} from directory: {}",
+                    actor_id,
+                    e
+                );
+            }
+
+            tracing::debug!(
+                "DeactivationGuard: Actor {} cleaned up and ready for reactivation",
+                actor_id
+            );
+        });
     }
 }
 
@@ -518,11 +583,21 @@ impl<A: Actor> ActorContext<A> {
 /// - `msg_rx`: Receiver for actor messages
 /// - `ctrl_rx`: Receiver for lifecycle commands
 /// - `message_bus`: MessageBus for sending responses
+/// - `catalog`: Reference to catalog for unregistration on deactivation
 ///
 /// # Loop Exit Conditions
 ///
 /// - `Deactivate` command received → exit after calling `on_deactivate()`
 /// - Both channels closed → exit (all senders dropped)
+///
+/// # Automatic Cleanup (Drop Guard)
+///
+/// When this function exits, the `DeactivationGuard` automatically:
+/// 1. Removes actor from cluster directory (allows fresh placement)
+/// 2. Logs cleanup for debugging
+///
+/// This enables Orleans-style reactivation: the next message to the same
+/// ActorId will trigger a fresh activation with new channels.
 ///
 /// # Orleans Pattern
 ///
@@ -535,15 +610,27 @@ impl<A: Actor> ActorContext<A> {
 /// - `loop` + `tokio::select!` on two channels
 /// - Explicit exit via `Deactivate` command
 /// - Channels provide implicit wake mechanism
+/// - RAII cleanup via `DeactivationGuard`
 #[allow(clippy::await_holding_refcell_ref)]
-pub async fn run_message_loop<A: Actor>(
+pub async fn run_message_loop<
+    A: Actor + 'static,
+    T: moonpool_foundation::TaskProvider + 'static,
+    F: crate::actor::ActorFactory<Actor = A> + 'static,
+>(
     context: Rc<ActorContext<A>>,
     mut msg_rx: mpsc::Receiver<Message>,
     mut ctrl_rx: mpsc::Receiver<LifecycleCommand<A>>,
     message_bus: Rc<MessageBus>,
+    catalog: Rc<crate::actor::ActorCatalog<A, T, F>>,
 ) {
     let actor_id = context.actor_id.clone();
     tracing::info!("Message loop started: {}", actor_id);
+
+    // Create guard that will clean up actor on drop (when loop exits)
+    let _cleanup_guard = DeactivationGuard {
+        actor_id: actor_id.clone(),
+        message_bus: message_bus.clone(),
+    };
 
     loop {
         tokio::select! {
@@ -636,6 +723,16 @@ pub async fn run_message_loop<A: Actor>(
                         tracing::info!("Deactivating: {} ({:?})", actor_id, reason);
 
                         let _ = context.deactivate(reason).await;
+
+                        // ORLEANS PATTERN: Unregister from catalog (ActivationData.cs:1812)
+                        // This removes the actor from the catalog's activation_directory,
+                        // allowing the next message to trigger fresh activation with new channels
+                        tracing::debug!(
+                            "Unregistering actor {} from catalog (Orleans pattern)",
+                            actor_id
+                        );
+                        let _ = catalog.remove(&actor_id);
+
                         break;  // Exit loop after deactivation
                     }
                 }

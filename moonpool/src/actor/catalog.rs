@@ -315,10 +315,25 @@ pub struct ActorCatalog<A: Actor, T: moonpool_foundation::TaskProvider, F: Actor
     /// instances. This enables dependency injection and ensures actor instances
     /// are never discarded (Orleans pattern).
     actor_factory: F,
+
+    /// Storage provider for actor state persistence.
+    ///
+    /// Used to load actor state during activation and save state during operation.
+    /// Stored as trait object to support any StorageProvider implementation.
+    storage: std::rc::Rc<dyn crate::storage::StorageProvider>,
+
+    /// Weak self-reference for passing to message loops.
+    ///
+    /// Set after wrapping in Rc via `init_self_ref()`. Required for message loops
+    /// to unregister from catalog on deactivation (Orleans pattern).
+    self_ref: RefCell<Option<std::rc::Weak<Self>>>,
 }
 
-impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<Actor = A>>
-    ActorCatalog<A, T, F>
+impl<
+    A: Actor + 'static,
+    T: moonpool_foundation::TaskProvider + 'static,
+    F: ActorFactory<Actor = A> + 'static,
+> ActorCatalog<A, T, F>
 {
     /// Create a new ActorCatalog for this node.
     ///
@@ -328,6 +343,7 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
     /// - `task_provider`: The TaskProvider for spawning message loop tasks
     /// - `actor_factory`: The ActorFactory for creating actor instances
     /// - `directory`: The Directory for cluster-wide actor placement (as trait object)
+    /// - `storage`: The StorageProvider for actor state persistence (as trait object)
     ///
     /// # Example
     ///
@@ -336,13 +352,15 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
     /// let task_provider = TokioTaskProvider;
     /// let factory = BankAccountFactory;
     /// let directory = Rc::new(SimpleDirectory::new(cluster_nodes)) as Rc<dyn Directory>;
-    /// let catalog = ActorCatalog::new(node_id, task_provider, factory, directory);
+    /// let storage = Rc::new(InMemoryStorage::new()) as Rc<dyn StorageProvider>;
+    /// let catalog = ActorCatalog::new(node_id, task_provider, factory, directory, storage);
     /// ```
     pub fn new(
         node_id: NodeId,
         task_provider: T,
         actor_factory: F,
         directory: std::rc::Rc<dyn crate::directory::Directory>,
+        storage: std::rc::Rc<dyn crate::storage::StorageProvider>,
     ) -> Self {
         Self {
             activation_directory: ActivationDirectory::new(),
@@ -352,7 +370,18 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
             directory,
             task_provider,
             actor_factory,
+            storage,
+            self_ref: RefCell::new(None),
         }
+    }
+
+    /// Initialize the self-reference after wrapping in Rc.
+    ///
+    /// This must be called after creating the catalog and wrapping it in Rc.
+    /// The weak reference is used to pass the catalog to message loops for
+    /// catalog unregistration on deactivation.
+    pub fn init_self_ref(self: &Rc<Self>) {
+        *self.self_ref.borrow_mut() = Some(Rc::downgrade(self));
     }
 
     /// Set the MessageBus reference for this catalog.
@@ -490,6 +519,7 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
             actor_instance,
             msg_tx,
             ctrl_tx,
+            self.storage.clone(),
         ));
 
         // Set MessageBus reference on context
@@ -499,9 +529,22 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
         let ctx_clone = context.clone();
         let bus_clone = message_bus.clone();
 
+        // Get catalog Rc for message loop (upgrade weak reference)
+        let catalog_ref = self
+            .self_ref
+            .borrow()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or_else(|| {
+                ActorError::ProcessingFailed(
+                    "Catalog self-reference not initialized (call init_self_ref() first)"
+                        .to_string(),
+                )
+            })?;
+
         let task_name = format!("actor_loop_{}", actor_id);
         let task_handle = self.task_provider.spawn_task(&task_name, async move {
-            crate::actor::run_message_loop(ctx_clone, msg_rx, ctrl_rx, bus_clone).await
+            crate::actor::run_message_loop(ctx_clone, msg_rx, ctrl_rx, bus_clone, catalog_ref).await
         });
 
         // Store task handle in context
@@ -594,11 +637,44 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
             }
         }
 
+        // LOAD STATE FROM STORAGE (before activation)
+        // Try to load persisted state for this actor
+        let loaded_state_bytes = self.storage.load_state(&actor_id).await.map_err(|e| {
+            ActorError::ProcessingFailed(format!("Failed to load actor state: {}", e))
+        })?;
+
+        // CREATE ACTOR STATE WRAPPER (deserialize if exists, or use default)
+        let actor_state = if let Some(bytes) = loaded_state_bytes {
+            use crate::storage::JsonSerializer;
+            use crate::storage::StateSerializer;
+            let serializer = JsonSerializer::new();
+            let state: A::State = serializer.deserialize(&bytes).map_err(|e| {
+                ActorError::ProcessingFailed(format!("Failed to deserialize actor state: {}", e))
+            })?;
+
+            tracing::debug!(
+                actor_id = %actor_id,
+                "Loaded persisted state from storage"
+            );
+
+            // Create ActorState with loaded state
+            crate::actor::ActorState::new(actor_id.clone(), state, self.storage.clone())
+        } else {
+            tracing::debug!(
+                actor_id = %actor_id,
+                "No persisted state found, will use default"
+            );
+
+            // Create ActorState with default state
+            let default_state = Default::default();
+            crate::actor::ActorState::new(actor_id.clone(), default_state, self.storage.clone())
+        };
+
         // SEND ACTIVATION COMMAND (auto-activate Orleans pattern)
         // Create oneshot channel for activation result
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let activate_cmd = crate::actor::LifecycleCommand::Activate {
-            state: None,
+            state: actor_state,
             result_tx,
         };
 
@@ -694,8 +770,11 @@ use crate::messaging::{ActorRouter, Message};
 use async_trait::async_trait;
 
 #[async_trait(?Send)]
-impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<Actor = A>>
-    ActorRouter for ActorCatalog<A, T, F>
+impl<
+    A: Actor + 'static,
+    T: moonpool_foundation::TaskProvider + 'static,
+    F: ActorFactory<Actor = A> + 'static,
+> ActorRouter for ActorCatalog<A, T, F>
 {
     /// Route a message to the appropriate local actor with auto-activation.
     ///
@@ -766,7 +845,7 @@ mod tests {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct DummyActor;
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
     struct DummyState;
 
     #[async_trait(?Send)]
@@ -780,7 +859,7 @@ mod tests {
 
         async fn on_activate(
             &mut self,
-            _state: Option<Self::State>,
+            _state: crate::actor::ActorState<Self::State>,
         ) -> Result<(), crate::error::ActorError> {
             Ok(())
         }
@@ -822,6 +901,11 @@ mod tests {
         SimplePlacement::new(nodes)
     }
 
+    fn create_test_storage() -> std::rc::Rc<dyn crate::storage::StorageProvider> {
+        use crate::storage::InMemoryStorage;
+        std::rc::Rc::new(InMemoryStorage::new())
+    }
+
     #[test]
     fn test_activation_directory_basic_operations() {
         use tokio::sync::mpsc;
@@ -837,12 +921,14 @@ mod tests {
         let (msg_tx, _msg_rx) = mpsc::channel(128);
         let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
 
+        let storage = create_test_storage();
         let context = Rc::new(ActorContext::new(
             actor_id.clone(),
             node_id.clone(),
             DummyActor,
             msg_tx,
             ctrl_tx,
+            storage,
         ));
         directory.record_new_target(context.clone());
 
@@ -875,12 +961,14 @@ mod tests {
         let (msg_tx2, _) = mpsc::channel(128);
         let (ctrl_tx2, _) = mpsc::channel(8);
 
+        let storage = create_test_storage();
         let prod_context = Rc::new(ActorContext::new(
             prod_actor.clone(),
             node_id.clone(),
             DummyActor,
             msg_tx1,
             ctrl_tx1,
+            storage.clone(),
         ));
         let staging_context = Rc::new(ActorContext::new(
             staging_actor.clone(),
@@ -888,6 +976,7 @@ mod tests {
             DummyActor,
             msg_tx2,
             ctrl_tx2,
+            storage.clone(),
         ));
 
         directory.record_new_target(prod_context);
@@ -913,6 +1002,7 @@ mod tests {
             DummyActor,
             msg_tx3,
             ctrl_tx3,
+            storage.clone(),
         ));
         let account_context = Rc::new(ActorContext::new(
             account_actor.clone(),
@@ -920,6 +1010,7 @@ mod tests {
             DummyActor,
             msg_tx4,
             ctrl_tx4,
+            storage,
         ));
 
         directory.record_new_target(counter_context);
@@ -942,8 +1033,17 @@ mod tests {
             let task_provider = TokioTaskProvider;
             let factory = DummyFactory;
             let directory = create_test_directory();
-            let catalog =
-                ActorCatalog::new(node_id.clone(), task_provider, factory, directory.clone());
+            let storage = create_test_storage();
+            let catalog = Rc::new(ActorCatalog::new(
+                node_id.clone(),
+                task_provider,
+                factory,
+                directory.clone(),
+                storage,
+            ));
+
+            // Initialize self-reference
+            catalog.init_self_ref();
 
             // Set MessageBus (required for spawning message loop task)
             let placement = create_test_placement();
@@ -1001,8 +1101,17 @@ mod tests {
             let task_provider = TokioTaskProvider;
             let factory = DummyFactory;
             let directory = create_test_directory();
-            let catalog =
-                ActorCatalog::new(node_id.clone(), task_provider, factory, directory.clone());
+            let storage = create_test_storage();
+            let catalog = Rc::new(ActorCatalog::new(
+                node_id.clone(),
+                task_provider,
+                factory,
+                directory.clone(),
+                storage,
+            ));
+
+            // Initialize self-reference
+            catalog.init_self_ref();
 
             // Set MessageBus (required for spawning message loop task)
             let placement = create_test_placement();
@@ -1044,8 +1153,17 @@ mod tests {
             let task_provider = TokioTaskProvider;
             let factory = DummyFactory;
             let directory = create_test_directory();
-            let catalog =
-                ActorCatalog::new(node_id.clone(), task_provider, factory, directory.clone());
+            let storage = create_test_storage();
+            let catalog = Rc::new(ActorCatalog::new(
+                node_id.clone(),
+                task_provider,
+                factory,
+                directory.clone(),
+                storage,
+            ));
+
+            // Initialize self-reference
+            catalog.init_self_ref();
 
             // Set MessageBus (required for spawning message loop task)
             let placement = create_test_placement();

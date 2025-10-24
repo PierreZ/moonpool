@@ -5,6 +5,7 @@
 //! - Automatic actor activation
 //! - Location-transparent messaging
 
+use moonpool::actor::ActorState;
 use moonpool::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -43,7 +44,7 @@ impl Actor for HelloActor {
         PlacementHint::LeastLoaded
     }
 
-    async fn on_activate(&mut self, _state: Option<()>) -> std::result::Result<(), ActorError> {
+    async fn on_activate(&mut self, _state: ActorState<()>) -> std::result::Result<(), ActorError> {
         tracing::info!(
             actor_id = %self.actor_id,
             key = self.key(),

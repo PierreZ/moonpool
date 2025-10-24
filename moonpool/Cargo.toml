@@ -50,3 +50,7 @@ path = "tests/unit/mod.rs"
 [[example]]
 name = "hello_actor"
 path = "examples/hello_actor_example/main.rs"
+
+[[example]]
+name = "bank_account"
+path = "examples/bank_account_example/main.rs"

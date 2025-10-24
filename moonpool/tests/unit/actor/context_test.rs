@@ -10,8 +10,12 @@
 
 use async_trait::async_trait;
 use moonpool::actor::traits::Actor;
-use moonpool::actor::{ActivationState, ActorContext, ActorId, DeactivationReason, NodeId};
+use moonpool::actor::{
+    ActivationState, ActorContext, ActorId, ActorState, DeactivationReason, NodeId,
+};
 use moonpool::error::ActorError;
+use moonpool::storage::InMemoryStorage;
+use std::rc::Rc;
 
 /// Simple test actor for context lifecycle testing
 struct TestActor {
@@ -39,7 +43,7 @@ impl Actor for TestActor {
         &self.actor_id
     }
 
-    async fn on_activate(&mut self, _state: Option<()>) -> Result<(), ActorError> {
+    async fn on_activate(&mut self, _state: ActorState<()>) -> Result<(), ActorError> {
         self.activation_count += 1;
         Ok(())
     }
@@ -60,8 +64,16 @@ fn test_context_creation() {
     use tokio::sync::mpsc;
     let (msg_tx, _msg_rx) = mpsc::channel(128);
     let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+    let storage = Rc::new(InMemoryStorage::new());
 
-    let context = ActorContext::new(actor_id.clone(), node_id.clone(), actor, msg_tx, ctrl_tx);
+    let context = ActorContext::new(
+        actor_id.clone(),
+        node_id.clone(),
+        actor,
+        msg_tx,
+        ctrl_tx,
+        storage,
+    );
 
     // Verify initial state
     assert_eq!(context.actor_id, actor_id);
@@ -79,8 +91,9 @@ fn test_state_transition_to_activating() {
     use tokio::sync::mpsc;
     let (msg_tx, _msg_rx) = mpsc::channel(128);
     let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+    let storage = Rc::new(InMemoryStorage::new());
 
-    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx);
+    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx, storage);
 
     // Transition to Activating
     context.set_state(ActivationState::Activating).unwrap();
@@ -97,8 +110,9 @@ async fn test_activation_lifecycle() {
     use tokio::sync::mpsc;
     let (msg_tx, _msg_rx) = mpsc::channel(128);
     let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+    let storage = Rc::new(InMemoryStorage::new());
 
-    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx);
+    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx, storage);
 
     // Initial state
     assert_eq!(context.get_state(), ActivationState::Creating);
@@ -106,10 +120,11 @@ async fn test_activation_lifecycle() {
     // Transition to Activating
     context.set_state(ActivationState::Activating).unwrap();
 
-    // Call on_activate
+    // Call on_activate with ActorState
     {
+        let actor_state = ActorState::new(context.actor_id.clone(), (), context.storage.clone());
         let mut actor = context.actor_instance.borrow_mut();
-        actor.on_activate(None).await.unwrap();
+        actor.on_activate(actor_state).await.unwrap();
     }
 
     // Transition to Valid
@@ -133,14 +148,16 @@ async fn test_deactivation_lifecycle() {
     use tokio::sync::mpsc;
     let (msg_tx, _msg_rx) = mpsc::channel(128);
     let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+    let storage = Rc::new(InMemoryStorage::new());
 
-    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx);
+    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx, storage);
 
     // Setup: activate the actor
     context.set_state(ActivationState::Activating).unwrap();
     {
+        let actor_state = ActorState::new(context.actor_id.clone(), (), context.storage.clone());
         let mut actor = context.actor_instance.borrow_mut();
-        actor.on_activate(None).await.unwrap();
+        actor.on_activate(actor_state).await.unwrap();
     }
     context.set_state(ActivationState::Valid).unwrap();
 
@@ -209,8 +226,9 @@ fn test_multiple_state_transitions() {
     use tokio::sync::mpsc;
     let (msg_tx, _msg_rx) = mpsc::channel(128);
     let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+    let storage = Rc::new(InMemoryStorage::new());
 
-    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx);
+    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx, storage);
 
     // Valid state transition sequence
     assert_eq!(context.get_state(), ActivationState::Creating);
@@ -238,8 +256,9 @@ async fn test_activation_time_tracking() {
     use tokio::sync::mpsc;
     let (msg_tx, _msg_rx) = mpsc::channel(128);
     let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+    let storage = Rc::new(InMemoryStorage::new());
 
-    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx);
+    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx, storage);
 
     let activation_time = context.activation_time;
 

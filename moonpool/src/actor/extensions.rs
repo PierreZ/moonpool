@@ -156,7 +156,10 @@ mod tests {
             &self.actor_id
         }
 
-        async fn on_activate(&mut self, _state: Option<Self::State>) -> Result<(), ActorError> {
+        async fn on_activate(
+            &mut self,
+            _state: crate::actor::ActorState<Self::State>,
+        ) -> Result<(), ActorError> {
             Ok(())
         }
 

@@ -63,6 +63,9 @@ pub struct ActorRuntimeBuilder<N, T, TP> {
     /// If None, a new directory will be created (single-node mode).
     pub(crate) shared_directory: Option<Rc<dyn crate::directory::Directory>>,
 
+    /// Storage provider for actor state persistence (required).
+    pub(crate) storage: Option<Rc<dyn crate::storage::StorageProvider>>,
+
     /// Network provider (required).
     pub(crate) network_provider: N,
 
@@ -84,6 +87,7 @@ impl ActorRuntimeBuilder<(), (), ()> {
             listen_addr: None,
             cluster_nodes: None,
             shared_directory: None,
+            storage: None,
             network_provider: (),
             time_provider: (),
             task_provider: (),
@@ -131,6 +135,7 @@ impl<N, T, TP> ActorRuntimeBuilder<N, T, TP> {
             listen_addr: self.listen_addr,
             cluster_nodes: self.cluster_nodes,
             shared_directory: self.shared_directory,
+            storage: self.storage,
             network_provider,
             time_provider,
             task_provider,
@@ -234,6 +239,25 @@ impl<N, T, TP> ActorRuntimeBuilder<N, T, TP> {
     /// ```
     pub fn shared_directory(mut self, directory: Rc<dyn crate::directory::Directory>) -> Self {
         self.shared_directory = Some(directory);
+        self
+    }
+
+    /// Set the storage provider for actor state persistence.
+    ///
+    /// Required for actors with persistent state. All actors in this runtime
+    /// will use this storage provider.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use moonpool::storage::InMemoryStorage;
+    /// use std::rc::Rc;
+    ///
+    /// let storage = Rc::new(InMemoryStorage::new()) as Rc<dyn StorageProvider>;
+    /// builder.with_storage(storage)
+    /// ```
+    pub fn with_storage(mut self, storage: Rc<dyn crate::storage::StorageProvider>) -> Self {
+        self.storage = Some(storage);
         self
     }
 }
@@ -383,12 +407,18 @@ where
             listen_addr
         );
 
+        // Validate storage provider
+        let storage = self
+            .storage
+            .ok_or_else(|| ActorError::InvalidConfiguration("storage is required".to_string()))?;
+
         ActorRuntime::new(
             namespace,
             node_id,
             message_bus,
             directory_rc,
             self.task_provider,
+            storage,
         )
     }
 }

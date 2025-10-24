@@ -42,6 +42,7 @@ use fake::faker::name::en::FirstName;
 use hello_actor::{HelloActor, HelloActorFactory, HelloActorRef};
 use moonpool::directory::{Directory, SimpleDirectory};
 use moonpool::prelude::*;
+use moonpool::storage::{InMemoryStorage, StorageProvider};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use std::rc::Rc;
@@ -134,23 +135,25 @@ async fn run_cluster(
 
     tracing::info!(
         cluster_size = cluster_nodes.len(),
-        "Creating shared directory for all nodes"
+        "Creating shared directory and storage for all nodes"
     );
 
     // Create shared directory for multi-node scenario
     // All runtimes will share the same directory so they can see each other's actors
     let shared_directory: Rc<dyn Directory> = Rc::new(SimpleDirectory::new());
 
+    // Create shared storage (even though HelloActor has no state, storage is required)
+    let shared_storage: Rc<dyn StorageProvider> = Rc::new(InMemoryStorage::new());
+
     // Create a runtime for each port
     let mut runtimes = Vec::new();
     for port in &ports {
-        tracing::info!(port = port, "Creating ActorRuntime");
-
         let runtime = ActorRuntime::<moonpool_foundation::TokioTaskProvider>::builder()
             .namespace("example")
             .listen_addr(format!("127.0.0.1:{}", port))?
             .cluster_nodes(cluster_nodes.clone())
             .shared_directory(shared_directory.clone())
+            .with_storage(shared_storage.clone())
             .with_providers(
                 moonpool_foundation::TokioNetworkProvider,
                 moonpool_foundation::TokioTimeProvider,
@@ -159,15 +162,18 @@ async fn run_cluster(
             .build()
             .await?;
 
+        // Instrument all subsequent logs with node_id (one-liner!)
+        let _span = tracing::info_span!("node", node_id = %runtime.node_id()).entered();
+
         tracing::info!(
-            node_id = %runtime.node_id(),
             namespace = runtime.namespace(),
+            port = port,
             "✅ ActorRuntime started"
         );
 
         // Register HelloActor with factory on each runtime
         runtime.register_actor::<HelloActor, _>(HelloActorFactory)?;
-        tracing::info!(node_id = %runtime.node_id(), "✅ HelloActor registered");
+        tracing::info!("✅ HelloActor registered");
 
         runtimes.push(runtime);
     }

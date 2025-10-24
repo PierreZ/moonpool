@@ -60,6 +60,12 @@ pub struct ActorRuntime<T: TaskProvider> {
     /// Task provider for spawning actor message loops.
     task_provider: T,
 
+    /// Storage provider for actor state persistence.
+    ///
+    /// All actor catalogs share this storage provider.
+    /// Stored as trait object to support any StorageProvider implementation.
+    storage: Rc<dyn crate::storage::StorageProvider>,
+
     /// Router registry mapping actor type names to their catalogs.
     ///
     /// Maps actor type name (e.g., "BankAccount") → ActorCatalog<A, T, F>
@@ -93,6 +99,7 @@ impl<T: TaskProvider + 'static> ActorRuntime<T> {
         message_bus: Rc<MessageBus>,
         directory: Rc<dyn Directory>,
         task_provider: T,
+        storage: Rc<dyn crate::storage::StorageProvider>,
     ) -> std::result::Result<Self, ActorError> {
         Ok(Self {
             namespace,
@@ -100,6 +107,7 @@ impl<T: TaskProvider + 'static> ActorRuntime<T> {
             message_bus,
             directory,
             task_provider,
+            storage,
             routers: RefCell::new(HashMap::new()),
         })
     }
@@ -165,14 +173,18 @@ impl<T: TaskProvider + 'static> ActorRuntime<T> {
             )));
         }
 
-        // Create catalog for this actor type with shared directory
-        // Use Rc::clone to share the directory reference
+        // Create catalog for this actor type with shared directory and storage
+        // Use Rc::clone to share the directory and storage references
         let catalog = Rc::new(ActorCatalog::new(
             self.node_id.clone(),
             self.task_provider.clone(),
             factory,
             self.directory.clone(), // Clone the Rc<dyn Directory>
+            self.storage.clone(),   // Clone the Rc<dyn StorageProvider>
         ));
+
+        // Initialize self-reference for message loop catalog access
+        catalog.init_self_ref();
 
         // Set message bus on catalog
         catalog.set_message_bus(self.message_bus.clone());
