@@ -744,6 +744,11 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
 
         Ok(())
     }
+
+    fn placement_hint(&self) -> crate::actor::PlacementHint {
+        // Delegate to the Actor's placement_hint() method
+        A::placement_hint()
+    }
 }
 
 #[cfg(test)]

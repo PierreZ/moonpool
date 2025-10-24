@@ -395,7 +395,7 @@ impl MessageBus {
                 message.method_name
             );
 
-            if let Some(ref mut transport) = *self.network_transport.borrow_mut() {
+            if let Some(ref transport) = *self.network_transport.borrow() {
                 // Serialize message to JSON
                 let payload = serde_json::to_vec(&message).map_err(|e| {
                     ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
@@ -443,7 +443,7 @@ impl MessageBus {
     /// bus.send_response(response).await?;
     /// ```
     pub async fn send_response(&self, message: Message) -> Result<(), ActorError> {
-        tracing::info!(
+        tracing::debug!(
             node_id = %self.node_id,
             "send_response: corr_id={}, target={}, target_node={}",
             message.correlation_id,
@@ -454,7 +454,7 @@ impl MessageBus {
         // Determine if response is for local or remote requester
         if message.target_node == self.node_id {
             // Local callback completion
-            tracing::info!(
+            tracing::debug!(
                 node_id = %self.node_id,
                 "send_response (LOCAL): corr_id={}, completing pending request",
                 message.correlation_id
@@ -462,14 +462,14 @@ impl MessageBus {
             self.complete_pending_request(message.correlation_id, Ok(message))?;
         } else {
             // Remote response - send over network
-            tracing::info!(
+            tracing::debug!(
                 node_id = %self.node_id,
                 "send_response (REMOTE): corr_id={}, target_node={}, sending over network",
                 message.correlation_id,
                 message.target_node
             );
 
-            if let Some(ref mut transport) = *self.network_transport.borrow_mut() {
+            if let Some(ref transport) = *self.network_transport.borrow() {
                 // Serialize message to JSON
                 let payload = serde_json::to_vec(&message).map_err(|e| {
                     ActorError::ProcessingFailed(format!("Failed to serialize response: {}", e))
@@ -477,13 +477,13 @@ impl MessageBus {
 
                 // Send over network using network transport
                 let destination = message.target_node.as_str();
-                tracing::info!(
+                tracing::debug!(
                     node_id = %self.node_id,
                     "send_response: Sending to destination={}",
                     destination
                 );
                 transport.send(destination, payload).await?;
-                tracing::info!(
+                tracing::debug!(
                     node_id = %self.node_id,
                     "send_response: Successfully sent response over network"
                 );
@@ -541,7 +541,7 @@ impl MessageBus {
                 message.target_node
             );
 
-            if let Some(ref mut transport) = *self.network_transport.borrow_mut() {
+            if let Some(ref transport) = *self.network_transport.borrow() {
                 // Serialize message to JSON
                 let payload = serde_json::to_vec(&message).map_err(|e| {
                     ActorError::ProcessingFailed(format!("Failed to serialize oneway: {}", e))
@@ -585,8 +585,8 @@ impl MessageBus {
     /// }
     /// ```
     pub async fn poll_network(&self) -> Result<bool, ActorError> {
-        if let Some(ref mut transport) = *self.network_transport.borrow_mut() {
-            if let Some(payload) = transport.poll_receive() {
+        if let Some(ref mut transport) = *self.network_transport.borrow_mut()
+            && let Some(payload) = transport.poll_receive() {
                 // Deserialize the message from payload
                 let message: Message = serde_json::from_slice(&payload).map_err(|e| {
                     ActorError::ProcessingFailed(format!("Failed to deserialize message: {}", e))
@@ -604,7 +604,6 @@ impl MessageBus {
                 self.route_message(message).await?;
                 return Ok(true);
             }
-        }
         Ok(false)
     }
 
@@ -642,10 +641,11 @@ impl MessageBus {
 
     /// Route request/oneway message to target actor.
     ///
-    /// This implements location-transparent routing:
+    /// This implements location-transparent routing with placement hints:
     /// 1. Check directory for actor location
     /// 2. If on remote node, forward message there
-    /// 3. If not found or local, route to local catalog (which may activate)
+    /// 3. If not found, consult actor's placement hint to decide where to activate
+    /// 4. Either activate locally or forward to chosen node
     ///
     /// # Parameters
     ///
@@ -679,12 +679,13 @@ impl MessageBus {
                 // Update target_node to remote location
                 message.target_node = node_id.clone();
 
-                // Send over network
-                if let Some(ref mut transport) = *self.network_transport.borrow_mut() {
+                // Send over network (now non-blocking)
+                if let Some(ref transport) = *self.network_transport.borrow() {
                     let payload = serde_json::to_vec(&message).map_err(|e| {
                         ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
                     })?;
 
+                    // Send returns immediately (spawns background task)
                     transport.send(node_id.as_str(), payload).await?;
                     return Ok(());
                 } else {
@@ -702,14 +703,71 @@ impl MessageBus {
                 );
             }
             Ok(None) => {
-                // Actor NOT in directory - ORLEANS PATTERN: Always activate locally!
-                // The catalog will optimistically activate and register with directory.
-                // If another node already registered (race), catalog handles it.
+                // Actor NOT in directory - Consult placement hint
+                let actor_type = message.target_actor.actor_type();
+                let router = self
+                    .actor_routers
+                    .borrow()
+                    .get(actor_type)
+                    .cloned()
+                    .ok_or_else(|| {
+                        ActorError::ProcessingFailed(format!(
+                            "No router registered for actor type '{}'",
+                            actor_type
+                        ))
+                    })?;
+
+                // Get placement hint from actor type
+                let hint = router.placement_hint();
+
+                // Ask directory to choose placement node based on hint
+                let chosen_node = self
+                    .directory
+                    .choose_placement_node(hint, &self.node_id)
+                    .await?;
+
                 tracing::debug!(
                     node_id = %self.node_id,
-                    "Actor {} not in directory, will activate locally (Orleans optimistic activation)",
+                    chosen_node = %chosen_node,
+                    hint = ?hint,
+                    "Actor {} not in directory, placement decision made",
                     message.target_actor
                 );
+
+                // If chosen node is remote, forward the message there
+                if chosen_node != self.node_id {
+                    tracing::debug!(
+                        node_id = %self.node_id,
+                        chosen_node = %chosen_node,
+                        "Forwarding activation to remote node"
+                    );
+
+                    // Update target_node to chosen location
+                    message.target_node = chosen_node.clone();
+
+                    // Send over network
+                    if let Some(ref transport) = *self.network_transport.borrow() {
+                        let payload = serde_json::to_vec(&message).map_err(|e| {
+                            ActorError::ProcessingFailed(format!(
+                                "Failed to serialize message: {}",
+                                e
+                            ))
+                        })?;
+
+                        transport.send(chosen_node.as_str(), payload).await?;
+                        return Ok(());
+                    } else {
+                        return Err(ActorError::ProcessingFailed(
+                            "Network not configured for remote activation".to_string(),
+                        ));
+                    }
+                } else {
+                    // Activate locally
+                    tracing::debug!(
+                        node_id = %self.node_id,
+                        "Will activate locally per placement decision"
+                    );
+                }
             }
             Err(e) => {
                 tracing::warn!(
@@ -752,12 +810,23 @@ impl MessageBus {
     /// - `Err(ActorError::UnknownCorrelationId)`: No pending request for this correlation ID
     async fn route_to_callback(&self, message: Message) -> Result<(), ActorError> {
         let correlation_id = message.correlation_id;
-        tracing::info!(
+        tracing::debug!(
             node_id = %self.node_id,
-            "route_to_callback: corr_id={}, pending_count={}",
+            "🔍 route_to_callback: ENTRY corr_id={}, pending_count={}",
             correlation_id,
             self.pending_count()
         );
+
+        // Log all pending correlation IDs for debugging
+        {
+            let pending = self.pending_requests.borrow();
+            let pending_ids: Vec<_> = pending.keys().map(|k| k.as_u64()).collect();
+            tracing::debug!(
+                node_id = %self.node_id,
+                "🔍 route_to_callback: Pending correlation IDs: {:?}",
+                pending_ids
+            );
+        }
 
         // Extract the callback BEFORE completing it
         // This is critical: we need to release the RefCell borrow before calling complete()
@@ -765,20 +834,33 @@ impl MessageBus {
             .pending_requests
             .borrow_mut()
             .remove(&correlation_id)
-            .ok_or(ActorError::UnknownCorrelationId)?;
+            .ok_or_else(|| {
+                tracing::error!(
+                    node_id = %self.node_id,
+                    "🔍 route_to_callback: ERROR - Unknown correlation ID {}",
+                    correlation_id
+                );
+                ActorError::UnknownCorrelationId
+            })?;
 
-        tracing::info!(
+        tracing::debug!(
             node_id = %self.node_id,
-            "route_to_callback: Successfully extracted pending request corr_id={}",
+            "🔍 route_to_callback: Successfully extracted pending request corr_id={}",
             correlation_id
         );
 
         // Complete the callback directly (spawning doesn't help with LocalSet waker issues)
+        tracing::debug!(
+            node_id = %self.node_id,
+            "🔍 route_to_callback: About to call callback.complete() for corr_id={}",
+            correlation_id
+        );
+
         callback.complete(Ok(message));
 
-        tracing::info!(
+        tracing::debug!(
             node_id = %self.node_id,
-            "route_to_callback: Successfully completed pending request corr_id={}",
+            "🔍 route_to_callback: Successfully completed pending request corr_id={}, EXIT",
             correlation_id
         );
 

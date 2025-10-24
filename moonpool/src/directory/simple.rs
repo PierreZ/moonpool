@@ -3,7 +3,7 @@
 //! This module provides a basic in-memory directory for actor location tracking
 //! in a single-threaded environment.
 
-use crate::actor::{ActorId, NodeId};
+use crate::actor::{ActorId, NodeId, PlacementHint};
 use crate::directory::{Directory, PlacementDecision};
 use crate::error::DirectoryError;
 use async_trait::async_trait;
@@ -187,48 +187,70 @@ impl SimpleDirectory {
         }
     }
 
-    /// Two-random-choices placement algorithm.
+    /// Choose a random node from the cluster.
     ///
-    /// Algorithm:
-    /// 1. Pick two random nodes from cluster
-    /// 2. Return the less-loaded one
-    ///
-    /// This provides near-optimal load balancing with minimal overhead.
-    /// See research.md for analysis.
-    fn choose_placement_node_internal(&self) -> Result<NodeId, DirectoryError> {
+    /// Uses a simple random selection (uniform distribution).
+    fn choose_random_node(&self) -> Result<NodeId, DirectoryError> {
         let state = self.state.borrow();
 
         if state.cluster_nodes.is_empty() {
             return Err(DirectoryError::Unavailable);
         }
 
-        if state.cluster_nodes.len() == 1 {
-            return Ok(state.cluster_nodes[0].clone());
-        }
-
-        // Two-random-choices algorithm
+        // Pick a single random node
         use rand::seq::SliceRandom;
         let mut rng = rand::thread_rng();
 
-        // Pick two distinct random nodes
-        let candidates: Vec<_> = state.cluster_nodes.choose_multiple(&mut rng, 2).collect();
+        state
+            .cluster_nodes
+            .choose(&mut rng)
+            .cloned()
+            .ok_or(DirectoryError::Unavailable)
+    }
 
-        if candidates.len() < 2 {
-            // Fallback: just pick the first node
-            return Ok(state.cluster_nodes[0].clone());
+    /// Choose the least loaded node from the cluster.
+    ///
+    /// Selects the node with the minimum activation count (fewest active actors).
+    /// Provides automatic load balancing based on current cluster state.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(node_id)`: Node with lowest activation count
+    /// - `Err(DirectoryError::Unavailable)`: No nodes in cluster
+    ///
+    /// # Tie-Breaking
+    ///
+    /// If multiple nodes have the same minimum load, the first one encountered
+    /// is returned (stable selection).
+    fn choose_least_loaded_node(&self) -> Result<NodeId, DirectoryError> {
+        let state = self.state.borrow();
+
+        if state.cluster_nodes.is_empty() {
+            return Err(DirectoryError::Unavailable);
         }
 
-        let node1 = candidates[0];
-        let node2 = candidates[1];
+        // Find node with minimum load
+        let least_loaded = state
+            .node_load
+            .iter()
+            .min_by_key(|(_, load)| *load)
+            .map(|(node, load)| (node.clone(), *load));
 
-        let load1 = state.node_load.get(node1).copied().unwrap_or(0);
-        let load2 = state.node_load.get(node2).copied().unwrap_or(0);
-
-        // Choose less-loaded node
-        if load1 <= load2 {
-            Ok(node1.clone())
-        } else {
-            Ok(node2.clone())
+        match least_loaded {
+            Some((node, load)) => {
+                tracing::debug!(
+                    node_id = %node,
+                    load = load,
+                    "📊 Directory: Selected least loaded node"
+                );
+                Ok(node)
+            }
+            None => {
+                // Fallback: if node_load is empty but cluster_nodes isn't,
+                // pick the first cluster node
+                tracing::warn!("📊 Directory: node_load empty, using first cluster node");
+                Ok(state.cluster_nodes[0].clone())
+            }
         }
     }
 }
@@ -304,8 +326,53 @@ impl Directory for SimpleDirectory {
         Ok(())
     }
 
-    async fn choose_placement_node(&self) -> Result<NodeId, DirectoryError> {
-        self.choose_placement_node_internal()
+    async fn choose_placement_node(
+        &self,
+        hint: PlacementHint,
+        caller_node: &NodeId,
+    ) -> Result<NodeId, DirectoryError> {
+        match hint {
+            PlacementHint::Local => {
+                // Return caller's node if it's in the cluster
+                let state = self.state.borrow();
+                if state.cluster_nodes.contains(caller_node) {
+                    tracing::debug!(
+                        caller_node = %caller_node,
+                        "📍 Directory: Honoring Local placement hint"
+                    );
+                    Ok(caller_node.clone())
+                } else {
+                    // Fallback to random if caller not in cluster
+                    tracing::warn!(
+                        caller_node = %caller_node,
+                        "📍 Directory: Caller node not in cluster, falling back to Random"
+                    );
+                    drop(state);
+                    self.choose_random_node()
+                }
+            }
+            PlacementHint::Random => {
+                let node = self.choose_random_node()?;
+                tracing::debug!(
+                    chosen_node = %node,
+                    "📍 Directory: Random placement selected"
+                );
+                Ok(node)
+            }
+            PlacementHint::LeastLoaded => {
+                let node = self.choose_least_loaded_node()?;
+                tracing::debug!(
+                    chosen_node = %node,
+                    "📍 Directory: LeastLoaded placement selected"
+                );
+                Ok(node)
+            }
+        }
+    }
+
+    async fn get_actor_count(&self, node_id: &NodeId) -> usize {
+        let state = self.state.borrow();
+        state.node_load.get(node_id).copied().unwrap_or(0)
     }
 }
 

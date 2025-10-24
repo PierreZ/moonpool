@@ -2,7 +2,7 @@
 //!
 //! The Directory is responsible for tracking actor locations across the cluster.
 
-use crate::actor::{ActorId, NodeId};
+use crate::actor::{ActorId, NodeId, PlacementHint};
 use crate::directory::PlacementDecision;
 use crate::error::DirectoryError;
 use async_trait::async_trait;
@@ -183,6 +183,11 @@ pub trait Directory {
 
     /// Choose a node for placing a new actor activation.
     ///
+    /// # Parameters
+    ///
+    /// - `hint`: Placement hint from the actor (Local, Random, or LeastLoaded)
+    /// - `caller_node`: The node making the placement request
+    ///
     /// # Returns
     ///
     /// - `Ok(node_id)`: Recommended node for activation
@@ -190,8 +195,15 @@ pub trait Directory {
     ///
     /// # Placement Strategy
     ///
-    /// Implementations should balance load across nodes. The default strategy
-    /// is **two-random-choices**: pick two random nodes, choose the less-loaded one.
+    /// - **PlacementHint::Local**: Return `caller_node` (prefer local activation)
+    /// - **PlacementHint::Random**: Choose a random node from the cluster (uniform distribution)
+    /// - **PlacementHint::LeastLoaded**: Choose the node with fewest active actors (load balancing)
+    ///
+    /// # Load Balancing
+    ///
+    /// The `LeastLoaded` hint uses the directory's internal load tracking (`node_load` map)
+    /// to select the node with the minimum activation count. This provides automatic
+    /// load balancing based on current cluster state.
     ///
     /// # Usage
     ///
@@ -199,9 +211,32 @@ pub trait Directory {
     ///
     /// ```rust,ignore
     /// if directory.lookup(&actor_id).await?.is_none() {
-    ///     let target_node = directory.choose_placement_node().await?;
+    ///     let hint = MyActor::placement_hint();
+    ///     let target_node = directory.choose_placement_node(hint, my_node_id).await?;
     ///     directory.register(actor_id, target_node).await?;
     /// }
     /// ```
-    async fn choose_placement_node(&self) -> Result<NodeId, DirectoryError>;
+    async fn choose_placement_node(
+        &self,
+        hint: PlacementHint,
+        caller_node: &NodeId,
+    ) -> Result<NodeId, DirectoryError>;
+
+    /// Get the number of actors currently registered on a specific node.
+    ///
+    /// # Parameters
+    ///
+    /// - `node_id`: The node to query
+    ///
+    /// # Returns
+    ///
+    /// The count of actors registered on the specified node.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let count = directory.get_actor_count(&node_id).await;
+    /// println!("Node {} has {} actors", node_id, count);
+    /// ```
+    async fn get_actor_count(&self, node_id: &NodeId) -> usize;
 }

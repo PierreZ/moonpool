@@ -38,6 +38,11 @@ impl Actor for HelloActor {
         &self.actor_id
     }
 
+    // Use LeastLoaded placement for automatic load balancing across nodes
+    fn placement_hint() -> PlacementHint {
+        PlacementHint::LeastLoaded
+    }
+
     async fn on_activate(&mut self, _state: Option<()>) -> std::result::Result<(), ActorError> {
         tracing::info!(
             actor_id = %self.actor_id,

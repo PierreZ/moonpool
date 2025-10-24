@@ -59,7 +59,7 @@
 
             # Set environment variables
             export RUST_BACKTRACE=1
-            export RUST_LOG=debug
+            # export RUST_LOG=debug
 
             # Install spec-kit CLI (idempotent - won't reinstall if already present)
             uv tool install specify-cli --from git+https://github.com/github/spec-kit.git

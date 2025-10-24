@@ -15,6 +15,8 @@ use async_trait::async_trait;
 pub trait NetworkTransport {
     /// Send a message payload to a destination address.
     ///
+    /// Takes `&self` instead of `&mut self` to allow calling from RefCell borrows.
+    ///
     /// # Parameters
     ///
     /// - `destination`: Target node address (e.g., "127.0.0.1:8001")
@@ -24,7 +26,7 @@ pub trait NetworkTransport {
     ///
     /// - `Ok(response_payload)`: Response bytes from the remote node
     /// - `Err(ActorError)`: Network error occurred
-    async fn send(&mut self, destination: &str, payload: Vec<u8>) -> Result<Vec<u8>, ActorError>;
+    async fn send(&self, destination: &str, payload: Vec<u8>) -> Result<Vec<u8>, ActorError>;
 
     /// Poll for incoming messages from the network.
     ///
@@ -45,11 +47,13 @@ where
     T: moonpool_foundation::time::TimeProvider + Clone + 'static,
     TP: moonpool_foundation::task::TaskProvider + Clone + 'static,
 {
-    transport: moonpool_foundation::network::transport::ClientTransport<
-        N,
-        T,
-        TP,
-        moonpool_foundation::network::transport::RequestResponseSerializer,
+    transport: std::cell::RefCell<
+        moonpool_foundation::network::transport::ClientTransport<
+            N,
+            T,
+            TP,
+            moonpool_foundation::network::transport::RequestResponseSerializer,
+        >,
     >,
 }
 
@@ -68,7 +72,9 @@ where
             moonpool_foundation::network::transport::RequestResponseSerializer,
         >,
     ) -> Self {
-        Self { transport }
+        Self {
+            transport: std::cell::RefCell::new(transport),
+        }
     }
 }
 
@@ -79,19 +85,27 @@ where
     T: moonpool_foundation::time::TimeProvider + Clone + 'static,
     TP: moonpool_foundation::task::TaskProvider + Clone + 'static,
 {
-    async fn send(&mut self, destination: &str, payload: Vec<u8>) -> Result<Vec<u8>, ActorError> {
+    async fn send(&self, destination: &str, payload: Vec<u8>) -> Result<Vec<u8>, ActorError> {
         use moonpool_foundation::network::transport::RequestResponseEnvelopeFactory;
 
-        self.transport
+        // Get mutable borrow of ClientTransport from RefCell
+        // This is safe because we're in a single-threaded context and the
+        // ClientTransport::request() self-drives internally without external calls
+        let response = self
+            .transport
+            .borrow_mut()
             .request::<RequestResponseEnvelopeFactory>(destination, payload)
             .await
-            .map_err(|e| ActorError::ProcessingFailed(format!("Network send failed: {}", e)))
+            .map_err(|e| ActorError::ProcessingFailed(format!("Network send failed: {}", e)))?;
+
+        Ok(response)
     }
 
     fn poll_receive(&mut self) -> Option<Vec<u8>> {
         use moonpool_foundation::network::transport::Envelope;
 
         self.transport
+            .borrow_mut()
             .poll_receive()
             .map(|received| received.envelope.payload().to_vec())
     }
