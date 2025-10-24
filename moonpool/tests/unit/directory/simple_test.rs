@@ -18,7 +18,7 @@ async fn test_directory_creation() {
         NodeId::from("127.0.0.1:8002").unwrap(),
         NodeId::from("127.0.0.1:8003").unwrap(),
     ];
-    let directory = SimpleDirectory::new(nodes);
+    let directory = SimpleDirectory::new();
 
     // Verify directory is created successfully
     let actor_id = ActorId::from_string("test::Counter/alice").unwrap();
@@ -33,7 +33,7 @@ async fn test_basic_lookup_register_unregister() {
         NodeId::from("127.0.0.1:8001").unwrap(),
         NodeId::from("127.0.0.1:8002").unwrap(),
     ];
-    let directory = SimpleDirectory::new(nodes.clone());
+    let directory = SimpleDirectory::new();
     let actor_id = ActorId::from_string("test::Counter/bob").unwrap();
 
     // Lookup non-existent actor
@@ -70,7 +70,7 @@ async fn test_registration_race_detection() {
         NodeId::from("127.0.0.1:8002").unwrap(),
         NodeId::from("127.0.0.1:8003").unwrap(),
     ];
-    let directory = SimpleDirectory::new(nodes.clone());
+    let directory = SimpleDirectory::new();
     let actor_id = ActorId::from_string("test::BankAccount/charlie").unwrap();
 
     // Node 0 registers first (winner)
@@ -112,7 +112,7 @@ async fn test_registration_race_detection() {
 #[tokio::test]
 async fn test_idempotent_register() {
     let nodes = vec![NodeId::from("127.0.0.1:8001").unwrap()];
-    let directory = SimpleDirectory::new(nodes.clone());
+    let directory = SimpleDirectory::new();
     let actor_id = ActorId::from_string("test::Counter/dave").unwrap();
 
     // Register actor
@@ -137,7 +137,7 @@ async fn test_idempotent_register() {
 #[tokio::test]
 async fn test_idempotent_unregister() {
     let nodes = vec![NodeId::from("127.0.0.1:8001").unwrap()];
-    let directory = SimpleDirectory::new(nodes.clone());
+    let directory = SimpleDirectory::new();
     let actor_id = ActorId::from_string("test::Counter/eve").unwrap();
 
     // Register actor
@@ -162,7 +162,7 @@ async fn test_idempotent_unregister() {
 #[tokio::test]
 async fn test_storage_key_isolation_namespaces() {
     let nodes = vec![NodeId::from("127.0.0.1:8001").unwrap()];
-    let directory = SimpleDirectory::new(nodes.clone());
+    let directory = SimpleDirectory::new();
 
     // Same actor_type and key, different namespaces
     let prod_actor = ActorId::from_string("prod::Counter/frank").unwrap();
@@ -194,7 +194,7 @@ async fn test_storage_key_isolation_namespaces() {
 #[tokio::test]
 async fn test_storage_key_isolation_actor_types() {
     let nodes = vec![NodeId::from("127.0.0.1:8001").unwrap()];
-    let directory = SimpleDirectory::new(nodes.clone());
+    let directory = SimpleDirectory::new();
 
     // Same namespace and key, different actor_types
     let counter = ActorId::from_string("prod::Counter/gina").unwrap();
@@ -229,7 +229,7 @@ async fn test_multiple_actors_different_keys() {
         NodeId::from("127.0.0.1:8001").unwrap(),
         NodeId::from("127.0.0.1:8002").unwrap(),
     ];
-    let directory = SimpleDirectory::new(nodes.clone());
+    let directory = SimpleDirectory::new();
 
     // Register multiple actors with different keys
     let actor1 = ActorId::from_string("prod::Counter/user1").unwrap();
@@ -258,61 +258,13 @@ async fn test_multiple_actors_different_keys() {
     assert_eq!(location, Some(nodes[0].clone()));
 }
 
-#[tokio::test]
-async fn test_placement_algorithm_single_node() {
-    use moonpool::actor::PlacementHint;
+// NOTE: The following placement tests have been moved to placement module tests.
+// Directory now only tracks WHERE actors are, not WHERE they should be placed.
+// See tests/unit/placement/ for placement strategy tests.
 
-    let nodes = vec![NodeId::from("127.0.0.1:8001").unwrap()];
-    let directory = SimpleDirectory::new(nodes.clone());
-
-    // With single node, should always place on that node
-    let chosen = directory
-        .choose_placement_node(PlacementHint::LeastLoaded, &nodes[0])
-        .await
-        .unwrap();
-    assert_eq!(chosen, nodes[0].clone());
-
-    // Multiple calls should return same node
-    for _ in 0..10 {
-        let chosen = directory
-            .choose_placement_node(PlacementHint::Random, &nodes[0])
-            .await
-            .unwrap();
-        assert_eq!(chosen, nodes[0].clone());
-    }
-}
-
-#[tokio::test]
-async fn test_placement_algorithm_multiple_nodes() {
-    use moonpool::actor::PlacementHint;
-
-    let nodes = vec![
-        NodeId::from("127.0.0.1:8001").unwrap(),
-        NodeId::from("127.0.0.1:8002").unwrap(),
-        NodeId::from("127.0.0.1:8003").unwrap(),
-    ];
-    let directory = SimpleDirectory::new(nodes.clone());
-
-    // Choose placement should return valid nodes
-    for _ in 0..20 {
-        let chosen = directory
-            .choose_placement_node(PlacementHint::Random, &nodes[0])
-            .await
-            .unwrap();
-        assert!(nodes.contains(&chosen));
-    }
-}
-
-#[tokio::test]
-async fn test_empty_cluster_error() {
-    use moonpool::actor::PlacementHint;
-
-    let directory = SimpleDirectory::new(vec![]);
-    let fake_node = NodeId::from("127.0.0.1:9999").unwrap();
-
-    // Placement should fail with empty cluster
-    let result = directory
-        .choose_placement_node(PlacementHint::Random, &fake_node)
-        .await;
-    assert!(result.is_err());
-}
+// #[tokio::test]
+// async fn test_placement_algorithm_single_node() - moved to placement tests
+// #[tokio::test]
+// async fn test_placement_algorithm_multiple_nodes() - moved to placement tests
+// #[tokio::test]
+// async fn test_empty_cluster_error() - moved to placement tests

@@ -2,7 +2,7 @@
 //!
 //! The Directory is responsible for tracking actor locations across the cluster.
 
-use crate::actor::{ActorId, NodeId, PlacementHint};
+use crate::actor::{ActorId, NodeId};
 use crate::directory::PlacementDecision;
 use crate::error::DirectoryError;
 use async_trait::async_trait;
@@ -15,9 +15,13 @@ use async_trait::async_trait;
 /// # Responsibilities
 ///
 /// 1. **Location Tracking**: Map ActorId → NodeId for routing
-/// 2. **Placement Decisions**: Choose node for new actor activations
-/// 3. **Race Detection**: Handle concurrent activation attempts
-/// 4. **Cache Management**: Coordinate cache invalidation across nodes
+/// 2. **Race Detection**: Handle concurrent activation attempts
+/// 3. **Load Tracking**: Maintain actor count per node
+///
+/// # Note on Placement
+///
+/// The Directory does NOT choose where actors should be placed. That responsibility
+/// belongs to the Placement module. The Directory only tracks where actors ARE.
 ///
 /// # Consistency Model
 ///
@@ -181,47 +185,6 @@ pub trait Directory {
     /// ```
     async fn unregister(&self, actor_id: &ActorId) -> Result<(), DirectoryError>;
 
-    /// Choose a node for placing a new actor activation.
-    ///
-    /// # Parameters
-    ///
-    /// - `hint`: Placement hint from the actor (Local, Random, or LeastLoaded)
-    /// - `caller_node`: The node making the placement request
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(node_id)`: Recommended node for activation
-    /// - `Err(DirectoryError)`: No suitable node available
-    ///
-    /// # Placement Strategy
-    ///
-    /// - **PlacementHint::Local**: Return `caller_node` (prefer local activation)
-    /// - **PlacementHint::Random**: Choose a random node from the cluster (uniform distribution)
-    /// - **PlacementHint::LeastLoaded**: Choose the node with fewest active actors (load balancing)
-    ///
-    /// # Load Balancing
-    ///
-    /// The `LeastLoaded` hint uses the directory's internal load tracking (`node_load` map)
-    /// to select the node with the minimum activation count. This provides automatic
-    /// load balancing based on current cluster state.
-    ///
-    /// # Usage
-    ///
-    /// Called when a message arrives for an actor that doesn't exist anywhere:
-    ///
-    /// ```rust,ignore
-    /// if directory.lookup(&actor_id).await?.is_none() {
-    ///     let hint = MyActor::placement_hint();
-    ///     let target_node = directory.choose_placement_node(hint, my_node_id).await?;
-    ///     directory.register(actor_id, target_node).await?;
-    /// }
-    /// ```
-    async fn choose_placement_node(
-        &self,
-        hint: PlacementHint,
-        caller_node: &NodeId,
-    ) -> Result<NodeId, DirectoryError>;
-
     /// Get the number of actors currently registered on a specific node.
     ///
     /// # Parameters
@@ -232,6 +195,11 @@ pub trait Directory {
     ///
     /// The count of actors registered on the specified node.
     ///
+    /// # Usage
+    ///
+    /// This method is primarily used by the Placement module to implement
+    /// load-aware placement strategies.
+    ///
     /// # Example
     ///
     /// ```rust,ignore
@@ -239,4 +207,51 @@ pub trait Directory {
     /// println!("Node {} has {} actors", node_id, count);
     /// ```
     async fn get_actor_count(&self, node_id: &NodeId) -> usize;
+
+    /// Get the current load for all nodes.
+    ///
+    /// # Returns
+    ///
+    /// A map of NodeId → actor count for all nodes being tracked.
+    ///
+    /// # Usage
+    ///
+    /// This method is used by the Placement module to make load-aware
+    /// placement decisions. It returns the complete load state.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use std::collections::HashMap;
+    ///
+    /// let node_loads = directory.get_all_node_loads().await;
+    /// let chosen_node = placement.choose_node(&actor_id, hint, &caller, &node_loads)?;
+    /// ```
+    async fn get_all_node_loads(&self) -> std::collections::HashMap<NodeId, usize>;
+
+    /// Get all actor IDs registered on a specific node.
+    ///
+    /// # Parameters
+    ///
+    /// - `node_id`: The node to query
+    ///
+    /// # Returns
+    ///
+    /// A vector of ActorId instances for all actors registered on the specified node.
+    ///
+    /// # Usage
+    ///
+    /// This method is primarily used for debugging, monitoring, and displaying
+    /// actor distribution across the cluster.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let actors = directory.get_actors_on_node(&node_id).await;
+    /// println!("Node {} hosts {} actors:", node_id, actors.len());
+    /// for actor_id in actors {
+    ///     println!("  - {}", actor_id);
+    /// }
+    /// ```
+    async fn get_actors_on_node(&self, node_id: &NodeId) -> Vec<ActorId>;
 }

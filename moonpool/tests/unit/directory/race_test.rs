@@ -12,7 +12,7 @@ use moonpool::directory::{Directory, PlacementDecision, SimpleDirectory};
 async fn test_no_race_first_activation() {
     // First activation should always succeed
     let node1 = NodeId::from("127.0.0.1:5000").unwrap();
-    let directory = SimpleDirectory::new(vec![node1.clone()]);
+    let directory = SimpleDirectory::new();
     let actor_id = ActorId::from_string("test::TestActor/actor1").unwrap();
 
     let decision = directory.register(actor_id, node1.clone()).await.unwrap();
@@ -28,7 +28,7 @@ async fn test_race_detection_same_actor() {
     // Registering the same actor from two different nodes should detect a race
     let node1 = NodeId::from("127.0.0.1:5000").unwrap();
     let node2 = NodeId::from("127.0.0.1:5001").unwrap();
-    let directory = SimpleDirectory::new(vec![node1.clone(), node2.clone()]);
+    let directory = SimpleDirectory::new();
     let actor_id = ActorId::from_string("test::TestActor/actor2").unwrap();
 
     // First registration succeeds
@@ -58,7 +58,7 @@ async fn test_race_detection_same_actor() {
 async fn test_no_race_same_node_reregistration() {
     // Registering the same actor from the same node should be idempotent (succeed)
     let node1 = NodeId::from("127.0.0.1:5000").unwrap();
-    let directory = SimpleDirectory::new(vec![node1.clone()]);
+    let directory = SimpleDirectory::new();
     let actor_id = ActorId::from_string("test::TestActor/actor3").unwrap();
 
     // First registration
@@ -78,7 +78,7 @@ async fn test_multiple_actors_no_interference() {
     // Different actors should not interfere with each other
     let node1 = NodeId::from("127.0.0.1:5000").unwrap();
     let node2 = NodeId::from("127.0.0.1:5001").unwrap();
-    let directory = SimpleDirectory::new(vec![node1.clone(), node2.clone()]);
+    let directory = SimpleDirectory::new();
     let actor1 = ActorId::from_string("test::TestActor/actor4").unwrap();
     let actor2 = ActorId::from_string("test::TestActor/actor5").unwrap();
 
@@ -95,7 +95,7 @@ async fn test_multiple_actors_no_interference() {
 async fn test_lookup_after_registration() {
     // Verify lookup returns correct node after registration
     let node1 = NodeId::from("127.0.0.1:5000").unwrap();
-    let directory = SimpleDirectory::new(vec![node1.clone()]);
+    let directory = SimpleDirectory::new();
     let actor_id = ActorId::from_string("test::TestActor/actor6").unwrap();
 
     // Register actor
@@ -115,7 +115,7 @@ async fn test_unregister_allows_new_registration() {
     // After unregistering, a new registration should succeed
     let node1 = NodeId::from("127.0.0.1:5000").unwrap();
     let node2 = NodeId::from("127.0.0.1:5001").unwrap();
-    let directory = SimpleDirectory::new(vec![node1.clone(), node2.clone()]);
+    let directory = SimpleDirectory::new();
     let actor_id = ActorId::from_string("test::TestActor/actor7").unwrap();
 
     // Register, then unregister

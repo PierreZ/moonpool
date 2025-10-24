@@ -452,7 +452,7 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
         tracing::info!(
             actor_id = %actor_id,
             node_id = %self.node_id,
-            "🎭 Auto-activating actor (Orleans pattern)"
+            "Auto-activating actor (Orleans pattern)"
         );
 
         // Acquire lock and do double-check, but drop before async operations
@@ -523,7 +523,7 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
                 tracing::debug!(
                     actor_id = %actor_id,
                     node_id = %self.node_id,
-                    "✅ Registered actor in directory"
+                    "Registered actor in directory"
                 );
             }
             Ok(PlacementDecision::AlreadyRegistered(existing_node)) => {
@@ -533,7 +533,7 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
                     actor_id = %actor_id,
                     existing_node = %existing_node,
                     our_node = %self.node_id,
-                    "⚠️  Actor already registered on different node"
+                    "Actor already registered on different node"
                 );
 
                 // Clean up: remove from local directory
@@ -551,14 +551,14 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
                     actor_id = %actor_id,
                     winner = %winner,
                     loser = %loser,
-                    "⚠️  Placement race detected"
+                    "Placement race detected"
                 );
 
                 if loser == self.node_id {
                     // We lost the race - clean up and fail
                     tracing::info!(
                         actor_id = %actor_id,
-                        "🧹 Cleaning up losing activation"
+                        "Cleaning up losing activation"
                     );
 
                     // Remove from local directory
@@ -572,7 +572,7 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
                     // We won the race - proceed with activation
                     tracing::debug!(
                         actor_id = %actor_id,
-                        "✅ Won activation race"
+                        "Won activation race"
                     );
                 }
             }
@@ -581,7 +581,7 @@ impl<A: Actor + 'static, T: moonpool_foundation::TaskProvider, F: ActorFactory<A
                 tracing::error!(
                     actor_id = %actor_id,
                     error = ?e,
-                    "❌ Failed to register in directory"
+                    "Failed to register in directory"
                 );
 
                 // Remove from local directory
@@ -810,11 +810,16 @@ mod tests {
 
     fn create_test_directory() -> std::rc::Rc<dyn crate::directory::Directory> {
         use crate::directory::SimpleDirectory;
+        std::rc::Rc::new(SimpleDirectory::new())
+    }
+
+    fn create_test_placement() -> crate::placement::SimplePlacement {
+        use crate::placement::SimplePlacement;
         let nodes = vec![
             NodeId::from("127.0.0.1:8001").unwrap(),
             NodeId::from("127.0.0.1:8002").unwrap(),
         ];
-        std::rc::Rc::new(SimpleDirectory::new(nodes))
+        SimplePlacement::new(nodes)
     }
 
     #[test]
@@ -941,7 +946,10 @@ mod tests {
                 ActorCatalog::new(node_id.clone(), task_provider, factory, directory.clone());
 
             // Set MessageBus (required for spawning message loop task)
-            let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id, directory));
+            let placement = create_test_placement();
+            let message_bus = Rc::new(crate::messaging::MessageBus::new(
+                node_id, directory, placement,
+            ));
             catalog.set_message_bus(message_bus);
 
             let actor_id = ActorId::from_string("test::Counter/charlie").unwrap();
@@ -997,7 +1005,10 @@ mod tests {
                 ActorCatalog::new(node_id.clone(), task_provider, factory, directory.clone());
 
             // Set MessageBus (required for spawning message loop task)
-            let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id, directory));
+            let placement = create_test_placement();
+            let message_bus = Rc::new(crate::messaging::MessageBus::new(
+                node_id, directory, placement,
+            ));
             catalog.set_message_bus(message_bus);
 
             let actor_id = ActorId::from_string("test::Counter/dave").unwrap();
@@ -1037,7 +1048,10 @@ mod tests {
                 ActorCatalog::new(node_id.clone(), task_provider, factory, directory.clone());
 
             // Set MessageBus (required for spawning message loop task)
-            let message_bus = Rc::new(crate::messaging::MessageBus::new(node_id, directory));
+            let placement = create_test_placement();
+            let message_bus = Rc::new(crate::messaging::MessageBus::new(
+                node_id, directory, placement,
+            ));
             catalog.set_message_bus(message_bus);
 
             // Create multiple actors

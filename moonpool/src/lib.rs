@@ -122,6 +122,7 @@ pub mod actor;
 pub mod directory;
 pub mod error;
 pub mod messaging;
+pub mod placement;
 pub mod runtime;
 pub mod storage;
 
