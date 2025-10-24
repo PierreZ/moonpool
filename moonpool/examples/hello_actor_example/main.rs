@@ -137,10 +137,11 @@ async fn run_cluster(
         "Creating shared directory for all nodes"
     );
 
-    // Create ONE shared directory instance that all runtimes will use
-    let shared_directory = Rc::new(SimpleDirectory::new(cluster_nodes.clone()));
+    // Create shared directory for multi-node scenario
+    // All runtimes will share the same directory so they can see each other's actors
+    let shared_directory: Rc<dyn Directory> = Rc::new(SimpleDirectory::new());
 
-    // Create a runtime for each port, all sharing the same directory
+    // Create a runtime for each port
     let mut runtimes = Vec::new();
     for port in &ports {
         tracing::info!(port = port, "Creating ActorRuntime");
@@ -148,7 +149,8 @@ async fn run_cluster(
         let runtime = ActorRuntime::<moonpool_foundation::TokioTaskProvider>::builder()
             .namespace("example")
             .listen_addr(format!("127.0.0.1:{}", port))?
-            .directory((*shared_directory).clone()) // Clone the Rc, not the directory
+            .cluster_nodes(cluster_nodes.clone())
+            .shared_directory(shared_directory.clone())
             .with_providers(
                 moonpool_foundation::TokioNetworkProvider,
                 moonpool_foundation::TokioTimeProvider,
@@ -218,12 +220,13 @@ async fn run_cluster(
 
     // Print actor distribution across nodes
     println!("\n📊 Actor Distribution:");
-    for runtime in &runtimes {
-        let node_id = runtime.node_id();
-        let actor_count = shared_directory.get_actor_count(node_id).await;
-        println!("  Node {}: {} actors", node_id, actor_count);
+    for node in &cluster_nodes {
+        let actors = shared_directory.get_actors_on_node(node).await;
+        println!("  Node {}: {} actors", node, actors.len());
+        for actor_id in actors {
+            println!("    - {}", actor_id);
+        }
     }
-    println!();
 
     // Give tasks time to clean up
     tokio::time::sleep(Duration::from_millis(100)).await;

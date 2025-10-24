@@ -3,7 +3,7 @@
 //! This module provides a basic in-memory directory for actor location tracking
 //! in a single-threaded environment.
 
-use crate::actor::{ActorId, NodeId, PlacementHint};
+use crate::actor::{ActorId, NodeId};
 use crate::directory::{Directory, PlacementDecision};
 use crate::error::DirectoryError;
 use async_trait::async_trait;
@@ -11,33 +11,34 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-/// Simple directory implementation with local caching.
+/// Simple directory implementation for location tracking.
 ///
 /// `SimpleDirectory` provides a basic actor location directory with:
 /// - Local in-memory location map (ActorId → NodeId)
-/// - Eventual consistency model
-/// - Two-random-choices placement algorithm
+/// - Node load tracking (NodeId → actor count)
 /// - Race detection for concurrent activations
+/// - Eventual consistency model
 ///
 /// # Architecture
 ///
 /// ```text
 /// ┌─────────────────────────────────────┐
-/// │ SimpleDirectory (per node)          │
+/// │ SimpleDirectory                     │
 /// │                                     │
 /// │  ┌───────────────────────────────┐  │
-/// │  │ location_map: ActorId → NodeId│  │
+/// │  │ location_map: ActorId → NodeId│  │  (WHERE actors are)
 /// │  └───────────────────────────────┘  │
 /// │                                     │
 /// │  ┌───────────────────────────────┐  │
-/// │  │ node_load: NodeId → usize    │  │
-/// │  └───────────────────────────────┘  │
-/// │                                     │
-/// │  ┌───────────────────────────────┐  │
-/// │  │ cluster_nodes: Vec<NodeId>   │  │
+/// │  │ node_load: NodeId → usize    │  │  (HOW MANY actors per node)
 /// │  └───────────────────────────────┘  │
 /// └─────────────────────────────────────┘
 /// ```
+///
+/// # Separation of Concerns
+///
+/// **Directory** (this module): Tracks WHERE actors are currently located
+/// **Placement** (placement module): Decides WHERE new actors should go
 ///
 /// # Consistency Model
 ///
@@ -50,20 +51,26 @@ use std::rc::Rc;
 /// ```rust,ignore
 /// use moonpool::prelude::*;
 /// use moonpool::directory::SimpleDirectory;
+/// use moonpool::placement::SimplePlacement;
 ///
-/// // Create directory with cluster nodes
+/// // Create directory (tracks locations)
+/// let directory = SimpleDirectory::new();
+///
+/// // Create placement (chooses nodes)
 /// let nodes = vec![
 ///     NodeId::parse("node1:8001")?,
 ///     NodeId::parse("node2:8002")?,
 ///     NodeId::parse("node3:8003")?,
 /// ];
-/// let directory = SimpleDirectory::new(nodes.clone());
+/// let placement = SimplePlacement::new(nodes.clone());
 ///
-/// // Register actor
+/// // Place a new actor
 /// let actor_id = ActorId::parse("prod::BankAccount/alice")?;
-/// let my_node = nodes[0].clone();
+/// let node_loads = directory.get_all_node_loads().await;
+/// let chosen_node = placement.choose_node(&actor_id, PlacementHint::LeastLoaded, &nodes[0], &node_loads)?;
 ///
-/// match directory.register(actor_id.clone(), my_node.clone()).await? {
+/// // Register actor at chosen node
+/// match directory.register(actor_id.clone(), chosen_node).await? {
 ///     PlacementDecision::PlaceOnNode(node) => {
 ///         println!("Actor placed on: {}", node);
 ///     }
@@ -96,48 +103,40 @@ struct DirectoryState {
 
     /// Node load tracking: NodeId → actor count
     ///
-    /// Used by two-random-choices placement algorithm.
+    /// Tracks how many actors are registered on each node.
     /// Incremented on register, decremented on unregister.
+    /// Exposed to Placement module for load-aware placement decisions.
     node_load: HashMap<NodeId, usize>,
-
-    /// List of all nodes in the cluster.
-    ///
-    /// Used for placement decisions. Should be updated when nodes join/leave.
-    cluster_nodes: Vec<NodeId>,
 }
 
 impl SimpleDirectory {
-    /// Create a new SimpleDirectory with specified cluster nodes.
+    /// Create a new SimpleDirectory.
     ///
-    /// # Parameters
-    ///
-    /// - `cluster_nodes`: List of all nodes in the cluster
+    /// The directory starts empty and tracks actors as they are registered.
+    /// Node load counters are created automatically as actors are registered.
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// let nodes = vec![
-    ///     NodeId::parse("127.0.0.1:8001")?,
-    ///     NodeId::parse("127.0.0.1:8002")?,
-    ///     NodeId::parse("127.0.0.1:8003")?,
-    /// ];
-    /// let directory = SimpleDirectory::new(nodes);
+    /// let directory = SimpleDirectory::new();
     /// ```
-    pub fn new(cluster_nodes: Vec<NodeId>) -> Self {
-        let mut node_load = HashMap::new();
-        for node in &cluster_nodes {
-            node_load.insert(node.clone(), 0);
-        }
-
+    pub fn new() -> Self {
         Self {
             state: Rc::new(RefCell::new(DirectoryState {
                 location_map: HashMap::new(),
-                node_load,
-                cluster_nodes,
+                node_load: HashMap::new(),
             })),
         }
     }
+}
 
+impl Default for SimpleDirectory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SimpleDirectory {
     /// Create storage key for an ActorId.
     ///
     /// Format: `namespace::actor_type/key`
@@ -150,19 +149,6 @@ impl SimpleDirectory {
             "{}::{}/{}",
             actor_id.namespace, actor_id.actor_type, actor_id.key
         )
-    }
-
-    /// Get current load for a node.
-    ///
-    /// Returns 0 if node not found (defensive).
-    #[allow(dead_code)]
-    fn get_node_load(&self, node_id: &NodeId) -> usize {
-        self.state
-            .borrow()
-            .node_load
-            .get(node_id)
-            .copied()
-            .unwrap_or(0)
     }
 
     /// Increment node load counter.
@@ -184,73 +170,6 @@ impl SimpleDirectory {
         let mut state = self.state.borrow_mut();
         if let Some(count) = state.node_load.get_mut(node_id) {
             *count = count.saturating_sub(1);
-        }
-    }
-
-    /// Choose a random node from the cluster.
-    ///
-    /// Uses a simple random selection (uniform distribution).
-    fn choose_random_node(&self) -> Result<NodeId, DirectoryError> {
-        let state = self.state.borrow();
-
-        if state.cluster_nodes.is_empty() {
-            return Err(DirectoryError::Unavailable);
-        }
-
-        // Pick a single random node
-        use rand::prelude::IndexedRandom;
-        let mut rng = rand::rng();
-
-        state
-            .cluster_nodes
-            .choose(&mut rng)
-            .cloned()
-            .ok_or(DirectoryError::Unavailable)
-    }
-
-    /// Choose the least loaded node from the cluster.
-    ///
-    /// Selects the node with the minimum activation count (fewest active actors).
-    /// Provides automatic load balancing based on current cluster state.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(node_id)`: Node with lowest activation count
-    /// - `Err(DirectoryError::Unavailable)`: No nodes in cluster
-    ///
-    /// # Tie-Breaking
-    ///
-    /// If multiple nodes have the same minimum load, the first one encountered
-    /// is returned (stable selection).
-    fn choose_least_loaded_node(&self) -> Result<NodeId, DirectoryError> {
-        let state = self.state.borrow();
-
-        if state.cluster_nodes.is_empty() {
-            return Err(DirectoryError::Unavailable);
-        }
-
-        // Find node with minimum load
-        let least_loaded = state
-            .node_load
-            .iter()
-            .min_by_key(|(_, load)| *load)
-            .map(|(node, load)| (node.clone(), *load));
-
-        match least_loaded {
-            Some((node, load)) => {
-                tracing::debug!(
-                    node_id = %node,
-                    load = load,
-                    "📊 Directory: Selected least loaded node"
-                );
-                Ok(node)
-            }
-            None => {
-                // Fallback: if node_load is empty but cluster_nodes isn't,
-                // pick the first cluster node
-                tracing::warn!("📊 Directory: node_load empty, using first cluster node");
-                Ok(state.cluster_nodes[0].clone())
-            }
         }
     }
 }
@@ -285,7 +204,7 @@ impl Directory for SimpleDirectory {
                 tracing::info!(
                     actor_id = %actor_id,
                     node_id = %node_id,
-                    "📍 Directory: Placed actor on node"
+                    "Directory: Placed actor on node"
                 );
 
                 Ok(PlacementDecision::PlaceOnNode(node_id))
@@ -326,53 +245,33 @@ impl Directory for SimpleDirectory {
         Ok(())
     }
 
-    async fn choose_placement_node(
-        &self,
-        hint: PlacementHint,
-        caller_node: &NodeId,
-    ) -> Result<NodeId, DirectoryError> {
-        match hint {
-            PlacementHint::Local => {
-                // Return caller's node if it's in the cluster
-                let state = self.state.borrow();
-                if state.cluster_nodes.contains(caller_node) {
-                    tracing::debug!(
-                        caller_node = %caller_node,
-                        "📍 Directory: Honoring Local placement hint"
-                    );
-                    Ok(caller_node.clone())
-                } else {
-                    // Fallback to random if caller not in cluster
-                    tracing::warn!(
-                        caller_node = %caller_node,
-                        "📍 Directory: Caller node not in cluster, falling back to Random"
-                    );
-                    drop(state);
-                    self.choose_random_node()
-                }
-            }
-            PlacementHint::Random => {
-                let node = self.choose_random_node()?;
-                tracing::debug!(
-                    chosen_node = %node,
-                    "📍 Directory: Random placement selected"
-                );
-                Ok(node)
-            }
-            PlacementHint::LeastLoaded => {
-                let node = self.choose_least_loaded_node()?;
-                tracing::debug!(
-                    chosen_node = %node,
-                    "📍 Directory: LeastLoaded placement selected"
-                );
-                Ok(node)
-            }
-        }
-    }
-
     async fn get_actor_count(&self, node_id: &NodeId) -> usize {
         let state = self.state.borrow();
         state.node_load.get(node_id).copied().unwrap_or(0)
+    }
+
+    async fn get_all_node_loads(&self) -> HashMap<NodeId, usize> {
+        let state = self.state.borrow();
+        state.node_load.clone()
+    }
+
+    async fn get_actors_on_node(&self, node_id: &NodeId) -> Vec<ActorId> {
+        let state = self.state.borrow();
+
+        // Iterate through location_map and collect actors on the specified node
+        state
+            .location_map
+            .iter()
+            .filter_map(|(key, location)| {
+                if location == node_id {
+                    // Parse the storage key back to ActorId
+                    // Format: "namespace::actor_type/key"
+                    ActorId::from_string(key).ok()
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }
 
@@ -382,11 +281,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_directory_basic_operations() {
+        let directory = SimpleDirectory::new();
+
         let nodes = vec![
             NodeId::from("127.0.0.1:8001").unwrap(),
             NodeId::from("127.0.0.1:8002").unwrap(),
         ];
-        let directory = SimpleDirectory::new(nodes.clone());
 
         let actor_id = ActorId::from_string("test::Counter/alice").unwrap();
 
@@ -413,11 +313,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_registration_race() {
+        let directory = SimpleDirectory::new();
+
         let nodes = vec![
             NodeId::from("127.0.0.1:8001").unwrap(),
             NodeId::from("127.0.0.1:8002").unwrap(),
         ];
-        let directory = SimpleDirectory::new(nodes.clone());
 
         let actor_id = ActorId::from_string("test::Counter/bob").unwrap();
 
@@ -445,15 +346,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_load_tracking() {
+        let directory = SimpleDirectory::new();
+
         let nodes = vec![
             NodeId::from("127.0.0.1:8001").unwrap(),
             NodeId::from("127.0.0.1:8002").unwrap(),
         ];
-        let directory = SimpleDirectory::new(nodes.clone());
 
         // Initially zero load
-        assert_eq!(directory.get_node_load(&nodes[0]), 0);
-        assert_eq!(directory.get_node_load(&nodes[1]), 0);
+        assert_eq!(directory.get_actor_count(&nodes[0]).await, 0);
+        assert_eq!(directory.get_actor_count(&nodes[1]).await, 0);
 
         // Register actor on node 0
         let actor1 = ActorId::from_string("test::Counter/a1").unwrap();
@@ -462,8 +364,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(directory.get_node_load(&nodes[0]), 1);
-        assert_eq!(directory.get_node_load(&nodes[1]), 0);
+        assert_eq!(directory.get_actor_count(&nodes[0]).await, 1);
+        assert_eq!(directory.get_actor_count(&nodes[1]).await, 0);
 
         // Register another actor on node 0
         let actor2 = ActorId::from_string("test::Counter/a2").unwrap();
@@ -472,23 +374,24 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(directory.get_node_load(&nodes[0]), 2);
+        assert_eq!(directory.get_actor_count(&nodes[0]).await, 2);
 
         // Unregister one actor
         directory.unregister(&actor1).await.unwrap();
 
-        assert_eq!(directory.get_node_load(&nodes[0]), 1);
+        assert_eq!(directory.get_actor_count(&nodes[0]).await, 1);
 
         // Unregister second actor
         directory.unregister(&actor2).await.unwrap();
 
-        assert_eq!(directory.get_node_load(&nodes[0]), 0);
+        assert_eq!(directory.get_actor_count(&nodes[0]).await, 0);
     }
 
     #[tokio::test]
     async fn test_idempotent_operations() {
+        let directory = SimpleDirectory::new();
+
         let nodes = vec![NodeId::from("127.0.0.1:8001").unwrap()];
-        let directory = SimpleDirectory::new(nodes.clone());
 
         let actor_id = ActorId::from_string("test::Counter/charlie").unwrap();
 

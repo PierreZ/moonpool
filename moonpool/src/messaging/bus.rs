@@ -52,6 +52,7 @@ use crate::actor::{CorrelationId, NodeId};
 use crate::directory::Directory;
 use crate::error::ActorError;
 use crate::messaging::{ActorRouter, CallbackData, Direction, Message, NetworkTransport};
+use crate::placement::SimplePlacement;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -118,11 +119,16 @@ pub struct MessageBus {
     /// Uses trait object to avoid generic parameters.
     network_transport: RefCell<Option<Box<dyn NetworkTransport>>>,
 
-    /// Directory for actor placement and location tracking.
+    /// Directory for actor location tracking.
     ///
-    /// Used to determine which node should host an actor and to look up
-    /// actor locations for message routing.
+    /// Used to look up actor locations for message routing.
     directory: SharedDirectory,
+
+    /// Placement strategy for choosing where to activate new actors.
+    ///
+    /// Consults placement hint from actor type and chooses appropriate node
+    /// based on load balancing and other placement strategies.
+    placement: SimplePlacement,
 }
 
 impl MessageBus {
@@ -134,16 +140,18 @@ impl MessageBus {
     /// # Parameters
     ///
     /// - `node_id`: This node's identifier
-    /// - `directory`: Directory for actor placement and location tracking
+    /// - `directory`: Directory for actor location tracking
+    /// - `placement`: Placement strategy for choosing where to activate new actors
     ///
     /// # Example
     ///
     /// ```rust,ignore
     /// let node_id = NodeId::from("127.0.0.1:8001")?;
-    /// let directory = SimpleDirectory::new(cluster_nodes);
-    /// let bus = MessageBus::new(node_id, Rc::new(directory) as SharedDirectory);
+    /// let directory = SimpleDirectory::new();
+    /// let placement = SimplePlacement::new(cluster_nodes);
+    /// let bus = MessageBus::new(node_id, Rc::new(directory) as SharedDirectory, placement);
     /// ```
-    pub fn new(node_id: NodeId, directory: SharedDirectory) -> Self {
+    pub fn new(node_id: NodeId, directory: SharedDirectory, placement: SimplePlacement) -> Self {
         Self {
             node_id,
             next_correlation_id: Cell::new(1),
@@ -151,6 +159,7 @@ impl MessageBus {
             actor_routers: RefCell::new(HashMap::new()),
             network_transport: RefCell::new(None),
             directory,
+            placement,
         }
     }
 
@@ -723,11 +732,16 @@ impl MessageBus {
                 // Get placement hint from actor type
                 let hint = router.placement_hint();
 
-                // Ask directory to choose placement node based on hint
-                let chosen_node = self
-                    .directory
-                    .choose_placement_node(hint, &self.node_id)
-                    .await?;
+                // Get current node loads from directory
+                let node_loads = self.directory.get_all_node_loads().await;
+
+                // Ask placement to choose node based on hint and current load
+                let chosen_node = self.placement.choose_node(
+                    &message.target_actor,
+                    hint,
+                    &self.node_id,
+                    &node_loads,
+                )?;
 
                 tracing::debug!(
                     node_id = %self.node_id,
@@ -815,7 +829,7 @@ impl MessageBus {
         let correlation_id = message.correlation_id;
         tracing::debug!(
             node_id = %self.node_id,
-            "🔍 route_to_callback: ENTRY corr_id={}, pending_count={}",
+            "route_to_callback: ENTRY corr_id={}, pending_count={}",
             correlation_id,
             self.pending_count()
         );
@@ -826,7 +840,7 @@ impl MessageBus {
             let pending_ids: Vec<_> = pending.keys().map(|k| k.as_u64()).collect();
             tracing::debug!(
                 node_id = %self.node_id,
-                "🔍 route_to_callback: Pending correlation IDs: {:?}",
+                "route_to_callback: Pending correlation IDs: {:?}",
                 pending_ids
             );
         }
@@ -840,7 +854,7 @@ impl MessageBus {
             .ok_or_else(|| {
                 tracing::error!(
                     node_id = %self.node_id,
-                    "🔍 route_to_callback: ERROR - Unknown correlation ID {}",
+                    "route_to_callback: ERROR - Unknown correlation ID {}",
                     correlation_id
                 );
                 ActorError::UnknownCorrelationId
@@ -848,14 +862,14 @@ impl MessageBus {
 
         tracing::debug!(
             node_id = %self.node_id,
-            "🔍 route_to_callback: Successfully extracted pending request corr_id={}",
+            "route_to_callback: Successfully extracted pending request corr_id={}",
             correlation_id
         );
 
         // Complete the callback directly (spawning doesn't help with LocalSet waker issues)
         tracing::debug!(
             node_id = %self.node_id,
-            "🔍 route_to_callback: About to call callback.complete() for corr_id={}",
+            "route_to_callback: About to call callback.complete() for corr_id={}",
             correlation_id
         );
 
@@ -863,7 +877,7 @@ impl MessageBus {
 
         tracing::debug!(
             node_id = %self.node_id,
-            "🔍 route_to_callback: Successfully completed pending request corr_id={}, EXIT",
+            "route_to_callback: Successfully completed pending request corr_id={}, EXIT",
             correlation_id
         );
 
@@ -901,18 +915,24 @@ mod tests {
 
     fn create_test_directory() -> SharedDirectory {
         use crate::directory::SimpleDirectory;
+        Rc::new(SimpleDirectory::new())
+    }
+
+    fn create_test_placement() -> SimplePlacement {
+        use crate::placement::SimplePlacement;
         let nodes = vec![
             NodeId::from("127.0.0.1:8001").unwrap(),
             NodeId::from("127.0.0.1:8002").unwrap(),
         ];
-        Rc::new(SimpleDirectory::new(nodes))
+        SimplePlacement::new(nodes)
     }
 
     #[test]
     fn test_message_bus_creation() {
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
         let directory = create_test_directory();
-        let bus = MessageBus::new(node_id.clone(), directory);
+        let placement = create_test_placement();
+        let bus = MessageBus::new(node_id.clone(), directory, placement);
 
         assert_eq!(bus.node_id(), &node_id);
         assert_eq!(bus.pending_count(), 0);
@@ -922,7 +942,8 @@ mod tests {
     fn test_correlation_id_generation() {
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
         let directory = create_test_directory();
-        let bus = MessageBus::new(node_id, directory);
+        let placement = create_test_placement();
+        let bus = MessageBus::new(node_id, directory, placement);
 
         let id1 = bus.next_correlation_id();
         let id2 = bus.next_correlation_id();
@@ -937,7 +958,8 @@ mod tests {
     fn test_register_and_complete_request() {
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
         let directory = create_test_directory();
-        let bus = MessageBus::new(node_id, directory);
+        let placement = create_test_placement();
+        let bus = MessageBus::new(node_id, directory, placement);
 
         let corr_id = bus.next_correlation_id();
         let request = create_test_message(corr_id);
@@ -962,7 +984,8 @@ mod tests {
     fn test_complete_unknown_correlation_id() {
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
         let directory = create_test_directory();
-        let bus = MessageBus::new(node_id, directory);
+        let placement = create_test_placement();
+        let bus = MessageBus::new(node_id, directory, placement);
 
         let corr_id = CorrelationId::new(999);
         let response = create_test_message(corr_id);
@@ -976,7 +999,8 @@ mod tests {
     fn test_handle_timeout() {
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
         let directory = create_test_directory();
-        let bus = MessageBus::new(node_id, directory);
+        let placement = create_test_placement();
+        let bus = MessageBus::new(node_id, directory, placement);
 
         let corr_id = bus.next_correlation_id();
         let request = create_test_message(corr_id);
@@ -999,7 +1023,8 @@ mod tests {
     fn test_multiple_pending_requests() {
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
         let directory = create_test_directory();
-        let bus = MessageBus::new(node_id, directory);
+        let placement = create_test_placement();
+        let bus = MessageBus::new(node_id, directory, placement);
 
         // Register 3 requests
         let mut receivers = vec![];

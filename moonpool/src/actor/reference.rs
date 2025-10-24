@@ -213,12 +213,12 @@ impl<A: Actor> ActorRef<A> {
 
         // 7. Route the message to the actor (use the mutated message with correct correlation ID!)
         tracing::debug!(
-            "🔍 ActorRef: About to call route_message for corr_id={}",
+            "ActorRef: About to call route_message for corr_id={}",
             correlation_id
         );
         message_bus.route_message(message).await?;
         tracing::debug!(
-            "🔍 ActorRef: route_message completed for corr_id={}",
+            "ActorRef: route_message completed for corr_id={}",
             correlation_id
         );
 
@@ -226,7 +226,7 @@ impl<A: Actor> ActorRef<A> {
         // In LocalSet, oneshot receivers don't wake up properly even with tokio::time::timeout
         // We must manually poll + yield to allow the completing task to run
         tracing::debug!(
-            "🔍 ActorRef: ENTRY polling loop for corr_id={}, timeout={:?}",
+            "ActorRef: ENTRY polling loop for corr_id={}, timeout={:?}",
             correlation_id,
             timeout
         );
@@ -244,7 +244,7 @@ impl<A: Actor> ActorRef<A> {
             // Check for timeout
             if start.elapsed() >= timeout {
                 tracing::warn!(
-                    "🔍 ActorRef: TIMEOUT after {} polls, corr_id={}",
+                    "ActorRef: TIMEOUT after {} polls, corr_id={}",
                     poll_count,
                     correlation_id
                 );
@@ -254,7 +254,7 @@ impl<A: Actor> ActorRef<A> {
             // Try to receive (non-blocking check)
             if poll_count % 100 == 0 {
                 tracing::debug!(
-                    "🔍 ActorRef: Still polling... count={}, elapsed={:?}, corr_id={}",
+                    "ActorRef: Still polling... count={}, elapsed={:?}, corr_id={}",
                     poll_count,
                     start.elapsed(),
                     correlation_id
@@ -264,7 +264,7 @@ impl<A: Actor> ActorRef<A> {
             match rx.try_recv() {
                 Ok(result) => {
                     tracing::debug!(
-                        "🔍 ActorRef: SUCCESS! Received response after {} polls, corr_id={}",
+                        "ActorRef: SUCCESS! Received response after {} polls, corr_id={}",
                         poll_count,
                         correlation_id
                     );
@@ -276,7 +276,7 @@ impl<A: Actor> ActorRef<A> {
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
                     tracing::error!(
-                        "🔍 ActorRef: ERROR - Channel closed after {} polls, corr_id={}",
+                        "ActorRef: ERROR - Channel closed after {} polls, corr_id={}",
                         poll_count,
                         correlation_id
                     );

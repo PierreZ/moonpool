@@ -4,6 +4,7 @@ use crate::actor::NodeId;
 use crate::directory::SimpleDirectory;
 use crate::error::ActorError;
 use crate::messaging::{FoundationTransport, MessageBus};
+use crate::placement::SimplePlacement;
 use crate::runtime::ActorRuntime;
 use moonpool_foundation::{
     NetworkProvider, PeerConfig, TaskProvider, TimeProvider,
@@ -26,21 +27,20 @@ use std::rc::Rc;
 ///
 /// ```rust,ignore
 /// use moonpool::ActorRuntime;
-/// use moonpool::directory::SimpleDirectory;
+/// use moonpool::actor::NodeId;
 /// use moonpool_foundation::{TokioNetworkProvider, TokioTimeProvider, TokioTaskProvider};
 ///
-/// // Create directory with cluster nodes
+/// // Define cluster nodes
 /// let nodes = vec![
 ///     NodeId::from("127.0.0.1:5000")?,
 ///     NodeId::from("127.0.0.1:5001")?,
 /// ];
-/// let directory = SimpleDirectory::new(nodes);
 ///
 /// // Production configuration with Tokio providers
 /// let runtime = ActorRuntime::builder()
 ///     .namespace("prod")
 ///     .listen_addr("127.0.0.1:5000")
-///     .directory(directory)
+///     .cluster_nodes(nodes)
 ///     .with_providers(
 ///         TokioNetworkProvider,
 ///         TokioTimeProvider,
@@ -56,8 +56,12 @@ pub struct ActorRuntimeBuilder<N, T, TP> {
     /// Listening address for incoming actor messages (required).
     pub(crate) listen_addr: Option<SocketAddr>,
 
-    /// Directory for actor placement (required).
-    pub(crate) directory: Option<SimpleDirectory>,
+    /// Cluster nodes for placement decisions (required).
+    pub(crate) cluster_nodes: Option<Vec<NodeId>>,
+
+    /// Shared directory for multi-node scenarios (optional).
+    /// If None, a new directory will be created (single-node mode).
+    pub(crate) shared_directory: Option<Rc<dyn crate::directory::Directory>>,
 
     /// Network provider (required).
     pub(crate) network_provider: N,
@@ -78,7 +82,8 @@ impl ActorRuntimeBuilder<(), (), ()> {
         Self {
             namespace: None,
             listen_addr: None,
-            directory: None,
+            cluster_nodes: None,
+            shared_directory: None,
             network_provider: (),
             time_provider: (),
             task_provider: (),
@@ -124,7 +129,8 @@ impl<N, T, TP> ActorRuntimeBuilder<N, T, TP> {
         ActorRuntimeBuilder {
             namespace: self.namespace,
             listen_addr: self.listen_addr,
-            directory: self.directory,
+            cluster_nodes: self.cluster_nodes,
+            shared_directory: self.shared_directory,
             network_provider,
             time_provider,
             task_provider,
@@ -167,25 +173,67 @@ impl<N, T, TP> ActorRuntimeBuilder<N, T, TP> {
         Ok(self)
     }
 
-    /// Set the directory for actor placement.
+    /// Set the cluster nodes for actor placement.
     ///
-    /// The directory tracks which nodes host which actors and provides
-    /// placement decisions for new activations.
+    /// These nodes are used by the placement strategy to decide where to
+    /// activate new actors. The directory will track which actors are
+    /// actually running on which nodes.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use moonpool::directory::SimpleDirectory;
+    /// use moonpool::actor::NodeId;
     ///
     /// let nodes = vec![
     ///     NodeId::from("127.0.0.1:5000")?,
     ///     NodeId::from("127.0.0.1:5001")?,
     /// ];
-    /// let directory = SimpleDirectory::new(nodes);
-    /// builder.directory(directory)
+    /// builder.cluster_nodes(nodes)
     /// ```
-    pub fn directory(mut self, directory: SimpleDirectory) -> Self {
-        self.directory = Some(directory);
+    pub fn cluster_nodes(mut self, nodes: Vec<NodeId>) -> Self {
+        self.cluster_nodes = Some(nodes);
+        self
+    }
+
+    /// Set a shared directory for multi-node scenarios.
+    ///
+    /// When running multiple nodes in the same process, you should create
+    /// a single Directory instance and share it across all runtimes. This
+    /// allows all nodes to see actor registrations from other nodes.
+    ///
+    /// If not provided, each runtime will create its own directory instance
+    /// (only suitable for single-node scenarios).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use moonpool::directory::SimpleDirectory;
+    /// use std::rc::Rc;
+    ///
+    /// // Create shared directory once
+    /// let shared_directory = Rc::new(SimpleDirectory::new()) as Rc<dyn Directory>;
+    ///
+    /// // Pass to all runtimes
+    /// let runtime1 = ActorRuntime::builder()
+    ///     .namespace("prod")
+    ///     .listen_addr("127.0.0.1:5000")?
+    ///     .cluster_nodes(nodes.clone())
+    ///     .shared_directory(shared_directory.clone())
+    ///     .with_providers(...)
+    ///     .build()
+    ///     .await?;
+    ///
+    /// let runtime2 = ActorRuntime::builder()
+    ///     .namespace("prod")
+    ///     .listen_addr("127.0.0.1:5001")?
+    ///     .cluster_nodes(nodes.clone())
+    ///     .shared_directory(shared_directory.clone())
+    ///     .with_providers(...)
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn shared_directory(mut self, directory: Rc<dyn crate::directory::Directory>) -> Self {
+        self.shared_directory = Some(directory);
         self
     }
 }
@@ -213,18 +261,30 @@ where
             ActorError::InvalidConfiguration("listen_addr is required".to_string())
         })?;
 
-        let directory = self
-            .directory
-            .ok_or_else(|| ActorError::InvalidConfiguration("directory is required".to_string()))?;
+        let cluster_nodes = self.cluster_nodes.ok_or_else(|| {
+            ActorError::InvalidConfiguration("cluster_nodes is required".to_string())
+        })?;
 
         // Create NodeId from listen address
         let node_id = NodeId::from_socket_addr(listen_addr);
 
-        // Wrap directory in Rc<dyn Directory> as trait object for sharing
-        let directory_rc: Rc<dyn crate::directory::Directory> = Rc::new(directory);
+        // Use shared directory if provided, otherwise create new one
+        let directory_rc: Rc<dyn crate::directory::Directory> =
+            self.shared_directory.unwrap_or_else(|| {
+                // Create directory (tracks WHERE actors currently are)
+                let directory = SimpleDirectory::new();
+                Rc::new(directory) as Rc<dyn crate::directory::Directory>
+            });
 
-        // Create MessageBus with directory
-        let message_bus = Rc::new(MessageBus::new(node_id.clone(), directory_rc.clone()));
+        // Create placement strategy (decides WHERE new actors should go)
+        let placement = SimplePlacement::new(cluster_nodes);
+
+        // Create MessageBus with directory and placement
+        let message_bus = Rc::new(MessageBus::new(
+            node_id.clone(),
+            directory_rc.clone(),
+            placement,
+        ));
 
         // Create network transport using foundation layer
         // ClientTransport for outgoing requests
