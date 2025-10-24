@@ -41,6 +41,7 @@ tokio-test = "0.4"
 
 # Examples
 clap = { version = "4.5", features = ["derive"] }
+fake = { version = "3.0", features = ["derive"] }
 
 [[test]]
 name = "unit"

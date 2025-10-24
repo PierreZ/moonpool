@@ -5,14 +5,24 @@
 //!
 //! # Usage
 //!
-//! Standalone (single node):
+//! Standalone (single node, default settings):
 //! ```bash
 //! cargo run --example hello_actor
 //! ```
 //!
-//! Multi-node (2 nodes with shared directory):
+//! Multi-node (3 nodes starting at port 5000):
 //! ```bash
-//! cargo run --example hello_actor -- --ports 5000,5001
+//! cargo run --example hello_actor -- --nodes 3
+//! ```
+//!
+//! Custom seed and count:
+//! ```bash
+//! cargo run --example hello_actor -- --seed 123 --count 5
+//! ```
+//!
+//! Full example with all options:
+//! ```bash
+//! cargo run --example hello_actor -- --nodes 3 --start-port 5010 --seed 42 --count 15
 //! ```
 //!
 //! # What You'll See
@@ -22,13 +32,18 @@
 //! - Cross-node actor calls via network transport
 //! - Rich tracing showing actor instantiation
 //! - Clean extension trait API
+//! - Random name generation using deterministic seed
 
 mod hello_actor;
 
 use clap::Parser;
+use fake::Fake;
+use fake::faker::name::en::FirstName;
 use hello_actor::{HelloActor, HelloActorFactory, HelloActorRef};
-use moonpool::directory::SimpleDirectory;
+use moonpool::directory::{Directory, SimpleDirectory};
 use moonpool::prelude::*;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 use std::rc::Rc;
 use std::time::Duration;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -38,10 +53,22 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[command(name = "hello_actor")]
 #[command(about = "Virtual actor example with auto-activation", long_about = None)]
 struct Args {
-    /// Comma-separated list of all ports in the cluster (defaults to single node on 5000)
-    /// Example: --ports 5000,5001,5002
+    /// Number of nodes in the cluster (defaults to 2)
+    #[arg(long, default_value = "2")]
+    nodes: usize,
+
+    /// Starting port for the cluster (defaults to 5000)
+    /// Nodes will use sequential ports starting from this value
     #[arg(long, default_value = "5000")]
-    ports: String,
+    start_port: u16,
+
+    /// Random seed for name generation (optional, uses random seed if not provided)
+    #[arg(long)]
+    seed: Option<u64>,
+
+    /// Number of random names to generate and greet (defaults to 10)
+    #[arg(long, default_value = "10")]
+    count: usize,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -54,16 +81,16 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
-        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(tracing_subscriber::fmt::layer().with_target(true))
         .init();
 
-    // Parse ports list
-    let ports: Vec<u16> = args
-        .ports
-        .split(',')
-        .map(|s| s.trim().parse())
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| format!("Invalid port number: {}", e))?;
+    // Validate nodes count
+    if args.nodes == 0 {
+        return Err("Number of nodes must be at least 1".into());
+    }
+
+    // Generate sequential ports starting from start_port
+    let ports: Vec<u16> = (args.start_port..args.start_port + args.nodes as u16).collect();
 
     let mode = if ports.len() > 1 {
         "multi-node"
@@ -74,6 +101,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         ports = ?ports,
         mode = mode,
+        seed = ?args.seed,
+        count = args.count,
         "🚀 Starting virtual actor hello example"
     );
 
@@ -82,7 +111,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     local
         .run_until(async move {
-            if let Err(e) = run_cluster(ports).await {
+            if let Err(e) = run_cluster(ports, args.seed, args.count).await {
                 tracing::error!(error = ?e, "Cluster failed");
             }
         })
@@ -91,7 +120,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn run_cluster(ports: Vec<u16>) -> std::result::Result<(), ActorError> {
+async fn run_cluster(
+    ports: Vec<u16>,
+    seed: Option<u64>,
+    count: usize,
+) -> std::result::Result<(), ActorError> {
     // Create cluster node IDs from ports
     let cluster_nodes: Vec<NodeId> = ports
         .iter()
@@ -148,10 +181,25 @@ async fn run_cluster(ports: Vec<u16>) -> std::result::Result<(), ActorError> {
     );
     println!();
 
-    let actor_keys = ["alice", "bob", "charlie"];
+    // Generate random first names using the provided seed (or random if not provided)
+    let actual_seed = seed.unwrap_or_else(|| rand::random());
+    let mut rng = StdRng::seed_from_u64(actual_seed);
+    let actor_keys: Vec<String> = (0..count)
+        .map(|_| {
+            let name: String = FirstName().fake_with_rng(&mut rng);
+            name.to_lowercase()
+        })
+        .collect();
+
+    tracing::info!(
+        seed = actual_seed,
+        count = count,
+        names = ?actor_keys,
+        "Generated random actor names"
+    );
 
     for key in &actor_keys {
-        let actor = runtime.get_actor::<HelloActor>("HelloActor", *key)?;
+        let actor = runtime.get_actor::<HelloActor>("HelloActor", key)?;
 
         match actor.say_hello().await {
             Ok(greeting) => {
@@ -167,6 +215,15 @@ async fn run_cluster(ports: Vec<u16>) -> std::result::Result<(), ActorError> {
 
     println!();
     tracing::info!("🎉 Example complete!");
+
+    // Print actor distribution across nodes
+    println!("\n📊 Actor Distribution:");
+    for runtime in &runtimes {
+        let node_id = runtime.node_id();
+        let actor_count = shared_directory.get_actor_count(node_id).await;
+        println!("  Node {}: {} actors", node_id, actor_count);
+    }
+    println!();
 
     // Give tasks time to clean up
     tokio::time::sleep(Duration::from_millis(100)).await;

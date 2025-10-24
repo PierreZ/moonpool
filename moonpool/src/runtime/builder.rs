@@ -272,7 +272,7 @@ where
                         if let Ok(message) =
                             serde_json::from_slice::<crate::messaging::Message>(&payload)
                         {
-                            tracing::info!(
+                            tracing::debug!(
                                 "Received network message: target={}, method={}, direction={:?}, corr_id={}",
                                 message.target_actor,
                                 message.method_name,
@@ -280,17 +280,34 @@ where
                                 message.correlation_id
                             );
 
-                            // Route to local actor
+                            // CRITICAL: Send transport-level ACK immediately
+                            // The ClientTransport::request() on the sending node is waiting
+                            // for a response envelope to complete the forwarding operation.
+                            // We send an empty ACK to unblock the sender, then route the message locally.
+                            use moonpool_foundation::network::transport::RequestResponseEnvelopeFactory;
+                            if let Err(e) = server_transport.send_reply::<RequestResponseEnvelopeFactory>(
+                                &msg.envelope,
+                                vec![], // Empty ACK payload
+                                &msg,
+                            ) {
+                                tracing::error!("Failed to send transport ACK: {}", e);
+                            } else {
+                                tracing::debug!("Sent transport-level ACK for received message");
+                            }
+
+                            // Route to local actor synchronously
+                            // After routing completes, we MUST yield to allow the waiting
+                            // task (polling loop) to observe the oneshot completion
                             if let Err(e) = message_bus_for_recv.route_message(message).await {
                                 tracing::error!("Failed to route network message: {}", e);
                             } else {
-                                tracing::info!("Successfully routed network message");
+                                tracing::debug!("Successfully routed network message");
                             }
 
-                            // Yield to scheduler to allow waiting tasks to run
-                            // This is critical in LocalSet: after completing a oneshot channel,
-                            // we must yield before polling next_message() to ensure the waiting
-                            // task gets scheduled and can observe the completion
+                            // CRITICAL: Yield to scheduler to allow waiting tasks to run
+                            // In LocalSet, after completing a oneshot channel, we must yield
+                            // before polling next_message() to ensure the waiting task gets
+                            // scheduled and can observe the completion
                             tokio::task::yield_now().await;
                         } else {
                             tracing::warn!("Failed to deserialize network message");

@@ -2,7 +2,7 @@
 //!
 //! This module defines the core traits for actor lifecycle and message handling.
 
-use crate::actor::{ActorContext, ActorId, DeactivationReason};
+use crate::actor::{ActorContext, ActorId, DeactivationReason, PlacementHint};
 use crate::error::ActorError;
 use async_trait::async_trait;
 use serde::Serialize;
@@ -88,6 +88,39 @@ pub trait Actor: Sized {
 
     /// Get this actor's unique identifier.
     fn actor_id(&self) -> &ActorId;
+
+    /// Provide a placement hint for actor activation.
+    ///
+    /// This method influences where the directory places new actor activations.
+    /// It's a **hint**, not a guarantee - the directory may ignore it based on
+    /// cluster state (e.g., if the preferred node is unavailable).
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns `PlacementHint::Random` for load-balanced distribution across nodes.
+    ///
+    /// # Override Examples
+    ///
+    /// **Local placement** (minimize network overhead):
+    /// ```rust,ignore
+    /// fn placement_hint() -> PlacementHint {
+    ///     PlacementHint::Local  // Prefer caller's node
+    /// }
+    /// ```
+    ///
+    /// # When to Override
+    ///
+    /// - **High-throughput actors**: Use `Local` to reduce cross-node calls
+    /// - **Session actors**: Use `Local` for strong locality
+    /// - **Load-balanced actors**: Use `Random` (default) for even distribution
+    ///
+    /// # Relationship to Orleans
+    ///
+    /// This replaces Orleans' `[StatelessWorker]` and `[OneInstancePerCluster]` attributes
+    /// with a simpler, more flexible hint-based system.
+    fn placement_hint() -> PlacementHint {
+        PlacementHint::Random
+    }
 
     /// Called when actor is activated (before first message).
     ///

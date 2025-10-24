@@ -91,4 +91,21 @@ pub trait ActorRouter {
     /// }
     /// ```
     async fn route_message(&self, message: Message) -> Result<(), ActorError>;
+
+    /// Get the placement hint for this actor type.
+    ///
+    /// This method returns the placement preference for actors of this type,
+    /// which influences where new actors should be activated in the cluster.
+    ///
+    /// # Returns
+    ///
+    /// The PlacementHint for this actor type (Local, Random, or LeastLoaded).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let hint = router.placement_hint();
+    /// let target_node = directory.choose_placement_node(hint, my_node).await?;
+    /// ```
+    fn placement_hint(&self) -> crate::actor::PlacementHint;
 }

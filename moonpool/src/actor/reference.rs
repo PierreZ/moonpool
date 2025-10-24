@@ -212,43 +212,74 @@ impl<A: Actor> ActorRef<A> {
         let correlation_id = message.correlation_id; // Save for logging
 
         // 7. Route the message to the actor (use the mutated message with correct correlation ID!)
+        tracing::debug!(
+            "🔍 ActorRef: About to call route_message for corr_id={}",
+            correlation_id
+        );
         message_bus.route_message(message).await?;
+        tracing::debug!(
+            "🔍 ActorRef: route_message completed for corr_id={}",
+            correlation_id
+        );
 
-        // 8. Poll for response with busy loop and timeout (workaround for LocalSet/oneshot waker issue)
-        // The oneshot waker doesn't properly trigger in LocalSet, so we manually poll
-        tracing::info!(
-            "ActorRef: Starting busy loop for corr_id={}, timeout={:?}",
+        // 8. Poll for response with manual checking (LocalSet waker workaround)
+        // In LocalSet, oneshot receivers don't wake up properly even with tokio::time::timeout
+        // We must manually poll + yield to allow the completing task to run
+        tracing::debug!(
+            "🔍 ActorRef: ENTRY polling loop for corr_id={}, timeout={:?}",
             correlation_id,
             timeout
         );
-        let start = std::time::Instant::now();
-        let response_message = loop {
-            tokio::task::yield_now().await;
 
-            // Check timeout
+        let start = std::time::Instant::now();
+        let mut poll_count = 0;
+        let response_message = loop {
+            poll_count += 1;
+
+            // Small sleep to yield control and allow other tasks to run
+            // Using sleep(1ms) instead of yield_now() because LocalSet doesn't properly
+            // schedule waiting tasks on simple yields - the timer wakes up the scheduler
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+            // Check for timeout
             if start.elapsed() >= timeout {
                 tracing::warn!(
-                    "ActorRef: Timeout waiting for response, corr_id={}",
+                    "🔍 ActorRef: TIMEOUT after {} polls, corr_id={}",
+                    poll_count,
                     correlation_id
                 );
                 return Err(ActorError::Timeout);
             }
 
+            // Try to receive (non-blocking check)
+            if poll_count % 100 == 0 {
+                tracing::debug!(
+                    "🔍 ActorRef: Still polling... count={}, elapsed={:?}, corr_id={}",
+                    poll_count,
+                    start.elapsed(),
+                    correlation_id
+                );
+            }
+
             match rx.try_recv() {
                 Ok(result) => {
-                    tracing::info!(
-                        "ActorRef: Received response in busy loop, corr_id={}",
+                    tracing::debug!(
+                        "🔍 ActorRef: SUCCESS! Received response after {} polls, corr_id={}",
+                        poll_count,
                         correlation_id
                     );
-                    // result is Result<Message, ActorError>
                     break result?;
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-                    // Not ready yet, continue polling
-                    tracing::debug!("ActorRef: try_recv() returned Empty, continuing...");
+                    // Not ready yet, loop continues after next sleep
                     continue;
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    tracing::error!(
+                        "🔍 ActorRef: ERROR - Channel closed after {} polls, corr_id={}",
+                        poll_count,
+                        correlation_id
+                    );
                     return Err(ActorError::ProcessingFailed(
                         "Response channel closed unexpectedly".to_string(),
                     ));
