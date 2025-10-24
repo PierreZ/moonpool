@@ -283,7 +283,7 @@ mod tests {
     async fn test_simple_directory_basic_operations() {
         let directory = SimpleDirectory::new();
 
-        let nodes = vec![
+        let nodes = [
             NodeId::from("127.0.0.1:8001").unwrap(),
             NodeId::from("127.0.0.1:8002").unwrap(),
         ];
@@ -315,7 +315,7 @@ mod tests {
     async fn test_concurrent_registration_race() {
         let directory = SimpleDirectory::new();
 
-        let nodes = vec![
+        let nodes = [
             NodeId::from("127.0.0.1:8001").unwrap(),
             NodeId::from("127.0.0.1:8002").unwrap(),
         ];
@@ -348,7 +348,7 @@ mod tests {
     async fn test_node_load_tracking() {
         let directory = SimpleDirectory::new();
 
-        let nodes = vec![
+        let nodes = [
             NodeId::from("127.0.0.1:8001").unwrap(),
             NodeId::from("127.0.0.1:8002").unwrap(),
         ];
@@ -391,7 +391,7 @@ mod tests {
     async fn test_idempotent_operations() {
         let directory = SimpleDirectory::new();
 
-        let nodes = vec![NodeId::from("127.0.0.1:8001").unwrap()];
+        let nodes = [NodeId::from("127.0.0.1:8001").unwrap()];
 
         let actor_id = ActorId::from_string("test::Counter/charlie").unwrap();
 

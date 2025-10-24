@@ -38,7 +38,10 @@ impl Actor for FailingActor {
         &self.actor_id
     }
 
-    async fn on_activate(&mut self, _state: Option<()>) -> Result<(), ActorError> {
+    async fn on_activate(
+        &mut self,
+        _state: moonpool::actor::ActorState<()>,
+    ) -> Result<(), ActorError> {
         Ok(())
     }
 

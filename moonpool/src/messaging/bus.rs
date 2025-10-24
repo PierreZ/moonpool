@@ -215,6 +215,14 @@ impl MessageBus {
         &self.node_id
     }
 
+    /// Get the directory reference.
+    ///
+    /// Returns a shared reference to the cluster-wide directory for
+    /// actor location tracking and registration/unregistration.
+    pub fn directory(&self) -> &SharedDirectory {
+        &self.directory
+    }
+
     /// Generate the next correlation ID.
     ///
     /// Returns monotonically increasing IDs starting from 1.
@@ -691,14 +699,18 @@ impl MessageBus {
                 // Update target_node to remote location
                 message.target_node = node_id.clone();
 
-                // Send over network (now non-blocking)
-                if let Some(ref transport) = *self.network_transport.borrow() {
-                    let payload = serde_json::to_vec(&message).map_err(|e| {
-                        ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
-                    })?;
+                // Serialize message BEFORE borrowing transport
+                let payload = serde_json::to_vec(&message).map_err(|e| {
+                    ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
+                })?;
 
-                    // Send returns immediately (spawns background task)
-                    transport.send(node_id.as_str(), payload).await?;
+                // Send over network (borrow released after this scope)
+                let has_transport = self.network_transport.borrow().is_some();
+                if has_transport {
+                    // Get transport and send in separate scope to avoid borrow conflicts
+                    if let Some(ref transport) = *self.network_transport.borrow() {
+                        transport.send(node_id.as_str(), payload).await?;
+                    }
                     return Ok(());
                 } else {
                     return Err(ActorError::ProcessingFailed(
@@ -762,16 +774,18 @@ impl MessageBus {
                     // Update target_node to chosen location
                     message.target_node = chosen_node.clone();
 
-                    // Send over network
-                    if let Some(ref transport) = *self.network_transport.borrow() {
-                        let payload = serde_json::to_vec(&message).map_err(|e| {
-                            ActorError::ProcessingFailed(format!(
-                                "Failed to serialize message: {}",
-                                e
-                            ))
-                        })?;
+                    // Serialize message BEFORE borrowing transport
+                    let payload = serde_json::to_vec(&message).map_err(|e| {
+                        ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
+                    })?;
 
-                        transport.send(chosen_node.as_str(), payload).await?;
+                    // Send over network (borrow released after this scope)
+                    let has_transport = self.network_transport.borrow().is_some();
+                    if has_transport {
+                        // Get transport and send in separate scope to avoid borrow conflicts
+                        if let Some(ref transport) = *self.network_transport.borrow() {
+                            transport.send(chosen_node.as_str(), payload).await?;
+                        }
                         return Ok(());
                     } else {
                         return Err(ActorError::ProcessingFailed(
