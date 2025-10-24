@@ -17,7 +17,7 @@ pub use context::{ActorContext, LifecycleCommand, run_message_loop};
 pub use factory::ActorFactory;
 pub use handlers::HandlerRegistry;
 pub use id::{ActorId, CorrelationId, NodeId};
-pub use lifecycle::{ActivationState, DeactivationReason};
+pub use lifecycle::{ActivationState, DeactivationPolicy, DeactivationReason};
 pub use reference::ActorRef;
 pub use state::ActorState;
 pub use traits::{Actor, MessageHandler};

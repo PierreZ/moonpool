@@ -2,7 +2,9 @@
 //!
 //! This module provides the `ActorContext` which holds per-actor state and metadata.
 
-use crate::actor::{ActivationState, Actor, ActorId, DeactivationReason, NodeId};
+use crate::actor::{
+    ActivationState, Actor, ActorId, DeactivationPolicy, DeactivationReason, NodeId,
+};
 
 /// Lifecycle commands sent via control channel.
 ///
@@ -580,6 +582,24 @@ pub async fn run_message_loop<A: Actor>(
                 match result {
                     Ok(()) => {
                         context.update_last_message_time();
+
+                        // Check deactivation policy after successful message processing
+                        if msg_rx.is_empty() {
+                            let policy = A::deactivation_policy();
+                            if policy == DeactivationPolicy::DeactivateOnIdle {
+                                tracing::info!(
+                                    "Actor {} has DeactivateOnIdle policy and queue is empty - triggering deactivation",
+                                    actor_id
+                                );
+
+                                // Send deactivate command to self
+                                let _ = context.control_sender.send(
+                                    LifecycleCommand::Deactivate {
+                                        reason: DeactivationReason::IdleTimeout,
+                                    }
+                                ).await;
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::error!("Processing failed for {}: {:?}", actor_id, e);

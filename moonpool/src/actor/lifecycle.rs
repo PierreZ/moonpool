@@ -73,6 +73,27 @@ impl ActivationState {
     }
 }
 
+/// Policy controlling when an actor should be deactivated.
+///
+/// Orleans provides DeactivateOnIdle() to control grain lifecycle.
+/// This enum provides similar control for Moonpool actors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DeactivationPolicy {
+    /// Actor is never automatically deactivated (stays active until explicit request or shutdown).
+    /// Use for: Long-lived stateful actors, singleton services, persistent connections
+    #[default]
+    NeverDeactivate,
+
+    /// Actor is deactivated when message queue becomes empty (after current message completes).
+    /// This is Orleans' DeactivateOnIdle() behavior - immediate deactivation when idle.
+    ///
+    /// Note: This is NOT a time-based idle timeout. The actor deactivates as soon as
+    /// the message queue drains. True time-based idle timeout will be added later.
+    ///
+    /// Use for: Stateless workers, one-shot actors, temporary processing units
+    DeactivateOnIdle,
+}
+
 /// Reason why an actor is being deactivated.
 ///
 /// Used in `Actor::on_deactivate()` to inform the actor why it's being removed.
@@ -183,5 +204,23 @@ mod tests {
         assert!(!ExplicitRequest.is_immediate());
         assert!(!ActivationFailed.is_immediate());
         assert!(!UnrecoverableError.is_immediate());
+    }
+
+    #[test]
+    fn test_deactivation_policy_default() {
+        let policy = DeactivationPolicy::default();
+        assert_eq!(policy, DeactivationPolicy::NeverDeactivate);
+    }
+
+    #[test]
+    fn test_deactivation_policy_never() {
+        let policy = DeactivationPolicy::NeverDeactivate;
+        assert_eq!(policy, DeactivationPolicy::NeverDeactivate);
+    }
+
+    #[test]
+    fn test_deactivation_policy_idle() {
+        let policy = DeactivationPolicy::DeactivateOnIdle;
+        assert_eq!(policy, DeactivationPolicy::DeactivateOnIdle);
     }
 }
