@@ -2,7 +2,7 @@
 //!
 //! This module defines the core traits for actor lifecycle and message handling.
 
-use crate::actor::{ActorContext, ActorId, DeactivationReason, PlacementHint};
+use crate::actor::{ActorContext, ActorId, DeactivationPolicy, DeactivationReason, PlacementHint};
 use crate::error::ActorError;
 use async_trait::async_trait;
 use serde::Serialize;
@@ -120,6 +120,51 @@ pub trait Actor: Sized {
     /// with a simpler, more flexible hint-based system.
     fn placement_hint() -> PlacementHint {
         PlacementHint::Random
+    }
+
+    /// Provide deactivation policy for this actor type.
+    ///
+    /// Controls when the actor runtime should automatically deactivate this actor.
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns `DeactivationPolicy::NeverDeactivate` - actor stays active until explicit removal.
+    ///
+    /// # Override Examples
+    ///
+    /// **Deactivate when idle** (stateless workers):
+    /// ```rust,ignore
+    /// fn deactivation_policy() -> DeactivationPolicy {
+    ///     DeactivationPolicy::DeactivateOnIdle
+    /// }
+    /// ```
+    ///
+    /// **Never deactivate** (persistent actors):
+    /// ```rust,ignore
+    /// fn deactivation_policy() -> DeactivationPolicy {
+    ///     DeactivationPolicy::NeverDeactivate  // Default
+    /// }
+    /// ```
+    ///
+    /// # Deactivation Timing
+    ///
+    /// - **DeactivateOnIdle**: Actor deactivates when message queue becomes empty (immediate)
+    /// - **NeverDeactivate**: Actor stays active until explicit deactivation or shutdown
+    ///
+    /// Note: Time-based idle timeout (e.g., "deactivate after 10 minutes of no messages")
+    /// will be added in a future update.
+    ///
+    /// # Use Cases
+    ///
+    /// - **NeverDeactivate**: Singleton services, connection pools, long-lived stateful actors
+    /// - **DeactivateOnIdle**: Stateless workers, one-shot actors, temporary processing units
+    ///
+    /// # Relationship to Orleans
+    ///
+    /// This replaces Orleans' `DeactivateOnIdle()` method with a declarative policy system.
+    /// Orleans' DeactivateOnIdle() marks a grain for immediate deactivation when queue drains.
+    fn deactivation_policy() -> DeactivationPolicy {
+        DeactivationPolicy::default()
     }
 
     /// Called when actor is activated (before first message).
