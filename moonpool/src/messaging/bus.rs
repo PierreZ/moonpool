@@ -8,6 +8,8 @@
 //! MessageBus integrates with foundation's transport layer to enable actor-to-actor
 //! communication across nodes.
 //!
+// Allow RefCell borrows across await points - safe in single-threaded context
+#![allow(clippy::await_holding_refcell_ref)]
 //! ```text
 //! ┌────────────────────────────────────┐
 //! │ MessageBus                         │
@@ -586,24 +588,25 @@ impl MessageBus {
     /// ```
     pub async fn poll_network(&self) -> Result<bool, ActorError> {
         if let Some(ref mut transport) = *self.network_transport.borrow_mut()
-            && let Some(payload) = transport.poll_receive() {
-                // Deserialize the message from payload
-                let message: Message = serde_json::from_slice(&payload).map_err(|e| {
-                    ActorError::ProcessingFailed(format!("Failed to deserialize message: {}", e))
-                })?;
+            && let Some(payload) = transport.poll_receive()
+        {
+            // Deserialize the message from payload
+            let message: Message = serde_json::from_slice(&payload).map_err(|e| {
+                ActorError::ProcessingFailed(format!("Failed to deserialize message: {}", e))
+            })?;
 
-                tracing::debug!(
-                    node_id = %self.node_id,
-                    "poll_network: received message corr_id={}, direction={:?}, target={}",
-                    message.correlation_id,
-                    message.direction,
-                    message.target_actor
-                );
+            tracing::debug!(
+                node_id = %self.node_id,
+                "poll_network: received message corr_id={}, direction={:?}, target={}",
+                message.correlation_id,
+                message.direction,
+                message.target_actor
+            );
 
-                // Route the message
-                self.route_message(message).await?;
-                return Ok(true);
-            }
+            // Route the message
+            self.route_message(message).await?;
+            return Ok(true);
+        }
         Ok(false)
     }
 

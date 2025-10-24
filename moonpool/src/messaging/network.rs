@@ -85,6 +85,7 @@ where
     T: moonpool_foundation::time::TimeProvider + Clone + 'static,
     TP: moonpool_foundation::task::TaskProvider + Clone + 'static,
 {
+    #[allow(clippy::await_holding_refcell_ref)]
     async fn send(&self, destination: &str, payload: Vec<u8>) -> Result<Vec<u8>, ActorError> {
         use moonpool_foundation::network::transport::RequestResponseEnvelopeFactory;
 

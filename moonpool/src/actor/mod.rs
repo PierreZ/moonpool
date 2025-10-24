@@ -74,8 +74,7 @@ pub use traits::{Actor, MessageHandler};
 /// - Heterogeneous workloads with varying actor lifetimes
 /// - Production deployments requiring automatic load balancing
 /// - Scenarios where some nodes may be overloaded
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PlacementHint {
     /// Activate on a random node (uniform distribution).
     ///
@@ -98,4 +97,3 @@ pub enum PlacementHint {
     /// Recommended as the default for most production deployments.
     LeastLoaded,
 }
-

@@ -4,7 +4,7 @@
 //! consistent with other provider abstractions in the simulation framework
 //! like TimeProvider, NetworkProvider, and TaskProvider.
 
-use rand::distributions::{Distribution, Standard, uniform::SampleUniform};
+use rand::distr::{Distribution, StandardUniform, uniform::SampleUniform};
 use std::ops::Range;
 
 pub mod sim;
@@ -23,7 +23,7 @@ pub trait RandomProvider: Clone {
     /// Generate a random value of type T.
     fn random<T>(&self) -> T
     where
-        Standard: Distribution<T>;
+        StandardUniform: Distribution<T>;
 
     /// Generate a random value within a specified range.
     ///

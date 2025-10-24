@@ -260,22 +260,32 @@ async fn test_multiple_actors_different_keys() {
 
 #[tokio::test]
 async fn test_placement_algorithm_single_node() {
+    use moonpool::actor::PlacementHint;
+
     let nodes = vec![NodeId::from("127.0.0.1:8001").unwrap()];
     let directory = SimpleDirectory::new(nodes.clone());
 
     // With single node, should always place on that node
-    let chosen = directory.choose_placement_node().await.unwrap();
+    let chosen = directory
+        .choose_placement_node(PlacementHint::LeastLoaded, &nodes[0])
+        .await
+        .unwrap();
     assert_eq!(chosen, nodes[0].clone());
 
     // Multiple calls should return same node
     for _ in 0..10 {
-        let chosen = directory.choose_placement_node().await.unwrap();
+        let chosen = directory
+            .choose_placement_node(PlacementHint::Random, &nodes[0])
+            .await
+            .unwrap();
         assert_eq!(chosen, nodes[0].clone());
     }
 }
 
 #[tokio::test]
 async fn test_placement_algorithm_multiple_nodes() {
+    use moonpool::actor::PlacementHint;
+
     let nodes = vec![
         NodeId::from("127.0.0.1:8001").unwrap(),
         NodeId::from("127.0.0.1:8002").unwrap(),
@@ -285,16 +295,24 @@ async fn test_placement_algorithm_multiple_nodes() {
 
     // Choose placement should return valid nodes
     for _ in 0..20 {
-        let chosen = directory.choose_placement_node().await.unwrap();
+        let chosen = directory
+            .choose_placement_node(PlacementHint::Random, &nodes[0])
+            .await
+            .unwrap();
         assert!(nodes.contains(&chosen));
     }
 }
 
 #[tokio::test]
 async fn test_empty_cluster_error() {
+    use moonpool::actor::PlacementHint;
+
     let directory = SimpleDirectory::new(vec![]);
+    let fake_node = NodeId::from("127.0.0.1:9999").unwrap();
 
     // Placement should fail with empty cluster
-    let result = directory.choose_placement_node().await;
+    let result = directory
+        .choose_placement_node(PlacementHint::Random, &fake_node)
+        .await;
     assert!(result.is_err());
 }

@@ -198,8 +198,8 @@ impl SimpleDirectory {
         }
 
         // Pick a single random node
-        use rand::seq::SliceRandom;
-        let mut rng = rand::thread_rng();
+        use rand::prelude::IndexedRandom;
+        let mut rng = rand::rng();
 
         state
             .cluster_nodes

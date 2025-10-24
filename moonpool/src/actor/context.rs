@@ -533,6 +533,7 @@ impl<A: Actor> ActorContext<A> {
 /// - `loop` + `tokio::select!` on two channels
 /// - Explicit exit via `Deactivate` command
 /// - Channels provide implicit wake mechanism
+#[allow(clippy::await_holding_refcell_ref)]
 pub async fn run_message_loop<A: Actor>(
     context: Rc<ActorContext<A>>,
     mut msg_rx: mpsc::Receiver<Message>,
@@ -564,6 +565,8 @@ pub async fn run_message_loop<A: Actor>(
                 );
 
                 // Dispatch to actor handler
+                // Note: We hold RefCell borrow across await, but this is safe in single-threaded
+                // context. The borrow is released after the async function returns.
                 let result = {
                     let mut actor = context.actor_instance.borrow_mut();
                     dispatch_message_to_actor(

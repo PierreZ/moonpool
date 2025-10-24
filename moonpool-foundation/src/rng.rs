@@ -8,7 +8,7 @@
 use rand::SeedableRng;
 use rand::{
     Rng,
-    distributions::{Distribution, Standard, uniform::SampleUniform},
+    distr::{Distribution, StandardUniform, uniform::SampleUniform},
 };
 use rand_chacha::ChaCha8Rng;
 use std::cell::RefCell;
@@ -18,7 +18,8 @@ thread_local! {
     ///
     /// Uses ChaCha8Rng for deterministic, reproducible randomness.
     /// Each thread maintains independent state for parallel test execution.
-    static SIM_RNG: RefCell<ChaCha8Rng> = RefCell::new(ChaCha8Rng::from_entropy());
+    /// Initialized with a fixed seed to avoid blocking on OS entropy.
+    static SIM_RNG: RefCell<ChaCha8Rng> = RefCell::new(ChaCha8Rng::seed_from_u64(0));
 
     /// Thread-local storage for the current simulation seed.
     ///
@@ -40,9 +41,9 @@ thread_local! {
 /// Generate a random value using the thread-local simulation RNG.
 pub fn sim_random<T>() -> T
 where
-    Standard: Distribution<T>,
+    StandardUniform: Distribution<T>,
 {
-    SIM_RNG.with(|rng| rng.borrow_mut().sample(Standard))
+    SIM_RNG.with(|rng| rng.borrow_mut().sample(StandardUniform))
 }
 
 /// Generate a random value within a specified range using the thread-local simulation RNG.
@@ -63,7 +64,7 @@ pub fn sim_random_range<T>(range: std::ops::Range<T>) -> T
 where
     T: SampleUniform + PartialOrd,
 {
-    SIM_RNG.with(|rng| rng.borrow_mut().gen_range(range))
+    SIM_RNG.with(|rng| rng.borrow_mut().random_range(range))
 }
 
 /// Generate a random value within the given range, returning the start value if the range is empty.
@@ -151,7 +152,7 @@ pub fn get_current_sim_seed() -> u64 {
 /// Reset the thread-local simulation RNG to a fresh state.
 pub fn reset_sim_rng() {
     SIM_RNG.with(|rng| {
-        *rng.borrow_mut() = ChaCha8Rng::from_entropy();
+        *rng.borrow_mut() = ChaCha8Rng::seed_from_u64(0);
     });
     CURRENT_SEED.with(|current| {
         *current.borrow_mut() = 0;

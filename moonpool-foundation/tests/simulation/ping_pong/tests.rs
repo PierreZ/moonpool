@@ -358,6 +358,28 @@ fn generate_random_peer_config(
 // ============================================================================
 
 #[test]
+fn slow_simulation_ping_pong_1x1_one() {
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_max_level(Level::ERROR)
+        .try_init();
+
+    let local_runtime = tokio::runtime::Builder::new_current_thread()
+        .build_local(Default::default())
+        .expect("Failed to build local runtime");
+
+    local_runtime.block_on(async move {
+        let report = run_ping_pong_simulation(1, 1, 10_000).await;
+
+        println!("{}", report);
+
+        if !report.seeds_failing.is_empty() {
+            panic!("faulty seeds detected: {:?}", report.seeds_failing);
+        }
+    });
+}
+
+#[test]
 fn slow_simulation_ping_pong_1x1() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
@@ -542,28 +564,28 @@ async fn tokio_ping_pong_client(
     impl moonpool_foundation::random::RandomProvider for TokioRandomProvider {
         fn random<T>(&self) -> T
         where
-            rand::distributions::Standard: rand::distributions::Distribution<T>,
+            rand::distr::StandardUniform: rand::distr::Distribution<T>,
         {
             use rand::Rng;
-            rand::thread_rng().r#gen()
+            rand::rng().random()
         }
 
         fn random_range<T>(&self, range: std::ops::Range<T>) -> T
         where
-            T: rand::distributions::uniform::SampleUniform + PartialOrd,
+            T: rand::distr::uniform::SampleUniform + PartialOrd,
         {
             use rand::Rng;
-            rand::thread_rng().gen_range(range)
+            rand::rng().random_range(range)
         }
 
         fn random_ratio(&self) -> f64 {
             use rand::Rng;
-            rand::thread_rng().r#gen()
+            rand::rng().random()
         }
 
         fn random_bool(&self, probability: f64) -> bool {
             use rand::Rng;
-            rand::thread_rng().gen_bool(probability)
+            rand::rng().random_bool(probability)
         }
     }
     impl Clone for TokioRandomProvider {
