@@ -310,6 +310,9 @@ where
             placement,
         ));
 
+        // Initialize MessageBus self-reference (required for passing to routers)
+        message_bus.init_self_ref();
+
         // Create network transport using foundation layer
         // ClientTransport for outgoing requests
         let peer_config = PeerConfig::default();

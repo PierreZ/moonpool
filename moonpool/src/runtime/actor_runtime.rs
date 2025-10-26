@@ -186,9 +186,6 @@ impl<T: TaskProvider + 'static> ActorRuntime<T> {
         // Initialize self-reference for message loop catalog access
         catalog.init_self_ref();
 
-        // Set message bus on catalog
-        catalog.set_message_bus(self.message_bus.clone());
-
         // Store in router registry as trait object
         self.routers
             .borrow_mut()

@@ -191,8 +191,9 @@ fn test_actor_id_accessor() {
     use tokio::sync::mpsc;
     let (msg_tx, _msg_rx) = mpsc::channel(128);
     let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+    let storage = Rc::new(InMemoryStorage::new());
 
-    let context = ActorContext::new(actor_id.clone(), node_id, actor, msg_tx, ctrl_tx);
+    let context = ActorContext::new(actor_id.clone(), node_id, actor, msg_tx, ctrl_tx, storage);
 
     assert_eq!(context.actor_id, actor_id);
     assert_eq!(context.actor_id.namespace, "test");
@@ -210,8 +211,9 @@ fn test_node_id_accessor() {
     use tokio::sync::mpsc;
     let (msg_tx, _msg_rx) = mpsc::channel(128);
     let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+    let storage = Rc::new(InMemoryStorage::new());
 
-    let context = ActorContext::new(actor_id, node_id.clone(), actor, msg_tx, ctrl_tx);
+    let context = ActorContext::new(actor_id, node_id.clone(), actor, msg_tx, ctrl_tx, storage);
 
     assert_eq!(context.node_id, node_id);
 }

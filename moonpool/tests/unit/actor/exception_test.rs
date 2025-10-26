@@ -9,7 +9,9 @@
 use async_trait::async_trait;
 use moonpool::actor::{Actor, ActorContext, ActorId, DeactivationReason};
 use moonpool::error::ActorError;
+use moonpool::storage::InMemoryStorage;
 use serde::{Deserialize, Serialize};
+use std::rc::Rc;
 
 /// Test actor that can be configured to fail on demand.
 #[derive(Debug)]
@@ -71,8 +73,9 @@ fn test_error_tracking_initialization() {
     use tokio::sync::mpsc;
     let (msg_tx, _msg_rx) = mpsc::channel(128);
     let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+    let storage = Rc::new(InMemoryStorage::new());
 
-    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx);
+    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx, storage);
 
     assert_eq!(context.get_error_count(), 0);
     assert!(context.get_last_error().is_none());
@@ -89,8 +92,9 @@ fn test_error_tracking_record() {
     use tokio::sync::mpsc;
     let (msg_tx, _msg_rx) = mpsc::channel(128);
     let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+    let storage = Rc::new(InMemoryStorage::new());
 
-    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx);
+    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx, storage);
 
     // Record an error
     let error = ActorError::ProcessingFailed("Test error".to_string());
@@ -117,8 +121,9 @@ fn test_error_tracking_clear() {
     use tokio::sync::mpsc;
     let (msg_tx, _msg_rx) = mpsc::channel(128);
     let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+    let storage = Rc::new(InMemoryStorage::new());
 
-    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx);
+    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx, storage);
 
     // Record some errors
     context.record_error(ActorError::ProcessingFailed("Error 1".to_string()));

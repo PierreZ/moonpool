@@ -129,6 +129,12 @@ pub struct MessageBus {
     /// Consults placement hint from actor type and chooses appropriate node
     /// based on load balancing and other placement strategies.
     placement: SimplePlacement,
+
+    /// Weak self-reference for passing to actor routers.
+    ///
+    /// Set after wrapping in Rc via `init_self_ref()`. Required for routers
+    /// to receive MessageBus reference when spawning message loops (Orleans pattern).
+    self_ref: RefCell<Option<std::rc::Weak<Self>>>,
 }
 
 impl MessageBus {
@@ -160,7 +166,24 @@ impl MessageBus {
             network_transport: RefCell::new(None),
             directory,
             placement,
+            self_ref: RefCell::new(None),
         }
+    }
+
+    /// Initialize the self-reference after wrapping in Rc.
+    ///
+    /// This must be called after creating the MessageBus and wrapping it in Rc.
+    /// The weak reference is used to pass MessageBus to actor routers for
+    /// spawning message loops (Orleans pattern).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let bus = Rc::new(MessageBus::new(node_id, directory, placement));
+    /// bus.init_self_ref();
+    /// ```
+    pub fn init_self_ref(self: &Rc<Self>) {
+        *self.self_ref.borrow_mut() = Some(Rc::downgrade(self));
     }
 
     /// Set the network transport for remote message delivery.
@@ -825,8 +848,22 @@ impl MessageBus {
                 ))
             })?;
 
-        // Delegate to router (which will auto-activate if needed)
-        router.route_message(message).await
+        // Get MessageBus Rc from weak reference (Orleans pattern)
+        // This allows routers to receive MessageBus for spawning message loops
+        let message_bus_rc = self
+            .self_ref
+            .borrow()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or_else(|| {
+                ActorError::ProcessingFailed(
+                    "MessageBus self-reference not initialized (call init_self_ref() first)"
+                        .to_string(),
+                )
+            })?;
+
+        // Delegate to router (which will auto-activate if needed, passing message_bus)
+        router.route_message(message, message_bus_rc).await
     }
 
     /// Route response message to waiting callback.

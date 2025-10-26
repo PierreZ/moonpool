@@ -291,12 +291,6 @@ pub struct ActorCatalog<A: Actor, T: moonpool_foundation::TaskProvider, F: Actor
     /// This node's ID.
     node_id: NodeId,
 
-    /// MessageBus reference for message processing.
-    ///
-    /// Set by ActorRuntime when connecting the catalog to the bus.
-    /// Required for actors to send responses.
-    message_bus: RefCell<Option<Rc<crate::messaging::MessageBus>>>,
-
     /// Directory for actor placement and location tracking.
     ///
     /// Used to register actors with the cluster-wide directory during activation.
@@ -366,7 +360,6 @@ impl<
             activation_directory: ActivationDirectory::new(),
             activation_lock: RefCell::new(()),
             node_id,
-            message_bus: RefCell::new(None),
             directory,
             task_provider,
             actor_factory,
@@ -382,13 +375,6 @@ impl<
     /// catalog unregistration on deactivation.
     pub fn init_self_ref(self: &Rc<Self>) {
         *self.self_ref.borrow_mut() = Some(Rc::downgrade(self));
-    }
-
-    /// Set the MessageBus reference for this catalog.
-    ///
-    /// This is called by ActorRuntime when initializing the system.
-    pub fn set_message_bus(&self, message_bus: Rc<crate::messaging::MessageBus>) {
-        *self.message_bus.borrow_mut() = Some(message_bus);
     }
 
     /// Get an existing activation by ActorId.
@@ -429,6 +415,7 @@ impl<
     /// # Parameters
     ///
     /// - `actor_id`: The ActorId to get or create
+    /// - `message_bus`: MessageBus reference for sending responses (passed from caller)
     ///
     /// # Returns
     ///
@@ -439,7 +426,7 @@ impl<
     ///
     /// ```rust,ignore
     /// // No need to create actor manually!
-    /// let context = catalog.get_or_create_activation(actor_id).await?;
+    /// let context = catalog.get_or_create_activation(actor_id, message_bus).await?;
     ///
     /// // Context ready with message loop running
     /// context.enqueue_message(message).await?;
@@ -467,6 +454,7 @@ impl<
     pub async fn get_or_create_activation(
         &self,
         actor_id: ActorId,
+        message_bus: Rc<crate::messaging::MessageBus>,
     ) -> Result<Rc<ActorContext<A>>, ActorError> {
         // FAST PATH: Check without lock (99% case - activation exists)
         if let Some(activation) = self.activation_directory.find_target(&actor_id) {
@@ -497,11 +485,6 @@ impl<
                 return Ok(activation); // Another task created while we waited
             }
         } // Drop lock before async operations
-
-        // Get required dependencies (outside lock)
-        let message_bus = self.message_bus.borrow().clone().ok_or_else(|| {
-            ActorError::ProcessingFailed("MessageBus not set in ActorCatalog".to_string())
-        })?;
 
         // CREATE ACTOR VIA FACTORY (outside lock to avoid holding RefCell across await)
         let actor_instance = self.actor_factory.create(actor_id.clone()).await?;
@@ -786,6 +769,7 @@ impl<
     /// # Parameters
     ///
     /// - `message`: The message to route to an actor
+    /// - `message_bus`: MessageBus reference for spawning message loops
     ///
     /// # Returns
     ///
@@ -796,7 +780,7 @@ impl<
     ///
     /// If the actor doesn't exist, it's automatically created via the factory:
     /// ```text
-    /// Message arrives → catalog.get_or_create_activation(actor_id)
+    /// Message arrives → catalog.get_or_create_activation(actor_id, message_bus)
     ///                 → factory.create(actor_id)
     ///                 → spawn message loop
     ///                 → enqueue message
@@ -812,12 +796,17 @@ impl<
     /// let router: Rc<dyn ActorRouter> = Rc::new(catalog);
     ///
     /// // Route message to actor (auto-activates if needed!)
-    /// router.route_message(message).await?;
+    /// router.route_message(message, message_bus).await?;
     /// ```
-    async fn route_message(&self, message: Message) -> Result<(), ActorError> {
+    async fn route_message(
+        &self,
+        message: Message,
+        message_bus: std::rc::Rc<crate::messaging::MessageBus>,
+    ) -> Result<(), ActorError> {
         // Get or auto-create the actor activation (Orleans pattern!)
+        // Pass message_bus for spawning message loop
         let context = self
-            .get_or_create_activation(message.target_actor.clone())
+            .get_or_create_activation(message.target_actor.clone(), message_bus)
             .await?;
 
         // Enqueue message in actor's channel (async send)
@@ -1045,12 +1034,12 @@ mod tests {
             // Initialize self-reference
             catalog.init_self_ref();
 
-            // Set MessageBus (required for spawning message loop task)
+            // Create MessageBus (required for spawning message loop task)
             let placement = create_test_placement();
             let message_bus = Rc::new(crate::messaging::MessageBus::new(
                 node_id, directory, placement,
             ));
-            catalog.set_message_bus(message_bus);
+            message_bus.init_self_ref();
 
             let actor_id = ActorId::from_string("test::Counter/charlie").unwrap();
 
@@ -1058,17 +1047,17 @@ mod tests {
             assert!(!catalog.exists(&actor_id));
             assert_eq!(catalog.count(), 0);
 
-            // Get or create (first time - creates via factory)
+            // Get or create (first time - creates via factory, passing message_bus)
             let context1 = catalog
-                .get_or_create_activation(actor_id.clone())
+                .get_or_create_activation(actor_id.clone(), message_bus.clone())
                 .await
                 .unwrap();
             assert_eq!(catalog.count(), 1);
             assert!(catalog.exists(&actor_id));
 
-            // Get or create (second time - returns existing)
+            // Get or create (second time - returns existing, passing message_bus)
             let context2 = catalog
-                .get_or_create_activation(actor_id.clone())
+                .get_or_create_activation(actor_id.clone(), message_bus.clone())
                 .await
                 .unwrap();
             assert_eq!(catalog.count(), 1); // Still 1, not 2
@@ -1113,25 +1102,28 @@ mod tests {
             // Initialize self-reference
             catalog.init_self_ref();
 
-            // Set MessageBus (required for spawning message loop task)
+            // Create MessageBus (required for spawning message loop task)
             let placement = create_test_placement();
             let message_bus = Rc::new(crate::messaging::MessageBus::new(
                 node_id, directory, placement,
             ));
-            catalog.set_message_bus(message_bus);
+            message_bus.init_self_ref();
 
             let actor_id = ActorId::from_string("test::Counter/dave").unwrap();
 
             // Simulate concurrent calls (single-threaded simulation)
             let context1 = catalog
-                .get_or_create_activation(actor_id.clone())
+                .get_or_create_activation(actor_id.clone(), message_bus.clone())
                 .await
                 .unwrap();
             let context2 = catalog
-                .get_or_create_activation(actor_id.clone())
+                .get_or_create_activation(actor_id.clone(), message_bus.clone())
                 .await
                 .unwrap();
-            let context3 = catalog.get_or_create_activation(actor_id).await.unwrap();
+            let context3 = catalog
+                .get_or_create_activation(actor_id, message_bus.clone())
+                .await
+                .unwrap();
 
             // All should be the same instance
             assert!(Rc::ptr_eq(&context1, &context2));
@@ -1165,12 +1157,12 @@ mod tests {
             // Initialize self-reference
             catalog.init_self_ref();
 
-            // Set MessageBus (required for spawning message loop task)
+            // Create MessageBus (required for spawning message loop task)
             let placement = create_test_placement();
             let message_bus = Rc::new(crate::messaging::MessageBus::new(
                 node_id, directory, placement,
             ));
-            catalog.set_message_bus(message_bus);
+            message_bus.init_self_ref();
 
             // Create multiple actors
             let alice = ActorId::from_string("test::Counter/alice").unwrap();
@@ -1178,12 +1170,15 @@ mod tests {
             let charlie = ActorId::from_string("test::BankAccount/charlie").unwrap();
 
             let context_alice = catalog
-                .get_or_create_activation(alice.clone())
+                .get_or_create_activation(alice.clone(), message_bus.clone())
                 .await
                 .unwrap();
-            let context_bob = catalog.get_or_create_activation(bob.clone()).await.unwrap();
+            let context_bob = catalog
+                .get_or_create_activation(bob.clone(), message_bus.clone())
+                .await
+                .unwrap();
             let context_charlie = catalog
-                .get_or_create_activation(charlie.clone())
+                .get_or_create_activation(charlie.clone(), message_bus.clone())
                 .await
                 .unwrap();
 

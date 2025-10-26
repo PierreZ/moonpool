@@ -55,6 +55,7 @@ pub trait ActorRouter {
     /// # Parameters
     ///
     /// - `message`: The message to route to an actor
+    /// - `message_bus`: MessageBus reference for spawning message loops and sending responses
     ///
     /// # Returns
     ///
@@ -65,32 +66,31 @@ pub trait ActorRouter {
     ///
     /// Implementations should:
     /// 1. Extract target actor ID from message
-    /// 2. Get or create actor activation
+    /// 2. Get or create actor activation (passing message_bus for message loop)
     /// 3. Enqueue message in actor's queue
-    /// 4. Spawn message processing task if not already running
+    /// 4. Message processing task spawned automatically if needed
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// async fn route_message(&self, message: Message) -> Result<(), ActorError> {
-    ///     // 1. Get or create activation
+    /// async fn route_message(&self, message: Message, message_bus: Rc<MessageBus>) -> Result<(), ActorError> {
+    ///     // 1. Get or create activation (passing message_bus)
     ///     let context = self.get_or_create_activation(
-    ///         message.target_actor.clone()
-    ///     )?;
+    ///         message.target_actor.clone(),
+    ///         message_bus
+    ///     ).await?;
     ///
-    ///     // 2. Enqueue message
-    ///     context.enqueue_message(message.clone());
-    ///
-    ///     // 3. Spawn processing task if needed
-    ///     if !context.is_processing() {
-    ///         context.set_processing(true);
-    ///         self.spawn_message_processor(context).await;
-    ///     }
+    ///     // 2. Enqueue message (message loop processes it)
+    ///     context.enqueue_message(message).await?;
     ///
     ///     Ok(())
     /// }
     /// ```
-    async fn route_message(&self, message: Message) -> Result<(), ActorError>;
+    async fn route_message(
+        &self,
+        message: Message,
+        message_bus: std::rc::Rc<crate::messaging::MessageBus>,
+    ) -> Result<(), ActorError>;
 
     /// Get the placement hint for this actor type.
     ///
