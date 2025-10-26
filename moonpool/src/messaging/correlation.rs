@@ -58,7 +58,7 @@
 
 use crate::error::ActorError;
 use crate::messaging::Message;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::time::Instant;
 use tokio::sync::oneshot;
 
@@ -379,6 +379,212 @@ impl CallbackConfig {
         Self {
             default_timeout: timeout,
         }
+    }
+}
+
+/// Callback manager for correlation tracking and callback management.
+///
+/// `CallbackManager` manages the lifecycle of pending requests awaiting responses.
+/// It tracks correlation IDs, registers callbacks, and completes them when responses
+/// arrive or timeouts occur.
+///
+/// This component matches Orleans' InsideRuntimeClient pattern - it handles the
+/// request-response correlation layer, separate from message routing logic.
+///
+/// # Architecture
+///
+/// ```text
+/// ┌──────────────────────────────────────┐
+/// │ CallbackManager                      │
+/// │                                      │
+/// │  ┌────────────────────────────────┐  │
+/// │  │ correlation_id_factory         │  │
+/// │  │ (generates unique IDs)         │  │
+/// │  └────────────────────────────────┘  │
+/// │                                      │
+/// │  ┌────────────────────────────────┐  │
+/// │  │ pending_requests               │  │
+/// │  │ HashMap<CorrelationId,         │  │
+/// │  │          CallbackData>         │  │
+/// │  └────────────────────────────────┘  │
+/// └──────────────────────────────────────┘
+/// ```
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use moonpool::messaging::CallbackManager;
+/// use std::rc::Rc;
+///
+/// // Create callback manager
+/// let callback_manager = Rc::new(CallbackManager::new());
+///
+/// // Generate correlation ID
+/// let corr_id = callback_manager.next_correlation_id();
+///
+/// // Register callback for response
+/// let (tx, rx) = oneshot::channel();
+/// callback_manager.register_pending_request(corr_id, request_msg, tx);
+///
+/// // Wait for response
+/// let response = rx.await?;
+/// ```
+pub struct CallbackManager {
+    /// Factory for generating unique correlation IDs.
+    ///
+    /// Produces monotonically increasing IDs starting from 1.
+    correlation_id_factory: CorrelationIdFactory,
+
+    /// Pending requests awaiting responses.
+    ///
+    /// Maps correlation_id → CallbackData.
+    /// Uses RefCell for interior mutability (single-threaded).
+    pending_requests: RefCell<std::collections::HashMap<crate::actor::CorrelationId, CallbackData>>,
+}
+
+impl CallbackManager {
+    /// Create a new CallbackManager.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use moonpool::messaging::CallbackManager;
+    ///
+    /// let manager = CallbackManager::new();
+    /// ```
+    pub fn new() -> Self {
+        Self {
+            correlation_id_factory: CorrelationIdFactory::new(),
+            pending_requests: RefCell::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Generate the next correlation ID.
+    ///
+    /// Returns monotonically increasing IDs starting from 1.
+    /// Unique per CallbackManager instance (not globally unique).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let id1 = manager.next_correlation_id();
+    /// let id2 = manager.next_correlation_id();
+    /// assert!(id2.value() > id1.value());
+    /// ```
+    pub fn next_correlation_id(&self) -> crate::actor::CorrelationId {
+        crate::actor::CorrelationId::new(self.correlation_id_factory.next())
+    }
+
+    /// Register a pending request awaiting response.
+    ///
+    /// Creates a CallbackData to track the request and stores it in the
+    /// pending_requests map for later correlation.
+    ///
+    /// # Parameters
+    ///
+    /// - `correlation_id`: The request's correlation ID
+    /// - `message`: The request message
+    /// - `sender`: Oneshot sender for delivering the response
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let corr_id = manager.next_correlation_id();
+    /// let (tx, rx) = oneshot::channel();
+    ///
+    /// manager.register_pending_request(corr_id, request_msg, tx);
+    ///
+    /// // Later, await response
+    /// let response = rx.await?;
+    /// ```
+    pub fn register_pending_request(
+        &self,
+        correlation_id: crate::actor::CorrelationId,
+        message: Message,
+        sender: oneshot::Sender<Result<Message, ActorError>>,
+    ) {
+        let callback = CallbackData::new(message, sender);
+        self.pending_requests
+            .borrow_mut()
+            .insert(correlation_id, callback);
+    }
+
+    /// Complete a pending request with a response.
+    ///
+    /// Looks up the CallbackData by correlation ID and completes it with
+    /// the provided result. Removes the callback from pending_requests.
+    ///
+    /// # Parameters
+    ///
+    /// - `correlation_id`: The correlation ID from the response
+    /// - `result`: The response message or error
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())`: Callback found and completed
+    /// - `Err(ActorError::UnknownCorrelationId)`: No pending request for this ID
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // When response message arrives:
+    /// manager.complete_pending_request(
+    ///     response.correlation_id,
+    ///     Ok(response)
+    /// )?;
+    /// ```
+    pub fn complete_pending_request(
+        &self,
+        correlation_id: crate::actor::CorrelationId,
+        result: Result<Message, ActorError>,
+    ) -> Result<(), ActorError> {
+        let callback = self
+            .pending_requests
+            .borrow_mut()
+            .remove(&correlation_id)
+            .ok_or(ActorError::UnknownCorrelationId)?;
+
+        callback.complete(result);
+        Ok(())
+    }
+
+    /// Handle a timeout for a pending request.
+    ///
+    /// Removes the callback from pending_requests and completes it with a timeout error.
+    ///
+    /// # Parameters
+    ///
+    /// - `correlation_id`: The correlation ID that timed out
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // In timeout task:
+    /// time_provider.sleep(timeout_duration).await;
+    /// manager.handle_timeout(correlation_id);
+    /// ```
+    pub fn handle_timeout(&self, correlation_id: crate::actor::CorrelationId) {
+        if let Some(callback) = self.pending_requests.borrow_mut().remove(&correlation_id) {
+            callback.on_timeout();
+        }
+    }
+
+    /// Get the number of pending requests.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let count = manager.pending_count();
+    /// println!("Pending requests: {}", count);
+    /// ```
+    pub fn pending_count(&self) -> usize {
+        self.pending_requests.borrow().len()
+    }
+}
+
+impl Default for CallbackManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

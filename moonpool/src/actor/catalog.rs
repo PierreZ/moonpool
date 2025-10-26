@@ -1036,8 +1036,12 @@ mod tests {
 
             // Create MessageBus (required for spawning message loop task)
             let placement = create_test_placement();
+            let callback_manager = Rc::new(crate::messaging::CallbackManager::new());
             let message_bus = Rc::new(crate::messaging::MessageBus::new(
-                node_id, directory, placement,
+                node_id,
+                callback_manager,
+                directory,
+                placement,
             ));
             message_bus.init_self_ref();
 
@@ -1104,8 +1108,12 @@ mod tests {
 
             // Create MessageBus (required for spawning message loop task)
             let placement = create_test_placement();
+            let callback_manager = Rc::new(crate::messaging::CallbackManager::new());
             let message_bus = Rc::new(crate::messaging::MessageBus::new(
-                node_id, directory, placement,
+                node_id,
+                callback_manager,
+                directory,
+                placement,
             ));
             message_bus.init_self_ref();
 
@@ -1159,8 +1167,12 @@ mod tests {
 
             // Create MessageBus (required for spawning message loop task)
             let placement = create_test_placement();
+            let callback_manager = Rc::new(crate::messaging::CallbackManager::new());
             let message_bus = Rc::new(crate::messaging::MessageBus::new(
-                node_id, directory, placement,
+                node_id,
+                callback_manager,
+                directory,
+                placement,
             ));
             message_bus.init_self_ref();
 

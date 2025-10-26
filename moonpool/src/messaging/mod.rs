@@ -13,7 +13,9 @@ pub mod router;
 pub use activation::{ActivationRequest, ActivationResponse, ActivationResult};
 pub use address::ActorAddress;
 pub use bus::MessageBus;
-pub use correlation::{CallbackConfig, CallbackData, CallbackResponse, CorrelationIdFactory};
+pub use correlation::{
+    CallbackConfig, CallbackData, CallbackManager, CallbackResponse, CorrelationIdFactory,
+};
 pub use envelope::ActorEnvelope;
 pub use message::{Direction, Message, MessageFlags};
 pub use network::{FoundationTransport, NetworkTransport};

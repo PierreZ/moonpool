@@ -6,22 +6,25 @@
 //! # Architecture
 //!
 //! MessageBus integrates with foundation's transport layer to enable actor-to-actor
-//! communication across nodes.
+//! communication across nodes. It follows Orleans' MessageCenter pattern (routing logic),
+//! delegating callback management to CallbackManager (Orleans' InsideRuntimeClient pattern).
 //!
 //! ```text
 //! ┌────────────────────────────────────┐
 //! │ MessageBus                         │
+//! │ (Orleans: MessageCenter)           │
 //! │                                    │
 //! │  ┌──────────────────────────────┐  │
 //! │  │ node_id: NodeId              │  │
 //! │  └──────────────────────────────┘  │
 //! │                                    │
 //! │  ┌──────────────────────────────┐  │
-//! │  │ next_correlation_id: Cell    │  │
+//! │  │ callback_manager             │  │
+//! │  │ (Orleans: InsideRuntimeClient)│ │
 //! │  └──────────────────────────────┘  │
 //! │                                    │
 //! │  ┌──────────────────────────────┐  │
-//! │  │ pending_requests: RefCell    │  │
+//! │  │ directory, placement         │  │
 //! │  └──────────────────────────────┘  │
 //! └────────────────────────────────────┘
 //! ```
@@ -29,13 +32,15 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use moonpool::messaging::MessageBus;
+//! use moonpool::messaging::{CallbackManager, MessageBus};
+//! use std::rc::Rc;
 //!
-//! // Create message bus
+//! // Create callback manager and message bus
 //! let node_id = NodeId::from("127.0.0.1:8001")?;
-//! let bus = MessageBus::new(node_id);
+//! let callback_manager = Rc::new(CallbackManager::new());
+//! let bus = MessageBus::new(node_id, callback_manager, directory, placement);
 //!
-//! // Generate correlation ID
+//! // Generate correlation ID (via callback manager)
 //! let correlation_id = bus.next_correlation_id();
 //!
 //! // Register callback for response
@@ -49,9 +54,9 @@
 use crate::actor::{CorrelationId, NodeId};
 use crate::directory::Directory;
 use crate::error::ActorError;
-use crate::messaging::{ActorRouter, CallbackData, Direction, Message, NetworkTransport};
+use crate::messaging::{ActorRouter, CallbackManager, Direction, Message, NetworkTransport};
 use crate::placement::SimplePlacement;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use tokio::sync::oneshot;
@@ -91,16 +96,11 @@ pub struct MessageBus {
     /// This node's identifier.
     node_id: NodeId,
 
-    /// Next correlation ID (monotonically increasing).
+    /// Callback manager for correlation tracking and callback management.
     ///
-    /// Uses Cell for single-threaded increment (no atomics needed).
-    next_correlation_id: Cell<u64>,
-
-    /// Pending requests awaiting responses.
-    ///
-    /// Maps correlation_id → CallbackData.
-    /// Uses RefCell for interior mutability.
-    pending_requests: RefCell<HashMap<CorrelationId, CallbackData>>,
+    /// Handles request-response correlation (Orleans: InsideRuntimeClient pattern).
+    /// Separated from routing logic following single responsibility principle.
+    callback_manager: Rc<CallbackManager>,
 
     /// Router registry mapping actor type names to their catalogs.
     ///
@@ -144,22 +144,31 @@ impl MessageBus {
     /// # Parameters
     ///
     /// - `node_id`: This node's identifier
+    /// - `callback_manager`: Callback manager for correlation tracking
     /// - `directory`: Directory for actor location tracking
     /// - `placement`: Placement strategy for choosing where to activate new actors
     ///
     /// # Example
     ///
     /// ```rust,ignore
+    /// use moonpool::messaging::CallbackManager;
+    /// use std::rc::Rc;
+    ///
     /// let node_id = NodeId::from("127.0.0.1:8001")?;
+    /// let callback_manager = Rc::new(CallbackManager::new());
     /// let directory = SimpleDirectory::new();
     /// let placement = SimplePlacement::new(cluster_nodes);
-    /// let bus = MessageBus::new(node_id, Rc::new(directory) as SharedDirectory, placement);
+    /// let bus = MessageBus::new(node_id, callback_manager, Rc::new(directory) as SharedDirectory, placement);
     /// ```
-    pub fn new(node_id: NodeId, directory: SharedDirectory, placement: SimplePlacement) -> Self {
+    pub fn new(
+        node_id: NodeId,
+        callback_manager: Rc<CallbackManager>,
+        directory: SharedDirectory,
+        placement: SimplePlacement,
+    ) -> Self {
         Self {
             node_id,
-            next_correlation_id: Cell::new(1),
-            pending_requests: RefCell::new(HashMap::new()),
+            callback_manager,
             actor_routers: RefCell::new(HashMap::new()),
             network_transport: RefCell::new(None),
             directory,
@@ -249,6 +258,8 @@ impl MessageBus {
     /// Returns monotonically increasing IDs starting from 1.
     /// Unique per node (not globally unique).
     ///
+    /// Delegates to CallbackManager (Orleans: InsideRuntimeClient pattern).
+    ///
     /// # Example
     ///
     /// ```rust,ignore
@@ -257,15 +268,15 @@ impl MessageBus {
     /// assert!(id2.value() > id1.value());
     /// ```
     pub fn next_correlation_id(&self) -> CorrelationId {
-        let id = self.next_correlation_id.get();
-        self.next_correlation_id.set(id + 1);
-        CorrelationId::new(id)
+        self.callback_manager.next_correlation_id()
     }
 
     /// Register a pending request awaiting response.
     ///
     /// Creates a CallbackData to track the request and stores it in the
     /// pending_requests map for later correlation.
+    ///
+    /// Delegates to CallbackManager (Orleans: InsideRuntimeClient pattern).
     ///
     /// # Parameters
     ///
@@ -290,16 +301,16 @@ impl MessageBus {
         message: Message,
         sender: oneshot::Sender<Result<Message, ActorError>>,
     ) {
-        let callback = CallbackData::new(message, sender);
-        self.pending_requests
-            .borrow_mut()
-            .insert(correlation_id, callback);
+        self.callback_manager
+            .register_pending_request(correlation_id, message, sender);
     }
 
     /// Complete a pending request with a response.
     ///
     /// Looks up the CallbackData by correlation ID and completes it with
     /// the provided result. Removes the callback from pending_requests.
+    ///
+    /// Delegates to CallbackManager (Orleans: InsideRuntimeClient pattern).
     ///
     /// # Parameters
     ///
@@ -325,19 +336,15 @@ impl MessageBus {
         correlation_id: CorrelationId,
         result: Result<Message, ActorError>,
     ) -> Result<(), ActorError> {
-        let callback = self
-            .pending_requests
-            .borrow_mut()
-            .remove(&correlation_id)
-            .ok_or(ActorError::UnknownCorrelationId)?;
-
-        callback.complete(result);
-        Ok(())
+        self.callback_manager
+            .complete_pending_request(correlation_id, result)
     }
 
     /// Handle a timeout for a pending request.
     ///
     /// Removes the callback from pending_requests and completes it with a timeout error.
+    ///
+    /// Delegates to CallbackManager (Orleans: InsideRuntimeClient pattern).
     ///
     /// # Parameters
     ///
@@ -351,12 +358,12 @@ impl MessageBus {
     /// bus.handle_timeout(correlation_id);
     /// ```
     pub fn handle_timeout(&self, correlation_id: CorrelationId) {
-        if let Some(callback) = self.pending_requests.borrow_mut().remove(&correlation_id) {
-            callback.on_timeout();
-        }
+        self.callback_manager.handle_timeout(correlation_id);
     }
 
     /// Get the number of pending requests.
+    ///
+    /// Delegates to CallbackManager (Orleans: InsideRuntimeClient pattern).
     ///
     /// # Example
     ///
@@ -365,7 +372,7 @@ impl MessageBus {
     /// println!("Pending requests: {}", count);
     /// ```
     pub fn pending_count(&self) -> usize {
-        self.pending_requests.borrow().len()
+        self.callback_manager.pending_count()
     }
 
     /// Send a request message and await the response.
@@ -891,46 +898,9 @@ impl MessageBus {
             self.pending_count()
         );
 
-        // Log all pending correlation IDs for debugging
-        {
-            let pending = self.pending_requests.borrow();
-            let pending_ids: Vec<_> = pending.keys().map(|k| k.as_u64()).collect();
-            tracing::debug!(
-                node_id = %self.node_id,
-                "route_to_callback: Pending correlation IDs: {:?}",
-                pending_ids
-            );
-        }
-
-        // Extract the callback BEFORE completing it
-        // This is critical: we need to release the RefCell borrow before calling complete()
-        let callback = self
-            .pending_requests
-            .borrow_mut()
-            .remove(&correlation_id)
-            .ok_or_else(|| {
-                tracing::error!(
-                    node_id = %self.node_id,
-                    "route_to_callback: ERROR - Unknown correlation ID {}",
-                    correlation_id
-                );
-                ActorError::UnknownCorrelationId
-            })?;
-
-        tracing::debug!(
-            node_id = %self.node_id,
-            "route_to_callback: Successfully extracted pending request corr_id={}",
-            correlation_id
-        );
-
-        // Complete the callback directly (spawning doesn't help with LocalSet waker issues)
-        tracing::debug!(
-            node_id = %self.node_id,
-            "route_to_callback: About to call callback.complete() for corr_id={}",
-            correlation_id
-        );
-
-        callback.complete(Ok(message));
+        // Complete the pending request via CallbackManager (Orleans: InsideRuntimeClient)
+        // CallbackManager handles correlation tracking and ensures exactly-once completion
+        self.complete_pending_request(correlation_id, Ok(message))?;
 
         tracing::debug!(
             node_id = %self.node_id,
@@ -984,12 +954,17 @@ mod tests {
         SimplePlacement::new(nodes)
     }
 
+    fn create_test_callback_manager() -> Rc<CallbackManager> {
+        Rc::new(CallbackManager::new())
+    }
+
     #[test]
     fn test_message_bus_creation() {
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let callback_manager = create_test_callback_manager();
         let directory = create_test_directory();
         let placement = create_test_placement();
-        let bus = MessageBus::new(node_id.clone(), directory, placement);
+        let bus = MessageBus::new(node_id.clone(), callback_manager, directory, placement);
 
         assert_eq!(bus.node_id(), &node_id);
         assert_eq!(bus.pending_count(), 0);
@@ -998,9 +973,10 @@ mod tests {
     #[test]
     fn test_correlation_id_generation() {
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let callback_manager = create_test_callback_manager();
         let directory = create_test_directory();
         let placement = create_test_placement();
-        let bus = MessageBus::new(node_id, directory, placement);
+        let bus = MessageBus::new(node_id, callback_manager, directory, placement);
 
         let id1 = bus.next_correlation_id();
         let id2 = bus.next_correlation_id();
@@ -1014,9 +990,10 @@ mod tests {
     #[test]
     fn test_register_and_complete_request() {
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let callback_manager = create_test_callback_manager();
         let directory = create_test_directory();
         let placement = create_test_placement();
-        let bus = MessageBus::new(node_id, directory, placement);
+        let bus = MessageBus::new(node_id, callback_manager, directory, placement);
 
         let corr_id = bus.next_correlation_id();
         let request = create_test_message(corr_id);
@@ -1040,9 +1017,10 @@ mod tests {
     #[test]
     fn test_complete_unknown_correlation_id() {
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let callback_manager = create_test_callback_manager();
         let directory = create_test_directory();
         let placement = create_test_placement();
-        let bus = MessageBus::new(node_id, directory, placement);
+        let bus = MessageBus::new(node_id, callback_manager, directory, placement);
 
         let corr_id = CorrelationId::new(999);
         let response = create_test_message(corr_id);
@@ -1055,9 +1033,10 @@ mod tests {
     #[test]
     fn test_handle_timeout() {
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let callback_manager = create_test_callback_manager();
         let directory = create_test_directory();
         let placement = create_test_placement();
-        let bus = MessageBus::new(node_id, directory, placement);
+        let bus = MessageBus::new(node_id, callback_manager, directory, placement);
 
         let corr_id = bus.next_correlation_id();
         let request = create_test_message(corr_id);
@@ -1079,9 +1058,10 @@ mod tests {
     #[test]
     fn test_multiple_pending_requests() {
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let callback_manager = create_test_callback_manager();
         let directory = create_test_directory();
         let placement = create_test_placement();
-        let bus = MessageBus::new(node_id, directory, placement);
+        let bus = MessageBus::new(node_id, callback_manager, directory, placement);
 
         // Register 3 requests
         let mut receivers = vec![];

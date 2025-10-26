@@ -303,9 +303,15 @@ where
         // Create placement strategy (decides WHERE new actors should go)
         let placement = SimplePlacement::new(cluster_nodes);
 
-        // Create MessageBus with directory and placement
+        // Create CallbackManager (Orleans: InsideRuntimeClient pattern)
+        // Handles correlation tracking and callback management
+        let callback_manager = Rc::new(crate::messaging::CallbackManager::new());
+
+        // Create MessageBus with CallbackManager dependency (Orleans: MessageCenter pattern)
+        // Handles routing logic, delegates callback management to CallbackManager
         let message_bus = Rc::new(MessageBus::new(
             node_id.clone(),
+            callback_manager,
             directory_rc.clone(),
             placement,
         ));
