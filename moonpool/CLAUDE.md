@@ -237,6 +237,26 @@ Built on foundation's deterministic testing:
 - **10x1**: Many actors, one manager (resource limits)
 - **10x10**: Stress testing (chaos conditions)
 
+### Running Examples as Tests
+Examples in the moonpool crate serve as integration tests and must be run to verify the system works correctly:
+
+```bash
+# Run specific example
+nix develop --command cargo run --example bank_account
+
+# Run all examples (recommended for validation)
+nix develop --command cargo run --example bank_account
+nix develop --command cargo run --example <other_example_name>
+```
+
+**Why examples matter**:
+- Examples exercise the full actor runtime with real network transport
+- They validate multi-node scenarios and state persistence
+- They catch RefCell borrow issues that unit tests might miss
+- They demonstrate correct usage patterns for users
+
+**Before completing any work**, run all examples to ensure they execute without panics or errors.
+
 ## Orleans vs Moonpool Vocabulary
 
 We use Orleans concepts but different names:
@@ -299,7 +319,8 @@ Before completing any step:
 5. Buggify strategically placed
 6. Multi-topology tests pass (1x1, 2x2, 10x10)
 7. All sometimes_assert! triggered in chaos tests
-8. Documentation updated
+8. All examples run successfully without panics
+9. Documentation updated
 
 ## Notes
 - Built on `moonpool-foundation` - always use provider traits

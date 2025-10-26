@@ -3,6 +3,7 @@
 //! This module provides a concrete ClientTransport struct that implements
 //! request-response semantics using correlation IDs and self-driving get_reply.
 
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use tokio::sync::oneshot;
 
@@ -19,6 +20,9 @@ use crate::time::TimeProvider;
 ///
 /// Provides a clean API for sending requests and receiving responses
 /// with automatic correlation ID management and self-driving behavior.
+///
+/// Uses interior mutability (Cell/RefCell) to allow `&self` methods,
+/// enabling safe shared usage in single-threaded async contexts.
 pub struct ClientTransport<N, T, TP, S>
 where
     N: NetworkProvider + Clone + 'static,
@@ -28,13 +32,16 @@ where
     S::Envelope: EnvelopeReplyDetection + Envelope,
 {
     /// Transport driver for managing peer connections
-    driver: TransportDriver<N, T, TP, S>,
+    /// Uses RefCell for interior mutability
+    driver: RefCell<TransportDriver<N, T, TP, S>>,
 
     /// Pending requests awaiting responses, indexed by correlation ID
-    pending_requests: HashMap<u64, oneshot::Sender<Vec<u8>>>,
+    /// Uses RefCell for interior mutability in single-threaded context
+    pending_requests: RefCell<HashMap<u64, oneshot::Sender<Vec<u8>>>>,
 
     /// Next correlation ID to use for requests
-    next_correlation_id: u64,
+    /// Uses Cell for interior mutability without borrowing
+    next_correlation_id: Cell<u64>,
 }
 
 impl<N, T, TP, S> ClientTransport<N, T, TP, S>
@@ -54,9 +61,15 @@ where
         peer_config: PeerConfig,
     ) -> Self {
         Self {
-            driver: TransportDriver::new(serializer, network, time, task_provider, peer_config),
-            pending_requests: HashMap::new(),
-            next_correlation_id: 1,
+            driver: RefCell::new(TransportDriver::new(
+                serializer,
+                network,
+                time,
+                task_provider,
+                peer_config,
+            )),
+            pending_requests: RefCell::new(HashMap::new()),
+            next_correlation_id: Cell::new(1),
         }
     }
 
@@ -65,8 +78,11 @@ where
     /// This method uses the turbofish pattern to specify the envelope type.
     /// It continuously drives the transport while waiting for the response
     /// to prevent deadlocks.
+    ///
+    /// Uses `&self` instead of `&mut self` to enable shared usage.
+    /// RefCell borrows are carefully released before await points.
     pub async fn request<E>(
-        &mut self,
+        &self,
         destination: &str,
         payload: Vec<u8>,
     ) -> Result<Vec<u8>, TransportError>
@@ -87,17 +103,23 @@ where
         );
 
         // Store response channel indexed by correlation ID
-        self.pending_requests.insert(correlation_id, tx);
+        // Borrow released immediately after insert
+        self.pending_requests
+            .borrow_mut()
+            .insert(correlation_id, tx);
 
         // Create request envelope using factory
         let envelope = E::create_request(correlation_id, payload);
         tracing::debug!("ClientTransport::request created envelope, calling driver.send()");
 
-        // Send through driver
-        self.driver.send(destination, envelope).map_err(|e| {
-            tracing::debug!("ClientTransport::request driver.send() failed: {:?}", e);
-            TransportError::PeerError(e.to_string())
-        })?;
+        // Send through driver (borrow released immediately after send)
+        self.driver
+            .borrow_mut()
+            .send(destination, envelope)
+            .map_err(|e| {
+                tracing::debug!("ClientTransport::request driver.send() failed: {:?}", e);
+                TransportError::PeerError(e.to_string())
+            })?;
 
         tracing::debug!(
             "ClientTransport::request driver.send() succeeded, entering self-driving loop"
@@ -112,17 +134,20 @@ where
             match rx.try_recv() {
                 Ok(response_payload) => {
                     // Clean up and return response
-                    self.pending_requests.remove(&correlation_id);
+                    // Borrow released immediately after remove
+                    self.pending_requests.borrow_mut().remove(&correlation_id);
                     return Ok(response_payload);
                 }
                 Err(oneshot::error::TryRecvError::Empty) => {
                     // No response yet, yield and continue
+                    // CRITICAL: No RefCell borrows held across this await point
                     tokio::task::yield_now().await;
                     continue;
                 }
                 Err(oneshot::error::TryRecvError::Closed) => {
                     // Channel was closed, request was cancelled
-                    self.pending_requests.remove(&correlation_id);
+                    // Borrow released immediately after remove
+                    self.pending_requests.borrow_mut().remove(&correlation_id);
                     return Err(TransportError::SendFailed("Request cancelled".to_string()));
                 }
             }
@@ -133,20 +158,31 @@ where
     ///
     /// This method drives the transport by checking for incoming messages
     /// and matching them to pending requests by correlation ID.
-    pub fn poll_receive(&mut self) -> Option<ReceivedEnvelope<S::Envelope>> {
-        // First update driver reads (this may fill the protocol receive queue)
-        self.driver.process_peer_reads();
+    ///
+    /// Uses `&self` with RefCell to ensure compatibility with `&self` methods.
+    pub fn poll_receive(&self) -> Option<ReceivedEnvelope<S::Envelope>> {
+        // Borrow driver for processing (released after this block)
+        {
+            let mut driver = self.driver.borrow_mut();
+            // First update driver reads (this may fill the protocol receive queue)
+            driver.process_peer_reads();
+        }
 
-        // Poll driver for received envelopes
-        if let Some(envelope) = self.driver.poll_receive() {
+        // Poll driver for received envelopes (separate borrow)
+        let envelope = self.driver.borrow_mut().poll_receive();
+
+        if let Some(envelope) = envelope {
             // Check if this is a response to a pending request
-            if let Some(correlation_id) = envelope.correlation_id()
-                && let Some(sender) = self.pending_requests.remove(&correlation_id)
-            {
-                // Extract payload and send through response channel
-                let payload = envelope.payload().to_vec();
-                let _ = sender.send(payload); // Ignore error if receiver was dropped
-                return None; // Response was consumed, don't return to caller
+            if let Some(correlation_id) = envelope.correlation_id() {
+                // Borrow and check/remove in a single scope
+                let sender = self.pending_requests.borrow_mut().remove(&correlation_id);
+
+                if let Some(sender) = sender {
+                    // Extract payload and send through response channel
+                    let payload = envelope.payload().to_vec();
+                    let _ = sender.send(payload); // Ignore error if receiver was dropped
+                    return None; // Response was consumed, don't return to caller
+                }
             }
 
             // This envelope is not a response to a pending request
@@ -162,7 +198,7 @@ where
     /// This method adds timeout functionality to request using tokio::select!
     /// to race between the request completion and a timeout from TimeProvider::sleep.
     pub async fn request_with_timeout<E>(
-        &mut self,
+        &self,
         destination: &str,
         payload: Vec<u8>,
         timeout_duration: std::time::Duration,
@@ -172,7 +208,7 @@ where
         S::Envelope: Clone,
     {
         // Clone the time provider to avoid borrowing conflicts
-        let time_provider = self.driver.time().clone();
+        let time_provider = self.driver.borrow().time().clone();
 
         tokio::select! {
             result = self.request::<E>(destination, payload) => {
@@ -187,34 +223,42 @@ where
     /// Periodic maintenance operations
     ///
     /// Should be called regularly to perform driver maintenance.
-    pub async fn tick(&mut self) {
+    pub async fn tick(&self) {
         // No async tick implemented for driver in Phase 11.3
         // This is a placeholder for future maintenance operations
     }
 
     /// Close the transport and clean up resources
-    pub async fn close(&mut self) {
+    pub async fn close(&self) {
         // Cancel all pending requests
-        for (_, sender) in self.pending_requests.drain() {
+        // Take ownership of all pending requests via drain
+        let pending = self
+            .pending_requests
+            .borrow_mut()
+            .drain()
+            .collect::<Vec<_>>();
+        for (_, sender) in pending {
             let _ = sender.send(Vec::new()); // Send empty response to unblock waiters
         }
     }
 
     /// Generate the next unique correlation ID
-    fn next_correlation_id(&mut self) -> u64 {
-        let id = self.next_correlation_id;
-        self.next_correlation_id = self.next_correlation_id.wrapping_add(1);
+    ///
+    /// Uses Cell for lock-free atomic-like operation in single-threaded context.
+    fn next_correlation_id(&self) -> u64 {
+        let id = self.next_correlation_id.get();
+        self.next_correlation_id.set(id.wrapping_add(1));
         id
     }
 
     /// Get the number of pending requests
     pub fn pending_request_count(&self) -> usize {
-        self.pending_requests.len()
+        self.pending_requests.borrow().len()
     }
 
     /// Check if a specific correlation ID is pending
     pub fn has_pending_request(&self, correlation_id: u64) -> bool {
-        self.pending_requests.contains_key(&correlation_id)
+        self.pending_requests.borrow().contains_key(&correlation_id)
     }
 }
 

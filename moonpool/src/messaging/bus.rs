@@ -8,8 +8,6 @@
 //! MessageBus integrates with foundation's transport layer to enable actor-to-actor
 //! communication across nodes.
 //!
-// Allow RefCell borrows across await points - safe in single-threaded context
-#![allow(clippy::await_holding_refcell_ref)]
 //! ```text
 //! ┌────────────────────────────────────┐
 //! │ MessageBus                         │
@@ -116,8 +114,8 @@ pub struct MessageBus {
     /// Network transport for sending messages to remote nodes.
     ///
     /// None means network is not configured (local-only mode).
-    /// Uses trait object to avoid generic parameters.
-    network_transport: RefCell<Option<Box<dyn NetworkTransport>>>,
+    /// Uses Rc to allow cloning and avoid RefCell borrows across awaits.
+    network_transport: RefCell<Option<Rc<dyn NetworkTransport>>>,
 
     /// Directory for actor location tracking.
     ///
@@ -205,7 +203,7 @@ impl MessageBus {
     /// bus.set_network_transport(Box::new(foundation_transport));
     /// ```
     pub fn set_network_transport(&self, transport: Box<dyn NetworkTransport>) {
-        *self.network_transport.borrow_mut() = Some(transport);
+        *self.network_transport.borrow_mut() = Some(Rc::from(transport));
     }
 
     /// Set the actor router registry for local message delivery.
@@ -437,13 +435,16 @@ impl MessageBus {
                 message.method_name
             );
 
-            if let Some(ref transport) = *self.network_transport.borrow() {
+            // Clone transport Rc to avoid holding RefCell borrow across await
+            let transport = self.network_transport.borrow().clone();
+
+            if let Some(transport) = transport {
                 // Serialize message to JSON
                 let payload = serde_json::to_vec(&message).map_err(|e| {
                     ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
                 })?;
 
-                // Send over network using network transport
+                // Send over network - transport.send() takes &self
                 let destination = message.target_node.as_str();
                 transport.send(destination, payload).await?;
             } else {
@@ -511,7 +512,10 @@ impl MessageBus {
                 message.target_node
             );
 
-            if let Some(ref transport) = *self.network_transport.borrow() {
+            // Clone transport Rc to avoid holding RefCell borrow across await
+            let transport = self.network_transport.borrow().clone();
+
+            if let Some(transport) = transport {
                 // Serialize message to JSON
                 let payload = serde_json::to_vec(&message).map_err(|e| {
                     ActorError::ProcessingFailed(format!("Failed to serialize response: {}", e))
@@ -583,7 +587,10 @@ impl MessageBus {
                 message.target_node
             );
 
-            if let Some(ref transport) = *self.network_transport.borrow() {
+            // Clone transport Rc to avoid holding RefCell borrow across await
+            let transport = self.network_transport.borrow().clone();
+
+            if let Some(transport) = transport {
                 // Serialize message to JSON
                 let payload = serde_json::to_vec(&message).map_err(|e| {
                     ActorError::ProcessingFailed(format!("Failed to serialize oneway: {}", e))
@@ -627,7 +634,10 @@ impl MessageBus {
     /// }
     /// ```
     pub async fn poll_network(&self) -> Result<bool, ActorError> {
-        if let Some(ref mut transport) = *self.network_transport.borrow_mut()
+        // Clone transport Rc to avoid holding RefCell borrow across await
+        let transport = self.network_transport.borrow().clone();
+
+        if let Some(transport) = transport
             && let Some(payload) = transport.poll_receive()
         {
             // Deserialize the message from payload
@@ -727,13 +737,11 @@ impl MessageBus {
                     ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
                 })?;
 
-                // Send over network (borrow released after this scope)
-                let has_transport = self.network_transport.borrow().is_some();
-                if has_transport {
-                    // Get transport and send in separate scope to avoid borrow conflicts
-                    if let Some(ref transport) = *self.network_transport.borrow() {
-                        transport.send(node_id.as_str(), payload).await?;
-                    }
+                // Clone transport Rc to avoid holding RefCell borrow across await
+                let transport = self.network_transport.borrow().clone();
+
+                if let Some(transport) = transport {
+                    transport.send(node_id.as_str(), payload).await?;
                     return Ok(());
                 } else {
                     return Err(ActorError::ProcessingFailed(
@@ -802,13 +810,11 @@ impl MessageBus {
                         ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
                     })?;
 
-                    // Send over network (borrow released after this scope)
-                    let has_transport = self.network_transport.borrow().is_some();
-                    if has_transport {
-                        // Get transport and send in separate scope to avoid borrow conflicts
-                        if let Some(ref transport) = *self.network_transport.borrow() {
-                            transport.send(chosen_node.as_str(), payload).await?;
-                        }
+                    // Clone transport Rc to avoid holding RefCell borrow across await
+                    let transport = self.network_transport.borrow().clone();
+
+                    if let Some(transport) = transport {
+                        transport.send(chosen_node.as_str(), payload).await?;
                         return Ok(());
                     } else {
                         return Err(ActorError::ProcessingFailed(
