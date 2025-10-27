@@ -307,18 +307,6 @@ where
         // Handles correlation tracking and callback management
         let callback_manager = Rc::new(crate::messaging::CallbackManager::new());
 
-        // Create MessageBus with CallbackManager dependency (Orleans: MessageCenter pattern)
-        // Handles routing logic, delegates callback management to CallbackManager
-        let message_bus = Rc::new(MessageBus::new(
-            node_id.clone(),
-            callback_manager,
-            directory_rc.clone(),
-            placement,
-        ));
-
-        // Initialize MessageBus self-reference (required for passing to routers)
-        message_bus.init_self_ref();
-
         // Create network transport using foundation layer
         // ClientTransport for outgoing requests
         let peer_config = PeerConfig::default();
@@ -331,10 +319,20 @@ where
             peer_config,
         );
 
-        let transport = FoundationTransport::new(client_transport);
+        let transport = Rc::new(FoundationTransport::new(client_transport));
 
-        // Attach network transport to MessageBus
-        message_bus.set_network_transport(Box::new(transport));
+        // Create MessageBus with CallbackManager dependency (Orleans: MessageCenter pattern)
+        // Handles routing logic, delegates callback management to CallbackManager
+        let message_bus = Rc::new(MessageBus::new(
+            node_id.clone(),
+            callback_manager,
+            directory_rc.clone(),
+            placement,
+            transport,
+        ));
+
+        // Initialize MessageBus self-reference (required for passing to routers)
+        message_bus.init_self_ref();
 
         // Create ServerTransport for incoming messages
         let server_serializer = RequestResponseSerializer::new();

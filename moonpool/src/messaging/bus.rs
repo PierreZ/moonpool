@@ -113,9 +113,8 @@ pub struct MessageBus {
 
     /// Network transport for sending messages to remote nodes.
     ///
-    /// None means network is not configured (local-only mode).
     /// Uses Rc to allow cloning and avoid RefCell borrows across awaits.
-    network_transport: RefCell<Option<Rc<dyn NetworkTransport>>>,
+    network_transport: Rc<dyn NetworkTransport>,
 
     /// Directory for actor location tracking.
     ///
@@ -136,10 +135,7 @@ pub struct MessageBus {
 }
 
 impl MessageBus {
-    /// Create a new MessageBus for this node (local-only mode).
-    ///
-    /// This creates a MessageBus without network capabilities.
-    /// Use `set_network_transport` to enable remote actor communication.
+    /// Create a new MessageBus for this node.
     ///
     /// # Parameters
     ///
@@ -147,6 +143,7 @@ impl MessageBus {
     /// - `callback_manager`: Callback manager for correlation tracking
     /// - `directory`: Directory for actor location tracking
     /// - `placement`: Placement strategy for choosing where to activate new actors
+    /// - `network_transport`: Network transport for remote communication
     ///
     /// # Example
     ///
@@ -158,19 +155,27 @@ impl MessageBus {
     /// let callback_manager = Rc::new(CallbackManager::new());
     /// let directory = SimpleDirectory::new();
     /// let placement = SimplePlacement::new(cluster_nodes);
-    /// let bus = MessageBus::new(node_id, callback_manager, Rc::new(directory) as SharedDirectory, placement);
+    /// let transport = create_network_transport();
+    /// let bus = MessageBus::new(
+    ///     node_id,
+    ///     callback_manager,
+    ///     Rc::new(directory) as SharedDirectory,
+    ///     placement,
+    ///     Rc::new(transport),
+    /// );
     /// ```
     pub fn new(
         node_id: NodeId,
         callback_manager: Rc<CallbackManager>,
         directory: SharedDirectory,
         placement: SimplePlacement,
+        network_transport: Rc<dyn NetworkTransport>,
     ) -> Self {
         Self {
             node_id,
             callback_manager,
             actor_routers: RefCell::new(HashMap::new()),
-            network_transport: RefCell::new(None),
+            network_transport,
             directory,
             placement,
             self_ref: RefCell::new(None),
@@ -191,28 +196,6 @@ impl MessageBus {
     /// ```
     pub fn init_self_ref(self: &Rc<Self>) {
         *self.self_ref.borrow_mut() = Some(Rc::downgrade(self));
-    }
-
-    /// Set the network transport for remote message delivery.
-    ///
-    /// This enables the MessageBus to send and receive messages over the network.
-    ///
-    /// # Parameters
-    ///
-    /// - `transport`: Network transport implementation
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let node_id = NodeId::from("127.0.0.1:8001")?;
-    /// let bus = MessageBus::new(node_id);
-    ///
-    /// // Create foundation transport
-    /// let foundation_transport = FoundationTransport::new(client_transport);
-    /// bus.set_network_transport(Box::new(foundation_transport));
-    /// ```
-    pub fn set_network_transport(&self, transport: Box<dyn NetworkTransport>) {
-        *self.network_transport.borrow_mut() = Some(Rc::from(transport));
     }
 
     /// Set the actor router registry for local message delivery.
@@ -442,23 +425,17 @@ impl MessageBus {
                 message.method_name
             );
 
-            // Clone transport Rc to avoid holding RefCell borrow across await
-            let transport = self.network_transport.borrow().clone();
+            // Clone transport Rc to avoid holding borrow across await
+            let transport = self.network_transport.clone();
 
-            if let Some(transport) = transport {
-                // Serialize message to JSON
-                let payload = serde_json::to_vec(&message).map_err(|e| {
-                    ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
-                })?;
+            // Serialize message to JSON
+            let payload = serde_json::to_vec(&message).map_err(|e| {
+                ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
+            })?;
 
-                // Send over network - transport.send() takes &self
-                let destination = message.target_node.as_str();
-                transport.send(destination, payload).await?;
-            } else {
-                return Err(ActorError::ProcessingFailed(
-                    "Network not configured for remote message".to_string(),
-                ));
-            }
+            // Send over network - transport.send() takes &self
+            let destination = message.target_node.as_str();
+            transport.send(destination, payload).await?;
         }
 
         Ok((message, rx))
@@ -519,32 +496,26 @@ impl MessageBus {
                 message.target_node
             );
 
-            // Clone transport Rc to avoid holding RefCell borrow across await
-            let transport = self.network_transport.borrow().clone();
+            // Clone transport Rc to avoid holding borrow across await
+            let transport = self.network_transport.clone();
 
-            if let Some(transport) = transport {
-                // Serialize message to JSON
-                let payload = serde_json::to_vec(&message).map_err(|e| {
-                    ActorError::ProcessingFailed(format!("Failed to serialize response: {}", e))
-                })?;
+            // Serialize message to JSON
+            let payload = serde_json::to_vec(&message).map_err(|e| {
+                ActorError::ProcessingFailed(format!("Failed to serialize response: {}", e))
+            })?;
 
-                // Send over network using network transport
-                let destination = message.target_node.as_str();
-                tracing::debug!(
-                    node_id = %self.node_id,
-                    "send_response: Sending to destination={}",
-                    destination
-                );
-                transport.send(destination, payload).await?;
-                tracing::debug!(
-                    node_id = %self.node_id,
-                    "send_response: Successfully sent response over network"
-                );
-            } else {
-                return Err(ActorError::ProcessingFailed(
-                    "Network not configured for remote response".to_string(),
-                ));
-            }
+            // Send over network using network transport
+            let destination = message.target_node.as_str();
+            tracing::debug!(
+                node_id = %self.node_id,
+                "send_response: Sending to destination={}",
+                destination
+            );
+            transport.send(destination, payload).await?;
+            tracing::debug!(
+                node_id = %self.node_id,
+                "send_response: Successfully sent response over network"
+            );
         }
 
         Ok(())
@@ -594,23 +565,17 @@ impl MessageBus {
                 message.target_node
             );
 
-            // Clone transport Rc to avoid holding RefCell borrow across await
-            let transport = self.network_transport.borrow().clone();
+            // Clone transport Rc to avoid holding borrow across await
+            let transport = self.network_transport.clone();
 
-            if let Some(transport) = transport {
-                // Serialize message to JSON
-                let payload = serde_json::to_vec(&message).map_err(|e| {
-                    ActorError::ProcessingFailed(format!("Failed to serialize oneway: {}", e))
-                })?;
+            // Serialize message to JSON
+            let payload = serde_json::to_vec(&message).map_err(|e| {
+                ActorError::ProcessingFailed(format!("Failed to serialize oneway: {}", e))
+            })?;
 
-                // Send over network using network transport
-                let destination = message.target_node.as_str();
-                transport.send(destination, payload).await?;
-            } else {
-                return Err(ActorError::ProcessingFailed(
-                    "Network not configured for remote oneway".to_string(),
-                ));
-            }
+            // Send over network using network transport
+            let destination = message.target_node.as_str();
+            transport.send(destination, payload).await?;
         }
 
         Ok(())
@@ -641,12 +606,10 @@ impl MessageBus {
     /// }
     /// ```
     pub async fn poll_network(&self) -> Result<bool, ActorError> {
-        // Clone transport Rc to avoid holding RefCell borrow across await
-        let transport = self.network_transport.borrow().clone();
+        // Clone transport Rc to avoid holding borrow across await
+        let transport = self.network_transport.clone();
 
-        if let Some(transport) = transport
-            && let Some(payload) = transport.poll_receive()
-        {
+        if let Some(payload) = transport.poll_receive() {
             // Deserialize the message from payload
             let message: Message = serde_json::from_slice(&payload).map_err(|e| {
                 ActorError::ProcessingFailed(format!("Failed to deserialize message: {}", e))
@@ -739,22 +702,16 @@ impl MessageBus {
                 // Update target_node to remote location
                 message.target_node = node_id.clone();
 
-                // Serialize message BEFORE borrowing transport
+                // Serialize message BEFORE cloning transport
                 let payload = serde_json::to_vec(&message).map_err(|e| {
                     ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
                 })?;
 
-                // Clone transport Rc to avoid holding RefCell borrow across await
-                let transport = self.network_transport.borrow().clone();
+                // Clone transport Rc to avoid holding borrow across await
+                let transport = self.network_transport.clone();
 
-                if let Some(transport) = transport {
-                    transport.send(node_id.as_str(), payload).await?;
-                    return Ok(());
-                } else {
-                    return Err(ActorError::ProcessingFailed(
-                        "Network not configured for remote forwarding".to_string(),
-                    ));
-                }
+                transport.send(node_id.as_str(), payload).await?;
+                return Ok(());
             }
             Ok(Some(_)) => {
                 // Actor registered locally, proceed with local routing
@@ -812,22 +769,16 @@ impl MessageBus {
                     // Update target_node to chosen location
                     message.target_node = chosen_node.clone();
 
-                    // Serialize message BEFORE borrowing transport
+                    // Serialize message BEFORE cloning transport
                     let payload = serde_json::to_vec(&message).map_err(|e| {
                         ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
                     })?;
 
-                    // Clone transport Rc to avoid holding RefCell borrow across await
-                    let transport = self.network_transport.borrow().clone();
+                    // Clone transport Rc to avoid holding borrow across await
+                    let transport = self.network_transport.clone();
 
-                    if let Some(transport) = transport {
-                        transport.send(chosen_node.as_str(), payload).await?;
-                        return Ok(());
-                    } else {
-                        return Err(ActorError::ProcessingFailed(
-                            "Network not configured for remote activation".to_string(),
-                        ));
-                    }
+                    transport.send(chosen_node.as_str(), payload).await?;
+                    return Ok(());
                 } else {
                     // Activate locally
                     tracing::debug!(
@@ -958,13 +909,38 @@ mod tests {
         Rc::new(CallbackManager::new())
     }
 
+    // Mock network transport for testing
+    struct MockNetworkTransport;
+
+    #[async_trait::async_trait(?Send)]
+    impl NetworkTransport for MockNetworkTransport {
+        async fn send(&self, _destination: &str, _payload: Vec<u8>) -> Result<Vec<u8>, ActorError> {
+            Ok(vec![])
+        }
+
+        fn poll_receive(&self) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    fn create_test_network_transport() -> Rc<dyn NetworkTransport> {
+        Rc::new(MockNetworkTransport)
+    }
+
     #[test]
     fn test_message_bus_creation() {
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
         let callback_manager = create_test_callback_manager();
         let directory = create_test_directory();
         let placement = create_test_placement();
-        let bus = MessageBus::new(node_id.clone(), callback_manager, directory, placement);
+        let network_transport = create_test_network_transport();
+        let bus = MessageBus::new(
+            node_id.clone(),
+            callback_manager,
+            directory,
+            placement,
+            network_transport,
+        );
 
         assert_eq!(bus.node_id(), &node_id);
         assert_eq!(bus.pending_count(), 0);
@@ -976,7 +952,14 @@ mod tests {
         let callback_manager = create_test_callback_manager();
         let directory = create_test_directory();
         let placement = create_test_placement();
-        let bus = MessageBus::new(node_id, callback_manager, directory, placement);
+        let network_transport = create_test_network_transport();
+        let bus = MessageBus::new(
+            node_id,
+            callback_manager,
+            directory,
+            placement,
+            network_transport,
+        );
 
         let id1 = bus.next_correlation_id();
         let id2 = bus.next_correlation_id();
@@ -993,7 +976,14 @@ mod tests {
         let callback_manager = create_test_callback_manager();
         let directory = create_test_directory();
         let placement = create_test_placement();
-        let bus = MessageBus::new(node_id, callback_manager, directory, placement);
+        let network_transport = create_test_network_transport();
+        let bus = MessageBus::new(
+            node_id,
+            callback_manager,
+            directory,
+            placement,
+            network_transport,
+        );
 
         let corr_id = bus.next_correlation_id();
         let request = create_test_message(corr_id);
@@ -1020,7 +1010,14 @@ mod tests {
         let callback_manager = create_test_callback_manager();
         let directory = create_test_directory();
         let placement = create_test_placement();
-        let bus = MessageBus::new(node_id, callback_manager, directory, placement);
+        let network_transport = create_test_network_transport();
+        let bus = MessageBus::new(
+            node_id,
+            callback_manager,
+            directory,
+            placement,
+            network_transport,
+        );
 
         let corr_id = CorrelationId::new(999);
         let response = create_test_message(corr_id);
@@ -1036,7 +1033,14 @@ mod tests {
         let callback_manager = create_test_callback_manager();
         let directory = create_test_directory();
         let placement = create_test_placement();
-        let bus = MessageBus::new(node_id, callback_manager, directory, placement);
+        let network_transport = create_test_network_transport();
+        let bus = MessageBus::new(
+            node_id,
+            callback_manager,
+            directory,
+            placement,
+            network_transport,
+        );
 
         let corr_id = bus.next_correlation_id();
         let request = create_test_message(corr_id);
@@ -1061,7 +1065,14 @@ mod tests {
         let callback_manager = create_test_callback_manager();
         let directory = create_test_directory();
         let placement = create_test_placement();
-        let bus = MessageBus::new(node_id, callback_manager, directory, placement);
+        let network_transport = create_test_network_transport();
+        let bus = MessageBus::new(
+            node_id,
+            callback_manager,
+            directory,
+            placement,
+            network_transport,
+        );
 
         // Register 3 requests
         let mut receivers = vec![];

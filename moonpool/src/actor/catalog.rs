@@ -895,6 +895,28 @@ mod tests {
         std::rc::Rc::new(InMemoryStorage::new())
     }
 
+    // Mock network transport for testing
+    struct MockNetworkTransport;
+
+    #[async_trait(?Send)]
+    impl crate::messaging::NetworkTransport for MockNetworkTransport {
+        async fn send(
+            &self,
+            _destination: &str,
+            _payload: Vec<u8>,
+        ) -> Result<Vec<u8>, crate::error::ActorError> {
+            Ok(vec![])
+        }
+
+        fn poll_receive(&self) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    fn create_test_network_transport() -> std::rc::Rc<dyn crate::messaging::NetworkTransport> {
+        std::rc::Rc::new(MockNetworkTransport)
+    }
+
     #[test]
     fn test_activation_directory_basic_operations() {
         use tokio::sync::mpsc;
@@ -1037,11 +1059,13 @@ mod tests {
             // Create MessageBus (required for spawning message loop task)
             let placement = create_test_placement();
             let callback_manager = Rc::new(crate::messaging::CallbackManager::new());
+            let network_transport = create_test_network_transport();
             let message_bus = Rc::new(crate::messaging::MessageBus::new(
                 node_id,
                 callback_manager,
                 directory,
                 placement,
+                network_transport,
             ));
             message_bus.init_self_ref();
 
@@ -1109,11 +1133,13 @@ mod tests {
             // Create MessageBus (required for spawning message loop task)
             let placement = create_test_placement();
             let callback_manager = Rc::new(crate::messaging::CallbackManager::new());
+            let network_transport = create_test_network_transport();
             let message_bus = Rc::new(crate::messaging::MessageBus::new(
                 node_id,
                 callback_manager,
                 directory,
                 placement,
+                network_transport,
             ));
             message_bus.init_self_ref();
 
@@ -1168,11 +1194,13 @@ mod tests {
             // Create MessageBus (required for spawning message loop task)
             let placement = create_test_placement();
             let callback_manager = Rc::new(crate::messaging::CallbackManager::new());
+            let network_transport = create_test_network_transport();
             let message_bus = Rc::new(crate::messaging::MessageBus::new(
                 node_id,
                 callback_manager,
                 directory,
                 placement,
+                network_transport,
             ));
             message_bus.init_self_ref();
 
