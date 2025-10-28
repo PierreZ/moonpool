@@ -1,15 +1,9 @@
 //! Actor runtime builder for configuration.
 
 use crate::actor::NodeId;
-use crate::directory::SimpleDirectory;
 use crate::error::ActorError;
-use crate::messaging::{FoundationTransport, MessageBus};
-use crate::placement::SimplePlacement;
 use crate::runtime::ActorRuntime;
-use moonpool_foundation::{
-    NetworkProvider, PeerConfig, TaskProvider, TimeProvider,
-    network::transport::{ClientTransport, Envelope, RequestResponseSerializer, ServerTransport},
-};
+use moonpool_foundation::{NetworkProvider, TaskProvider, TimeProvider};
 use std::net::SocketAddr;
 use std::rc::Rc;
 
@@ -22,12 +16,14 @@ use std::rc::Rc;
 /// - `N`: NetworkProvider (e.g., TokioNetworkProvider, SimNetworkProvider)
 /// - `T`: TimeProvider (e.g., TokioTimeProvider, SimTimeProvider)
 /// - `TP`: TaskProvider (e.g., TokioTaskProvider)
+/// - `S`: Serializer (e.g., JsonSerializer, custom implementations)
 ///
 /// # Example
 ///
 /// ```rust,ignore
 /// use moonpool::ActorRuntime;
 /// use moonpool::actor::NodeId;
+/// use moonpool::serialization::JsonSerializer;
 /// use moonpool_foundation::{TokioNetworkProvider, TokioTimeProvider, TokioTaskProvider};
 ///
 /// // Define cluster nodes
@@ -46,10 +42,11 @@ use std::rc::Rc;
 ///         TokioTimeProvider,
 ///         TokioTaskProvider,
 ///     )
+///     .with_serializer(JsonSerializer)
 ///     .build()
 ///     .await?;
 /// ```
-pub struct ActorRuntimeBuilder<N, T, TP> {
+pub struct ActorRuntimeBuilder<N, T, TP, S> {
     /// Cluster namespace (required).
     pub(crate) namespace: Option<String>,
 
@@ -66,6 +63,9 @@ pub struct ActorRuntimeBuilder<N, T, TP> {
     /// Storage provider for actor state persistence (required).
     pub(crate) storage: Option<Rc<dyn crate::storage::StorageProvider>>,
 
+    /// Message serializer for handler dispatch (required).
+    pub(crate) serializer: Option<S>,
+
     /// Network provider (required).
     pub(crate) network_provider: N,
 
@@ -76,7 +76,7 @@ pub struct ActorRuntimeBuilder<N, T, TP> {
     pub(crate) task_provider: TP,
 }
 
-impl ActorRuntimeBuilder<(), (), ()> {
+impl ActorRuntimeBuilder<(), (), (), ()> {
     /// Create a new runtime builder.
     ///
     /// You must call `with_providers()` to set the network, time, and task providers
@@ -88,6 +88,7 @@ impl ActorRuntimeBuilder<(), (), ()> {
             cluster_nodes: None,
             shared_directory: None,
             storage: None,
+            serializer: None,
             network_provider: (),
             time_provider: (),
             task_provider: (),
@@ -95,7 +96,7 @@ impl ActorRuntimeBuilder<(), (), ()> {
     }
 }
 
-impl<N, T, TP> ActorRuntimeBuilder<N, T, TP> {
+impl<N, T, TP, S> ActorRuntimeBuilder<N, T, TP, S> {
     /// Set the providers for network, time, and task execution.
     ///
     /// Required before calling `build()`. This method consumes the builder and returns
@@ -129,16 +130,51 @@ impl<N, T, TP> ActorRuntimeBuilder<N, T, TP> {
         network_provider: NewN,
         time_provider: NewT,
         task_provider: NewTP,
-    ) -> ActorRuntimeBuilder<NewN, NewT, NewTP> {
+    ) -> ActorRuntimeBuilder<NewN, NewT, NewTP, S> {
         ActorRuntimeBuilder {
             namespace: self.namespace,
             listen_addr: self.listen_addr,
             cluster_nodes: self.cluster_nodes,
             shared_directory: self.shared_directory,
             storage: self.storage,
+            serializer: self.serializer,
             network_provider,
             time_provider,
             task_provider,
+        }
+    }
+
+    /// Set the message serializer for handler dispatch.
+    ///
+    /// Required before calling `build()`. This method consumes the builder and returns
+    /// a new builder with the serializer set.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use moonpool::serialization::JsonSerializer;
+    ///
+    /// let runtime = ActorRuntime::builder()
+    ///     .namespace("prod")
+    ///     .listen_addr("127.0.0.1:5000")?
+    ///     .with_serializer(JsonSerializer)
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn with_serializer<NewS: crate::serialization::Serializer>(
+        self,
+        serializer: NewS,
+    ) -> ActorRuntimeBuilder<N, T, TP, NewS> {
+        ActorRuntimeBuilder {
+            namespace: self.namespace,
+            listen_addr: self.listen_addr,
+            cluster_nodes: self.cluster_nodes,
+            shared_directory: self.shared_directory,
+            storage: self.storage,
+            serializer: Some(serializer),
+            network_provider: self.network_provider,
+            time_provider: self.time_provider,
+            task_provider: self.task_provider,
         }
     }
 
@@ -262,20 +298,21 @@ impl<N, T, TP> ActorRuntimeBuilder<N, T, TP> {
     }
 }
 
-impl<N, T, TP> ActorRuntimeBuilder<N, T, TP>
+impl<N, T, TP, S> ActorRuntimeBuilder<N, T, TP, S>
 where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
+    S: crate::serialization::Serializer + Clone + 'static,
 {
     /// Build the ActorRuntime.
     ///
-    /// Validates configuration and creates the runtime instance with network transport enabled.
+    /// Validates configuration and creates the runtime instance by calling `ActorRuntime::new()`.
     ///
     /// # Errors
     ///
     /// Returns error if required fields are missing or invalid.
-    pub async fn build(self) -> std::result::Result<ActorRuntime<TP>, ActorError> {
+    pub async fn build(self) -> std::result::Result<ActorRuntime<TP, S>, ActorError> {
         // Validate required fields
         let namespace = self
             .namespace
@@ -289,148 +326,33 @@ where
             ActorError::InvalidConfiguration("cluster_nodes is required".to_string())
         })?;
 
-        // Create NodeId from listen address
-        let node_id = NodeId::from_socket_addr(listen_addr);
-
-        // Use shared directory if provided, otherwise create new one
-        let directory_rc: Rc<dyn crate::directory::Directory> =
-            self.shared_directory.unwrap_or_else(|| {
-                // Create directory (tracks WHERE actors currently are)
-                let directory = SimpleDirectory::new();
-                Rc::new(directory) as Rc<dyn crate::directory::Directory>
-            });
-
-        // Create placement strategy (decides WHERE new actors should go)
-        let placement = SimplePlacement::new(cluster_nodes);
-
-        // Create CallbackManager (Orleans: InsideRuntimeClient pattern)
-        // Handles correlation tracking and callback management
-        let callback_manager = Rc::new(crate::messaging::CallbackManager::new());
-
-        // Create network transport using foundation layer
-        // ClientTransport for outgoing requests
-        let peer_config = PeerConfig::default();
-        let client_serializer = RequestResponseSerializer::new();
-        let client_transport = ClientTransport::new(
-            client_serializer,
-            self.network_provider.clone(),
-            self.time_provider.clone(),
-            self.task_provider.clone(),
-            peer_config,
-        );
-
-        let transport = Rc::new(FoundationTransport::new(client_transport));
-
-        // Create MessageBus with CallbackManager dependency (Orleans: MessageCenter pattern)
-        // Handles routing logic, delegates callback management to CallbackManager
-        let message_bus = Rc::new(MessageBus::new(
-            node_id.clone(),
-            callback_manager,
-            directory_rc.clone(),
-            placement,
-            transport,
-        ));
-
-        // Initialize MessageBus self-reference (required for passing to routers)
-        message_bus.init_self_ref();
-
-        // Create ServerTransport for incoming messages
-        let server_serializer = RequestResponseSerializer::new();
-        let listen_addr_str = listen_addr.to_string();
-        let mut server_transport = ServerTransport::bind(
-            self.network_provider,
-            self.time_provider,
-            self.task_provider.clone(),
-            server_serializer,
-            &listen_addr_str,
-        )
-        .await
-        .map_err(|e| {
-            ActorError::InvalidConfiguration(format!("Failed to bind ServerTransport: {}", e))
-        })?;
-
-        // Start event-driven message receive loop (NOT polling!)
-        let message_bus_for_recv = message_bus.clone();
-        self.task_provider
-            .spawn_task("network_receive_loop", async move {
-                loop {
-                    // Wait for next incoming message (event-driven, blocks until message arrives)
-                    if let Some(msg) = server_transport.next_message().await {
-                        // Feed message into MessageBus for routing
-                        let payload = msg.envelope.payload().to_vec();
-
-                        // Deserialize and route the message
-                        if let Ok(message) =
-                            serde_json::from_slice::<crate::messaging::Message>(&payload)
-                        {
-                            tracing::debug!(
-                                "Received network message: target={}, method={}, direction={:?}, corr_id={}",
-                                message.target_actor,
-                                message.method_name,
-                                message.direction,
-                                message.correlation_id
-                            );
-
-                            // CRITICAL: Send transport-level ACK immediately
-                            // The ClientTransport::request() on the sending node is waiting
-                            // for a response envelope to complete the forwarding operation.
-                            // We send an empty ACK to unblock the sender, then route the message locally.
-                            use moonpool_foundation::network::transport::RequestResponseEnvelopeFactory;
-                            if let Err(e) = server_transport.send_reply::<RequestResponseEnvelopeFactory>(
-                                &msg.envelope,
-                                vec![], // Empty ACK payload
-                                &msg,
-                            ) {
-                                tracing::error!("Failed to send transport ACK: {}", e);
-                            } else {
-                                tracing::debug!("Sent transport-level ACK for received message");
-                            }
-
-                            // Route to local actor synchronously
-                            // After routing completes, we MUST yield to allow the waiting
-                            // task (polling loop) to observe the oneshot completion
-                            if let Err(e) = message_bus_for_recv.route_message(message).await {
-                                tracing::error!("Failed to route network message: {}", e);
-                            } else {
-                                tracing::debug!("Successfully routed network message");
-                            }
-
-                            // CRITICAL: Yield to scheduler to allow waiting tasks to run
-                            // In LocalSet, after completing a oneshot channel, we must yield
-                            // before polling next_message() to ensure the waiting task gets
-                            // scheduled and can observe the completion
-                            tokio::task::yield_now().await;
-                        } else {
-                            tracing::warn!("Failed to deserialize network message");
-                        }
-                    }
-                }
-            });
-
-        tracing::info!(
-            "ActorRuntime created: namespace={}, node_id={}, listen_addr={}, network=enabled",
-            namespace,
-            node_id,
-            listen_addr
-        );
-
-        // Validate storage provider
         let storage = self
             .storage
             .ok_or_else(|| ActorError::InvalidConfiguration("storage is required".to_string()))?;
 
+        let serializer = self.serializer.ok_or_else(|| {
+            ActorError::InvalidConfiguration(
+                "serializer is required (use .with_serializer())".to_string(),
+            )
+        })?;
+
+        // Delegate to ActorRuntime::new() with all the builder's parameters
         ActorRuntime::new(
             namespace,
-            node_id,
-            message_bus,
-            directory_rc,
-            self.task_provider,
+            listen_addr.to_string(),
+            cluster_nodes,
+            self.shared_directory,
             storage,
+            self.network_provider,
+            self.time_provider,
+            self.task_provider,
+            serializer,
         )
+        .await
     }
 }
 
-impl Default for ActorRuntimeBuilder<(), (), ()> {
+impl Default for ActorRuntimeBuilder<(), (), (), ()> {
     fn default() -> Self {
         Self::new()
     }

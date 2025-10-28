@@ -56,6 +56,7 @@ use crate::directory::Directory;
 use crate::error::ActorError;
 use crate::messaging::{ActorRouter, CallbackManager, Direction, Message, NetworkTransport};
 use crate::placement::SimplePlacement;
+use crate::serialization::{Serializer, erase_message_serializer};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -116,6 +117,16 @@ pub struct MessageBus {
     /// Uses Rc to allow cloning and avoid RefCell borrows across awaits.
     network_transport: Rc<dyn NetworkTransport>,
 
+    /// Type-erased message serializer for network messages.
+    ///
+    /// MessageBus only serializes Message envelopes (not arbitrary types), so we use
+    /// type erasure to avoid making MessageBus generic. The serializer is provided
+    /// during construction and type-erased to `Box<dyn ErasedMessageSerializer>`.
+    ///
+    /// Pluggable serialization enables users to choose between JSON, MessagePack, Bincode,
+    /// or any custom implementation of the Serializer trait.
+    message_serializer: Box<dyn crate::serialization::ErasedMessageSerializer>,
+
     /// Directory for actor location tracking.
     ///
     /// Used to look up actor locations for message routing.
@@ -144,11 +155,13 @@ impl MessageBus {
     /// - `directory`: Directory for actor location tracking
     /// - `placement`: Placement strategy for choosing where to activate new actors
     /// - `network_transport`: Network transport for remote communication
+    /// - `message_serializer`: Serializer for network messages (default: MessageSerializerImpl::json())
     ///
     /// # Example
     ///
     /// ```rust,ignore
     /// use moonpool::messaging::CallbackManager;
+    /// use moonpool::serialization::JsonSerializer;
     /// use std::rc::Rc;
     ///
     /// let node_id = NodeId::from("127.0.0.1:8001")?;
@@ -156,26 +169,30 @@ impl MessageBus {
     /// let directory = SimpleDirectory::new();
     /// let placement = SimplePlacement::new(cluster_nodes);
     /// let transport = create_network_transport();
+    /// let serializer = JsonSerializer;
     /// let bus = MessageBus::new(
     ///     node_id,
     ///     callback_manager,
     ///     Rc::new(directory) as SharedDirectory,
     ///     placement,
     ///     Rc::new(transport),
+    ///     serializer,
     /// );
     /// ```
-    pub fn new(
+    pub fn new<S: Serializer + 'static>(
         node_id: NodeId,
         callback_manager: Rc<CallbackManager>,
         directory: SharedDirectory,
         placement: SimplePlacement,
         network_transport: Rc<dyn NetworkTransport>,
+        message_serializer: S,
     ) -> Self {
         Self {
             node_id,
             callback_manager,
             actor_routers: RefCell::new(HashMap::new()),
             network_transport,
+            message_serializer: erase_message_serializer(message_serializer),
             directory,
             placement,
             self_ref: RefCell::new(None),
@@ -425,13 +442,16 @@ impl MessageBus {
                 message.method_name
             );
 
-            // Clone transport Rc to avoid holding borrow across await
+            // Clone Rc references to avoid holding borrow across await
             let transport = self.network_transport.clone();
 
-            // Serialize message to JSON
-            let payload = serde_json::to_vec(&message).map_err(|e| {
-                ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
-            })?;
+            // Serialize message using configured serializer
+            let payload = self
+                .message_serializer
+                .serialize_message(&message)
+                .map_err(|e| {
+                    ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
+                })?;
 
             // Send over network - transport.send() takes &self
             let destination = message.target_node.as_str();
@@ -496,13 +516,16 @@ impl MessageBus {
                 message.target_node
             );
 
-            // Clone transport Rc to avoid holding borrow across await
+            // Clone Rc references to avoid holding borrow across await
             let transport = self.network_transport.clone();
 
-            // Serialize message to JSON
-            let payload = serde_json::to_vec(&message).map_err(|e| {
-                ActorError::ProcessingFailed(format!("Failed to serialize response: {}", e))
-            })?;
+            // Serialize message using configured serializer
+            let payload = self
+                .message_serializer
+                .serialize_message(&message)
+                .map_err(|e| {
+                    ActorError::ProcessingFailed(format!("Failed to serialize response: {}", e))
+                })?;
 
             // Send over network using network transport
             let destination = message.target_node.as_str();
@@ -565,13 +588,16 @@ impl MessageBus {
                 message.target_node
             );
 
-            // Clone transport Rc to avoid holding borrow across await
+            // Clone Rc references to avoid holding borrow across await
             let transport = self.network_transport.clone();
 
-            // Serialize message to JSON
-            let payload = serde_json::to_vec(&message).map_err(|e| {
-                ActorError::ProcessingFailed(format!("Failed to serialize oneway: {}", e))
-            })?;
+            // Serialize message using configured serializer
+            let payload = self
+                .message_serializer
+                .serialize_message(&message)
+                .map_err(|e| {
+                    ActorError::ProcessingFailed(format!("Failed to serialize oneway: {}", e))
+                })?;
 
             // Send over network using network transport
             let destination = message.target_node.as_str();
@@ -606,14 +632,17 @@ impl MessageBus {
     /// }
     /// ```
     pub async fn poll_network(&self) -> Result<bool, ActorError> {
-        // Clone transport Rc to avoid holding borrow across await
+        // Clone Rc references to avoid holding borrow across await
         let transport = self.network_transport.clone();
 
         if let Some(payload) = transport.poll_receive() {
-            // Deserialize the message from payload
-            let message: Message = serde_json::from_slice(&payload).map_err(|e| {
-                ActorError::ProcessingFailed(format!("Failed to deserialize message: {}", e))
-            })?;
+            // Deserialize the message from payload using configured serializer
+            let message: Message = self
+                .message_serializer
+                .deserialize_message(&payload)
+                .map_err(|e| {
+                    ActorError::ProcessingFailed(format!("Failed to deserialize message: {}", e))
+                })?;
 
             tracing::debug!(
                 node_id = %self.node_id,
@@ -702,10 +731,13 @@ impl MessageBus {
                 // Update target_node to remote location
                 message.target_node = node_id.clone();
 
-                // Serialize message BEFORE cloning transport
-                let payload = serde_json::to_vec(&message).map_err(|e| {
-                    ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
-                })?;
+                // Serialize message BEFORE await
+                let payload = self
+                    .message_serializer
+                    .serialize_message(&message)
+                    .map_err(|e| {
+                        ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
+                    })?;
 
                 // Clone transport Rc to avoid holding borrow across await
                 let transport = self.network_transport.clone();
@@ -769,10 +801,16 @@ impl MessageBus {
                     // Update target_node to chosen location
                     message.target_node = chosen_node.clone();
 
-                    // Serialize message BEFORE cloning transport
-                    let payload = serde_json::to_vec(&message).map_err(|e| {
-                        ActorError::ProcessingFailed(format!("Failed to serialize message: {}", e))
-                    })?;
+                    // Serialize message BEFORE await
+                    let payload = self
+                        .message_serializer
+                        .serialize_message(&message)
+                        .map_err(|e| {
+                            ActorError::ProcessingFailed(format!(
+                                "Failed to serialize message: {}",
+                                e
+                            ))
+                        })?;
 
                     // Clone transport Rc to avoid holding borrow across await
                     let transport = self.network_transport.clone();
@@ -868,6 +906,7 @@ mod tests {
     use super::*;
     use crate::actor::{ActorId, CorrelationId};
     use crate::messaging::{Direction, MessageFlags};
+    use crate::serialization::JsonSerializer;
 
     fn create_test_message(correlation_id: CorrelationId) -> Message {
         let target = ActorId::from_string("test::Actor/1").unwrap();
@@ -927,6 +966,10 @@ mod tests {
         Rc::new(MockNetworkTransport)
     }
 
+    fn create_test_serializer() -> JsonSerializer {
+        JsonSerializer
+    }
+
     #[test]
     fn test_message_bus_creation() {
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
@@ -934,12 +977,14 @@ mod tests {
         let directory = create_test_directory();
         let placement = create_test_placement();
         let network_transport = create_test_network_transport();
+        let serializer = create_test_serializer();
         let bus = MessageBus::new(
             node_id.clone(),
             callback_manager,
             directory,
             placement,
             network_transport,
+            serializer,
         );
 
         assert_eq!(bus.node_id(), &node_id);
@@ -953,12 +998,14 @@ mod tests {
         let directory = create_test_directory();
         let placement = create_test_placement();
         let network_transport = create_test_network_transport();
+        let serializer = create_test_serializer();
         let bus = MessageBus::new(
             node_id,
             callback_manager,
             directory,
             placement,
             network_transport,
+            serializer,
         );
 
         let id1 = bus.next_correlation_id();
@@ -977,12 +1024,14 @@ mod tests {
         let directory = create_test_directory();
         let placement = create_test_placement();
         let network_transport = create_test_network_transport();
+        let serializer = create_test_serializer();
         let bus = MessageBus::new(
             node_id,
             callback_manager,
             directory,
             placement,
             network_transport,
+            serializer,
         );
 
         let corr_id = bus.next_correlation_id();
@@ -1011,12 +1060,14 @@ mod tests {
         let directory = create_test_directory();
         let placement = create_test_placement();
         let network_transport = create_test_network_transport();
+        let serializer = create_test_serializer();
         let bus = MessageBus::new(
             node_id,
             callback_manager,
             directory,
             placement,
             network_transport,
+            serializer,
         );
 
         let corr_id = CorrelationId::new(999);
@@ -1034,12 +1085,14 @@ mod tests {
         let directory = create_test_directory();
         let placement = create_test_placement();
         let network_transport = create_test_network_transport();
+        let serializer = create_test_serializer();
         let bus = MessageBus::new(
             node_id,
             callback_manager,
             directory,
             placement,
             network_transport,
+            serializer,
         );
 
         let corr_id = bus.next_correlation_id();
@@ -1066,12 +1119,14 @@ mod tests {
         let directory = create_test_directory();
         let placement = create_test_placement();
         let network_transport = create_test_network_transport();
+        let serializer = create_test_serializer();
         let bus = MessageBus::new(
             node_id,
             callback_manager,
             directory,
             placement,
             network_transport,
+            serializer,
         );
 
         // Register 3 requests

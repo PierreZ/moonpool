@@ -152,19 +152,23 @@ async fn run_cluster(
     // Create a runtime for each port
     let mut runtimes = Vec::new();
     for port in &ports {
-        let runtime = ActorRuntime::<moonpool_foundation::TokioTaskProvider>::builder()
-            .namespace("example")
-            .listen_addr(format!("127.0.0.1:{}", port))?
-            .cluster_nodes(cluster_nodes.clone())
-            .shared_directory(shared_directory.clone())
-            .with_storage(shared_storage.clone())
-            .with_providers(
-                moonpool_foundation::TokioNetworkProvider,
-                moonpool_foundation::TokioTimeProvider,
-                moonpool_foundation::TokioTaskProvider,
-            )
-            .build()
-            .await?;
+        let runtime = ActorRuntime::<
+            moonpool_foundation::TokioTaskProvider,
+            moonpool::serialization::JsonSerializer,
+        >::builder()
+        .namespace("example")
+        .listen_addr(format!("127.0.0.1:{}", port))?
+        .cluster_nodes(cluster_nodes.clone())
+        .shared_directory(shared_directory.clone())
+        .with_storage(shared_storage.clone())
+        .with_providers(
+            moonpool_foundation::TokioNetworkProvider,
+            moonpool_foundation::TokioTimeProvider,
+            moonpool_foundation::TokioTaskProvider,
+        )
+        .with_serializer(moonpool::serialization::JsonSerializer)
+        .build()
+        .await?;
 
         // Instrument all subsequent logs with node_id (one-liner!)
         let _span = tracing::info_span!("node", node_id = %runtime.node_id()).entered();

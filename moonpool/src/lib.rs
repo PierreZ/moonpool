@@ -124,6 +124,7 @@ pub mod error;
 pub mod messaging;
 pub mod placement;
 pub mod runtime;
+pub mod serialization;
 pub mod storage;
 
 // Re-export prelude for convenience

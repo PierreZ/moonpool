@@ -28,7 +28,7 @@ fn create_message_conservation_invariant() -> moonpool_foundation::InvariantChec
         let mut total_pings_received = 0u64;
         let mut total_pongs_sent = 0u64;
 
-        for (_ip, state) in states {
+        for state in states.values() {
             if let Some(role) = state.get("role").and_then(|r| r.as_str()) {
                 match role {
                     "client" => {
@@ -89,7 +89,7 @@ fn create_message_conservation_invariant() -> moonpool_foundation::InvariantChec
         );
 
         // BUG DETECTOR 5: Per-peer accounting must be consistent
-        for (_ip, state) in states {
+        for state in states.values() {
             if let Some(role) = state.get("role").and_then(|r| r.as_str()) {
                 if role == "client" {
                     if let Some(per_peer) = state.get("pings_per_peer").and_then(|p| p.as_object())
@@ -151,15 +151,14 @@ fn create_message_conservation_invariant() -> moonpool_foundation::InvariantChec
 
         // BUG DETECTOR 6: Global message conservation with in-transit accounting
         let mut total_client_in_transit = 0u64;
-        for (_ip, state) in states {
-            if let Some(role) = state.get("role").and_then(|r| r.as_str()) {
-                if role == "client" {
+        for state in states.values() {
+            if let Some(role) = state.get("role").and_then(|r| r.as_str())
+                && role == "client" {
                     total_client_in_transit += state
                         .get("in_transit")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
                 }
-            }
         }
 
         assert_eq!(
@@ -172,9 +171,9 @@ fn create_message_conservation_invariant() -> moonpool_foundation::InvariantChec
         );
 
         // BUG DETECTOR 7: Per-server in-transit consistency
-        for (_ip, state) in states {
-            if let Some(role) = state.get("role").and_then(|r| r.as_str()) {
-                if role == "server" {
+        for state in states.values() {
+            if let Some(role) = state.get("role").and_then(|r| r.as_str())
+                && role == "server" {
                     let pings_received = state
                         .get("pings_received")
                         .and_then(|v| v.as_u64())
@@ -197,7 +196,6 @@ fn create_message_conservation_invariant() -> moonpool_foundation::InvariantChec
                         );
                     }
                 }
-            }
         }
     })
 }
@@ -215,12 +213,12 @@ async fn run_ping_pong_simulation(
 
     // Register servers
     for i in 1..=num_servers {
-        builder = builder.register_workload(&format!("ping_pong_server_{}", i), ping_pong_server);
+        builder = builder.register_workload(format!("ping_pong_server_{}", i), ping_pong_server);
     }
 
     // Register clients
     for i in 1..=num_clients {
-        builder = builder.register_workload(&format!("ping_pong_client_{}", i), ping_pong_client);
+        builder = builder.register_workload(format!("ping_pong_client_{}", i), ping_pong_client);
     }
 
     builder.run().await

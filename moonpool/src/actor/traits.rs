@@ -294,7 +294,9 @@ pub trait Actor: Sized {
     ///     // No need to write register_handlers() manually!
     /// }
     /// ```
-    fn register_handlers(_registry: &mut crate::actor::HandlerRegistry<Self>) {
+    fn register_handlers<S: crate::serialization::Serializer + 'static>(
+        _registry: &mut crate::actor::HandlerRegistry<Self, S>,
+    ) {
         // Default: no handlers (for system actors)
     }
 }
@@ -363,10 +365,11 @@ pub trait Actor: Sized {
 /// - State transitions (query current state)
 /// - Actor-to-actor messaging (future: `ctx.get_actor()`)
 #[async_trait(?Send)]
-pub trait MessageHandler<Req, Res>: Actor
+pub trait MessageHandler<Req, Res, S>: Actor
 where
     Req: Serialize + DeserializeOwned,
     Res: Serialize + DeserializeOwned,
+    S: crate::serialization::Serializer,
 {
     /// Handle a typed request message.
     ///
@@ -407,5 +410,5 @@ where
     ///     Ok(self.balance)
     /// }
     /// ```
-    async fn handle(&mut self, req: Req, ctx: &ActorContext<Self>) -> Result<Res, ActorError>;
+    async fn handle(&mut self, req: Req, ctx: &ActorContext<Self, S>) -> Result<Res, ActorError>;
 }

@@ -13,7 +13,7 @@ use moonpool::directory::{Directory, PlacementDecision, SimpleDirectory};
 
 #[tokio::test]
 async fn test_directory_creation() {
-    let nodes = vec![
+    let nodes = [
         NodeId::from("127.0.0.1:8001").unwrap(),
         NodeId::from("127.0.0.1:8002").unwrap(),
         NodeId::from("127.0.0.1:8003").unwrap(),
@@ -29,7 +29,7 @@ async fn test_directory_creation() {
 
 #[tokio::test]
 async fn test_basic_lookup_register_unregister() {
-    let nodes = vec![
+    let nodes = [
         NodeId::from("127.0.0.1:8001").unwrap(),
         NodeId::from("127.0.0.1:8002").unwrap(),
     ];
@@ -65,7 +65,7 @@ async fn test_basic_lookup_register_unregister() {
 
 #[tokio::test]
 async fn test_registration_race_detection() {
-    let nodes = vec![
+    let nodes = [
         NodeId::from("127.0.0.1:8001").unwrap(),
         NodeId::from("127.0.0.1:8002").unwrap(),
         NodeId::from("127.0.0.1:8003").unwrap(),
@@ -111,7 +111,7 @@ async fn test_registration_race_detection() {
 
 #[tokio::test]
 async fn test_idempotent_register() {
-    let nodes = vec![NodeId::from("127.0.0.1:8001").unwrap()];
+    let nodes = [NodeId::from("127.0.0.1:8001").unwrap()];
     let directory = SimpleDirectory::new();
     let actor_id = ActorId::from_string("test::Counter/dave").unwrap();
 
@@ -136,7 +136,7 @@ async fn test_idempotent_register() {
 
 #[tokio::test]
 async fn test_idempotent_unregister() {
-    let nodes = vec![NodeId::from("127.0.0.1:8001").unwrap()];
+    let nodes = [NodeId::from("127.0.0.1:8001").unwrap()];
     let directory = SimpleDirectory::new();
     let actor_id = ActorId::from_string("test::Counter/eve").unwrap();
 
@@ -161,7 +161,7 @@ async fn test_idempotent_unregister() {
 
 #[tokio::test]
 async fn test_storage_key_isolation_namespaces() {
-    let nodes = vec![NodeId::from("127.0.0.1:8001").unwrap()];
+    let nodes = [NodeId::from("127.0.0.1:8001").unwrap()];
     let directory = SimpleDirectory::new();
 
     // Same actor_type and key, different namespaces
@@ -193,7 +193,7 @@ async fn test_storage_key_isolation_namespaces() {
 
 #[tokio::test]
 async fn test_storage_key_isolation_actor_types() {
-    let nodes = vec![NodeId::from("127.0.0.1:8001").unwrap()];
+    let nodes = [NodeId::from("127.0.0.1:8001").unwrap()];
     let directory = SimpleDirectory::new();
 
     // Same namespace and key, different actor_types
@@ -225,7 +225,7 @@ async fn test_storage_key_isolation_actor_types() {
 
 #[tokio::test]
 async fn test_multiple_actors_different_keys() {
-    let nodes = vec![
+    let nodes = [
         NodeId::from("127.0.0.1:8001").unwrap(),
         NodeId::from("127.0.0.1:8002").unwrap(),
     ];

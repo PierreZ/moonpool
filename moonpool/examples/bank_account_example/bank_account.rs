@@ -120,7 +120,9 @@ impl Actor for BankAccountActor {
     }
 
     // Register message handlers
-    fn register_handlers(registry: &mut HandlerRegistry<Self>) {
+    fn register_handlers<S: moonpool::serialization::Serializer + 'static>(
+        registry: &mut HandlerRegistry<Self, S>,
+    ) {
         registry.register::<DepositRequest, u32>();
         registry.register::<WithdrawRequest, u32>();
         registry.register::<GetBalanceRequest, u32>();
@@ -129,8 +131,10 @@ impl Actor for BankAccountActor {
 
 // Implement MessageHandler for DepositRequest
 #[async_trait(?Send)]
-impl MessageHandler<DepositRequest, u32> for BankAccountActor {
-    async fn handle(&mut self, req: DepositRequest, _ctx: &ActorContext<Self>) -> Result<u32> {
+impl<S: moonpool::serialization::Serializer> MessageHandler<DepositRequest, u32, S>
+    for BankAccountActor
+{
+    async fn handle(&mut self, req: DepositRequest, _ctx: &ActorContext<Self, S>) -> Result<u32> {
         let state = self.state.as_ref().ok_or_else(|| {
             ActorError::ProcessingFailed("Actor state not initialized".to_string())
         })?;
@@ -157,8 +161,10 @@ impl MessageHandler<DepositRequest, u32> for BankAccountActor {
 
 // Implement MessageHandler for WithdrawRequest
 #[async_trait(?Send)]
-impl MessageHandler<WithdrawRequest, u32> for BankAccountActor {
-    async fn handle(&mut self, req: WithdrawRequest, _ctx: &ActorContext<Self>) -> Result<u32> {
+impl<S: moonpool::serialization::Serializer> MessageHandler<WithdrawRequest, u32, S>
+    for BankAccountActor
+{
+    async fn handle(&mut self, req: WithdrawRequest, _ctx: &ActorContext<Self, S>) -> Result<u32> {
         let state = self.state.as_ref().ok_or_else(|| {
             ActorError::ProcessingFailed("Actor state not initialized".to_string())
         })?;
@@ -195,8 +201,14 @@ impl MessageHandler<WithdrawRequest, u32> for BankAccountActor {
 
 // Implement MessageHandler for GetBalanceRequest
 #[async_trait(?Send)]
-impl MessageHandler<GetBalanceRequest, u32> for BankAccountActor {
-    async fn handle(&mut self, _req: GetBalanceRequest, _ctx: &ActorContext<Self>) -> Result<u32> {
+impl<S: moonpool::serialization::Serializer> MessageHandler<GetBalanceRequest, u32, S>
+    for BankAccountActor
+{
+    async fn handle(
+        &mut self,
+        _req: GetBalanceRequest,
+        _ctx: &ActorContext<Self, S>,
+    ) -> Result<u32> {
         let state = self.state.as_ref().ok_or_else(|| {
             ActorError::ProcessingFailed("Actor state not initialized".to_string())
         })?;

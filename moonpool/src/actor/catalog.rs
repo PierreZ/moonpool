@@ -88,11 +88,11 @@ use std::rc::Rc;
 /// // Remove activation
 /// directory.remove_target(&actor_id);
 /// ```
-pub struct ActivationDirectory<A: Actor> {
+pub struct ActivationDirectory<A: Actor, S: crate::serialization::Serializer> {
     /// Map from ActorId to ActorContext.
     ///
     /// Uses string key for efficient hashing (ActorId formatted as "namespace::actor_type/key").
-    activations: RefCell<HashMap<String, Rc<ActorContext<A>>>>,
+    activations: RefCell<HashMap<String, Rc<ActorContext<A, S>>>>,
 
     /// Count of active activations.
     ///
@@ -100,7 +100,7 @@ pub struct ActivationDirectory<A: Actor> {
     count: RefCell<usize>,
 }
 
-impl<A: Actor> ActivationDirectory<A> {
+impl<A: Actor, S: crate::serialization::Serializer> ActivationDirectory<A, S> {
     /// Create a new empty activation directory.
     pub fn new() -> Self {
         Self {
@@ -143,7 +143,7 @@ impl<A: Actor> ActivationDirectory<A> {
     ///     let context = catalog.get_or_create_activation(actor_id)?;
     /// }
     /// ```
-    pub fn find_target(&self, actor_id: &ActorId) -> Option<Rc<ActorContext<A>>> {
+    pub fn find_target(&self, actor_id: &ActorId) -> Option<Rc<ActorContext<A, S>>> {
         let key = storage_key(actor_id);
         self.activations.borrow().get(&key).cloned()
     }
@@ -164,7 +164,7 @@ impl<A: Actor> ActivationDirectory<A> {
     /// let context = Rc::new(ActorContext::new(actor_id, node_id));
     /// directory.record_new_target(context);
     /// ```
-    pub fn record_new_target(&self, target: Rc<ActorContext<A>>) {
+    pub fn record_new_target(&self, target: Rc<ActorContext<A, S>>) {
         let key = storage_key(&target.actor_id);
         let mut activations = self.activations.borrow_mut();
 
@@ -203,7 +203,7 @@ impl<A: Actor> ActivationDirectory<A> {
     }
 }
 
-impl<A: Actor> Default for ActivationDirectory<A> {
+impl<A: Actor, S: crate::serialization::Serializer> Default for ActivationDirectory<A, S> {
     fn default() -> Self {
         Self::new()
     }
@@ -274,10 +274,14 @@ fn storage_key(actor_id: &ActorId) -> String {
 const ACTOR_MESSAGE_QUEUE_SIZE: usize = 128;
 const ACTOR_CONTROL_QUEUE_SIZE: usize = 8;
 
-pub struct ActorCatalog<A: Actor, T: moonpool_foundation::TaskProvider, F: ActorFactory<Actor = A>>
-{
+pub struct ActorCatalog<
+    A: Actor,
+    T: moonpool_foundation::TaskProvider,
+    F: ActorFactory<Actor = A>,
+    S: crate::serialization::Serializer,
+> {
     /// Local activation directory (ActorId → ActorContext).
-    activation_directory: ActivationDirectory<A>,
+    activation_directory: ActivationDirectory<A, S>,
 
     /// Coarse lock for get-or-create operations.
     ///
@@ -316,6 +320,12 @@ pub struct ActorCatalog<A: Actor, T: moonpool_foundation::TaskProvider, F: Actor
     /// Stored as trait object to support any StorageProvider implementation.
     storage: std::rc::Rc<dyn crate::storage::StorageProvider>,
 
+    /// Message serializer for network messages.
+    ///
+    /// Used by ActorContext to create HandlerRegistry for message dispatch.
+    /// Generic over Serializer trait for pluggable serialization.
+    message_serializer: S,
+
     /// Weak self-reference for passing to message loops.
     ///
     /// Set after wrapping in Rc via `init_self_ref()`. Required for message loops
@@ -327,7 +337,8 @@ impl<
     A: Actor + 'static,
     T: moonpool_foundation::TaskProvider + 'static,
     F: ActorFactory<Actor = A> + 'static,
-> ActorCatalog<A, T, F>
+    S: crate::serialization::Serializer + Clone + 'static,
+> ActorCatalog<A, T, F, S>
 {
     /// Create a new ActorCatalog for this node.
     ///
@@ -355,6 +366,7 @@ impl<
         actor_factory: F,
         directory: std::rc::Rc<dyn crate::directory::Directory>,
         storage: std::rc::Rc<dyn crate::storage::StorageProvider>,
+        message_serializer: S,
     ) -> Self {
         Self {
             activation_directory: ActivationDirectory::new(),
@@ -364,6 +376,7 @@ impl<
             task_provider,
             actor_factory,
             storage,
+            message_serializer,
             self_ref: RefCell::new(None),
         }
     }
@@ -397,7 +410,7 @@ impl<
     ///     let context = catalog.get_or_create_activation(actor_id)?;
     /// }
     /// ```
-    pub fn get(&self, actor_id: &ActorId) -> Option<Rc<ActorContext<A>>> {
+    pub fn get(&self, actor_id: &ActorId) -> Option<Rc<ActorContext<A, S>>> {
         self.activation_directory.find_target(actor_id)
     }
 
@@ -455,7 +468,7 @@ impl<
         &self,
         actor_id: ActorId,
         message_bus: Rc<crate::messaging::MessageBus>,
-    ) -> Result<Rc<ActorContext<A>>, ActorError> {
+    ) -> Result<Rc<ActorContext<A, S>>, ActorError> {
         // FAST PATH: Check without lock (99% case - activation exists)
         if let Some(activation) = self.activation_directory.find_target(&actor_id) {
             tracing::debug!(
@@ -503,6 +516,7 @@ impl<
             msg_tx,
             ctrl_tx,
             self.storage.clone(),
+            self.message_serializer.clone(),
         ));
 
         // Set MessageBus reference on context
@@ -757,7 +771,8 @@ impl<
     A: Actor + 'static,
     T: moonpool_foundation::TaskProvider + 'static,
     F: ActorFactory<Actor = A> + 'static,
-> ActorRouter for ActorCatalog<A, T, F>
+    S: crate::serialization::Serializer + Clone + 'static,
+> ActorRouter for ActorCatalog<A, T, F, S>
 {
     /// Route a message to the appropriate local actor with auto-activation.
     ///
@@ -895,6 +910,10 @@ mod tests {
         std::rc::Rc::new(InMemoryStorage::new())
     }
 
+    fn create_test_serializer() -> crate::serialization::JsonSerializer {
+        crate::serialization::JsonSerializer
+    }
+
     // Mock network transport for testing
     struct MockNetworkTransport;
 
@@ -921,7 +940,8 @@ mod tests {
     fn test_activation_directory_basic_operations() {
         use tokio::sync::mpsc;
 
-        let directory = ActivationDirectory::<DummyActor>::new();
+        let directory =
+            ActivationDirectory::<DummyActor, crate::serialization::JsonSerializer>::new();
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
 
         // Initially empty
@@ -933,6 +953,7 @@ mod tests {
         let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
 
         let storage = create_test_storage();
+        let message_serializer = create_test_serializer();
         let context = Rc::new(ActorContext::new(
             actor_id.clone(),
             node_id.clone(),
@@ -940,6 +961,7 @@ mod tests {
             msg_tx,
             ctrl_tx,
             storage,
+            message_serializer,
         ));
         directory.record_new_target(context.clone());
 
@@ -960,7 +982,8 @@ mod tests {
     fn test_activation_directory_storage_key_isolation() {
         use tokio::sync::mpsc;
 
-        let directory = ActivationDirectory::<DummyActor>::new();
+        let directory =
+            ActivationDirectory::<DummyActor, crate::serialization::JsonSerializer>::new();
         let node_id = NodeId::from("127.0.0.1:8001").unwrap();
 
         // Different namespaces
@@ -973,6 +996,7 @@ mod tests {
         let (ctrl_tx2, _) = mpsc::channel(8);
 
         let storage = create_test_storage();
+        let message_serializer = create_test_serializer();
         let prod_context = Rc::new(ActorContext::new(
             prod_actor.clone(),
             node_id.clone(),
@@ -980,6 +1004,7 @@ mod tests {
             msg_tx1,
             ctrl_tx1,
             storage.clone(),
+            message_serializer.clone(),
         ));
         let staging_context = Rc::new(ActorContext::new(
             staging_actor.clone(),
@@ -988,6 +1013,7 @@ mod tests {
             msg_tx2,
             ctrl_tx2,
             storage.clone(),
+            message_serializer.clone(),
         ));
 
         directory.record_new_target(prod_context);
@@ -1014,6 +1040,7 @@ mod tests {
             msg_tx3,
             ctrl_tx3,
             storage.clone(),
+            message_serializer.clone(),
         ));
         let account_context = Rc::new(ActorContext::new(
             account_actor.clone(),
@@ -1022,6 +1049,7 @@ mod tests {
             msg_tx4,
             ctrl_tx4,
             storage,
+            message_serializer,
         ));
 
         directory.record_new_target(counter_context);
@@ -1045,12 +1073,14 @@ mod tests {
             let factory = DummyFactory;
             let directory = create_test_directory();
             let storage = create_test_storage();
+            let message_serializer = create_test_serializer();
             let catalog = Rc::new(ActorCatalog::new(
                 node_id.clone(),
                 task_provider,
                 factory,
                 directory.clone(),
                 storage,
+                message_serializer.clone(),
             ));
 
             // Initialize self-reference
@@ -1066,6 +1096,7 @@ mod tests {
                 directory,
                 placement,
                 network_transport,
+                message_serializer,
             ));
             message_bus.init_self_ref();
 
@@ -1119,12 +1150,14 @@ mod tests {
             let factory = DummyFactory;
             let directory = create_test_directory();
             let storage = create_test_storage();
+            let message_serializer = create_test_serializer();
             let catalog = Rc::new(ActorCatalog::new(
                 node_id.clone(),
                 task_provider,
                 factory,
                 directory.clone(),
                 storage,
+                message_serializer.clone(),
             ));
 
             // Initialize self-reference
@@ -1140,6 +1173,7 @@ mod tests {
                 directory,
                 placement,
                 network_transport,
+                message_serializer,
             ));
             message_bus.init_self_ref();
 
@@ -1180,12 +1214,14 @@ mod tests {
             let factory = DummyFactory;
             let directory = create_test_directory();
             let storage = create_test_storage();
+            let message_serializer = create_test_serializer();
             let catalog = Rc::new(ActorCatalog::new(
                 node_id.clone(),
                 task_provider,
                 factory,
                 directory.clone(),
                 storage,
+                message_serializer.clone(),
             ));
 
             // Initialize self-reference
@@ -1201,6 +1237,7 @@ mod tests {
                 directory,
                 placement,
                 network_transport,
+                message_serializer,
             ));
             message_bus.init_self_ref();
 

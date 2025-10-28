@@ -7,6 +7,7 @@
 use crate::actor::{Actor, ActorContext, MessageHandler};
 use crate::error::ActorError;
 use crate::messaging::Message;
+use crate::serialization::Serializer;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -23,11 +24,11 @@ use std::pin::Pin;
 /// - Serializes the response to `Vec<u8>`
 ///
 /// Uses higher-ranked trait bound (HRTB) `for<'a>` to handle lifetimes correctly.
-type HandlerFn<A> = Box<
+type HandlerFn<A, S> = Box<
     dyn for<'a> Fn(
         &'a mut A,
         &'a Message,
-        &'a ActorContext<A>,
+        &'a ActorContext<A, S>,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ActorError>> + 'a>>,
 >;
 
@@ -74,21 +75,40 @@ type HandlerFn<A> = Box<
 /// ```rust,ignore
 /// let response_payload = context.handlers.dispatch(actor, message, context).await?;
 /// ```
-pub struct HandlerRegistry<A: Actor> {
+pub struct HandlerRegistry<A: Actor, S: Serializer> {
     /// Map from method name to handler function.
     ///
     /// Key: Type name of request (e.g., "SayHelloRequest")
     /// Value: Type-erased closure that handles the message
-    handlers: HashMap<String, HandlerFn<A>>,
+    handlers: HashMap<String, HandlerFn<A, S>>,
+
+    /// Message serializer for encoding/decoding message payloads.
+    ///
+    /// Pluggable serialization. Used to deserialize incoming request payloads
+    /// and serialize outgoing response payloads. Generic over Serializer trait
+    /// for maximum flexibility (users can provide their own implementations).
+    message_serializer: S,
 }
 
-impl<A: Actor> HandlerRegistry<A> {
-    /// Create a new empty handler registry.
+impl<A: Actor, S: Serializer + Clone + 'static> HandlerRegistry<A, S> {
+    /// Create a new empty handler registry with the given message serializer.
     ///
-    /// Call `register::<Req, Res>()` to add handlers.
-    pub fn new() -> Self {
+    /// # Parameters
+    ///
+    /// - `message_serializer`: Serializer for message payloads
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use moonpool::serialization::JsonSerializer;
+    ///
+    /// let serializer = JsonSerializer;
+    /// let registry = HandlerRegistry::new(serializer);
+    /// ```
+    pub fn new(message_serializer: S) -> Self {
         Self {
             handlers: HashMap::new(),
+            message_serializer,
         }
     }
 
@@ -123,7 +143,7 @@ impl<A: Actor> HandlerRegistry<A> {
     /// - Must match the `method_name` field in incoming `Message` structs
     pub fn register<Req, Res>(&mut self)
     where
-        A: MessageHandler<Req, Res>,
+        A: MessageHandler<Req, Res, S>,
         Req: serde::Serialize + serde::de::DeserializeOwned,
         Res: serde::Serialize + serde::de::DeserializeOwned,
     {
@@ -140,18 +160,20 @@ impl<A: Actor> HandlerRegistry<A> {
             std::any::type_name::<A>()
         );
 
-        // Clone method_name for use in closure (can't move in Fn closure)
+        // Clone method_name and serializer for use in closure
         let method_name_for_closure = method_name.clone();
+        let serializer = self.message_serializer.clone();
 
         // Create type-erased handler closure
-        let handler: HandlerFn<A> = Box::new(
-            move |actor: &mut A, message: &Message, ctx: &ActorContext<A>| {
-                // Clone method_name again for the async block
+        let handler: HandlerFn<A, S> = Box::new(
+            move |actor: &mut A, message: &Message, ctx: &ActorContext<A, S>| {
+                // Clone method_name and serializer for the async block
                 let method_name = method_name_for_closure.clone();
+                let serializer = serializer.clone();
 
                 Box::pin(async move {
-                    // 1. Deserialize request payload using serde_json
-                    let req: Req = serde_json::from_slice(&message.payload).map_err(|e| {
+                    // 1. Deserialize request payload using configured serializer
+                    let req: Req = serializer.deserialize(&message.payload).map_err(|e| {
                         ActorError::Message(crate::error::MessageError::Serialization(format!(
                             "Failed to deserialize {}: {}",
                             method_name, e
@@ -162,8 +184,8 @@ impl<A: Actor> HandlerRegistry<A> {
                     // This is where the user's handler logic executes
                     let res: Res = actor.handle(req, ctx).await?;
 
-                    // 3. Serialize response using serde_json
-                    let payload = serde_json::to_vec(&res).map_err(|e| {
+                    // 3. Serialize response using configured serializer
+                    let payload = serializer.serialize(&res).map_err(|e| {
                         ActorError::Message(crate::error::MessageError::Serialization(format!(
                             "Failed to serialize response for {}: {}",
                             method_name, e
@@ -208,7 +230,7 @@ impl<A: Actor> HandlerRegistry<A> {
         &self,
         actor: &mut A,
         message: &Message,
-        ctx: &ActorContext<A>,
+        ctx: &ActorContext<A, S>,
     ) -> Result<Vec<u8>, ActorError> {
         // Lookup handler by method name
         let handler = self.handlers.get(&message.method_name).ok_or_else(|| {
@@ -245,16 +267,14 @@ impl<A: Actor> HandlerRegistry<A> {
     }
 }
 
-impl<A: Actor> Default for HandlerRegistry<A> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// No Default impl - users must explicitly provide serializer
+// This enforces the design goal of making serialization pluggable without defaults
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::actor::{ActorId, DeactivationReason};
+    use crate::serialization::JsonSerializer;
     use async_trait::async_trait;
     use serde::{Deserialize, Serialize};
 
@@ -296,11 +316,11 @@ mod tests {
 
     // Handler implementations
     #[async_trait(?Send)]
-    impl MessageHandler<SetValueRequest, ()> for TestActor {
+    impl<S: Serializer> MessageHandler<SetValueRequest, (), S> for TestActor {
         async fn handle(
             &mut self,
             req: SetValueRequest,
-            _ctx: &ActorContext<Self>,
+            _ctx: &ActorContext<Self, S>,
         ) -> Result<(), ActorError> {
             self.value = req.value;
             Ok(())
@@ -308,11 +328,11 @@ mod tests {
     }
 
     #[async_trait(?Send)]
-    impl MessageHandler<GetValueRequest, String> for TestActor {
+    impl<S: Serializer> MessageHandler<GetValueRequest, String, S> for TestActor {
         async fn handle(
             &mut self,
             _req: GetValueRequest,
-            _ctx: &ActorContext<Self>,
+            _ctx: &ActorContext<Self, S>,
         ) -> Result<String, ActorError> {
             Ok(self.value.clone())
         }
@@ -320,13 +340,15 @@ mod tests {
 
     #[test]
     fn test_handler_registry_creation() {
-        let registry = HandlerRegistry::<TestActor>::new();
+        let serializer = JsonSerializer;
+        let registry = HandlerRegistry::<TestActor, _>::new(serializer);
         assert_eq!(registry.handler_count(), 0);
     }
 
     #[test]
     fn test_handler_registration() {
-        let mut registry = HandlerRegistry::<TestActor>::new();
+        let serializer = JsonSerializer;
+        let mut registry = HandlerRegistry::<TestActor, _>::new(serializer);
         registry.register::<SetValueRequest, ()>();
         registry.register::<GetValueRequest, String>();
 

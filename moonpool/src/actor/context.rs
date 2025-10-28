@@ -78,7 +78,7 @@ use tokio::sync::{mpsc, oneshot};
 /// - Messages delivered via bounded channel (capacity: 128)
 /// - `last_message_time` updated on every message processing
 /// - Actor only removed from catalog when state == Invalid
-pub struct ActorContext<A: Actor> {
+pub struct ActorContext<A: Actor, S: crate::serialization::Serializer> {
     /// Actor's unique identifier.
     pub actor_id: ActorId,
 
@@ -141,16 +141,22 @@ pub struct ActorContext<A: Actor> {
     ///
     /// Maps method names (e.g., "SayHelloRequest") to type-erased handler closures.
     /// Initialized once during ActorContext creation via `A::register_handlers()`.
-    pub handlers: crate::actor::HandlerRegistry<A>,
+    pub handlers: crate::actor::HandlerRegistry<A, S>,
 
     /// Storage provider for actor state persistence.
     ///
     /// Actors can use this to persist state changes via `ActorState<T>` wrapper.
     /// Shared across all actors in the same runtime.
     pub storage: Rc<dyn crate::storage::StorageProvider>,
+
+    /// Message serializer for network messages.
+    ///
+    /// Used by HandlerRegistry for deserializing requests and serializing responses.
+    /// Generic over Serializer trait for pluggable serialization.
+    pub message_serializer: S,
 }
 
-impl<A: Actor> ActorContext<A> {
+impl<A: Actor, S: crate::serialization::Serializer + Clone + 'static> ActorContext<A, S> {
     /// Create a new actor context in `Creating` state.
     ///
     /// # Parameters
@@ -171,6 +177,7 @@ impl<A: Actor> ActorContext<A> {
     /// - `message_sender`: Sender for actor messages (from message channel)
     /// - `control_sender`: Sender for lifecycle commands (from control channel)
     /// - `storage`: Storage provider for actor state persistence
+    /// - `message_serializer`: Serializer for network messages
     pub fn new(
         actor_id: ActorId,
         node_id: NodeId,
@@ -178,11 +185,12 @@ impl<A: Actor> ActorContext<A> {
         message_sender: mpsc::Sender<Message>,
         control_sender: mpsc::Sender<LifecycleCommand<A>>,
         storage: Rc<dyn crate::storage::StorageProvider>,
+        message_serializer: S,
     ) -> Self {
         let now = Instant::now();
 
-        // Initialize handler registry by calling the actor's register_handlers() method
-        let mut handlers = crate::actor::HandlerRegistry::new();
+        // Initialize handler registry with message serializer
+        let mut handlers = crate::actor::HandlerRegistry::new(message_serializer.clone());
         A::register_handlers(&mut handlers);
 
         tracing::debug!(
@@ -206,6 +214,7 @@ impl<A: Actor> ActorContext<A> {
             error_count: RefCell::new(0),
             handlers,
             storage,
+            message_serializer,
         }
     }
 
@@ -616,12 +625,13 @@ pub async fn run_message_loop<
     A: Actor + 'static,
     T: moonpool_foundation::TaskProvider + 'static,
     F: crate::actor::ActorFactory<Actor = A> + 'static,
+    S: crate::serialization::Serializer + 'static,
 >(
-    context: Rc<ActorContext<A>>,
+    context: Rc<ActorContext<A, S>>,
     mut msg_rx: mpsc::Receiver<Message>,
     mut ctrl_rx: mpsc::Receiver<LifecycleCommand<A>>,
     message_bus: Rc<MessageBus>,
-    catalog: Rc<crate::actor::ActorCatalog<A, T, F>>,
+    catalog: Rc<crate::actor::ActorCatalog<A, T, F, S>>,
 ) {
     let actor_id = context.actor_id.clone();
     tracing::info!("Message loop started: {}", actor_id);
@@ -767,10 +777,10 @@ pub async fn run_message_loop<
 ///
 /// - `Ok(())`: Message dispatched successfully, response sent
 /// - `Err(ActorError)`: Handler not found, execution failed, or response send failed
-async fn dispatch_message_to_actor<A: Actor>(
+async fn dispatch_message_to_actor<A: Actor, S: crate::serialization::Serializer + 'static>(
     actor: &mut A,
     message: &Message,
-    context: &ActorContext<A>,
+    context: &ActorContext<A, S>,
     message_bus: &MessageBus,
 ) -> Result<(), ActorError> {
     tracing::debug!(
@@ -792,7 +802,7 @@ async fn dispatch_message_to_actor<A: Actor>(
 }
 
 // Manual Debug implementation (actor_instance may not be Debug)
-impl<A: Actor> std::fmt::Debug for ActorContext<A> {
+impl<A: Actor, S: crate::serialization::Serializer> std::fmt::Debug for ActorContext<A, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ActorContext")
             .field("actor_id", &self.actor_id)

@@ -67,18 +67,22 @@ impl Actor for HelloActor {
     }
 
     // Register message handlers for dynamic dispatch
-    fn register_handlers(registry: &mut HandlerRegistry<Self>) {
+    fn register_handlers<S: moonpool::serialization::Serializer + 'static>(
+        registry: &mut HandlerRegistry<Self, S>,
+    ) {
         registry.register::<SayHelloRequest, String>();
     }
 }
 
 // Implement MessageHandler for SayHelloRequest
 #[async_trait(?Send)]
-impl MessageHandler<SayHelloRequest, String> for HelloActor {
+impl<S: moonpool::serialization::Serializer> MessageHandler<SayHelloRequest, String, S>
+    for HelloActor
+{
     async fn handle(
         &mut self,
         _req: SayHelloRequest,
-        _ctx: &ActorContext<Self>,
+        _ctx: &ActorContext<Self, S>,
     ) -> std::result::Result<String, ActorError> {
         let greeting = format!("Hello from {}!", self.key());
         tracing::debug!(

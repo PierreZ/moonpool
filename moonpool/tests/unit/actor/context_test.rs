@@ -65,6 +65,7 @@ fn test_context_creation() {
     let (msg_tx, _msg_rx) = mpsc::channel(128);
     let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
     let storage = Rc::new(InMemoryStorage::new());
+    let message_serializer = moonpool::serialization::JsonSerializer;
 
     let context = ActorContext::new(
         actor_id.clone(),
@@ -73,6 +74,7 @@ fn test_context_creation() {
         msg_tx,
         ctrl_tx,
         storage,
+        message_serializer,
     );
 
     // Verify initial state
@@ -92,8 +94,17 @@ fn test_state_transition_to_activating() {
     let (msg_tx, _msg_rx) = mpsc::channel(128);
     let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
     let storage = Rc::new(InMemoryStorage::new());
+    let message_serializer = moonpool::serialization::JsonSerializer;
 
-    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx, storage);
+    let context = ActorContext::new(
+        actor_id,
+        node_id,
+        actor,
+        msg_tx,
+        ctrl_tx,
+        storage,
+        message_serializer,
+    );
 
     // Transition to Activating
     context.set_state(ActivationState::Activating).unwrap();
@@ -111,8 +122,17 @@ async fn test_activation_lifecycle() {
     let (msg_tx, _msg_rx) = mpsc::channel(128);
     let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
     let storage = Rc::new(InMemoryStorage::new());
+    let message_serializer = moonpool::serialization::JsonSerializer;
 
-    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx, storage);
+    let context = ActorContext::new(
+        actor_id,
+        node_id,
+        actor,
+        msg_tx,
+        ctrl_tx,
+        storage,
+        message_serializer,
+    );
 
     // Initial state
     assert_eq!(context.get_state(), ActivationState::Creating);
@@ -149,8 +169,17 @@ async fn test_deactivation_lifecycle() {
     let (msg_tx, _msg_rx) = mpsc::channel(128);
     let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
     let storage = Rc::new(InMemoryStorage::new());
+    let message_serializer = moonpool::serialization::JsonSerializer;
 
-    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx, storage);
+    let context = ActorContext::new(
+        actor_id,
+        node_id,
+        actor,
+        msg_tx,
+        ctrl_tx,
+        storage,
+        message_serializer,
+    );
 
     // Setup: activate the actor
     context.set_state(ActivationState::Activating).unwrap();
@@ -192,8 +221,17 @@ fn test_actor_id_accessor() {
     let (msg_tx, _msg_rx) = mpsc::channel(128);
     let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
     let storage = Rc::new(InMemoryStorage::new());
+    let message_serializer = moonpool::serialization::JsonSerializer;
 
-    let context = ActorContext::new(actor_id.clone(), node_id, actor, msg_tx, ctrl_tx, storage);
+    let context = ActorContext::new(
+        actor_id.clone(),
+        node_id,
+        actor,
+        msg_tx,
+        ctrl_tx,
+        storage,
+        message_serializer,
+    );
 
     assert_eq!(context.actor_id, actor_id);
     assert_eq!(context.actor_id.namespace, "test");
@@ -212,8 +250,17 @@ fn test_node_id_accessor() {
     let (msg_tx, _msg_rx) = mpsc::channel(128);
     let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
     let storage = Rc::new(InMemoryStorage::new());
+    let message_serializer = moonpool::serialization::JsonSerializer;
 
-    let context = ActorContext::new(actor_id, node_id.clone(), actor, msg_tx, ctrl_tx, storage);
+    let context = ActorContext::new(
+        actor_id,
+        node_id.clone(),
+        actor,
+        msg_tx,
+        ctrl_tx,
+        storage,
+        message_serializer,
+    );
 
     assert_eq!(context.node_id, node_id);
 }
@@ -229,8 +276,17 @@ fn test_multiple_state_transitions() {
     let (msg_tx, _msg_rx) = mpsc::channel(128);
     let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
     let storage = Rc::new(InMemoryStorage::new());
+    let message_serializer = moonpool::serialization::JsonSerializer;
 
-    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx, storage);
+    let context = ActorContext::new(
+        actor_id,
+        node_id,
+        actor,
+        msg_tx,
+        ctrl_tx,
+        storage,
+        message_serializer,
+    );
 
     // Valid state transition sequence
     assert_eq!(context.get_state(), ActivationState::Creating);
@@ -259,8 +315,17 @@ async fn test_activation_time_tracking() {
     let (msg_tx, _msg_rx) = mpsc::channel(128);
     let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
     let storage = Rc::new(InMemoryStorage::new());
+    let message_serializer = moonpool::serialization::JsonSerializer;
 
-    let context = ActorContext::new(actor_id, node_id, actor, msg_tx, ctrl_tx, storage);
+    let context = ActorContext::new(
+        actor_id,
+        node_id,
+        actor,
+        msg_tx,
+        ctrl_tx,
+        storage,
+        message_serializer,
+    );
 
     let activation_time = context.activation_time;
 
