@@ -119,6 +119,7 @@ impl<T: TaskProvider + 'static, S: crate::serialization::Serializer + Clone + 's
     ///     moonpool::serialization::JsonSerializer,
     /// ).await?;
     /// ```
+    #[allow(clippy::too_many_arguments)]
     pub async fn new<N, Ti>(
         namespace: impl Into<String>,
         listen_addr: impl AsRef<str>,

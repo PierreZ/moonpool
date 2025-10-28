@@ -17,16 +17,16 @@ use std::rc::Rc;
 #[derive(Debug)]
 struct FailingActor {
     actor_id: ActorId,
-    should_fail: bool,
-    call_count: usize,
+    _should_fail: bool,
+    _call_count: usize,
 }
 
 impl FailingActor {
     fn new(actor_id: ActorId, should_fail: bool) -> Self {
         Self {
             actor_id,
-            should_fail,
-            call_count: 0,
+            _should_fail: should_fail,
+            _call_count: 0,
         }
     }
 }
@@ -53,13 +53,13 @@ impl Actor for FailingActor {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TestRequest {
-    value: u64,
+struct _TestRequest {
+    _value: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TestResponse {
-    result: u64,
+struct _TestResponse {
+    _result: u64,
 }
 
 #[test]

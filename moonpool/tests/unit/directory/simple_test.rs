@@ -13,7 +13,7 @@ use moonpool::directory::{Directory, PlacementDecision, SimpleDirectory};
 
 #[tokio::test]
 async fn test_directory_creation() {
-    let nodes = [
+    let _nodes = [
         NodeId::from("127.0.0.1:8001").unwrap(),
         NodeId::from("127.0.0.1:8002").unwrap(),
         NodeId::from("127.0.0.1:8003").unwrap(),
