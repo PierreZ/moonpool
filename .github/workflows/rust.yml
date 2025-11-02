@@ -39,3 +39,15 @@ jobs:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Run cargo nextest
         run: nix develop --command cargo nextest run
+
+  examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v26
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run hello_actor example
+        run: nix develop --command cargo run --example hello_actor -- --nodes 2 --count 3
+      - name: Run bank_account example
+        run: nix develop --command cargo run --example bank_account -- --nodes 2 --operations 5

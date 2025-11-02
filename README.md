@@ -5,16 +5,16 @@
 </p>
 
 A Rust workspace containing two distinct projects:
-- **moonpool-foundation**: A standalone deterministic simulation framework (✅ COMPLETE)
-- **moonpool**: A virtual actor system similar to Orleans (❌ NOT BUILT YET)
+- **moonpool-foundation**: A standalone deterministic simulation framework (✅ COMPLETE - HOBBY-GRADE)
+- **moonpool**: A virtual actor system similar to Orleans (⚠️ EARLY ALPHA - HOBBY-GRADE)
 
-> **Note:** This is currently a hobby-grade project. Only **moonpool-foundation** is implemented and production-ready. The actor system is in the planning phase.
+> **Note:** This is a hobby-grade project. **moonpool-foundation** is complete and can be used for simulation testing, but remains hobby-grade. **moonpool** is in early alpha with working core features but should be considered experimental.
 
 ## Project Components
 
-### moonpool-foundation (✅ COMPLETE - Standalone Framework)
+### moonpool-foundation (✅ COMPLETE - Hobby-Grade Framework)
 
-A production-ready **deterministic simulation framework** inspired by FoundationDB's simulation testing approach. This is a **standalone library** that can be used independently to test any distributed system.
+A **deterministic simulation framework** inspired by FoundationDB's simulation testing approach. This is a **standalone library** that can be used independently to test distributed systems, particularly for moonpool's actor system simulation.
 
 **Key Features:**
 - Sans I/O transport layer with request-response semantics
@@ -23,23 +23,34 @@ A production-ready **deterministic simulation framework** inspired by Foundation
 - Complete TCP connection management with automatic reconnection
 - Cross-workload invariant validation system
 
-**Status:** Fully implemented, all tests passing, ready for use.
+**Status:** Fully implemented, all tests passing. Suitable for simulation testing but remains hobby-grade.
 
-### moonpool (❌ NOT BUILT YET - Actor System)
+### moonpool (⚠️ EARLY ALPHA - Actor System)
 
-A planned **virtual actor system** similar to Microsoft Orleans, featuring location transparency and automatic lifecycle management.
+An **experimental virtual actor system** similar to Microsoft Orleans, featuring location transparency and automatic lifecycle management. Core features are functional but the project is in early alpha and should be considered experimental.
 
-**Planned Features:**
-- Location-transparent actor addressing
-- Automatic activation, deactivation, and migration
-- MessageBus and ActorCatalog runtime infrastructure
-- Built on top of moonpool-foundation
+**Implemented Features:**
+- ✅ Location-transparent actor addressing (ActorRef with call/send)
+- ✅ Automatic activation on first message (ActorCatalog with factories)
+- ✅ MessageBus with request-response correlation
+- ✅ Directory-based actor placement across nodes
+- ✅ Pluggable state persistence (Storage trait with JSON serialization)
+- ✅ Multi-node networking via moonpool-foundation transport
+- ✅ Actor lifecycle management (activation, deactivation, message processing)
 
-**Status:** Phase 12+ planning only - no implementation yet. Design documents and Orleans analysis available in `docs/`.
+**Working Examples:**
+- `hello_actor` - Virtual actor demonstration with multi-node deployment
+- `bank_account` - State persistence with DeactivateOnIdle policy
+
+**Status:** Early alpha - core functionality works but lacks production hardening, comprehensive testing, and monitoring. Built on moonpool-foundation for deterministic simulation.
 
 ## Overview
 
-**The current implementation is moonpool-foundation**, a comprehensive framework for developing and testing distributed systems through deterministic simulation. The framework features a sophisticated Sans I/O transport layer with request-response semantics, enabling you to write distributed system logic once and test it with simulated networking for predictable debugging, then deploy with real networking - all using identical application code.
+This workspace provides **two complementary tools** for building distributed systems:
+
+1. **moonpool-foundation** (✅ Complete - Hobby-Grade): A comprehensive framework for developing and testing distributed systems through deterministic simulation. Features a sophisticated Sans I/O transport layer with request-response semantics, enabling you to write distributed system logic once and test it with simulated networking for predictable debugging, then deploy with real networking - all using identical application code. Suitable for simulation testing but remains hobby-grade.
+
+2. **moonpool** (⚠️ Early Alpha - Hobby-Grade): An experimental actor system built on moonpool-foundation, providing Orleans-style virtual actors with location transparency, automatic activation, and state persistence. Core features work but the project is in early development.
 
 ## Features
 
@@ -88,9 +99,9 @@ The framework follows a layered architecture with clear separation of concerns:
 
 ## Current Status
 
-### moonpool-foundation: ✅ COMPLETE (Phases 1-11)
-**Standalone deterministic simulation framework - production ready:**
-- ✅ **Phase 11: Sans I/O Transport Layer** - Complete request-response semantics with envelope system
+### moonpool-foundation: ✅ COMPLETE - HOBBY-GRADE
+**Standalone deterministic simulation framework - suitable for simulation testing:**
+- ✅ **Sans I/O Transport Layer** - Complete request-response semantics with envelope system
 - ✅ **Provider Pattern** - Full abstraction layer (Network, Time, Task, Random providers)
 - ✅ **Buggify Chaos Testing** - Deterministic fault injection with strategic placement
 - ✅ **Sometimes Assertions** - Statistical validation system with coverage tracking
@@ -99,12 +110,20 @@ The framework follows a layered architecture with clear separation of concerns:
 - ✅ **Cross-Workload Invariant System** - JSON-based state registry with global property validation
 - ✅ **Multi-Topology Testing** - Support for 1x1 through 10x10 client-server topologies with comprehensive bug detection
 - ✅ **Per-Peer Message Tracking** - Detailed accounting for message routing and load distribution validation
+- ✅ **101 tests passing** - Comprehensive test coverage with deterministic chaos testing
 
-### moonpool: ❌ NOT IMPLEMENTED (Phase 12+)
-**Virtual actor system - planning phase only:**
-- Phase 12+ design documents and Orleans reference analysis available
-- No code implementation yet
-- Will build on moonpool-foundation when ready
+### moonpool: ⚠️ EARLY ALPHA - FUNCTIONAL BUT EXPERIMENTAL
+**Virtual actor system - core features working, needs production hardening:**
+- ✅ **ActorCatalog** - Local actor registry with double-check locking and auto-activation
+- ✅ **MessageBus** - Full routing with correlation IDs, local/remote dispatch, request-response
+- ✅ **ActorContext** - Per-actor message processing loop with lifecycle management
+- ✅ **ActorRuntime** - Multi-node runtime with builder pattern and graceful startup
+- ✅ **Directory** - Location tracking and placement decisions (Random/Local/LeastLoaded)
+- ✅ **Storage** - Pluggable state persistence with JSON serialization
+- ✅ **Network Integration** - Built on moonpool-foundation transport layer
+- ✅ **76 tests passing** - Unit tests for core components
+- ✅ **2 working examples** - hello_actor and bank_account demonstrating multi-node scenarios
+- ⚠️ **Lacks**: Production monitoring, comprehensive integration tests, time-based idle timeout, replication
 
 ## Getting Started
 
@@ -131,24 +150,44 @@ Tests are configured with specific timeouts in `.config/nextest.toml`:
 
 ### Usage Examples
 
-The transport layer provides clean async APIs for distributed system development:
+**moonpool-foundation Transport Layer:**
 
-**Client Example (simplified):**
 ```rust
-// Type-safe request-response with automatic correlation
+// Client: Type-safe request-response with automatic correlation
 let response: PongMessage = client_transport
     .request::<PingMessage, PongMessage>(ping_msg)
     .await?;
-```
 
-**Server Example (simplified):**  
-```rust
-// Event-driven message handling across multiple connections
+// Server: Event-driven message handling across multiple connections
 while let Some((request, responder)) = server_transport.try_next_message().await? {
     let response = handle_request(request).await;
     responder.send(response).await?;
 }
 ```
+
+**moonpool Actor System:**
+
+```rust
+use moonpool::prelude::*;
+
+// Create actor runtime
+let runtime = ActorRuntime::builder()
+    .namespace("example")
+    .listen_addr("127.0.0.1:5000")
+    .build()
+    .await?;
+
+// Register actor type with factory
+runtime.register_actor::<BankAccountActor, _>(BankAccountActorFactory)?;
+
+// Get actor reference (location-transparent)
+let alice = runtime.get_actor::<BankAccountActor>("BankAccount", "alice")?;
+
+// Call actor methods (auto-activation, state persistence)
+let balance = alice.deposit(100).await?;
+```
+
+See `moonpool/examples/` for complete working examples.
 
 ## Testing Philosophy
 
@@ -169,11 +208,10 @@ The framework uses "sometimes assertions" for statistical validation under chaos
 
 ## Project Structure
 
-- **moonpool-foundation/** - ✅ **COMPLETE**: Standalone deterministic simulation framework (FDB-inspired)
-- **moonpool/** - ❌ **NOT BUILT**: Virtual actor system (Orleans-like, planning only)
+- **moonpool-foundation/** - ✅ **COMPLETE - HOBBY-GRADE**: Standalone deterministic simulation framework (FDB-inspired)
+- **moonpool/** - ⚠️ **EARLY ALPHA - HOBBY-GRADE**: Virtual actor system (Orleans-like, functional but experimental)
 - **docs/** - Comprehensive documentation ([INDEX.md](docs/INDEX.md))
-  - specs/ - Technical specifications (foundation layer complete)
-  - plans/ - Phase implementation roadmaps (Phases 1-11 complete, 12+ planning)
+  - specs/ - Technical specifications
   - analysis/ - Reference architecture analysis (FDB, Orleans)
   - references/ - Source code from FoundationDB, Orleans, TigerBeetle
 

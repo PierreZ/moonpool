@@ -1,9 +1,11 @@
 # Moonpool Foundation: Deterministic Simulation Framework
 
 ## Overview
-Foundation crate providing core simulation infrastructure, transport layer, and testing framework. This is the low-level layer that enables deterministic testing of distributed systems.
+Foundation crate providing core simulation infrastructure, transport layer, and testing framework. This is the low-level layer that enables deterministic testing of distributed systems, particularly designed for testing the moonpool actor system.
 
-**Status**: Phase 11 COMPLETED - Sans I/O transport layer with comprehensive chaos testing
+**Status**: ✅ COMPLETE - HOBBY-GRADE
+
+All features implemented and tested, but remains hobby-grade. Suitable for simulation testing but not production systems.
 
 ## Core Constraints
 - Single-core execution (no Send/Sync)
@@ -159,19 +161,8 @@ Strategic placement: error handling, timeouts, retries, resource limits
 - `peer-networking-spec.md` - TCP connection management
 - `testing-framework-spec.md` - Chaos testing and assertion system
 
-### Implementation Plans
-**Location**: `docs/plans/`
-
-Phase-by-phase implementation roadmaps (Phase 1-11 for foundation):
-- Phase 1: Core simulation infrastructure
-- Phase 2a-2e: Network simulation and ping-pong
-- Phase 3: Simulation reports
-- Phase 4: Resilient peer connections
-- Phase 5-6: Reliability improvements
-- Phase 7: Network disruption
-- Phase 8-9: Chaos testing with buggify
-- Phase 10: Actor-style peer API
-- Phase 11: Sans I/O transport layer
+### Implementation History
+The framework was developed incrementally with comprehensive testing at each stage. All features are now complete but remain hobby-grade.
 
 ## Validation Checklist
 Before completing any work on foundation:
@@ -184,8 +175,9 @@ Before completing any work on foundation:
 7. Documentation updated for public APIs
 
 ## Notes
+- **Hobby-grade project**: Suitable for simulation testing but not production systems
 - Focus: TCP-level simulation (connection faults) not packet-level
 - Single-core design simplifies reasoning about determinism
 - Provider traits enable seamless sim/real switching
 - Invariant system catches bugs that assertions miss
-- Chaos testing finds edge cases before production
+- Chaos testing finds edge cases during development

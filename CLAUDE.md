@@ -8,19 +8,24 @@ Rust workspace containing two distinct projects:
 
 This workspace contains **two separate projects** with different purposes and completion status:
 
-### moonpool-foundation (✅ COMPLETED - Standalone Framework)
-A production-ready deterministic simulation framework inspired by FoundationDB's simulation testing approach:
+### moonpool-foundation (✅ COMPLETE - HOBBY-GRADE)
+A deterministic simulation framework inspired by FoundationDB's simulation testing approach:
 - **Sans I/O transport layer** with request-response semantics
 - **Comprehensive chaos testing** infrastructure (Buggify, sometimes assertions, invariant validation)
 - **Provider pattern** for seamless simulation/production switching
-- **Complete and usable independently** for testing any distributed system
+- **Can be used independently** for simulation testing of distributed systems
+- **101 tests passing** with full chaos testing coverage
+- **Hobby-grade**: Suitable for simulation testing but not production systems
 
-### moonpool (❌ NOT BUILT YET - Actor System)
-A planned virtual actor system similar to Microsoft Orleans:
-- **Location transparency** - actors addressable by ID regardless of physical location
-- **Automatic lifecycle management** - activation, deactivation, migration
-- **MessageBus and ActorCatalog** - core actor runtime infrastructure
-- **Currently in Phase 12 planning** - implementation not started
+### moonpool (⚠️ EARLY ALPHA - FUNCTIONAL BUT EXPERIMENTAL)
+An experimental virtual actor system similar to Microsoft Orleans:
+- **Location transparency** - actors addressable by ID regardless of physical location (✅ WORKING)
+- **Automatic activation** - actors created on-demand via factories (✅ WORKING)
+- **MessageBus and ActorCatalog** - core actor runtime infrastructure (✅ WORKING)
+- **State persistence** - pluggable storage with JSON serialization (✅ WORKING)
+- **Multi-node networking** - built on moonpool-foundation transport (✅ WORKING)
+- **76 tests passing**, 2 working examples (hello_actor, bank_account)
+- **Status**: Early alpha - core features functional but lacks production hardening
 
 ## Workspace Structure
 
@@ -180,11 +185,6 @@ Technical architecture and design documents:
 - `peer-networking-spec.md` - TCP connection management
 - `testing-framework-spec.md` - Chaos testing and assertions
 
-### Implementation Plans (`docs/plans/`)
-Phase-by-phase roadmaps (see `docs/INDEX.md` for complete listing):
-- Phases 1-11: Foundation layer (COMPLETED)
-- Phase 12+: Actor system (IN PROGRESS)
-
 ### Analysis Documents (`docs/analysis/`)
 Deep dives into reference architectures:
 - `foundationdb/flow.md` - **READ FIRST** before touching actor.cpp
@@ -201,19 +201,21 @@ Source code from production systems:
 
 ## Current Status
 
-### moonpool-foundation: ✅ COMPLETE & PRODUCTION-READY
+### moonpool-foundation: ✅ COMPLETE - HOBBY-GRADE
 **Standalone deterministic simulation framework** (inspired by FoundationDB):
-- Phases 1-11 fully implemented and tested
+- Fully implemented and tested with 101 tests passing
 - Sans I/O transport layer with request-response semantics
-- Comprehensive chaos testing infrastructure
-- **Can be used independently** for testing any distributed system
-- All tests passing, 100% coverage of sometimes assertions
+- Comprehensive chaos testing infrastructure with 100% sometimes assertion coverage
+- **Can be used independently** for simulation testing of distributed systems
+- **Hobby-grade**: Suitable for simulation testing but not production systems
 
-### moonpool: ❌ NOT BUILT YET
+### moonpool: ⚠️ EARLY ALPHA - FUNCTIONAL BUT EXPERIMENTAL
 **Virtual actor system** (similar to Microsoft Orleans):
-- Phase 12+ planning in progress
-- **No code implementation yet** - only design documents and analysis
-- Will build on moonpool-foundation when ready
+- Core features implemented: ActorCatalog, MessageBus, Runtime, Directory, Storage
+- 76 tests passing with 2 working multi-node examples
+- Built on moonpool-foundation for deterministic testing
+- **Early alpha status**: Functional but lacks production hardening, comprehensive integration tests, and monitoring
+- See `moonpool/examples/` for hello_actor and bank_account demonstrations
 - See `docs/analysis/orleans/` for reference architecture research
 
 ## Testing Philosophy
