@@ -10,7 +10,7 @@ use tokio::sync::oneshot;
 use crate::network::NetworkProvider;
 use crate::network::PeerConfig;
 use crate::network::transport::{
-    Envelope, EnvelopeFactory, EnvelopeReplyDetection, EnvelopeSerializer, ReceivedEnvelope,
+    Envelope, EnvelopeFactory, EnvelopeSerializer, ReceivedEnvelope,
     TransportError, driver::TransportDriver,
 };
 use crate::task::TaskProvider;
@@ -29,9 +29,9 @@ where
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
     S: EnvelopeSerializer + 'static,
-    S::Envelope: EnvelopeReplyDetection + Envelope,
+    S::Envelope: Envelope + Clone,
 {
-    /// Transport driver for managing peer connections
+    /// Transport driver for managing peer connections  
     /// Uses RefCell for interior mutability
     driver: RefCell<TransportDriver<N, T, TP, S>>,
 
@@ -50,7 +50,7 @@ where
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
     S: EnvelopeSerializer + 'static,
-    S::Envelope: EnvelopeReplyDetection + Envelope,
+    S::Envelope: Envelope + Clone,
 {
     /// Create a new ClientTransport with the given components
     pub fn new(
@@ -154,6 +154,88 @@ where
         }
     }
 
+    /// Send a request envelope directly (unified Envelope trait approach).
+    ///
+    /// This method works with the transport's envelope type directly,
+    /// avoiding double serialization by sending the envelope as-is.
+    ///
+    /// # Arguments
+    ///
+    /// * `destination` - Target node address (e.g., "127.0.0.1:8001")
+    /// * `envelope` - Request envelope of the transport's type
+    ///
+    /// # Returns
+    ///
+    /// Response envelope of the same type
+    pub async fn request_envelope(
+        &self,
+        destination: &str,
+        envelope: S::Envelope,
+    ) -> Result<S::Envelope, TransportError>
+    where
+        S::Envelope: Envelope + Clone,
+    {
+        tracing::debug!(
+            "ClientTransport::request_envelope called for destination: {}",
+            destination
+        );
+        
+        let correlation_id = Envelope::correlation_id(&envelope);
+        let (tx, mut rx) = oneshot::channel();
+        tracing::debug!(
+            "ClientTransport::request_envelope using correlation_id: {}",
+            correlation_id
+        );
+
+        // Store response channel indexed by correlation ID
+        self.pending_requests
+            .borrow_mut()
+            .insert(correlation_id, tx);
+
+        // Send envelope directly through driver
+        self.driver
+            .borrow_mut()
+            .send(destination, envelope)
+            .map_err(|e| {
+                tracing::debug!("ClientTransport::request_envelope driver.send() failed: {:?}", e);
+                TransportError::PeerError(e.to_string())
+            })?;
+
+        tracing::debug!(
+            "ClientTransport::request_envelope driver.send() succeeded, entering self-driving loop"
+        );
+
+        // Self-driving loop to process responses
+        loop {
+            // Drive transport by processing incoming messages
+            self.poll_receive();
+
+            // Check if our response arrived
+            match rx.try_recv() {
+                Ok(response_payload) => {
+                    // Deserialize response payload back to envelope type
+                    let response = S::Envelope::from_bytes(&response_payload).map_err(|e| {
+                        TransportError::SendFailed(format!("Failed to deserialize response: {}", e))
+                    })?;
+                    
+                    // Clean up and return response
+                    self.pending_requests.borrow_mut().remove(&correlation_id);
+                    return Ok(response);
+                }
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    // No response yet, yield and continue
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    // Channel was closed, request was cancelled
+                    self.pending_requests.borrow_mut().remove(&correlation_id);
+                    return Err(TransportError::SendFailed("Request cancelled".to_string()));
+                }
+            }
+        }
+    }
+
     /// Poll for received messages and process correlation matching
     ///
     /// This method drives the transport by checking for incoming messages
@@ -173,13 +255,14 @@ where
 
         if let Some(envelope) = envelope {
             // Check if this is a response to a pending request
-            if let Some(correlation_id) = envelope.correlation_id() {
+            let correlation_id = Envelope::correlation_id(&envelope);
+            {
                 // Borrow and check/remove in a single scope
                 let sender = self.pending_requests.borrow_mut().remove(&correlation_id);
 
                 if let Some(sender) = sender {
                     // Extract payload and send through response channel
-                    let payload = envelope.payload().to_vec();
+                    let payload = Envelope::payload(&envelope).to_vec();
                     let _ = sender.send(payload); // Ignore error if receiver was dropped
                     return None; // Response was consumed, don't return to caller
                 }

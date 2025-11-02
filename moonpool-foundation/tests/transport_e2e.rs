@@ -4,7 +4,7 @@
 //! to provide request-response messaging functionality.
 
 use moonpool_foundation::network::transport::{
-    EnvelopeFactory, EnvelopeSerializer, RequestResponseEnvelopeFactory, RequestResponseSerializer,
+    EnvelopeFactory, RequestResponseEnvelopeFactory, RequestResponseSerializer,
     TransportError,
 };
 

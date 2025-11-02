@@ -48,6 +48,9 @@ pub mod time;
 /// Tokio-based runner for real-world execution.
 pub mod tokio_runner;
 
+/// Prelude module with common imports for ease of use.
+pub mod prelude;
+
 // Public API exports
 pub use assertions::{AssertionStats, get_assertion_results, validate_assertion_contracts};
 pub use buggify::{buggify_init, buggify_reset};

@@ -922,12 +922,13 @@ mod tests {
         async fn send(
             &self,
             _destination: &str,
-            _payload: Vec<u8>,
-        ) -> Result<Vec<u8>, crate::error::ActorError> {
-            Ok(vec![])
+            _message: crate::messaging::Message,
+        ) -> Result<crate::messaging::Message, crate::error::ActorError> {
+            // Return a dummy response message
+            Ok(crate::messaging::Message::response(&_message, vec![]))
         }
 
-        fn poll_receive(&self) -> Option<Vec<u8>> {
+        fn poll_receive(&self) -> Option<crate::messaging::Message> {
             None
         }
     }
@@ -1096,7 +1097,6 @@ mod tests {
                 directory,
                 placement,
                 network_transport,
-                message_serializer,
             ));
             message_bus.init_self_ref();
 
@@ -1173,7 +1173,6 @@ mod tests {
                 directory,
                 placement,
                 network_transport,
-                message_serializer,
             ));
             message_bus.init_self_ref();
 
@@ -1237,7 +1236,6 @@ mod tests {
                 directory,
                 placement,
                 network_transport,
-                message_serializer,
             ));
             message_bus.init_self_ref();
 

@@ -36,8 +36,21 @@ pub use config::{NetworkConfiguration, sample_duration};
 
 // Re-export transport types
 pub use transport::{
-    DriverError, Envelope, EnvelopeError, EnvelopeFactory, EnvelopeReplyDetection,
-    EnvelopeSerializer, ProtocolStats, RequestResponseEnvelope, RequestResponseEnvelopeFactory,
-    RequestResponseSerializer, SimpleEnvelope, SimpleEnvelopeFactory, Transmit, TransportDriver,
+    DriverError,
+    Envelope,
+    EnvelopeError,
+    EnvelopeFactory,
+    EnvelopeReplyDetection,
+    EnvelopeSerializer,
+    // Legacy traits for backward compatibility
+    LegacyEnvelope,
+    ProtocolStats,
+    RequestResponseEnvelope,
+    RequestResponseEnvelopeFactory,
+    RequestResponseSerializer,
+    SimpleEnvelope,
+    SimpleEnvelopeFactory,
+    Transmit,
+    TransportDriver,
     TransportProtocol,
 };

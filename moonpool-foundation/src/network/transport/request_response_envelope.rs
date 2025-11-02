@@ -1,31 +1,9 @@
 use std::fmt::Debug;
 
 use crate::network::transport::types::EnvelopeError;
-use crate::network::transport::{Envelope, EnvelopeFactory, EnvelopeReplyDetection};
-
-/// Trait for swappable envelope serialization strategies
-pub trait EnvelopeSerializer: Clone {
-    /// The envelope type this serializer works with
-    type Envelope: Envelope + Clone + Debug;
-
-    /// Serialize an envelope to bytes for wire transmission
-    fn serialize(&self, envelope: &Self::Envelope) -> Vec<u8>;
-
-    /// Deserialize bytes from wire into an envelope
-    fn deserialize(&self, data: &[u8]) -> Result<Self::Envelope, EnvelopeError>;
-
-    /// Try to deserialize an envelope from a buffer, consuming parsed data
-    ///
-    /// Returns:
-    /// - Ok(Some(envelope)) - Successfully parsed, data consumed from buffer
-    /// - Ok(None) - Buffer is empty
-    /// - Err(EnvelopeError::InsufficientData{needed, available}) - Need more bytes
-    /// - Err(other) - Parse error, malformed data
-    fn try_deserialize_from_buffer(
-        &self,
-        buffer: &mut Vec<u8>,
-    ) -> Result<Option<Self::Envelope>, EnvelopeError>;
-}
+use crate::network::transport::{
+    Envelope, EnvelopeFactory, EnvelopeReplyDetection, EnvelopeSerializer, LegacyEnvelope,
+};
 
 /// Request-response envelope with correlation ID and payload
 /// Wire format: \[correlation_id:8\]\[len:4\]\[payload:N\]
@@ -63,8 +41,35 @@ impl RequestResponseEnvelope {
 }
 
 impl Envelope for RequestResponseEnvelope {
+    fn to_bytes(&self) -> Vec<u8> {
+        RequestResponseSerializer::new().serialize(self)
+    }
+
+    fn from_bytes(data: &[u8]) -> Result<Self, EnvelopeError> {
+        RequestResponseSerializer::new().deserialize(data)
+    }
+
+    fn try_from_buffer(buffer: &mut Vec<u8>) -> Result<Option<Self>, EnvelopeError> {
+        RequestResponseSerializer::new().try_deserialize_from_buffer(buffer)
+    }
+
+    fn correlation_id(&self) -> u64 {
+        self.correlation_id
+    }
+
+    fn create_response(&self, payload: Vec<u8>) -> Self {
+        RequestResponseEnvelope::new(self.correlation_id, payload)
+    }
+
     fn payload(&self) -> &[u8] {
         &self.payload
+    }
+}
+
+// Legacy trait implementations for backward compatibility
+impl LegacyEnvelope for RequestResponseEnvelope {
+    fn payload(&self) -> &[u8] {
+        Envelope::payload(self)
     }
 }
 
@@ -94,7 +99,26 @@ impl EnvelopeFactory<RequestResponseEnvelope> for RequestResponseEnvelopeFactory
     }
 
     fn extract_payload(envelope: &RequestResponseEnvelope) -> &[u8] {
-        envelope.payload()
+        Envelope::payload(envelope)
+    }
+}
+
+impl EnvelopeSerializer for RequestResponseSerializer {
+    type Envelope = RequestResponseEnvelope;
+
+    fn serialize(&self, envelope: &Self::Envelope) -> Vec<u8> {
+        self.serialize(envelope)
+    }
+
+    fn deserialize(&self, data: &[u8]) -> Result<Self::Envelope, EnvelopeError> {
+        self.deserialize(data)
+    }
+
+    fn try_deserialize_from_buffer(
+        &self,
+        buffer: &mut Vec<u8>,
+    ) -> Result<Option<Self::Envelope>, EnvelopeError> {
+        self.try_deserialize_from_buffer(buffer)
     }
 }
 
@@ -122,10 +146,9 @@ impl Default for RequestResponseSerializer {
     }
 }
 
-impl EnvelopeSerializer for RequestResponseSerializer {
-    type Envelope = RequestResponseEnvelope;
-
-    fn serialize(&self, envelope: &Self::Envelope) -> Vec<u8> {
+impl RequestResponseSerializer {
+    /// Serialize a RequestResponseEnvelope to bytes
+    pub fn serialize(&self, envelope: &RequestResponseEnvelope) -> Vec<u8> {
         let payload_len = envelope.payload.len();
         let total_len = Self::HEADER_SIZE + payload_len;
         let mut buffer = Vec::with_capacity(total_len);
@@ -142,7 +165,8 @@ impl EnvelopeSerializer for RequestResponseSerializer {
         buffer
     }
 
-    fn deserialize(&self, data: &[u8]) -> Result<Self::Envelope, EnvelopeError> {
+    /// Deserialize bytes to a RequestResponseEnvelope
+    pub fn deserialize(&self, data: &[u8]) -> Result<RequestResponseEnvelope, EnvelopeError> {
         // Check minimum size for header
         if data.len() < Self::HEADER_SIZE {
             return Err(EnvelopeError::DeserializationFailed(format!(
@@ -184,10 +208,11 @@ impl EnvelopeSerializer for RequestResponseSerializer {
         Ok(RequestResponseEnvelope::new(correlation_id, payload))
     }
 
-    fn try_deserialize_from_buffer(
+    /// Try to deserialize from a buffer, consuming parsed data
+    pub fn try_deserialize_from_buffer(
         &self,
         buffer: &mut Vec<u8>,
-    ) -> Result<Option<Self::Envelope>, EnvelopeError> {
+    ) -> Result<Option<RequestResponseEnvelope>, EnvelopeError> {
         // Buffer is empty - normal case, not an error
         if buffer.is_empty() {
             return Ok(None);
@@ -238,13 +263,14 @@ impl EnvelopeSerializer for RequestResponseSerializer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::transport::Envelope;
 
     #[test]
     fn test_request_response_envelope_creation() {
         let envelope = RequestResponseEnvelope::new(42, b"test payload".to_vec());
 
         assert_eq!(EnvelopeReplyDetection::correlation_id(&envelope), Some(42));
-        assert_eq!(envelope.payload(), b"test payload");
+        assert_eq!(Envelope::payload(&envelope), b"test payload");
         assert!(!envelope.is_empty());
         assert_eq!(envelope.payload_size(), 12);
         assert_eq!(envelope.serialized_size(), 8 + 4 + 12); // header + payload
@@ -255,7 +281,7 @@ mod tests {
         let envelope = RequestResponseEnvelope::new(0, Vec::new());
 
         assert_eq!(EnvelopeReplyDetection::correlation_id(&envelope), Some(0));
-        assert_eq!(envelope.payload(), b"");
+        assert_eq!(Envelope::payload(&envelope), b"");
         assert!(envelope.is_empty());
         assert_eq!(envelope.payload_size(), 0);
         assert_eq!(envelope.serialized_size(), 12); // header only

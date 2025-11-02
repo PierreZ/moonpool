@@ -5,6 +5,8 @@
 
 /// Client transport for request-response messaging
 pub mod client;
+/// Convenience type aliases for common transport configurations
+pub mod convenience;
 /// Transport driver that bridges protocol to actual peer I/O
 pub mod driver;
 /// Core envelope traits and SimpleEnvelope implementation
@@ -19,9 +21,21 @@ pub mod server;
 pub mod types;
 
 pub use client::*;
+pub use convenience::*;
 pub use driver::*;
-pub use envelope::*;
+pub use envelope::{
+    Envelope,
+    EnvelopeFactory,
+    EnvelopeReplyDetection,
+    EnvelopeSerializer,
+    // Legacy traits for backward compatibility
+    LegacyEnvelope,
+    SimpleEnvelope,
+    SimpleEnvelopeFactory,
+};
 pub use protocol::*;
-pub use request_response_envelope::*;
+pub use request_response_envelope::{
+    RequestResponseEnvelope, RequestResponseEnvelopeFactory, RequestResponseSerializer,
+};
 pub use server::*;
 pub use types::*;

@@ -136,11 +136,11 @@ impl<T: TaskProvider + 'static, S: crate::serialization::Serializer + Clone + 's
         Ti: moonpool_foundation::TimeProvider + Clone + 'static,
     {
         use crate::directory::SimpleDirectory;
-        use crate::messaging::{FoundationTransport, MessageBus};
+        use crate::messaging::MessageBus;
         use crate::placement::SimplePlacement;
         use moonpool_foundation::PeerConfig;
         use moonpool_foundation::network::transport::{
-            ClientTransport, Envelope, RequestResponseSerializer, ServerTransport,
+            Envelope, RequestResponseSerializer, ServerTransport,
         };
 
         let namespace = namespace.into();
@@ -169,18 +169,15 @@ impl<T: TaskProvider + 'static, S: crate::serialization::Serializer + Clone + 's
         let callback_manager = Rc::new(crate::messaging::CallbackManager::new());
 
         // Create network transport using foundation layer
-        // ClientTransport for outgoing requests
+        // FoundationTransport wraps the foundation's transport with Message support
         let peer_config = PeerConfig::default();
-        let client_serializer = RequestResponseSerializer::new();
-        let client_transport = ClientTransport::new(
-            client_serializer,
+
+        let transport = Rc::new(crate::messaging::network::FoundationTransport::new(
             network_provider.clone(),
             time_provider.clone(),
             task_provider.clone(),
             peer_config,
-        );
-
-        let transport = Rc::new(FoundationTransport::new(client_transport));
+        ));
 
         // Create MessageBus with CallbackManager dependency (Orleans: MessageCenter pattern)
         // Handles routing logic, delegates callback management to CallbackManager
@@ -191,14 +188,13 @@ impl<T: TaskProvider + 'static, S: crate::serialization::Serializer + Clone + 's
             directory_rc.clone(),
             placement,
             transport,
-            serializer.clone(), // Clone for ActorRuntime use
         ));
 
         // Initialize MessageBus self-reference (required for passing to routers)
         message_bus.init_self_ref();
 
-        // Create ServerTransport for incoming messages
-        let server_serializer = RequestResponseSerializer::new();
+        // Create ServerTransport for incoming messages  
+        let server_serializer = crate::messaging::network::MessageSerializer;
         let listen_addr_str = listen_addr.to_string();
         let mut server_transport = ServerTransport::bind(
             network_provider,
@@ -219,53 +215,45 @@ impl<T: TaskProvider + 'static, S: crate::serialization::Serializer + Clone + 's
                 loop {
                     // Wait for next incoming message (event-driven, blocks until message arrives)
                     if let Some(msg) = server_transport.next_message().await {
-                        // Feed message into MessageBus for routing
-                        let payload = msg.envelope.payload().to_vec();
+                        // The envelope IS the Message now - no deserialization needed
+                        let message = msg.envelope.clone();
+                        
+                        tracing::debug!(
+                            "Received network message: target={}, method={}, direction={:?}, corr_id={}",
+                            message.target_actor,
+                            message.method_name,
+                            message.direction,
+                            message.correlation_id
+                        );
 
-                        // Deserialize and route the message
-                        if let Ok(message) =
-                            serde_json::from_slice::<crate::messaging::Message>(&payload)
-                        {
-                            tracing::debug!(
-                                "Received network message: target={}, method={}, direction={:?}, corr_id={}",
-                                message.target_actor,
-                                message.method_name,
-                                message.direction,
-                                message.correlation_id
-                            );
-
-                            // CRITICAL: Send transport-level ACK immediately
-                            // The ClientTransport::request() on the sending node is waiting
-                            // for a response envelope to complete the forwarding operation.
-                            // We send an empty ACK to unblock the sender, then route the message locally.
-                            use moonpool_foundation::network::transport::RequestResponseEnvelopeFactory;
-                            if let Err(e) = server_transport.send_reply::<RequestResponseEnvelopeFactory>(
-                                &msg.envelope,
-                                vec![], // Empty ACK payload
-                                &msg,
-                            ) {
-                                tracing::error!("Failed to send transport ACK: {}", e);
-                            } else {
-                                tracing::debug!("Sent transport-level ACK for received message");
-                            }
-
-                            // Route to local actor synchronously
-                            // After routing completes, we MUST yield to allow the waiting
-                            // task (polling loop) to observe the oneshot completion
-                            if let Err(e) = message_bus_for_recv.route_message(message).await {
-                                tracing::error!("Failed to route network message: {}", e);
-                            } else {
-                                tracing::debug!("Successfully routed network message");
-                            }
-
-                            // CRITICAL: Yield to scheduler to allow waiting tasks to run
-                            // In LocalSet, after completing a oneshot channel, we must yield
-                            // before polling next_message() to ensure the waiting task gets
-                            // scheduled and can observe the completion
-                            tokio::task::yield_now().await;
+                        // CRITICAL: Send transport-level ACK immediately
+                        // The ClientTransport::request() on the sending node is waiting
+                        // for a response envelope to complete the forwarding operation.
+                        // We send an empty ACK to unblock the sender, then route the message locally.
+                        if let Err(e) = server_transport.send_reply::<crate::messaging::network::MessageEnvelopeFactory>(
+                            &message,
+                            vec![], // Empty ACK payload
+                            &msg,
+                        ) {
+                            tracing::error!("Failed to send transport ACK: {}", e);
                         } else {
-                            tracing::warn!("Failed to deserialize network message");
+                            tracing::debug!("Sent transport-level ACK for received message");
                         }
+
+                        // Route to local actor synchronously
+                        // After routing completes, we MUST yield to allow the waiting
+                        // task (polling loop) to observe the oneshot completion
+                        if let Err(e) = message_bus_for_recv.route_message(message).await {
+                            tracing::error!("Failed to route network message: {}", e);
+                        } else {
+                            tracing::debug!("Successfully routed network message");
+                        }
+
+                        // CRITICAL: Yield to scheduler to allow waiting tasks to run
+                        // In LocalSet, after completing a oneshot channel, we must yield
+                        // before polling next_message() to ensure the waiting task gets
+                        // scheduled and can observe the completion
+                        tokio::task::yield_now().await;
                     }
                 }
             });

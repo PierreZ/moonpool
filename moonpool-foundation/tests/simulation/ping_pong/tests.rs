@@ -153,12 +153,13 @@ fn create_message_conservation_invariant() -> moonpool_foundation::InvariantChec
         let mut total_client_in_transit = 0u64;
         for state in states.values() {
             if let Some(role) = state.get("role").and_then(|r| r.as_str())
-                && role == "client" {
-                    total_client_in_transit += state
-                        .get("in_transit")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                }
+                && role == "client"
+            {
+                total_client_in_transit += state
+                    .get("in_transit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+            }
         }
 
         assert_eq!(
@@ -173,29 +174,30 @@ fn create_message_conservation_invariant() -> moonpool_foundation::InvariantChec
         // BUG DETECTOR 7: Per-server in-transit consistency
         for state in states.values() {
             if let Some(role) = state.get("role").and_then(|r| r.as_str())
-                && role == "server" {
-                    let pings_received = state
-                        .get("pings_received")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let pongs_sent = state
-                        .get("pongs_sent")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let expected_in_transit = pings_received.saturating_sub(pongs_sent);
+                && role == "server"
+            {
+                let pings_received = state
+                    .get("pings_received")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let pongs_sent = state
+                    .get("pongs_sent")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let expected_in_transit = pings_received.saturating_sub(pongs_sent);
 
-                    if let Some(in_transit_map) =
-                        state.get("in_transit_per_peer").and_then(|m| m.as_object())
-                    {
-                        let actual_in_transit: u64 =
-                            in_transit_map.values().filter_map(|v| v.as_u64()).sum();
-                        assert_eq!(
-                            actual_in_transit, expected_in_transit,
-                            "Server in-transit accounting broken: sum of in_transit_per_peer={} != (pings_received={} - pongs_sent={})",
-                            actual_in_transit, pings_received, pongs_sent
-                        );
-                    }
+                if let Some(in_transit_map) =
+                    state.get("in_transit_per_peer").and_then(|m| m.as_object())
+                {
+                    let actual_in_transit: u64 =
+                        in_transit_map.values().filter_map(|v| v.as_u64()).sum();
+                    assert_eq!(
+                        actual_in_transit, expected_in_transit,
+                        "Server in-transit accounting broken: sum of in_transit_per_peer={} != (pings_received={} - pongs_sent={})",
+                        actual_in_transit, pings_received, pongs_sent
+                    );
                 }
+            }
         }
     })
 }
