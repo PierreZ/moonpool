@@ -169,20 +169,23 @@ impl<S: moonpool::serialization::Serializer> MessageHandler<WithdrawRequest, u32
             ActorError::ProcessingFailed("Actor state not initialized".to_string())
         })?;
 
-        // Check sufficient funds
-        let current = state.get();
-        if current.balance < req.amount {
-            return Err(ActorError::ProcessingFailed(format!(
-                "Insufficient funds: requested {}, available {}",
-                req.amount, current.balance
-            )));
-        }
+        // Check sufficient funds and prepare update
+        let updated_balance = {
+            let current = state.get();
+            if current.balance < req.amount {
+                return Err(ActorError::ProcessingFailed(format!(
+                    "Insufficient funds: requested {}, available {}",
+                    req.amount, current.balance
+                )));
+            }
 
-        // Update balance
-        let mut updated = current.clone();
-        updated.balance -= req.amount;
-        drop(current);
-        state.set(updated.clone());
+            // Update balance
+            let mut updated = current.clone();
+            updated.balance -= req.amount;
+            drop(current); // Explicitly drop before mutating state
+            state.set(updated.clone());
+            updated.balance
+        };
 
         // Persist to storage
         state.persist().await?;
@@ -191,11 +194,11 @@ impl<S: moonpool::serialization::Serializer> MessageHandler<WithdrawRequest, u32
             actor_id = %self.actor_id,
             key = self.key(),
             amount = req.amount,
-            new_balance = updated.balance,
+            new_balance = updated_balance,
             "Withdrawal completed"
         );
 
-        Ok(updated.balance)
+        Ok(updated_balance)
     }
 }
 

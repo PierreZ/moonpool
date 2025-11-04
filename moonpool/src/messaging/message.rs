@@ -412,6 +412,52 @@ impl PartialEq for ActorAddress {
 
 impl Eq for ActorAddress {}
 
+// Implementation of foundation's Envelope trait for direct integration
+impl Envelope for Message {
+    fn to_bytes(&self) -> Vec<u8> {
+        // Use ActorEnvelope serialization for wire format
+        crate::messaging::envelope::ActorEnvelope::serialize(self)
+            .expect("Message serialization should not fail")
+    }
+
+    fn from_bytes(data: &[u8]) -> Result<Self, EnvelopeError> {
+        crate::messaging::envelope::ActorEnvelope::deserialize(data).map_err(|e| {
+            EnvelopeError::DeserializationFailed(format!("ActorEnvelope error: {}", e))
+        })
+    }
+
+    fn try_from_buffer(buffer: &mut Vec<u8>) -> Result<Option<Self>, EnvelopeError> {
+        match crate::messaging::envelope::ActorEnvelope::try_deserialize(buffer) {
+            Ok(Some((message, bytes_consumed))) => {
+                // Remove consumed bytes from buffer
+                buffer.drain(..bytes_consumed);
+                Ok(Some(message))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(EnvelopeError::DeserializationFailed(format!(
+                "ActorEnvelope error: {}",
+                e
+            ))),
+        }
+    }
+
+    fn correlation_id(&self) -> u64 {
+        self.correlation_id.as_u64()
+    }
+
+    fn is_response_to(&self, request_id: u64) -> bool {
+        self.correlation_id.as_u64() == request_id && self.direction == Direction::Response
+    }
+
+    fn create_response(&self, payload: Vec<u8>) -> Self {
+        Message::response(self, payload)
+    }
+
+    fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,51 +579,5 @@ mod tests {
 
         // Third forward fails (exceeds max)
         assert!(msg.increment_forward_count(2).is_err());
-    }
-}
-
-// Implementation of foundation's Envelope trait for direct integration
-impl Envelope for Message {
-    fn to_bytes(&self) -> Vec<u8> {
-        // Use ActorEnvelope serialization for wire format
-        crate::messaging::envelope::ActorEnvelope::serialize(self)
-            .expect("Message serialization should not fail")
-    }
-
-    fn from_bytes(data: &[u8]) -> Result<Self, EnvelopeError> {
-        crate::messaging::envelope::ActorEnvelope::deserialize(data).map_err(|e| {
-            EnvelopeError::DeserializationFailed(format!("ActorEnvelope error: {}", e))
-        })
-    }
-
-    fn try_from_buffer(buffer: &mut Vec<u8>) -> Result<Option<Self>, EnvelopeError> {
-        match crate::messaging::envelope::ActorEnvelope::try_deserialize(buffer) {
-            Ok(Some((message, bytes_consumed))) => {
-                // Remove consumed bytes from buffer
-                buffer.drain(..bytes_consumed);
-                Ok(Some(message))
-            }
-            Ok(None) => Ok(None),
-            Err(e) => Err(EnvelopeError::DeserializationFailed(format!(
-                "ActorEnvelope error: {}",
-                e
-            ))),
-        }
-    }
-
-    fn correlation_id(&self) -> u64 {
-        self.correlation_id.as_u64()
-    }
-
-    fn is_response_to(&self, request_id: u64) -> bool {
-        self.correlation_id.as_u64() == request_id && self.direction == Direction::Response
-    }
-
-    fn create_response(&self, payload: Vec<u8>) -> Self {
-        Message::response(self, payload)
-    }
-
-    fn payload(&self) -> &[u8] {
-        &self.payload
     }
 }

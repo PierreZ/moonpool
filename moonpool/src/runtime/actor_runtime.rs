@@ -136,12 +136,10 @@ impl<T: TaskProvider + 'static, S: crate::serialization::Serializer + Clone + 's
         Ti: moonpool_foundation::TimeProvider + Clone + 'static,
     {
         use crate::directory::SimpleDirectory;
-        use crate::messaging::MessageBus;
+        use crate::messaging::{Message, MessageBus};
         use crate::placement::SimplePlacement;
         use moonpool_foundation::PeerConfig;
-        use moonpool_foundation::network::transport::{
-            Envelope, RequestResponseSerializer, ServerTransport,
-        };
+        use moonpool_foundation::network::transport::{Envelope, ServerTransport};
 
         let namespace = namespace.into();
 
@@ -193,14 +191,12 @@ impl<T: TaskProvider + 'static, S: crate::serialization::Serializer + Clone + 's
         // Initialize MessageBus self-reference (required for passing to routers)
         message_bus.init_self_ref();
 
-        // Create ServerTransport for incoming messages
-        let server_serializer = crate::messaging::network::MessageSerializer;
+        // Create ServerTransport for incoming messages using Message as envelope type
         let listen_addr_str = listen_addr.to_string();
-        let mut server_transport = ServerTransport::bind(
+        let mut server_transport = ServerTransport::<_, _, _, Message>::bind(
             network_provider,
             time_provider,
             task_provider.clone(),
-            server_serializer,
             &listen_addr_str,
         )
         .await
@@ -217,7 +213,6 @@ impl<T: TaskProvider + 'static, S: crate::serialization::Serializer + Clone + 's
                     if let Some(msg) = server_transport.next_message().await {
                         // The envelope IS the Message now - no deserialization needed
                         let message = msg.envelope.clone();
-                        
                         tracing::debug!(
                             "Received network message: target={}, method={}, direction={:?}, corr_id={}",
                             message.target_actor,
@@ -227,17 +222,22 @@ impl<T: TaskProvider + 'static, S: crate::serialization::Serializer + Clone + 's
                         );
 
                         // CRITICAL: Send transport-level ACK immediately
-                        // The ClientTransport::request() on the sending node is waiting
+                        // The ClientTransport::send() on the sending node is waiting
                         // for a response envelope to complete the forwarding operation.
-                        // We send an empty ACK to unblock the sender, then route the message locally.
-                        if let Err(e) = server_transport.send_reply::<crate::messaging::network::MessageEnvelopeFactory>(
-                            &message,
-                            vec![], // Empty ACK payload
-                            &msg,
+                        // We create a proper response message and serialize it for the ACK.
+                        let ack_response = Message::response(&message, vec![]);
+                        match server_transport.reply_with_payload(
+                            &msg.envelope,  // request envelope (implements Envelope trait)
+                            ack_response.to_bytes(),  // Serialized response message
+                            &msg,           // incoming message with connection_id
                         ) {
-                            tracing::error!("Failed to send transport ACK: {}", e);
-                        } else {
-                            tracing::debug!("Sent transport-level ACK for received message");
+                            Ok(_) => {
+                                tracing::debug!("Sent transport-level ACK for received message");
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to send transport ACK: {}", e);
+                                continue; // Skip routing if ACK failed
+                            }
                         }
 
                         // Route to local actor synchronously

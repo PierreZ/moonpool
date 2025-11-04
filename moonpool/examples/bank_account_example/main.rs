@@ -207,7 +207,7 @@ async fn run_cluster(
     let accounts = vec![("Alice", alice), ("Bob", bob), ("Charlie", charlie)];
 
     // Generate random operations using seed
-    let actual_seed = seed.unwrap_or_else(|| rand::random());
+    let actual_seed = seed.unwrap_or_else(rand::random);
     let mut rng = StdRng::seed_from_u64(actual_seed);
 
     tracing::info!(seed = actual_seed, "Generating random operations");

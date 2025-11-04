@@ -63,6 +63,7 @@ struct WorkloadOrchestrator;
 
 impl WorkloadOrchestrator {
     /// Execute all workloads using spawn_local and coordinate their execution.
+    #[allow(clippy::too_many_arguments)]
     async fn orchestrate_workloads(
         workloads: &[Workload],
         seed: u64,

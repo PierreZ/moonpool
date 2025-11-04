@@ -194,7 +194,7 @@ async fn run_cluster(
     println!();
 
     // Generate random first names using the provided seed (or random if not provided)
-    let actual_seed = seed.unwrap_or_else(|| rand::random());
+    let actual_seed = seed.unwrap_or_else(rand::random);
     let mut rng = StdRng::seed_from_u64(actual_seed);
     let actor_keys: Vec<String> = (0..count)
         .map(|_| {
