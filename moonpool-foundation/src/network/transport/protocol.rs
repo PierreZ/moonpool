@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::network::transport::EnvelopeSerializer;
+use crate::network::transport::Envelope;
 
 /// A message ready for transmission with destination information
 #[derive(Debug, Clone)]
@@ -33,15 +33,12 @@ impl Transmit {
 /// This is a Sans I/O implementation - it has NO I/O dependencies.
 /// All networking operations are abstracted as parameters passed to methods.
 /// This enables deterministic testing without any actual networking.
-pub struct TransportProtocol<S: EnvelopeSerializer> {
-    /// Serializer for envelope conversion
-    serializer: S,
-
+pub struct TransportProtocol<E: Envelope> {
     /// Queue of outbound transmissions ready for I/O layer
     transmit_queue: VecDeque<Transmit>,
 
     /// Queue of inbound processed envelopes ready for application
-    receive_queue: VecDeque<S::Envelope>,
+    receive_queue: VecDeque<E>,
 
     /// Statistics for monitoring
     stats: ProtocolStats,
@@ -81,11 +78,10 @@ impl ProtocolStats {
     }
 }
 
-impl<S: EnvelopeSerializer> TransportProtocol<S> {
-    /// Create a new TransportProtocol with the given serializer
-    pub fn new(serializer: S) -> Self {
+impl<E: Envelope> TransportProtocol<E> {
+    /// Create a new TransportProtocol
+    pub fn new() -> Self {
         Self {
-            serializer,
             transmit_queue: VecDeque::new(),
             receive_queue: VecDeque::new(),
             stats: ProtocolStats::new(),
@@ -96,9 +92,9 @@ impl<S: EnvelopeSerializer> TransportProtocol<S> {
     ///
     /// This is a pure state transition - no I/O is performed.
     /// The envelope is serialized and queued for transmission.
-    pub fn send(&mut self, destination: String, envelope: S::Envelope) {
+    pub fn send(&mut self, destination: String, envelope: E) {
         // Serialize the envelope
-        let data = self.serializer.serialize(&envelope);
+        let data = envelope.to_bytes();
 
         // Update statistics
         self.stats.envelopes_sent += 1;
@@ -118,7 +114,7 @@ impl<S: EnvelopeSerializer> TransportProtocol<S> {
         self.stats.bytes_received += data.len() as u64;
 
         // Attempt to deserialize the envelope
-        match self.serializer.deserialize(&data) {
+        match E::from_bytes(&data) {
             Ok(envelope) => {
                 // Successfully deserialized
                 self.stats.envelopes_received += 1;
@@ -145,7 +141,7 @@ impl<S: EnvelopeSerializer> TransportProtocol<S> {
     ///
     /// Returns None if no envelopes are queued.
     /// This is non-blocking and pure - no I/O is performed.
-    pub fn poll_receive(&mut self) -> Option<S::Envelope> {
+    pub fn poll_receive(&mut self) -> Option<E> {
         self.receive_queue.pop_front()
     }
 
@@ -184,18 +180,12 @@ impl<S: EnvelopeSerializer> TransportProtocol<S> {
         self.transmit_queue.clear();
         self.receive_queue.clear();
     }
-
-    /// Get the serializer reference (for testing)
-    pub fn serializer(&self) -> &S {
-        &self.serializer
-    }
 }
 
-// Implement Clone if the serializer is Clone
-impl<S: EnvelopeSerializer> Clone for TransportProtocol<S> {
+// Implement Clone for TransportProtocol
+impl<E: Envelope> Clone for TransportProtocol<E> {
     fn clone(&self) -> Self {
         Self {
-            serializer: self.serializer.clone(),
             transmit_queue: self.transmit_queue.clone(),
             receive_queue: self.receive_queue.clone(),
             stats: self.stats.clone(),
@@ -203,13 +193,20 @@ impl<S: EnvelopeSerializer> Clone for TransportProtocol<S> {
     }
 }
 
+// Implement Default for convenience
+impl<E: Envelope> Default for TransportProtocol<E> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network::transport::{RequestResponseEnvelope, RequestResponseSerializer};
+    use crate::network::transport::RequestResponseEnvelope;
 
-    fn create_test_protocol() -> TransportProtocol<RequestResponseSerializer> {
-        TransportProtocol::new(RequestResponseSerializer::new())
+    fn create_test_protocol() -> TransportProtocol<RequestResponseEnvelope> {
+        TransportProtocol::new()
     }
 
     fn create_test_envelope(correlation_id: u64, payload: &[u8]) -> RequestResponseEnvelope {
@@ -268,7 +265,7 @@ mod tests {
         let original_envelope = create_test_envelope(456, b"response");
 
         // Serialize envelope to simulate received data
-        let serialized_data = protocol.serializer().serialize(&original_envelope);
+        let serialized_data = original_envelope.to_bytes();
 
         // Handle received data
         protocol.handle_received("client".to_string(), serialized_data);
@@ -286,7 +283,7 @@ mod tests {
         let original_envelope = create_test_envelope(789, b"data");
 
         // Simulate received data
-        let serialized_data = protocol.serializer().serialize(&original_envelope);
+        let serialized_data = original_envelope.to_bytes();
         protocol.handle_received("peer".to_string(), serialized_data);
 
         // Poll received envelope
@@ -399,7 +396,7 @@ mod tests {
 
         // Add items to queues
         protocol.send("dest".to_string(), envelope.clone());
-        let serialized = protocol.serializer().serialize(&envelope);
+        let serialized = envelope.to_bytes();
         protocol.handle_received("peer".to_string(), serialized);
 
         assert!(protocol.has_pending_transmissions());
@@ -426,7 +423,7 @@ mod tests {
         protocol.send("dest".to_string(), envelope.clone());
         let _transmit = protocol.poll_transmit();
 
-        let serialized = protocol.serializer().serialize(&envelope);
+        let serialized = envelope.to_bytes();
         protocol.handle_received("peer".to_string(), serialized);
         let _received = protocol.poll_receive();
 

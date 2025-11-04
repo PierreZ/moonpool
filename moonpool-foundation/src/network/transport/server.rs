@@ -10,9 +10,7 @@ use std::rc::Rc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
-use crate::network::transport::{
-    Envelope, EnvelopeFactory, EnvelopeReplyDetection, EnvelopeSerializer, TransportError,
-};
+use crate::network::transport::{Envelope, TransportError};
 use crate::network::{NetworkProvider, TcpListenerTrait};
 use crate::task::TaskProvider;
 use crate::time::TimeProvider;
@@ -46,13 +44,12 @@ struct ConnectionHandle {
 /// and per-connection I/O. All incoming messages from all connections flow through
 /// a single channel, making it easy for higher-level components (like MessageCenter)
 /// to process them.
-pub struct ServerTransport<N, T, TP, S>
+pub struct ServerTransport<N, T, TP, E>
 where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
-    S: EnvelopeSerializer + Clone + 'static,
-    S::Envelope: EnvelopeReplyDetection + Envelope,
+    E: Envelope + 'static,
 {
     /// Network provider
     #[allow(dead_code)]
@@ -66,11 +63,8 @@ where
     #[allow(dead_code)]
     task_provider: TP,
 
-    /// Serializer for envelopes
-    serializer: S,
-
     /// Channel receiving all messages from all connections
-    incoming_rx: mpsc::UnboundedReceiver<IncomingMessage<S::Envelope>>,
+    incoming_rx: mpsc::UnboundedReceiver<IncomingMessage<E>>,
 
     /// Map of active connections (Rc/RefCell for single-threaded efficiency)
     connections: Rc<RefCell<HashMap<ConnectionId, ConnectionHandle>>>,
@@ -79,13 +73,12 @@ where
     bind_address: String,
 }
 
-impl<N, T, TP, S> ServerTransport<N, T, TP, S>
+impl<N, T, TP, E> ServerTransport<N, T, TP, E>
 where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
-    S: EnvelopeSerializer + Clone + 'static,
-    S::Envelope: EnvelopeReplyDetection + Envelope,
+    E: Envelope + 'static,
 {
     /// Create and start a new server transport
     ///
@@ -95,7 +88,6 @@ where
         network: N,
         time: T,
         task_provider: TP,
-        serializer: S,
         address: &str,
     ) -> Result<Self, TransportError> {
         tracing::info!("ServerTransport binding to {}", address);
@@ -113,16 +105,14 @@ where
         let accept_connections = connections.clone();
         let accept_incoming_tx = incoming_tx.clone();
         let accept_task_provider = task_provider.clone();
-        let accept_serializer = serializer.clone();
 
         task_provider.spawn_task(
             "accept_loop",
-            accept_loop::<N, TP, S>(
+            accept_loop::<N, TP, E>(
                 listener,
                 accept_incoming_tx,
                 accept_connections,
                 accept_task_provider,
-                accept_serializer,
             ),
         );
 
@@ -132,7 +122,6 @@ where
             network,
             time,
             task_provider,
-            serializer,
             incoming_rx,
             connections,
             bind_address: address.to_string(),
@@ -143,7 +132,7 @@ where
     ///
     /// This method blocks until a message arrives from any active connection.
     /// It's the main way to receive messages in the event-driven model.
-    pub async fn next_message(&mut self) -> Option<IncomingMessage<S::Envelope>> {
+    pub async fn next_message(&mut self) -> Option<IncomingMessage<E>> {
         self.incoming_rx.recv().await
     }
 
@@ -166,41 +155,31 @@ where
     pub fn send_envelope(
         &self,
         connection_id: ConnectionId,
-        envelope: &S::Envelope,
+        envelope: &E,
     ) -> Result<(), TransportError> {
-        let data = self.serializer.serialize(envelope);
+        let data = envelope.to_bytes();
         self.send_to(connection_id, data)
     }
 
     /// Reply to a received message (uses the connection from the message)
-    pub fn reply(
-        &self,
-        msg: &IncomingMessage<S::Envelope>,
-        response: &S::Envelope,
-    ) -> Result<(), TransportError> {
+    pub fn reply(&self, msg: &IncomingMessage<E>, response: &E) -> Result<(), TransportError> {
         self.send_envelope(msg.connection_id, response)
     }
 
-    /// Create and send a reply with proper correlation
-    pub fn send_reply<F>(
+    /// Create and send a reply using the envelope's create_response method
+    pub fn reply_with_payload(
         &self,
-        request: &S::Envelope,
+        request: &E,
         payload: Vec<u8>,
-        msg: &IncomingMessage<S::Envelope>,
-    ) -> Result<(), TransportError>
-    where
-        F: EnvelopeFactory<S::Envelope>,
-    {
-        let reply = F::create_reply(request, payload);
+        msg: &IncomingMessage<E>,
+    ) -> Result<(), TransportError> {
+        let reply = request.create_response(payload);
         self.reply(msg, &reply)
     }
 
     /// Broadcast an envelope to all connected clients
-    pub fn broadcast(
-        &self,
-        envelope: &S::Envelope,
-    ) -> Vec<(ConnectionId, Result<(), TransportError>)> {
-        let data = self.serializer.serialize(envelope);
+    pub fn broadcast(&self, envelope: &E) -> Vec<(ConnectionId, Result<(), TransportError>)> {
+        let data = envelope.to_bytes();
         self.connections
             .borrow()
             .iter()
@@ -245,17 +224,15 @@ where
 }
 
 /// Accept loop actor - handles incoming connections
-async fn accept_loop<N, TP, S>(
+async fn accept_loop<N, TP, E>(
     listener: N::TcpListener,
-    incoming_tx: mpsc::UnboundedSender<IncomingMessage<S::Envelope>>,
+    incoming_tx: mpsc::UnboundedSender<IncomingMessage<E>>,
     connections: Rc<RefCell<HashMap<ConnectionId, ConnectionHandle>>>,
     task_provider: TP,
-    serializer: S,
 ) where
     N: NetworkProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
-    S: EnvelopeSerializer + Clone + 'static,
-    S::Envelope: EnvelopeReplyDetection + Envelope,
+    E: Envelope + 'static,
 {
     let mut next_connection_id = 0u64;
 
@@ -282,18 +259,16 @@ async fn accept_loop<N, TP, S>(
                 // Spawn connection handler actor
                 let conn_incoming_tx = incoming_tx.clone();
                 let conn_connections = connections.clone();
-                let conn_serializer = serializer.clone();
 
                 task_provider.spawn_task(
                     &format!("connection_{}", connection_id),
-                    handle_connection(
+                    handle_connection::<N::TcpStream, E>(
                         stream,
                         connection_id,
                         peer_addr.to_string(),
                         conn_incoming_tx,
                         write_rx,
                         conn_connections,
-                        conn_serializer,
                     ),
                 );
             }
@@ -306,18 +281,16 @@ async fn accept_loop<N, TP, S>(
 }
 
 /// Connection handler actor - manages I/O for a single connection
-async fn handle_connection<TcpStream, S>(
+async fn handle_connection<TcpStream, E>(
     mut stream: TcpStream,
     connection_id: ConnectionId,
     peer_addr: String,
-    incoming_tx: mpsc::UnboundedSender<IncomingMessage<S::Envelope>>,
+    incoming_tx: mpsc::UnboundedSender<IncomingMessage<E>>,
     mut write_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     connections: Rc<RefCell<HashMap<ConnectionId, ConnectionHandle>>>,
-    serializer: S,
 ) where
     TcpStream: AsyncReadExt + AsyncWriteExt + Unpin,
-    S: EnvelopeSerializer,
-    S::Envelope: EnvelopeReplyDetection + Envelope,
+    E: Envelope,
 {
     let mut read_buffer = Vec::with_capacity(4096);
 
@@ -335,9 +308,9 @@ async fn handle_connection<TcpStream, S>(
                     Ok(n) => {
                         tracing::trace!("Connection {} read {} bytes", connection_id, n);
 
-                        // Try to parse complete envelopes from buffer using serializer
+                        // Try to parse complete envelopes from buffer using Envelope trait
                         loop {
-                            match serializer.try_deserialize_from_buffer(&mut read_buffer) {
+                            match E::try_from_buffer(&mut read_buffer) {
                                 Ok(Some(envelope)) => {
                                     let msg = IncomingMessage {
                                         envelope,

@@ -3,19 +3,15 @@
 //! These tests verify that ClientTransport and ServerTransport work together
 //! to provide request-response messaging functionality.
 
-use moonpool_foundation::network::transport::{
-    EnvelopeFactory, RequestResponseEnvelopeFactory, RequestResponseSerializer,
-    TransportError,
-};
+use moonpool_foundation::network::transport::{Envelope, RequestResponseEnvelope, TransportError};
 
 #[tokio::test]
 async fn test_basic_envelope_serialization() {
     // Test basic envelope serialization roundtrip
-    let serializer = RequestResponseSerializer;
-    let envelope = RequestResponseEnvelopeFactory::create_request(42, b"test payload".to_vec());
+    let envelope = RequestResponseEnvelope::new(42, b"test payload".to_vec());
 
-    let serialized = serializer.serialize(&envelope);
-    let deserialized = serializer.deserialize(&serialized).unwrap();
+    let serialized = envelope.to_bytes();
+    let deserialized = RequestResponseEnvelope::from_bytes(&serialized).unwrap();
 
     assert_eq!(envelope.correlation_id, deserialized.correlation_id);
     assert_eq!(envelope.payload, deserialized.payload);
@@ -27,12 +23,12 @@ fn test_transport_types_compile() {
     // and have the expected API signatures
 
     // Test that we can create envelopes
-    let request = RequestResponseEnvelopeFactory::create_request(42, b"test".to_vec());
+    let request = RequestResponseEnvelope::new(42, b"test".to_vec());
     assert_eq!(request.correlation_id, 42);
     assert_eq!(request.payload, b"test");
 
     // Test that we can create replies
-    let reply = RequestResponseEnvelopeFactory::create_reply(&request, b"response".to_vec());
+    let reply = request.create_response(b"response".to_vec());
     assert_eq!(reply.correlation_id, 42);
     assert_eq!(reply.payload, b"response");
 }
@@ -41,21 +37,19 @@ fn test_transport_types_compile() {
 fn test_serialization_roundtrip() {
     // Test serialization and deserialization work correctly
 
-    let serializer = RequestResponseSerializer;
-
     // Create different types of messages
-    let request = RequestResponseEnvelopeFactory::create_request(1, b"hello".to_vec());
-    let reply = RequestResponseEnvelopeFactory::create_reply(&request, b"world".to_vec());
+    let request = RequestResponseEnvelope::new(1, b"hello".to_vec());
+    let reply = request.create_response(b"world".to_vec());
 
     // Test request serialization
-    let request_bytes = serializer.serialize(&request);
-    let request_restored = serializer.deserialize(&request_bytes).unwrap();
+    let request_bytes = request.to_bytes();
+    let request_restored = RequestResponseEnvelope::from_bytes(&request_bytes).unwrap();
     assert_eq!(request.correlation_id, request_restored.correlation_id);
     assert_eq!(request.payload, request_restored.payload);
 
     // Test reply serialization
-    let reply_bytes = serializer.serialize(&reply);
-    let reply_restored = serializer.deserialize(&reply_bytes).unwrap();
+    let reply_bytes = reply.to_bytes();
+    let reply_restored = RequestResponseEnvelope::from_bytes(&reply_bytes).unwrap();
     assert_eq!(reply.correlation_id, reply_restored.correlation_id);
     assert_eq!(reply.payload, reply_restored.payload);
 }
@@ -64,22 +58,20 @@ fn test_serialization_roundtrip() {
 fn test_envelope_reply_detection() {
     // Test that envelope reply detection works correctly
 
-    use moonpool_foundation::network::transport::EnvelopeReplyDetection;
-
     // Create a request
-    let request = RequestResponseEnvelopeFactory::create_request(123, b"ping".to_vec());
+    let request = RequestResponseEnvelope::new(123, b"ping".to_vec());
     assert_eq!(request.correlation_id, 123);
     assert_eq!(request.payload, b"ping");
 
     // Create a reply
-    let reply = RequestResponseEnvelopeFactory::create_reply(&request, b"pong".to_vec());
+    let reply = request.create_response(b"pong".to_vec());
     assert_eq!(reply.correlation_id, 123); // Same correlation ID
     assert_eq!(reply.payload, b"pong");
 
     // Test reply detection
-    assert!(reply.is_reply_to(123));
-    assert!(!reply.is_reply_to(124));
-    assert_eq!(reply.correlation_id(), Some(123));
+    assert!(reply.is_response_to(123));
+    assert!(!reply.is_response_to(124));
+    assert_eq!(reply.correlation_id(), 123);
 }
 
 #[test]

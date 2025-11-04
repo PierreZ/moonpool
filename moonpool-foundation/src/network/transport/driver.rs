@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crate::network::transport::{EnvelopeSerializer, TransportProtocol};
+use crate::network::transport::{Envelope, TransportProtocol};
 use crate::network::{NetworkProvider, Peer, PeerConfig};
 use crate::task::TaskProvider;
 use crate::time::provider::TimeProvider;
@@ -55,15 +55,15 @@ type PeerHandle<N, T, TP> = Rc<RefCell<Peer<N, T, TP>>>;
 /// This component connects the pure TransportProtocol state machine to Phase 10 Peers
 /// for actual network I/O operations. It manages a pool of peer connections and drives
 /// the protocol by processing transmissions and receives.
-pub struct TransportDriver<N, T, TP, S>
+pub struct TransportDriver<N, T, TP, E>
 where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
-    S: EnvelopeSerializer,
+    E: Envelope + 'static,
 {
     /// Sans I/O protocol state machine
-    protocol: TransportProtocol<S>,
+    protocol: TransportProtocol<E>,
 
     /// Pool of peer connections indexed by destination
     peers: HashMap<String, PeerHandle<N, T, TP>>,
@@ -84,23 +84,17 @@ where
     reconnect_states: HashMap<String, PeerReconnectState>,
 }
 
-impl<N, T, TP, S> TransportDriver<N, T, TP, S>
+impl<N, T, TP, E> TransportDriver<N, T, TP, E>
 where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
-    S: EnvelopeSerializer,
+    E: Envelope + 'static,
 {
     /// Create a new TransportDriver with the given components
-    pub fn new(
-        serializer: S,
-        network: N,
-        time: T,
-        task_provider: TP,
-        peer_config: PeerConfig,
-    ) -> Self {
+    pub fn new(network: N, time: T, task_provider: TP, peer_config: PeerConfig) -> Self {
         Self {
-            protocol: TransportProtocol::new(serializer),
+            protocol: TransportProtocol::new(),
             peers: HashMap::new(),
             network,
             time,
@@ -113,7 +107,7 @@ where
     /// Send an envelope to the specified destination
     ///
     /// This delegates to the protocol and then processes any pending transmissions.
-    pub fn send(&mut self, destination: &str, envelope: S::Envelope) -> Result<(), DriverError> {
+    pub fn send(&mut self, destination: &str, envelope: E) -> Result<(), DriverError> {
         tracing::debug!(
             "TransportDriver::send called for destination: {}",
             destination
@@ -186,7 +180,7 @@ where
     }
 
     /// Poll for the next received envelope from the protocol
-    pub fn poll_receive(&mut self) -> Option<S::Envelope> {
+    pub fn poll_receive(&mut self) -> Option<E> {
         self.protocol.poll_receive()
     }
 
@@ -314,12 +308,12 @@ where
     }
 
     /// Get access to the underlying protocol (for testing)
-    pub fn protocol(&self) -> &TransportProtocol<S> {
+    pub fn protocol(&self) -> &TransportProtocol<E> {
         &self.protocol
     }
 
     /// Get mutable access to the underlying protocol (for testing)
-    pub fn protocol_mut(&mut self) -> &mut TransportProtocol<S> {
+    pub fn protocol_mut(&mut self) -> &mut TransportProtocol<E> {
         &mut self.protocol
     }
 }
@@ -328,8 +322,8 @@ where
 mod tests {
     use super::*;
     use crate::SimWorld;
-    use crate::network::transport::{Envelope, EnvelopeReplyDetection};
-    use crate::network::{RequestResponseEnvelope, RequestResponseSerializer, SimNetworkProvider};
+    use crate::network::transport::Envelope;
+    use crate::network::{RequestResponseEnvelope, SimNetworkProvider};
     use crate::task::tokio_provider::TokioTaskProvider;
     use crate::time::provider::TokioTimeProvider;
 
@@ -337,16 +331,15 @@ mod tests {
         SimNetworkProvider,
         TokioTimeProvider,
         TokioTaskProvider,
-        RequestResponseSerializer,
+        RequestResponseEnvelope,
     > {
-        let serializer = RequestResponseSerializer::new();
         let sim = SimWorld::new();
         let network = SimNetworkProvider::new(sim.downgrade());
         let time = TokioTimeProvider::new();
         let task_provider = TokioTaskProvider;
         let peer_config = PeerConfig::default();
 
-        TransportDriver::new(serializer, network, time, task_provider, peer_config)
+        TransportDriver::new(network, time, task_provider, peer_config)
     }
 
     fn create_test_envelope(correlation_id: u64, payload: &[u8]) -> RequestResponseEnvelope {
@@ -390,7 +383,7 @@ mod tests {
 
         // Simulate received data by feeding it directly to protocol
         let envelope = create_test_envelope(777, b"received data");
-        let serialized = driver.protocol().serializer().serialize(&envelope);
+        let serialized = envelope.to_bytes();
         driver
             .protocol_mut()
             .handle_received("sender".to_string(), serialized);
@@ -399,7 +392,7 @@ mod tests {
         let received = driver
             .poll_receive()
             .expect("Should have received envelope");
-        assert_eq!(EnvelopeReplyDetection::correlation_id(&received), Some(777));
+        assert_eq!(received.correlation_id(), 777);
         assert_eq!(received.payload(), b"received data");
 
         // No more envelopes

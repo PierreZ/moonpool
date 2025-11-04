@@ -1,10 +1,7 @@
 use moonpool_foundation::{
     NetworkProvider, PeerConfig, SimulationError, SimulationMetrics, SimulationResult,
     TaskProvider, TimeProvider, WorkloadTopology,
-    network::transport::{
-        ClientTransport, Envelope, RequestResponseEnvelopeFactory, RequestResponseSerializer,
-        ServerTransport,
-    },
+    network::transport::{ClientTransport, Envelope, RequestResponseEnvelope, ServerTransport},
     sometimes_assert,
 };
 use std::collections::HashMap;
@@ -86,11 +83,10 @@ impl<
         );
 
         // Create and bind transport - this starts the accept loop automatically
-        let mut transport = ServerTransport::bind(
+        let mut transport = ServerTransport::<_, _, _, RequestResponseEnvelope>::bind(
             self.network.clone(),
             self.time.clone(),
             self.task_provider.clone(),
-            RequestResponseSerializer::new(),
             &self.topology.my_ip,
         )
         .await
@@ -154,7 +150,7 @@ impl<
 
                         // Send PONG response with server IP included
                         let pong_response = format!("PONG:{}", self.topology.my_ip);
-                        match transport.send_reply::<RequestResponseEnvelopeFactory>(
+                        match transport.reply_with_payload(
                             &msg.envelope,
                             pong_response.into_bytes(),
                             &msg,
@@ -190,7 +186,7 @@ pub struct PingPongClientActor<
     TP: TaskProvider + Clone + 'static,
     R: moonpool_foundation::random::RandomProvider,
 > {
-    transport: ClientTransport<N, T, TP, RequestResponseSerializer>,
+    transport: ClientTransport<N, T, TP, RequestResponseEnvelope>,
     server_addresses: Vec<String>,
     topology: WorkloadTopology,
     messages_sent: usize,
@@ -218,8 +214,7 @@ impl<
         peer_config: PeerConfig,
         random: R,
     ) -> Self {
-        let serializer = RequestResponseSerializer::new();
-        let transport = ClientTransport::new(serializer, network, time, task_provider, peer_config);
+        let transport = ClientTransport::new(network, time, task_provider, peer_config);
 
         // Get all server addresses from peer_ips
         let server_addresses = if topology.peer_ips.is_empty() {
@@ -335,14 +330,17 @@ impl<
             }
 
             // Send ping with source IP included in payload
-            result = self.transport.request_with_timeout::<RequestResponseEnvelopeFactory>(
+            result = self.transport.send_with_timeout(
                 &selected_server,
-                format!("PING:{}", self.topology.my_ip).into_bytes(),
+                RequestResponseEnvelope::new(
+                    self.messages_sent as u64,
+                    format!("PING:{}", self.topology.my_ip).into_bytes()
+                ),
                 std::time::Duration::from_millis(timeout_ms)
             ) => {
                 match result {
                     Ok(response) => {
-                        let response_str = String::from_utf8_lossy(&response);
+                        let response_str = String::from_utf8_lossy(response.payload());
                         if response_str.starts_with("PONG:") {
                             let server_ip = response_str.strip_prefix("PONG:").unwrap_or("unknown").to_string();
                             self.pongs_received += 1;

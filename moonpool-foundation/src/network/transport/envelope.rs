@@ -2,54 +2,6 @@ use std::fmt::Debug;
 
 use crate::network::transport::types::EnvelopeError;
 
-/// Legacy trait maintained for backward compatibility
-pub trait LegacyEnvelope: Debug + Clone {
-    /// Get the payload data
-    fn payload(&self) -> &[u8];
-}
-
-/// Legacy trait maintained for backward compatibility  
-pub trait EnvelopeFactory<E: Envelope> {
-    /// Create a new request envelope with the given correlation ID and payload
-    fn create_request(correlation_id: u64, payload: Vec<u8>) -> E;
-
-    /// Create a reply envelope from the given request envelope
-    fn create_reply(request: &E, payload: Vec<u8>) -> E;
-
-    /// Extract the payload from an envelope
-    fn extract_payload(envelope: &E) -> &[u8];
-}
-
-/// Legacy trait maintained for backward compatibility
-pub trait EnvelopeReplyDetection {
-    /// Check if this envelope is a reply to the given correlation ID
-    fn is_reply_to(&self, correlation_id: u64) -> bool;
-
-    /// Get the correlation ID of this envelope
-    fn correlation_id(&self) -> Option<u64>;
-}
-
-/// Legacy trait maintained for backward compatibility
-pub trait EnvelopeSerializer: Clone {
-    /// The envelope type this serializer works with
-    type Envelope: Envelope + Clone + Debug;
-
-    /// Serialize an envelope to bytes for wire transmission
-    fn serialize(&self, envelope: &Self::Envelope) -> Vec<u8>;
-
-    /// Deserialize bytes from wire into an envelope
-    fn deserialize(
-        &self,
-        data: &[u8],
-    ) -> Result<Self::Envelope, crate::network::transport::types::EnvelopeError>;
-
-    /// Try to deserialize an envelope from a buffer, consuming parsed data
-    fn try_deserialize_from_buffer(
-        &self,
-        buffer: &mut Vec<u8>,
-    ) -> Result<Option<Self::Envelope>, crate::network::transport::types::EnvelopeError>;
-}
-
 /// Unified trait for envelope types that carry payloads with correlation IDs
 ///
 /// This trait combines serialization, correlation, and factory concerns into a single interface.
@@ -178,40 +130,6 @@ impl Envelope for SimpleEnvelope {
 
     fn payload(&self) -> &[u8] {
         &self.payload
-    }
-}
-
-// Legacy trait implementations for backward compatibility
-impl LegacyEnvelope for SimpleEnvelope {
-    fn payload(&self) -> &[u8] {
-        Envelope::payload(self)
-    }
-}
-
-impl EnvelopeReplyDetection for SimpleEnvelope {
-    fn is_reply_to(&self, correlation_id: u64) -> bool {
-        self.correlation_id == correlation_id
-    }
-
-    fn correlation_id(&self) -> Option<u64> {
-        Some(self.correlation_id)
-    }
-}
-
-/// Factory for creating SimpleEnvelope instances
-pub struct SimpleEnvelopeFactory;
-
-impl EnvelopeFactory<SimpleEnvelope> for SimpleEnvelopeFactory {
-    fn create_request(correlation_id: u64, payload: Vec<u8>) -> SimpleEnvelope {
-        SimpleEnvelope::new(correlation_id, payload)
-    }
-
-    fn create_reply(request: &SimpleEnvelope, payload: Vec<u8>) -> SimpleEnvelope {
-        SimpleEnvelope::new(request.correlation_id, payload)
-    }
-
-    fn extract_payload(envelope: &SimpleEnvelope) -> &[u8] {
-        Envelope::payload(envelope)
     }
 }
 

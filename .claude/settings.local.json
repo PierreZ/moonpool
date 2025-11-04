@@ -30,7 +30,9 @@
       "Bash(git -C /home/pierrez/workspace/rust/moonpool log -1 --format='%an %ae')",
       "Bash(git -C /home/pierrez/workspace/rust/moonpool diff --stat)",
       "Read(//home/pierrez/workspace/markdown/llm-notes/actor/01_dynamic_dispatch/**)",
-      "Bash(git -C /home/pierrez/workspace/rust/moonpool log -3 --format='%h %s')"
+      "Bash(git -C /home/pierrez/workspace/rust/moonpool log -3 --format='%h %s')",
+      "WebFetch(domain:release-plz.ieni.dev)",
+      "Bash(git log:*)"
     ],
     "deny": [],
     "ask": [],

@@ -14,29 +14,25 @@
 //! ```
 
 // Core simulation types
-pub use crate::sim::{SimWorld, WeakSimWorld};
-pub use crate::runner::{SimulationBuilder, SimulationReport};
 pub use crate::error::SimulationResult;
+pub use crate::runner::{SimulationBuilder, SimulationReport};
+pub use crate::sim::{SimWorld, WeakSimWorld};
 
 // Provider traits
 pub use crate::network::NetworkProvider;
-pub use crate::time::TimeProvider;
-pub use crate::task::TaskProvider;
 pub use crate::random::RandomProvider;
+pub use crate::task::TaskProvider;
+pub use crate::time::TimeProvider;
 
 // Network configuration and transport
 pub use crate::network::PeerConfig;
 pub use crate::network::transport::{
-    ClientTransport, ServerTransport, TransportError,
-    Envelope, SimpleEnvelope,
-    // Legacy traits for backward compatibility
-    LegacyEnvelope, EnvelopeFactory, EnvelopeReplyDetection, EnvelopeSerializer,
-    // Common envelope implementations
-    RequestResponseEnvelope, RequestResponseEnvelopeFactory, RequestResponseSerializer,
+    ClientTransport, Envelope, RequestResponseEnvelope, RequestResponseSerializer, ServerTransport,
+    SimpleEnvelope, TransportError,
 };
 
 // Assertion and testing framework - these are macros exported at the root
-pub use crate::{always_assert, sometimes_assert, buggify};
+pub use crate::{always_assert, buggify, sometimes_assert};
 
 // Common error types
 pub use crate::network::transport::types::EnvelopeError;

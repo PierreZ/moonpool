@@ -71,6 +71,7 @@ impl WorkloadOrchestrator {
         shutdown_signal: tokio_util::sync::CancellationToken,
         iteration_count: usize,
         invariants: &[crate::InvariantCheck],
+        max_wall_time: Duration,
     ) -> Result<(Vec<SimulationResult<SimulationMetrics>>, SimulationMetrics), (Vec<u64>, usize)>
     {
         tracing::debug!("Spawning {} workload(s) with spawn_local", workloads.len());
@@ -108,6 +109,7 @@ impl WorkloadOrchestrator {
         let mut loop_count = 0;
         let mut deadlock_detector = DeadlockDetector::new(3);
         let mut first_success_triggered = false;
+        let iteration_start_time = Instant::now();
         while !handles.is_empty() {
             loop_count += 1;
             if loop_count % 100 == 0 {
@@ -185,6 +187,28 @@ impl WorkloadOrchestrator {
                     results.push(Err(crate::SimulationError::InvalidState(
                         format!("Deadlock detected on iteration {} with seed {}: tasks stuck with no events", iteration_count, seed),
                     )));
+                }
+
+                // Return error state for early exit
+                return Err((vec![seed], 1));
+            }
+
+            // Check for wall-time timeout to detect infinite loops
+            let elapsed = iteration_start_time.elapsed();
+            if elapsed > max_wall_time {
+                tracing::error!(
+                    "⏱️ TIMEOUT detected on iteration {} with seed {}: exceeded {:?} wall time (ran for {:?})",
+                    iteration_count,
+                    seed,
+                    max_wall_time,
+                    elapsed
+                );
+                // Mark all remaining tasks as failed
+                for _ in 0..handles.len() {
+                    results.push(Err(crate::SimulationError::InvalidState(format!(
+                        "Timeout detected on iteration {} with seed {}: exceeded {:?} wall time",
+                        iteration_count, seed, max_wall_time
+                    ))));
                 }
 
                 // Return error state for early exit
@@ -722,6 +746,7 @@ pub struct SimulationBuilder {
     next_ip: u32, // For auto-assigning IP addresses starting from 10.0.0.1
     use_random_config: bool,
     invariants: Vec<crate::InvariantCheck>,
+    max_iteration_wall_time: Duration,
 }
 
 impl Default for SimulationBuilder {
@@ -740,6 +765,7 @@ impl SimulationBuilder {
             next_ip: 1, // Start from 10.0.0.1
             use_random_config: false,
             invariants: Vec::new(),
+            max_iteration_wall_time: Duration::from_secs(10),
         }
     }
 
@@ -868,6 +894,28 @@ impl SimulationBuilder {
         self
     }
 
+    /// Set the maximum wall-clock time allowed for a single iteration.
+    ///
+    /// If an iteration exceeds this timeout, it will be terminated and marked as failed
+    /// with the seed reported for debugging. This helps detect infinite loops or
+    /// unexpectedly slow iterations early rather than waiting for test framework timeouts.
+    ///
+    /// # Arguments
+    /// * `duration` - Maximum wall-time allowed per iteration (default: 30 seconds)
+    ///
+    /// # Example
+    /// ```ignore
+    /// SimulationBuilder::new()
+    ///     .register_workload(...)
+    ///     .set_max_iteration_wall_time(Duration::from_secs(120))  // Allow 2 minutes per iteration
+    ///     .run()
+    ///     .await
+    /// ```
+    pub fn set_max_iteration_wall_time(mut self, duration: Duration) -> Self {
+        self.max_iteration_wall_time = duration;
+        self
+    }
+
     #[instrument(skip_all)]
     /// Run the simulation and generate a report.
     pub async fn run(self) -> SimulationReport {
@@ -927,6 +975,7 @@ impl SimulationBuilder {
                 shutdown_signal,
                 iteration_count,
                 &self.invariants,
+                self.max_iteration_wall_time,
             )
             .await;
 

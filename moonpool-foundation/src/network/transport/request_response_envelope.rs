@@ -1,9 +1,7 @@
 use std::fmt::Debug;
 
+use crate::network::transport::Envelope;
 use crate::network::transport::types::EnvelopeError;
-use crate::network::transport::{
-    Envelope, EnvelopeFactory, EnvelopeReplyDetection, EnvelopeSerializer, LegacyEnvelope,
-};
 
 /// Request-response envelope with correlation ID and payload
 /// Wire format: \[correlation_id:8\]\[len:4\]\[payload:N\]
@@ -63,62 +61,6 @@ impl Envelope for RequestResponseEnvelope {
 
     fn payload(&self) -> &[u8] {
         &self.payload
-    }
-}
-
-// Legacy trait implementations for backward compatibility
-impl LegacyEnvelope for RequestResponseEnvelope {
-    fn payload(&self) -> &[u8] {
-        Envelope::payload(self)
-    }
-}
-
-impl EnvelopeReplyDetection for RequestResponseEnvelope {
-    fn is_reply_to(&self, correlation_id: u64) -> bool {
-        self.correlation_id == correlation_id
-    }
-
-    fn correlation_id(&self) -> Option<u64> {
-        Some(self.correlation_id)
-    }
-}
-
-/// Factory for creating RequestResponseEnvelope instances
-pub struct RequestResponseEnvelopeFactory;
-
-impl EnvelopeFactory<RequestResponseEnvelope> for RequestResponseEnvelopeFactory {
-    fn create_request(correlation_id: u64, payload: Vec<u8>) -> RequestResponseEnvelope {
-        RequestResponseEnvelope::new(correlation_id, payload)
-    }
-
-    fn create_reply(
-        request: &RequestResponseEnvelope,
-        payload: Vec<u8>,
-    ) -> RequestResponseEnvelope {
-        RequestResponseEnvelope::new(request.correlation_id, payload)
-    }
-
-    fn extract_payload(envelope: &RequestResponseEnvelope) -> &[u8] {
-        Envelope::payload(envelope)
-    }
-}
-
-impl EnvelopeSerializer for RequestResponseSerializer {
-    type Envelope = RequestResponseEnvelope;
-
-    fn serialize(&self, envelope: &Self::Envelope) -> Vec<u8> {
-        self.serialize(envelope)
-    }
-
-    fn deserialize(&self, data: &[u8]) -> Result<Self::Envelope, EnvelopeError> {
-        self.deserialize(data)
-    }
-
-    fn try_deserialize_from_buffer(
-        &self,
-        buffer: &mut Vec<u8>,
-    ) -> Result<Option<Self::Envelope>, EnvelopeError> {
-        self.try_deserialize_from_buffer(buffer)
     }
 }
 
@@ -269,7 +211,7 @@ mod tests {
     fn test_request_response_envelope_creation() {
         let envelope = RequestResponseEnvelope::new(42, b"test payload".to_vec());
 
-        assert_eq!(EnvelopeReplyDetection::correlation_id(&envelope), Some(42));
+        assert_eq!(envelope.correlation_id(), 42);
         assert_eq!(Envelope::payload(&envelope), b"test payload");
         assert!(!envelope.is_empty());
         assert_eq!(envelope.payload_size(), 12);
@@ -280,7 +222,7 @@ mod tests {
     fn test_request_response_envelope_empty_payload() {
         let envelope = RequestResponseEnvelope::new(0, Vec::new());
 
-        assert_eq!(EnvelopeReplyDetection::correlation_id(&envelope), Some(0));
+        assert_eq!(envelope.correlation_id(), 0);
         assert_eq!(Envelope::payload(&envelope), b"");
         assert!(envelope.is_empty());
         assert_eq!(envelope.payload_size(), 0);
@@ -290,32 +232,19 @@ mod tests {
     #[test]
     fn test_request_response_envelope_factory() {
         let correlation_id = 123;
-        let request =
-            RequestResponseEnvelopeFactory::create_request(correlation_id, b"ping".to_vec());
-        let reply = RequestResponseEnvelopeFactory::create_reply(&request, b"pong".to_vec());
+        let request = RequestResponseEnvelope::new(correlation_id, b"ping".to_vec());
+        let reply = request.create_response(b"pong".to_vec());
 
         // Both should have same correlation ID
-        assert_eq!(
-            EnvelopeReplyDetection::correlation_id(&request),
-            Some(correlation_id)
-        );
-        assert_eq!(
-            EnvelopeReplyDetection::correlation_id(&reply),
-            Some(correlation_id)
-        );
+        assert_eq!(Envelope::correlation_id(&request), correlation_id);
+        assert_eq!(Envelope::correlation_id(&reply), correlation_id);
 
-        // Reply should be detected as reply to request
-        assert!(reply.is_reply_to(correlation_id));
+        // Reply should have matching correlation ID
+        assert_eq!(reply.correlation_id, correlation_id);
 
         // Extract payload should work
-        assert_eq!(
-            RequestResponseEnvelopeFactory::extract_payload(&request),
-            b"ping"
-        );
-        assert_eq!(
-            RequestResponseEnvelopeFactory::extract_payload(&reply),
-            b"pong"
-        );
+        assert_eq!(Envelope::payload(&request), b"ping");
+        assert_eq!(Envelope::payload(&reply), b"pong");
     }
 
     #[test]

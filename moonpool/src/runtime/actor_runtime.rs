@@ -193,7 +193,7 @@ impl<T: TaskProvider + 'static, S: crate::serialization::Serializer + Clone + 's
         // Initialize MessageBus self-reference (required for passing to routers)
         message_bus.init_self_ref();
 
-        // Create ServerTransport for incoming messages  
+        // Create ServerTransport for incoming messages
         let server_serializer = crate::messaging::network::MessageSerializer;
         let listen_addr_str = listen_addr.to_string();
         let mut server_transport = ServerTransport::bind(

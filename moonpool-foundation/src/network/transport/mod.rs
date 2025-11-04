@@ -23,19 +23,8 @@ pub mod types;
 pub use client::*;
 pub use convenience::*;
 pub use driver::*;
-pub use envelope::{
-    Envelope,
-    EnvelopeFactory,
-    EnvelopeReplyDetection,
-    EnvelopeSerializer,
-    // Legacy traits for backward compatibility
-    LegacyEnvelope,
-    SimpleEnvelope,
-    SimpleEnvelopeFactory,
-};
+pub use envelope::{Envelope, SimpleEnvelope};
 pub use protocol::*;
-pub use request_response_envelope::{
-    RequestResponseEnvelope, RequestResponseEnvelopeFactory, RequestResponseSerializer,
-};
+pub use request_response_envelope::{RequestResponseEnvelope, RequestResponseSerializer};
 pub use server::*;
 pub use types::*;

@@ -3,15 +3,14 @@
 //! This module provides a concrete ClientTransport struct that implements
 //! request-response semantics using correlation IDs and self-driving get_reply.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use tokio::sync::oneshot;
 
 use crate::network::NetworkProvider;
 use crate::network::PeerConfig;
 use crate::network::transport::{
-    Envelope, EnvelopeFactory, EnvelopeSerializer, ReceivedEnvelope,
-    TransportError, driver::TransportDriver,
+    Envelope, ReceivedEnvelope, TransportError, driver::TransportDriver,
 };
 use crate::task::TaskProvider;
 use crate::time::TimeProvider;
@@ -23,167 +22,65 @@ use crate::time::TimeProvider;
 ///
 /// Uses interior mutability (Cell/RefCell) to allow `&self` methods,
 /// enabling safe shared usage in single-threaded async contexts.
-pub struct ClientTransport<N, T, TP, S>
+pub struct ClientTransport<N, T, TP, E>
 where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
-    S: EnvelopeSerializer + 'static,
-    S::Envelope: Envelope + Clone,
+    E: Envelope + 'static,
 {
-    /// Transport driver for managing peer connections  
+    /// Transport driver for managing peer connections
     /// Uses RefCell for interior mutability
-    driver: RefCell<TransportDriver<N, T, TP, S>>,
+    driver: RefCell<TransportDriver<N, T, TP, E>>,
 
     /// Pending requests awaiting responses, indexed by correlation ID
     /// Uses RefCell for interior mutability in single-threaded context
     pending_requests: RefCell<HashMap<u64, oneshot::Sender<Vec<u8>>>>,
-
-    /// Next correlation ID to use for requests
-    /// Uses Cell for interior mutability without borrowing
-    next_correlation_id: Cell<u64>,
 }
 
-impl<N, T, TP, S> ClientTransport<N, T, TP, S>
+impl<N, T, TP, E> ClientTransport<N, T, TP, E>
 where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
-    S: EnvelopeSerializer + 'static,
-    S::Envelope: Envelope + Clone,
+    E: Envelope + 'static,
 {
     /// Create a new ClientTransport with the given components
-    pub fn new(
-        serializer: S,
-        network: N,
-        time: T,
-        task_provider: TP,
-        peer_config: PeerConfig,
-    ) -> Self {
+    pub fn new(network: N, time: T, task_provider: TP, peer_config: PeerConfig) -> Self {
         Self {
             driver: RefCell::new(TransportDriver::new(
-                serializer,
                 network,
                 time,
                 task_provider,
                 peer_config,
             )),
             pending_requests: RefCell::new(HashMap::new()),
-            next_correlation_id: Cell::new(1),
         }
     }
 
-    /// Send a request and wait for response with self-driving behavior
+    /// Send a request envelope and wait for response
     ///
-    /// This method uses the turbofish pattern to specify the envelope type.
-    /// It continuously drives the transport while waiting for the response
-    /// to prevent deadlocks.
-    ///
-    /// Uses `&self` instead of `&mut self` to enable shared usage.
-    /// RefCell borrows are carefully released before await points.
-    pub async fn request<E>(
-        &self,
-        destination: &str,
-        payload: Vec<u8>,
-    ) -> Result<Vec<u8>, TransportError>
-    where
-        E: EnvelopeFactory<S::Envelope> + 'static,
-        S::Envelope: Clone,
-    {
-        tracing::debug!(
-            "ClientTransport::request called for destination: {}, payload size: {}",
-            destination,
-            payload.len()
-        );
-        let correlation_id = self.next_correlation_id();
-        let (tx, mut rx) = oneshot::channel();
-        tracing::debug!(
-            "ClientTransport::request generated correlation_id: {}",
-            correlation_id
-        );
-
-        // Store response channel indexed by correlation ID
-        // Borrow released immediately after insert
-        self.pending_requests
-            .borrow_mut()
-            .insert(correlation_id, tx);
-
-        // Create request envelope using factory
-        let envelope = E::create_request(correlation_id, payload);
-        tracing::debug!("ClientTransport::request created envelope, calling driver.send()");
-
-        // Send through driver (borrow released immediately after send)
-        self.driver
-            .borrow_mut()
-            .send(destination, envelope)
-            .map_err(|e| {
-                tracing::debug!("ClientTransport::request driver.send() failed: {:?}", e);
-                TransportError::PeerError(e.to_string())
-            })?;
-
-        tracing::debug!(
-            "ClientTransport::request driver.send() succeeded, entering self-driving loop"
-        );
-
-        // Self-driving loop to process responses
-        loop {
-            // Drive transport by processing incoming messages
-            self.poll_receive();
-
-            // Check if our response arrived
-            match rx.try_recv() {
-                Ok(response_payload) => {
-                    // Clean up and return response
-                    // Borrow released immediately after remove
-                    self.pending_requests.borrow_mut().remove(&correlation_id);
-                    return Ok(response_payload);
-                }
-                Err(oneshot::error::TryRecvError::Empty) => {
-                    // No response yet, yield and continue
-                    // CRITICAL: No RefCell borrows held across this await point
-                    tokio::task::yield_now().await;
-                    continue;
-                }
-                Err(oneshot::error::TryRecvError::Closed) => {
-                    // Channel was closed, request was cancelled
-                    // Borrow released immediately after remove
-                    self.pending_requests.borrow_mut().remove(&correlation_id);
-                    return Err(TransportError::SendFailed("Request cancelled".to_string()));
-                }
-            }
-        }
-    }
-
-    /// Send a request envelope directly (unified Envelope trait approach).
-    ///
-    /// This method works with the transport's envelope type directly,
-    /// avoiding double serialization by sending the envelope as-is.
+    /// This method sends an envelope directly to the destination and waits for a response.
+    /// It continuously drives the transport while waiting to prevent deadlocks.
     ///
     /// # Arguments
     ///
     /// * `destination` - Target node address (e.g., "127.0.0.1:8001")
-    /// * `envelope` - Request envelope of the transport's type
+    /// * `envelope` - Request envelope to send
     ///
     /// # Returns
     ///
     /// Response envelope of the same type
-    pub async fn request_envelope(
-        &self,
-        destination: &str,
-        envelope: S::Envelope,
-    ) -> Result<S::Envelope, TransportError>
-    where
-        S::Envelope: Envelope + Clone,
-    {
+    pub async fn send(&self, destination: &str, envelope: E) -> Result<E, TransportError> {
         tracing::debug!(
-            "ClientTransport::request_envelope called for destination: {}",
+            "ClientTransport::send called for destination: {}",
             destination
         );
-        
-        let correlation_id = Envelope::correlation_id(&envelope);
+
+        let correlation_id = envelope.correlation_id();
         let (tx, mut rx) = oneshot::channel();
         tracing::debug!(
-            "ClientTransport::request_envelope using correlation_id: {}",
+            "ClientTransport::send using correlation_id: {}",
             correlation_id
         );
 
@@ -197,12 +94,12 @@ where
             .borrow_mut()
             .send(destination, envelope)
             .map_err(|e| {
-                tracing::debug!("ClientTransport::request_envelope driver.send() failed: {:?}", e);
+                tracing::debug!("ClientTransport::send driver.send() failed: {:?}", e);
                 TransportError::PeerError(e.to_string())
             })?;
 
         tracing::debug!(
-            "ClientTransport::request_envelope driver.send() succeeded, entering self-driving loop"
+            "ClientTransport::send driver.send() succeeded, entering self-driving loop"
         );
 
         // Self-driving loop to process responses
@@ -214,10 +111,10 @@ where
             match rx.try_recv() {
                 Ok(response_payload) => {
                     // Deserialize response payload back to envelope type
-                    let response = S::Envelope::from_bytes(&response_payload).map_err(|e| {
+                    let response = E::from_bytes(&response_payload).map_err(|e| {
                         TransportError::SendFailed(format!("Failed to deserialize response: {}", e))
                     })?;
-                    
+
                     // Clean up and return response
                     self.pending_requests.borrow_mut().remove(&correlation_id);
                     return Ok(response);
@@ -242,7 +139,7 @@ where
     /// and matching them to pending requests by correlation ID.
     ///
     /// Uses `&self` with RefCell to ensure compatibility with `&self` methods.
-    pub fn poll_receive(&self) -> Option<ReceivedEnvelope<S::Envelope>> {
+    pub fn poll_receive(&self) -> Option<ReceivedEnvelope<E>> {
         // Borrow driver for processing (released after this block)
         {
             let mut driver = self.driver.borrow_mut();
@@ -276,25 +173,21 @@ where
         None
     }
 
-    /// Send a request and wait for response with timeout
+    /// Send a request envelope and wait for response with timeout
     ///
-    /// This method adds timeout functionality to request using tokio::select!
+    /// This method adds timeout functionality using tokio::select!
     /// to race between the request completion and a timeout from TimeProvider::sleep.
-    pub async fn request_with_timeout<E>(
+    pub async fn send_with_timeout(
         &self,
         destination: &str,
-        payload: Vec<u8>,
+        envelope: E,
         timeout_duration: std::time::Duration,
-    ) -> Result<Vec<u8>, TransportError>
-    where
-        E: EnvelopeFactory<S::Envelope> + 'static,
-        S::Envelope: Clone,
-    {
+    ) -> Result<E, TransportError> {
         // Clone the time provider to avoid borrowing conflicts
         let time_provider = self.driver.borrow().time().clone();
 
         tokio::select! {
-            result = self.request::<E>(destination, payload) => {
+            result = self.send(destination, envelope) => {
                 result
             }
             _ = time_provider.sleep(timeout_duration) => {
@@ -325,15 +218,6 @@ where
         }
     }
 
-    /// Generate the next unique correlation ID
-    ///
-    /// Uses Cell for lock-free atomic-like operation in single-threaded context.
-    fn next_correlation_id(&self) -> u64 {
-        let id = self.next_correlation_id.get();
-        self.next_correlation_id.set(id.wrapping_add(1));
-        id
-    }
-
     /// Get the number of pending requests
     pub fn pending_request_count(&self) -> usize {
         self.pending_requests.borrow().len()
@@ -348,7 +232,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network::transport::RequestResponseEnvelopeFactory;
 
     // Simplified test struct for testing correlation ID generation
     struct TestClient {
@@ -415,20 +298,6 @@ mod tests {
         assert_eq!(client.pending_request_count(), 1);
         assert!(client.has_pending_request(42));
         assert!(!client.has_pending_request(43));
-    }
-
-    #[test]
-    fn test_envelope_factory_compilation() {
-        // This test verifies that the turbofish pattern compiles correctly
-        // Testing type constraints at compile time
-
-        let envelope = RequestResponseEnvelopeFactory::create_request(42, b"test".to_vec());
-        assert_eq!(envelope.correlation_id, 42);
-        assert_eq!(envelope.payload, b"test");
-
-        let reply = RequestResponseEnvelopeFactory::create_reply(&envelope, b"response".to_vec());
-        assert_eq!(reply.correlation_id, 42);
-        assert_eq!(reply.payload, b"response");
     }
 
     #[test]
