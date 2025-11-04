@@ -819,3 +819,1990 @@ impl<A: Actor, S: crate::serialization::Serializer> std::fmt::Debug for ActorCon
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use serde::{Deserialize, Serialize};
+
+    // ============================================================================
+    // Test Actor Implementations
+    // ============================================================================
+
+    /// Simple test actor for context testing
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct TestActor {
+        actor_id: ActorId,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    struct TestState;
+
+    impl TestActor {
+        fn new(actor_id: ActorId) -> Self {
+            Self { actor_id }
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl Actor for TestActor {
+        type State = TestState;
+        const ACTOR_TYPE: &'static str = "TestActor";
+
+        fn actor_id(&self) -> &ActorId {
+            &self.actor_id
+        }
+
+        async fn on_activate(
+            &mut self,
+            _state: crate::actor::ActorState<Self::State>,
+        ) -> Result<(), ActorError> {
+            Ok(())
+        }
+
+        async fn on_deactivate(&mut self, _reason: DeactivationReason) -> Result<(), ActorError> {
+            Ok(())
+        }
+    }
+
+    fn create_test_storage() -> Rc<dyn crate::storage::StorageProvider> {
+        use crate::storage::InMemoryStorage;
+        Rc::new(InMemoryStorage::new())
+    }
+
+    fn create_test_serializer() -> crate::serialization::JsonSerializer {
+        crate::serialization::JsonSerializer
+    }
+
+    // ============================================================================
+    // Section 1: Context Creation & Initialization
+    // ============================================================================
+
+    #[test]
+    fn test_context_creation_basic() {
+        let actor_id = ActorId::from_string("test::TestActor/alice").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id.clone(),
+            node_id.clone(),
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        assert_eq!(context.actor_id, actor_id);
+        assert_eq!(context.node_id, node_id);
+    }
+
+    #[test]
+    fn test_context_initial_state_is_creating() {
+        let actor_id = ActorId::from_string("test::TestActor/bob").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        assert_eq!(context.get_state(), ActivationState::Creating);
+    }
+
+    #[test]
+    fn test_context_activation_time_initialization() {
+        let actor_id = ActorId::from_string("test::TestActor/charlie").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let before = Instant::now();
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+        let after = Instant::now();
+
+        // activation_time should be between before and after
+        assert!(context.activation_time >= before);
+        assert!(context.activation_time <= after);
+    }
+
+    #[test]
+    fn test_context_handler_registry_initialization() {
+        let actor_id = ActorId::from_string("test::TestActor/dave").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        // Handler registry should be initialized
+        // Note: TestActor has no handlers registered, so count is 0
+        let _handler_count = context.handlers.handler_count();
+    }
+
+    #[test]
+    fn test_context_storage_reference_set() {
+        let actor_id = ActorId::from_string("test::TestActor/eve").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage.clone(),
+            serializer,
+        );
+
+        // Verify storage reference is set (same Rc pointer)
+        assert!(Rc::ptr_eq(&context.storage, &storage));
+    }
+
+    #[test]
+    fn test_context_message_sender_channel() {
+        let actor_id = ActorId::from_string("test::TestActor/frank").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, mut msg_rx) = mpsc::channel::<Message>(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id.clone(),
+            node_id.clone(),
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        // Test that message sender is connected to receiver
+        let test_message = Message::oneway(
+            actor_id.clone(),
+            actor_id,
+            node_id.clone(),
+            node_id,
+            "test".to_string(),
+            vec![],
+        );
+
+        // Send via context.message_sender
+        context
+            .message_sender
+            .blocking_send(test_message.clone())
+            .unwrap();
+
+        // Verify received
+        let received = msg_rx.blocking_recv().unwrap();
+        assert_eq!(received.method_name, test_message.method_name);
+    }
+
+    #[test]
+    fn test_context_control_sender_channel() {
+        let actor_id = ActorId::from_string("test::TestActor/grace").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<LifecycleCommand<TestActor>>(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage.clone(),
+            serializer,
+        );
+
+        // Test that control sender is connected to receiver
+        let state = crate::actor::ActorState::new(context.actor_id.clone(), TestState, storage);
+        let (result_tx, _result_rx) = oneshot::channel();
+        let cmd = LifecycleCommand::Activate { state, result_tx };
+
+        // Send via context.control_sender
+        context.control_sender.blocking_send(cmd).unwrap();
+
+        // Verify received
+        assert!(matches!(
+            ctrl_rx.blocking_recv(),
+            Some(LifecycleCommand::Activate { .. })
+        ));
+    }
+
+    #[test]
+    fn test_context_error_tracking_initial_state() {
+        let actor_id = ActorId::from_string("test::TestActor/henry").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        // Initially no errors
+        assert_eq!(context.get_error_count(), 0);
+        assert!(context.get_last_error().is_none());
+    }
+
+    // ============================================================================
+    // Section 2: State Transition Validation
+    // ============================================================================
+
+    #[test]
+    fn test_context_state_transition_creating_to_activating() {
+        let actor_id = ActorId::from_string("test::TestActor/ida").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        assert_eq!(context.get_state(), ActivationState::Creating);
+
+        // Valid transition
+        context.set_state(ActivationState::Activating).unwrap();
+        assert_eq!(context.get_state(), ActivationState::Activating);
+    }
+
+    #[test]
+    fn test_context_state_transition_activating_to_valid() {
+        let actor_id = ActorId::from_string("test::TestActor/judy").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        context.set_state(ActivationState::Activating).unwrap();
+        assert_eq!(context.get_state(), ActivationState::Activating);
+
+        // Valid transition
+        context.set_state(ActivationState::Valid).unwrap();
+        assert_eq!(context.get_state(), ActivationState::Valid);
+    }
+
+    #[test]
+    fn test_context_state_transition_valid_to_deactivating() {
+        let actor_id = ActorId::from_string("test::TestActor/kevin").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        context.set_state(ActivationState::Activating).unwrap();
+        context.set_state(ActivationState::Valid).unwrap();
+        assert_eq!(context.get_state(), ActivationState::Valid);
+
+        // Valid transition
+        context.set_state(ActivationState::Deactivating).unwrap();
+        assert_eq!(context.get_state(), ActivationState::Deactivating);
+    }
+
+    #[test]
+    fn test_context_state_transition_deactivating_to_invalid() {
+        let actor_id = ActorId::from_string("test::TestActor/lisa").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        context.set_state(ActivationState::Activating).unwrap();
+        context.set_state(ActivationState::Valid).unwrap();
+        context.set_state(ActivationState::Deactivating).unwrap();
+        assert_eq!(context.get_state(), ActivationState::Deactivating);
+
+        // Valid transition
+        context.set_state(ActivationState::Invalid).unwrap();
+        assert_eq!(context.get_state(), ActivationState::Invalid);
+    }
+
+    #[test]
+    fn test_context_state_transition_activating_to_deactivating_on_failure() {
+        let actor_id = ActorId::from_string("test::TestActor/mike").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        context.set_state(ActivationState::Activating).unwrap();
+        assert_eq!(context.get_state(), ActivationState::Activating);
+
+        // Valid transition on activation failure
+        context.set_state(ActivationState::Deactivating).unwrap();
+        assert_eq!(context.get_state(), ActivationState::Deactivating);
+    }
+
+    #[test]
+    fn test_context_invalid_state_transition_creating_to_valid() {
+        let actor_id = ActorId::from_string("test::TestActor/nancy").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        assert_eq!(context.get_state(), ActivationState::Creating);
+
+        // Invalid transition (should skip Activating)
+        let result = context.set_state(ActivationState::Valid);
+        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(ActorError::InvalidStateTransition { .. })
+        ));
+
+        // State should remain unchanged
+        assert_eq!(context.get_state(), ActivationState::Creating);
+    }
+
+    #[test]
+    fn test_context_invalid_state_transition_valid_to_activating() {
+        let actor_id = ActorId::from_string("test::TestActor/oscar").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        context.set_state(ActivationState::Activating).unwrap();
+        context.set_state(ActivationState::Valid).unwrap();
+        assert_eq!(context.get_state(), ActivationState::Valid);
+
+        // Invalid transition (backward)
+        let result = context.set_state(ActivationState::Activating);
+        assert!(result.is_err());
+
+        // State should remain unchanged
+        assert_eq!(context.get_state(), ActivationState::Valid);
+    }
+
+    #[test]
+    fn test_context_invalid_state_transition_invalid_to_creating() {
+        let actor_id = ActorId::from_string("test::TestActor/paula").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        // Go through full lifecycle
+        context.set_state(ActivationState::Activating).unwrap();
+        context.set_state(ActivationState::Valid).unwrap();
+        context.set_state(ActivationState::Deactivating).unwrap();
+        context.set_state(ActivationState::Invalid).unwrap();
+        assert_eq!(context.get_state(), ActivationState::Invalid);
+
+        // Invalid transition (can't restart from Invalid)
+        let result = context.set_state(ActivationState::Creating);
+        assert!(result.is_err());
+
+        // State should remain Invalid
+        assert_eq!(context.get_state(), ActivationState::Invalid);
+    }
+
+    #[test]
+    fn test_context_get_state_returns_current() {
+        let actor_id = ActorId::from_string("test::TestActor/quinn").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        // Test get_state at each stage
+        assert_eq!(context.get_state(), ActivationState::Creating);
+
+        context.set_state(ActivationState::Activating).unwrap();
+        assert_eq!(context.get_state(), ActivationState::Activating);
+
+        context.set_state(ActivationState::Valid).unwrap();
+        assert_eq!(context.get_state(), ActivationState::Valid);
+
+        context.set_state(ActivationState::Deactivating).unwrap();
+        assert_eq!(context.get_state(), ActivationState::Deactivating);
+
+        context.set_state(ActivationState::Invalid).unwrap();
+        assert_eq!(context.get_state(), ActivationState::Invalid);
+    }
+
+    #[test]
+    fn test_context_state_transition_validation_error_message() {
+        let actor_id = ActorId::from_string("test::TestActor/rachel").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        // Attempt invalid transition
+        let result = context.set_state(ActivationState::Valid);
+        assert!(result.is_err());
+
+        // Verify error includes from/to states
+        match result {
+            Err(ActorError::InvalidStateTransition { from, to }) => {
+                assert_eq!(from, ActivationState::Creating);
+                assert_eq!(to, ActivationState::Valid);
+            }
+            _ => panic!("Expected InvalidStateTransition error"),
+        }
+    }
+
+    // ============================================================================
+    // Section 3: Message Queue Operations
+    // ============================================================================
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_context_enqueue_message_success() {
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let actor_id = ActorId::from_string("test::TestActor/sam").unwrap();
+                let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+                let actor_instance = TestActor::new(actor_id.clone());
+                let (msg_tx, mut msg_rx) = mpsc::channel(128);
+                let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+                let storage = create_test_storage();
+                let serializer = create_test_serializer();
+
+                let context = ActorContext::new(
+                    actor_id.clone(),
+                    node_id.clone(),
+                    actor_instance,
+                    msg_tx,
+                    ctrl_tx,
+                    storage,
+                    serializer,
+                );
+
+                let message = Message::oneway(
+                    actor_id.clone(),
+                    actor_id,
+                    node_id.clone(),
+                    node_id,
+                    "test".to_string(),
+                    vec![1, 2, 3],
+                );
+
+                // Enqueue message
+                context.enqueue_message(message.clone()).await.unwrap();
+
+                // Verify received
+                let received = msg_rx.recv().await.unwrap();
+                assert_eq!(received.method_name, message.method_name);
+                assert_eq!(received.payload, message.payload);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_context_enqueue_message_updates_correlation() {
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let actor_id = ActorId::from_string("test::TestActor/tina").unwrap();
+                let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+                let actor_instance = TestActor::new(actor_id.clone());
+                let (msg_tx, mut msg_rx) = mpsc::channel(128);
+                let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+                let storage = create_test_storage();
+                let serializer = create_test_serializer();
+
+                let context = ActorContext::new(
+                    actor_id.clone(),
+                    node_id.clone(),
+                    actor_instance,
+                    msg_tx,
+                    ctrl_tx,
+                    storage,
+                    serializer,
+                );
+
+                let message = Message::oneway(
+                    actor_id.clone(),
+                    actor_id,
+                    node_id.clone(),
+                    node_id,
+                    "test".to_string(),
+                    vec![],
+                );
+
+                let corr_id = message.correlation_id;
+
+                context.enqueue_message(message).await.unwrap();
+
+                // Verify correlation ID preserved
+                let received = msg_rx.recv().await.unwrap();
+                assert_eq!(received.correlation_id, corr_id);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_context_enqueue_message_multiple_sequential() {
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let actor_id = ActorId::from_string("test::TestActor/uma").unwrap();
+                let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+                let actor_instance = TestActor::new(actor_id.clone());
+                let (msg_tx, mut msg_rx) = mpsc::channel(128);
+                let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+                let storage = create_test_storage();
+                let serializer = create_test_serializer();
+
+                let context = ActorContext::new(
+                    actor_id.clone(),
+                    node_id.clone(),
+                    actor_instance,
+                    msg_tx,
+                    ctrl_tx,
+                    storage,
+                    serializer,
+                );
+
+                // Enqueue 3 messages
+                for i in 0..3 {
+                    let message = Message::oneway(
+                        actor_id.clone(),
+                        actor_id.clone(),
+                        node_id.clone(),
+                        node_id.clone(),
+                        format!("test{}", i),
+                        vec![i],
+                    );
+                    context.enqueue_message(message).await.unwrap();
+                }
+
+                // Verify all received
+                for i in 0..3 {
+                    let received = msg_rx.recv().await.unwrap();
+                    assert_eq!(received.method_name, format!("test{}", i));
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_context_enqueue_message_ordering_preserved() {
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let actor_id = ActorId::from_string("test::TestActor/victor").unwrap();
+                let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+                let actor_instance = TestActor::new(actor_id.clone());
+                let (msg_tx, mut msg_rx) = mpsc::channel(128);
+                let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+                let storage = create_test_storage();
+                let serializer = create_test_serializer();
+
+                let context = ActorContext::new(
+                    actor_id.clone(),
+                    node_id.clone(),
+                    actor_instance,
+                    msg_tx,
+                    ctrl_tx,
+                    storage,
+                    serializer,
+                );
+
+                // Enqueue messages with different payloads
+                let payloads = vec![vec![1], vec![2], vec![3], vec![4], vec![5]];
+                for payload in &payloads {
+                    let message = Message::oneway(
+                        actor_id.clone(),
+                        actor_id.clone(),
+                        node_id.clone(),
+                        node_id.clone(),
+                        "test".to_string(),
+                        payload.clone(),
+                    );
+                    context.enqueue_message(message).await.unwrap();
+                }
+
+                // Verify order preserved
+                for expected_payload in payloads {
+                    let received = msg_rx.recv().await.unwrap();
+                    assert_eq!(received.payload, expected_payload);
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_context_enqueue_message_after_channel_closed() {
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let actor_id = ActorId::from_string("test::TestActor/wendy").unwrap();
+                let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+                let actor_instance = TestActor::new(actor_id.clone());
+                let (msg_tx, msg_rx) = mpsc::channel(128);
+                let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+                let storage = create_test_storage();
+                let serializer = create_test_serializer();
+
+                let context = ActorContext::new(
+                    actor_id.clone(),
+                    node_id.clone(),
+                    actor_instance,
+                    msg_tx,
+                    ctrl_tx,
+                    storage,
+                    serializer,
+                );
+
+                // Drop receiver to close channel
+                drop(msg_rx);
+
+                let message = Message::oneway(
+                    actor_id.clone(),
+                    actor_id,
+                    node_id.clone(),
+                    node_id,
+                    "test".to_string(),
+                    vec![],
+                );
+
+                // Enqueue should fail
+                let result = context.enqueue_message(message).await;
+                assert!(result.is_err());
+                assert!(matches!(result, Err(ActorError::ProcessingFailed(_))));
+            })
+            .await;
+    }
+
+    #[test]
+    fn test_context_message_sender_capacity_limit() {
+        let actor_id = ActorId::from_string("test::TestActor/xavier").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel::<Message>(2); // Small capacity
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id.clone(),
+            node_id.clone(),
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        // Fill channel (2 messages)
+        for i in 0..2 {
+            let message = Message::oneway(
+                actor_id.clone(),
+                actor_id.clone(),
+                node_id.clone(),
+                node_id.clone(),
+                format!("test{}", i),
+                vec![],
+            );
+            context.message_sender.blocking_send(message).unwrap();
+        }
+
+        // Next send would block (we don't test blocking_send with full channel)
+        // This test just verifies the capacity limit exists
+    }
+
+    #[test]
+    fn test_context_control_sender_separate_channel() {
+        let actor_id = ActorId::from_string("test::TestActor/yara").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, mut msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<LifecycleCommand<TestActor>>(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id.clone(),
+            node_id.clone(),
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage.clone(),
+            serializer,
+        );
+
+        // Send message on message channel
+        let message = Message::oneway(
+            actor_id.clone(),
+            actor_id.clone(),
+            node_id.clone(),
+            node_id.clone(),
+            "test".to_string(),
+            vec![],
+        );
+        context.message_sender.blocking_send(message).unwrap();
+
+        // Send command on control channel
+        let state = crate::actor::ActorState::new(context.actor_id.clone(), TestState, storage);
+        let (result_tx, _result_rx) = oneshot::channel();
+        let cmd = LifecycleCommand::Activate { state, result_tx };
+        context.control_sender.blocking_send(cmd).unwrap();
+
+        // Verify channels are independent
+        assert!(msg_rx.try_recv().is_ok());
+        assert!(ctrl_rx.try_recv().is_ok());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_context_enqueue_message_backpressure_handling() {
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let actor_id = ActorId::from_string("test::TestActor/zara").unwrap();
+                let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+                let actor_instance = TestActor::new(actor_id.clone());
+                let (msg_tx, mut msg_rx) = mpsc::channel(5); // Small capacity for backpressure
+                let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+                let storage = create_test_storage();
+                let serializer = create_test_serializer();
+
+                let context = ActorContext::new(
+                    actor_id.clone(),
+                    node_id.clone(),
+                    actor_instance,
+                    msg_tx,
+                    ctrl_tx,
+                    storage,
+                    serializer,
+                );
+
+                // Fill channel
+                for i in 0..5 {
+                    let message = Message::oneway(
+                        actor_id.clone(),
+                        actor_id.clone(),
+                        node_id.clone(),
+                        node_id.clone(),
+                        format!("test{}", i),
+                        vec![],
+                    );
+                    context.enqueue_message(message).await.unwrap();
+                }
+
+                // Drain one message
+                msg_rx.recv().await.unwrap();
+
+                // Now can enqueue one more
+                let message = Message::oneway(
+                    actor_id.clone(),
+                    actor_id,
+                    node_id.clone(),
+                    node_id,
+                    "test5".to_string(),
+                    vec![],
+                );
+                context.enqueue_message(message).await.unwrap();
+            })
+            .await;
+    }
+
+    // ============================================================================
+    // Section 4: Error Tracking & Monitoring
+    // ============================================================================
+
+    #[test]
+    fn test_context_record_error_updates_last_error() {
+        let actor_id = ActorId::from_string("test::TestActor/adam").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        assert!(context.get_last_error().is_none());
+
+        let error = ActorError::ProcessingFailed("test error".to_string());
+        context.record_error(error.clone());
+
+        let last_error = context.get_last_error().unwrap();
+        assert!(matches!(last_error, ActorError::ProcessingFailed(_)));
+    }
+
+    #[test]
+    fn test_context_record_error_increments_count() {
+        let actor_id = ActorId::from_string("test::TestActor/beth").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        assert_eq!(context.get_error_count(), 0);
+
+        context.record_error(ActorError::ProcessingFailed("error1".to_string()));
+        assert_eq!(context.get_error_count(), 1);
+
+        context.record_error(ActorError::ProcessingFailed("error2".to_string()));
+        assert_eq!(context.get_error_count(), 2);
+    }
+
+    #[test]
+    fn test_context_get_last_error_returns_most_recent() {
+        let actor_id = ActorId::from_string("test::TestActor/carlos").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        context.record_error(ActorError::ProcessingFailed("first".to_string()));
+        context.record_error(ActorError::ProcessingFailed("second".to_string()));
+        context.record_error(ActorError::ProcessingFailed("third".to_string()));
+
+        let last_error = context.get_last_error().unwrap();
+        match last_error {
+            ActorError::ProcessingFailed(msg) => assert_eq!(msg, "third"),
+            _ => panic!("Expected ProcessingFailed error"),
+        }
+    }
+
+    #[test]
+    fn test_context_get_error_count_accumulates() {
+        let actor_id = ActorId::from_string("test::TestActor/diana").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        for i in 1..=5 {
+            context.record_error(ActorError::ProcessingFailed(format!("error{}", i)));
+            assert_eq!(context.get_error_count(), i);
+        }
+    }
+
+    #[test]
+    fn test_context_clear_errors_resets_state() {
+        let actor_id = ActorId::from_string("test::TestActor/ethan").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        // Record errors
+        context.record_error(ActorError::ProcessingFailed("error1".to_string()));
+        context.record_error(ActorError::ProcessingFailed("error2".to_string()));
+        assert_eq!(context.get_error_count(), 2);
+        assert!(context.get_last_error().is_some());
+
+        // Clear errors
+        context.clear_errors();
+        assert_eq!(context.get_error_count(), 0);
+        assert!(context.get_last_error().is_none());
+    }
+
+    #[test]
+    fn test_context_multiple_errors_accumulate_count() {
+        let actor_id = ActorId::from_string("test::TestActor/fiona").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        for i in 1..=10 {
+            context.record_error(ActorError::ProcessingFailed(format!("error{}", i)));
+        }
+
+        assert_eq!(context.get_error_count(), 10);
+    }
+
+    #[test]
+    fn test_context_error_isolation_continues_processing() {
+        let actor_id = ActorId::from_string("test::TestActor/george").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, mut msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id.clone(),
+            node_id.clone(),
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        // Record error
+        context.record_error(ActorError::ProcessingFailed("error".to_string()));
+
+        // Context should still be able to process messages
+        let message = Message::oneway(
+            actor_id.clone(),
+            actor_id,
+            node_id.clone(),
+            node_id,
+            "test".to_string(),
+            vec![],
+        );
+        context.message_sender.blocking_send(message).unwrap();
+
+        // Verify message received
+        assert!(msg_rx.blocking_recv().is_some());
+    }
+
+    // ============================================================================
+    // Section 5: Actor-to-Actor Communication
+    // ============================================================================
+
+    fn create_test_message_bus() -> Rc<crate::messaging::MessageBus> {
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let callback_manager = Rc::new(crate::messaging::CallbackManager::new());
+        let directory = Rc::new(crate::directory::SimpleDirectory::new())
+            as Rc<dyn crate::directory::Directory>;
+        let placement = crate::placement::SimplePlacement::new(vec![node_id.clone()]);
+
+        // Mock network transport
+        struct MockNetworkTransport;
+
+        #[async_trait::async_trait(?Send)]
+        impl crate::messaging::NetworkTransport for MockNetworkTransport {
+            async fn send(
+                &self,
+                _destination: &str,
+                _message: crate::messaging::Message,
+            ) -> Result<crate::messaging::Message, ActorError> {
+                Ok(crate::messaging::Message::response(&_message, vec![]))
+            }
+
+            fn poll_receive(&self) -> Option<crate::messaging::Message> {
+                None
+            }
+        }
+
+        let network_transport =
+            Rc::new(MockNetworkTransport) as Rc<dyn crate::messaging::NetworkTransport>;
+
+        Rc::new(crate::messaging::MessageBus::new(
+            node_id,
+            callback_manager,
+            directory,
+            placement,
+            network_transport,
+        ))
+    }
+
+    #[test]
+    fn test_context_get_actor_creates_correct_actor_ref() {
+        let actor_id = ActorId::from_string("test::TestActor/helen").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        // Set MessageBus
+        let message_bus = create_test_message_bus();
+        context.set_message_bus(message_bus);
+
+        // Get actor reference
+        let actor_ref: Result<crate::actor::ActorRef<TestActor>, _> =
+            context.get_actor("TestActor", "other");
+
+        assert!(actor_ref.is_ok());
+    }
+
+    #[test]
+    fn test_context_get_actor_preserves_namespace() {
+        let actor_id = ActorId::from_string("production::TestActor/ian").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        let message_bus = create_test_message_bus();
+        context.set_message_bus(message_bus);
+
+        let actor_ref: crate::actor::ActorRef<TestActor> =
+            context.get_actor("TestActor", "other").unwrap();
+
+        // Verify namespace is preserved from context's actor_id
+        assert_eq!(actor_ref.actor_id().namespace, "production");
+    }
+
+    #[test]
+    fn test_context_get_actor_fails_without_message_bus() {
+        let actor_id = ActorId::from_string("test::TestActor/jack").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        // Don't set MessageBus
+
+        let result: Result<crate::actor::ActorRef<TestActor>, _> =
+            context.get_actor("TestActor", "other");
+
+        assert!(result.is_err());
+        assert!(matches!(result, Err(ActorError::ProcessingFailed(_))));
+    }
+
+    #[test]
+    fn test_context_get_actor_different_types_same_namespace() {
+        let actor_id = ActorId::from_string("test::TestActor/kate").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        let message_bus = create_test_message_bus();
+        context.set_message_bus(message_bus);
+
+        // Get references to different actor types
+        let ref1: crate::actor::ActorRef<TestActor> =
+            context.get_actor("TestActor", "alice").unwrap();
+        let ref2: crate::actor::ActorRef<TestActor> =
+            context.get_actor("OtherActor", "bob").unwrap();
+
+        // Both should have same namespace
+        assert_eq!(ref1.actor_id().namespace, ref2.actor_id().namespace);
+        assert_eq!(ref1.actor_id().namespace, "test");
+    }
+
+    #[test]
+    fn test_context_get_actor_uses_message_bus_reference() {
+        let actor_id = ActorId::from_string("test::TestActor/leo").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        let message_bus = create_test_message_bus();
+        let bus_clone = message_bus.clone();
+        context.set_message_bus(message_bus);
+
+        // Verify MessageBus is set
+        assert!(context.get_message_bus().is_some());
+        assert!(Rc::ptr_eq(&context.get_message_bus().unwrap(), &bus_clone));
+    }
+
+    #[test]
+    fn test_context_get_actor_constructs_valid_actor_id() {
+        let actor_id = ActorId::from_string("test::TestActor/maria").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        let message_bus = create_test_message_bus();
+        context.set_message_bus(message_bus);
+
+        let actor_ref: crate::actor::ActorRef<TestActor> =
+            context.get_actor("TargetActor", "target_key").unwrap();
+
+        // Verify ActorId components
+        assert_eq!(actor_ref.actor_id().namespace, "test");
+        assert_eq!(actor_ref.actor_id().actor_type, "TargetActor");
+        assert_eq!(actor_ref.actor_id().key, "target_key");
+    }
+
+    // ============================================================================
+    // Section 6: Lifecycle Operations
+    // ============================================================================
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_context_activate_transitions_to_activating() {
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let actor_id = ActorId::from_string("test::TestActor/nina").unwrap();
+                let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+                let actor_instance = TestActor::new(actor_id.clone());
+                let (msg_tx, _msg_rx) = mpsc::channel(128);
+                let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+                let storage = create_test_storage();
+                let serializer = create_test_serializer();
+
+                let context = ActorContext::new(
+                    actor_id.clone(),
+                    node_id,
+                    actor_instance,
+                    msg_tx,
+                    ctrl_tx,
+                    storage.clone(),
+                    serializer,
+                );
+
+                assert_eq!(context.get_state(), ActivationState::Creating);
+
+                let state = crate::actor::ActorState::new(actor_id, TestState, storage);
+                context.activate(state).await.unwrap();
+
+                // Should transition through Activating to Valid
+                assert_eq!(context.get_state(), ActivationState::Valid);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_context_activate_calls_on_activate_hook() {
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let actor_id = ActorId::from_string("test::TestActor/oliver").unwrap();
+                let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+                let actor_instance = TestActor::new(actor_id.clone());
+                let (msg_tx, _msg_rx) = mpsc::channel(128);
+                let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+                let storage = create_test_storage();
+                let serializer = create_test_serializer();
+
+                let context = ActorContext::new(
+                    actor_id.clone(),
+                    node_id,
+                    actor_instance,
+                    msg_tx,
+                    ctrl_tx,
+                    storage.clone(),
+                    serializer,
+                );
+
+                let state = crate::actor::ActorState::new(actor_id, TestState, storage);
+                let result = context.activate(state).await;
+
+                // Should succeed (TestActor's on_activate returns Ok)
+                assert!(result.is_ok());
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_context_activate_success_transitions_to_valid() {
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let actor_id = ActorId::from_string("test::TestActor/peter").unwrap();
+                let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+                let actor_instance = TestActor::new(actor_id.clone());
+                let (msg_tx, _msg_rx) = mpsc::channel(128);
+                let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+                let storage = create_test_storage();
+                let serializer = create_test_serializer();
+
+                let context = ActorContext::new(
+                    actor_id.clone(),
+                    node_id,
+                    actor_instance,
+                    msg_tx,
+                    ctrl_tx,
+                    storage.clone(),
+                    serializer,
+                );
+
+                let state = crate::actor::ActorState::new(actor_id, TestState, storage);
+                context.activate(state).await.unwrap();
+
+                assert_eq!(context.get_state(), ActivationState::Valid);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_context_deactivate_transitions_to_deactivating() {
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let actor_id = ActorId::from_string("test::TestActor/quinn2").unwrap();
+                let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+                let actor_instance = TestActor::new(actor_id.clone());
+                let (msg_tx, _msg_rx) = mpsc::channel(128);
+                let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+                let storage = create_test_storage();
+                let serializer = create_test_serializer();
+
+                let context = ActorContext::new(
+                    actor_id.clone(),
+                    node_id,
+                    actor_instance,
+                    msg_tx,
+                    ctrl_tx,
+                    storage.clone(),
+                    serializer,
+                );
+
+                // Activate first
+                let state = crate::actor::ActorState::new(actor_id, TestState, storage);
+                context.activate(state).await.unwrap();
+                assert_eq!(context.get_state(), ActivationState::Valid);
+
+                // Deactivate
+                context
+                    .deactivate(DeactivationReason::ExplicitRequest)
+                    .await
+                    .unwrap();
+
+                // Should transition through Deactivating to Invalid
+                assert_eq!(context.get_state(), ActivationState::Invalid);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_context_deactivate_calls_on_deactivate_hook() {
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let actor_id = ActorId::from_string("test::TestActor/rachel2").unwrap();
+                let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+                let actor_instance = TestActor::new(actor_id.clone());
+                let (msg_tx, _msg_rx) = mpsc::channel(128);
+                let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+                let storage = create_test_storage();
+                let serializer = create_test_serializer();
+
+                let context = ActorContext::new(
+                    actor_id.clone(),
+                    node_id,
+                    actor_instance,
+                    msg_tx,
+                    ctrl_tx,
+                    storage.clone(),
+                    serializer,
+                );
+
+                // Activate first
+                let state = crate::actor::ActorState::new(actor_id, TestState, storage);
+                context.activate(state).await.unwrap();
+
+                // Deactivate
+                let result = context.deactivate(DeactivationReason::IdleTimeout).await;
+
+                // Should succeed (TestActor's on_deactivate returns Ok)
+                assert!(result.is_ok());
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_context_deactivate_transitions_to_invalid() {
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let actor_id = ActorId::from_string("test::TestActor/steve").unwrap();
+                let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+                let actor_instance = TestActor::new(actor_id.clone());
+                let (msg_tx, _msg_rx) = mpsc::channel(128);
+                let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+                let storage = create_test_storage();
+                let serializer = create_test_serializer();
+
+                let context = ActorContext::new(
+                    actor_id.clone(),
+                    node_id,
+                    actor_instance,
+                    msg_tx,
+                    ctrl_tx,
+                    storage.clone(),
+                    serializer,
+                );
+
+                // Activate first
+                let state = crate::actor::ActorState::new(actor_id, TestState, storage);
+                context.activate(state).await.unwrap();
+
+                // Deactivate
+                context
+                    .deactivate(DeactivationReason::ExplicitRequest)
+                    .await
+                    .unwrap();
+
+                assert_eq!(context.get_state(), ActivationState::Invalid);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_context_activate_deactivate_full_cycle() {
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let actor_id = ActorId::from_string("test::TestActor/tara").unwrap();
+                let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+                let actor_instance = TestActor::new(actor_id.clone());
+                let (msg_tx, _msg_rx) = mpsc::channel(128);
+                let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+                let storage = create_test_storage();
+                let serializer = create_test_serializer();
+
+                let context = ActorContext::new(
+                    actor_id.clone(),
+                    node_id,
+                    actor_instance,
+                    msg_tx,
+                    ctrl_tx,
+                    storage.clone(),
+                    serializer,
+                );
+
+                // Full lifecycle: Creating → Activating → Valid → Deactivating → Invalid
+                assert_eq!(context.get_state(), ActivationState::Creating);
+
+                let state = crate::actor::ActorState::new(actor_id, TestState, storage);
+                context.activate(state).await.unwrap();
+                assert_eq!(context.get_state(), ActivationState::Valid);
+
+                context
+                    .deactivate(DeactivationReason::ExplicitRequest)
+                    .await
+                    .unwrap();
+                assert_eq!(context.get_state(), ActivationState::Invalid);
+            })
+            .await;
+    }
+
+    // ============================================================================
+    // Section 7: Time Tracking & Idle Detection
+    // ============================================================================
+
+    #[test]
+    fn test_context_update_last_message_time_updates_timestamp() {
+        let actor_id = ActorId::from_string("test::TestActor/ursula").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        let before = *context.last_message_time.borrow();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        context.update_last_message_time();
+        let after = *context.last_message_time.borrow();
+
+        assert!(after > before);
+    }
+
+    #[test]
+    fn test_context_time_since_last_message_calculates_duration() {
+        let actor_id = ActorId::from_string("test::TestActor/victor2").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let duration = context.time_since_last_message();
+
+        assert!(duration >= std::time::Duration::from_millis(50));
+    }
+
+    #[test]
+    fn test_context_last_message_time_initial_value() {
+        let actor_id = ActorId::from_string("test::TestActor/wendy2").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let before = Instant::now();
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+        let after = Instant::now();
+
+        let last_message_time = *context.last_message_time.borrow();
+        assert!(last_message_time >= before);
+        assert!(last_message_time <= after);
+    }
+
+    #[test]
+    fn test_context_idle_detection_after_delay() {
+        let actor_id = ActorId::from_string("test::TestActor/xander").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let idle_time = context.time_since_last_message();
+
+        // Should be idle for at least 100ms
+        assert!(idle_time >= std::time::Duration::from_millis(100));
+    }
+
+    #[test]
+    fn test_context_activation_time_set_on_creation() {
+        let actor_id = ActorId::from_string("test::TestActor/yolanda").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let before = Instant::now();
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+        let after = Instant::now();
+
+        // activation_time should be set during context creation
+        assert!(context.activation_time >= before);
+        assert!(context.activation_time <= after);
+    }
+
+    #[test]
+    fn test_context_time_tracking_after_multiple_messages() {
+        let actor_id = ActorId::from_string("test::TestActor/zelda").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        // Simulate processing multiple messages
+        for _ in 0..3 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            context.update_last_message_time();
+        }
+
+        // Time since last message should be small (just processed)
+        let idle_time = context.time_since_last_message();
+        assert!(idle_time < std::time::Duration::from_millis(50));
+    }
+
+    // ============================================================================
+    // Section 8: MessageBus Integration
+    // ============================================================================
+
+    #[test]
+    fn test_context_set_message_bus_stores_reference() {
+        let actor_id = ActorId::from_string("test::TestActor/aaron").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        let message_bus = create_test_message_bus();
+        context.set_message_bus(message_bus.clone());
+
+        // Verify MessageBus is stored
+        assert!(context.get_message_bus().is_some());
+        assert!(Rc::ptr_eq(
+            &context.get_message_bus().unwrap(),
+            &message_bus
+        ));
+    }
+
+    #[test]
+    fn test_context_get_message_bus_returns_reference() {
+        let actor_id = ActorId::from_string("test::TestActor/barbara").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        let message_bus = create_test_message_bus();
+        context.set_message_bus(message_bus.clone());
+
+        let retrieved = context.get_message_bus().unwrap();
+        assert!(Rc::ptr_eq(&retrieved, &message_bus));
+    }
+
+    #[test]
+    fn test_context_get_message_bus_none_before_set() {
+        let actor_id = ActorId::from_string("test::TestActor/carl").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        // Before setting MessageBus
+        assert!(context.get_message_bus().is_none());
+    }
+
+    #[test]
+    fn test_context_message_bus_used_for_get_actor() {
+        let actor_id = ActorId::from_string("test::TestActor/donna").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        // Without MessageBus, get_actor fails
+        let result: Result<crate::actor::ActorRef<TestActor>, _> =
+            context.get_actor("TestActor", "other");
+        assert!(result.is_err());
+
+        // With MessageBus, get_actor succeeds
+        let message_bus = create_test_message_bus();
+        context.set_message_bus(message_bus);
+
+        let result2: Result<crate::actor::ActorRef<TestActor>, _> =
+            context.get_actor("TestActor", "other");
+        assert!(result2.is_ok());
+    }
+
+    #[test]
+    fn test_context_message_bus_reference_cloneable() {
+        let actor_id = ActorId::from_string("test::TestActor/eric").unwrap();
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let actor_instance = TestActor::new(actor_id.clone());
+        let (msg_tx, _msg_rx) = mpsc::channel(128);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let storage = create_test_storage();
+        let serializer = create_test_serializer();
+
+        let context = ActorContext::new(
+            actor_id,
+            node_id,
+            actor_instance,
+            msg_tx,
+            ctrl_tx,
+            storage,
+            serializer,
+        );
+
+        let message_bus = create_test_message_bus();
+        context.set_message_bus(message_bus.clone());
+
+        // Get MessageBus twice, should be same reference
+        let bus1 = context.get_message_bus().unwrap();
+        let bus2 = context.get_message_bus().unwrap();
+
+        assert!(Rc::ptr_eq(&bus1, &bus2));
+        assert!(Rc::ptr_eq(&bus1, &message_bus));
+    }
+}

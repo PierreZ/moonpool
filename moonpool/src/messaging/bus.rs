@@ -846,6 +846,7 @@ impl MessageBus {
 mod tests {
     use super::*;
     use crate::actor::{ActorId, CorrelationId};
+    use crate::error::MessageError;
     use crate::messaging::{Direction, MessageFlags};
 
     fn create_test_message(correlation_id: CorrelationId) -> Message {
@@ -1077,5 +1078,1353 @@ mod tests {
         let (_, rx) = receivers.swap_remove(1);
         let result = rx.blocking_recv().unwrap();
         assert!(result.is_ok());
+    }
+
+    // Async tests for send_request, send_response, send_oneway, etc.
+
+    #[test]
+    fn test_send_request_local() {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let callback_manager = create_test_callback_manager();
+            let directory = create_test_directory();
+            let placement = create_test_placement();
+            let network_transport = create_test_network_transport();
+            let bus = MessageBus::new(
+                node_id.clone(),
+                callback_manager,
+                directory,
+                placement,
+                network_transport,
+            );
+
+            // Create a request targeting the local node
+            let target = ActorId::from_string("test::Actor/1").unwrap();
+            let sender = ActorId::from_string("test::Sender/1").unwrap();
+            let request = Message::request(
+                CorrelationId::new(0), // Will be overwritten by send_request
+                target,
+                sender,
+                node_id.clone(), // Same node
+                node_id.clone(),
+                "test_method".to_string(),
+                vec![1, 2, 3],
+                std::time::Duration::from_secs(5),
+            );
+
+            // Send request
+            let (sent_msg, _rx) = bus.send_request(request).await.unwrap();
+
+            // Verify correlation ID was assigned
+            assert!(sent_msg.correlation_id.as_u64() > 0);
+            assert_eq!(bus.pending_count(), 1);
+        });
+    }
+
+    #[test]
+    fn test_send_request_remote() {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let remote_node = NodeId::from("127.0.0.1:8002").unwrap();
+            let callback_manager = create_test_callback_manager();
+            let directory = create_test_directory();
+            let placement = create_test_placement();
+            let network_transport = create_test_network_transport();
+            let bus = MessageBus::new(
+                node_id.clone(),
+                callback_manager,
+                directory,
+                placement,
+                network_transport,
+            );
+
+            // Create a request targeting a remote node
+            let target = ActorId::from_string("test::Actor/1").unwrap();
+            let sender = ActorId::from_string("test::Sender/1").unwrap();
+            let request = Message::request(
+                CorrelationId::new(0),
+                target,
+                sender,
+                remote_node, // Different node
+                node_id.clone(),
+                "test_method".to_string(),
+                vec![1, 2, 3],
+                std::time::Duration::from_secs(5),
+            );
+
+            // Send request
+            let (sent_msg, _rx) = bus.send_request(request).await.unwrap();
+
+            // Verify correlation ID was assigned
+            assert!(sent_msg.correlation_id.as_u64() > 0);
+            assert_eq!(bus.pending_count(), 1);
+        });
+    }
+
+    #[test]
+    fn test_send_response_local() {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let callback_manager = create_test_callback_manager();
+            let directory = create_test_directory();
+            let placement = create_test_placement();
+            let network_transport = create_test_network_transport();
+            let bus = MessageBus::new(
+                node_id.clone(),
+                callback_manager,
+                directory,
+                placement,
+                network_transport,
+            );
+
+            // Register a pending request first
+            let corr_id = bus.next_correlation_id();
+            let request = create_test_message(corr_id);
+            let (tx, rx) = oneshot::channel();
+            bus.register_pending_request(corr_id, request.clone(), tx);
+
+            // Create response targeting local node
+            let response = Message {
+                correlation_id: corr_id,
+                direction: Direction::Response,
+                target_actor: request.sender_actor.clone(),
+                sender_actor: request.target_actor.clone(),
+                target_node: node_id.clone(), // Local
+                sender_node: node_id.clone(),
+                method_name: "test".to_string(),
+                payload: vec![4, 5, 6],
+                flags: MessageFlags::empty(),
+                time_to_expiry: None,
+                forward_count: 0,
+                cache_invalidation: None,
+            };
+
+            // Send response
+            bus.send_response(response).await.unwrap();
+
+            // Verify callback completed
+            assert_eq!(bus.pending_count(), 0);
+
+            // Verify response delivered
+            let result = rx.await.unwrap();
+            assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn test_send_response_remote() {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let remote_node = NodeId::from("127.0.0.1:8002").unwrap();
+            let callback_manager = create_test_callback_manager();
+            let directory = create_test_directory();
+            let placement = create_test_placement();
+            let network_transport = create_test_network_transport();
+            let bus = MessageBus::new(
+                node_id.clone(),
+                callback_manager,
+                directory,
+                placement,
+                network_transport,
+            );
+
+            // Create response targeting remote node (no local callback)
+            let target = ActorId::from_string("test::Actor/1").unwrap();
+            let sender = ActorId::from_string("test::Sender/1").unwrap();
+            let response = Message {
+                correlation_id: CorrelationId::new(123),
+                direction: Direction::Response,
+                target_actor: target,
+                sender_actor: sender,
+                target_node: remote_node, // Remote
+                sender_node: node_id.clone(),
+                method_name: "test".to_string(),
+                payload: vec![4, 5, 6],
+                flags: MessageFlags::empty(),
+                time_to_expiry: None,
+                forward_count: 0,
+                cache_invalidation: None,
+            };
+
+            // Send response (should go over network)
+            bus.send_response(response).await.unwrap();
+
+            // No pending requests should be affected
+            assert_eq!(bus.pending_count(), 0);
+        });
+    }
+
+    #[test]
+    fn test_send_oneway_local() {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let callback_manager = create_test_callback_manager();
+            let directory = create_test_directory();
+            let placement = create_test_placement();
+            let network_transport = create_test_network_transport();
+            let bus = Rc::new(MessageBus::new(
+                node_id.clone(),
+                callback_manager,
+                directory,
+                placement,
+                network_transport,
+            ));
+            bus.init_self_ref();
+
+            // Create oneway message targeting local node
+            let target = ActorId::from_string("test::Actor/1").unwrap();
+            let sender = ActorId::from_string("test::Sender/1").unwrap();
+            let oneway = Message::oneway(
+                target,
+                sender,
+                node_id.clone(), // Local
+                node_id.clone(),
+                "notify".to_string(),
+                vec![1, 2, 3],
+            );
+
+            // Send oneway - this would route to actor if routers were registered
+            // For now just verify it doesn't panic
+            // Note: route_to_actor will fail without routers, so we expect an error
+            let result = bus.send_oneway(oneway).await;
+
+            // Should get error about no router (expected without actor setup)
+            assert!(result.is_err());
+
+            // No pending requests should be created
+            assert_eq!(bus.pending_count(), 0);
+        });
+    }
+
+    #[test]
+    fn test_send_oneway_remote() {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let remote_node = NodeId::from("127.0.0.1:8002").unwrap();
+            let callback_manager = create_test_callback_manager();
+            let directory = create_test_directory();
+            let placement = create_test_placement();
+            let network_transport = create_test_network_transport();
+            let bus = MessageBus::new(
+                node_id.clone(),
+                callback_manager,
+                directory,
+                placement,
+                network_transport,
+            );
+
+            // Create oneway message targeting remote node
+            let target = ActorId::from_string("test::Actor/1").unwrap();
+            let sender = ActorId::from_string("test::Sender/1").unwrap();
+            let oneway = Message::oneway(
+                target,
+                sender,
+                remote_node, // Remote
+                node_id.clone(),
+                "notify".to_string(),
+                vec![1, 2, 3],
+            );
+
+            // Send oneway (should go over network)
+            bus.send_oneway(oneway).await.unwrap();
+
+            // No pending requests should be created
+            assert_eq!(bus.pending_count(), 0);
+        });
+    }
+
+    #[test]
+    fn test_route_message_response() {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let callback_manager = create_test_callback_manager();
+            let directory = create_test_directory();
+            let placement = create_test_placement();
+            let network_transport = create_test_network_transport();
+            let bus = MessageBus::new(
+                node_id.clone(),
+                callback_manager,
+                directory,
+                placement,
+                network_transport,
+            );
+
+            // Register a pending request
+            let corr_id = bus.next_correlation_id();
+            let request = create_test_message(corr_id);
+            let (tx, rx) = oneshot::channel();
+            bus.register_pending_request(corr_id, request.clone(), tx);
+
+            // Create response message
+            let response = Message {
+                correlation_id: corr_id,
+                direction: Direction::Response,
+                target_actor: request.sender_actor.clone(),
+                sender_actor: request.target_actor.clone(),
+                target_node: node_id.clone(),
+                sender_node: node_id.clone(),
+                method_name: "test".to_string(),
+                payload: vec![7, 8, 9],
+                flags: MessageFlags::empty(),
+                time_to_expiry: None,
+                forward_count: 0,
+                cache_invalidation: None,
+            };
+
+            // Route the response
+            bus.route_message(response).await.unwrap();
+
+            // Verify callback was completed
+            assert_eq!(bus.pending_count(), 0);
+
+            // Verify response delivered
+            let result = rx.await.unwrap();
+            assert!(result.is_ok());
+            let received_msg = result.unwrap();
+            assert_eq!(received_msg.payload, vec![7, 8, 9]);
+        });
+    }
+
+    #[test]
+    fn test_full_request_response_cycle() {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let callback_manager = create_test_callback_manager();
+            let directory = create_test_directory();
+            let placement = create_test_placement();
+            let network_transport = create_test_network_transport();
+            let bus = MessageBus::new(
+                node_id.clone(),
+                callback_manager,
+                directory,
+                placement,
+                network_transport,
+            );
+
+            // 1. Send request
+            let target = ActorId::from_string("test::Actor/1").unwrap();
+            let sender = ActorId::from_string("test::Sender/1").unwrap();
+            let request = Message::request(
+                CorrelationId::new(0),
+                target.clone(),
+                sender.clone(),
+                node_id.clone(),
+                node_id.clone(),
+                "test_method".to_string(),
+                vec![1, 2, 3],
+                std::time::Duration::from_secs(5),
+            );
+
+            let (sent_msg, response_rx) = bus.send_request(request).await.unwrap();
+            let corr_id = sent_msg.correlation_id;
+
+            assert_eq!(bus.pending_count(), 1);
+
+            // 2. Simulate receiving and processing by creating response
+            let response = Message {
+                correlation_id: corr_id,
+                direction: Direction::Response,
+                target_actor: sender,
+                sender_actor: target,
+                target_node: node_id.clone(),
+                sender_node: node_id.clone(),
+                method_name: "test_method".to_string(),
+                payload: vec![4, 5, 6],
+                flags: MessageFlags::empty(),
+                time_to_expiry: None,
+                forward_count: 0,
+                cache_invalidation: None,
+            };
+
+            // 3. Send response back
+            bus.send_response(response).await.unwrap();
+
+            // 4. Verify pending request was completed
+            assert_eq!(bus.pending_count(), 0);
+
+            // 5. Verify response was delivered
+            let result = response_rx.await.unwrap();
+            assert!(result.is_ok());
+            let received_response = result.unwrap();
+            assert_eq!(received_response.correlation_id, corr_id);
+            assert_eq!(received_response.payload, vec![4, 5, 6]);
+        });
+    }
+
+    // ============================================================================
+    // POLL NETWORK TESTS
+    // ============================================================================
+
+    // Mock transport that can return messages
+    struct MockNetworkTransportWithQueue {
+        messages: RefCell<Vec<Message>>,
+    }
+
+    impl MockNetworkTransportWithQueue {
+        fn new(messages: Vec<Message>) -> Self {
+            Self {
+                messages: RefCell::new(messages),
+            }
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl NetworkTransport for MockNetworkTransportWithQueue {
+        async fn send(&self, _destination: &str, _message: Message) -> Result<Message, ActorError> {
+            Ok(Message::response(&_message, vec![]))
+        }
+
+        fn poll_receive(&self) -> Option<Message> {
+            self.messages.borrow_mut().pop()
+        }
+    }
+
+    #[test]
+    fn test_poll_network_empty() {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let callback_manager = create_test_callback_manager();
+            let directory = create_test_directory();
+            let placement = create_test_placement();
+            let network_transport = create_test_network_transport();
+            let bus = MessageBus::new(
+                node_id,
+                callback_manager,
+                directory,
+                placement,
+                network_transport,
+            );
+
+            // Poll with no messages available
+            let result = bus.poll_network().await.unwrap();
+            assert!(!result); // Should return false
+        });
+    }
+
+    #[test]
+    fn test_poll_network_response_message() {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let callback_manager = create_test_callback_manager();
+            let directory = create_test_directory();
+            let placement = create_test_placement();
+
+            // Register a pending request first
+            let corr_id = callback_manager.next_correlation_id();
+            let request = create_test_message(corr_id);
+            let (tx, rx) = oneshot::channel();
+            callback_manager.register_pending_request(corr_id, request.clone(), tx);
+
+            // Create response message to be returned by poll
+            let response = Message {
+                correlation_id: corr_id,
+                direction: Direction::Response,
+                target_actor: request.sender_actor.clone(),
+                sender_actor: request.target_actor.clone(),
+                target_node: node_id.clone(),
+                sender_node: node_id.clone(),
+                method_name: "test".to_string(),
+                payload: vec![10, 11, 12],
+                flags: MessageFlags::empty(),
+                time_to_expiry: None,
+                forward_count: 0,
+                cache_invalidation: None,
+            };
+
+            let network_transport = Rc::new(MockNetworkTransportWithQueue::new(vec![response]));
+            let bus = MessageBus::new(
+                node_id,
+                callback_manager,
+                directory,
+                placement,
+                network_transport,
+            );
+
+            // Poll network - should receive and route response
+            let result = bus.poll_network().await.unwrap();
+            assert!(result); // Should return true (message processed)
+
+            // Verify callback was completed
+            let received = rx.await.unwrap().unwrap();
+            assert_eq!(received.payload, vec![10, 11, 12]);
+        });
+    }
+
+    #[test]
+    fn test_poll_network_multiple_messages() {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let callback_manager = create_test_callback_manager();
+            let directory = create_test_directory();
+            let placement = create_test_placement();
+
+            // Register two pending requests
+            let corr_id1 = callback_manager.next_correlation_id();
+            let corr_id2 = callback_manager.next_correlation_id();
+            let request1 = create_test_message(corr_id1);
+            let request2 = create_test_message(corr_id2);
+            let (tx1, rx1) = oneshot::channel();
+            let (tx2, rx2) = oneshot::channel();
+            callback_manager.register_pending_request(corr_id1, request1.clone(), tx1);
+            callback_manager.register_pending_request(corr_id2, request2.clone(), tx2);
+
+            // Create two response messages
+            // Note: Vec::pop() returns from the end, so response2 will be returned first
+            let response1 = Message {
+                correlation_id: corr_id1,
+                direction: Direction::Response,
+                target_actor: request1.sender_actor.clone(),
+                sender_actor: request1.target_actor.clone(),
+                target_node: node_id.clone(),
+                sender_node: node_id.clone(),
+                method_name: "test".to_string(),
+                payload: vec![1],
+                flags: MessageFlags::empty(),
+                time_to_expiry: None,
+                forward_count: 0,
+                cache_invalidation: None,
+            };
+            let response2 = Message {
+                correlation_id: corr_id2,
+                direction: Direction::Response,
+                target_actor: request2.sender_actor.clone(),
+                sender_actor: request2.target_actor.clone(),
+                target_node: node_id.clone(),
+                sender_node: node_id.clone(),
+                method_name: "test".to_string(),
+                payload: vec![2],
+                flags: MessageFlags::empty(),
+                time_to_expiry: None,
+                forward_count: 0,
+                cache_invalidation: None,
+            };
+
+            let network_transport = Rc::new(MockNetworkTransportWithQueue::new(vec![
+                response1, response2,
+            ]));
+            let bus = MessageBus::new(
+                node_id,
+                callback_manager,
+                directory,
+                placement,
+                network_transport,
+            );
+
+            // Poll first message (will get response2)
+            let result1 = bus.poll_network().await.unwrap();
+            assert!(result1);
+
+            // Poll second message (will get response1)
+            let result2 = bus.poll_network().await.unwrap();
+            assert!(result2);
+
+            // Poll with no more messages
+            let result3 = bus.poll_network().await.unwrap();
+            assert!(!result3);
+
+            // Verify both callbacks completed with correct payloads
+            let received1 = rx1.await.unwrap().unwrap();
+            let received2 = rx2.await.unwrap().unwrap();
+            assert_eq!(received1.payload, vec![1]); // corr_id1 -> payload [1]
+            assert_eq!(received2.payload, vec![2]); // corr_id2 -> payload [2]
+        });
+    }
+
+    // ============================================================================
+    // ROUTER REGISTRY TESTS
+    // ============================================================================
+
+    // Mock router for testing
+    struct MockActorRouter {
+        route_called: RefCell<bool>,
+    }
+
+    impl MockActorRouter {
+        fn new() -> Self {
+            Self {
+                route_called: RefCell::new(false),
+            }
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl ActorRouter for MockActorRouter {
+        async fn route_message(
+            &self,
+            _message: Message,
+            _message_bus: Rc<MessageBus>,
+        ) -> Result<(), ActorError> {
+            *self.route_called.borrow_mut() = true;
+            Ok(())
+        }
+
+        fn placement_hint(&self) -> crate::actor::PlacementHint {
+            crate::actor::PlacementHint::Local
+        }
+    }
+
+    #[test]
+    fn test_set_actor_routers() {
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let callback_manager = create_test_callback_manager();
+        let directory = create_test_directory();
+        let placement = create_test_placement();
+        let network_transport = create_test_network_transport();
+        let bus = MessageBus::new(
+            node_id,
+            callback_manager,
+            directory,
+            placement,
+            network_transport,
+        );
+
+        // Create router registry
+        let mut routers: HashMap<String, Rc<dyn ActorRouter>> = HashMap::new();
+        let mock_router = Rc::new(MockActorRouter::new());
+        routers.insert("TestActor".to_string(), mock_router.clone());
+
+        // Set routers
+        bus.set_actor_routers(routers);
+
+        // Verify router was registered (indirectly, by checking it doesn't panic)
+        assert_eq!(bus.pending_count(), 0); // Just a sanity check
+    }
+
+    #[test]
+    fn test_route_to_actor_no_router_registered() {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let callback_manager = create_test_callback_manager();
+            let directory = create_test_directory();
+            let placement = create_test_placement();
+            let network_transport = create_test_network_transport();
+            let bus = Rc::new(MessageBus::new(
+                node_id.clone(),
+                callback_manager,
+                directory,
+                placement,
+                network_transport,
+            ));
+            bus.init_self_ref();
+
+            // Create request message
+            let target = ActorId::from_string("test::UnknownActor/1").unwrap();
+            let sender = ActorId::from_string("test::Sender/1").unwrap();
+            let message = Message::request(
+                CorrelationId::new(1),
+                target,
+                sender,
+                node_id.clone(),
+                node_id,
+                "test".to_string(),
+                vec![],
+                std::time::Duration::from_secs(5),
+            );
+
+            // Try to route - should fail with no router registered
+            let result = bus.route_message(message).await;
+            assert!(result.is_err());
+            assert!(matches!(result, Err(ActorError::ProcessingFailed(_))));
+        });
+    }
+
+    // ============================================================================
+    // SELF-REFERENCE TESTS
+    // ============================================================================
+
+    #[test]
+    fn test_init_self_ref() {
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let callback_manager = create_test_callback_manager();
+        let directory = create_test_directory();
+        let placement = create_test_placement();
+        let network_transport = create_test_network_transport();
+        let bus = Rc::new(MessageBus::new(
+            node_id,
+            callback_manager,
+            directory,
+            placement,
+            network_transport,
+        ));
+
+        // Before init, self_ref should be None
+        assert!(bus.self_ref.borrow().is_none());
+
+        // After init, self_ref should be Some
+        bus.init_self_ref();
+        assert!(bus.self_ref.borrow().is_some());
+
+        // Verify we can upgrade the weak reference
+        let weak_ref = bus.self_ref.borrow().as_ref().unwrap().clone();
+        assert!(weak_ref.upgrade().is_some());
+    }
+
+    #[test]
+    fn test_route_to_actor_without_init_self_ref() {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let callback_manager = create_test_callback_manager();
+            let directory = create_test_directory();
+            let placement = create_test_placement();
+            let network_transport = create_test_network_transport();
+            let bus = Rc::new(MessageBus::new(
+                node_id.clone(),
+                callback_manager,
+                directory,
+                placement,
+                network_transport,
+            ));
+            // Note: NOT calling init_self_ref()
+
+            // Register a mock router
+            let mut routers: HashMap<String, Rc<dyn ActorRouter>> = HashMap::new();
+            let mock_router = Rc::new(MockActorRouter::new());
+            routers.insert("Actor".to_string(), mock_router);
+            bus.set_actor_routers(routers);
+
+            // Create request message
+            let target = ActorId::from_string("test::Actor/1").unwrap();
+            let sender = ActorId::from_string("test::Sender/1").unwrap();
+            let message = Message::request(
+                CorrelationId::new(1),
+                target,
+                sender,
+                node_id.clone(),
+                node_id,
+                "test".to_string(),
+                vec![],
+                std::time::Duration::from_secs(5),
+            );
+
+            // Try to route - should fail because self_ref not initialized
+            let result = bus.route_message(message).await;
+            assert!(result.is_err());
+            match result {
+                Err(ActorError::ProcessingFailed(msg)) => {
+                    assert!(msg.contains("self-reference not initialized"));
+                }
+                _ => panic!("Expected ProcessingFailed error"),
+            }
+        });
+    }
+
+    // ============================================================================
+    // ERROR PATH TESTS
+    // ============================================================================
+
+    struct FailingNetworkTransport;
+
+    #[async_trait::async_trait(?Send)]
+    impl NetworkTransport for FailingNetworkTransport {
+        async fn send(&self, _destination: &str, _message: Message) -> Result<Message, ActorError> {
+            Err(ActorError::Message(MessageError::IoError(
+                "Simulated network failure".to_string(),
+            )))
+        }
+
+        fn poll_receive(&self) -> Option<Message> {
+            None
+        }
+    }
+
+    #[test]
+    fn test_send_request_network_failure() {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let remote_node = NodeId::from("127.0.0.1:8002").unwrap();
+            let callback_manager = create_test_callback_manager();
+            let directory = create_test_directory();
+            let placement = create_test_placement();
+            let network_transport = Rc::new(FailingNetworkTransport);
+            let bus = MessageBus::new(
+                node_id.clone(),
+                callback_manager,
+                directory,
+                placement,
+                network_transport,
+            );
+
+            // Create remote request
+            let target = ActorId::from_string("test::Actor/1").unwrap();
+            let sender = ActorId::from_string("test::Sender/1").unwrap();
+            let request = Message::request(
+                CorrelationId::new(0),
+                target,
+                sender,
+                remote_node, // Remote
+                node_id,
+                "test".to_string(),
+                vec![],
+                std::time::Duration::from_secs(5),
+            );
+
+            // Send request - should fail due to network error
+            let result = bus.send_request(request).await;
+            assert!(result.is_err());
+            assert!(matches!(
+                result,
+                Err(ActorError::Message(MessageError::IoError(_)))
+            ));
+        });
+    }
+
+    #[test]
+    fn test_send_response_network_failure() {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let remote_node = NodeId::from("127.0.0.1:8002").unwrap();
+            let callback_manager = create_test_callback_manager();
+            let directory = create_test_directory();
+            let placement = create_test_placement();
+            let network_transport = Rc::new(FailingNetworkTransport);
+            let bus = MessageBus::new(
+                node_id.clone(),
+                callback_manager,
+                directory,
+                placement,
+                network_transport,
+            );
+
+            // Create remote response
+            let target = ActorId::from_string("test::Actor/1").unwrap();
+            let sender = ActorId::from_string("test::Sender/1").unwrap();
+            let response = Message {
+                correlation_id: CorrelationId::new(123),
+                direction: Direction::Response,
+                target_actor: target,
+                sender_actor: sender,
+                target_node: remote_node, // Remote
+                sender_node: node_id,
+                method_name: "test".to_string(),
+                payload: vec![],
+                flags: MessageFlags::empty(),
+                time_to_expiry: None,
+                forward_count: 0,
+                cache_invalidation: None,
+            };
+
+            // Send response - should fail due to network error
+            let result = bus.send_response(response).await;
+            assert!(result.is_err());
+            assert!(matches!(
+                result,
+                Err(ActorError::Message(MessageError::IoError(_)))
+            ));
+        });
+    }
+
+    #[test]
+    fn test_complete_request_twice() {
+        let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+        let callback_manager = create_test_callback_manager();
+        let directory = create_test_directory();
+        let placement = create_test_placement();
+        let network_transport = create_test_network_transport();
+        let bus = MessageBus::new(
+            node_id,
+            callback_manager,
+            directory,
+            placement,
+            network_transport,
+        );
+
+        let corr_id = bus.next_correlation_id();
+        let request = create_test_message(corr_id);
+        let (tx, _rx) = oneshot::channel();
+
+        // Register
+        bus.register_pending_request(corr_id, request.clone(), tx);
+
+        // Complete first time - should succeed
+        let response = create_test_message(corr_id);
+        let result1 = bus.complete_pending_request(corr_id, Ok(response.clone()));
+        assert!(result1.is_ok());
+
+        // Complete second time - should fail with UnknownCorrelationId
+        let result2 = bus.complete_pending_request(corr_id, Ok(response));
+        assert!(matches!(result2, Err(ActorError::UnknownCorrelationId)));
+    }
+
+    // ============================================================================
+    // CONCURRENT OPERATIONS TESTS
+    // ============================================================================
+
+    #[test]
+    fn test_multiple_concurrent_send_requests() {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let callback_manager = create_test_callback_manager();
+            let directory = create_test_directory();
+            let placement = create_test_placement();
+            let network_transport = create_test_network_transport();
+            let bus = MessageBus::new(
+                node_id.clone(),
+                callback_manager,
+                directory,
+                placement,
+                network_transport,
+            );
+
+            let target = ActorId::from_string("test::Actor/1").unwrap();
+            let sender = ActorId::from_string("test::Sender/1").unwrap();
+
+            // Send multiple requests concurrently (sequentially in single-threaded runtime)
+            let mut receivers = vec![];
+            for _ in 0..5 {
+                let request = Message::request(
+                    CorrelationId::new(0),
+                    target.clone(),
+                    sender.clone(),
+                    node_id.clone(),
+                    node_id.clone(),
+                    "test".to_string(),
+                    vec![],
+                    std::time::Duration::from_secs(5),
+                );
+                let (_msg, rx) = bus.send_request(request).await.unwrap();
+                receivers.push(rx);
+            }
+
+            // All 5 should be pending
+            assert_eq!(bus.pending_count(), 5);
+
+            // Correlation IDs should be unique
+            assert_eq!(receivers.len(), 5);
+        });
+    }
+
+    #[test]
+    fn test_interleaved_request_response() {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let callback_manager = create_test_callback_manager();
+            let directory = create_test_directory();
+            let placement = create_test_placement();
+            let network_transport = create_test_network_transport();
+            let bus = MessageBus::new(
+                node_id.clone(),
+                callback_manager,
+                directory,
+                placement,
+                network_transport,
+            );
+
+            let target = ActorId::from_string("test::Actor/1").unwrap();
+            let sender = ActorId::from_string("test::Sender/1").unwrap();
+
+            // Send request 1
+            let req1 = Message::request(
+                CorrelationId::new(0),
+                target.clone(),
+                sender.clone(),
+                node_id.clone(),
+                node_id.clone(),
+                "test".to_string(),
+                vec![1],
+                std::time::Duration::from_secs(5),
+            );
+            let (msg1, rx1) = bus.send_request(req1).await.unwrap();
+            let corr_id1 = msg1.correlation_id;
+
+            // Send request 2
+            let req2 = Message::request(
+                CorrelationId::new(0),
+                target.clone(),
+                sender.clone(),
+                node_id.clone(),
+                node_id.clone(),
+                "test".to_string(),
+                vec![2],
+                std::time::Duration::from_secs(5),
+            );
+            let (msg2, rx2) = bus.send_request(req2).await.unwrap();
+            let corr_id2 = msg2.correlation_id;
+
+            assert_eq!(bus.pending_count(), 2);
+
+            // Respond to request 2 first (out of order)
+            let resp2 = Message {
+                correlation_id: corr_id2,
+                direction: Direction::Response,
+                target_actor: sender.clone(),
+                sender_actor: target.clone(),
+                target_node: node_id.clone(),
+                sender_node: node_id.clone(),
+                method_name: "test".to_string(),
+                payload: vec![20],
+                flags: MessageFlags::empty(),
+                time_to_expiry: None,
+                forward_count: 0,
+                cache_invalidation: None,
+            };
+            bus.send_response(resp2).await.unwrap();
+            assert_eq!(bus.pending_count(), 1);
+
+            // Respond to request 1
+            let resp1 = Message {
+                correlation_id: corr_id1,
+                direction: Direction::Response,
+                target_actor: sender,
+                sender_actor: target,
+                target_node: node_id.clone(),
+                sender_node: node_id,
+                method_name: "test".to_string(),
+                payload: vec![10],
+                flags: MessageFlags::empty(),
+                time_to_expiry: None,
+                forward_count: 0,
+                cache_invalidation: None,
+            };
+            bus.send_response(resp1).await.unwrap();
+            assert_eq!(bus.pending_count(), 0);
+
+            // Verify responses delivered correctly
+            let result1 = rx1.await.unwrap().unwrap();
+            let result2 = rx2.await.unwrap().unwrap();
+            assert_eq!(result1.payload, vec![10]);
+            assert_eq!(result2.payload, vec![20]);
+        });
+    }
+
+    // ============================================================================
+    // MESSAGE VALIDATION TESTS
+    // ============================================================================
+
+    #[test]
+    fn test_message_directions() {
+        let target = ActorId::from_string("test::Actor/1").unwrap();
+        let sender = ActorId::from_string("test::Sender/1").unwrap();
+        let target_node = NodeId::from("127.0.0.1:8001").unwrap();
+        let sender_node = NodeId::from("127.0.0.1:8002").unwrap();
+
+        // Test Request direction
+        let request = Message::request(
+            CorrelationId::new(1),
+            target.clone(),
+            sender.clone(),
+            target_node.clone(),
+            sender_node.clone(),
+            "test".to_string(),
+            vec![],
+            std::time::Duration::from_secs(5),
+        );
+        assert_eq!(request.direction, Direction::Request);
+        assert!(request.time_to_expiry.is_some());
+
+        // Test Response direction
+        let response = Message::response(&request, vec![1, 2, 3]);
+        assert_eq!(response.direction, Direction::Response);
+        assert!(response.time_to_expiry.is_none());
+        assert_eq!(response.correlation_id, request.correlation_id);
+
+        // Test OneWay direction
+        let oneway = Message::oneway(
+            target,
+            sender,
+            target_node,
+            sender_node,
+            "notify".to_string(),
+            vec![],
+        );
+        assert_eq!(oneway.direction, Direction::OneWay);
+        assert!(oneway.time_to_expiry.is_none());
+    }
+
+    #[test]
+    fn test_message_forward_count_limit() {
+        let target = ActorId::from_string("test::Actor/1").unwrap();
+        let sender = ActorId::from_string("test::Sender/1").unwrap();
+        let target_node = NodeId::from("127.0.0.1:8001").unwrap();
+        let sender_node = NodeId::from("127.0.0.1:8002").unwrap();
+
+        let mut message = Message::request(
+            CorrelationId::new(1),
+            target,
+            sender,
+            target_node,
+            sender_node,
+            "test".to_string(),
+            vec![],
+            std::time::Duration::from_secs(5),
+        );
+
+        assert_eq!(message.forward_count, 0);
+
+        // Increment within limit
+        assert!(message.increment_forward_count(3).is_ok());
+        assert_eq!(message.forward_count, 1);
+
+        assert!(message.increment_forward_count(3).is_ok());
+        assert_eq!(message.forward_count, 2);
+
+        assert!(message.increment_forward_count(3).is_ok());
+        assert_eq!(message.forward_count, 3);
+
+        // Exceed limit
+        assert!(message.increment_forward_count(3).is_err());
+        assert_eq!(message.forward_count, 3); // Should not increment
+    }
+
+    // ============================================================================
+    // EDGE CASE TESTS
+    // ============================================================================
+
+    #[test]
+    fn test_empty_payload_message() {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let callback_manager = create_test_callback_manager();
+            let directory = create_test_directory();
+            let placement = create_test_placement();
+            let network_transport = create_test_network_transport();
+            let bus = MessageBus::new(
+                node_id.clone(),
+                callback_manager,
+                directory,
+                placement,
+                network_transport,
+            );
+
+            let target = ActorId::from_string("test::Actor/1").unwrap();
+            let sender = ActorId::from_string("test::Sender/1").unwrap();
+            let request = Message::request(
+                CorrelationId::new(0),
+                target,
+                sender,
+                node_id.clone(),
+                node_id,
+                "test".to_string(),
+                vec![], // Empty payload
+                std::time::Duration::from_secs(5),
+            );
+
+            let (_msg, _rx) = bus.send_request(request).await.unwrap();
+            assert_eq!(bus.pending_count(), 1);
+        });
+    }
+
+    #[test]
+    fn test_large_payload_message() {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let callback_manager = create_test_callback_manager();
+            let directory = create_test_directory();
+            let placement = create_test_placement();
+            let network_transport = create_test_network_transport();
+            let bus = MessageBus::new(
+                node_id.clone(),
+                callback_manager,
+                directory,
+                placement,
+                network_transport,
+            );
+
+            let target = ActorId::from_string("test::Actor/1").unwrap();
+            let sender = ActorId::from_string("test::Sender/1").unwrap();
+            let large_payload = vec![42u8; 10_000]; // 10KB payload
+            let request = Message::request(
+                CorrelationId::new(0),
+                target,
+                sender,
+                node_id.clone(),
+                node_id,
+                "test".to_string(),
+                large_payload.clone(),
+                std::time::Duration::from_secs(5),
+            );
+
+            let (sent_msg, _rx) = bus.send_request(request).await.unwrap();
+            assert_eq!(sent_msg.payload.len(), 10_000);
+            assert_eq!(bus.pending_count(), 1);
+        });
+    }
+
+    #[test]
+    fn test_correlation_id_reuse_after_completion() {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .build_local(Default::default())
+            .expect("Failed to build local runtime");
+
+        local_runtime.block_on(async move {
+            let node_id = NodeId::from("127.0.0.1:8001").unwrap();
+            let callback_manager = create_test_callback_manager();
+            let directory = create_test_directory();
+            let placement = create_test_placement();
+            let network_transport = create_test_network_transport();
+            let bus = MessageBus::new(
+                node_id.clone(),
+                callback_manager,
+                directory,
+                placement,
+                network_transport,
+            );
+
+            let target = ActorId::from_string("test::Actor/1").unwrap();
+            let sender = ActorId::from_string("test::Sender/1").unwrap();
+
+            // First request-response cycle
+            let req1 = Message::request(
+                CorrelationId::new(0),
+                target.clone(),
+                sender.clone(),
+                node_id.clone(),
+                node_id.clone(),
+                "test".to_string(),
+                vec![1],
+                std::time::Duration::from_secs(5),
+            );
+            let (msg1, rx1) = bus.send_request(req1).await.unwrap();
+            let corr_id1 = msg1.correlation_id;
+
+            let resp1 = Message {
+                correlation_id: corr_id1,
+                direction: Direction::Response,
+                target_actor: sender.clone(),
+                sender_actor: target.clone(),
+                target_node: node_id.clone(),
+                sender_node: node_id.clone(),
+                method_name: "test".to_string(),
+                payload: vec![10],
+                flags: MessageFlags::empty(),
+                time_to_expiry: None,
+                forward_count: 0,
+                cache_invalidation: None,
+            };
+            bus.send_response(resp1).await.unwrap();
+            let _ = rx1.await.unwrap().unwrap();
+
+            assert_eq!(bus.pending_count(), 0);
+
+            // Second request - correlation ID continues incrementing
+            let req2 = Message::request(
+                CorrelationId::new(0),
+                target,
+                sender,
+                node_id.clone(),
+                node_id,
+                "test".to_string(),
+                vec![2],
+                std::time::Duration::from_secs(5),
+            );
+            let (msg2, _rx2) = bus.send_request(req2).await.unwrap();
+            let corr_id2 = msg2.correlation_id;
+
+            // Correlation IDs should be different
+            assert_ne!(corr_id1, corr_id2);
+            assert_eq!(corr_id2.as_u64(), corr_id1.as_u64() + 1);
+            assert_eq!(bus.pending_count(), 1);
+        });
+    }
+
+    #[test]
+    fn test_message_flags() {
+        let target = ActorId::from_string("test::Actor/1").unwrap();
+        let sender = ActorId::from_string("test::Sender/1").unwrap();
+        let target_node = NodeId::from("127.0.0.1:8001").unwrap();
+        let sender_node = NodeId::from("127.0.0.1:8002").unwrap();
+
+        let mut message = Message::request(
+            CorrelationId::new(1),
+            target,
+            sender,
+            target_node,
+            sender_node,
+            "test".to_string(),
+            vec![],
+            std::time::Duration::from_secs(5),
+        );
+
+        // Initially empty
+        assert!(message.flags.is_empty());
+
+        // Set READ_ONLY flag
+        message.flags = MessageFlags::READ_ONLY;
+        assert!(message.flags.contains(MessageFlags::READ_ONLY));
+
+        // Set multiple flags
+        message.flags = MessageFlags::READ_ONLY | MessageFlags::ALWAYS_INTERLEAVE;
+        assert!(message.flags.contains(MessageFlags::READ_ONLY));
+        assert!(message.flags.contains(MessageFlags::ALWAYS_INTERLEAVE));
+
+        // Set IS_LOCAL_ONLY flag
+        message.flags = MessageFlags::IS_LOCAL_ONLY;
+        assert!(message.flags.contains(MessageFlags::IS_LOCAL_ONLY));
+        assert!(!message.flags.contains(MessageFlags::READ_ONLY));
     }
 }

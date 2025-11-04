@@ -6,7 +6,7 @@ failure-output = "immediate"
 success-output = "never"
 
 # Run tests in parallel but limit concurrency for simulation tests
-test-threads = 4
+test-threads = "num-cpus"
 
 # Slow simulation tests (using SimulationBuilder) get extra time
 [[profile.default.overrides]]
