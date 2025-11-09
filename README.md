@@ -110,7 +110,7 @@ The framework follows a layered architecture with clear separation of concerns:
 - ✅ **Cross-Workload Invariant System** - JSON-based state registry with global property validation
 - ✅ **Multi-Topology Testing** - Support for 1x1 through 10x10 client-server topologies with comprehensive bug detection
 - ✅ **Per-Peer Message Tracking** - Detailed accounting for message routing and load distribution validation
-- ✅ **101 tests passing** - Comprehensive test coverage with deterministic chaos testing
+- ✅ **403 tests passing** (404 total, 1 skipped) - Comprehensive test coverage with deterministic chaos testing
 
 ### moonpool: ⚠️ EARLY ALPHA - FUNCTIONAL BUT EXPERIMENTAL
 **Virtual actor system - core features working, needs production hardening:**
@@ -145,8 +145,9 @@ nix develop --command cargo build
 ### Test Execution
 
 Tests are configured with specific timeouts in `.config/nextest.toml`:
-- Default tests: 1 second timeout
-- Tests with "slow_simulation" in name: 4 minute timeout (for multi-topology chaos testing)
+- Default slow-timeout: 5 seconds
+- Tests with "slow_simulation" in name: 10 minute timeout (for multi-topology chaos testing)
+- Tests with "tokio_runner" in name: 60 second timeout (for production networking validation)
 
 ### Usage Examples
 

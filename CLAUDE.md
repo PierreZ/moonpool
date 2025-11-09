@@ -14,7 +14,7 @@ A deterministic simulation framework inspired by FoundationDB's simulation testi
 - **Comprehensive chaos testing** infrastructure (Buggify, sometimes assertions, invariant validation)
 - **Provider pattern** for seamless simulation/production switching
 - **Can be used independently** for simulation testing of distributed systems
-- **101 tests passing** with full chaos testing coverage
+- **403 tests passing** (404 total, 1 skipped) with full chaos testing coverage
 - **Hobby-grade**: Suitable for simulation testing but not production systems
 
 ### moonpool (⚠️ EARLY ALPHA - FUNCTIONAL BUT EXPERIMENTAL)
@@ -102,8 +102,9 @@ Before completing any phase or major feature:
 **Location**: `.config/nextest.toml`
 
 **Timeouts**:
-- Default: 1 second
-- Slow simulation tests (name contains "slow_simulation"): 4 minutes
+- Default slow-timeout: 5 seconds
+- Slow simulation tests (name contains "slow_simulation"): 10 minutes
+- TokioRunner tests (name contains "tokio_runner"): 60 seconds
 
 **Debug Testing**:
 - Default: `UntilAllSometimesReached(1000)` for comprehensive chaos coverage
@@ -203,7 +204,7 @@ Source code from production systems:
 
 ### moonpool-foundation: ✅ COMPLETE - HOBBY-GRADE
 **Standalone deterministic simulation framework** (inspired by FoundationDB):
-- Fully implemented and tested with 101 tests passing
+- Fully implemented and tested with 403 tests passing (404 total, 1 skipped)
 - Sans I/O transport layer with request-response semantics
 - Comprehensive chaos testing infrastructure with 100% sometimes assertion coverage
 - **Can be used independently** for simulation testing of distributed systems
@@ -234,3 +235,4 @@ Source code from production systems:
 - **Actor system questions?** → Read `moonpool/CLAUDE.md` and `docs/analysis/orleans/`
 - **Architecture questions?** → Start with `docs/INDEX.md`
 - **Reference implementations?** → Check `docs/references/` and analysis docs
+- **Chaos testing guidance?** → Use the `moonpool-chaos-testing` Claude skill for comprehensive patterns on buggify, assertions, autonomous testing, and invariant design

@@ -30,6 +30,9 @@ All features implemented and tested, but remains hobby-grade. Suitable for simul
 **Invariant checking**: Cross-workload properties validated after every simulation event
 **Goal**: Find bugs, not regression testing
 
+**Autonomous Testing**: Primary approach uses operation generators with random workloads (see `tests/autonomous_ping_pong.rs`)
+**Claude Skill**: Use `/moonpool-chaos-testing` skill for comprehensive guidance on buggify patterns, assertion strategies, and invariant design
+
 ## Assertions & Buggify
 **Always**: Guard invariants (never fail)
 **Sometimes**: Test error paths (statistical coverage)
@@ -124,6 +127,7 @@ Strategic placement: error handling, timeouts, retries, resource limits
 - 1x2, 1x10 (asymmetric loads)
 - 2x2 (distributed scenarios)
 - 10x10 (stress testing)
+- **Closure-based topology configurator**: Use `with_topology_configurator()` to generate unique random topologies per simulation seed for comprehensive chaos testing
 
 ## Reference Documentation
 

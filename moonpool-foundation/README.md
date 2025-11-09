@@ -215,7 +215,7 @@ All core features are implemented and tested, but the project remains hobby-grad
 - **Invariants** (Cross-workload validation system)
 - **Multi-Topology Testing** (1x1 through 10x10 topologies)
 - **Network Simulation** (Peer connections, fault injection)
-- **101 Tests Passing** (Comprehensive coverage with chaos testing)
+- **403 Tests Passing** (404 total, 1 skipped) - Comprehensive coverage with chaos testing
 
 **Limitations**: Hobby-grade quality, suitable for simulation testing but not production systems.
 
@@ -273,13 +273,14 @@ RUST_LOG=debug nix develop --command cargo nextest run -p moonpool-foundation
 ```
 
 Test configuration in `.config/nextest.toml`:
-- Default tests: 1 second timeout
-- Slow simulation tests: 4 minute timeout
+- Default slow-timeout: 5 seconds
+- Slow simulation tests: 10 minute timeout
+- TokioRunner tests: 60 second timeout
 
 ## Examples
 
 See the test suite for extensive examples:
-- `tests/simulation/ping_pong/` - Complete ping-pong workload with chaos testing
+- `tests/autonomous_ping_pong.rs` - Comprehensive autonomous chaos testing with 7 bug detectors and multi-topology validation
 - `tests/transport_e2e.rs` - End-to-end transport layer validation
 - `tests/simulation_integration.rs` - Multi-topology testing
 
