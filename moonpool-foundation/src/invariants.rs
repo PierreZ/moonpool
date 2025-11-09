@@ -148,4 +148,6 @@ use std::collections::HashMap;
 /// - The simulation time when it occurred
 /// - The complete actor states at that moment
 /// - The invariant's assertion message
-pub type InvariantCheck = Box<dyn Fn(&HashMap<String, Value>, u64)>;
+///
+/// Parameters: (states, time_ms, seed)
+pub type InvariantCheck = Box<dyn Fn(&HashMap<String, Value>, u64, u64)>;

@@ -13,6 +13,11 @@ test-threads = "num-cpus"
 filter = 'test(slow_simulation)'
 slow-timeout = { period = "10m", terminate-after = 5 }
 
+# TokioRunner tests use real networking and need more time than unit tests
+[[profile.default.overrides]]
+filter = 'test(tokio_runner)'
+slow-timeout = { period = "60s", terminate-after = 3 }
+
 [profile.default.junit]
 # Store test results
 path = "target/nextest/default/junit.xml"

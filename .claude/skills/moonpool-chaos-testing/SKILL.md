@@ -1363,6 +1363,374 @@ SimulationBuilder::new()
 
 **Remember**: The goal is to let the computer explore your state space autonomously, finding bugs you couldn't think of!
 
+## 5. Operation Generators - Structured Autonomous Testing
+
+**Location**: `moonpool-foundation/src/operation_gen.rs`
+
+Operation generators provide a structured framework for creating autonomous test workloads. Instead of manually writing operation selection logic, you define operations and their probabilities, then let the generator handle the randomization.
+
+### Operation Generator API
+
+#### Core Trait
+
+```rust
+pub trait OperationGenerator {
+    type Operation: Clone;
+
+    /// Generate a single operation
+    fn generate<R: RandomProvider>(&mut self, rng: &R) -> Self::Operation;
+
+    /// Get the weight distribution for debugging/analysis
+    fn weight_distribution(&self) -> Vec<(Self::Operation, f64)>;
+
+    /// Generate a sequence of operations
+    fn generate_sequence<R: RandomProvider>(&mut self, rng: &R, count: usize)
+        -> Vec<Self::Operation>;
+}
+```
+
+#### Built-in Generators
+
+**UniformGenerator** - Equal probability for all operations:
+```rust
+use moonpool_foundation::UniformGenerator;
+
+let mut gen = UniformGenerator::new(vec![
+    Operation::SendPing,
+    Operation::Wait,
+    Operation::SwitchServer,
+]);
+
+// Each operation has 33.3% probability
+let op = gen.generate(&random);
+```
+
+**WeightedGenerator** - Custom probability distribution:
+```rust
+use moonpool_foundation::WeightedGenerator;
+
+let mut gen = WeightedGenerator::new(vec![
+    (Operation::SendPing, 0.7),      // 70% probability
+    (Operation::Wait, 0.2),           // 20% probability
+    (Operation::SwitchServer, 0.1),   // 10% probability
+]);
+
+let op = gen.generate(&random);
+```
+
+**OperationBuilder** - Helper for parameterized operations:
+```rust
+use moonpool_foundation::OperationBuilder;
+
+let builder = OperationBuilder::new(&random);
+
+// Generate random parameters
+let timeout_ms = builder.random_range(1..1000);
+let duration_ms = builder.random_range(1..50);
+let should_retry = builder.random_bool(0.3); // 30% probability
+let ratio = builder.random_ratio(); // 0.0..1.0
+```
+
+### Example: Autonomous Ping-Pong with Operation Generators
+
+**From** `moonpool-foundation/tests/autonomous_ping_pong.rs`:
+
+#### Step 1: Define Operation Alphabet
+
+```rust
+#[derive(Clone, Debug, PartialEq)]
+enum PingPongOp {
+    /// Send a ping with specified timeout
+    SendPing { timeout_ms: u64 },
+    /// Wait for a short period
+    Wait { duration_ms: u64 },
+    /// Switch to a different server
+    SwitchServer,
+    /// Send burst of pings to fill peer queue (triggered by buggify)
+    BurstSend { count: usize, timeout_ms: u64 },
+}
+```
+
+#### Step 2: Create Operation Generator with Buggify
+
+```rust
+fn generate_ping_pong_operation<R: RandomProvider>(
+    builder: &OperationBuilder<R>
+) -> PingPongOp {
+    // Use buggify to occasionally generate burst sends (triggers queue growth)
+    if buggify_with_prob!(0.05) {
+        // 5% chance: Send burst to fill queue
+        return PingPongOp::BurstSend {
+            count: builder.random_range(5..20) as usize,
+            timeout_ms: builder.random_range(1..50), // Short timeouts
+        };
+    }
+
+    // 70% send ping, 20% wait, 10% switch server
+    let choice = builder.random_ratio();
+
+    if choice < 0.7 {
+        // Send ping with either short or normal timeout
+        let timeout_ms = if builder.random_bool(0.3) {
+            builder.random_range(1..10) // Very short: stress test
+        } else {
+            builder.random_range(100..1000) // Normal
+        };
+        PingPongOp::SendPing { timeout_ms }
+    } else if choice < 0.9 {
+        // Short wait to vary timing
+        PingPongOp::Wait {
+            duration_ms: builder.random_range(1..50),
+        }
+    } else {
+        // Switch server to test multi-server scenarios
+        PingPongOp::SwitchServer
+    }
+}
+```
+
+#### Step 3: Execute Operations in Workload
+
+```rust
+async fn autonomous_ping_pong_client(
+    random: SimRandomProvider,
+    provider: SimNetworkProvider,
+    time_provider: SimTimeProvider,
+    task_provider: TokioTaskProvider,
+    topology: WorkloadTopology,
+) -> SimulationResult<SimulationMetrics> {
+    let transport = ClientTransport::new(
+        provider,
+        time_provider.clone(),
+        task_provider,
+        PeerConfig::default()
+    );
+
+    // Generate 100-500 operations autonomously
+    let num_operations = random.random_range(100..500);
+
+    for op_num in 0..num_operations {
+        // Check shutdown signal
+        if topology.shutdown_signal.is_cancelled() {
+            break;
+        }
+
+        // Generate next operation using builder
+        let builder = OperationBuilder::new(&random);
+        let op = generate_ping_pong_operation(&builder);
+
+        match op {
+            PingPongOp::SendPing { timeout_ms } => {
+                // ... send ping
+            }
+            PingPongOp::Wait { duration_ms } => {
+                // ... wait
+            }
+            PingPongOp::SwitchServer => {
+                // ... switch server
+            }
+            PingPongOp::BurstSend { count, timeout_ms } => {
+                // Fire off multiple sends rapidly to fill peer queue
+                for _ in 0..count {
+                    let _ = transport.send_with_timeout(
+                        server,
+                        envelope,
+                        Duration::from_millis(timeout_ms),
+                    ).await;
+                }
+            }
+        }
+    }
+
+    Ok(SimulationMetrics::default())
+}
+```
+
+### Using Buggify to Force Trigger Difficult Assertions
+
+Some assertions are hard to trigger naturally (like `peer_queue_near_capacity` or `peer_queue_grows`). Use buggify to create conditions that force these assertions to fire.
+
+#### Problem: Peer Queue Assertions Rarely Fire
+
+**The Challenge**: These assertions in `network/peer/core.rs`:
+```rust
+// Triggers when queue has >= 80% of max capacity
+sometimes_assert!(
+    peer_queue_near_capacity,
+    state.send_queue.len() >= (self.config.max_queue_size as f64 * 0.8) as usize,
+    "Message queue should sometimes approach capacity limit"
+);
+
+// Triggers when queue has > 1 message
+sometimes_assert!(
+    peer_queue_grows,
+    state.send_queue.len() > 1,
+    "Message queue should sometimes contain multiple messages"
+);
+```
+
+These only fire when messages queue up due to network delays/failures. With normal testing, this is rare.
+
+#### Solution: Buggify Burst Sends
+
+**Add burst operation to force queue growth**:
+
+```rust
+// 1. Add burst operation to your operation enum
+enum PingPongOp {
+    // ... other operations
+    /// Send burst of pings to fill peer queue
+    BurstSend { count: usize, timeout_ms: u64 },
+}
+
+// 2. Use buggify in generator to occasionally create bursts
+fn generate_operation<R: RandomProvider>(builder: &OperationBuilder<R>) -> Operation {
+    // 5% chance of burst send (deterministic with seed)
+    if buggify_with_prob!(0.05) {
+        return Operation::BurstSend {
+            count: builder.random_range(5..20) as usize,  // 5-20 messages
+            timeout_ms: builder.random_range(1..50),      // Very short timeouts
+        };
+    }
+
+    // ... normal operation generation
+}
+
+// 3. Handle burst in workload
+match op {
+    Operation::BurstSend { count, timeout_ms } => {
+        sometimes_assert!(
+            autonomous_client_sends_burst,
+            true,
+            "Autonomous client sending burst to fill queue"
+        );
+
+        // Fire off multiple sends rapidly - creates queue pressure!
+        for _ in 0..count {
+            messages_sent += 1;
+            let _ = transport.send_with_timeout(
+                server,
+                RequestResponseEnvelope::new(
+                    messages_sent,
+                    format!("PING:{}", topology.my_ip).into_bytes(),
+                ),
+                std::time::Duration::from_millis(timeout_ms),
+            ).await;
+
+            // Short timeout + rapid sends = queue buildup
+        }
+    }
+    // ... other operations
+}
+```
+
+**Why This Works**:
+- Burst sends flood the peer with messages
+- Short timeouts (1-50ms) often timeout before send completes
+- Multiple pending sends accumulate in peer queue
+- `peer_queue_grows` fires when queue has >1 message
+- `peer_queue_near_capacity` fires when queue approaches limit
+- Deterministic: Same seed creates same bursts
+
+#### Other Difficult Assertion Patterns
+
+**Force connection failures**:
+```rust
+// In operation generator
+if buggify_with_prob!(0.1) {
+    return Operation::ForceDisconnect { target_server };
+}
+
+// In workload
+Operation::ForceDisconnect { target_server } => {
+    // Simulate abrupt connection loss
+    transport.close_connection(&target_server).await;
+
+    sometimes_assert!(
+        connection_failure_handled,
+        true,
+        "Connection failure recovery path exercised"
+    );
+}
+```
+
+**Force timeout scenarios**:
+```rust
+// Use buggify to generate very short timeouts
+let timeout_ms = if buggify_with_prob!(0.3) {
+    builder.random_range(1..5)  // Almost guaranteed timeout
+} else {
+    builder.random_range(100..1000)  // Normal
+};
+
+// This forces timeout assertions to fire
+sometimes_assert!(
+    client_timeout_occurred,
+    true,
+    "Client experiencing timeout"
+);
+```
+
+**Force resource exhaustion**:
+```rust
+if buggify_with_prob!(0.05) {
+    // Spawn many concurrent actors at once
+    return Operation::SpawnBurst {
+        count: builder.random_range(10..50),
+    };
+}
+
+// This triggers resource limit assertions
+sometimes_assert!(
+    catalog_at_capacity,
+    self.actors.len() >= self.max_actors * 0.8,
+    "Catalog approaching capacity limit"
+);
+```
+
+### Benefits of Operation Generators
+
+1. **Cleaner Code**: Separate operation generation from execution logic
+2. **Easier Testing**: Change probabilities without touching workload code
+3. **Better Coverage**: Structured approach ensures all operations get tested
+4. **Debugging**: `weight_distribution()` shows exactly what's being tested
+5. **Composability**: Combine multiple generators for complex scenarios
+6. **Determinism**: Same seed = same operation sequence
+
+### Best Practices
+
+1. **Start with simple generators**: Use `UniformGenerator` first, then add weights
+2. **Use buggify for rare events**: Don't rely on natural occurrence of difficult assertions
+3. **Balance burst probability**: Too high (>10%) makes tests unstable, too low (<1%) doesn't trigger
+4. **Document burst operations**: Explain why you're forcing specific conditions
+5. **Validate burst behavior**: Ensure bursts actually trigger target assertions
+6. **Iterate counts matter**: Use `UntilAllSometimesReached(10_000)` to give buggify chances to fire
+
+### Debugging Tips
+
+If assertions still don't fire after adding buggify bursts:
+
+```rust
+// 1. Increase burst probability temporarily
+if buggify_with_prob!(0.2) {  // Higher chance for debugging
+    return Operation::BurstSend { ... };
+}
+
+// 2. Increase burst size
+return Operation::BurstSend {
+    count: builder.random_range(20..50),  // Larger bursts
+    timeout_ms: builder.random_range(1..10),  // Even shorter timeouts
+};
+
+// 3. Add logging to verify bursts are executing
+tracing::info!("BURST: Sending {} messages rapidly", count);
+
+// 4. Check assertion success rates in report
+println!("{}", report);  // Shows which assertions fired
+```
+
+**Remember**: The goal is to let the computer explore your state space autonomously, finding bugs you couldn't think of!
+
 ## Integration Checklist
 
 ### 1. Add Foundation Dependency

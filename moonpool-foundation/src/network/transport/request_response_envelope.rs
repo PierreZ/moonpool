@@ -155,6 +155,10 @@ impl RequestResponseSerializer {
         &self,
         buffer: &mut Vec<u8>,
     ) -> Result<Option<RequestResponseEnvelope>, EnvelopeError> {
+        let buffer_len_before = buffer.len();
+
+        tracing::warn!("TRY_FROM_BUFFER: buffer_len={}", buffer_len_before);
+
         // Buffer is empty - normal case, not an error
         if buffer.is_empty() {
             return Ok(None);
@@ -167,6 +171,11 @@ impl RequestResponseSerializer {
                 available: buffer.len(),
             });
         }
+
+        // Read correlation_id to know which message we're parsing
+        let correlation_id = u64::from_le_bytes([
+            buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5], buffer[6], buffer[7],
+        ]);
 
         // Read payload length from header
         let payload_len =
@@ -196,7 +205,15 @@ impl RequestResponseSerializer {
 
         // Deserialize the complete message
         match self.deserialize(&message_data) {
-            Ok(envelope) => Ok(Some(envelope)),
+            Ok(envelope) => {
+                tracing::warn!(
+                    "TRY_FROM_BUFFER_SUCCESS: correlation_id={}, consumed={}, buffer_remaining={}",
+                    correlation_id,
+                    total_message_len,
+                    buffer.len()
+                );
+                Ok(Some(envelope))
+            }
             Err(e) => Err(e),
         }
     }

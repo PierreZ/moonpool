@@ -352,7 +352,7 @@ async fn handle_connection<TcpStream, E>(
             // Write side - send outgoing data
             Some(data) = write_rx.recv() => {
                 if let Err(e) = stream.write_all(&data).await {
-                    tracing::warn!("Connection {} write error: {}", connection_id, e);
+                    tracing::trace!("Connection {} write error: {}", connection_id, e);
                     break;
                 }
                 tracing::trace!("Connection {} sent {} bytes", connection_id, data.len());

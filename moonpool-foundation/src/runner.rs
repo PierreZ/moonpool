@@ -135,7 +135,7 @@ impl WorkloadOrchestrator {
 
                 // Check invariants after processing event
                 let current_time_ms = sim.current_time().as_millis() as u64;
-                Self::check_invariants(&state_registry, current_time_ms, invariants);
+                Self::check_invariants(&state_registry, current_time_ms, seed, invariants);
             }
 
             // Check if any handles are ready
@@ -266,6 +266,7 @@ impl WorkloadOrchestrator {
     fn check_invariants(
         state_registry: &crate::StateRegistry,
         sim_time_ms: u64,
+        seed: u64,
         invariants: &[crate::InvariantCheck],
     ) {
         if invariants.is_empty() {
@@ -274,7 +275,7 @@ impl WorkloadOrchestrator {
 
         let all_states = state_registry.get_all_states();
         for invariant in invariants {
-            invariant(&all_states, sim_time_ms);
+            invariant(&all_states, sim_time_ms, seed);
         }
     }
 }

@@ -930,11 +930,20 @@ impl SimWorld {
                         // - Each DataDelivery specifies the TARGET connection to receive the data
                         let data_preview =
                             String::from_utf8_lossy(&data[..std::cmp::min(data.len(), 20)]);
-                        tracing::info!(
-                            "Event::DataDelivery processing delivery of {} bytes: '{}' to connection {}",
+
+                        // Extract correlation_id from first 8 bytes for tracing
+                        let correlation_id = if data.len() >= 8 {
+                            u64::from_le_bytes(data[0..8].try_into().unwrap())
+                        } else {
+                            0
+                        };
+
+                        tracing::warn!(
+                            "DATADELIVERY: connection_id={}, bytes={}, correlation_id={}, preview='{}'",
+                            connection_id,
                             data.len(),
-                            data_preview,
-                            connection_id
+                            correlation_id,
+                            data_preview
                         );
 
                         let connection_id = ConnectionId(connection_id);
@@ -1044,6 +1053,13 @@ impl SimWorld {
                                     conn.send_in_progress = false;
                                 }
                             } else if let Some(data) = conn.send_buffer.pop_front() {
+                                // Extract correlation_id from first 8 bytes for tracing
+                                let correlation_id = if data.len() >= 8 {
+                                    u64::from_le_bytes(data[0..8].try_into().unwrap())
+                                } else {
+                                    0
+                                };
+
                                 // For TCP ordering, we need to maintain connection-level delays
                                 // Check if there are more messages AFTER popping the current one
                                 let has_more_messages = !conn.send_buffer.is_empty();
@@ -1068,17 +1084,17 @@ impl SimWorld {
                                 conn.next_send_time =
                                     earliest_time + std::time::Duration::from_nanos(1);
 
-                                tracing::info!(
-                                    "Event::ProcessSendBuffer processing {} bytes from connection {} with delay {:?}, has_more_messages={} (TCP ordering: earliest_time={:?})",
-                                    data.len(),
-                                    connection_id.0,
-                                    actual_delay,
-                                    has_more_messages,
-                                    earliest_time
-                                );
-
                                 // Schedule delivery to paired connection
                                 if let Some(paired_id) = conn.paired_connection {
+                                    tracing::warn!(
+                                        "PROCESS_SEND: connection_id={}, paired_id={}, bytes={}, correlation_id={}, queue_remaining={}, has_more={}",
+                                        connection_id.0,
+                                        paired_id.0,
+                                        data.len(),
+                                        correlation_id,
+                                        conn.send_buffer.len(),
+                                        has_more_messages
+                                    );
                                     let scheduled_time = earliest_time;
                                     let sequence = inner.next_sequence;
                                     inner.next_sequence += 1;

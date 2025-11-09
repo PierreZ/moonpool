@@ -40,6 +40,10 @@ pub struct TransportProtocol<E: Envelope> {
     /// Queue of inbound processed envelopes ready for application
     receive_queue: VecDeque<E>,
 
+    /// Buffer for accumulating partial messages from TCP reads
+    /// TCP reads may contain 0, 1, or multiple concatenated messages
+    receive_buffer: Vec<u8>,
+
     /// Statistics for monitoring
     stats: ProtocolStats,
 }
@@ -84,6 +88,7 @@ impl<E: Envelope> TransportProtocol<E> {
         Self {
             transmit_queue: VecDeque::new(),
             receive_queue: VecDeque::new(),
+            receive_buffer: Vec::new(),
             stats: ProtocolStats::new(),
         }
     }
@@ -108,25 +113,71 @@ impl<E: Envelope> TransportProtocol<E> {
     /// Handle received data from a peer
     ///
     /// This is a pure state transition - no I/O is performed.
-    /// The data is deserialized and queued for application consumption.
-    pub fn handle_received(&mut self, _from: String, data: Vec<u8>) {
+    /// The data is accumulated in a buffer and all complete messages are extracted.
+    ///
+    /// TCP reads may contain:
+    /// - Partial messages (need more data)
+    /// - Single complete message
+    /// - Multiple concatenated complete messages
+    /// - Complete message(s) + partial next message
+    ///
+    /// This method handles all cases by using try_from_buffer() which consumes
+    /// complete messages from the buffer and leaves partial data for the next read.
+    pub fn handle_received(&mut self, _from: String, mut data: Vec<u8>) {
         // Update byte statistics
         self.stats.bytes_received += data.len() as u64;
 
-        // Attempt to deserialize the envelope
-        match E::from_bytes(&data) {
-            Ok(envelope) => {
-                // Successfully deserialized
-                self.stats.envelopes_received += 1;
-                self.receive_queue.push_back(envelope);
-            }
-            Err(_) => {
-                // Deserialization failed - increment error count
-                self.stats.deserialization_errors += 1;
-                // Note: In a real implementation, we might want to log this error
-                // or notify the application layer, but for Sans I/O we just count it
+        let buffer_before = self.receive_buffer.len();
+        let incoming_len = data.len();
+
+        // Append new data to the receive buffer
+        self.receive_buffer.append(&mut data);
+
+        tracing::warn!(
+            "PROTOCOL_RECV: buffer_before={}, incoming={}, buffer_after={}",
+            buffer_before,
+            incoming_len,
+            self.receive_buffer.len()
+        );
+
+        // Parse all complete messages from the buffer
+        let mut parsed_count = 0;
+        loop {
+            match E::try_from_buffer(&mut self.receive_buffer) {
+                Ok(Some(envelope)) => {
+                    // Successfully parsed a complete message
+                    parsed_count += 1;
+                    self.stats.envelopes_received += 1;
+                    self.receive_queue.push_back(envelope);
+                    // Continue loop to parse next message if available
+                }
+                Ok(None) => {
+                    // Buffer is empty - all messages parsed
+                    break;
+                }
+                Err(crate::network::transport::types::EnvelopeError::InsufficientData {
+                    ..
+                }) => {
+                    // Partial message in buffer - need more data
+                    // Leave the partial data in the buffer for next read
+                    break;
+                }
+                Err(e) => {
+                    // Parsing error (corrupt data)
+                    self.stats.deserialization_errors += 1;
+                    tracing::warn!("Envelope parsing error, clearing buffer: {}", e);
+                    // Clear buffer to recover from corrupt data
+                    self.receive_buffer.clear();
+                    break;
+                }
             }
         }
+
+        tracing::warn!(
+            "PROTOCOL_PARSE: envelopes_parsed={}, buffer_remaining={}",
+            parsed_count,
+            self.receive_buffer.len()
+        );
     }
 
     /// Poll for the next transmission ready for I/O
@@ -175,10 +226,11 @@ impl<E: Envelope> TransportProtocol<E> {
         self.receive_queue.len()
     }
 
-    /// Clear all queued transmissions and receives (for testing/reset)
+    /// Clear all queued transmissions, receives, and buffered data (for testing/reset)
     pub fn clear_queues(&mut self) {
         self.transmit_queue.clear();
         self.receive_queue.clear();
+        self.receive_buffer.clear();
     }
 }
 
@@ -188,6 +240,7 @@ impl<E: Envelope> Clone for TransportProtocol<E> {
         Self {
             transmit_queue: self.transmit_queue.clone(),
             receive_queue: self.receive_queue.clone(),
+            receive_buffer: self.receive_buffer.clone(),
             stats: self.stats.clone(),
         }
     }
@@ -336,8 +389,12 @@ mod tests {
     fn test_protocol_malformed_data_handling() {
         let mut protocol = create_test_protocol();
 
-        // Send malformed data
-        let malformed_data = vec![1, 2, 3]; // Too short for valid envelope
+        // Send malformed data with invalid payload length (exceeds MAX_PAYLOAD_SIZE)
+        let mut malformed_data = vec![0u8; 12]; // Valid header size
+        malformed_data[8] = 255;
+        malformed_data[9] = 255;
+        malformed_data[10] = 255;
+        malformed_data[11] = 255; // Payload length = u32::MAX (exceeds MAX_PAYLOAD_SIZE)
         protocol.handle_received("bad_peer".to_string(), malformed_data);
 
         // Should have no received envelopes but error should be counted
@@ -385,7 +442,14 @@ mod tests {
         assert_eq!(protocol.stats().envelopes_sent, 0);
 
         // Test error counting
-        protocol.handle_received("peer".to_string(), vec![1, 2, 3]); // malformed
+        // Note: Short data (< 12 bytes) is treated as incomplete, not corrupt
+        // We need data with valid length header but invalid content to trigger error
+        let mut malformed = vec![0u8; 12]; // Valid header size
+        malformed[8] = 255; // Set payload_len to 255 (but we'll provide invalid data)
+        malformed[9] = 255;
+        malformed[10] = 255;
+        malformed[11] = 255; // Payload length = u32::MAX (way too large)
+        protocol.handle_received("peer".to_string(), malformed);
         assert_eq!(protocol.stats().deserialization_errors, 1);
     }
 
