@@ -740,6 +740,10 @@ impl fmt::Debug for Workload {
     }
 }
 
+/// Type alias for topology configurator closure.
+type TopologyConfigurator =
+    Box<dyn Fn(SimulationBuilder, &crate::random::sim::SimRandomProvider) -> SimulationBuilder>;
+
 /// Builder pattern for configuring and running simulation experiments.
 pub struct SimulationBuilder {
     iteration_control: IterationControl,
@@ -749,6 +753,7 @@ pub struct SimulationBuilder {
     use_random_config: bool,
     invariants: Vec<crate::InvariantCheck>,
     max_iteration_wall_time: Duration,
+    topology_configurator: Option<TopologyConfigurator>,
 }
 
 impl Default for SimulationBuilder {
@@ -768,6 +773,7 @@ impl SimulationBuilder {
             use_random_config: false,
             invariants: Vec::new(),
             max_iteration_wall_time: Duration::from_secs(10),
+            topology_configurator: None,
         }
     }
 
@@ -811,6 +817,78 @@ impl SimulationBuilder {
             ip_address,
             workload: boxed_workload,
         });
+        self
+    }
+
+    /// Register multiple copies of the same workload with auto-numbered names.
+    ///
+    /// This is a convenience method for registering N identical workloads. Each workload
+    /// will be named "{prefix}_1", "{prefix}_2", etc.
+    ///
+    /// # Arguments
+    /// * `prefix` - Name prefix for the workloads (e.g., "server" becomes "server_1", "server_2", ...)
+    /// * `count` - Number of workloads to register
+    /// * `workload` - The workload function to register (must be Copy, e.g., function pointers)
+    ///
+    /// # Example
+    /// ```ignore
+    /// SimulationBuilder::new()
+    ///     .register_workload_count("server", 5, my_server_workload)
+    ///     .register_workload_count("client", 3, my_client_workload)
+    /// ```
+    pub fn register_workload_count<S, F, Fut>(
+        mut self,
+        prefix: S,
+        count: usize,
+        workload: F,
+    ) -> Self
+    where
+        S: AsRef<str>,
+        F: Fn(
+                crate::random::sim::SimRandomProvider,
+                crate::SimNetworkProvider,
+                crate::SimTimeProvider,
+                crate::task::tokio_provider::TokioTaskProvider,
+                WorkloadTopology,
+            ) -> Fut
+            + 'static
+            + Copy,
+        Fut: Future<Output = SimulationResult<SimulationMetrics>> + 'static,
+    {
+        for i in 1..=count {
+            self = self.register_workload(format!("{}_{}", prefix.as_ref(), i), workload);
+        }
+        self
+    }
+
+    /// Register a dynamic topology configurator.
+    ///
+    /// The configurator closure is called once per simulation seed, allowing each
+    /// iteration to have a different random topology. This enables comprehensive
+    /// chaos testing across varied network configurations.
+    ///
+    /// # Arguments
+    /// * `configurator` - Closure that takes a builder and RandomProvider, returns configured builder
+    ///
+    /// # Example
+    /// ```ignore
+    /// SimulationBuilder::new()
+    ///     .with_random_topology(|builder, random| {
+    ///         let num_servers = random.random_range(1..21) as usize;
+    ///         let num_clients = random.random_range(1..21) as usize;
+    ///         builder
+    ///             .register_workload_count("server", num_servers, server_workload)
+    ///             .register_workload_count("client", num_clients, client_workload)
+    ///     })
+    ///     .run()
+    ///     .await
+    /// ```
+    pub fn with_random_topology<F>(mut self, configurator: F) -> Self
+    where
+        F: Fn(SimulationBuilder, &crate::random::sim::SimRandomProvider) -> SimulationBuilder
+            + 'static,
+    {
+        self.topology_configurator = Some(Box::new(configurator));
         self
     }
 
@@ -920,8 +998,9 @@ impl SimulationBuilder {
 
     #[instrument(skip_all)]
     /// Run the simulation and generate a report.
-    pub async fn run(self) -> SimulationReport {
-        if self.workloads.is_empty() {
+    pub async fn run(mut self) -> SimulationReport {
+        // Early validation: check if we have workloads OR a topology configurator
+        if self.workloads.is_empty() && self.topology_configurator.is_none() {
             return SimulationReport {
                 iterations: 0,
                 successful_runs: 0,
@@ -951,6 +1030,40 @@ impl SimulationBuilder {
             // Initialize buggify system for this iteration
             // Use moderate probabilities: 50% activation rate, 25% firing rate
             buggify_init(0.5, 0.25);
+
+            // If topology configurator exists, apply it to generate workloads for this seed
+            if self.topology_configurator.is_some() {
+                // Clear previous iteration's workloads
+                self.workloads.clear();
+                self.next_ip = 1; // Reset IP allocation
+
+                // Create RandomProvider for this seed
+                let random = crate::random::sim::SimRandomProvider::new(seed);
+
+                // Save state that needs to be preserved across configurator call
+                let configurator = self.topology_configurator.take().expect("checked above");
+                let saved_invariants = std::mem::take(&mut self.invariants);
+
+                // Call configurator to register workloads
+                // Create a builder snapshot without the configurator
+                let builder_snapshot = SimulationBuilder {
+                    iteration_control: self.iteration_control.clone(),
+                    workloads: Vec::new(),
+                    seeds: self.seeds.clone(),
+                    next_ip: 1,
+                    use_random_config: self.use_random_config,
+                    invariants: Vec::new(), // Empty - configurator doesn't need invariants
+                    max_iteration_wall_time: self.max_iteration_wall_time,
+                    topology_configurator: None,
+                };
+
+                // Apply configurator
+                self = configurator(builder_snapshot, &random);
+
+                // Restore saved state for next iteration
+                self.topology_configurator = Some(configurator);
+                self.invariants = saved_invariants;
+            }
 
             // Create fresh NetworkConfiguration for this iteration
             let network_config = if self.use_random_config {

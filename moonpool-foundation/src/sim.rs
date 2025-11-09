@@ -933,7 +933,9 @@ impl SimWorld {
 
                         // Extract correlation_id from first 8 bytes for tracing
                         let correlation_id = if data.len() >= 8 {
-                            u64::from_le_bytes(data[0..8].try_into().unwrap())
+                            u64::from_le_bytes(
+                                data[0..8].try_into().expect("slice is exactly 8 bytes"),
+                            )
                         } else {
                             0
                         };
@@ -1055,7 +1057,9 @@ impl SimWorld {
                             } else if let Some(data) = conn.send_buffer.pop_front() {
                                 // Extract correlation_id from first 8 bytes for tracing
                                 let correlation_id = if data.len() >= 8 {
-                                    u64::from_le_bytes(data[0..8].try_into().unwrap())
+                                    u64::from_le_bytes(
+                                        data[0..8].try_into().expect("slice is exactly 8 bytes"),
+                                    )
                                 } else {
                                     0
                                 };

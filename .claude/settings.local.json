@@ -32,7 +32,13 @@
       "Read(//home/pierrez/workspace/markdown/llm-notes/actor/01_dynamic_dispatch/**)",
       "Bash(git -C /home/pierrez/workspace/rust/moonpool log -3 --format='%h %s')",
       "WebFetch(domain:release-plz.ieni.dev)",
-      "Bash(git log:*)"
+      "Bash(git log:*)",
+      "Bash(timeout 10 nix develop --command cargo test:*)",
+      "Skill(moonpool-chaos-testing)",
+      "Bash(git -C /home/pierrez/workspace/rust/moonpool status)",
+      "Bash(git -C /home/pierrez/workspace/rust/moonpool diff moonpool-foundation/src/runner.rs moonpool-foundation/src/sim.rs moonpool-foundation/src/tokio_runner.rs moonpool-foundation/tests/autonomous_ping_pong.rs)",
+      "Bash(git -C /home/pierrez/workspace/rust/moonpool diff moonpool-foundation/tests/autonomous_ping_pong.rs)",
+      "Bash(git -C /home/pierrez/workspace/rust/moonpool add .claude/settings.local.json .claude/skills/moonpool-chaos-testing/SKILL.md moonpool-foundation/src/lib.rs moonpool-foundation/src/operation_gen.rs moonpool-foundation/src/runner.rs moonpool-foundation/src/sim.rs moonpool-foundation/src/tokio_runner.rs moonpool-foundation/tests/autonomous_ping_pong.rs)"
     ],
     "deny": [],
     "ask": [],

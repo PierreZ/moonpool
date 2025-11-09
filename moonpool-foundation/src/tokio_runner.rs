@@ -138,6 +138,41 @@ impl TokioRunner {
         self
     }
 
+    /// Register multiple copies of the same workload with auto-numbered names.
+    ///
+    /// This is a convenience method for registering N identical workloads. Each workload
+    /// will be named "{prefix}_1", "{prefix}_2", etc.
+    ///
+    /// # Arguments
+    /// * `prefix` - Name prefix for the workloads (e.g., "server" becomes "server_1", "server_2", ...)
+    /// * `count` - Number of workloads to register
+    /// * `workload` - The workload function to register (must be Copy, e.g., function pointers)
+    ///
+    /// # Example
+    /// ```ignore
+    /// TokioRunner::new()
+    ///     .register_workload_count("server", 5, my_server_workload)
+    ///     .register_workload_count("client", 3, my_client_workload)
+    /// ```
+    pub fn register_workload_count<S, F, Fut>(
+        mut self,
+        prefix: S,
+        count: usize,
+        workload: F,
+    ) -> Self
+    where
+        S: AsRef<str>,
+        F: Fn(TokioNetworkProvider, TokioTimeProvider, TokioTaskProvider, WorkloadTopology) -> Fut
+            + 'static
+            + Copy,
+        Fut: Future<Output = SimulationResult<SimulationMetrics>> + 'static,
+    {
+        for i in 1..=count {
+            self = self.register_workload(format!("{}_{}", prefix.as_ref(), i), workload);
+        }
+        self
+    }
+
     /// Run all registered workloads and generate a report.
     pub async fn run(self) -> TokioReport {
         if self.workloads.is_empty() {

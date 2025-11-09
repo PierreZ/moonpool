@@ -19,8 +19,8 @@
 use std::collections::HashMap;
 
 use moonpool_foundation::{
-    OperationBuilder, SimulationBuilder, SimulationMetrics, SimulationResult, TimeProvider,
-    TokioNetworkProvider, TokioRunner, TokioTaskProvider, TokioTimeProvider, WorkloadTopology,
+    SimulationBuilder, SimulationMetrics, SimulationResult, TimeProvider, TokioNetworkProvider,
+    TokioRunner, TokioTaskProvider, TokioTimeProvider, WorkloadTopology,
     assertions::panic_on_assertion_violations, buggify_with_prob, network::Envelope,
     random::RandomProvider, runner::IterationControl,
 };
@@ -39,31 +39,31 @@ enum PingPongOp {
 }
 
 /// Generate a ping-pong operation with randomized parameters
-fn generate_ping_pong_operation<R: RandomProvider>(builder: &OperationBuilder<R>) -> PingPongOp {
+fn generate_ping_pong_operation<R: RandomProvider>(random: &R) -> PingPongOp {
     // Use buggify to occasionally generate burst sends (triggers queue growth)
     if buggify_with_prob!(0.05) {
         // 5% chance: Send burst to fill queue
         return PingPongOp::BurstSend {
-            count: builder.random_range(5..20) as usize,
-            timeout_ms: builder.random_range(1..50), // Short timeouts to cause queue buildup
+            count: random.random_range(5..20) as usize,
+            timeout_ms: random.random_range(1..50), // Short timeouts to cause queue buildup
         };
     }
 
     // 70% send ping, 20% wait, 10% switch server
-    let choice = builder.random_ratio();
+    let choice = random.random_ratio();
 
     if choice < 0.7 {
         // Send ping with either short or normal timeout
-        let timeout_ms = if builder.random_bool(0.3) {
-            builder.random_range(1..10) // Very short: stress test
+        let timeout_ms = if random.random_bool(0.3) {
+            random.random_range(1..10) // Very short: stress test
         } else {
-            builder.random_range(100..1000) // Normal
+            random.random_range(100..1000) // Normal
         };
         PingPongOp::SendPing { timeout_ms }
     } else if choice < 0.9 {
         // Short wait to vary timing
         PingPongOp::Wait {
-            duration_ms: builder.random_range(1..50),
+            duration_ms: random.random_range(1..50),
         }
     } else {
         // Switch server to test multi-server scenarios
@@ -153,9 +153,8 @@ where
             break;
         }
 
-        // Generate next operation using builder
-        let builder = OperationBuilder::new(&random);
-        let op = generate_ping_pong_operation(&builder);
+        // Generate next operation
+        let op = generate_ping_pong_operation(&random);
 
         tracing::trace!("Client: Operation {}: {:?}", op_num, op);
 
@@ -775,9 +774,8 @@ fn slow_simulation_autonomous_ping_pong_1x2() {
             .use_random_config()
             .with_invariants(vec![create_message_conservation_invariant()])
             .set_iteration_control(IterationControl::UntilAllSometimesReached(100))
-            .register_workload("autonomous_server_1", simple_ping_pong_server)
-            .register_workload("autonomous_server_2", simple_ping_pong_server)
-            .register_workload("autonomous_client_1", autonomous_ping_pong_client)
+            .register_workload_count("server", 2, simple_ping_pong_server)
+            .register_workload_count("client", 1, autonomous_ping_pong_client)
             .run()
             .await;
 
@@ -808,17 +806,8 @@ fn slow_simulation_autonomous_ping_pong_1x10() {
             .use_random_config()
             .with_invariants(vec![create_message_conservation_invariant()])
             .set_iteration_control(IterationControl::UntilAllSometimesReached(100))
-            .register_workload("autonomous_server_1", simple_ping_pong_server)
-            .register_workload("autonomous_server_2", simple_ping_pong_server)
-            .register_workload("autonomous_server_3", simple_ping_pong_server)
-            .register_workload("autonomous_server_4", simple_ping_pong_server)
-            .register_workload("autonomous_server_5", simple_ping_pong_server)
-            .register_workload("autonomous_server_6", simple_ping_pong_server)
-            .register_workload("autonomous_server_7", simple_ping_pong_server)
-            .register_workload("autonomous_server_8", simple_ping_pong_server)
-            .register_workload("autonomous_server_9", simple_ping_pong_server)
-            .register_workload("autonomous_server_10", simple_ping_pong_server)
-            .register_workload("autonomous_client_1", autonomous_ping_pong_client)
+            .register_workload_count("server", 10, simple_ping_pong_server)
+            .register_workload_count("client", 1, autonomous_ping_pong_client)
             .run()
             .await;
 
@@ -849,10 +838,8 @@ fn slow_simulation_autonomous_ping_pong_2x2() {
             .use_random_config()
             .with_invariants(vec![create_message_conservation_invariant()])
             .set_iteration_control(IterationControl::UntilAllSometimesReached(100))
-            .register_workload("autonomous_server_1", simple_ping_pong_server)
-            .register_workload("autonomous_server_2", simple_ping_pong_server)
-            .register_workload("autonomous_client_1", autonomous_ping_pong_client)
-            .register_workload("autonomous_client_2", autonomous_ping_pong_client)
+            .register_workload_count("server", 2, simple_ping_pong_server)
+            .register_workload_count("client", 2, autonomous_ping_pong_client)
             .run()
             .await;
 
@@ -883,26 +870,53 @@ fn slow_simulation_autonomous_ping_pong_10x10() {
             .use_random_config()
             .with_invariants(vec![create_message_conservation_invariant()])
             .set_iteration_control(IterationControl::UntilAllSometimesReached(100))
-            .register_workload("autonomous_server_1", simple_ping_pong_server)
-            .register_workload("autonomous_server_2", simple_ping_pong_server)
-            .register_workload("autonomous_server_3", simple_ping_pong_server)
-            .register_workload("autonomous_server_4", simple_ping_pong_server)
-            .register_workload("autonomous_server_5", simple_ping_pong_server)
-            .register_workload("autonomous_server_6", simple_ping_pong_server)
-            .register_workload("autonomous_server_7", simple_ping_pong_server)
-            .register_workload("autonomous_server_8", simple_ping_pong_server)
-            .register_workload("autonomous_server_9", simple_ping_pong_server)
-            .register_workload("autonomous_server_10", simple_ping_pong_server)
-            .register_workload("autonomous_client_1", autonomous_ping_pong_client)
-            .register_workload("autonomous_client_2", autonomous_ping_pong_client)
-            .register_workload("autonomous_client_3", autonomous_ping_pong_client)
-            .register_workload("autonomous_client_4", autonomous_ping_pong_client)
-            .register_workload("autonomous_client_5", autonomous_ping_pong_client)
-            .register_workload("autonomous_client_6", autonomous_ping_pong_client)
-            .register_workload("autonomous_client_7", autonomous_ping_pong_client)
-            .register_workload("autonomous_client_8", autonomous_ping_pong_client)
-            .register_workload("autonomous_client_9", autonomous_ping_pong_client)
-            .register_workload("autonomous_client_10", autonomous_ping_pong_client)
+            .register_workload_count("server", 10, simple_ping_pong_server)
+            .register_workload_count("client", 10, autonomous_ping_pong_client)
+            .run()
+            .await;
+
+        println!("{}", report);
+
+        if !report.seeds_failing.is_empty() {
+            panic!("Faulty seeds detected: {:?}", report.seeds_failing);
+        }
+
+        panic_on_assertion_violations(&report);
+    });
+}
+
+#[test]
+fn slow_simulation_autonomous_ping_pong_random_topology() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::ERROR)
+        .try_init();
+
+    let local_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build_local(Default::default())
+        .expect("Failed to build local runtime");
+
+    local_runtime.block_on(async move {
+        let report = SimulationBuilder::new()
+            .use_random_config()
+            .with_invariants(vec![create_message_conservation_invariant()])
+            .set_iteration_control(IterationControl::UntilAllSometimesReached(100))
+            .with_random_topology(|builder, random| {
+                // Generate random topology for each simulation seed
+                let num_servers = random.random_range(1..21) as usize;
+                let num_clients = random.random_range(1..21) as usize;
+
+                tracing::info!(
+                    "Random topology: {} servers, {} clients",
+                    num_servers,
+                    num_clients
+                );
+
+                builder
+                    .register_workload_count("server", num_servers, simple_ping_pong_server)
+                    .register_workload_count("client", num_clients, autonomous_ping_pong_client)
+            })
             .run()
             .await;
 
@@ -1044,10 +1058,8 @@ fn test_autonomous_ping_pong_2x2_with_tokio_runner() {
 
     let report = local_runtime.block_on(async move {
         TokioRunner::new()
-            .register_workload("autonomous_server_1", tokio_autonomous_server)
-            .register_workload("autonomous_server_2", tokio_autonomous_server)
-            .register_workload("autonomous_client_1", tokio_autonomous_client)
-            .register_workload("autonomous_client_2", tokio_autonomous_client)
+            .register_workload_count("server", 2, tokio_autonomous_server)
+            .register_workload_count("client", 2, tokio_autonomous_client)
             .run()
             .await
     });
