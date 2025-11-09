@@ -29,6 +29,8 @@ pub mod invariants;
 pub mod network;
 /// Network state management for simulation.
 mod network_state;
+/// Operation generation framework for autonomous testing.
+pub mod operation_gen;
 /// Random number generation provider abstraction.
 pub mod random;
 /// Thread-local random number generation for simulation.
@@ -62,6 +64,10 @@ pub use state_registry::StateRegistry;
 pub use network::{
     NetworkConfiguration, NetworkProvider, Peer, PeerConfig, PeerError, PeerMetrics,
     SimNetworkProvider, TcpListenerTrait, TokioNetworkProvider, sample_duration,
+};
+// Operation generation exports
+pub use operation_gen::{
+    OperationBuilder, OperationGenerator, UniformGenerator, WeightedGenerator,
 };
 // Random provider exports
 pub use random::{RandomProvider, sim::SimRandomProvider};
