@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 use crate::network::transport::Envelope;
+use crate::{buggify_with_prob, sometimes_assert};
 
 /// A message ready for transmission with destination information
 #[derive(Debug, Clone)]
@@ -140,19 +141,63 @@ impl<E: Envelope> TransportProtocol<E> {
             self.receive_buffer.len()
         );
 
+        // Buggify: Inject buffer corruption to test error recovery
+        if buggify_with_prob!(0.03) && !self.receive_buffer.is_empty() {
+            tracing::warn!("Buggify: Corrupting receive buffer to test error recovery");
+            self.receive_buffer[0] = 0xFF;
+            sometimes_assert!(
+                protocol_recovers_from_corrupt_data,
+                true,
+                "Protocol should handle corrupted buffer data gracefully"
+            );
+        }
+
         // Parse all complete messages from the buffer
         let mut parsed_count = 0;
         loop {
+            // Buggify: Force early loop termination to simulate extreme packet fragmentation
+            if buggify_with_prob!(0.05) && parsed_count > 0 {
+                tracing::warn!(
+                    "Buggify: Forcing early parse loop exit to simulate packet fragmentation"
+                );
+                sometimes_assert!(
+                    protocol_handles_fragmentation,
+                    true,
+                    "Protocol handles extreme packet fragmentation scenarios"
+                );
+                break;
+            }
+
             match E::try_from_buffer(&mut self.receive_buffer) {
                 Ok(Some(envelope)) => {
                     // Successfully parsed a complete message
                     parsed_count += 1;
                     self.stats.envelopes_received += 1;
                     self.receive_queue.push_back(envelope);
+
+                    sometimes_assert!(
+                        protocol_parses_messages,
+                        true,
+                        "Protocol successfully parses complete messages"
+                    );
+
+                    // Track multi-message concatenation (TCP optimization)
+                    if parsed_count > 1 {
+                        sometimes_assert!(
+                            protocol_handles_concatenated_messages,
+                            true,
+                            "Protocol handles multiple concatenated messages in single TCP read"
+                        );
+                    }
                     // Continue loop to parse next message if available
                 }
                 Ok(None) => {
                     // Buffer is empty - all messages parsed
+                    sometimes_assert!(
+                        protocol_buffer_fully_consumed,
+                        parsed_count > 0,
+                        "Protocol fully consumes buffer with complete message parsing"
+                    );
                     break;
                 }
                 Err(crate::network::transport::types::EnvelopeError::InsufficientData {
@@ -160,14 +205,32 @@ impl<E: Envelope> TransportProtocol<E> {
                 }) => {
                     // Partial message in buffer - need more data
                     // Leave the partial data in the buffer for next read
+                    sometimes_assert!(
+                        protocol_handles_partial_messages,
+                        !self.receive_buffer.is_empty(),
+                        "Protocol handles partial messages by buffering incomplete data"
+                    );
                     break;
                 }
                 Err(e) => {
                     // Parsing error (corrupt data)
                     self.stats.deserialization_errors += 1;
                     tracing::warn!("Envelope parsing error, clearing buffer: {}", e);
+
+                    sometimes_assert!(
+                        protocol_handles_parse_errors,
+                        true,
+                        "Protocol encounters and recovers from parsing errors"
+                    );
+
                     // Clear buffer to recover from corrupt data
                     self.receive_buffer.clear();
+
+                    sometimes_assert!(
+                        protocol_clears_buffer_on_error,
+                        self.receive_buffer.is_empty(),
+                        "Protocol clears buffer after parse error for recovery"
+                    );
                     break;
                 }
             }
@@ -178,6 +241,24 @@ impl<E: Envelope> TransportProtocol<E> {
             parsed_count,
             self.receive_buffer.len()
         );
+
+        // Track high-throughput scenarios
+        if parsed_count > 0 {
+            sometimes_assert!(
+                protocol_processes_messages,
+                true,
+                "Protocol processes at least one message per receive"
+            );
+        }
+
+        // Track scenarios with remaining buffer data (partial message buffering)
+        if !self.receive_buffer.is_empty() && self.stats.deserialization_errors == 0 {
+            sometimes_assert!(
+                protocol_buffers_partial_data,
+                true,
+                "Protocol buffers partial message data for next read"
+            );
+        }
     }
 
     /// Poll for the next transmission ready for I/O

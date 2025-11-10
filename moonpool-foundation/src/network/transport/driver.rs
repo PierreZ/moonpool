@@ -7,6 +7,7 @@ use crate::network::transport::{Envelope, TransportProtocol};
 use crate::network::{NetworkProvider, Peer, PeerConfig};
 use crate::task::TaskProvider;
 use crate::time::provider::TimeProvider;
+use crate::{buggify_with_prob, sometimes_assert};
 
 // Connection recovery constants following FoundationDB patterns
 const INITIAL_RECONNECTION_TIME: Duration = Duration::from_millis(50);
@@ -135,6 +136,23 @@ where
             let peer = self.get_or_create_peer(&transmit.destination)?;
             tracing::debug!("TransportDriver::process_transmissions got peer, calling peer.send()");
 
+            // Buggify: Force send failure to test reconnection logic
+            if buggify_with_prob!(0.05) {
+                tracing::warn!("Buggify: Forcing peer send failure to test reconnection backoff");
+                self.handle_peer_failure(&transmit.destination);
+
+                sometimes_assert!(
+                    driver_forced_send_failure,
+                    true,
+                    "Driver experiences forced send failures for testing reconnection"
+                );
+
+                return Err(DriverError::PeerOperationFailed(format!(
+                    "Buggified send failure for {}",
+                    transmit.destination
+                )));
+            }
+
             // Send data via peer
             match peer.borrow_mut().send(transmit.data) {
                 Ok(_) => {
@@ -198,6 +216,23 @@ where
         if !self.should_attempt_reconnect(destination) {
             return Err(DriverError::PeerCreationFailed(format!(
                 "Reconnection backoff active for destination: {}",
+                destination
+            )));
+        }
+
+        // Buggify: Force peer creation failure to test backoff behavior
+        if buggify_with_prob!(0.06) {
+            tracing::warn!("Buggify: Forcing peer creation failure to test backoff");
+            self.handle_peer_failure(destination);
+
+            sometimes_assert!(
+                driver_forced_peer_creation_failure,
+                true,
+                "Driver experiences forced peer creation failures for testing backoff"
+            );
+
+            return Err(DriverError::PeerCreationFailed(format!(
+                "Buggified peer creation failure for {}",
                 destination
             )));
         }
@@ -269,6 +304,12 @@ where
         // Remove the failed peer from the pool
         self.peers.remove(destination);
 
+        sometimes_assert!(
+            driver_handles_peer_failure,
+            true,
+            "Driver handles peer connection failures"
+        );
+
         // Update reconnection state with exponential backoff
         let state = self
             .reconnect_states
@@ -278,12 +319,32 @@ where
                 last_failure: None,
             });
 
+        let old_delay = state.reconnect_delay;
+
         // Record failure time and update delay for next attempt
         state.last_failure = Some(Instant::now());
         state.reconnect_delay = Duration::from_secs_f64(
             (state.reconnect_delay.as_secs_f64() * RECONNECTION_TIME_GROWTH_RATE)
                 .min(MAX_RECONNECTION_TIME.as_secs_f64()),
         );
+
+        // Track exponential backoff growth
+        if state.reconnect_delay > old_delay {
+            sometimes_assert!(
+                driver_increases_backoff_delay,
+                true,
+                "Driver increases reconnection delay exponentially"
+            );
+        }
+
+        // Track when delay reaches ceiling
+        if state.reconnect_delay >= MAX_RECONNECTION_TIME {
+            sometimes_assert!(
+                driver_reaches_max_reconnection_delay,
+                true,
+                "Driver reaches maximum reconnection delay ceiling"
+            );
+        }
     }
 
     /// Check if we should attempt reconnection to a destination
@@ -291,15 +352,43 @@ where
         if let Some(state) = self.reconnect_states.get(destination)
             && let Some(last_failure) = state.last_failure
         {
+            let elapsed = last_failure.elapsed();
+            let should_retry = elapsed >= state.reconnect_delay;
+
+            // Track when backoff delay prevents reconnection
+            if !should_retry {
+                sometimes_assert!(
+                    driver_backoff_prevents_reconnect,
+                    true,
+                    "Driver backoff delay prevents premature reconnection attempts"
+                );
+            } else {
+                sometimes_assert!(
+                    driver_allows_reconnect_after_backoff,
+                    true,
+                    "Driver allows reconnection after backoff period expires"
+                );
+            }
+
             // Check if enough time has passed since last failure
-            return last_failure.elapsed() >= state.reconnect_delay;
+            return should_retry;
         }
         true // No previous failure recorded, can attempt connection
     }
 
     /// Reset reconnection state on successful connection
     fn reset_reconnection_state(&mut self, destination: &str) {
+        let had_failure = self.reconnect_states.contains_key(destination);
         self.reconnect_states.remove(destination);
+
+        // Track successful recovery after previous failures
+        if had_failure {
+            sometimes_assert!(
+                driver_recovers_after_failure,
+                true,
+                "Driver successfully recovers connection after previous failures"
+            );
+        }
     }
 
     /// Get access to the time provider

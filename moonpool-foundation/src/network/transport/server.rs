@@ -14,6 +14,7 @@ use crate::network::transport::{Envelope, TransportError};
 use crate::network::{NetworkProvider, TcpListenerTrait};
 use crate::task::TaskProvider;
 use crate::time::TimeProvider;
+use crate::{buggify_with_prob, sometimes_assert};
 
 /// Unique identifier for each connection
 pub type ConnectionId = u64;
@@ -303,13 +304,35 @@ async fn handle_connection<TcpStream, E>(
                 match result {
                     Ok(0) => {
                         tracing::debug!("Connection {} closed by peer", connection_id);
+                        sometimes_assert!(
+                            server_connection_closed_by_peer,
+                            true,
+                            "Server handles connection closed by peer"
+                        );
                         break;
                     }
                     Ok(n) => {
                         tracing::trace!("Connection {} read {} bytes", connection_id, n);
 
+                        sometimes_assert!(
+                            server_receives_data,
+                            n > 0,
+                            "Server successfully receives data from connection"
+                        );
+
                         // Try to parse complete envelopes from buffer using Envelope trait
                         loop {
+                            // Buggify: Force parse error to test server error handling
+                            if buggify_with_prob!(0.02) && !read_buffer.is_empty() {
+                                tracing::warn!("Buggify: Forcing parse error in server connection handler");
+                                sometimes_assert!(
+                                    server_forced_parse_error,
+                                    true,
+                                    "Server experiences forced parse errors for testing"
+                                );
+                                break;
+                            }
+
                             match E::try_from_buffer(&mut read_buffer) {
                                 Ok(Some(envelope)) => {
                                     let msg = IncomingMessage {
@@ -317,6 +340,12 @@ async fn handle_connection<TcpStream, E>(
                                         connection_id,
                                         peer_address: peer_addr.clone(),
                                     };
+
+                                    sometimes_assert!(
+                                        server_parses_envelope,
+                                        true,
+                                        "Server successfully parses envelope from connection"
+                                    );
 
                                     if incoming_tx.send(msg).is_err() {
                                         // Server has been dropped, exit
@@ -332,10 +361,23 @@ async fn handle_connection<TcpStream, E>(
                                     // Need more data - this is expected, break and continue reading
                                     tracing::trace!("Connection {}: need {} bytes, have {} bytes, waiting for more data",
                                         connection_id, needed, available);
+
+                                    sometimes_assert!(
+                                        server_handles_partial_messages,
+                                        available > 0,
+                                        "Server handles partial messages by buffering incomplete data"
+                                    );
                                     break;
                                 }
                                 Err(e) => {
                                     tracing::warn!("Connection {} parsing error: {}", connection_id, e);
+
+                                    sometimes_assert!(
+                                        server_encounters_parse_error,
+                                        true,
+                                        "Server encounters and handles parsing errors"
+                                    );
+
                                     // For other errors, continue trying to parse remaining data
                                     break;
                                 }
@@ -344,6 +386,11 @@ async fn handle_connection<TcpStream, E>(
                     }
                     Err(e) => {
                         tracing::warn!("Connection {} read error: {}", connection_id, e);
+                        sometimes_assert!(
+                            server_handles_read_errors,
+                            true,
+                            "Server handles read errors and closes connection gracefully"
+                        );
                         break;
                     }
                 }
@@ -351,11 +398,33 @@ async fn handle_connection<TcpStream, E>(
 
             // Write side - send outgoing data
             Some(data) = write_rx.recv() => {
+                // Buggify: Force write failure to test server error handling
+                if buggify_with_prob!(0.02) {
+                    tracing::warn!("Buggify: Forcing write failure in server connection handler");
+                    sometimes_assert!(
+                        server_forced_write_failure,
+                        true,
+                        "Server experiences forced write failures for testing"
+                    );
+                    break;
+                }
+
                 if let Err(e) = stream.write_all(&data).await {
                     tracing::trace!("Connection {} write error: {}", connection_id, e);
+                    sometimes_assert!(
+                        server_handles_write_errors,
+                        true,
+                        "Server handles write errors and closes connection gracefully"
+                    );
                     break;
                 }
                 tracing::trace!("Connection {} sent {} bytes", connection_id, data.len());
+
+                sometimes_assert!(
+                    server_sends_data,
+                    !data.is_empty(),
+                    "Server successfully sends data to connection"
+                );
             }
         }
     }
@@ -363,6 +432,12 @@ async fn handle_connection<TcpStream, E>(
     // Cleanup when connection closes
     connections.borrow_mut().remove(&connection_id);
     tracing::debug!("Connection {} handler exiting", connection_id);
+
+    sometimes_assert!(
+        server_cleans_up_connection,
+        true,
+        "Server cleans up connection state on handler exit"
+    );
 }
 
 // We need to add the missing error type to TransportError

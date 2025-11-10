@@ -1082,7 +1082,7 @@ impl SimWorld {
                                     inner.current_time + base_delay,
                                     conn.next_send_time,
                                 );
-                                let actual_delay = earliest_time - inner.current_time;
+                                let _actual_delay = earliest_time - inner.current_time;
 
                                 // Update next available send time for this connection
                                 conn.next_send_time =
