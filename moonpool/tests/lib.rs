@@ -5,4 +5,5 @@
 #![allow(clippy::explicit_auto_deref)]
 
 pub mod integration;
+pub mod simulation;
 pub mod unit;

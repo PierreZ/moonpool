@@ -42,7 +42,10 @@
       "Bash(timeout 120 nix develop --command cargo nextest run:*)",
       "Bash(git -C /home/pierrez/workspace/rust/moonpool diff moonpool-foundation/src/network/transport/protocol.rs moonpool-foundation/src/network/transport/driver.rs moonpool-foundation/src/network/transport/server.rs moonpool-foundation/src/sim.rs)",
       "Bash(git -C /home/pierrez/workspace/rust/moonpool add moonpool-foundation/src/network/transport/protocol.rs moonpool-foundation/src/network/transport/driver.rs moonpool-foundation/src/network/transport/server.rs moonpool-foundation/src/sim.rs)",
-      "Bash(git -C /home/pierrez/workspace/rust/moonpool log -5 --format='%h %s')"
+      "Bash(git -C /home/pierrez/workspace/rust/moonpool log -5 --format='%h %s')",
+      "Bash(timeout 120s nix develop --command cargo check:*)",
+      "Bash(timeout 60 nix develop --command cargo nextest run:*)",
+      "Bash(git -C /home/pierrez/workspace/rust/moonpool diff moonpool/tests/lib.rs)"
     ],
     "deny": [],
     "ask": [],
