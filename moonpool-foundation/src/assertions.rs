@@ -185,6 +185,7 @@ pub fn validate_assertion_contracts() -> Vec<String> {
 /// Assert that a condition must always be true. Panics immediately if false.
 #[macro_export]
 macro_rules! always_assert {
+    // Single message string (no format args)
     ($name:ident, $condition:expr, $message:expr) => {
         let result = $condition;
         if !result {
@@ -194,6 +195,19 @@ macro_rules! always_assert {
                 stringify!($name),
                 current_seed,
                 $message
+            );
+        }
+    };
+    // Format string with arguments (like standard assert!)
+    ($name:ident, $condition:expr, $fmt:expr, $($arg:tt)*) => {
+        let result = $condition;
+        if !result {
+            let current_seed = $crate::get_current_sim_seed();
+            panic!(
+                "Always assertion '{}' failed (seed: {}): {}",
+                stringify!($name),
+                current_seed,
+                format!($fmt, $($arg)*)
             );
         }
     };

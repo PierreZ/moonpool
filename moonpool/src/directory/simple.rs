@@ -275,6 +275,18 @@ impl Directory for SimpleDirectory {
     }
 }
 
+impl SimpleDirectory {
+    /// Clear all directory state.
+    ///
+    /// This method removes all actor registrations and resets node load counters.
+    /// **Only for testing** - ensures clean state between simulation seeds.
+    pub async fn clear(&self) {
+        let mut state = self.state.borrow_mut();
+        state.location_map.clear();
+        state.node_load.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

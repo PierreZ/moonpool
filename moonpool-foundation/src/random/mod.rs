@@ -47,4 +47,22 @@ pub trait RandomProvider: Clone {
     ///
     /// Generate a random bool with the given probability of being true.
     fn random_bool(&self, probability: f64) -> bool;
+
+    /// Choose a random element from a slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slice is empty.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let options = vec!["a", "b", "c"];
+    /// let chosen = random.choice(&options);
+    /// ```
+    fn choice<'a, T>(&self, items: &'a [T]) -> &'a T {
+        assert!(!items.is_empty(), "Cannot choose from empty slice");
+        let idx = self.random_range(0..items.len());
+        &items[idx]
+    }
 }

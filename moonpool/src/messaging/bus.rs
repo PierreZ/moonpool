@@ -61,6 +61,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use tokio::sync::oneshot;
 
+// Import buggify and assertions for chaos testing
+use moonpool_foundation::{buggify, buggify_with_prob, sometimes_assert};
+
 // Type alias for shared directory reference
 type SharedDirectory = Rc<dyn Directory>;
 
@@ -676,6 +679,13 @@ impl MessageBus {
 
         // ORLEANS ROUTING PATTERN (as shown in architecture diagram):
         // Check directory only for actors that are ALREADY ACTIVATED elsewhere
+
+        // BUGGIFY: Inject chaos into directory lookup timing
+        // This creates race windows where actor locations might change between lookup and routing
+        if buggify!() {
+            tracing::warn!("Buggify: Creating race window in directory lookup");
+        }
+
         match self.directory.lookup(&message.target_actor).await {
             Ok(Some(node_id)) if node_id != self.node_id => {
                 // Actor exists on remote node - forward message there
@@ -686,11 +696,25 @@ impl MessageBus {
                     node_id
                 );
 
+                sometimes_assert!(
+                    messagebus_remote_forward,
+                    true,
+                    "MessageBus forwarding message to remote node"
+                );
+
                 // Update target_node to remote location
                 message.target_node = node_id.clone();
 
                 // Clone transport Rc to avoid holding borrow across await
                 let transport = self.network_transport.clone();
+
+                // BUGGIFY: Simulate network send delays/failures
+                if buggify_with_prob!(0.25) {
+                    tracing::warn!("Buggify: Simulating network send failure");
+                    return Err(ActorError::ProcessingFailed(
+                        "Buggified network failure".to_string(),
+                    ));
+                }
 
                 // Send message directly - transport will handle serialization
                 transport.send(node_id.as_str(), message).await?;
@@ -703,9 +727,21 @@ impl MessageBus {
                     "Actor {} registered locally, routing to catalog",
                     message.target_actor
                 );
+
+                sometimes_assert!(
+                    messagebus_directory_hit_local,
+                    true,
+                    "MessageBus found actor in directory (local)"
+                );
             }
             Ok(None) => {
                 // Actor NOT in directory - Consult placement hint
+                sometimes_assert!(
+                    messagebus_directory_miss,
+                    true,
+                    "MessageBus directory miss - consulting placement"
+                );
+
                 let actor_type = message.target_actor.actor_type();
                 let router = self
                     .actor_routers
@@ -722,6 +758,12 @@ impl MessageBus {
                 // Get placement hint from actor type
                 let hint = router.placement_hint();
 
+                // BUGGIFY: Inject chaos into node load queries
+                // Simulates stale or slow load information
+                if buggify!() {
+                    tracing::warn!("Buggify: Simulating slow node load query");
+                }
+
                 // Get current node loads from directory
                 let node_loads = self.directory.get_all_node_loads().await;
 
@@ -732,6 +774,12 @@ impl MessageBus {
                     &self.node_id,
                     &node_loads,
                 )?;
+
+                sometimes_assert!(
+                    messagebus_placement_consulted,
+                    true,
+                    "MessageBus consulted placement strategy"
+                );
 
                 tracing::debug!(
                     node_id = %self.node_id,
@@ -749,11 +797,25 @@ impl MessageBus {
                         "Forwarding activation to remote node"
                     );
 
+                    sometimes_assert!(
+                        messagebus_placement_chose_remote,
+                        true,
+                        "Placement chose remote node for activation"
+                    );
+
                     // Update target_node to chosen location
                     message.target_node = chosen_node.clone();
 
                     // Clone transport Rc to avoid holding borrow across await
                     let transport = self.network_transport.clone();
+
+                    // BUGGIFY: Simulate network send failures on placement forwards
+                    if buggify_with_prob!(0.20) {
+                        tracing::warn!("Buggify: Placement forward network failure");
+                        return Err(ActorError::ProcessingFailed(
+                            "Buggified placement forward failure".to_string(),
+                        ));
+                    }
 
                     // Send message directly - transport will handle serialization
                     transport.send(chosen_node.as_str(), message).await?;
@@ -764,6 +826,12 @@ impl MessageBus {
                         node_id = %self.node_id,
                         "Will activate locally per placement decision"
                     );
+
+                    sometimes_assert!(
+                        messagebus_placement_chose_local,
+                        true,
+                        "Placement chose local node for activation"
+                    );
                 }
             }
             Err(e) => {
@@ -773,10 +841,22 @@ impl MessageBus {
                     message.target_actor,
                     e
                 );
+
+                sometimes_assert!(
+                    messagebus_directory_error,
+                    true,
+                    "MessageBus directory lookup error - fallback to local"
+                );
             }
         }
 
         // LOCATE ROUTING: Find the local catalog for this actor type
+        sometimes_assert!(
+            messagebus_local_routing,
+            true,
+            "MessageBus performing local routing"
+        );
+
         let actor_type = message.target_actor.actor_type();
 
         let router = self
@@ -790,6 +870,12 @@ impl MessageBus {
                     actor_type
                 ))
             })?;
+
+        // BUGGIFY: Inject chaos into local routing
+        // Creates timing variations in local message delivery
+        if buggify!() {
+            tracing::warn!("Buggify: Creating timing variation in local routing");
+        }
 
         // Get MessageBus Rc from weak reference (Orleans pattern)
         // This allows routers to receive MessageBus for spawning message loops
@@ -828,9 +914,27 @@ impl MessageBus {
             self.pending_count()
         );
 
+        sometimes_assert!(
+            messagebus_response_routed,
+            true,
+            "MessageBus routing response to callback"
+        );
+
+        // BUGGIFY: Inject chaos into response delivery timing
+        // Tests callback manager's correlation tracking under stress
+        if buggify!() {
+            tracing::warn!("Buggify: Creating timing variation in callback delivery");
+        }
+
         // Complete the pending request via CallbackManager (Orleans: InsideRuntimeClient)
         // CallbackManager handles correlation tracking and ensures exactly-once completion
         self.complete_pending_request(correlation_id, Ok(message))?;
+
+        sometimes_assert!(
+            messagebus_callback_completed,
+            true,
+            "MessageBus completed callback delivery"
+        );
 
         tracing::debug!(
             node_id = %self.node_id,

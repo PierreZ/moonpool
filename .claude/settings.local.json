@@ -45,7 +45,10 @@
       "Bash(git -C /home/pierrez/workspace/rust/moonpool log -5 --format='%h %s')",
       "Bash(timeout 120s nix develop --command cargo check:*)",
       "Bash(timeout 60 nix develop --command cargo nextest run:*)",
-      "Bash(git -C /home/pierrez/workspace/rust/moonpool diff moonpool/tests/lib.rs)"
+      "Bash(git -C /home/pierrez/workspace/rust/moonpool diff moonpool/tests/lib.rs)",
+      "Bash(git -C /home/pierrez/workspace/rust/moonpool log -1 --stat)",
+      "Bash(timeout 120s nix develop:*)",
+      "Bash(timeout 30 nix develop --command cargo nextest run:*)"
     ],
     "deny": [],
     "ask": [],

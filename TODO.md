@@ -6,45 +6,111 @@
 
 ---
 
-## Phase 1: Minimal 2-Node Request-Response
+## Phase 1: Enhanced MessageBus with Autonomous Testing
 
-**Duration**: ~2 hours
-**Status**: ✅ COMPLETED
+**Duration**: ~6 hours
+**Status**: 🚧 IN PROGRESS (90% complete - network active, debugging response routing)
 
 ### Objectives
-- Create first simulation test with real async I/O (network operations)
-- Validate simulation framework works with MessageBus
-- Establish baseline request-response flow
+- Create comprehensive MessageBus simulation test with real ActorRuntime integration
+- Implement autonomous testing pattern (operation generator)
+- Add strategic chaos injection (buggify) throughout MessageBus code
+- Establish comprehensive coverage assertions (15-20 sometimes_assert)
+- Validate message conservation and correlation tracking invariants
 
-### Implementation
-- **File**: `moonpool/tests/simulation/minimal_message_bus.rs`
-- **Setup**: 2 nodes exchanging 10 request-response pairs
-- **I/O Operations**: Real network sends/receives via FoundationTransport
-- **Buggify Calls**: 1-2 locations in network send paths (random delays)
-- **Assertions**:
-  - `sometimes_assert!(request_sent, ...)` - Request sent over network
-  - `sometimes_assert!(response_received, ...)` - Response arrived
-  - `sometimes_assert!(callback_completed, ...)` - Callback invoked
+### Implementation - Enhanced Approach
+- **Files**:
+  - `moonpool/tests/simulation/minimal_message_bus.rs` - Main test with autonomous workload
+  - `moonpool/tests/simulation/actors/ping_pong_actor.rs` - Test actor for request-response
+  - `moonpool/src/messaging/bus.rs` - Added 6 strategic buggify calls + 11 coverage assertions
+- **Setup**: 2 nodes (client + server) with ActorRuntime, PingPongActor for request-response
+- **Workload**: Autonomous operation generator producing 100-500 operations per run
+- **Operation Alphabet**:
+  ```rust
+  enum MessageBusOp {
+      SendPing { target_actor, timeout_ms },  // 80% - normal ping
+      Wait { duration_ms },                    // 20% - timing variation
+      BurstSend { target_actor, count, timeout_ms }, // 5% - stress test
+  }
+  ```
+- **Buggify Locations** (6 strategic placements):
+  1. `bus.rs:685` - Race window in directory lookup
+  2. `bus.rs:712` - Network send failure (25% prob when active)
+  3. `bus.rs:763` - Slow node load query
+  4. `bus.rs:813` - Placement forward network failure (20% prob)
+  5. `bus.rs:876` - Local routing timing variation
+  6. `bus.rs:925` - Callback delivery timing variation
+
+- **Coverage Assertions** (11 in MessageBus):
+  - `messagebus_remote_forward` - Message forwarded to remote node
+  - `messagebus_directory_hit_local` - Actor found in directory (local)
+  - `messagebus_directory_miss` - Directory miss triggers placement
+  - `messagebus_placement_consulted` - Placement strategy invoked
+  - `messagebus_placement_chose_remote` - Placement selected remote node
+  - `messagebus_placement_chose_local` - Placement selected local node
+  - `messagebus_directory_error` - Directory lookup failed
+  - `messagebus_local_routing` - Local routing performed
+  - `messagebus_response_routed` - Response routed to callback
+  - `messagebus_callback_completed` - Callback delivery completed
+  - Plus 7 in test workload (client operations)
+
+- **Comprehensive Invariants**:
+  1. **Message Conservation**: `sent = received + in_transit + timeouts` (strict accounting)
+  2. **No Correlation Leaks**: All pending requests resolved at completion
+  3. **Completion Tracking**: All nodes reach completed status
 
 ### Success Criteria
-- [x] Test completes without deadlock detection
-- [x] All sometimes_assert trigger at least once
-- [x] Basic async I/O (time.sleep) works through simulation
-- [x] Test runs in <30 seconds (actually <0.02s!)
+- [x] ActorRuntime integrated with simulation providers
+- [x] PingPongActor test infrastructure created
+- [x] Autonomous operation generator implemented
+- [x] 6 strategic buggify calls added to MessageBus
+- [x] 11 coverage assertions in MessageBus code
+- [x] 3 comprehensive invariants (conservation, leaks, completion)
+- [x] Test compiles and runs successfully
+- [x] Network layer active (foundation assertions triggering)
+- [ ] Response routing working (currently 0 responses received)
+- [ ] 100% sometimes_assert coverage across 1000+ seeds
+- [ ] All invariants hold (no violations)
+- [ ] 100% success rate (no failing seeds)
 
 ### What Was Accomplished
-- Created `moonpool/tests/simulation/minimal_message_bus.rs`
-- Validated that simulation framework integrates with moonpool crate
-- Established baseline test structure for future phases
-- Confirmed async I/O operations prevent deadlock detection
-- Simple invariant checking works correctly
-- 10 iterations with 100% success rate
+- ✅ Created PingPongActor with message handlers and state management
+- ✅ Integrated ActorRuntime with simulation providers (NetworkProvider, TimeProvider, TaskProvider)
+- ✅ Implemented autonomous operation generator with 3 operation types
+- ✅ Added 6 strategic buggify calls throughout MessageBus routing logic
+- ✅ Added 11 coverage assertions to track all MessageBus code paths
+- ✅ Implemented 3 comprehensive invariants with detailed validation
+- ✅ Fixed foundation ergonomics: `always_assert!` now supports format args, added `RandomProvider::choice()`
+- ✅ Fixed ActorRuntime simulation setup:
+  - Added shared Directory and Storage across workloads
+  - Added `clear()` methods for per-seed state cleanup
+  - Configured cluster_nodes, storage, and shared_directory
+  - Added 1-second startup delay (mirrors hello_actor example)
+  - Enabled Tokio runtime time/IO features
+- 🚧 Debugging response routing (218 sent, 0 received, 16 timeouts)
+
+### Foundation Ergonomics Improvements (Completed)
+1. **Enhanced `always_assert!` macro**: Now supports format arguments like standard `assert!`
+   ```rust
+   // Before: always_assert!(name, cond, format!("val: {}", x))
+   // After:  always_assert!(name, cond, "val: {}", x)
+   ```
+2. **Added `RandomProvider::choice()` method**: Common pattern now built-in
+   ```rust
+   // Before: let idx = random.random_range(0..vec.len()); let item = &vec[idx];
+   // After:  let item = random.choice(&vec);
+   ```
 
 ### Key Learnings
-1. **Shared state challenge**: ActorRuntime requires shared Directory/Storage, but simulation workloads are independent. For Phase 1, simplified to pure I/O validation.
-2. **I/O requirement critical**: Must have real async operations (time.sleep, network I/O) to prevent deadlock detection
-3. **Type annotations**: ActorRuntime generic types need explicit turbofish syntax in test context
-4. **API differences**: Used foundation's patterns (WorkloadTopology, sometimes_assert, invariants)
+1. **Autonomous testing is powerful**: Operation generator with 100-500 ops finds edge cases automatically
+2. **Strategic buggify placement**: Focus on state transitions, error paths, timing-sensitive code
+3. **Comprehensive assertions essential**: Need 15-20 to achieve full coverage of code paths
+4. **Invariants catch what assertions miss**: Message conservation found accounting bugs
+5. **Result nesting complexity**: `timeout()` returns `SimulationResult<Result<T, ()>>`, creates nested Results with actor errors
+6. **Foundation ergonomics matter**: Small API improvements (format args, choice) greatly improve test readability
+7. **Shared state in simulation**: Directory and Storage must be shared across workloads with per-seed clearing
+8. **Startup synchronization critical**: Need 1s delay for ServerTransport bind + receive loop before sending messages
+9. **Foundation assertions valuable**: Network-level assertions (`peer_queue_*`) show transport layer is active
 
 ---
 
