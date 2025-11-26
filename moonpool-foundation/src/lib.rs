@@ -25,6 +25,8 @@ pub mod error;
 pub mod events;
 /// Invariant checking for cross-workload validation.
 pub mod invariants;
+/// FDB-compatible messaging types and wire format.
+pub mod messaging;
 /// Network simulation and abstraction layer.
 pub mod network;
 /// Network state management for simulation.
@@ -73,5 +75,11 @@ pub use sleep::SleepFuture;
 pub use task::{TaskProvider, tokio_provider::TokioTaskProvider};
 pub use time::{SimTimeProvider, TimeProvider, TokioTimeProvider};
 pub use tokio_runner::{TokioReport, TokioRunner};
+// FDB-compatible messaging exports
+pub use messaging::{
+    Endpoint, HEADER_SIZE, MAX_PAYLOAD_SIZE, NetworkAddress, NetworkAddressParseError,
+    PacketHeader, UID, WELL_KNOWN_RESERVED_COUNT, WellKnownToken, WireError, deserialize_packet,
+    flags, serialize_packet, try_deserialize_packet,
+};
 
 // Macros are automatically available at crate root when defined with #[macro_export]

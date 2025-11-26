@@ -828,12 +828,14 @@ fn enable_connection_failures(sim: &SimWorld, duration: Duration) {
 
 # PHASE 4: Migration Steps
 
-## Step 1: Foundation Types & Wire Format
-1. Create `types.rs` with UID, Endpoint, NetworkAddress
-2. Create `well_known.rs` with WellKnownToken enum
-3. Create `wire.rs` with FDB-compatible packet format
-4. Add crc32c dependency to Cargo.toml
-5. Write unit tests for wire format
+## Step 1: Foundation Types & Wire Format ✅ DONE
+1. ✅ Create `types.rs` with UID, Endpoint, NetworkAddress
+2. ✅ Create `well_known.rs` with WellKnownToken enum
+3. ✅ Create `wire.rs` with FDB-compatible packet format
+4. ✅ Add crc32c dependency to Cargo.toml
+5. ✅ Write unit tests for wire format
+
+> Note: Organized into `messaging/` module. Simplified Endpoint to hold single NetworkAddress instead of NetworkAddressList.
 
 ## Step 2: Refactor Peer
 1. Modify `peer/core.rs` to use new wire format
