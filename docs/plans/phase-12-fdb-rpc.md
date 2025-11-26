@@ -843,16 +843,27 @@ fn enable_connection_failures(sim: &SimWorld, duration: Duration) {
 3. Update receive to return `(UID, Vec<u8>)`
 4. Update peer tests
 
-## Step 3: Remove Old Transport Layer
-1. Delete `network/transport/` directory entirely
-2. Update `network/mod.rs` exports
-3. Update `lib.rs` exports
-4. Fix any compilation errors
+## Step 3: Remove Old Transport Layer ✅ DONE
+1. ✅ Delete `network/transport/` directory entirely
+2. ✅ Update `network/mod.rs` exports
+3. ✅ Update `lib.rs` exports
+4. ✅ Fix any compilation errors
 
-## Step 4: Update Foundation Tests
-1. Update existing tests to use new API
-2. Remove tests for deleted code
-3. Add new tests for raw transport
+> Note: Also deleted old simulation tests (ping-pong, transport_e2e) that depended on transport layer.
+
+## Step 4: Update Foundation Tests ✅ DONE (partial)
+1. ⏳ Update existing tests to use new API (will do when refactoring Peer)
+2. ✅ Remove tests for deleted code
+3. ⏳ Add new tests for raw transport (will do when refactoring Peer)
+
+## Step 4.5: Build New E2E Simulation Tests
+> **IMPORTANT**: Before proceeding to moonpool work, ask user to backport Claude skills for simulation testing.
+
+1. Create new simulation test infrastructure using new wire format
+2. Build ping-pong simulation tests with UID-based messaging
+3. Test chaos scenarios (disconnection, reconnection, message reordering)
+4. Verify determinism with multi-seed testing
+5. Add invariant checks for message delivery guarantees
 
 ## Step 5: Moonpool Messaging Module Structure
 1. Create `moonpool/src/messaging/mod.rs`

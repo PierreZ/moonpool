@@ -18,9 +18,6 @@ pub mod sim;
 /// Resilient peer connection management
 pub mod peer;
 
-/// Transport layer abstraction for request-response messaging
-pub mod transport;
-
 // Re-export main traits
 pub use traits::{NetworkProvider, TcpListenerTrait};
 
@@ -33,11 +30,3 @@ pub use peer::{Peer, PeerConfig, PeerError, PeerMetrics};
 
 // Re-export configuration
 pub use config::{NetworkConfiguration, sample_duration};
-
-// Re-export transport types
-pub use transport::{
-    DriverError, Envelope, EnvelopeError, EnvelopeFactory, EnvelopeReplyDetection,
-    EnvelopeSerializer, ProtocolStats, RequestResponseEnvelope, RequestResponseEnvelopeFactory,
-    RequestResponseSerializer, SimpleEnvelope, SimpleEnvelopeFactory, Transmit, TransportDriver,
-    TransportProtocol,
-};
