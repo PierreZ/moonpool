@@ -837,11 +837,13 @@ fn enable_connection_failures(sim: &SimWorld, duration: Duration) {
 
 > Note: Organized into `messaging/` module. Simplified Endpoint to hold single NetworkAddress instead of NetworkAddressList.
 
-## Step 2: Refactor Peer
-1. Modify `peer/core.rs` to use new wire format
-2. Change API to `send_reliable(token, bytes)`, `send_unreliable(token, bytes)`
-3. Update receive to return `(UID, Vec<u8>)`
-4. Update peer tests
+## Step 2: Refactor Peer ✅ DONE
+1. ✅ Modify `peer/core.rs` to use new wire format
+2. ✅ Change API to `send_reliable(token, bytes)`, `send_unreliable(token, bytes)`
+3. ✅ Update receive to return `(UID, Vec<u8>)`
+4. ⏳ Update peer tests (will do in Step 4.5)
+
+> Note: Added read buffer for packet framing with `try_deserialize_packet`. Wire format checksum validation on receive.
 
 ## Step 3: Remove Old Transport Layer ✅ DONE
 1. ✅ Delete `network/transport/` directory entirely
