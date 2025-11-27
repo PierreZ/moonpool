@@ -858,14 +858,167 @@ fn enable_connection_failures(sim: &SimWorld, duration: Duration) {
 2. ✅ Remove tests for deleted code
 3. ⏳ Add new tests for raw transport (will do when refactoring Peer)
 
+## Step 4.1: FDB Chaos Injection Parity ⏳ TODO
+
+Add missing chaos injection features from FDB's simulation to moonpool-foundation.
+
+### 4.1.1 Network Bit Flipping ⏳
+**Why**: Tests that checksum validation correctly catches corruption. Without this, checksum code paths are never exercised under chaos.
+- Add `BUGGIFY_WITH_PROB(0.0001)` bit flipping at packet receive
+- Power-law distribution for number of bits (1-32, biased toward fewer)
+- Skip for stable connections
+- Verify checksum catches corruption and throws error
+- **FDB ref**: `FlowTransport.actor.cpp:1288-1332`
+
+### 4.1.2 Partial/Short Writes ⏳
+**Why**: Tests that application code correctly handles `write()` returning less than requested (TCP backpressure, slow receiver).
+- BUGGIFY truncates writes to random smaller amounts (0-1000 bytes)
+- Caller must check return value and retry with remaining bytes
+- **FDB ref**: `sim2.actor.cpp:427-441`
+
+### 4.1.3 Random Connection Failures ⏳
+**Why**: Real connections fail randomly during I/O, not just via explicit partitions. Tests recovery code paths.
+- 0.001% probability per read/write operation
+- Asymmetric failures: send-only, recv-only, or both directions
+- Respects cooldown period after failures
+- **FDB ref**: `sim2.actor.cpp:580-605`
+
+### 4.1.4 Clock Drift ⏳
+**Why**: Real clocks drift. Tests time-sensitive code (timeouts, leases, distributed consensus).
+- `timer()` drifts 0-0.1s ahead of `now()`
+- Simulates clock skew between processes
+- **FDB ref**: `sim2.actor.cpp:1058-1064`
+
+### 4.1.5 Buggified Delays ⏳
+**Why**: Tests timeout handling and retry logic under unexpected latency spikes.
+- 25% chance of extra delay on sleep/timer operations
+- Uses power distribution for delay amount
+- **FDB ref**: `sim2.actor.cpp:1101-1104`
+
+### 4.1.6 Connection Establishment Failures ⏳
+**Why**: `connect()` can fail or hang forever in real networks. Tests connection retry logic.
+- Configurable failure modes: throw error, hang forever, or probabilistic
+- **FDB ref**: `sim2.actor.cpp:1243-1250`
+
+### 4.1.7 Document All Fault Injection ⏳
+- Create `docs/fault-injection.md` describing all chaos mechanisms
+- Include: trigger conditions, probabilities, what each tests, FDB references
+- Serve as reference for simulation workload authors
+
+## Step 4.2: Foundation Crate Reorganization ⏳ TODO
+
+Reorganize moonpool-foundation to improve maintainability by splitting large files and grouping related modules.
+
+### Current Issues
+- `sim.rs` is 1789 lines (too large)
+- `runner.rs` is 1176 lines (too large)
+- Root-level files are scattered (assertions, buggify, invariants, events, etc.)
+
+### New Directory Structure
+
+```
+moonpool-foundation/src/
+├── lib.rs                    # Public API exports only
+├── error.rs                  # SimulationError, SimulationResult
+│
+├── sim/                      # Core simulation engine (was sim.rs)
+│   ├── mod.rs               # exports
+│   ├── world.rs             # SimWorld, WeakSimWorld core struct
+│   ├── wakers.rs            # WakerRegistry and waker management
+│   ├── stepping.rs          # Event stepping and task scheduling
+│   ├── events.rs            # Event, EventQueue, ScheduledEvent
+│   ├── state.rs             # NetworkState (was network_state.rs)
+│   ├── sleep.rs             # SleepFuture
+│   └── rng.rs               # Thread-local RNG
+│
+├── runner/                   # Simulation runners (was runner.rs)
+│   ├── mod.rs               # exports
+│   ├── builder.rs           # SimulationBuilder
+│   ├── deadlock.rs          # DeadlockDetector
+│   ├── orchestrator.rs      # WorkloadOrchestrator
+│   ├── topology.rs          # TopologyFactory, WorkloadTopology
+│   ├── metrics.rs           # SimulationMetrics, SimulationReport
+│   └── tokio.rs             # TokioRunner, TokioReport
+│
+├── testing/                  # Testing utilities & fault injection
+│   ├── mod.rs               # exports + macros
+│   ├── assertions.rs        # always_assert!, sometimes_assert!
+│   ├── buggify.rs           # buggify!, fault injection
+│   ├── invariants.rs        # InvariantCheck type
+│   └── state_registry.rs    # StateRegistry for invariants
+│
+├── messaging/                # FDB-compatible wire format (unchanged)
+│   ├── mod.rs
+│   ├── types.rs
+│   ├── well_known.rs
+│   └── wire.rs
+│
+├── network/                  # Network abstractions (unchanged)
+│   ├── mod.rs
+│   ├── config.rs
+│   ├── traits.rs
+│   ├── peer/
+│   ├── sim/
+│   └── tokio/
+│
+└── providers/                # Provider pattern implementations
+    ├── mod.rs               # exports all providers
+    ├── time.rs              # TimeProvider, SimTimeProvider, TokioTimeProvider
+    ├── task.rs              # TaskProvider, TokioTaskProvider
+    └── random.rs            # RandomProvider, SimRandomProvider
+```
+
+### Migration Steps
+
+1. **Split sim.rs → sim/ directory**
+   - Extract WakerRegistry to `wakers.rs`
+   - Extract event stepping to `stepping.rs`
+   - Move events.rs, sleep.rs, rng.rs, network_state.rs into sim/
+
+2. **Split runner.rs → runner/ directory**
+   - Extract DeadlockDetector to `deadlock.rs`
+   - Extract WorkloadOrchestrator to `orchestrator.rs`
+   - Extract TopologyFactory to `topology.rs`
+   - Move tokio_runner.rs to runner/tokio.rs
+
+3. **Create testing/ directory**
+   - Move assertions.rs, buggify.rs, invariants.rs, state_registry.rs
+
+4. **Create providers/ directory**
+   - Consolidate time/, task/, random/ modules
+   - Flatten into single files per provider
+
+5. **Update lib.rs exports**
+   - Preserve all current public API paths
+   - No breaking changes to external users
+
+6. **Run validation**
+   - `cargo fmt && cargo clippy && cargo nextest run`
+
 ## Step 4.5: Build New E2E Simulation Tests
-> **IMPORTANT**: Before proceeding to moonpool work, ask user to backport Claude skills for simulation testing.
+> **IMPORTANT**: Use the new Claude skills in `.claude/skills/` for simulation testing:
+> - `designing-simulation-workloads` - Design operation alphabets and autonomous workloads
+> - `using-buggify` - Add strategic fault injection for chaos testing
+> - `using-chaos-assertions` - Track coverage with sometimes_assert! and validate with always_assert!
+> - `validating-with-invariants` - Add cross-workload invariant checks
+>
+> See `.claude/skills/README.md` for learning path and decision flowchart.
 
 1. Create new simulation test infrastructure using new wire format
 2. Build ping-pong simulation tests with UID-based messaging
+   - Design operation alphabet (connect, disconnect, send_request, etc.)
+   - Add buggify for connection failures and timeouts
+   - Track coverage with sometimes_assert! (timeout occurred, reconnection succeeded)
 3. Test chaos scenarios (disconnection, reconnection, message reordering)
+   - Use buggify to force disconnections and delays
+   - Verify error handling paths with sometimes_assert!
 4. Verify determinism with multi-seed testing
+   - Run with `UntilAllSometimesReached(10_000)` for comprehensive coverage
+   - Reproduce any failures with specific seeds
 5. Add invariant checks for message delivery guarantees
+   - Message conservation: `sent ≥ received`
+   - No duplicate correlation IDs
+   - Request-response pairing correctness
 
 ## Step 5: Moonpool Messaging Module Structure
 1. Create `moonpool/src/messaging/mod.rs`
