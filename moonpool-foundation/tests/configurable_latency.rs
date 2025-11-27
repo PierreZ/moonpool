@@ -108,6 +108,10 @@ fn test_custom_latency_configuration() {
             clog_duration: Duration::ZERO..Duration::ZERO,
             partition_probability: 0.0,
             partition_duration: Duration::ZERO..Duration::ZERO,
+            bit_flip_probability: 0.0,
+            bit_flip_min_bits: 1,
+            bit_flip_max_bits: 32,
+            bit_flip_cooldown: Duration::ZERO,
         };
 
         let mut sim = SimWorld::new_with_network_config(config);
@@ -156,6 +160,10 @@ fn test_latency_range_sampling() {
             clog_duration: Duration::ZERO..Duration::ZERO,
             partition_probability: 0.0,
             partition_duration: Duration::ZERO..Duration::ZERO,
+            bit_flip_probability: 0.0,
+            bit_flip_min_bits: 1,
+            bit_flip_max_bits: 32,
+            bit_flip_cooldown: Duration::ZERO,
         };
 
         let mut execution_times = Vec::new();
@@ -213,6 +221,10 @@ fn test_network_randomization_ranges() {
             clog_duration: Duration::ZERO..Duration::ZERO,
             partition_probability: 0.0,
             partition_duration: Duration::ZERO..Duration::ZERO,
+            bit_flip_probability: 0.0,
+            bit_flip_min_bits: 1,
+            bit_flip_max_bits: 32,
+            bit_flip_cooldown: Duration::ZERO,
         };
 
         let mut sim = SimWorld::new_with_network_config(config);

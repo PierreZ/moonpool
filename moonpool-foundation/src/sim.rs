@@ -50,6 +50,9 @@ struct SimInner {
 
     // Event processing metrics
     events_processed: u64,
+
+    // Chaos tracking
+    last_bit_flip_time: Duration,
 }
 
 impl SimInner {
@@ -63,6 +66,7 @@ impl SimInner {
             next_task_id: 0,
             awakened_tasks: HashSet::new(),
             events_processed: 0,
+            last_bit_flip_time: Duration::ZERO,
         }
     }
 
@@ -76,7 +80,30 @@ impl SimInner {
             next_task_id: 0,
             awakened_tasks: HashSet::new(),
             events_processed: 0,
+            last_bit_flip_time: Duration::ZERO,
         }
+    }
+
+    /// Calculate the number of bits to flip using a power-law distribution.
+    ///
+    /// Uses the formula: 32 - floor(log2(random_value))
+    /// This creates a power-law distribution biased toward fewer bits:
+    /// - 1-2 bits: very common
+    /// - 16 bits: uncommon
+    /// - 32 bits: very rare
+    ///
+    /// Matches FDB's approach in FlowTransport.actor.cpp:1297
+    fn calculate_flip_bit_count(random_value: u32, min_bits: u32, max_bits: u32) -> u32 {
+        if random_value == 0 {
+            // Handle edge case: treat 0 as if it were 1
+            return max_bits.min(32);
+        }
+
+        // Formula: 32 - floor(log2(x)) = 1 + leading_zeros(x)
+        let bit_count = 1 + random_value.leading_zeros();
+
+        // Clamp to configured range
+        bit_count.clamp(min_bits, max_bits)
     }
 }
 
@@ -941,13 +968,74 @@ impl SimWorld {
 
                         // Write data to the specified connection's receive buffer
                         if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
+                            // Apply bit flipping chaos BEFORE writing to receive buffer
+                            let data_to_deliver = if data.is_empty() {
+                                // No data to corrupt
+                                data
+                            } else {
+                                let config = &inner.network.config;
+                                let now = inner.current_time;
+                                let cooldown_elapsed = now.saturating_sub(inner.last_bit_flip_time)
+                                    >= config.bit_flip_cooldown;
+
+                                // Check if we should inject bit flips
+                                // Note: All connections are unstable for now (stable connection support deferred)
+                                if cooldown_elapsed
+                                    && crate::buggify_with_prob!(config.bit_flip_probability)
+                                {
+                                    // Calculate number of bits to flip using power-law distribution
+                                    let random_value = sim_random::<u32>();
+                                    let flip_count = SimInner::calculate_flip_bit_count(
+                                        random_value,
+                                        config.bit_flip_min_bits,
+                                        config.bit_flip_max_bits,
+                                    );
+
+                                    // Clone data to make it mutable for corruption
+                                    let mut corrupted_data = data.clone();
+
+                                    // Flip bits at random positions
+                                    let mut flipped_positions = std::collections::HashSet::new();
+                                    for _ in 0..flip_count {
+                                        // Pick a random byte
+                                        let byte_idx =
+                                            (sim_random::<u64>() as usize) % corrupted_data.len();
+                                        // Pick a random bit within that byte (0-7)
+                                        let bit_idx = (sim_random::<u64>() as usize) % 8;
+
+                                        // Track position to avoid duplicate flips (which would cancel out)
+                                        let position = (byte_idx, bit_idx);
+                                        if !flipped_positions.contains(&position) {
+                                            flipped_positions.insert(position);
+                                            // Flip the bit using XOR
+                                            corrupted_data[byte_idx] ^= 1 << bit_idx;
+                                        }
+                                    }
+
+                                    // Update chaos tracking
+                                    inner.last_bit_flip_time = now;
+
+                                    tracing::info!(
+                                        "BitFlipInjected: connection={} bytes={} bits_flipped={} unique_positions={}",
+                                        connection_id.0,
+                                        data.len(),
+                                        flip_count,
+                                        flipped_positions.len()
+                                    );
+
+                                    corrupted_data
+                                } else {
+                                    data
+                                }
+                            };
+
                             // Normal delivery to receive buffer
                             tracing::debug!(
                                 "DataDelivery writing {} bytes to connection {} receive_buffer",
-                                data.len(),
+                                data_to_deliver.len(),
                                 connection_id.0
                             );
-                            for &byte in &data {
+                            for &byte in &data_to_deliver {
                                 conn.receive_buffer.push_back(byte);
                             }
 

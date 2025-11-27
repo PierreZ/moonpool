@@ -622,8 +622,24 @@ async fn connection_task<
                                 }
                                 Err(e) => {
                                     // Protocol error - invalid packet
-                                    tracing::warn!("connection_task: wire format error: {}", e);
-                                    // Clear buffer and continue - could be corruption
+                                    use crate::WireError;
+                                    match &e {
+                                        WireError::ChecksumMismatch { expected, actual } => {
+                                            // Checksum validation caught corruption
+                                            // This could be:
+                                            // 1. Expected: intentional chaos injection (check for BitFlipInjected log)
+                                            // 2. Unexpected: real bug in network/serialization code (BUG!)
+                                            tracing::warn!(
+                                                "ChecksumMismatch: expected={:#010x} actual={:#010x} - corruption detected",
+                                                expected,
+                                                actual
+                                            );
+                                        }
+                                        _ => {
+                                            tracing::warn!("connection_task: wire format error: {}", e);
+                                        }
+                                    }
+                                    // Clear buffer and continue - recovery will happen via reconnection
                                     read_buffer.clear();
                                     break;
                                 }

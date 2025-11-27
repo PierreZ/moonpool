@@ -25,6 +25,15 @@ pub struct NetworkConfiguration {
     pub partition_probability: f64,
     /// Duration range for network partitions
     pub partition_duration: Range<Duration>,
+
+    /// Bit flip probability for packet corruption (0.0 - 1.0)
+    pub bit_flip_probability: f64,
+    /// Minimum number of bits to flip (power-law distribution lower bound)
+    pub bit_flip_min_bits: u32,
+    /// Maximum number of bits to flip (power-law distribution upper bound)
+    pub bit_flip_max_bits: u32,
+    /// Cooldown duration after bit flip to prevent excessive corruption
+    pub bit_flip_cooldown: Duration,
 }
 
 impl Default for NetworkConfiguration {
@@ -39,6 +48,10 @@ impl Default for NetworkConfiguration {
             clog_duration: Duration::from_millis(100)..Duration::from_millis(300),
             partition_probability: 0.0,
             partition_duration: Duration::from_millis(200)..Duration::from_secs(2),
+            bit_flip_probability: 0.0001, // 0.01% - matches FDB's BUGGIFY_WITH_PROB(0.0001)
+            bit_flip_min_bits: 1,
+            bit_flip_max_bits: 32,
+            bit_flip_cooldown: Duration::ZERO, // No cooldown by default for maximum chaos
         }
     }
 }
@@ -76,6 +89,11 @@ impl NetworkConfiguration {
             partition_probability: sim_random_range(0..15) as f64 / 100.0, // 0-15% (lower than faults)
             partition_duration: Duration::from_millis(sim_random_range(100..1000))
                 ..Duration::from_millis(sim_random_range(500..3000)),
+            // Bit flip probability range: 0.001% to 0.02% (very low, like FDB)
+            bit_flip_probability: sim_random_range(1..20) as f64 / 100000.0,
+            bit_flip_min_bits: 1,
+            bit_flip_max_bits: 32,
+            bit_flip_cooldown: Duration::from_millis(sim_random_range(0..100)),
         }
     }
 
@@ -93,6 +111,10 @@ impl NetworkConfiguration {
             clog_duration: Duration::ZERO..Duration::ZERO,
             partition_probability: 0.0,
             partition_duration: Duration::ZERO..Duration::ZERO,
+            bit_flip_probability: 0.0, // Disabled for fast local testing
+            bit_flip_min_bits: 1,
+            bit_flip_max_bits: 32,
+            bit_flip_cooldown: Duration::ZERO,
         }
     }
 }
