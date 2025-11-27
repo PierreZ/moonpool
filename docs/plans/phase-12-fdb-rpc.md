@@ -862,13 +862,14 @@ fn enable_connection_failures(sim: &SimWorld, duration: Duration) {
 
 Add missing chaos injection features from FDB's simulation to moonpool-foundation.
 
-### 4.1.1 Network Bit Flipping ⏳
+### 4.1.1 Network Bit Flipping ✅
 **Why**: Tests that checksum validation correctly catches corruption. Without this, checksum code paths are never exercised under chaos.
 - Add `BUGGIFY_WITH_PROB(0.0001)` bit flipping at packet receive
 - Power-law distribution for number of bits (1-32, biased toward fewer)
 - Skip for stable connections
 - Verify checksum catches corruption and throws error
 - **FDB ref**: `FlowTransport.actor.cpp:1288-1332`
+- **Implemented**: Bit flipping in `sim.rs:DataDelivery`, FDB connection teardown pattern in `peer/core.rs`
 
 ### 4.1.2 Partial/Short Writes ⏳
 **Why**: Tests that application code correctly handles `write()` returning less than requested (TCP backpressure, slow receiver).

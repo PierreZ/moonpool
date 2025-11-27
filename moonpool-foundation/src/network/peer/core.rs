@@ -622,6 +622,8 @@ async fn connection_task<
                                 }
                                 Err(e) => {
                                     // Protocol error - invalid packet
+                                    // FDB pattern: Tear down connection on wire errors
+                                    // (FlowTransport.actor.cpp:889-960, 1325)
                                     use crate::WireError;
                                     match &e {
                                         WireError::ChecksumMismatch { expected, actual } => {
@@ -630,17 +632,46 @@ async fn connection_task<
                                             // 1. Expected: intentional chaos injection (check for BitFlipInjected log)
                                             // 2. Unexpected: real bug in network/serialization code (BUG!)
                                             tracing::warn!(
-                                                "ChecksumMismatch: expected={:#010x} actual={:#010x} - corruption detected",
+                                                "ChecksumMismatch: expected={:#010x} actual={:#010x} - tearing down connection (FDB pattern)",
                                                 expected,
                                                 actual
                                             );
                                         }
                                         _ => {
-                                            tracing::warn!("connection_task: wire format error: {}", e);
+                                            tracing::warn!(
+                                                "connection_task: wire format error: {} - tearing down connection",
+                                                e
+                                            );
                                         }
                                     }
-                                    // Clear buffer and continue - recovery will happen via reconnection
+
+                                    // FDB pattern: Full connection teardown on wire errors
+                                    // Matches FlowTransport.actor.cpp:889-960 error handling
+                                    current_connection = None;
                                     read_buffer.clear();
+
+                                    {
+                                        let mut state = shared_state.borrow_mut();
+                                        state.connection = None;
+                                        state.metrics.is_connected = false;
+
+                                        // FDB's discardUnreliablePackets() pattern (line 923, 1072-1082)
+                                        // Drop all unreliable messages, keep reliable for retry
+                                        let unreliable_count = state.unreliable_queue.len();
+                                        if unreliable_count > 0 {
+                                            tracing::debug!(
+                                                "connection_task: discarding {} unreliable packets after wire error (FDB pattern)",
+                                                unreliable_count
+                                            );
+                                            for _ in 0..unreliable_count {
+                                                state.metrics.record_message_dropped();
+                                            }
+                                            state.unreliable_queue.clear();
+                                        }
+                                        // Note: reliable_queue remains intact for automatic retry
+                                    }
+
+                                    // Break exits packet parse loop -> select! continues -> will reconnect
                                     break;
                                 }
                             }
