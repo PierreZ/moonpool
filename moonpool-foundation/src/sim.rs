@@ -16,7 +16,7 @@ use crate::{
         sim::{ConnectionId, ListenerId, SimNetworkProvider},
     },
     network_state::{ClogState, ConnectionState, ListenerState, NetworkState},
-    rng::{reset_sim_rng, set_sim_seed, sim_random},
+    rng::{reset_sim_rng, set_sim_seed, sim_random, sim_random_range},
     sleep::SleepFuture,
 };
 use std::collections::VecDeque;
@@ -1131,7 +1131,31 @@ impl SimWorld {
                                     // No messages to process
                                     conn.send_in_progress = false;
                                 }
-                            } else if let Some(data) = conn.send_buffer.pop_front() {
+                            } else if let Some(mut data) = conn.send_buffer.pop_front() {
+                                // BUGGIFY: Simulate partial/short writes (TCP backpressure, slow receiver)
+                                // Following FDB's approach: truncate writes to random bytes
+                                // This tests that message fragmentation is handled correctly
+                                if crate::buggify!() && !is_partitioned && !data.is_empty() {
+                                    let max_send = std::cmp::min(
+                                        data.len(),
+                                        inner.network.config.partial_write_max_bytes,
+                                    );
+                                    let truncate_to = sim_random_range(0..max_send + 1);
+
+                                    if truncate_to < data.len() {
+                                        // Partial write - split the message and requeue remainder
+                                        let remainder = data.split_off(truncate_to);
+                                        conn.send_buffer.push_front(remainder);
+
+                                        tracing::debug!(
+                                            "BUGGIFY: Partial write on connection {} - sending {} bytes, {} bytes remain queued",
+                                            connection_id.0,
+                                            data.len(),
+                                            conn.send_buffer.front().map(|v| v.len()).unwrap_or(0)
+                                        );
+                                    }
+                                }
+
                                 // For TCP ordering, we need to maintain connection-level delays
                                 // Check if there are more messages AFTER popping the current one
                                 let has_more_messages = !conn.send_buffer.is_empty();

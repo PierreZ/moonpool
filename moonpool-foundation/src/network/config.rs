@@ -34,6 +34,10 @@ pub struct NetworkConfiguration {
     pub bit_flip_max_bits: u32,
     /// Cooldown duration after bit flip to prevent excessive corruption
     pub bit_flip_cooldown: Duration,
+
+    /// Maximum bytes for partial write simulation (BUGGIFY truncates writes to 0-max_bytes)
+    /// Following FDB's approach of truncating writes to test TCP backpressure handling
+    pub partial_write_max_bytes: usize,
 }
 
 impl Default for NetworkConfiguration {
@@ -52,6 +56,7 @@ impl Default for NetworkConfiguration {
             bit_flip_min_bits: 1,
             bit_flip_max_bits: 32,
             bit_flip_cooldown: Duration::ZERO, // No cooldown by default for maximum chaos
+            partial_write_max_bytes: 1000,     // Matches FDB's randomInt(0, 1000)
         }
     }
 }
@@ -94,6 +99,7 @@ impl NetworkConfiguration {
             bit_flip_min_bits: 1,
             bit_flip_max_bits: 32,
             bit_flip_cooldown: Duration::from_millis(sim_random_range(0..100)),
+            partial_write_max_bytes: sim_random_range(100..2000), // Vary max bytes for different scenarios
         }
     }
 
@@ -115,6 +121,7 @@ impl NetworkConfiguration {
             bit_flip_min_bits: 1,
             bit_flip_max_bits: 32,
             bit_flip_cooldown: Duration::ZERO,
+            partial_write_max_bytes: 1000, // Use FDB's default
         }
     }
 }

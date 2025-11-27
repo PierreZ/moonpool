@@ -871,11 +871,12 @@ Add missing chaos injection features from FDB's simulation to moonpool-foundatio
 - **FDB ref**: `FlowTransport.actor.cpp:1288-1332`
 - **Implemented**: Bit flipping in `sim.rs:DataDelivery`, FDB connection teardown pattern in `peer/core.rs`
 
-### 4.1.2 Partial/Short Writes ⏳
+### 4.1.2 Partial/Short Writes ✅
 **Why**: Tests that application code correctly handles `write()` returning less than requested (TCP backpressure, slow receiver).
 - BUGGIFY truncates writes to random smaller amounts (0-1000 bytes)
 - Caller must check return value and retry with remaining bytes
 - **FDB ref**: `sim2.actor.cpp:427-441`
+- **Implemented**: Simulation layer truncation in `sim.rs:ProcessSendBuffer`, configurable via `NetworkConfiguration.partial_write_max_bytes`
 
 ### 4.1.3 Random Connection Failures ⏳
 **Why**: Real connections fail randomly during I/O, not just via explicit partitions. Tests recovery code paths.

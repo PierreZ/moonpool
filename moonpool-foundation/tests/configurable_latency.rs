@@ -112,6 +112,7 @@ fn test_custom_latency_configuration() {
             bit_flip_min_bits: 1,
             bit_flip_max_bits: 32,
             bit_flip_cooldown: Duration::ZERO,
+            partial_write_max_bytes: 1000,
         };
 
         let mut sim = SimWorld::new_with_network_config(config);
@@ -164,6 +165,7 @@ fn test_latency_range_sampling() {
             bit_flip_min_bits: 1,
             bit_flip_max_bits: 32,
             bit_flip_cooldown: Duration::ZERO,
+            partial_write_max_bytes: 1000,
         };
 
         let mut execution_times = Vec::new();
@@ -225,6 +227,7 @@ fn test_network_randomization_ranges() {
             bit_flip_min_bits: 1,
             bit_flip_max_bits: 32,
             bit_flip_cooldown: Duration::ZERO,
+            partial_write_max_bytes: 1000,
         };
 
         let mut sim = SimWorld::new_with_network_config(config);
