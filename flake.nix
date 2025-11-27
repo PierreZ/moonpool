@@ -42,6 +42,7 @@
             pkg-config
             openssl
             cargo-nextest
+	          cargo-edit
           ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             # macOS specific dependencies
             pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
