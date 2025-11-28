@@ -878,12 +878,13 @@ Add missing chaos injection features from FDB's simulation to moonpool-foundatio
 - **FDB ref**: `sim2.actor.cpp:427-441`
 - **Implemented**: Simulation layer truncation in `sim.rs:ProcessSendBuffer`, configurable via `NetworkConfiguration.partial_write_max_bytes`
 
-### 4.1.3 Random Connection Failures ⏳
+### 4.1.3 Random Connection Failures ✅
 **Why**: Real connections fail randomly during I/O, not just via explicit partitions. Tests recovery code paths.
 - 0.001% probability per read/write operation
 - Asymmetric failures: send-only, recv-only, or both directions
 - Respects cooldown period after failures
 - **FDB ref**: `sim2.actor.cpp:580-605`
+- **Implemented**: `roll_random_close()` in `sim.rs`, `close_connection_asymmetric()` API, directional closure via `send_closed`/`recv_closed` fields, configurable via `NetworkConfiguration.random_close_probability/cooldown/explicit_ratio`
 
 ### 4.1.4 Clock Drift ⏳
 **Why**: Real clocks drift. Tests time-sensitive code (timeouts, leases, distributed consensus).

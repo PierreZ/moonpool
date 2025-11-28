@@ -38,6 +38,18 @@ pub struct NetworkConfiguration {
     /// Maximum bytes for partial write simulation (BUGGIFY truncates writes to 0-max_bytes)
     /// Following FDB's approach of truncating writes to test TCP backpressure handling
     pub partial_write_max_bytes: usize,
+
+    /// Random connection close probability per I/O operation (0.0 - 1.0)
+    /// FDB default: 0.00001 (0.001%) - see sim2.actor.cpp:584
+    pub random_close_probability: f64,
+
+    /// Cooldown duration after a random close event (prevents cascading failures)
+    /// FDB uses connectionFailuresDisableDuration - see sim2.actor.cpp:583
+    pub random_close_cooldown: Duration,
+
+    /// Ratio of explicit exceptions vs silent failures (0.0 - 1.0)
+    /// FDB default: 0.3 (30% explicit) - see sim2.actor.cpp:602
+    pub random_close_explicit_ratio: f64,
 }
 
 impl Default for NetworkConfiguration {
@@ -57,6 +69,9 @@ impl Default for NetworkConfiguration {
             bit_flip_max_bits: 32,
             bit_flip_cooldown: Duration::ZERO, // No cooldown by default for maximum chaos
             partial_write_max_bytes: 1000,     // Matches FDB's randomInt(0, 1000)
+            random_close_probability: 0.00001, // 0.001% - matches FDB's sim2.actor.cpp:584
+            random_close_cooldown: Duration::from_secs(5), // Reasonable default
+            random_close_explicit_ratio: 0.3,  // 30% explicit - matches FDB's sim2.actor.cpp:602
         }
     }
 }
@@ -100,6 +115,10 @@ impl NetworkConfiguration {
             bit_flip_max_bits: 32,
             bit_flip_cooldown: Duration::from_millis(sim_random_range(0..100)),
             partial_write_max_bytes: sim_random_range(100..2000), // Vary max bytes for different scenarios
+            // Random close probability: 0.0001% to 0.01% (very low, like FDB)
+            random_close_probability: sim_random_range(1..100) as f64 / 1000000.0,
+            random_close_cooldown: Duration::from_millis(sim_random_range(1000..10000)),
+            random_close_explicit_ratio: sim_random_range(20..40) as f64 / 100.0, // 20-40%
         }
     }
 
@@ -122,6 +141,9 @@ impl NetworkConfiguration {
             bit_flip_max_bits: 32,
             bit_flip_cooldown: Duration::ZERO,
             partial_write_max_bytes: 1000, // Use FDB's default
+            random_close_probability: 0.0, // Disabled for fast local testing
+            random_close_cooldown: Duration::ZERO,
+            random_close_explicit_ratio: 0.3, // 30% explicit (matches FDB)
         }
     }
 }

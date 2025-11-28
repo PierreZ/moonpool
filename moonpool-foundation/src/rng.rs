@@ -128,6 +128,17 @@ pub fn random_unique_id() -> u128 {
     ((high as u128) << 64) | (low as u128)
 }
 
+/// Generate a random f64 in the range [0.0, 1.0) using the simulation RNG.
+///
+/// This is a convenience function matching FDB's `deterministicRandom()->random01()`.
+///
+/// # Returns
+///
+/// A random f64 value in [0.0, 1.0).
+pub fn sim_random_f64() -> f64 {
+    sim_random::<f64>()
+}
+
 /// Get the current simulation seed.
 ///
 /// Returns the seed that was last set via [`set_sim_seed`].

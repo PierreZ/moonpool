@@ -57,6 +57,14 @@ pub struct ConnectionState {
 
     /// Whether this connection has been permanently closed by one of the endpoints
     pub is_closed: bool,
+
+    /// Whether the send side is closed (writes will fail) - for asymmetric closure
+    /// FDB: closeInternal() on self closes send capability
+    pub send_closed: bool,
+
+    /// Whether the receive side is closed (reads return EOF) - for asymmetric closure
+    /// FDB: closeInternal() on peer closes recv capability
+    pub recv_closed: bool,
 }
 
 /// Internal listener state for simulation
@@ -90,6 +98,10 @@ pub struct NetworkState {
     pub send_partitions: HashMap<IpAddr, Duration>,
     /// Receive partitions - IP cannot receive from anyone
     pub recv_partitions: HashMap<IpAddr, Duration>,
+
+    /// Last time a random close was triggered (global cooldown tracking)
+    /// FDB: g_simulator->lastConnectionFailure - see sim2.actor.cpp:583
+    pub last_random_close_time: Duration,
 }
 
 impl NetworkState {
@@ -105,6 +117,7 @@ impl NetworkState {
             ip_partitions: HashMap::new(),
             send_partitions: HashMap::new(),
             recv_partitions: HashMap::new(),
+            last_random_close_time: Duration::ZERO,
         }
     }
 

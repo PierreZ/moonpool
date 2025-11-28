@@ -597,6 +597,8 @@ impl SimWorld {
                 send_in_progress: false,
                 next_send_time: current_time,
                 is_closed: false,
+                send_closed: false,
+                recv_closed: false,
             },
         );
 
@@ -613,6 +615,8 @@ impl SimWorld {
                 send_in_progress: false,
                 next_send_time: current_time,
                 is_closed: false,
+                send_closed: false,
+                recv_closed: false,
             },
         );
 
@@ -1441,6 +1445,174 @@ impl SimWorld {
             );
             paired_waker.wake();
         }
+    }
+
+    // Random Connection Close Methods (following FDB sim2.actor.cpp:580-605)
+
+    /// Close connection asymmetrically (FDB rollRandomClose pattern)
+    /// - close_send: Close this connection's send capability (writes will fail)
+    /// - close_recv: Close paired connection's receive capability (reads return EOF)
+    ///
+    /// FDB ref: sim2.actor.cpp:580-605 - closeInternal() on self vs peer
+    pub fn close_connection_asymmetric(
+        &self,
+        connection_id: ConnectionId,
+        close_send: bool,
+        close_recv: bool,
+    ) {
+        let mut inner = self.inner.borrow_mut();
+
+        // Get paired connection before modifications
+        let paired_id = inner
+            .network
+            .connections
+            .get(&connection_id)
+            .and_then(|conn| conn.paired_connection);
+
+        // Close send side on this connection (like FDB closeInternal() on self)
+        if close_send && let Some(conn) = inner.network.connections.get_mut(&connection_id) {
+            conn.send_closed = true;
+            // Clear send buffer - data in flight is lost (like TCP RST)
+            conn.send_buffer.clear();
+            tracing::debug!(
+                "Connection {} send side closed (asymmetric)",
+                connection_id.0
+            );
+        }
+
+        // Close recv side on paired connection (like FDB closeInternal() on peer)
+        if close_recv
+            && let Some(paired) = paired_id
+            && let Some(paired_conn) = inner.network.connections.get_mut(&paired)
+        {
+            paired_conn.recv_closed = true;
+            tracing::debug!(
+                "Connection {} recv side closed (asymmetric via peer)",
+                paired.0
+            );
+        }
+
+        // Wake read wakers so they can see the closure
+        if close_send && let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
+            waker.wake();
+        }
+        if close_recv
+            && let Some(paired) = paired_id
+            && let Some(waker) = inner.wakers.read_wakers.remove(&paired)
+        {
+            waker.wake();
+        }
+    }
+
+    /// Roll random close chaos injection (FDB rollRandomClose pattern)
+    /// Returns:
+    /// - Some(true): Random close triggered, should throw explicit error (30%)
+    /// - Some(false): Random close triggered, silent failure (70%)
+    /// - None: No random close triggered (cooldown or probability check failed)
+    ///
+    /// FDB ref: sim2.actor.cpp:580-605
+    pub fn roll_random_close(&self, connection_id: ConnectionId) -> Option<bool> {
+        let mut inner = self.inner.borrow_mut();
+        let config = &inner.network.config;
+
+        // Check if random close is enabled
+        if config.random_close_probability <= 0.0 {
+            return None;
+        }
+
+        // Check cooldown: now() - lastConnectionFailure > connectionFailuresDisableDuration
+        let current_time = inner.current_time;
+        let time_since_last = current_time.saturating_sub(inner.network.last_random_close_time);
+        if time_since_last < config.random_close_cooldown {
+            return None;
+        }
+
+        // Probability check using buggify
+        if !crate::buggify_with_prob!(config.random_close_probability) {
+            return None;
+        }
+
+        // Random close triggered! Update cooldown timestamp
+        inner.network.last_random_close_time = current_time;
+
+        // Get paired connection for asymmetric closure
+        let paired_id = inner
+            .network
+            .connections
+            .get(&connection_id)
+            .and_then(|conn| conn.paired_connection);
+
+        // Roll for direction: a < .66 close recv (peer), a > .33 close send (self)
+        // .33 < a < .66 = both
+        let a = crate::rng::sim_random_f64();
+        let close_recv = a < 0.66;
+        let close_send = a > 0.33;
+
+        tracing::info!(
+            "Random connection failure triggered on connection {} (send={}, recv={}, a={:.3})",
+            connection_id.0,
+            close_send,
+            close_recv,
+            a
+        );
+
+        // Close send side on this connection
+        if close_send && let Some(conn) = inner.network.connections.get_mut(&connection_id) {
+            conn.send_closed = true;
+            conn.send_buffer.clear();
+        }
+
+        // Close recv side on paired connection
+        if close_recv
+            && let Some(paired) = paired_id
+            && let Some(paired_conn) = inner.network.connections.get_mut(&paired)
+        {
+            paired_conn.recv_closed = true;
+        }
+
+        // Wake read wakers
+        if close_send && let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
+            waker.wake();
+        }
+        if close_recv
+            && let Some(paired) = paired_id
+            && let Some(waker) = inner.wakers.read_wakers.remove(&paired)
+        {
+            waker.wake();
+        }
+
+        // Roll for explicit vs silent: b < .3 = explicit (30%)
+        let b = crate::rng::sim_random_f64();
+        let explicit = b < inner.network.config.random_close_explicit_ratio;
+
+        tracing::debug!(
+            "Random close explicit={} (b={:.3}, ratio={:.2})",
+            explicit,
+            b,
+            inner.network.config.random_close_explicit_ratio
+        );
+
+        Some(explicit)
+    }
+
+    /// Check if a connection's send side is closed
+    pub fn is_send_closed(&self, connection_id: ConnectionId) -> bool {
+        let inner = self.inner.borrow();
+        inner
+            .network
+            .connections
+            .get(&connection_id)
+            .is_some_and(|conn| conn.send_closed || conn.is_closed)
+    }
+
+    /// Check if a connection's receive side is closed
+    pub fn is_recv_closed(&self, connection_id: ConnectionId) -> bool {
+        let inner = self.inner.borrow();
+        inner
+            .network
+            .connections
+            .get(&connection_id)
+            .is_some_and(|conn| conn.recv_closed || conn.is_closed)
     }
 
     // Network Partition Control Methods (following FoundationDB patterns)

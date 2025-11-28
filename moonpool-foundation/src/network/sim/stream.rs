@@ -99,6 +99,11 @@ impl SimTcpStream {
     pub(crate) fn new(sim: WeakSimWorld, connection_id: ConnectionId) -> Self {
         Self { sim, connection_id }
     }
+
+    /// Get the connection ID (for test introspection and chaos injection)
+    pub fn connection_id(&self) -> ConnectionId {
+        self.connection_id
+    }
 }
 
 impl Drop for SimTcpStream {
@@ -130,6 +135,27 @@ impl AsyncRead for SimTcpStream {
             .sim
             .upgrade()
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown"))?;
+
+        // Random close chaos injection (FDB rollRandomClose pattern)
+        // Check at start of every read operation - sim2.actor.cpp:408
+        // Returns Some(true) for explicit error, Some(false) for silent (connection marked closed)
+        if let Some(true) = sim.roll_random_close(self.connection_id) {
+            // 30% explicit exception - throw connection_failed immediately
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "Random connection failure (explicit)",
+            )));
+            // 70% silent case: connection already marked as closed, will return EOF below
+        }
+
+        // Check if receive side is closed (asymmetric closure)
+        if sim.is_recv_closed(self.connection_id) {
+            tracing::debug!(
+                "SimTcpStream::poll_read connection_id={} recv side closed, returning EOF",
+                self.connection_id.0
+            );
+            return Poll::Ready(Ok(())); // EOF
+        }
 
         // Try to read from connection's receive buffer first
         // We should be able to read buffered data even if connection is currently cut
@@ -236,6 +262,26 @@ impl AsyncWrite for SimTcpStream {
             .sim
             .upgrade()
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown"))?;
+
+        // Random close chaos injection (FDB rollRandomClose pattern)
+        // Check at start of every write operation - sim2.actor.cpp:423
+        // Returns Some(true) for explicit error, Some(false) for silent (connection marked closed)
+        if let Some(true) = sim.roll_random_close(self.connection_id) {
+            // 30% explicit exception - throw connection_failed immediately
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "Random connection failure (explicit)",
+            )));
+            // 70% silent case: connection already marked as closed, will fail below
+        }
+
+        // Check if send side is closed (asymmetric closure)
+        if sim.is_send_closed(self.connection_id) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Connection send side closed",
+            )));
+        }
 
         // Check if connection is closed or cut
         if sim.is_connection_closed(self.connection_id) {
