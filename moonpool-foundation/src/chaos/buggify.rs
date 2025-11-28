@@ -3,7 +3,7 @@
 //! Each buggify location is randomly activated once per simulation run.
 //! Active locations fire probabilistically on each call.
 
-use crate::rng::sim_random;
+use crate::sim::rng::sim_random;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -65,7 +65,7 @@ pub fn buggify_internal(prob: f64, location: &'static str) -> bool {
 #[macro_export]
 macro_rules! buggify {
     () => {
-        $crate::buggify::buggify_internal(0.25, concat!(file!(), ":", line!()))
+        $crate::chaos::buggify::buggify_internal(0.25, concat!(file!(), ":", line!()))
     };
 }
 
@@ -73,14 +73,14 @@ macro_rules! buggify {
 #[macro_export]
 macro_rules! buggify_with_prob {
     ($prob:expr) => {
-        $crate::buggify::buggify_internal($prob as f64, concat!(file!(), ":", line!()))
+        $crate::chaos::buggify::buggify_internal($prob as f64, concat!(file!(), ":", line!()))
     };
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rng::{reset_sim_rng, set_sim_seed};
+    use crate::sim::rng::{reset_sim_rng, set_sim_seed};
 
     #[test]
     fn test_disabled_by_default() {

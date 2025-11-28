@@ -10,9 +10,12 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use crate::{
-    SimulationMetrics, SimulationResult, TokioNetworkProvider, TokioTaskProvider,
-    TokioTimeProvider, WorkloadTopology,
+    SimulationResult, network::TokioNetworkProvider, task::TokioTaskProvider,
+    time::TokioTimeProvider,
 };
+
+use super::report::SimulationMetrics;
+use super::topology::WorkloadTopology;
 
 /// Type alias for Tokio workload function signature.
 type TokioWorkloadFn = Box<

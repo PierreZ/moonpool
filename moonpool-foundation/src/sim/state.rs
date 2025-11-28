@@ -1,3 +1,8 @@
+//! Network state management for simulation.
+//!
+//! This module provides internal state types for managing connections,
+//! listeners, partitions, and clogs in the simulation environment.
+
 use std::{
     collections::{HashMap, VecDeque},
     net::IpAddr,
@@ -70,10 +75,13 @@ pub struct ConnectionState {
 /// Internal listener state for simulation
 #[derive(Debug)]
 pub struct ListenerState {
+    /// Unique identifier for this listener.
     #[allow(dead_code)]
     pub id: ListenerId,
+    /// Network address this listener is bound to.
     #[allow(dead_code)]
     pub addr: String,
+    /// Queue of pending connections waiting to be accepted.
     #[allow(dead_code)]
     pub pending_connections: VecDeque<ConnectionId>,
 }
@@ -81,17 +89,22 @@ pub struct ListenerState {
 /// Network-related state management
 #[derive(Debug)]
 pub struct NetworkState {
+    /// Counter for generating unique connection IDs.
     pub next_connection_id: u64,
+    /// Counter for generating unique listener IDs.
     pub next_listener_id: u64,
+    /// Network configuration for this simulation.
     pub config: NetworkConfiguration,
+    /// Active connections indexed by their ID.
     pub connections: HashMap<ConnectionId, ConnectionState>,
+    /// Active listeners indexed by their ID.
     pub listeners: HashMap<ListenerId, ListenerState>,
+    /// Connections pending acceptance, indexed by address.
     pub pending_connections: HashMap<String, ConnectionId>,
 
-    // Connection disruption state
+    /// Connection clog state (temporary write blocking).
     pub connection_clogs: HashMap<ConnectionId, ClogState>,
 
-    // Network partition state
     /// Partitions between specific IP pairs (from, to) -> partition state
     pub ip_partitions: HashMap<(IpAddr, IpAddr), PartitionState>,
     /// Send partitions - IP cannot send to anyone
@@ -105,6 +118,7 @@ pub struct NetworkState {
 }
 
 impl NetworkState {
+    /// Create a new network state with the given configuration.
     pub fn new(config: NetworkConfiguration) -> Self {
         Self {
             next_connection_id: 0,

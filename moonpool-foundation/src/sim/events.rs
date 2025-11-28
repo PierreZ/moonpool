@@ -1,3 +1,8 @@
+//! Event scheduling and processing for the simulation engine.
+//!
+//! This module provides the core event types and queue for scheduling
+//! events in chronological order with deterministic ordering.
+
 use std::{cmp::Ordering, collections::BinaryHeap, time::Duration};
 
 /// Events that can be scheduled in the simulation.
@@ -21,7 +26,7 @@ pub enum Event {
     Connection {
         /// The connection or listener ID
         id: u64,
-        /// The state change type  
+        /// The state change type
         state: ConnectionStateChange,
     },
 
@@ -83,7 +88,8 @@ pub enum ConnectionStateChange {
 pub struct ScheduledEvent {
     time: Duration,
     event: Event,
-    sequence: u64, // For deterministic ordering
+    /// Sequence number for deterministic ordering
+    pub sequence: u64,
 }
 
 impl ScheduledEvent {
@@ -161,6 +167,7 @@ impl EventQueue {
     }
 
     /// Returns a reference to the earliest scheduled event without removing it.
+    #[allow(dead_code)]
     pub fn peek_earliest(&self) -> Option<&ScheduledEvent> {
         self.heap.peek()
     }

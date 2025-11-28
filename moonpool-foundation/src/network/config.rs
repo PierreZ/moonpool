@@ -1,4 +1,4 @@
-use crate::rng::{sim_random_range, sim_random_range_or_default};
+use crate::sim::rng::{sim_random_range, sim_random_range_or_default};
 use std::ops::Range;
 use std::time::Duration;
 

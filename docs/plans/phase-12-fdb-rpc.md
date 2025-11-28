@@ -914,45 +914,38 @@ Add missing chaos injection features from FDB's simulation to moonpool-foundatio
 - Includes: trigger conditions, probabilities, what each tests, FDB references
 - Covers: TCP latencies, random close, bit flip, connect failure, clock drift, buggified delays, partial writes, clogging, partitions, peer write failures, message delivery scheduling
 
-## Step 4.2: Foundation Crate Reorganization ⏳ TODO
+## Step 4.2: Foundation Crate Reorganization ✅
 
-Reorganize moonpool-foundation to improve maintainability by splitting large files and grouping related modules.
+Reorganized moonpool-foundation to improve maintainability by splitting large files and grouping related modules.
 
-### Current Issues
-- `sim.rs` is 1789 lines (too large)
-- `runner.rs` is 1176 lines (too large)
-- Root-level files are scattered (assertions, buggify, invariants, events, etc.)
-
-### New Directory Structure
+### Final Directory Structure
 
 ```
 moonpool-foundation/src/
 ├── lib.rs                    # Public API exports only
 ├── error.rs                  # SimulationError, SimulationResult
 │
-├── sim/                      # Core simulation engine (was sim.rs)
+├── sim/                      # Core simulation engine (was sim.rs ~2200 lines)
 │   ├── mod.rs               # exports
-│   ├── world.rs             # SimWorld, WeakSimWorld core struct
+│   ├── world.rs             # SimWorld, WeakSimWorld, SimInner
 │   ├── wakers.rs            # WakerRegistry and waker management
-│   ├── stepping.rs          # Event stepping and task scheduling
-│   ├── events.rs            # Event, EventQueue, ScheduledEvent
-│   ├── state.rs             # NetworkState (was network_state.rs)
+│   ├── events.rs            # Event, EventQueue, ScheduledEvent, NetworkOperation
+│   ├── state.rs             # NetworkState, ConnectionState, ClogState, PartitionState
 │   ├── sleep.rs             # SleepFuture
-│   └── rng.rs               # Thread-local RNG
+│   └── rng.rs               # Thread-local RNG functions
 │
-├── runner/                   # Simulation runners (was runner.rs)
+├── runner/                   # Simulation runners (was runner.rs ~1176 lines)
 │   ├── mod.rs               # exports
-│   ├── builder.rs           # SimulationBuilder
-│   ├── deadlock.rs          # DeadlockDetector
-│   ├── orchestrator.rs      # WorkloadOrchestrator
-│   ├── topology.rs          # TopologyFactory, WorkloadTopology
-│   ├── metrics.rs           # SimulationMetrics, SimulationReport
+│   ├── builder.rs           # SimulationBuilder, IterationControl
+│   ├── orchestrator.rs      # DeadlockDetector, WorkloadOrchestrator, IterationManager, MetricsCollector
+│   ├── topology.rs          # WorkloadTopology, Workload, TopologyFactory
+│   ├── report.rs            # SimulationMetrics, SimulationReport
 │   └── tokio.rs             # TokioRunner, TokioReport
 │
-├── testing/                  # Testing utilities & fault injection
+├── chaos/                    # Testing utilities & fault injection (was scattered)
 │   ├── mod.rs               # exports + macros
 │   ├── assertions.rs        # always_assert!, sometimes_assert!
-│   ├── buggify.rs           # buggify!, fault injection
+│   ├── buggify.rs           # buggify!, buggify_with_prob!
 │   ├── invariants.rs        # InvariantCheck type
 │   └── state_registry.rs    # StateRegistry for invariants
 │
@@ -970,39 +963,40 @@ moonpool-foundation/src/
 │   ├── sim/
 │   └── tokio/
 │
-└── providers/                # Provider pattern implementations
-    ├── mod.rs               # exports all providers
-    ├── time.rs              # TimeProvider, SimTimeProvider, TokioTimeProvider
-    ├── task.rs              # TaskProvider, TokioTaskProvider
-    └── random.rs            # RandomProvider, SimRandomProvider
+├── time/mod.rs              # TimeProvider, SimTimeProvider, TokioTimeProvider (flattened)
+├── task/mod.rs              # TaskProvider, TokioTaskProvider (flattened)
+└── random/mod.rs            # RandomProvider, SimRandomProvider (flattened)
 ```
 
-### Migration Steps
+### Tests Reorganization (mirroring src/)
 
-1. **Split sim.rs → sim/ directory**
-   - Extract WakerRegistry to `wakers.rs`
-   - Extract event stepping to `stepping.rs`
-   - Move events.rs, sleep.rs, rng.rs, network_state.rs into sim/
+```
+moonpool-foundation/tests/
+├── sim.rs + sim/            # Simulation tests
+│   ├── determinism.rs       # Deterministic execution tests
+│   ├── integration.rs       # SimWorld integration tests
+│   ├── rng.rs               # Thread-local RNG tests
+│   └── sleep.rs             # Sleep functionality tests
+│
+├── chaos.rs + chaos/        # Chaos testing
+│   ├── assertions.rs        # Assertion integration tests
+│   ├── buggify.rs           # Buggify integration tests
+│   ├── bit_flip.rs          # Bit flip chaos tests
+│   ├── random_close.rs      # Random close chaos tests
+│   ├── connect_failure.rs   # Connect failure chaos tests
+│   ├── buggified_delay.rs   # Buggified delay chaos tests
+│   └── clock_drift.rs       # Clock drift chaos tests
+│
+└── network.rs + network/    # Network tests
+    ├── traits.rs            # Network provider trait tests
+    ├── partition.rs         # Partition integration tests
+    └── latency.rs           # Configurable latency tests
+```
 
-2. **Split runner.rs → runner/ directory**
-   - Extract DeadlockDetector to `deadlock.rs`
-   - Extract WorkloadOrchestrator to `orchestrator.rs`
-   - Extract TopologyFactory to `topology.rs`
-   - Move tokio_runner.rs to runner/tokio.rs
-
-3. **Create testing/ directory**
-   - Move assertions.rs, buggify.rs, invariants.rs, state_registry.rs
-
-4. **Create providers/ directory**
-   - Consolidate time/, task/, random/ modules
-   - Flatten into single files per provider
-
-5. **Update lib.rs exports**
-   - Preserve all current public API paths
-   - No breaking changes to external users
-
-6. **Run validation**
-   - `cargo fmt && cargo clippy && cargo nextest run`
+### Validation Results
+- ✅ `cargo fmt` - Clean
+- ✅ `cargo clippy` - No warnings
+- ✅ `cargo nextest run` - 188 tests passed (89 unit + 99 integration)
 
 ## Step 4.5: Build New E2E Simulation Tests
 > **IMPORTANT**: Use the new Claude skills in `.claude/skills/` for simulation testing:

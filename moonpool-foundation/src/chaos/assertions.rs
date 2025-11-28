@@ -188,7 +188,7 @@ macro_rules! always_assert {
     ($name:ident, $condition:expr, $message:expr) => {
         let result = $condition;
         if !result {
-            let current_seed = $crate::get_current_sim_seed();
+            let current_seed = $crate::sim::get_current_sim_seed();
             panic!(
                 "Always assertion '{}' failed (seed: {}): {}",
                 stringify!($name),
@@ -221,7 +221,7 @@ macro_rules! sometimes_assert {
     ($name:ident, $condition:expr, $message:expr) => {
         // Runtime execution - simplified to just record the result
         let result = $condition;
-        $crate::assertions::record_assertion(stringify!($name), result);
+        $crate::chaos::assertions::record_assertion(stringify!($name), result);
     };
 }
 

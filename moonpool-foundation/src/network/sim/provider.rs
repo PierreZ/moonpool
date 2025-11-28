@@ -1,7 +1,7 @@
 use super::stream::{SimTcpListener, SimTcpStream};
 use crate::buggify;
 use crate::network::traits::NetworkProvider;
-use crate::rng::sim_random;
+use crate::sim::rng::sim_random;
 use crate::{Event, WeakSimWorld};
 use async_trait::async_trait;
 use std::io;

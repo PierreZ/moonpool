@@ -122,6 +122,7 @@ pub fn set_sim_seed(seed: u64) {
 /// A deterministic u128 unique ID that is unique within the simulation.
 ///
 /// Generate a unique identifier using the simulation RNG.
+#[allow(dead_code)]
 pub fn random_unique_id() -> u128 {
     let high: u64 = sim_random();
     let low: u64 = sim_random();

@@ -8,7 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use crate::{SimulationResult, WeakSimWorld};
+use crate::{SimulationResult, sim::WeakSimWorld};
 
 /// Future that completes after a specified simulation time duration.
 ///

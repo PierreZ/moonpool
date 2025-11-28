@@ -1,6 +1,11 @@
+//! Core simulation world and coordination logic.
+//!
+//! This module provides the central SimWorld coordinator that manages time,
+//! event processing, and network simulation state.
+
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     rc::{Rc, Weak},
     task::Waker,
     time::Duration,
@@ -8,58 +13,50 @@ use std::{
 use tracing::instrument;
 
 use crate::{
-    assertions::reset_assertion_results,
     error::{SimulationError, SimulationResult},
-    events::{Event, EventQueue, ScheduledEvent},
     network::{
         NetworkConfiguration,
         sim::{ConnectionId, ListenerId, SimNetworkProvider},
     },
-    network_state::{ClogState, ConnectionState, ListenerState, NetworkState},
+};
+
+use super::{
+    events::{ConnectionStateChange, Event, EventQueue, NetworkOperation, ScheduledEvent},
     rng::{reset_sim_rng, set_sim_seed, sim_random, sim_random_range},
     sleep::SleepFuture,
+    state::{ClogState, ConnectionState, ListenerState, NetworkState, PartitionState},
+    wakers::WakerRegistry,
 };
-use std::collections::VecDeque;
 
-/// Waker management for async coordination.
-#[derive(Debug, Default)]
-struct WakerRegistry {
-    #[allow(dead_code)] // Will be used for connection coordination in future phases
-    connection_wakers: HashMap<ConnectionId, Waker>,
-    listener_wakers: HashMap<ListenerId, Waker>,
-    read_wakers: HashMap<ConnectionId, Waker>,
-    task_wakers: HashMap<u64, Waker>,
-    clog_wakers: HashMap<ConnectionId, Vec<Waker>>,
-}
-
+/// Internal simulation state holder
 #[derive(Debug)]
-struct SimInner {
-    current_time: Duration,
+pub(crate) struct SimInner {
+    pub(crate) current_time: Duration,
     /// Drifted timer time (can be ahead of current_time)
     /// FDB ref: sim2.actor.cpp:1058-1064 - timer() drifts 0-0.1s ahead of now()
-    timer_time: Duration,
-    event_queue: EventQueue,
-    next_sequence: u64,
+    pub(crate) timer_time: Duration,
+    pub(crate) event_queue: EventQueue,
+    pub(crate) next_sequence: u64,
 
     // Network management
-    network: NetworkState,
+    pub(crate) network: NetworkState,
 
     // Async coordination
-    wakers: WakerRegistry,
+    pub(crate) wakers: WakerRegistry,
 
     // Task management for sleep functionality
-    next_task_id: u64,
-    awakened_tasks: HashSet<u64>,
+    pub(crate) next_task_id: u64,
+    pub(crate) awakened_tasks: HashSet<u64>,
 
     // Event processing metrics
-    events_processed: u64,
+    pub(crate) events_processed: u64,
 
     // Chaos tracking
-    last_bit_flip_time: Duration,
+    pub(crate) last_bit_flip_time: Duration,
 }
 
 impl SimInner {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             current_time: Duration::ZERO,
             timer_time: Duration::ZERO,
@@ -74,7 +71,7 @@ impl SimInner {
         }
     }
 
-    fn new_with_config(network_config: NetworkConfiguration) -> Self {
+    pub(crate) fn new_with_config(network_config: NetworkConfiguration) -> Self {
         Self {
             current_time: Duration::ZERO,
             timer_time: Duration::ZERO,
@@ -98,7 +95,7 @@ impl SimInner {
     /// - 32 bits: very rare
     ///
     /// Matches FDB's approach in FlowTransport.actor.cpp:1297
-    fn calculate_flip_bit_count(random_value: u32, min_bits: u32, max_bits: u32) -> u32 {
+    pub(crate) fn calculate_flip_bit_count(random_value: u32, min_bits: u32, max_bits: u32) -> u32 {
         if random_value == 0 {
             // Handle edge case: treat 0 as if it were 1
             return max_bits.min(32);
@@ -119,7 +116,7 @@ impl SimInner {
 /// ownership model with handle-based access to avoid borrow checker conflicts.
 #[derive(Debug)]
 pub struct SimWorld {
-    inner: Rc<RefCell<SimInner>>,
+    pub(crate) inner: Rc<RefCell<SimInner>>,
 }
 
 impl SimWorld {
@@ -131,7 +128,7 @@ impl SimWorld {
         // Initialize with default seed for deterministic behavior
         reset_sim_rng();
         set_sim_seed(0);
-        reset_assertion_results();
+        crate::chaos::assertions::reset_assertion_results();
 
         Self {
             inner: Rc::new(RefCell::new(SimInner::new())),
@@ -151,7 +148,7 @@ impl SimWorld {
     pub fn new_with_seed(seed: u64) -> Self {
         reset_sim_rng();
         set_sim_seed(seed);
-        reset_assertion_results();
+        crate::chaos::assertions::reset_assertion_results();
 
         Self {
             inner: Rc::new(RefCell::new(SimInner::new())),
@@ -163,7 +160,7 @@ impl SimWorld {
         // Initialize with default seed for deterministic behavior
         reset_sim_rng();
         set_sim_seed(0);
-        reset_assertion_results();
+        crate::chaos::assertions::reset_assertion_results();
 
         Self {
             inner: Rc::new(RefCell::new(SimInner::new_with_config(network_config))),
@@ -184,7 +181,7 @@ impl SimWorld {
     ) -> Self {
         reset_sim_rng();
         set_sim_seed(seed);
-        reset_assertion_results();
+        crate::chaos::assertions::reset_assertion_results();
 
         Self {
             inner: Rc::new(RefCell::new(SimInner::new_with_config(network_config))),
@@ -353,8 +350,8 @@ impl SimWorld {
     }
 
     /// Create a task provider for this simulation
-    pub fn task_provider(&self) -> crate::task::tokio_provider::TokioTaskProvider {
-        crate::task::tokio_provider::TokioTaskProvider
+    pub fn task_provider(&self) -> crate::task::TokioTaskProvider {
+        crate::task::TokioTaskProvider
     }
 
     /// Access network configuration for latency calculations using thread-local RNG.
@@ -437,59 +434,7 @@ impl SimWorld {
     /// Buffer data for ordered sending on a TCP connection.
     ///
     /// This method implements the core TCP ordering guarantee by ensuring that all
-    /// write operations on a single connection are processed in FIFO (First-In-First-Out) order.
-    ///
-    /// ## TCP Ordering Problem Solved
-    ///
-    /// The original implementation gave each `write_all()` call an independent random network delay,
-    /// which could cause messages to arrive out of order:
-    ///
-    /// ```text
-    /// BROKEN: Independent delays per write
-    /// write("PING-0") -> 50ms delay -> arrives second
-    /// write("PING-1") -> 20ms delay -> arrives first  ❌ WRONG ORDER
-    /// ```
-    ///
-    /// This method fixes the problem by buffering all writes and processing them sequentially:
-    ///
-    /// ```text
-    /// FIXED: Sequential processing with buffering
-    /// write("PING-0") -> buffer[0] -> process -> 50ms -> arrives first
-    /// write("PING-1") -> buffer[1] -> wait    -> 1ns  -> arrives second ✅ CORRECT ORDER
-    /// ```
-    ///
-    /// ## Implementation Strategy
-    ///
-    /// 1. **Buffer the data**: Add the message to the connection's `send_buffer`
-    /// 2. **Start processing if idle**: If no send operation is in progress, schedule a `ProcessSendBuffer` event
-    /// 3. **Sequential processing**: The event handler processes messages one by one, maintaining order
-    /// 4. **Network delay**: Only the final message in a burst gets the full network delay
-    ///
-    /// ## Arguments
-    ///
-    /// * `connection_id` - The connection to send data on
-    /// * `data` - The message data to send (typically from a `write_all()` call)
-    ///
-    /// ## Returns
-    ///
-    /// * `Ok(())` - Data successfully buffered for sending
-    /// * `Err(SimulationError)` - Connection not found or simulation error
-    ///
-    /// ## Usage Pattern
-    ///
-    /// This method is called by `SimTcpStream::poll_write()` for every write operation:
-    ///
-    /// Application write operations call this method to queue data for sending.
-    ///
-    /// ## Event Flow
-    ///
-    /// 1. `buffer_send()` adds data to `send_buffer`
-    /// 2. If `!send_in_progress`, schedules `ProcessSendBuffer` event immediately  
-    /// 3. `ProcessSendBuffer` handler dequeues and sends one message
-    /// 4. If more messages remain, schedules next `ProcessSendBuffer` event
-    /// 5. Continues until `send_buffer` is empty
-    ///
-    /// This ensures that even rapid successive writes are processed in order.
+    /// write operations on a single connection are processed in FIFO order.
     pub(crate) fn buffer_send(
         &self,
         connection_id: ConnectionId,
@@ -517,7 +462,7 @@ impl SimWorld {
                 );
                 conn.send_in_progress = true;
 
-                // Schedule immediate processing of the buffer - add directly to queue to avoid borrowing conflict
+                // Schedule immediate processing of the buffer
                 let scheduled_time = inner.current_time + std::time::Duration::ZERO;
                 let sequence = inner.next_sequence;
                 inner.next_sequence += 1;
@@ -525,7 +470,7 @@ impl SimWorld {
                     scheduled_time,
                     Event::Network {
                         connection_id: connection_id.0,
-                        operation: crate::NetworkOperation::ProcessSendBuffer,
+                        operation: NetworkOperation::ProcessSendBuffer,
                     },
                     sequence,
                 );
@@ -539,7 +484,6 @@ impl SimWorld {
                     "buffer_send: sender already in progress, not scheduling new event"
                 );
             }
-            // If sender is already active, the new data will be processed when the current buffer is processed
 
             Ok(())
         } else {
@@ -554,70 +498,6 @@ impl SimWorld {
     }
 
     /// Create a bidirectional TCP connection pair for client-server communication.
-    ///
-    /// This method establishes the foundation of TCP simulation by creating two linked
-    /// `ConnectionState` instances that represent both ends of a TCP connection.
-    ///
-    /// ## Connection Pair Architecture
-    ///
-    /// ```text
-    /// ┌─────────────────────────────────────────────────────────────┐
-    /// │                    TCP Connection Pair                      │
-    /// │                                                             │
-    /// │  Client Side (ID: N)              Server Side (ID: N+1)     │
-    /// │  ┌─────────────────────┐          ┌─────────────────────┐   │
-    /// │  │ addr: "client-addr" │          │ addr: server_addr   │   │
-    /// │  │ paired_connection: │◄─────────►│ paired_connection:  │   │
-    /// │  │   Some(N+1)        │          │   Some(N)           │   │
-    /// │  │                    │          │                     │   │
-    /// │  │ send_buffer: []    │   ┌──┐   │ receive_buffer: []  │   │
-    /// │  │ receive_buffer: [] │   │  │   │ send_buffer: []     │   │
-    /// │  └─────────────────────┘   └──┘   └─────────────────────┘   │
-    /// └─────────────────────────────────────────────────────────────┘
-    /// ```
-    ///
-    /// ## Connection Pairing Logic
-    ///
-    /// Each connection knows about its counterpart via `paired_connection`:
-    /// - **Client connection** has `paired_connection = Some(server_id)`
-    /// - **Server connection** has `paired_connection = Some(client_id)`
-    ///
-    /// This enables the data flow:
-    /// 1. Data written to client's `send_buffer` → delivered to server's `receive_buffer`
-    /// 2. Data written to server's `send_buffer` → delivered to client's `receive_buffer`
-    ///
-    /// ## Usage in Network Provider
-    ///
-    /// This method is called by `SimNetworkProvider::connect()`:
-    ///
-    /// Called by the network provider to establish bidirectional TCP connections.
-    ///
-    /// ## Connection ID Management
-    ///
-    /// Connection IDs are assigned sequentially:
-    /// - **Client connection**: Uses current `next_connection_id` (even numbers: 0, 2, 4...)
-    /// - **Server connection**: Uses `next_connection_id + 1` (odd numbers: 1, 3, 5...)
-    /// - Counter increments by 2 to reserve both IDs
-    ///
-    /// This pairing convention makes debugging easier and ensures unique IDs.
-    ///
-    /// ## Arguments
-    ///
-    /// * `client_addr` - Address string for the client side (typically generated)
-    /// * `server_addr` - Address string for the server side (the bind address)
-    ///
-    /// ## Returns
-    ///
-    /// * `Ok((client_id, server_id))` - Connection IDs for both ends of the pair
-    /// * `Err(SimulationError)` - If connection creation fails
-    ///
-    /// ## Connection Lifecycle
-    ///
-    /// 1. **Creation**: Both connections start with empty buffers and `send_in_progress = false`
-    /// 2. **Active Use**: Applications write/read data via `SimTcpStream` operations
-    /// 3. **Data Flow**: Writes go to `send_buffer`, reads come from `receive_buffer`
-    /// 4. **Event Processing**: `ProcessSendBuffer` and `DataDelivery` events handle data transfer
-    /// 5. **Cleanup**: Connections remain until simulation ends (no explicit close yet)
     pub(crate) fn create_connection_pair(
         &self,
         client_addr: String,
@@ -635,8 +515,8 @@ impl SimWorld {
         let current_time = inner.current_time;
 
         // Parse IP addresses for partition tracking
-        let client_ip = crate::network_state::NetworkState::parse_ip_from_addr(&client_addr);
-        let server_ip = crate::network_state::NetworkState::parse_ip_from_addr(&server_addr);
+        let client_ip = NetworkState::parse_ip_from_addr(&client_addr);
+        let server_ip = NetworkState::parse_ip_from_addr(&server_addr);
 
         // Create paired connections
         inner.network.connections.insert(
@@ -748,18 +628,12 @@ impl SimWorld {
     /// Sleep for the specified duration in simulation time.
     ///
     /// Returns a future that will complete when the simulation time has advanced
-    /// by the specified duration. This integrates with the event system by
-    /// scheduling a Wake event and coordinating with the async runtime.
-    ///
-    /// When buggified delays are enabled, there's a 25% chance of adding extra
-    /// delay using a power-law distribution (FDB ref: sim2.actor.cpp:1100-1105).
-    ///
-    /// Sleep for a specified duration in simulation time.
+    /// by the specified duration.
     #[instrument(skip(self))]
     pub fn sleep(&self, duration: Duration) -> SleepFuture {
         let task_id = self.generate_task_id();
 
-        // Apply buggified delay if enabled (FDB ref: sim2.actor.cpp:1100-1105)
+        // Apply buggified delay if enabled
         let actual_duration = self.apply_buggified_delay(duration);
 
         // Schedule a wake event for this task
@@ -770,17 +644,6 @@ impl SimWorld {
     }
 
     /// Apply buggified delay to a duration if chaos is enabled.
-    ///
-    /// FDB pattern (sim2.actor.cpp:1100-1105):
-    /// ```cpp
-    /// if (deterministicRandom()->random01() < 0.25) {
-    ///     seconds += MAX_BUGGIFIED_DELAY * pow(random01(), 1000.0);
-    /// }
-    /// ```
-    ///
-    /// The power-law distribution (pow(random, 1000)) creates very skewed delays:
-    /// - Most delays are near 0 (since random^1000 is tiny for random < 1)
-    /// - Occasionally (when random is close to 1.0) the full max delay is added
     fn apply_buggified_delay(&self, duration: Duration) -> Duration {
         let inner = self.inner.borrow();
         let chaos = &inner.network.config.chaos;
@@ -789,7 +652,7 @@ impl SimWorld {
             return duration;
         }
 
-        // 25% probability per FDB (or configured probability)
+        // 25% probability per FDB
         if sim_random::<f64>() < chaos.buggified_delay_probability {
             // Power-law distribution: pow(random01(), 1000) creates very skewed delays
             let random_factor = sim_random::<f64>().powf(1000.0);
@@ -822,89 +685,18 @@ impl SimWorld {
     }
 
     /// Check if a task has been awakened.
-    ///
-    /// This is used internally by SleepFuture to determine if its corresponding
-    /// Wake event has been processed.
     pub(crate) fn is_task_awake(&self, task_id: u64) -> SimulationResult<bool> {
         let inner = self.inner.borrow();
         Ok(inner.awakened_tasks.contains(&task_id))
     }
 
     /// Register a waker for a task.
-    ///
-    /// This is used internally by SleepFuture to register a waker that should
-    /// be called when the task's Wake event is processed.
     pub(crate) fn register_task_waker(&self, task_id: u64, waker: Waker) -> SimulationResult<()> {
         let mut inner = self.inner.borrow_mut();
         inner.wakers.task_wakers.insert(task_id, waker);
         Ok(())
     }
 
-    /// Static event processor for simulation events with comprehensive TCP simulation support.
-    ///
-    /// This method is the heart of the simulation engine, processing all types of events
-    /// that drive the deterministic simulation forward. It's implemented as a static method
-    /// to avoid borrowing conflicts when event processing needs to modify simulation state.
-    ///
-    /// ## Event Processing Architecture
-    ///
-    /// ```text
-    /// Event Queue                Event Processor              Connection State
-    /// ─────────────             ─────────────────            ──────────────────
-    ///
-    /// [TaskWake]           ──► process_event_with_inner ──► awakened_tasks.insert()
-    /// [DataDelivery]       ──►        │                 ──► connection.receive_buffer.push()
-    /// [ProcessSendBuffer]  ──►        │                 ──► connection.send_buffer.pop()
-    /// [ConnectionReady]    ──►        │                 ──► // Future connection events
-    /// ```
-    ///
-    /// ## TCP-Specific Event Handling
-    ///
-    /// ### ProcessSendBuffer Event
-    /// Core of the TCP ordering fix - ensures FIFO message delivery:
-    /// 1. **Message Dequeue**: Removes next message from connection's send_buffer
-    /// 2. **Delay Strategy**:
-    ///    - Last message in buffer: Full network delay (realistic latency)
-    ///    - More messages queued: Minimal delay (1ns) for immediate processing
-    /// 3. **Delivery Scheduling**: Creates DataDelivery event for paired connection
-    /// 4. **Continuation**: Schedules next ProcessSendBuffer if buffer not empty
-    ///
-    /// ### DataDelivery Event
-    /// Handles reliable data transfer between connection pairs:
-    /// 1. **Target Resolution**: Finds destination connection by ID
-    /// 2. **Data Transfer**: Appends data to connection's receive_buffer
-    /// 3. **Notification**: Wakes any pending read operations on that connection
-    /// 4. **Logging**: Comprehensive tracing for debugging network behavior
-    ///
-    /// ## Event Processing Guarantees
-    ///
-    /// - **Atomicity**: Each event is processed completely before the next
-    /// - **Ordering**: Events are processed by scheduled time, then sequence number
-    /// - **Isolation**: No event can interfere with another's processing
-    /// - **Determinism**: Same events + same order = identical simulation results
-    ///
-    /// ## Error Handling Strategy
-    ///
-    /// The method is designed to be robust against various error conditions:
-    /// - **Missing connections**: Log warnings but continue processing
-    /// - **Invalid wakers**: Handle gracefully without simulation failure  
-    /// - **Empty buffers**: Treat as normal operation completion
-    ///
-    /// ## Performance Characteristics
-    ///
-    /// - **Time Complexity**: O(1) for most events, O(log n) for queue operations
-    /// - **Memory Usage**: Minimal - operates on existing connection state
-    /// - **Event Throughput**: Limited by connection buffer operations, not event count
-    ///
-    /// ## Integration with AsyncRead/AsyncWrite
-    ///
-    /// This event processor directly supports the async stream operations:
-    /// - **Write operations** → buffer_send() → ProcessSendBuffer events
-    /// - **Read operations** → register_read_waker() → DataDelivery wake-ups
-    /// - **Connection setup** → ConnectionReady events (future enhancement)
-    ///
-    /// The static design prevents the common async borrowing issue where event
-    /// processing needs to modify simulation state while async operations hold borrows.
     /// Clear expired clogs and wake pending tasks (helper for use with SimInner)
     fn clear_expired_clogs_with_inner(inner: &mut SimInner) {
         let now = inner.current_time;
@@ -921,6 +713,7 @@ impl SimWorld {
         }
     }
 
+    /// Static event processor for simulation events.
     #[instrument(skip(inner))]
     fn process_event_with_inner(inner: &mut SimInner, event: Event) {
         // Increment event processing counter for metrics
@@ -929,8 +722,6 @@ impl SimWorld {
         // Process different event types
         match event {
             Event::Timer { task_id } => {
-                // Phase 2d: Real task waking implementation
-
                 // Mark this task as awakened
                 inner.awakened_tasks.insert(task_id);
 
@@ -941,18 +732,14 @@ impl SimWorld {
             }
             Event::Connection { id, state } => {
                 match state {
-                    crate::ConnectionStateChange::BindComplete => {
-                        // Network bind completed - forward to network module for handling
-                        // For Phase 2c, this is just acknowledgment
-                        // In Phase 2d, this will wake futures and update state
+                    ConnectionStateChange::BindComplete => {
+                        // Network bind completed
                     }
-                    crate::ConnectionStateChange::ConnectionReady => {
-                        // Connection establishment completed - forward to network module for handling
-                        // For Phase 2c, this is just acknowledgment
-                        // In Phase 2d, this will wake futures and update state
+                    ConnectionStateChange::ConnectionReady => {
+                        // Connection establishment completed
                     }
-                    crate::ConnectionStateChange::ClogClear => {
-                        // Phase 7: Clear clog for the specified connection and wake any waiting tasks
+                    ConnectionStateChange::ClogClear => {
+                        // Clear clog for the specified connection
                         let connection_id = ConnectionId(id);
 
                         inner.network.connection_clogs.remove(&connection_id);
@@ -962,7 +749,7 @@ impl SimWorld {
                             }
                         }
                     }
-                    crate::ConnectionStateChange::PartitionRestore => {
+                    ConnectionStateChange::PartitionRestore => {
                         // Clear expired IP partitions
                         let now = inner.current_time;
                         let expired_partitions: Vec<_> = inner
@@ -983,7 +770,7 @@ impl SimWorld {
                             tracing::debug!("Restored IP partition {} -> {}", pair.0, pair.1);
                         }
                     }
-                    crate::ConnectionStateChange::SendPartitionClear => {
+                    ConnectionStateChange::SendPartitionClear => {
                         // Clear expired send partitions
                         let now = inner.current_time;
                         let expired_ips: Vec<_> = inner
@@ -1002,7 +789,7 @@ impl SimWorld {
                             tracing::debug!("Cleared send partition for {}", ip);
                         }
                     }
-                    crate::ConnectionStateChange::RecvPartitionClear => {
+                    ConnectionStateChange::RecvPartitionClear => {
                         // Clear expired receive partitions
                         let now = inner.current_time;
                         let expired_ips: Vec<_> = inner
@@ -1028,33 +815,7 @@ impl SimWorld {
                 operation,
             } => {
                 match operation {
-                    crate::NetworkOperation::DataDelivery { data } => {
-                        // **DataDelivery Event Handler**: Core TCP data transfer implementation
-                        //
-                        // This event handler completes the final step of TCP message delivery by
-                        // transferring data from the sender's send_buffer to the receiver's receive_buffer.
-                        // It's the endpoint of the TCP ordering pipeline that maintains reliable delivery.
-                        //
-                        // Event Flow Context:
-                        // 1. Application calls stream.write_all(data)  -> buffer_send(data)
-                        // 2. buffer_send() adds to send_buffer        -> ProcessSendBuffer event scheduled
-                        // 3. ProcessSendBuffer dequeues data          -> DataDelivery event scheduled (THIS EVENT)
-                        // 4. DataDelivery writes to receive_buffer   -> Application stream.read() succeeds
-                        //
-                        // Key Responsibilities:
-                        // - **Data Transfer**: Move bytes from network simulation to connection buffer
-                        // - **Async Notification**: Wake any read operations waiting for this data
-                        // - **Reliability**: Ensure no data is lost in transfer
-                        // - **Ordering**: Maintain FIFO delivery within the connection
-                        //
-                        // Critical Fix (Phase 6): This handler now delivers data to the CORRECT connection
-                        // - Previous bug: delivered to paired_connection (wrong direction!)
-                        // - Current fix: delivers directly to specified connection_id (correct!)
-                        //
-                        // Connection ID Routing:
-                        // - Client writes to server: Client ProcessSendBuffer -> Server DataDelivery
-                        // - Server writes to client: Server ProcessSendBuffer -> Client DataDelivery
-                        // - Each DataDelivery specifies the TARGET connection to receive the data
+                    NetworkOperation::DataDelivery { data } => {
                         let data_preview =
                             String::from_utf8_lossy(&data[..std::cmp::min(data.len(), 20)]);
                         tracing::info!(
@@ -1070,7 +831,6 @@ impl SimWorld {
                         if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
                             // Apply bit flipping chaos BEFORE writing to receive buffer
                             let data_to_deliver = if data.is_empty() {
-                                // No data to corrupt
                                 data
                             } else {
                                 let chaos = &inner.network.config.chaos;
@@ -1078,12 +838,9 @@ impl SimWorld {
                                 let cooldown_elapsed = now.saturating_sub(inner.last_bit_flip_time)
                                     >= chaos.bit_flip_cooldown;
 
-                                // Check if we should inject bit flips
-                                // Note: All connections are unstable for now (stable connection support deferred)
                                 if cooldown_elapsed
                                     && crate::buggify_with_prob!(chaos.bit_flip_probability)
                                 {
-                                    // Calculate number of bits to flip using power-law distribution
                                     let random_value = sim_random::<u32>();
                                     let flip_count = SimInner::calculate_flip_bit_count(
                                         random_value,
@@ -1091,28 +848,20 @@ impl SimWorld {
                                         chaos.bit_flip_max_bits,
                                     );
 
-                                    // Clone data to make it mutable for corruption
                                     let mut corrupted_data = data.clone();
-
-                                    // Flip bits at random positions
                                     let mut flipped_positions = std::collections::HashSet::new();
                                     for _ in 0..flip_count {
-                                        // Pick a random byte
                                         let byte_idx =
                                             (sim_random::<u64>() as usize) % corrupted_data.len();
-                                        // Pick a random bit within that byte (0-7)
                                         let bit_idx = (sim_random::<u64>() as usize) % 8;
 
-                                        // Track position to avoid duplicate flips (which would cancel out)
                                         let position = (byte_idx, bit_idx);
                                         if !flipped_positions.contains(&position) {
                                             flipped_positions.insert(position);
-                                            // Flip the bit using XOR
                                             corrupted_data[byte_idx] ^= 1 << bit_idx;
                                         }
                                     }
 
-                                    // Update chaos tracking
                                     inner.last_bit_flip_time = now;
 
                                     tracing::info!(
@@ -1129,7 +878,6 @@ impl SimWorld {
                                 }
                             };
 
-                            // Normal delivery to receive buffer
                             tracing::debug!(
                                 "DataDelivery writing {} bytes to connection {} receive_buffer",
                                 data_to_deliver.len(),
@@ -1139,7 +887,6 @@ impl SimWorld {
                                 conn.receive_buffer.push_back(byte);
                             }
 
-                            // Wake any futures waiting to read from this connection
                             if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
                                 tracing::debug!(
                                     "DataDelivery waking up read waker for connection_id={}",
@@ -1159,37 +906,7 @@ impl SimWorld {
                             );
                         }
                     }
-                    // Process the next message from a connection's send buffer.
-                    //
-                    // This event handler is the core of the TCP ordering fix. It ensures that
-                    // messages are sent in FIFO order by processing the send buffer sequentially.
-                    //
-                    // Event Processing Flow:
-                    // 1. Dequeue Message: Remove the next message from send_buffer
-                    // 2. Apply Delay Logic:
-                    //    - If more messages remain: minimal delay (1ns) for immediate processing
-                    //    - If this is the last message: full network delay simulation
-                    // 3. Schedule Delivery: Create DataDelivery event to paired connection
-                    // 4. Continue Processing: If more messages remain, schedule next ProcessSendBuffer
-                    // 5. Mark Idle: If buffer empty, set send_in_progress = false
-                    //
-                    // TCP Ordering Guarantee:
-                    // The key insight is that within a connection, we want FIFO ordering but still
-                    // need realistic network delays. The solution:
-                    //
-                    // Message Flow Timeline:
-                    // T=0ms:  buffer_send("A") -> send_buffer = ["A"]          -> ProcessSendBuffer scheduled
-                    // T=1ms:  buffer_send("B") -> send_buffer = ["A", "B"]     -> (ProcessSendBuffer already active)
-                    // T=2ms:  buffer_send("C") -> send_buffer = ["A","B","C"]  -> (ProcessSendBuffer already active)
-                    //
-                    // T=5ms:  ProcessSendBuffer -> pop "A", 2 msgs remaining   -> DataDelivery("A") @ T=6ms (1ns delay)
-                    // T=6ms:  ProcessSendBuffer -> pop "B", 1 msg remaining    -> DataDelivery("B") @ T=7ms (1ns delay)
-                    // T=7ms:  ProcessSendBuffer -> pop "C", 0 msgs remaining   -> DataDelivery("C") @ T=57ms (50ms delay)
-                    //
-                    // Result: A arrives at T=6ms, B arrives at T=7ms, C arrives at T=57ms ✅ ORDERED
-                    //
-                    // This preserves both ordering (A→B→C) and realistic network delays (C gets full latency).
-                    crate::NetworkOperation::ProcessSendBuffer => {
+                    NetworkOperation::ProcessSendBuffer => {
                         let connection_id = ConnectionId(connection_id);
 
                         // Check if this connection is partitioned before processing
@@ -1199,8 +916,6 @@ impl SimWorld {
 
                         if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
                             if is_partitioned {
-                                // Connection is partitioned - fail sends immediately (like FoundationDB simulation)
-                                // The peer layer should handle reliability via retries and reconnection
                                 if let Some(data) = conn.send_buffer.pop_front() {
                                     tracing::debug!(
                                         "Connection {} partitioned, failing send of {} bytes",
@@ -1208,7 +923,6 @@ impl SimWorld {
                                         data.len()
                                     );
 
-                                    // Continue processing remaining messages (they'll also fail)
                                     if !conn.send_buffer.is_empty() {
                                         let scheduled_time = inner.current_time;
                                         let sequence = inner.next_sequence;
@@ -1218,8 +932,7 @@ impl SimWorld {
                                             scheduled_time,
                                             Event::Network {
                                                 connection_id: connection_id.0,
-                                                operation:
-                                                    crate::NetworkOperation::ProcessSendBuffer,
+                                                operation: NetworkOperation::ProcessSendBuffer,
                                             },
                                             sequence,
                                         );
@@ -1228,13 +941,10 @@ impl SimWorld {
                                         conn.send_in_progress = false;
                                     }
                                 } else {
-                                    // No messages to process
                                     conn.send_in_progress = false;
                                 }
                             } else if let Some(mut data) = conn.send_buffer.pop_front() {
-                                // BUGGIFY: Simulate partial/short writes (TCP backpressure, slow receiver)
-                                // Following FDB's approach: truncate writes to random bytes
-                                // This tests that message fragmentation is handled correctly
+                                // BUGGIFY: Simulate partial/short writes
                                 if crate::buggify!() && !is_partitioned && !data.is_empty() {
                                     let max_send = std::cmp::min(
                                         data.len(),
@@ -1243,7 +953,6 @@ impl SimWorld {
                                     let truncate_to = sim_random_range(0..max_send + 1);
 
                                     if truncate_to < data.len() {
-                                        // Partial write - split the message and requeue remainder
                                         let remainder = data.split_off(truncate_to);
                                         conn.send_buffer.push_front(remainder);
 
@@ -1256,27 +965,21 @@ impl SimWorld {
                                     }
                                 }
 
-                                // For TCP ordering, we need to maintain connection-level delays
-                                // Check if there are more messages AFTER popping the current one
                                 let has_more_messages = !conn.send_buffer.is_empty();
                                 let base_delay = if has_more_messages {
-                                    // More messages in buffer, minimal delay for immediate processing
                                     std::time::Duration::from_nanos(1)
                                 } else {
-                                    // This is the last message in buffer, apply network delay
                                     crate::network::config::sample_duration(
                                         &inner.network.config.write_latency,
                                     )
                                 };
 
-                                // Ensure TCP ordering: schedule at next available time for this connection
                                 let earliest_time = std::cmp::max(
                                     inner.current_time + base_delay,
                                     conn.next_send_time,
                                 );
                                 let actual_delay = earliest_time - inner.current_time;
 
-                                // Update next available send time for this connection
                                 conn.next_send_time =
                                     earliest_time + std::time::Duration::from_nanos(1);
 
@@ -1289,7 +992,6 @@ impl SimWorld {
                                     earliest_time
                                 );
 
-                                // Schedule delivery to paired connection
                                 if let Some(paired_id) = conn.paired_connection {
                                     let scheduled_time = earliest_time;
                                     let sequence = inner.next_sequence;
@@ -1299,18 +1001,15 @@ impl SimWorld {
                                         scheduled_time,
                                         Event::Network {
                                             connection_id: paired_id.0,
-                                            operation: crate::NetworkOperation::DataDelivery {
-                                                data,
-                                            },
+                                            operation: NetworkOperation::DataDelivery { data },
                                         },
                                         sequence,
                                     );
                                     inner.event_queue.schedule(scheduled_event);
                                 }
 
-                                // If more messages in buffer, schedule next processing immediately to maintain throughput
                                 if !conn.send_buffer.is_empty() {
-                                    let scheduled_time = inner.current_time; // Process immediately
+                                    let scheduled_time = inner.current_time;
                                     let sequence = inner.next_sequence;
                                     inner.next_sequence += 1;
 
@@ -1318,17 +1017,15 @@ impl SimWorld {
                                         scheduled_time,
                                         Event::Network {
                                             connection_id: connection_id.0,
-                                            operation: crate::NetworkOperation::ProcessSendBuffer,
+                                            operation: NetworkOperation::ProcessSendBuffer,
                                         },
                                         sequence,
                                     );
                                     inner.event_queue.schedule(scheduled_event);
                                 } else {
-                                    // Mark sender as no longer active
                                     conn.send_in_progress = false;
                                 }
                             } else {
-                                // No more messages, mark sender as inactive
                                 conn.send_in_progress = false;
                             }
                         }
@@ -1336,19 +1033,15 @@ impl SimWorld {
                 }
             }
             Event::Shutdown => {
-                // Wake all pending tasks to allow them to check shutdown conditions
                 tracing::debug!("Processing Shutdown event - waking all pending tasks");
 
-                // Collect all task wakers (we need to drain to avoid double-borrow)
                 let task_wakers: Vec<_> = inner.wakers.task_wakers.drain().collect();
 
-                // Wake all tasks
                 for (task_id, waker) in task_wakers {
                     tracing::trace!("Waking task {}", task_id);
                     waker.wake();
                 }
 
-                // Also wake any read wakers that might be blocked
                 let read_wakers: Vec<_> = inner
                     .wakers
                     .read_wakers
@@ -1366,41 +1059,23 @@ impl SimWorld {
     }
 
     /// Get current assertion results for all tracked assertions.
-    ///
-    /// Returns a snapshot of assertion statistics collected during this simulation.
-    /// This provides access to both `always_assert!` and `sometimes_assert!` results
-    /// for statistical analysis of distributed system properties.
-    ///
-    /// Access assertion statistics from the simulation.
     pub fn assertion_results(
         &self,
-    ) -> std::collections::HashMap<String, crate::assertions::AssertionStats> {
-        crate::assertions::get_assertion_results()
+    ) -> std::collections::HashMap<String, crate::chaos::AssertionStats> {
+        crate::chaos::get_assertion_results()
     }
 
     /// Reset assertion statistics to empty state.
-    ///
-    /// This should be called before each simulation run to ensure clean state
-    /// between consecutive simulations. It is automatically called by
-    /// `new_with_seed()` and related methods.
-    ///
-    /// Reset all assertion statistics.
     pub fn reset_assertion_results(&self) {
-        crate::assertions::reset_assertion_results();
+        crate::chaos::reset_assertion_results();
     }
 
     /// Extract simulation metrics for reporting.
-    ///
-    /// Returns the current simulation metrics including simulated time,
-    /// events processed, and custom metrics. This is useful for integration
-    /// with the simulation reporting framework.
-    ///
-    /// Extract simulation metrics including timing and event statistics.
     pub fn extract_metrics(&self) -> crate::runner::SimulationMetrics {
         let inner = self.inner.borrow();
 
         crate::runner::SimulationMetrics {
-            wall_time: std::time::Duration::ZERO, // This will be filled by the report builder
+            wall_time: std::time::Duration::ZERO,
             simulated_time: inner.current_time,
             events_processed: inner.events_processed,
         }
@@ -1437,7 +1112,7 @@ impl SimWorld {
         // Schedule an event to clear this clog
         let clear_event = Event::Connection {
             id: connection_id.0,
-            state: crate::ConnectionStateChange::ClogClear,
+            state: ConnectionStateChange::ClogClear,
         };
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
@@ -1499,14 +1174,12 @@ impl SimWorld {
     pub fn close_connection(&self, connection_id: ConnectionId) {
         let mut inner = self.inner.borrow_mut();
 
-        // First, get the paired connection ID if it exists
         let paired_connection_id = inner
             .network
             .connections
             .get(&connection_id)
             .and_then(|conn| conn.paired_connection);
 
-        // Close the main connection
         if let Some(conn) = inner.network.connections.get_mut(&connection_id)
             && !conn.is_closed
         {
@@ -1514,7 +1187,6 @@ impl SimWorld {
             tracing::debug!("Connection {} closed permanently", connection_id.0);
         }
 
-        // Close the paired connection if it exists
         if let Some(paired_id) = paired_connection_id
             && let Some(paired_conn) = inner.network.connections.get_mut(&paired_id)
             && !paired_conn.is_closed
@@ -1523,7 +1195,6 @@ impl SimWorld {
             tracing::debug!("Paired connection {} also closed", paired_id.0);
         }
 
-        // Wake any read wakers on both connections (after connection modifications)
         if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
             tracing::debug!(
                 "Waking read waker for closed connection {}",
@@ -1543,13 +1214,7 @@ impl SimWorld {
         }
     }
 
-    // Random Connection Close Methods (following FDB sim2.actor.cpp:580-605)
-
     /// Close connection asymmetrically (FDB rollRandomClose pattern)
-    /// - close_send: Close this connection's send capability (writes will fail)
-    /// - close_recv: Close paired connection's receive capability (reads return EOF)
-    ///
-    /// FDB ref: sim2.actor.cpp:580-605 - closeInternal() on self vs peer
     pub fn close_connection_asymmetric(
         &self,
         connection_id: ConnectionId,
@@ -1558,17 +1223,14 @@ impl SimWorld {
     ) {
         let mut inner = self.inner.borrow_mut();
 
-        // Get paired connection before modifications
         let paired_id = inner
             .network
             .connections
             .get(&connection_id)
             .and_then(|conn| conn.paired_connection);
 
-        // Close send side on this connection (like FDB closeInternal() on self)
         if close_send && let Some(conn) = inner.network.connections.get_mut(&connection_id) {
             conn.send_closed = true;
-            // Clear send buffer - data in flight is lost (like TCP RST)
             conn.send_buffer.clear();
             tracing::debug!(
                 "Connection {} send side closed (asymmetric)",
@@ -1576,7 +1238,6 @@ impl SimWorld {
             );
         }
 
-        // Close recv side on paired connection (like FDB closeInternal() on peer)
         if close_recv
             && let Some(paired) = paired_id
             && let Some(paired_conn) = inner.network.connections.get_mut(&paired)
@@ -1588,7 +1249,6 @@ impl SimWorld {
             );
         }
 
-        // Wake read wakers so they can see the closure
         if close_send && let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
             waker.wake();
         }
@@ -1601,46 +1261,33 @@ impl SimWorld {
     }
 
     /// Roll random close chaos injection (FDB rollRandomClose pattern)
-    /// Returns:
-    /// - Some(true): Random close triggered, should throw explicit error (30%)
-    /// - Some(false): Random close triggered, silent failure (70%)
-    /// - None: No random close triggered (cooldown or probability check failed)
-    ///
-    /// FDB ref: sim2.actor.cpp:580-605
     pub fn roll_random_close(&self, connection_id: ConnectionId) -> Option<bool> {
         let mut inner = self.inner.borrow_mut();
         let config = &inner.network.config;
 
-        // Check if random close is enabled
         if config.chaos.random_close_probability <= 0.0 {
             return None;
         }
 
-        // Check cooldown: now() - lastConnectionFailure > connectionFailuresDisableDuration
         let current_time = inner.current_time;
         let time_since_last = current_time.saturating_sub(inner.network.last_random_close_time);
         if time_since_last < config.chaos.random_close_cooldown {
             return None;
         }
 
-        // Probability check using buggify
         if !crate::buggify_with_prob!(config.chaos.random_close_probability) {
             return None;
         }
 
-        // Random close triggered! Update cooldown timestamp
         inner.network.last_random_close_time = current_time;
 
-        // Get paired connection for asymmetric closure
         let paired_id = inner
             .network
             .connections
             .get(&connection_id)
             .and_then(|conn| conn.paired_connection);
 
-        // Roll for direction: a < .66 close recv (peer), a > .33 close send (self)
-        // .33 < a < .66 = both
-        let a = crate::rng::sim_random_f64();
+        let a = super::rng::sim_random_f64();
         let close_recv = a < 0.66;
         let close_send = a > 0.33;
 
@@ -1652,13 +1299,11 @@ impl SimWorld {
             a
         );
 
-        // Close send side on this connection
         if close_send && let Some(conn) = inner.network.connections.get_mut(&connection_id) {
             conn.send_closed = true;
             conn.send_buffer.clear();
         }
 
-        // Close recv side on paired connection
         if close_recv
             && let Some(paired) = paired_id
             && let Some(paired_conn) = inner.network.connections.get_mut(&paired)
@@ -1666,7 +1311,6 @@ impl SimWorld {
             paired_conn.recv_closed = true;
         }
 
-        // Wake read wakers
         if close_send && let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
             waker.wake();
         }
@@ -1677,8 +1321,7 @@ impl SimWorld {
             waker.wake();
         }
 
-        // Roll for explicit vs silent: b < .3 = explicit (30%)
-        let b = crate::rng::sim_random_f64();
+        let b = super::rng::sim_random_f64();
         let explicit = b < inner.network.config.chaos.random_close_explicit_ratio;
 
         tracing::debug!(
@@ -1711,11 +1354,9 @@ impl SimWorld {
             .is_some_and(|conn| conn.recv_closed || conn.is_closed)
     }
 
-    // Network Partition Control Methods (following FoundationDB patterns)
+    // Network Partition Control Methods
 
     /// Partition communication between two IP addresses for a specified duration
-    /// Sends will fail immediately during partition (like FoundationDB simulation layer)
-    /// The peer layer should handle reliability via retries and reconnection
     pub fn partition_pair(
         &self,
         from_ip: std::net::IpAddr,
@@ -1725,20 +1366,18 @@ impl SimWorld {
         let mut inner = self.inner.borrow_mut();
         let expires_at = inner.current_time + duration;
 
-        inner.network.ip_partitions.insert(
-            (from_ip, to_ip),
-            crate::network_state::PartitionState { expires_at },
-        );
+        inner
+            .network
+            .ip_partitions
+            .insert((from_ip, to_ip), PartitionState { expires_at });
 
-        // Schedule partition restore event
-        let restore_event = crate::events::Event::Connection {
-            id: 0, // Not connection-specific for IP partitions
-            state: crate::events::ConnectionStateChange::PartitionRestore,
+        let restore_event = Event::Connection {
+            id: 0,
+            state: ConnectionStateChange::PartitionRestore,
         };
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
-        let scheduled_event =
-            crate::events::ScheduledEvent::new(expires_at, restore_event, sequence);
+        let scheduled_event = ScheduledEvent::new(expires_at, restore_event, sequence);
         inner.event_queue.schedule(scheduled_event);
 
         tracing::debug!(
@@ -1761,21 +1400,20 @@ impl SimWorld {
 
         inner.network.send_partitions.insert(ip, expires_at);
 
-        // Schedule partition clear event
-        let clear_event = crate::events::Event::Connection {
+        let clear_event = Event::Connection {
             id: 0,
-            state: crate::events::ConnectionStateChange::SendPartitionClear,
+            state: ConnectionStateChange::SendPartitionClear,
         };
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
-        let scheduled_event = crate::events::ScheduledEvent::new(expires_at, clear_event, sequence);
+        let scheduled_event = ScheduledEvent::new(expires_at, clear_event, sequence);
         inner.event_queue.schedule(scheduled_event);
 
         tracing::debug!("Partitioned sends from {} until {:?}", ip, expires_at);
         Ok(())
     }
 
-    /// Block all incoming communication to an IP address  
+    /// Block all incoming communication to an IP address
     pub fn partition_recv_to(
         &self,
         ip: std::net::IpAddr,
@@ -1786,14 +1424,13 @@ impl SimWorld {
 
         inner.network.recv_partitions.insert(ip, expires_at);
 
-        // Schedule partition clear event
-        let clear_event = crate::events::Event::Connection {
+        let clear_event = Event::Connection {
             id: 0,
-            state: crate::events::ConnectionStateChange::RecvPartitionClear,
+            state: ConnectionStateChange::RecvPartitionClear,
         };
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
-        let scheduled_event = crate::events::ScheduledEvent::new(expires_at, clear_event, sequence);
+        let scheduled_event = ScheduledEvent::new(expires_at, clear_event, sequence);
         inner.event_queue.schedule(scheduled_event);
 
         tracing::debug!("Partitioned receives to {} until {:?}", ip, expires_at);
@@ -1828,12 +1465,10 @@ impl SimWorld {
     fn randomly_trigger_partitions_with_inner(inner: &mut SimInner) {
         let partition_config = &inner.network.config;
 
-        // Skip if partition triggering is disabled
         if partition_config.chaos.partition_probability == 0.0 {
             return;
         }
 
-        // Get all unique IP pairs from existing connections
         let ip_pairs: Vec<(std::net::IpAddr, std::net::IpAddr)> = inner
             .network
             .connections
@@ -1848,7 +1483,6 @@ impl SimWorld {
             .collect();
 
         for (from_ip, to_ip) in ip_pairs {
-            // Skip if already partitioned
             if inner
                 .network
                 .is_partitioned(from_ip, to_ip, inner.current_time)
@@ -1856,27 +1490,24 @@ impl SimWorld {
                 continue;
             }
 
-            // Probability check
             if sim_random::<f64>() < partition_config.chaos.partition_probability {
                 let partition_duration = crate::network::config::sample_duration(
                     &partition_config.chaos.partition_duration,
                 );
                 let expires_at = inner.current_time + partition_duration;
 
-                inner.network.ip_partitions.insert(
-                    (from_ip, to_ip),
-                    crate::network_state::PartitionState { expires_at },
-                );
+                inner
+                    .network
+                    .ip_partitions
+                    .insert((from_ip, to_ip), PartitionState { expires_at });
 
-                // Schedule partition restore event
-                let restore_event = crate::events::Event::Connection {
-                    id: 0, // Not connection-specific for IP partitions
-                    state: crate::events::ConnectionStateChange::PartitionRestore,
+                let restore_event = Event::Connection {
+                    id: 0,
+                    state: ConnectionStateChange::PartitionRestore,
                 };
                 let sequence = inner.next_sequence;
                 inner.next_sequence += 1;
-                let scheduled_event =
-                    crate::events::ScheduledEvent::new(expires_at, restore_event, sequence);
+                let scheduled_event = ScheduledEvent::new(expires_at, restore_event, sequence);
                 inner.event_queue.schedule(scheduled_event);
 
                 tracing::debug!(
@@ -1900,18 +1531,14 @@ impl Default for SimWorld {
 /// A weak reference to a simulation world.
 ///
 /// This provides handle-based access to the simulation without holding
-/// a strong reference that would prevent cleanup. All operations
-/// return `SimulationResult` and will fail if the simulation has been dropped.
+/// a strong reference that would prevent cleanup.
 #[derive(Debug)]
 pub struct WeakSimWorld {
-    inner: Weak<RefCell<SimInner>>,
+    pub(crate) inner: Weak<RefCell<SimInner>>,
 }
 
 impl WeakSimWorld {
     /// Attempts to upgrade this weak reference to a strong reference.
-    ///
-    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
-    /// has been dropped.
     pub fn upgrade(&self) -> SimulationResult<SimWorld> {
         self.inner
             .upgrade()
@@ -1920,36 +1547,24 @@ impl WeakSimWorld {
     }
 
     /// Returns the current simulation time.
-    ///
-    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
-    /// has been dropped.
     pub fn current_time(&self) -> SimulationResult<Duration> {
         let sim = self.upgrade()?;
         Ok(sim.current_time())
     }
 
     /// Returns the exact simulation time (equivalent to FDB's now()).
-    ///
-    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
-    /// has been dropped.
     pub fn now(&self) -> SimulationResult<Duration> {
         let sim = self.upgrade()?;
         Ok(sim.now())
     }
 
     /// Returns the drifted timer time (equivalent to FDB's timer()).
-    ///
-    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
-    /// has been dropped.
     pub fn timer(&self) -> SimulationResult<Duration> {
         let sim = self.upgrade()?;
         Ok(sim.timer())
     }
 
-    /// Schedules an event to execute after the specified delay from the current time.
-    ///
-    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
-    /// has been dropped.
+    /// Schedules an event to execute after the specified delay.
     pub fn schedule_event(&self, event: Event, delay: Duration) -> SimulationResult<()> {
         let sim = self.upgrade()?;
         sim.schedule_event(event, delay);
@@ -1957,19 +1572,13 @@ impl WeakSimWorld {
     }
 
     /// Schedules an event to execute at the specified absolute time.
-    ///
-    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
-    /// has been dropped.
     pub fn schedule_event_at(&self, event: Event, time: Duration) -> SimulationResult<()> {
         let sim = self.upgrade()?;
         sim.schedule_event_at(event, time);
         Ok(())
     }
 
-    /// Access network configuration for latency calculations using thread-local RNG.
-    ///
-    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
-    /// has been dropped.
+    /// Access network configuration for latency calculations.
     pub fn with_network_config<F, R>(&self, f: F) -> SimulationResult<R>
     where
         F: FnOnce(&NetworkConfiguration) -> R,
@@ -1979,9 +1588,6 @@ impl WeakSimWorld {
     }
 
     /// Read data from connection's receive buffer
-    ///
-    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
-    /// has been dropped.
     pub fn read_from_connection(
         &self,
         connection_id: ConnectionId,
@@ -1992,9 +1598,6 @@ impl WeakSimWorld {
     }
 
     /// Write data to connection's receive buffer
-    ///
-    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
-    /// has been dropped.
     pub fn write_to_connection(
         &self,
         connection_id: ConnectionId,
@@ -2005,39 +1608,24 @@ impl WeakSimWorld {
     }
 
     /// Buffer data for ordered sending on a connection.
-    ///
-    /// This method implements TCP-like ordering by buffering the data and processing
-    /// it through a FIFO queue to prevent message reordering due to random delays.
-    ///
-    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
-    /// has been dropped.
     pub fn buffer_send(&self, connection_id: ConnectionId, data: Vec<u8>) -> SimulationResult<()> {
         let sim = self.upgrade()?;
         sim.buffer_send(connection_id, data)
     }
 
     /// Get a network provider for the simulation.
-    ///
-    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
-    /// has been dropped.
     pub fn network_provider(&self) -> SimulationResult<SimNetworkProvider> {
         let sim = self.upgrade()?;
         Ok(sim.network_provider())
     }
 
     /// Get a time provider for the simulation.
-    ///
-    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
-    /// has been dropped.
     pub fn time_provider(&self) -> SimulationResult<crate::time::SimTimeProvider> {
         let sim = self.upgrade()?;
         Ok(sim.time_provider())
     }
 
     /// Sleep for the specified duration in simulation time.
-    ///
-    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
-    /// has been dropped.
     pub fn sleep(&self, duration: Duration) -> SimulationResult<SleepFuture> {
         let sim = self.upgrade()?;
         Ok(sim.sleep(duration))
@@ -2070,12 +1658,12 @@ mod tests {
 
         assert!(sim.has_pending_events());
         assert_eq!(sim.pending_event_count(), 1);
-        assert_eq!(sim.current_time(), Duration::ZERO); // Time hasn't advanced yet
+        assert_eq!(sim.current_time(), Duration::ZERO);
 
         // Process the event
         let has_more = sim.step();
-        assert!(!has_more); // No more events after processing
-        assert_eq!(sim.current_time(), Duration::from_millis(100)); // Time advanced
+        assert!(!has_more);
+        assert_eq!(sim.current_time(), Duration::from_millis(100));
         assert!(!sim.has_pending_events());
         assert_eq!(sim.pending_event_count(), 0);
     }
@@ -2092,15 +1680,15 @@ mod tests {
         assert_eq!(sim.pending_event_count(), 3);
 
         // Process events - should happen in time order
-        assert!(sim.step()); // Event 1
+        assert!(sim.step());
         assert_eq!(sim.current_time(), Duration::from_millis(100));
         assert_eq!(sim.pending_event_count(), 2);
 
-        assert!(sim.step()); // Event 2
+        assert!(sim.step());
         assert_eq!(sim.current_time(), Duration::from_millis(200));
         assert_eq!(sim.pending_event_count(), 1);
 
-        assert!(!sim.step()); // Event 3 - last event
+        assert!(!sim.step());
         assert_eq!(sim.current_time(), Duration::from_millis(300));
         assert_eq!(sim.pending_event_count(), 0);
     }
@@ -2125,16 +1713,13 @@ mod tests {
     fn sim_world_schedule_at_specific_time() {
         let mut sim = SimWorld::new();
 
-        // Schedule event at specific time (not relative to current time)
+        // Schedule event at specific time
         sim.schedule_event_at(Event::Timer { task_id: 1 }, Duration::from_millis(500));
 
-        // Current time is still zero
         assert_eq!(sim.current_time(), Duration::ZERO);
 
-        // Process the event
         sim.step();
 
-        // Time should jump to the scheduled time
         assert_eq!(sim.current_time(), Duration::from_millis(500));
     }
 
@@ -2171,18 +1756,17 @@ mod tests {
     fn deterministic_event_ordering() {
         let mut sim = SimWorld::new();
 
-        // Schedule events at the same time - should be processed in sequence order
+        // Schedule events at the same time
         sim.schedule_event(Event::Timer { task_id: 2 }, Duration::from_millis(100));
         sim.schedule_event(Event::Timer { task_id: 1 }, Duration::from_millis(100));
         sim.schedule_event(Event::Timer { task_id: 3 }, Duration::from_millis(100));
 
-        // All events are at the same time, but should be processed in the order they were scheduled
-        // due to sequence numbers
+        // All events are at the same time, but should be processed in sequence order
         assert!(sim.step());
         assert_eq!(sim.current_time(), Duration::from_millis(100));
-        assert!(sim.step()); // Should process in sequence order
-        assert_eq!(sim.current_time(), Duration::from_millis(100)); // Time doesn't change
-        assert!(!sim.step()); // Last event
+        assert!(sim.step());
+        assert_eq!(sim.current_time(), Duration::from_millis(100));
+        assert!(!sim.step());
         assert_eq!(sim.current_time(), Duration::from_millis(100));
     }
 }
