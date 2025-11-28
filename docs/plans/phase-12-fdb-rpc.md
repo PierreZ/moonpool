@@ -858,7 +858,7 @@ fn enable_connection_failures(sim: &SimWorld, duration: Duration) {
 2. ✅ Remove tests for deleted code
 3. ⏳ Add new tests for raw transport (will do when refactoring Peer)
 
-## Step 4.1: FDB Chaos Injection Parity ⏳ TODO
+## Step 4.1: FDB Chaos Injection Parity ✅
 
 Add missing chaos injection features from FDB's simulation to moonpool-foundation.
 
@@ -907,10 +907,12 @@ Add missing chaos injection features from FDB's simulation to moonpool-foundatio
 - **FDB ref**: `sim2.actor.cpp:1243-1250` (SIM_CONNECT_ERROR_MODE)
 - **Implemented**: Failure injection in `network/sim/provider.rs:connect()`, configurable via `ChaosConfiguration.connect_failure_mode/probability`, comprehensive tests in `tests/chaos_connect_failure.rs`
 
-### 4.1.7 Document All Fault Injection ⏳
-- Create `docs/fault-injection.md` describing all chaos mechanisms
-- Include: trigger conditions, probabilities, what each tests, FDB references
-- Serve as reference for simulation workload authors
+### 4.1.7 Document All Fault Injection ✅
+- Created `docs/fault-injection.md` describing all 11 chaos mechanisms
+- Created `fault_injection` module in lib.rs for cargo doc integration
+- Added summary table to crate-level docs
+- Includes: trigger conditions, probabilities, what each tests, FDB references
+- Covers: TCP latencies, random close, bit flip, connect failure, clock drift, buggified delays, partial writes, clogging, partitions, peer write failures, message delivery scheduling
 
 ## Step 4.2: Foundation Crate Reorganization ⏳ TODO
 

@@ -1,16 +1,46 @@
 //! # Moonpool Simulation Framework
 //!
-//! A deterministic simulation framework for testing distributed systems.
+//! A deterministic simulation framework for testing distributed systems,
+//! inspired by FoundationDB's simulation testing approach.
 //!
-//! ## Phase 1: Core Infrastructure
+//! ## Key Features
 //!
-//! This phase provides the foundation for the simulation framework:
-//! - Logical time engine with event-driven time advancement
-//! - Event queue and processing for deterministic execution
-//! - Basic simulation harness with centralized state management
-//! - Handle pattern for avoiding borrow checker conflicts
+//! - **Deterministic execution**: Same seed produces identical behavior
+//! - **Fault injection**: Comprehensive chaos testing via [`buggify!`] macros
+//! - **Network simulation**: TCP-level faults, partitions, and latency
+//! - **Time control**: Logical time with clock drift simulation
 //!
-//! Provides SimWorld for deterministic simulation and event processing.
+//! ## Fault Injection
+//!
+//! Moonpool provides extensive fault injection following FDB's buggify patterns.
+//! See the [`fault_injection`] module for complete documentation.
+//!
+//! Quick overview of chaos mechanisms:
+//!
+//! | Mechanism | Default | What it tests |
+//! |-----------|---------|---------------|
+//! | TCP operation latencies | 1-11ms connect | Async scheduling |
+//! | Random connection close | 0.001% | Reconnection, redelivery |
+//! | Bit flip corruption | 0.01% | Checksum validation |
+//! | Connect failure | Mode 2 | Timeout handling, retries |
+//! | Clock drift | 100ms max | Leases, heartbeats |
+//! | Buggified delays | 25% | Race conditions |
+//! | Partial writes | 1000 bytes | Message fragmentation |
+//! | Network partitions | disabled | Split-brain handling |
+//!
+//! Configure via [`ChaosConfiguration`] and [`NetworkConfiguration`], or use defaults.
+//!
+//! ## Getting Started
+//!
+//! ```ignore
+//! use moonpool_foundation::{SimulationBuilder, WorkloadTopology};
+//!
+//! SimulationBuilder::new()
+//!     .topology(WorkloadTopology::ClientServer { clients: 2, servers: 1 })
+//!     .run(|ctx| async move {
+//!         // Your workload here
+//!     });
+//! ```
 
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
@@ -21,6 +51,8 @@ pub mod assertions;
 pub mod buggify;
 /// Error types and utilities for simulation operations.
 pub mod error;
+/// Comprehensive guide to fault injection mechanisms.
+pub mod fault_injection;
 /// Event scheduling and processing for the simulation engine.
 pub mod events;
 /// Invariant checking for cross-workload validation.
