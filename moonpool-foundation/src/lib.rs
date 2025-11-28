@@ -59,8 +59,8 @@ pub use invariants::InvariantCheck;
 pub use state_registry::StateRegistry;
 // Network exports
 pub use network::{
-    NetworkConfiguration, NetworkProvider, Peer, PeerConfig, PeerError, PeerMetrics,
-    SimNetworkProvider, TcpListenerTrait, TokioNetworkProvider, sample_duration,
+    ChaosConfiguration, NetworkConfiguration, NetworkProvider, Peer, PeerConfig, PeerError,
+    PeerMetrics, SimNetworkProvider, TcpListenerTrait, TokioNetworkProvider, sample_duration,
 };
 // Random provider exports
 pub use random::{RandomProvider, sim::SimRandomProvider};

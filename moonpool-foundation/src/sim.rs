@@ -35,6 +35,9 @@ struct WakerRegistry {
 #[derive(Debug)]
 struct SimInner {
     current_time: Duration,
+    /// Drifted timer time (can be ahead of current_time)
+    /// FDB ref: sim2.actor.cpp:1058-1064 - timer() drifts 0-0.1s ahead of now()
+    timer_time: Duration,
     event_queue: EventQueue,
     next_sequence: u64,
 
@@ -59,6 +62,7 @@ impl SimInner {
     fn new() -> Self {
         Self {
             current_time: Duration::ZERO,
+            timer_time: Duration::ZERO,
             event_queue: EventQueue::new(),
             next_sequence: 0,
             network: NetworkState::new(NetworkConfiguration::default()),
@@ -73,6 +77,7 @@ impl SimInner {
     fn new_with_config(network_config: NetworkConfiguration) -> Self {
         Self {
             current_time: Duration::ZERO,
+            timer_time: Duration::ZERO,
             event_queue: EventQueue::new(),
             next_sequence: 0,
             network: NetworkState::new(network_config),
@@ -243,6 +248,56 @@ impl SimWorld {
     /// Returns the current simulation time.
     pub fn current_time(&self) -> Duration {
         self.inner.borrow().current_time
+    }
+
+    /// Returns the exact simulation time (equivalent to FDB's now()).
+    ///
+    /// This is the canonical simulation time used for scheduling events.
+    /// Use this for precise time comparisons and scheduling.
+    pub fn now(&self) -> Duration {
+        self.inner.borrow().current_time
+    }
+
+    /// Returns the drifted timer time (equivalent to FDB's timer()).
+    ///
+    /// The timer can be up to `clock_drift_max` (default 100ms) ahead of `now()`.
+    /// This simulates real-world clock drift between processes, which is important
+    /// for testing time-sensitive code like:
+    /// - Timeout handling
+    /// - Lease expiration
+    /// - Distributed consensus (leader election)
+    /// - Cache invalidation
+    /// - Heartbeat detection
+    ///
+    /// FDB formula: `timerTime += random01() * (time + 0.1 - timerTime) / 2.0`
+    ///
+    /// FDB ref: sim2.actor.cpp:1058-1064
+    pub fn timer(&self) -> Duration {
+        let mut inner = self.inner.borrow_mut();
+        let chaos = &inner.network.config.chaos;
+
+        // If clock drift is disabled, return exact simulation time
+        if !chaos.clock_drift_enabled {
+            return inner.current_time;
+        }
+
+        // FDB formula: timerTime += random01() * (time + 0.1 - timerTime) / 2.0
+        // This smoothly interpolates timerTime toward (time + drift_max)
+        // The /2.0 creates a damped approach (never overshoots)
+        let max_timer = inner.current_time + chaos.clock_drift_max;
+
+        // Only advance if timer is behind max
+        if inner.timer_time < max_timer {
+            let random_factor = sim_random::<f64>(); // 0.0 to 1.0
+            let gap = (max_timer - inner.timer_time).as_secs_f64();
+            let delta = random_factor * gap / 2.0;
+            inner.timer_time += Duration::from_secs_f64(delta);
+        }
+
+        // Ensure timer never goes backwards relative to simulation time
+        inner.timer_time = inner.timer_time.max(inner.current_time);
+
+        inner.timer_time
     }
 
     /// Schedules an event to execute after the specified delay from the current time.
@@ -977,22 +1032,22 @@ impl SimWorld {
                                 // No data to corrupt
                                 data
                             } else {
-                                let config = &inner.network.config;
+                                let chaos = &inner.network.config.chaos;
                                 let now = inner.current_time;
                                 let cooldown_elapsed = now.saturating_sub(inner.last_bit_flip_time)
-                                    >= config.bit_flip_cooldown;
+                                    >= chaos.bit_flip_cooldown;
 
                                 // Check if we should inject bit flips
                                 // Note: All connections are unstable for now (stable connection support deferred)
                                 if cooldown_elapsed
-                                    && crate::buggify_with_prob!(config.bit_flip_probability)
+                                    && crate::buggify_with_prob!(chaos.bit_flip_probability)
                                 {
                                     // Calculate number of bits to flip using power-law distribution
                                     let random_value = sim_random::<u32>();
                                     let flip_count = SimInner::calculate_flip_bit_count(
                                         random_value,
-                                        config.bit_flip_min_bits,
-                                        config.bit_flip_max_bits,
+                                        chaos.bit_flip_min_bits,
+                                        chaos.bit_flip_max_bits,
                                     );
 
                                     // Clone data to make it mutable for corruption
@@ -1142,7 +1197,7 @@ impl SimWorld {
                                 if crate::buggify!() && !is_partitioned && !data.is_empty() {
                                     let max_send = std::cmp::min(
                                         data.len(),
-                                        inner.network.config.partial_write_max_bytes,
+                                        inner.network.config.chaos.partial_write_max_bytes,
                                     );
                                     let truncate_to = sim_random_range(0..max_send + 1);
 
@@ -1323,7 +1378,7 @@ impl SimWorld {
         }
 
         // Check probability
-        config.clog_probability > 0.0 && sim_random::<f64>() < config.clog_probability
+        config.chaos.clog_probability > 0.0 && sim_random::<f64>() < config.chaos.clog_probability
     }
 
     /// Clog a connection's write operations
@@ -1331,7 +1386,7 @@ impl SimWorld {
         let mut inner = self.inner.borrow_mut();
         let config = &inner.network.config;
 
-        let clog_duration = crate::network::config::sample_duration(&config.clog_duration);
+        let clog_duration = crate::network::config::sample_duration(&config.chaos.clog_duration);
         let expires_at = inner.current_time + clog_duration;
         inner
             .network
@@ -1516,19 +1571,19 @@ impl SimWorld {
         let config = &inner.network.config;
 
         // Check if random close is enabled
-        if config.random_close_probability <= 0.0 {
+        if config.chaos.random_close_probability <= 0.0 {
             return None;
         }
 
         // Check cooldown: now() - lastConnectionFailure > connectionFailuresDisableDuration
         let current_time = inner.current_time;
         let time_since_last = current_time.saturating_sub(inner.network.last_random_close_time);
-        if time_since_last < config.random_close_cooldown {
+        if time_since_last < config.chaos.random_close_cooldown {
             return None;
         }
 
         // Probability check using buggify
-        if !crate::buggify_with_prob!(config.random_close_probability) {
+        if !crate::buggify_with_prob!(config.chaos.random_close_probability) {
             return None;
         }
 
@@ -1583,13 +1638,13 @@ impl SimWorld {
 
         // Roll for explicit vs silent: b < .3 = explicit (30%)
         let b = crate::rng::sim_random_f64();
-        let explicit = b < inner.network.config.random_close_explicit_ratio;
+        let explicit = b < inner.network.config.chaos.random_close_explicit_ratio;
 
         tracing::debug!(
             "Random close explicit={} (b={:.3}, ratio={:.2})",
             explicit,
             b,
-            inner.network.config.random_close_explicit_ratio
+            inner.network.config.chaos.random_close_explicit_ratio
         );
 
         Some(explicit)
@@ -1733,7 +1788,7 @@ impl SimWorld {
         let partition_config = &inner.network.config;
 
         // Skip if partition triggering is disabled
-        if partition_config.partition_probability == 0.0 {
+        if partition_config.chaos.partition_probability == 0.0 {
             return;
         }
 
@@ -1761,9 +1816,10 @@ impl SimWorld {
             }
 
             // Probability check
-            if sim_random::<f64>() < partition_config.partition_probability {
-                let partition_duration =
-                    crate::network::config::sample_duration(&partition_config.partition_duration);
+            if sim_random::<f64>() < partition_config.chaos.partition_probability {
+                let partition_duration = crate::network::config::sample_duration(
+                    &partition_config.chaos.partition_duration,
+                );
                 let expires_at = inner.current_time + partition_duration;
 
                 inner.network.ip_partitions.insert(
@@ -1829,6 +1885,24 @@ impl WeakSimWorld {
     pub fn current_time(&self) -> SimulationResult<Duration> {
         let sim = self.upgrade()?;
         Ok(sim.current_time())
+    }
+
+    /// Returns the exact simulation time (equivalent to FDB's now()).
+    ///
+    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
+    /// has been dropped.
+    pub fn now(&self) -> SimulationResult<Duration> {
+        let sim = self.upgrade()?;
+        Ok(sim.now())
+    }
+
+    /// Returns the drifted timer time (equivalent to FDB's timer()).
+    ///
+    /// Returns `Err(SimulationError::SimulationShutdown)` if the simulation
+    /// has been dropped.
+    pub fn timer(&self) -> SimulationResult<Duration> {
+        let sim = self.upgrade()?;
+        Ok(sim.timer())
     }
 
     /// Schedules an event to execute after the specified delay from the current time.

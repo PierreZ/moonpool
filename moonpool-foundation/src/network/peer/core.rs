@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
@@ -28,8 +28,8 @@ struct ReconnectState {
     /// Number of consecutive failures
     failure_count: u32,
 
-    /// Time of last connection attempt
-    last_attempt: Option<Instant>,
+    /// Time of last connection attempt (simulation or wall time as Duration)
+    last_attempt: Option<Duration>,
 
     /// Whether we're currently in the process of reconnecting
     reconnecting: bool,
@@ -711,9 +711,10 @@ async fn establish_connection<N: NetworkProvider + 'static, T: TimeProvider + 's
             }
 
             // Check if backoff is needed
+            let now = state.time.now();
             let (should_backoff, delay) =
                 if let Some(last_attempt) = state.reconnect_state.last_attempt {
-                    let elapsed = last_attempt.elapsed();
+                    let elapsed = now.saturating_sub(last_attempt);
                     if elapsed < state.reconnect_state.current_delay {
                         (true, state.reconnect_state.current_delay - elapsed)
                     } else {

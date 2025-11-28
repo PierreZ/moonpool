@@ -25,7 +25,7 @@ fn test_random_close_disabled_with_zero_probability() {
 
     local_runtime.block_on(async move {
         let mut config = NetworkConfiguration::fast_local();
-        config.random_close_probability = 0.0; // Explicitly disable
+        config.chaos.random_close_probability = 0.0; // Explicitly disable
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
@@ -67,8 +67,8 @@ fn test_random_close_injection_with_high_probability() {
         buggify_init(1.0, 1.0);
 
         let mut config = NetworkConfiguration::fast_local();
-        config.random_close_probability = 0.1; // 10% per I/O operation (very high)
-        config.random_close_cooldown = Duration::ZERO;
+        config.chaos.random_close_probability = 0.1; // 10% per I/O operation (very high)
+        config.chaos.random_close_cooldown = Duration::ZERO;
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
@@ -115,7 +115,7 @@ fn test_random_close_asymmetric_behavior() {
 
     local_runtime.block_on(async move {
         let mut config = NetworkConfiguration::fast_local();
-        config.random_close_probability = 0.0; // We'll trigger manually
+        config.chaos.random_close_probability = 0.0; // We'll trigger manually
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
@@ -170,8 +170,8 @@ fn test_random_close_cooldown() {
         buggify_init(1.0, 1.0);
 
         let mut config = NetworkConfiguration::fast_local();
-        config.random_close_probability = 1.0; // Always trigger (when not in cooldown)
-        config.random_close_cooldown = Duration::from_secs(100); // Very long cooldown
+        config.chaos.random_close_probability = 1.0; // Always trigger (when not in cooldown)
+        config.chaos.random_close_cooldown = Duration::from_secs(100); // Very long cooldown
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
@@ -215,9 +215,9 @@ fn test_random_close_explicit_vs_silent() {
         buggify_init(1.0, 1.0);
 
         let mut config = NetworkConfiguration::fast_local();
-        config.random_close_probability = 0.05; // 5% probability
-        config.random_close_cooldown = Duration::ZERO;
-        config.random_close_explicit_ratio = 0.3; // 30% explicit
+        config.chaos.random_close_probability = 0.05; // 5% probability
+        config.chaos.random_close_cooldown = Duration::ZERO;
+        config.chaos.random_close_explicit_ratio = 0.3; // 30% explicit
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
@@ -258,7 +258,7 @@ fn test_random_close_paired_connection_coordination() {
 
     local_runtime.block_on(async move {
         let mut config = NetworkConfiguration::fast_local();
-        config.random_close_probability = 0.0; // Manual control
+        config.chaos.random_close_probability = 0.0; // Manual control
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
@@ -295,7 +295,7 @@ fn test_random_close_buffer_clearing() {
 
     local_runtime.block_on(async move {
         let mut config = NetworkConfiguration::fast_local();
-        config.random_close_probability = 0.0;
+        config.chaos.random_close_probability = 0.0;
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
@@ -332,8 +332,8 @@ fn test_random_close_bidirectional_communication() {
         buggify_init(1.0, 1.0);
 
         let mut config = NetworkConfiguration::fast_local();
-        config.random_close_probability = 0.02; // 2% probability
-        config.random_close_cooldown = Duration::from_millis(10);
+        config.chaos.random_close_probability = 0.02; // 2% probability
+        config.chaos.random_close_cooldown = Duration::from_millis(10);
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
@@ -392,8 +392,8 @@ fn test_random_close_with_partitions() {
 
     local_runtime.block_on(async move {
         let mut config = NetworkConfiguration::fast_local();
-        config.random_close_probability = 0.01;
-        config.partition_probability = 0.05;
+        config.chaos.random_close_probability = 0.01;
+        config.chaos.partition_probability = 0.05;
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();

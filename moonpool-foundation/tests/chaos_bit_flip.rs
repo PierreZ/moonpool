@@ -24,7 +24,7 @@ fn test_bit_flip_disabled_with_zero_probability() {
 
     local_runtime.block_on(async move {
         let mut config = NetworkConfiguration::fast_local();
-        config.bit_flip_probability = 0.0; // Explicitly disable
+        config.chaos.bit_flip_probability = 0.0; // Explicitly disable
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
@@ -67,8 +67,8 @@ fn test_bit_flip_injection_with_high_probability() {
         buggify_init(1.0, 1.0);
 
         let mut config = NetworkConfiguration::fast_local();
-        config.bit_flip_probability = 0.5; // Very high probability
-        config.bit_flip_cooldown = Duration::ZERO;
+        config.chaos.bit_flip_probability = 0.5; // Very high probability
+        config.chaos.bit_flip_cooldown = Duration::ZERO;
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
@@ -112,8 +112,8 @@ fn test_bit_flip_cooldown() {
         buggify_init(1.0, 1.0);
 
         let mut config = NetworkConfiguration::fast_local();
-        config.bit_flip_probability = 1.0; // Always trigger (when not in cooldown)
-        config.bit_flip_cooldown = Duration::from_secs(10); // Long cooldown
+        config.chaos.bit_flip_probability = 1.0; // Always trigger (when not in cooldown)
+        config.chaos.bit_flip_cooldown = Duration::from_secs(10); // Long cooldown
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
@@ -150,8 +150,8 @@ fn test_peer_checksum_error_recovery() {
         buggify_init(1.0, 1.0);
 
         let mut config = NetworkConfiguration::fast_local();
-        config.bit_flip_probability = 0.3;
-        config.bit_flip_cooldown = Duration::ZERO;
+        config.chaos.bit_flip_probability = 0.3;
+        config.chaos.bit_flip_cooldown = Duration::ZERO;
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
@@ -186,10 +186,10 @@ fn test_bit_flip_with_message_exchange() {
         buggify_init(1.0, 1.0);
 
         let mut config = NetworkConfiguration::fast_local();
-        config.bit_flip_probability = 0.1; // Moderate probability
-        config.bit_flip_min_bits = 1;
-        config.bit_flip_max_bits = 32;
-        config.bit_flip_cooldown = Duration::ZERO;
+        config.chaos.bit_flip_probability = 0.1; // Moderate probability
+        config.chaos.bit_flip_min_bits = 1;
+        config.chaos.bit_flip_max_bits = 32;
+        config.chaos.bit_flip_cooldown = Duration::ZERO;
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();

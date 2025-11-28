@@ -1,6 +1,6 @@
 //! Metrics collection and connection state tracking for peers.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Metrics and state information for a peer connection.
 #[derive(Debug, Clone)]
@@ -35,14 +35,14 @@ pub struct PeerMetrics {
     /// Current size of the send queue
     pub current_queue_size: usize,
 
-    /// Time when the peer was created
-    pub created_at: Instant,
+    /// Time when the peer was created (simulation or wall time as Duration)
+    pub created_at: Duration,
 
     /// Time of last successful connection (None if never connected)
-    pub last_connected: Option<Instant>,
+    pub last_connected: Option<Duration>,
 
     /// Time of last connection failure (None if no failures)
-    pub last_failure: Option<Instant>,
+    pub last_failure: Option<Duration>,
 
     /// Current consecutive failure count
     pub consecutive_failures: u32,
@@ -61,13 +61,13 @@ impl Default for PeerMetrics {
 }
 
 impl PeerMetrics {
-    /// Create new metrics instance.
+    /// Create new metrics instance (defaults to zero creation time).
     pub fn new() -> Self {
-        Self::new_at(Instant::now())
+        Self::new_at(Duration::ZERO)
     }
 
     /// Create new metrics instance with a specific creation time.
-    pub fn new_at(created_at: Instant) -> Self {
+    pub fn new_at(created_at: Duration) -> Self {
         Self {
             connection_attempts: 0,
             connections_established: 0,
@@ -93,26 +93,16 @@ impl PeerMetrics {
         self.connection_attempts += 1;
     }
 
-    /// Record a successful connection.
-    pub fn record_connection_success(&mut self) {
-        self.record_connection_success_at(Instant::now());
-    }
-
     /// Record a successful connection at a specific time.
-    pub fn record_connection_success_at(&mut self, now: Instant) {
+    pub fn record_connection_success_at(&mut self, now: Duration) {
         self.connections_established += 1;
         self.last_connected = Some(now);
         self.consecutive_failures = 0;
         self.is_connected = true;
     }
 
-    /// Record a connection failure.
-    pub fn record_connection_failure(&mut self, reconnect_delay: Duration) {
-        self.record_connection_failure_at(Instant::now(), reconnect_delay);
-    }
-
     /// Record a connection failure at a specific time.
-    pub fn record_connection_failure_at(&mut self, now: Instant, reconnect_delay: Duration) {
+    pub fn record_connection_failure_at(&mut self, now: Duration, reconnect_delay: Duration) {
         self.connection_failures += 1;
         self.last_failure = Some(now);
         self.consecutive_failures += 1;
@@ -160,17 +150,17 @@ impl PeerMetrics {
     }
 
     /// Get the total uptime duration since creation.
-    pub fn total_uptime(&self) -> Duration {
-        self.created_at.elapsed()
+    pub fn total_uptime(&self, now: Duration) -> Duration {
+        now.saturating_sub(self.created_at)
     }
 
     /// Get time since last successful connection.
-    pub fn time_since_last_connection(&self) -> Option<Duration> {
-        self.last_connected.map(|t| t.elapsed())
+    pub fn time_since_last_connection(&self, now: Duration) -> Option<Duration> {
+        self.last_connected.map(|t| now.saturating_sub(t))
     }
 
     /// Get time since last failure.
-    pub fn time_since_last_failure(&self) -> Option<Duration> {
-        self.last_failure.map(|t| t.elapsed())
+    pub fn time_since_last_failure(&self, now: Duration) -> Option<Duration> {
+        self.last_failure.map(|t| now.saturating_sub(t))
     }
 }

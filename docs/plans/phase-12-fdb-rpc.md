@@ -886,11 +886,12 @@ Add missing chaos injection features from FDB's simulation to moonpool-foundatio
 - **FDB ref**: `sim2.actor.cpp:580-605`
 - **Implemented**: `roll_random_close()` in `sim.rs`, `close_connection_asymmetric()` API, directional closure via `send_closed`/`recv_closed` fields, configurable via `NetworkConfiguration.random_close_probability/cooldown/explicit_ratio`
 
-### 4.1.4 Clock Drift ⏳
+### 4.1.4 Clock Drift ✅
 **Why**: Real clocks drift. Tests time-sensitive code (timeouts, leases, distributed consensus).
 - `timer()` drifts 0-0.1s ahead of `now()`
 - Simulates clock skew between processes
 - **FDB ref**: `sim2.actor.cpp:1058-1064`
+- **Implemented**: `timer()` and `now()` on `SimWorld`/`TimeProvider`, FDB formula `timerTime += random01() * (time + 0.1 - timerTime) / 2.0`, `ChaosConfiguration.clock_drift_enabled/max`, comprehensive tests in `tests/clock_drift.rs`
 
 ### 4.1.5 Buggified Delays ⏳
 **Why**: Tests timeout handling and retry logic under unexpected latency spikes.

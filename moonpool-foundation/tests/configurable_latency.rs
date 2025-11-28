@@ -1,4 +1,6 @@
-use moonpool_foundation::{NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait};
+use moonpool_foundation::{
+    ChaosConfiguration, NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait,
+};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
@@ -104,18 +106,7 @@ fn test_custom_latency_configuration() {
             connect_latency: Duration::from_millis(1)..Duration::from_millis(1),
             read_latency: Duration::from_micros(10)..Duration::from_micros(10),
             write_latency: Duration::from_millis(2)..Duration::from_millis(2),
-            clog_probability: 0.0,
-            clog_duration: Duration::ZERO..Duration::ZERO,
-            partition_probability: 0.0,
-            partition_duration: Duration::ZERO..Duration::ZERO,
-            bit_flip_probability: 0.0,
-            bit_flip_min_bits: 1,
-            bit_flip_max_bits: 32,
-            bit_flip_cooldown: Duration::ZERO,
-            partial_write_max_bytes: 1000,
-            random_close_probability: 0.0,
-            random_close_cooldown: Duration::ZERO,
-            random_close_explicit_ratio: 0.3,
+            chaos: ChaosConfiguration::disabled(),
         };
 
         let mut sim = SimWorld::new_with_network_config(config);
@@ -160,18 +151,7 @@ fn test_latency_range_sampling() {
             connect_latency: Duration::from_millis(1)..Duration::from_millis(6),
             read_latency: Duration::from_micros(10)..Duration::from_micros(10),
             write_latency: Duration::from_millis(1)..Duration::from_millis(6),
-            clog_probability: 0.0,
-            clog_duration: Duration::ZERO..Duration::ZERO,
-            partition_probability: 0.0,
-            partition_duration: Duration::ZERO..Duration::ZERO,
-            bit_flip_probability: 0.0,
-            bit_flip_min_bits: 1,
-            bit_flip_max_bits: 32,
-            bit_flip_cooldown: Duration::ZERO,
-            partial_write_max_bytes: 1000,
-            random_close_probability: 0.0,
-            random_close_cooldown: Duration::ZERO,
-            random_close_explicit_ratio: 0.3,
+            chaos: ChaosConfiguration::disabled(),
         };
 
         let mut execution_times = Vec::new();
@@ -225,18 +205,7 @@ fn test_network_randomization_ranges() {
             connect_latency: Duration::from_millis(3)..Duration::from_millis(3),
             read_latency: Duration::from_micros(100)..Duration::from_micros(100),
             write_latency: Duration::from_micros(500)..Duration::from_micros(500),
-            clog_probability: 0.0,
-            clog_duration: Duration::ZERO..Duration::ZERO,
-            partition_probability: 0.0,
-            partition_duration: Duration::ZERO..Duration::ZERO,
-            bit_flip_probability: 0.0,
-            bit_flip_min_bits: 1,
-            bit_flip_max_bits: 32,
-            bit_flip_cooldown: Duration::ZERO,
-            partial_write_max_bytes: 1000,
-            random_close_probability: 0.0,
-            random_close_cooldown: Duration::ZERO,
-            random_close_explicit_ratio: 0.3,
+            chaos: ChaosConfiguration::disabled(),
         };
 
         let mut sim = SimWorld::new_with_network_config(config);
