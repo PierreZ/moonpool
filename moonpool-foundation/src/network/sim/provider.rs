@@ -1,5 +1,7 @@
 use super::stream::{SimTcpListener, SimTcpStream};
+use crate::buggify;
 use crate::network::traits::NetworkProvider;
+use crate::rng::sim_random;
 use crate::{Event, WeakSimWorld};
 use async_trait::async_trait;
 use std::io;
@@ -64,12 +66,61 @@ impl NetworkProvider for SimNetworkProvider {
         Ok(listener)
     }
 
+    /// Connect to a remote address.
+    ///
+    /// When chaos is enabled, connection establishment can fail or hang forever
+    /// based on the connect_failure_mode setting (FDB ref: sim2.actor.cpp:1243-1250):
+    /// - Mode 0: Normal operation (no failure injection)
+    /// - Mode 1: Always fail with ConnectionRefused when buggified
+    /// - Mode 2: 50% fail with error, 50% hang forever (tests timeout handling)
     #[instrument(skip(self))]
     async fn connect(&self, addr: &str) -> io::Result<Self::TcpStream> {
         let sim = self
             .sim
             .upgrade()
             .map_err(|_| io::Error::other("simulation shutdown"))?;
+
+        // Check connect failure mode (FDB SIM_CONNECT_ERROR_MODE pattern)
+        // FDB ref: sim2.actor.cpp:1243-1250
+        let (failure_mode, failure_probability) = sim.with_network_config(|config| {
+            (
+                config.chaos.connect_failure_mode,
+                config.chaos.connect_failure_probability,
+            )
+        });
+
+        match failure_mode {
+            1 => {
+                // Mode 1: Always fail with connection_failed when buggified
+                if buggify!() {
+                    tracing::debug!(addr = %addr, "Connection establishment failed (chaos mode 1)");
+                    return Err(io::Error::new(
+                        io::ErrorKind::ConnectionRefused,
+                        "Connection establishment failed (chaos mode 1)",
+                    ));
+                }
+            }
+            2 => {
+                // Mode 2: Probabilistic - fail or hang forever
+                if buggify!() {
+                    if sim_random::<f64>() > failure_probability {
+                        // Throw connection_failed error
+                        tracing::debug!(addr = %addr, "Connection establishment failed (chaos mode 2 - error)");
+                        return Err(io::Error::new(
+                            io::ErrorKind::ConnectionRefused,
+                            "Connection establishment failed (chaos mode 2)",
+                        ));
+                    } else {
+                        // Hang forever - create a future that never completes
+                        // This tests timeout handling in connection retry logic
+                        tracing::debug!(addr = %addr, "Connection hanging forever (chaos mode 2 - hang)");
+                        std::future::pending::<()>().await;
+                        unreachable!("pending() never resolves");
+                    }
+                }
+            }
+            _ => {} // Mode 0 or other: proceed normally
+        }
 
         // Get connect delay from network configuration and schedule connection event
         let delay = sim.with_network_config(|config| {

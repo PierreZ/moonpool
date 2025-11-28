@@ -51,6 +51,27 @@ pub struct ChaosConfiguration {
     /// Maximum clock drift (default 100ms per FDB)
     /// timer() can be up to this much ahead of now()
     pub clock_drift_max: Duration,
+
+    /// Enable buggified delays on sleep/timer operations
+    /// When enabled, 25% of sleep operations get extra delay
+    /// FDB ref: sim2.actor.cpp:1100-1105
+    pub buggified_delay_enabled: bool,
+
+    /// Maximum additional delay for buggified sleep (default 100ms)
+    /// Uses power-law distribution: max_delay * pow(random01(), 1000.0)
+    /// FDB ref: sim2.actor.cpp:1104
+    pub buggified_delay_max: Duration,
+
+    /// Probability of adding buggified delay (default 25% per FDB)
+    pub buggified_delay_probability: f64,
+
+    /// Connection establishment failure mode (per FDB)
+    /// 0 = disabled, 1 = always fail when buggified, 2 = probabilistic (50% fail, 50% hang)
+    /// FDB ref: sim2.actor.cpp:1243-1250 (SIM_CONNECT_ERROR_MODE)
+    pub connect_failure_mode: u8,
+
+    /// Probability of connect failure when mode 2 is enabled (default 50%)
+    pub connect_failure_probability: f64,
 }
 
 impl Default for ChaosConfiguration {
@@ -70,6 +91,11 @@ impl Default for ChaosConfiguration {
             random_close_explicit_ratio: 0.3,  // 30% explicit - matches FDB's sim2.actor.cpp:602
             clock_drift_enabled: true,         // Enable by default for chaos testing
             clock_drift_max: Duration::from_millis(100), // FDB default: 0.1 seconds
+            buggified_delay_enabled: true,     // Enable by default for chaos testing
+            buggified_delay_max: Duration::from_millis(100), // FDB: MAX_BUGGIFIED_DELAY
+            buggified_delay_probability: 0.25, // FDB: random01() < 0.25
+            connect_failure_mode: 2,           // FDB: SIM_CONNECT_ERROR_MODE = 2 (probabilistic)
+            connect_failure_probability: 0.5,  // FDB: random01() > 0.5
         }
     }
 }
@@ -92,6 +118,11 @@ impl ChaosConfiguration {
             random_close_explicit_ratio: 0.3,
             clock_drift_enabled: false,
             clock_drift_max: Duration::from_millis(100),
+            buggified_delay_enabled: false,
+            buggified_delay_max: Duration::from_millis(100),
+            buggified_delay_probability: 0.25,
+            connect_failure_mode: 0, // Disabled
+            connect_failure_probability: 0.5,
         }
     }
 
@@ -116,6 +147,12 @@ impl ChaosConfiguration {
             random_close_explicit_ratio: sim_random_range(20..40) as f64 / 100.0, // 20-40%
             clock_drift_enabled: true,
             clock_drift_max: Duration::from_millis(sim_random_range(50..150)), // 50-150ms
+            buggified_delay_enabled: true,
+            buggified_delay_max: Duration::from_millis(sim_random_range(50..150)), // 50-150ms
+            buggified_delay_probability: sim_random_range(20..30) as f64 / 100.0,  // 20-30%
+            // Randomly choose connect failure mode: 0, 1, or 2
+            connect_failure_mode: sim_random_range(0..3) as u8,
+            connect_failure_probability: sim_random_range(40..60) as f64 / 100.0, // 40-60%
         }
     }
 }

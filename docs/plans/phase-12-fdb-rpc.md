@@ -893,16 +893,19 @@ Add missing chaos injection features from FDB's simulation to moonpool-foundatio
 - **FDB ref**: `sim2.actor.cpp:1058-1064`
 - **Implemented**: `timer()` and `now()` on `SimWorld`/`TimeProvider`, FDB formula `timerTime += random01() * (time + 0.1 - timerTime) / 2.0`, `ChaosConfiguration.clock_drift_enabled/max`, comprehensive tests in `tests/clock_drift.rs`
 
-### 4.1.5 Buggified Delays ⏳
+### 4.1.5 Buggified Delays ✅
 **Why**: Tests timeout handling and retry logic under unexpected latency spikes.
 - 25% chance of extra delay on sleep/timer operations
-- Uses power distribution for delay amount
-- **FDB ref**: `sim2.actor.cpp:1101-1104`
+- Uses power distribution for delay amount: `MAX_DELAY * pow(random01(), 1000.0)`
+- **FDB ref**: `sim2.actor.cpp:1100-1105`
+- **Implemented**: `apply_buggified_delay()` in `sim.rs:sleep()`, configurable via `ChaosConfiguration.buggified_delay_enabled/max/probability`, comprehensive tests in `tests/chaos_buggified_delay.rs`
 
-### 4.1.6 Connection Establishment Failures ⏳
+### 4.1.6 Connection Establishment Failures ✅
 **Why**: `connect()` can fail or hang forever in real networks. Tests connection retry logic.
-- Configurable failure modes: throw error, hang forever, or probabilistic
-- **FDB ref**: `sim2.actor.cpp:1243-1250`
+- Configurable failure modes: throw error (mode 1), hang forever or error (mode 2), disabled (mode 0)
+- Mode 2: 50% throw `ConnectionRefused`, 50% hang forever (`std::future::pending`)
+- **FDB ref**: `sim2.actor.cpp:1243-1250` (SIM_CONNECT_ERROR_MODE)
+- **Implemented**: Failure injection in `network/sim/provider.rs:connect()`, configurable via `ChaosConfiguration.connect_failure_mode/probability`, comprehensive tests in `tests/chaos_connect_failure.rs`
 
 ### 4.1.7 Document All Fault Injection ⏳
 - Create `docs/fault-injection.md` describing all chaos mechanisms

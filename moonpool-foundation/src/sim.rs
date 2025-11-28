@@ -751,16 +751,57 @@ impl SimWorld {
     /// by the specified duration. This integrates with the event system by
     /// scheduling a Wake event and coordinating with the async runtime.
     ///
+    /// When buggified delays are enabled, there's a 25% chance of adding extra
+    /// delay using a power-law distribution (FDB ref: sim2.actor.cpp:1100-1105).
+    ///
     /// Sleep for a specified duration in simulation time.
     #[instrument(skip(self))]
     pub fn sleep(&self, duration: Duration) -> SleepFuture {
         let task_id = self.generate_task_id();
 
+        // Apply buggified delay if enabled (FDB ref: sim2.actor.cpp:1100-1105)
+        let actual_duration = self.apply_buggified_delay(duration);
+
         // Schedule a wake event for this task
-        self.schedule_event(Event::Timer { task_id }, duration);
+        self.schedule_event(Event::Timer { task_id }, actual_duration);
 
         // Return a future that will be woken when the event is processed
         SleepFuture::new(self.downgrade(), task_id)
+    }
+
+    /// Apply buggified delay to a duration if chaos is enabled.
+    ///
+    /// FDB pattern (sim2.actor.cpp:1100-1105):
+    /// ```cpp
+    /// if (deterministicRandom()->random01() < 0.25) {
+    ///     seconds += MAX_BUGGIFIED_DELAY * pow(random01(), 1000.0);
+    /// }
+    /// ```
+    ///
+    /// The power-law distribution (pow(random, 1000)) creates very skewed delays:
+    /// - Most delays are near 0 (since random^1000 is tiny for random < 1)
+    /// - Occasionally (when random is close to 1.0) the full max delay is added
+    fn apply_buggified_delay(&self, duration: Duration) -> Duration {
+        let inner = self.inner.borrow();
+        let chaos = &inner.network.config.chaos;
+
+        if !chaos.buggified_delay_enabled || chaos.buggified_delay_max == Duration::ZERO {
+            return duration;
+        }
+
+        // 25% probability per FDB (or configured probability)
+        if sim_random::<f64>() < chaos.buggified_delay_probability {
+            // Power-law distribution: pow(random01(), 1000) creates very skewed delays
+            let random_factor = sim_random::<f64>().powf(1000.0);
+            let extra_delay = chaos.buggified_delay_max.mul_f64(random_factor);
+            tracing::trace!(
+                extra_delay_ms = extra_delay.as_millis(),
+                "Buggified delay applied"
+            );
+            duration + extra_delay
+        } else {
+            duration
+        }
     }
 
     /// Generate a unique task ID for sleep operations.
