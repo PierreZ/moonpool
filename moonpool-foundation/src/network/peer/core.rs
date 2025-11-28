@@ -636,6 +636,11 @@ async fn connection_task<
                                                 expected,
                                                 actual
                                             );
+                                            sometimes_assert!(
+                                                checksum_caught_corruption,
+                                                true,
+                                                "Checksum validation should sometimes catch corrupted packets"
+                                            );
                                         }
                                         _ => {
                                             tracing::warn!(
@@ -647,6 +652,11 @@ async fn connection_task<
 
                                     // FDB pattern: Full connection teardown on wire errors
                                     // Matches FlowTransport.actor.cpp:889-960 error handling
+                                    sometimes_assert!(
+                                        connection_teardown_on_wire_error,
+                                        true,
+                                        "Connection should sometimes be torn down on wire format errors"
+                                    );
                                     current_connection = None;
                                     read_buffer.clear();
 
@@ -662,6 +672,11 @@ async fn connection_task<
                                             tracing::debug!(
                                                 "connection_task: discarding {} unreliable packets after wire error (FDB pattern)",
                                                 unreliable_count
+                                            );
+                                            sometimes_assert!(
+                                                unreliable_discarded_on_error,
+                                                true,
+                                                "Unreliable packets should sometimes be discarded on connection errors"
                                             );
                                             for _ in 0..unreliable_count {
                                                 state.metrics.record_message_dropped();

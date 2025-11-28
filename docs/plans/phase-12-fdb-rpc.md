@@ -998,7 +998,7 @@ moonpool-foundation/tests/
 - ✅ `cargo clippy` - No warnings
 - ✅ `cargo nextest run` - 188 tests passed (89 unit + 99 integration)
 
-## Step 4.5: Build New E2E Simulation Tests
+## Step 4.5: Build New E2E Simulation Tests ✅ DONE (partial)
 > **IMPORTANT**: Use the new Claude skills in `.claude/skills/` for simulation testing:
 > - `designing-simulation-workloads` - Design operation alphabets and autonomous workloads
 > - `using-buggify` - Add strategic fault injection for chaos testing
@@ -1007,21 +1007,53 @@ moonpool-foundation/tests/
 >
 > See `.claude/skills/README.md` for learning path and decision flowchart.
 
-1. Create new simulation test infrastructure using new wire format
-2. Build ping-pong simulation tests with UID-based messaging
-   - Design operation alphabet (connect, disconnect, send_request, etc.)
-   - Add buggify for connection failures and timeouts
-   - Track coverage with sometimes_assert! (timeout occurred, reconnection succeeded)
-3. Test chaos scenarios (disconnection, reconnection, message reordering)
-   - Use buggify to force disconnections and delays
-   - Verify error handling paths with sometimes_assert!
-4. Verify determinism with multi-seed testing
-   - Run with `UntilAllSometimesReached(10_000)` for comprehensive coverage
-   - Reproduce any failures with specific seeds
-5. Add invariant checks for message delivery guarantees
-   - Message conservation: `sent ≥ received`
-   - No duplicate correlation IDs
-   - Request-response pairing correctness
+### Completed ✅
+
+1. ✅ Created E2E test infrastructure in `tests/e2e/`
+   - `mod.rs` - TestMessage format with custom serialization
+   - `operations.rs` - Operation alphabet (SendReliable, SendUnreliable, Receive, ForceReconnect, etc.)
+   - `invariants.rs` - MessageInvariants for tracking sent/received messages
+   - `workloads.rs` - Client and server workloads
+   - `tests.rs` - Simulation tests with chaos
+
+2. ✅ Created wire-protocol-aware server (`wire_server_workload`)
+   - Uses `try_deserialize_packet()` to parse FDB wire format
+   - Validates checksums via wire format
+   - Parses TestMessage from payload
+   - Tracks received messages for invariant checking
+
+3. ✅ Added sometimes_assert! coverage
+   - `checksum_caught_corruption` - Wire checksum validation
+   - `connection_teardown_on_wire_error` - FDB pattern for corrupt connections
+   - `unreliable_discarded_on_error` - Unreliable message drop on failure
+   - `wire_server_connection_closed` - Server sees connection closes
+   - `wire_server_wire_error` - Server sees wire format errors
+   - `receiver_sees_duplicates` - Duplicates from retransmission
+   - `receiver_no_duplicates` - Clean delivery (no chaos)
+
+4. ✅ Chaos testing with `UntilAllSometimesReached(1000)`
+   - Tests: reliable_delivery, unreliable_drops, mixed_queues, reconnection, multi_client
+
+### Pending: Cross-Workload Validation
+
+**Current limitation**: Client and server track invariants locally but don't compare across workloads.
+
+The server validates:
+- Wire format integrity (checksum via `try_deserialize_packet`)
+- TestMessage parsing
+- Duplicate tracking (as `sometimes_assert`, not `always_assert`)
+
+But we do NOT validate:
+- `client.reliable_sent ⊆ server.reliable_received` at quiescence
+- Ordering preservation across workloads
+- Global message accounting
+
+**Future enhancement**: Use `StateRegistry` for cross-workload validation:
+1. Client publishes `{ reliable_sent: [...], unreliable_sent: [...] }` to StateRegistry
+2. Server publishes `{ reliable_received: [...], unreliable_received: [...] }` to StateRegistry
+3. Add invariant check that compares client.sent vs server.received after simulation
+
+This requires StateRegistry integration in workloads, which can be implemented independently as a follow-up task.
 
 ## Step 5: Moonpool Messaging Module Structure
 1. Create `moonpool/src/messaging/mod.rs`
