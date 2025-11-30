@@ -26,7 +26,7 @@ pub use sim::SimNetworkProvider;
 pub use tokio::TokioNetworkProvider;
 
 // Re-export peer types
-pub use peer::{Peer, PeerConfig, PeerError, PeerMetrics};
+pub use peer::{Peer, PeerConfig, PeerError, PeerMetrics, PeerReceiver};
 
 // Re-export configuration
 pub use config::{ChaosConfiguration, NetworkConfiguration, sample_duration};

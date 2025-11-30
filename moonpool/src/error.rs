@@ -52,6 +52,20 @@ pub enum MessagingError {
     /// Transport is closed or shutting down.
     #[error("transport closed")]
     TransportClosed,
+
+    /// Invalid state for the requested operation.
+    #[error("invalid state: {message}")]
+    InvalidState {
+        /// Details about the invalid state.
+        message: String,
+    },
+
+    /// Network operation failed.
+    #[error("network error: {message}")]
+    NetworkError {
+        /// Details about the network error.
+        message: String,
+    },
 }
 
 impl From<serde_json::Error> for MessagingError {

@@ -8,11 +8,11 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use moonpool_foundation::{
-    Endpoint, NetworkAddress, NetworkProvider, Peer, PeerConfig, TaskProvider, TimeProvider, UID,
-    WellKnownToken, sometimes_assert,
+    Endpoint, NetworkAddress, NetworkProvider, Peer, PeerConfig, TaskProvider, TcpListenerTrait,
+    TimeProvider, UID, WellKnownToken, sometimes_assert,
 };
 
 use super::endpoint_map::{EndpointMap, MessageReceiver};
@@ -43,9 +43,13 @@ where
     /// Endpoint map for routing incoming packets.
     endpoints: EndpointMap,
 
-    /// Peer connections keyed by destination address.
+    /// Peer connections keyed by destination address (outgoing).
     /// FDB: std::unordered_map<NetworkAddress, Reference<struct Peer>> peers;
     peers: HashMap<String, SharedPeer<N, T, TP>>,
+
+    /// Incoming peer connections (from accepted connections).
+    /// Separate from outgoing peers to avoid conflicts.
+    incoming_peers: HashMap<String, SharedPeer<N, T, TP>>,
 
     /// Statistics.
     stats: TransportStats,
@@ -61,6 +65,7 @@ where
         Self {
             endpoints: EndpointMap::new(),
             peers: HashMap::new(),
+            incoming_peers: HashMap::new(),
             stats: TransportStats::default(),
         }
     }
@@ -78,6 +83,15 @@ where
 ///
 /// # FDB Reference
 /// From FlowTransport.h:195-314
+///
+/// # Multi-Node Support (Phase 12 Step 7d)
+///
+/// For multi-node operation, wrap in `Rc` and call `set_weak_self()`:
+/// ```ignore
+/// let transport = Rc::new(FlowTransport::new(...));
+/// transport.set_weak_self(Rc::downgrade(&transport));
+/// transport.listen().await?; // Start accepting connections
+/// ```
 pub struct FlowTransport<N, T, TP>
 where
     N: NetworkProvider + 'static,
@@ -101,6 +115,11 @@ where
 
     /// Peer configuration.
     peer_config: PeerConfig,
+
+    /// Weak self-reference for spawning background tasks.
+    /// Required for `connection_reader` tasks to dispatch back to this transport.
+    /// Set via `set_weak_self()` after wrapping in `Rc`.
+    weak_self: RefCell<Option<Weak<Self>>>,
 }
 
 /// Statistics for the transport.
@@ -130,6 +149,14 @@ where
     /// * `network` - Network provider for connections
     /// * `time` - Time provider for timing
     /// * `task_provider` - Task provider for background tasks
+    ///
+    /// # Multi-Node Usage
+    ///
+    /// For multi-node operation, wrap in `Rc` and call `set_weak_self()`:
+    /// ```ignore
+    /// let transport = Rc::new(FlowTransport::new(...));
+    /// transport.set_weak_self(Rc::downgrade(&transport));
+    /// ```
     pub fn new(local_address: NetworkAddress, network: N, time: T, task_provider: TP) -> Self {
         Self {
             data: RefCell::new(TransportData::default()),
@@ -138,7 +165,33 @@ where
             time,
             task_provider,
             peer_config: PeerConfig::default(),
+            weak_self: RefCell::new(None),
         }
+    }
+
+    /// Set the weak self-reference for background task spawning.
+    ///
+    /// Required for multi-node operation where `connection_reader` tasks need
+    /// to dispatch incoming packets back to this transport.
+    ///
+    /// # FDB Pattern
+    /// Similar to how FDB actors reference `TransportData* self`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let transport = Rc::new(FlowTransport::new(...));
+    /// transport.set_weak_self(Rc::downgrade(&transport));
+    /// ```
+    pub fn set_weak_self(&self, weak: Weak<Self>) {
+        *self.weak_self.borrow_mut() = Some(weak);
+    }
+
+    /// Get weak self-reference, panics if not set.
+    fn weak_self(&self) -> Weak<Self> {
+        self.weak_self
+            .borrow()
+            .clone()
+            .expect("weak_self not set - call set_weak_self() after wrapping in Rc")
     }
 
     /// Create with custom peer configuration.
@@ -280,7 +333,11 @@ where
     /// Get or create a peer for the given address.
     ///
     /// Peers are created lazily on first send (FDB connectionKeeper pattern).
-    /// FDB: Reference<struct Peer> getOrOpenPeer(NetworkAddress const& address);
+    /// When a new peer is created, a `connection_reader` task is spawned to
+    /// handle incoming packets (FDB: connectionKeeper spawns connectionReader at line 843).
+    ///
+    /// # FDB Reference
+    /// `Reference<struct Peer> getOrOpenPeer(NetworkAddress const& address);`
     fn get_or_open_peer(&self, address: &NetworkAddress) -> SharedPeer<N, T, TP> {
         let addr_str = address.to_string();
 
@@ -300,11 +357,18 @@ where
         );
         let peer = Rc::new(RefCell::new(peer));
 
-        let mut data = self.data.borrow_mut();
-        data.peers.insert(addr_str, Rc::clone(&peer));
-        data.stats.peers_created += 1;
-        sometimes_assert!(peer_created, true, "New peer created for address");
+        // Store in peers map
+        {
+            let mut data = self.data.borrow_mut();
+            data.peers.insert(addr_str.clone(), Rc::clone(&peer));
+            data.stats.peers_created += 1;
+        }
 
+        // Spawn connection_reader for incoming packets (FDB pattern: connectionKeeper spawns connectionReader)
+        // This handles responses for outgoing requests
+        self.spawn_connection_reader(Rc::clone(&peer), addr_str);
+
+        sometimes_assert!(peer_created, true, "New peer created for address");
         peer
     }
 
@@ -362,6 +426,292 @@ where
         let data = self.data.borrow();
         data.endpoints.well_known_count() + data.endpoints.dynamic_count()
     }
+
+    /// Get number of incoming peers (from accepted connections).
+    pub fn incoming_peer_count(&self) -> usize {
+        self.data.borrow().incoming_peers.len()
+    }
+
+    /// Spawn a connection_reader for a peer.
+    ///
+    /// FDB Pattern: connectionKeeper spawns connectionReader (line 843).
+    /// The connection_reader reads from the peer and dispatches to endpoints.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer` - The peer to read from
+    /// * `peer_addr` - Address string for logging
+    fn spawn_connection_reader(&self, peer: SharedPeer<N, T, TP>, peer_addr: String) {
+        // Only spawn if weak_self is set (multi-node mode)
+        if self.weak_self.borrow().is_none() {
+            return;
+        }
+
+        let transport_weak = self.weak_self();
+        self.task_provider.spawn_task(
+            "connection_reader",
+            connection_reader(transport_weak, peer, peer_addr),
+        );
+    }
+
+    // =========================================================================
+    // Server Listener Support (FDB: listen + connectionIncoming)
+    // =========================================================================
+
+    /// Start listening for incoming connections.
+    ///
+    /// FDB Pattern: `listen()` (FlowTransport.actor.cpp:1646-1676)
+    /// Binds to the local address and spawns an accept loop that handles
+    /// incoming connections via `connection_incoming()`.
+    ///
+    /// # Requirements
+    ///
+    /// Must call `set_weak_self()` before calling this method.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let transport = Rc::new(FlowTransport::new(...));
+    /// transport.set_weak_self(Rc::downgrade(&transport));
+    /// transport.listen().await?;
+    /// ```
+    pub async fn listen(&self) -> Result<(), MessagingError> {
+        // Verify weak_self is set
+        if self.weak_self.borrow().is_none() {
+            return Err(MessagingError::InvalidState {
+                message: "weak_self not set - call set_weak_self() before listen()".to_string(),
+            });
+        }
+
+        // Bind to local address
+        let addr_str = self.local_address.to_string();
+        let listener =
+            self.network
+                .bind(&addr_str)
+                .await
+                .map_err(|e| MessagingError::NetworkError {
+                    message: format!("Failed to bind to {}: {}", addr_str, e),
+                })?;
+
+        tracing::info!("FlowTransport: listening on {}", addr_str);
+
+        // Spawn listen task (FDB: listen() actor)
+        let transport_weak = self.weak_self();
+        self.task_provider
+            .spawn_task("listen", listen_task(transport_weak, listener, addr_str));
+
+        Ok(())
+    }
+}
+
+/// FDB: connectionReader() - reads from connection and dispatches to endpoints.
+///
+/// This is a background task that:
+/// 1. Takes ownership of the peer's receiver channel at startup
+/// 2. Reads incoming packets from the channel (no RefCell borrow held during await)
+/// 3. Dispatches them to the appropriate endpoint via `transport.dispatch()`
+///
+/// # FDB Reference
+/// From FlowTransport.actor.cpp:1401-1602 connectionReader
+///
+/// The FDB version is more complex (handles ConnectPacket, protocol negotiation),
+/// but the core loop is: read packets → scanPackets → deliver.
+async fn connection_reader<N, T, TP>(
+    transport: Weak<FlowTransport<N, T, TP>>,
+    peer: SharedPeer<N, T, TP>,
+    peer_addr: String,
+) where
+    N: NetworkProvider + Clone + 'static,
+    T: TimeProvider + Clone + 'static,
+    TP: TaskProvider + Clone + 'static,
+{
+    tracing::debug!("connection_reader: started for peer {}", peer_addr);
+
+    // Take ownership of the receiver at startup.
+    // This avoids holding RefCell borrows across await points (critical safety fix).
+    let mut receiver = {
+        match peer.borrow_mut().take_receiver() {
+            Some(rx) => rx,
+            None => {
+                tracing::error!(
+                    "connection_reader: receiver already taken for peer {}",
+                    peer_addr
+                );
+                return;
+            }
+        }
+    }; // RefCell borrow released here
+
+    loop {
+        // Await directly on the owned receiver - safe, no RefCell involved!
+        match receiver.recv().await {
+            Some((token, payload)) => {
+                // Try to get transport reference
+                let Some(transport) = transport.upgrade() else {
+                    tracing::debug!(
+                        "connection_reader: transport dropped, exiting for peer {}",
+                        peer_addr
+                    );
+                    break;
+                };
+
+                // FDB: deliver() - looks up endpoint and dispatches
+                if let Err(e) = transport.dispatch(&token, &payload) {
+                    tracing::debug!(
+                        "connection_reader: dispatch failed for token {}: {:?}",
+                        token,
+                        e
+                    );
+                }
+
+                sometimes_assert!(
+                    connection_reader_dispatch,
+                    true,
+                    "connectionReader dispatched incoming message"
+                );
+            }
+            None => {
+                // Channel closed - peer disconnected or shutdown
+                tracing::debug!("connection_reader: peer {} receiver closed", peer_addr);
+                break;
+            }
+        }
+    }
+
+    tracing::debug!("connection_reader: exiting for peer {}", peer_addr);
+}
+
+/// FDB: listen() - accept loop spawning connectionIncoming per connection.
+///
+/// This is a background task that:
+/// 1. Accepts incoming connections
+/// 2. Spawns `connection_incoming` for each accepted connection
+///
+/// # FDB Reference
+/// From FlowTransport.actor.cpp:1646-1676 listen
+async fn listen_task<N, T, TP>(
+    transport: Weak<FlowTransport<N, T, TP>>,
+    listener: N::TcpListener,
+    listen_addr: String,
+) where
+    N: NetworkProvider + Clone + 'static,
+    T: TimeProvider + Clone + 'static,
+    TP: TaskProvider + Clone + 'static,
+{
+    tracing::debug!("listen_task: started on {}", listen_addr);
+
+    loop {
+        // Accept next connection
+        match listener.accept().await {
+            Ok((stream, peer_addr)) => {
+                tracing::debug!(
+                    "listen_task: accepted connection from {} on {}",
+                    peer_addr,
+                    listen_addr
+                );
+
+                // Get transport reference
+                let Some(transport_rc) = transport.upgrade() else {
+                    tracing::debug!("listen_task: transport dropped, exiting");
+                    break;
+                };
+
+                // Handle the incoming connection (FDB: connectionIncoming)
+                connection_incoming(
+                    Rc::downgrade(&transport_rc),
+                    stream,
+                    peer_addr,
+                    &transport_rc,
+                );
+
+                sometimes_assert!(
+                    connection_incoming_accepted,
+                    true,
+                    "listen() accepted incoming connection"
+                );
+            }
+            Err(e) => {
+                tracing::warn!("listen_task: accept error on {}: {:?}", listen_addr, e);
+                // Continue accepting - transient errors are expected
+            }
+        }
+    }
+
+    tracing::debug!("listen_task: exiting for {}", listen_addr);
+}
+
+/// FDB: connectionIncoming() - handles accepted connection.
+///
+/// This function:
+/// 1. Creates a peer for the incoming connection
+/// 2. Spawns a connection_reader for the peer
+///
+/// # FDB Reference
+/// From FlowTransport.actor.cpp:1604-1644 connectionIncoming
+///
+/// Note: FDB's connectionIncoming waits for ConnectPacket to identify the peer.
+/// We simplify by using the peer address directly since SimNetworkProvider
+/// already provides the peer address.
+fn connection_incoming<N, T, TP>(
+    transport_weak: Weak<FlowTransport<N, T, TP>>,
+    _stream: N::TcpStream,
+    peer_addr: String,
+    transport: &FlowTransport<N, T, TP>,
+) where
+    N: NetworkProvider + Clone + 'static,
+    T: TimeProvider + Clone + 'static,
+    TP: TaskProvider + Clone + 'static,
+{
+    tracing::debug!(
+        "connection_incoming: handling connection from {}",
+        peer_addr
+    );
+
+    // Check if we already have a peer for this address (FDB: getOrOpenPeer in connectionReader:1555)
+    // For incoming connections, we store in incoming_peers to avoid conflicts with outgoing peers
+    let peer = {
+        let data = transport.data.borrow();
+        if let Some(existing) = data.incoming_peers.get(&peer_addr) {
+            tracing::debug!(
+                "connection_incoming: reusing existing incoming peer for {}",
+                peer_addr
+            );
+            Rc::clone(existing)
+        } else {
+            drop(data); // Release borrow
+
+            // Create new peer for this connection
+            // Note: In Step 3, we'll use Peer::new_incoming() with the stream
+            // For now, create a regular peer (it will connect back)
+            let peer = Peer::new(
+                transport.network.clone(),
+                transport.time.clone(),
+                transport.task_provider.clone(),
+                peer_addr.clone(),
+                transport.peer_config.clone(),
+            );
+            let peer = Rc::new(RefCell::new(peer));
+
+            // Store in incoming_peers
+            transport
+                .data
+                .borrow_mut()
+                .incoming_peers
+                .insert(peer_addr.clone(), Rc::clone(&peer));
+
+            tracing::debug!(
+                "connection_incoming: created new incoming peer for {}",
+                peer_addr
+            );
+            peer
+        }
+    };
+
+    // Spawn connection_reader to handle incoming packets
+    transport.task_provider.spawn_task(
+        "connection_reader",
+        connection_reader(transport_weak, peer, peer_addr),
+    );
 }
 
 #[cfg(test)]

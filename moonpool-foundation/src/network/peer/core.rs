@@ -19,6 +19,10 @@ use crate::sometimes_assert;
 use crate::task::TaskProvider;
 use crate::time::TimeProvider;
 
+/// Type alias for the peer receiver channel.
+/// Used when taking ownership via `take_receiver()`.
+pub type PeerReceiver = mpsc::UnboundedReceiver<(UID, Vec<u8>)>;
+
 /// State for managing reconnections with exponential backoff.
 #[derive(Debug, Clone)]
 struct ReconnectState {
@@ -71,8 +75,9 @@ pub struct Peer<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> {
     /// Background actor handles
     writer_handle: Option<JoinHandle<()>>,
 
-    /// Receive channel for incoming packets (token + payload)
-    receive_rx: mpsc::UnboundedReceiver<(UID, Vec<u8>)>,
+    /// Receive channel for incoming packets (token + payload).
+    /// Can be taken via `take_receiver()` for external ownership.
+    receive_rx: Option<mpsc::UnboundedReceiver<(UID, Vec<u8>)>>,
 
     /// Shutdown signaling
     shutdown_tx: mpsc::UnboundedSender<()>,
@@ -162,7 +167,7 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
             shared_state,
             data_to_send,
             writer_handle: Some(writer_handle),
-            receive_rx,
+            receive_rx: Some(receive_rx),
             shutdown_tx,
             config,
             task_provider,
@@ -178,6 +183,72 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
             destination,
             PeerConfig::default(),
         )
+    }
+
+    /// Create a new peer from an incoming (already-connected) stream.
+    ///
+    /// FDB Pattern: `Peer::onIncomingConnection()` (FlowTransport.actor.cpp:1123)
+    ///
+    /// Used by server-side listener to wrap accepted connections.
+    /// Unlike `new()`, this starts with an established connection instead of
+    /// initiating an outbound connection.
+    pub fn new_incoming(
+        network: N,
+        time: T,
+        task_provider: TP,
+        peer_address: String,
+        stream: N::TcpStream,
+        config: PeerConfig,
+    ) -> Self {
+        let reconnect_state = ReconnectState::new(config.initial_reconnect_delay);
+        let now = time.now();
+
+        // Create shared state - mark as connected since we have an existing stream
+        let shared_state = Rc::new(RefCell::new(PeerSharedState {
+            network,
+            time,
+            destination: peer_address,
+            connection: Some(()), // Already connected
+            reliable_queue: VecDeque::new(),
+            unreliable_queue: VecDeque::new(),
+            reconnect_state,
+            metrics: PeerMetrics::new_at(now),
+        }));
+
+        // Mark metrics as connected
+        shared_state.borrow_mut().metrics.is_connected = true;
+        shared_state
+            .borrow_mut()
+            .metrics
+            .record_connection_success_at(now);
+
+        // Create coordination primitives
+        let data_to_send = Rc::new(Notify::new());
+        let (receive_tx, receive_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
+
+        // Spawn background connection task with the existing stream
+        let writer_handle = task_provider.spawn_task(
+            "incoming_connection_task",
+            incoming_connection_task(
+                shared_state.clone(),
+                data_to_send.clone(),
+                config.clone(),
+                receive_tx,
+                shutdown_rx,
+                stream,
+            ),
+        );
+
+        Self {
+            shared_state,
+            data_to_send,
+            writer_handle: Some(writer_handle),
+            receive_rx: Some(receive_rx),
+            shutdown_tx,
+            config,
+            task_provider,
+        }
     }
 
     /// Check if currently connected.
@@ -322,19 +393,71 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
         Ok(())
     }
 
+    /// Take ownership of the receive channel.
+    ///
+    /// This allows an external task to receive messages directly from the
+    /// channel without borrowing the Peer. Useful for avoiding RefCell
+    /// borrows across await points.
+    ///
+    /// After calling this, `receive()` and `try_receive()` will return
+    /// `PeerError::ReceiverTaken`.
+    ///
+    /// # Returns
+    ///
+    /// `Some(receiver)` if the receiver hasn't been taken yet, `None` otherwise.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut peer = Peer::new(...);
+    /// let receiver = peer.take_receiver().expect("receiver not yet taken");
+    ///
+    /// // Now can await on receiver without borrowing peer
+    /// loop {
+    ///     match receiver.recv().await {
+    ///         Some((token, payload)) => { /* handle message */ }
+    ///         None => break, // Channel closed
+    ///     }
+    /// }
+    /// ```
+    pub fn take_receiver(&mut self) -> Option<PeerReceiver> {
+        self.receive_rx.take()
+    }
+
+    /// Check if the receiver has been taken.
+    pub fn receiver_taken(&self) -> bool {
+        self.receive_rx.is_none()
+    }
+
     /// Receive packet from the peer.
     ///
     /// Returns the endpoint token and payload bytes.
     /// Waits for data from the background reader actor.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PeerError::ReceiverTaken` if `take_receiver()` was called.
+    /// Returns `PeerError::Disconnected` if the peer connection is closed.
     pub async fn receive(&mut self) -> PeerResult<(UID, Vec<u8>)> {
-        self.receive_rx.recv().await.ok_or(PeerError::Disconnected)
+        match &mut self.receive_rx {
+            Some(rx) => rx.recv().await.ok_or(PeerError::Disconnected),
+            None => Err(PeerError::ReceiverTaken),
+        }
     }
 
     /// Try to receive packet from the peer without blocking.
     ///
-    /// Returns immediately with (token, payload) if available, or None if no data is ready.
-    pub fn try_receive(&mut self) -> Option<(UID, Vec<u8>)> {
-        self.receive_rx.try_recv().ok()
+    /// Returns immediately with (token, payload) if available.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(PeerError::ReceiverTaken)` if `take_receiver()` was called.
+    /// Returns `Ok(None)` if no message is currently available.
+    pub fn try_receive(&mut self) -> PeerResult<Option<(UID, Vec<u8>)>> {
+        match &mut self.receive_rx {
+            Some(rx) => Ok(rx.try_recv().ok()),
+            None => Err(PeerError::ReceiverTaken),
+        }
     }
 
     /// Force reconnection by dropping current connection.
@@ -800,6 +923,228 @@ async fn establish_connection<N: NetworkProvider + 'static, T: TimeProvider + 's
                     state.metrics.record_connection_failure_at(now, next_delay);
                 }
                 // Continue loop to retry
+            }
+        }
+    }
+}
+
+/// Background connection task for incoming (already-connected) streams.
+///
+/// FDB Pattern: `Peer::onIncomingConnection()` (FlowTransport.actor.cpp:1123)
+///
+/// Unlike `connection_task`, this starts with an existing stream and does NOT
+/// attempt reconnection if the connection is lost (server-side connections
+/// are not re-established - the client must reconnect).
+async fn incoming_connection_task<N: NetworkProvider + 'static, T: TimeProvider + 'static>(
+    shared_state: Rc<RefCell<PeerSharedState<N, T>>>,
+    data_to_send: Rc<Notify>,
+    _config: PeerConfig,
+    receive_tx: mpsc::UnboundedSender<(UID, Vec<u8>)>,
+    mut shutdown_rx: mpsc::UnboundedReceiver<()>,
+    initial_stream: N::TcpStream,
+) {
+    let mut current_connection: Option<N::TcpStream> = Some(initial_stream);
+    let mut read_buffer: Vec<u8> = Vec::with_capacity(4096);
+
+    loop {
+        tokio::select! {
+            // Check for shutdown
+            _ = shutdown_rx.recv() => {
+                break;
+            }
+
+            // Wait for data to send
+            _ = data_to_send.notified() => {
+                let has_messages = {
+                    let state = shared_state.borrow();
+                    state.reliable_queue.len() + state.unreliable_queue.len() > 0
+                };
+
+                if !has_messages {
+                    continue;
+                }
+
+                // For incoming connections, if disconnected we just stop
+                // (no reconnection - client must reconnect)
+                if current_connection.is_none() {
+                    tracing::debug!("incoming_connection_task: connection lost, cannot send (client must reconnect)");
+                    break;
+                }
+
+                // Process send queues
+                while let Some(ref mut stream) = current_connection {
+                    let (message, is_reliable) = {
+                        let mut state = shared_state.borrow_mut();
+                        if let Some(msg) = state.reliable_queue.pop_front() {
+                            (Some(msg), true)
+                        } else if let Some(msg) = state.unreliable_queue.pop_front() {
+                            (Some(msg), false)
+                        } else {
+                            (None, false)
+                        }
+                    };
+
+                    let Some(data) = message else {
+                        break;
+                    };
+
+                    // Buggify: Sometimes force write failures
+                    if crate::buggify_with_prob!(0.02) {
+                        tracing::debug!("Buggify forcing write failure on incoming connection");
+                        current_connection = None;
+                        read_buffer.clear();
+                        {
+                            let mut state = shared_state.borrow_mut();
+                            state.connection = None;
+                            state.metrics.is_connected = false;
+
+                            if is_reliable {
+                                state.reliable_queue.push_front(data);
+                            } else {
+                                state.metrics.record_message_dropped();
+                            }
+
+                            let unreliable_count = state.unreliable_queue.len();
+                            for _ in 0..unreliable_count {
+                                state.metrics.record_message_dropped();
+                            }
+                            state.unreliable_queue.clear();
+                        }
+                        break;
+                    }
+
+                    match stream.write_all(&data).await {
+                        Ok(_) => {
+                            let mut state = shared_state.borrow_mut();
+                            state.metrics.record_message_sent(data.len());
+                            state.metrics.record_message_dequeued();
+                        }
+                        Err(_) => {
+                            current_connection = None;
+                            read_buffer.clear();
+                            {
+                                let mut state = shared_state.borrow_mut();
+                                state.connection = None;
+                                state.metrics.is_connected = false;
+
+                                if is_reliable {
+                                    state.reliable_queue.push_front(data);
+                                } else {
+                                    state.metrics.record_message_dropped();
+                                }
+
+                                let unreliable_count = state.unreliable_queue.len();
+                                for _ in 0..unreliable_count {
+                                    state.metrics.record_message_dropped();
+                                }
+                                state.unreliable_queue.clear();
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Handle reading
+            read_result = async {
+                match &mut current_connection {
+                    Some(stream) => {
+                        let mut buffer = vec![0u8; 4096];
+                        stream.read(&mut buffer).await.map(|n| (buffer, n))
+                    }
+                    None => std::future::pending().await
+                }
+            } => {
+                match read_result {
+                    Ok((_buffer, 0)) => {
+                        // Connection closed
+                        current_connection = None;
+                        read_buffer.clear();
+                        {
+                            let mut state = shared_state.borrow_mut();
+                            state.connection = None;
+                            state.metrics.is_connected = false;
+                        }
+                        // For incoming connections, exit when closed
+                        break;
+                    }
+                    Ok((buffer, n)) => {
+                        read_buffer.extend_from_slice(&buffer[..n]);
+                        tracing::debug!("incoming_connection_task: received {} bytes", n);
+
+                        // Parse packets
+                        loop {
+                            if read_buffer.len() < HEADER_SIZE {
+                                break;
+                            }
+
+                            match try_deserialize_packet(&read_buffer) {
+                                Ok(Some((token, payload, consumed))) => {
+                                    tracing::debug!(
+                                        "incoming_connection_task: parsed packet token={}, payload={} bytes",
+                                        token,
+                                        payload.len()
+                                    );
+
+                                    {
+                                        let mut state = shared_state.borrow_mut();
+                                        state.metrics.record_message_received(consumed);
+                                    }
+
+                                    read_buffer.drain(..consumed);
+
+                                    if receive_tx.send((token, payload)).is_err() {
+                                        return;
+                                    }
+                                }
+                                Ok(None) => {
+                                    break;
+                                }
+                                Err(e) => {
+                                    use crate::WireError;
+                                    match &e {
+                                        WireError::ChecksumMismatch { expected, actual } => {
+                                            tracing::warn!(
+                                                "ChecksumMismatch on incoming: expected={:#010x} actual={:#010x}",
+                                                expected,
+                                                actual
+                                            );
+                                        }
+                                        _ => {
+                                            tracing::warn!("Wire format error on incoming: {}", e);
+                                        }
+                                    }
+
+                                    current_connection = None;
+                                    read_buffer.clear();
+                                    {
+                                        let mut state = shared_state.borrow_mut();
+                                        state.connection = None;
+                                        state.metrics.is_connected = false;
+
+                                        let unreliable_count = state.unreliable_queue.len();
+                                        for _ in 0..unreliable_count {
+                                            state.metrics.record_message_dropped();
+                                        }
+                                        state.unreliable_queue.clear();
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        current_connection = None;
+                        read_buffer.clear();
+                        {
+                            let mut state = shared_state.borrow_mut();
+                            state.connection = None;
+                            state.metrics.is_connected = false;
+                        }
+                        // For incoming connections, exit on error
+                        break;
+                    }
+                }
             }
         }
     }

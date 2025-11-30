@@ -33,6 +33,10 @@ pub enum PeerError {
     /// Invalid operation for current peer state
     #[error("Invalid operation: {0}")]
     InvalidOperation(String),
+
+    /// Receiver has been taken via take_receiver()
+    #[error("Receiver has been taken")]
+    ReceiverTaken,
 }
 
 impl From<io::Error> for PeerError {

@@ -295,13 +295,16 @@ where
         }
 
         PeerOp::TryReceive => match peer.try_receive() {
-            Some((_token, payload)) => match TestMessage::from_bytes(&payload) {
+            Ok(Some((_token, payload))) => match TestMessage::from_bytes(&payload) {
                 Ok(message) => OpResult::Received { message },
                 Err(e) => OpResult::Failed {
                     error: format!("deserialization failed: {:?}", e),
                 },
             },
-            None => OpResult::NoMessage,
+            Ok(None) => OpResult::NoMessage,
+            Err(e) => OpResult::Failed {
+                error: format!("try_receive error: {:?}", e),
+            },
         },
 
         PeerOp::ForceReconnect => {
