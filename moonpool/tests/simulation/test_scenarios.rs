@@ -8,7 +8,10 @@ use std::time::Duration;
 use moonpool_foundation::{IterationControl, SimulationBuilder, SimulationReport};
 
 use super::operations::ClientOpWeights;
-use super::workloads::{LocalDeliveryConfig, endpoint_lifecycle_workload, local_delivery_workload};
+use super::workloads::{
+    LocalDeliveryConfig, RpcWorkloadConfig, endpoint_lifecycle_workload, local_delivery_workload,
+    rpc_workload,
+};
 
 // ============================================================================
 // Test Utilities
@@ -191,6 +194,116 @@ fn slow_simulation_endpoint_lifecycle() {
         SimulationBuilder::new()
             .use_random_config() // Enable chaos
             .register_workload("node", endpoint_lifecycle_workload)
+            .set_iteration_control(IterationControl::UntilAllSometimesReached(1000)),
+    );
+
+    println!("{}", report);
+    assert_simulation_success(&report);
+}
+
+// ============================================================================
+// RPC Tests (Phase 12B)
+// ============================================================================
+
+/// Test RPC basic request-response without chaos - verifies happy path.
+#[test]
+fn test_rpc_basic_request_response() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
+
+    let report = run_simulation(
+        SimulationBuilder::new()
+            .register_workload("node", |random, network, time, task, topology| {
+                rpc_workload(
+                    random,
+                    network,
+                    time,
+                    task,
+                    topology,
+                    RpcWorkloadConfig::happy_path(),
+                )
+            })
+            .set_iterations(5),
+    );
+
+    println!("{}", report);
+    assert_simulation_success(&report);
+}
+
+/// Test RPC with broken promises - server drops some promises.
+#[test]
+fn test_rpc_broken_promise() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
+
+    let report = run_simulation(
+        SimulationBuilder::new()
+            .register_workload("node", |random, network, time, task, topology| {
+                rpc_workload(
+                    random,
+                    network,
+                    time,
+                    task,
+                    topology,
+                    RpcWorkloadConfig::broken_promise_focused(),
+                )
+            })
+            .set_iterations(10),
+    );
+
+    println!("{}", report);
+    assert_simulation_success(&report);
+}
+
+/// Chaos test for RPC happy path - runs until all sometimes_assert! reached.
+#[test]
+fn slow_simulation_rpc_happy_path() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
+
+    let report = run_simulation(
+        SimulationBuilder::new()
+            .use_random_config() // Enable chaos
+            .register_workload("node", |random, network, time, task, topology| {
+                rpc_workload(
+                    random,
+                    network,
+                    time,
+                    task,
+                    topology,
+                    RpcWorkloadConfig::happy_path(),
+                )
+            })
+            .set_iteration_control(IterationControl::UntilAllSometimesReached(1000)),
+    );
+
+    println!("{}", report);
+    assert_simulation_success(&report);
+}
+
+/// Chaos test for RPC error paths - focuses on broken promises and edge cases.
+#[test]
+fn slow_simulation_rpc_error_paths() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
+
+    let report = run_simulation(
+        SimulationBuilder::new()
+            .use_random_config() // Enable chaos
+            .register_workload("node", |random, network, time, task, topology| {
+                rpc_workload(
+                    random,
+                    network,
+                    time,
+                    task,
+                    topology,
+                    RpcWorkloadConfig::broken_promise_focused(),
+                )
+            })
             .set_iteration_control(IterationControl::UntilAllSometimesReached(1000)),
     );
 

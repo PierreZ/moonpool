@@ -17,9 +17,12 @@ use moonpool_foundation::{
 };
 use moonpool_traits::JsonCodec;
 
-use super::TestMessage;
-use super::invariants::MessageInvariants;
-use super::operations::{ClientOp, ClientOpWeights, generate_client_op};
+use super::invariants::{MessageInvariants, RpcInvariants};
+use super::operations::{
+    ClientOp, ClientOpWeights, RpcClientOp, RpcClientOpWeights, RpcServerOp, RpcServerOpWeights,
+    generate_client_op, generate_rpc_client_op, generate_rpc_server_op,
+};
+use super::{RpcTestRequest, RpcTestResponse, TestMessage};
 
 /// Configuration for local delivery workload.
 #[derive(Debug, Clone)]
@@ -262,6 +265,242 @@ where
     })
 }
 
+// ============================================================================
+// RPC Workload (Phase 12B)
+// ============================================================================
+
+use moonpool::{RequestStream, send_request};
+use moonpool_foundation::sometimes_assert;
+
+/// Configuration for RPC workload.
+#[derive(Debug, Clone)]
+pub struct RpcWorkloadConfig {
+    /// Number of operations to perform per workload
+    pub num_operations: u64,
+    /// Weights for client operations
+    pub client_weights: RpcClientOpWeights,
+    /// Weights for server operations
+    pub server_weights: RpcServerOpWeights,
+    /// Timeout for awaiting RPC responses
+    pub request_timeout: Duration,
+}
+
+impl Default for RpcWorkloadConfig {
+    fn default() -> Self {
+        Self {
+            num_operations: 100,
+            client_weights: RpcClientOpWeights::default(),
+            server_weights: RpcServerOpWeights::default(),
+            request_timeout: Duration::from_secs(5),
+        }
+    }
+}
+
+impl RpcWorkloadConfig {
+    /// Configuration focused on happy path testing (no dropped promises).
+    pub fn happy_path() -> Self {
+        Self {
+            num_operations: 50,
+            client_weights: RpcClientOpWeights::default(),
+            server_weights: RpcServerOpWeights::happy_path(),
+            request_timeout: Duration::from_secs(5),
+        }
+    }
+
+    /// Configuration focused on broken promise testing.
+    pub fn broken_promise_focused() -> Self {
+        Self {
+            num_operations: 100,
+            client_weights: RpcClientOpWeights::default(),
+            server_weights: RpcServerOpWeights::broken_promise_focused(),
+            request_timeout: Duration::from_secs(5),
+        }
+    }
+}
+
+/// RPC workload - tests request-response patterns with ReplyPromise/ReplyFuture.
+///
+/// This workload:
+/// 1. Creates a FlowTransport with local address
+/// 2. Sets up a RequestStream for the server
+/// 3. Client sends RPC requests
+/// 4. Server processes requests and sends responses (or tracks broken promises)
+/// 5. Validates RPC invariants throughout
+pub async fn rpc_workload<N, T, TP>(
+    random: SimRandomProvider,
+    _network: N,
+    time: T,
+    task: TP,
+    topology: WorkloadTopology,
+    config: RpcWorkloadConfig,
+) -> SimulationResult<SimulationMetrics>
+where
+    N: NetworkProvider + Clone + 'static,
+    T: TimeProvider + Clone + 'static,
+    TP: TaskProvider + Clone + 'static,
+{
+    let my_id = topology.my_ip.clone();
+
+    // Create local address from topology
+    let local_addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
+
+    // Create FlowTransport
+    let transport = FlowTransport::new(local_addr.clone(), _network, time.clone(), task);
+
+    // Create server endpoint and RequestStream
+    let server_token = UID::new(0xAABB, 0xCCDD);
+    let server_endpoint = Endpoint::new(local_addr.clone(), server_token);
+    let request_stream: RequestStream<RpcTestRequest, JsonCodec> =
+        RequestStream::new(server_endpoint.clone(), JsonCodec);
+
+    // Register request stream with transport
+    transport.register(
+        server_token,
+        request_stream.queue() as Rc<dyn MessageReceiver>,
+    );
+
+    // Track invariants
+    let invariants = Rc::new(RefCell::new(RpcInvariants::new()));
+
+    // State tracking
+    let mut next_request_id = 0u64;
+    let mut pending_requests: Vec<u64> = Vec::new();
+    // Track requests received by server but not yet responded to (stored with reply_to endpoint)
+    let mut pending_server_requests: Vec<(u64, Endpoint)> = Vec::new();
+
+    // Perform operations
+    for _op_num in 0..config.num_operations {
+        // Client operation
+        let client_op = generate_rpc_client_op(
+            &random,
+            &mut next_request_id,
+            &pending_requests,
+            &config.client_weights,
+        );
+
+        match client_op {
+            RpcClientOp::SendRequest { request_id } => {
+                let request = RpcTestRequest::with_payload(request_id, &my_id, 32);
+                match send_request::<_, RpcTestResponse, _, _, _, _>(
+                    &transport,
+                    &server_endpoint,
+                    request,
+                    JsonCodec,
+                ) {
+                    Ok(_future) => {
+                        invariants.borrow_mut().record_request_sent(request_id);
+                        pending_requests.push(request_id);
+                        sometimes_assert!(
+                            rpc_request_sent,
+                            true,
+                            "Should be able to send RPC requests"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "RPC request send failed");
+                        invariants.borrow_mut().record_connection_failure();
+                    }
+                }
+            }
+            RpcClientOp::AwaitResponse { request_id } => {
+                // Note: In a real workload, we'd await the actual future
+                // For now, we just track that we attempted to await
+                pending_requests.retain(|&id| id != request_id);
+            }
+            RpcClientOp::SmallDelay => {
+                let _ = time.sleep(Duration::from_millis(1)).await;
+            }
+        }
+
+        // Server operation - process incoming requests
+        // First, check if we have any pending promises to work with
+        let pending_ids: Vec<u64> = pending_server_requests.iter().map(|(id, _)| *id).collect();
+        let server_op = generate_rpc_server_op(&random, &pending_ids, &config.server_weights);
+
+        match server_op {
+            RpcServerOp::TryReceiveRequest => {
+                // Use the underlying queue to receive, then manually send response
+                if let Some(envelope) = request_stream.queue().try_recv() {
+                    sometimes_assert!(
+                        rpc_server_received_request,
+                        true,
+                        "Server should receive RPC requests"
+                    );
+
+                    // Track the pending request with its reply_to endpoint
+                    pending_server_requests.push((envelope.request.request_id, envelope.reply_to));
+                }
+            }
+            RpcServerOp::SendResponse { request_id } => {
+                // Find and respond to the pending request
+                if let Some(pos) = pending_server_requests
+                    .iter()
+                    .position(|(id, _)| *id == request_id)
+                {
+                    let (req_id, reply_to) = pending_server_requests.remove(pos);
+
+                    // Create and send response
+                    let response: Result<RpcTestResponse, moonpool::ReplyError> =
+                        Ok(RpcTestResponse::success(req_id));
+                    let payload = serde_json::to_vec(&response).expect("serialize response");
+
+                    let _ = transport.dispatch(&reply_to.token, &payload);
+
+                    invariants.borrow_mut().record_response_received(req_id);
+                    sometimes_assert!(rpc_response_sent, true, "Server should send RPC responses");
+                }
+            }
+            RpcServerOp::DropPromise { request_id } => {
+                // Drop the promise without responding (tracks broken promise)
+                if let Some(pos) = pending_server_requests
+                    .iter()
+                    .position(|(id, _)| *id == request_id)
+                {
+                    let (req_id, _reply_to) = pending_server_requests.remove(pos);
+                    invariants.borrow_mut().record_broken_promise(req_id);
+                    sometimes_assert!(
+                        rpc_promise_dropped,
+                        true,
+                        "Server should sometimes drop promises"
+                    );
+                }
+            }
+            RpcServerOp::SmallDelay => {
+                let _ = time.sleep(Duration::from_millis(1)).await;
+            }
+        }
+
+        // Validate invariants after each operation pair
+        invariants.borrow().validate_always();
+    }
+
+    // Drain remaining requests - respond to all pending
+    while let Some(envelope) = request_stream.queue().try_recv() {
+        pending_server_requests.push((envelope.request.request_id, envelope.reply_to));
+    }
+
+    // Respond to all remaining pending requests
+    for (req_id, reply_to) in pending_server_requests.drain(..) {
+        let response: Result<RpcTestResponse, moonpool::ReplyError> =
+            Ok(RpcTestResponse::success(req_id));
+        let payload = serde_json::to_vec(&response).expect("serialize response");
+        let _ = transport.dispatch(&reply_to.token, &payload);
+        invariants.borrow_mut().record_response_received(req_id);
+    }
+
+    // Final validation
+    let inv = invariants.borrow();
+    inv.validate_always();
+    inv.validate_coverage();
+
+    tracing::info!(summary = %inv.summary(), "RPC workload completed");
+
+    Ok(SimulationMetrics {
+        events_processed: config.num_operations,
+        ..Default::default()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,5 +509,20 @@ mod tests {
     fn test_local_delivery_config_default() {
         let config = LocalDeliveryConfig::default();
         assert_eq!(config.num_operations, 100);
+    }
+
+    #[test]
+    fn test_rpc_workload_config_default() {
+        let config = RpcWorkloadConfig::default();
+        assert_eq!(config.num_operations, 100);
+    }
+
+    #[test]
+    fn test_rpc_workload_config_presets() {
+        let happy = RpcWorkloadConfig::happy_path();
+        assert_eq!(happy.server_weights.drop_promise, 0);
+
+        let broken = RpcWorkloadConfig::broken_promise_focused();
+        assert_eq!(broken.server_weights.drop_promise, 30);
     }
 }

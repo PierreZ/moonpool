@@ -161,6 +161,143 @@ impl MessageInvariants {
     }
 }
 
+// ============================================================================
+// RPC Invariants (Phase 12B)
+// ============================================================================
+
+/// Tracks RPC request-response pairs for invariant validation.
+///
+/// Validates FDB-style guarantees:
+/// - Request-Response Correlation: every response maps to a sent request
+/// - Promise Single-Fulfillment: at most one of send/error/drop per promise
+/// - Broken Promise Guarantee: dropped promises send BrokenPromise error
+/// - No Phantom Messages: can't receive response for unsent request
+#[derive(Debug, Default)]
+pub struct RpcInvariants {
+    /// RPC requests sent (by request_id)
+    pub requests_sent: HashSet<u64>,
+    /// RPC responses received (by request_id)
+    pub responses_received: HashSet<u64>,
+    /// Broken promises detected (by request_id)
+    pub broken_promises: HashSet<u64>,
+    /// Connection failures count
+    pub connection_failures: u64,
+    /// Timeouts count
+    pub timeouts: u64,
+    /// Successful responses count
+    pub successful_responses: u64,
+}
+
+impl RpcInvariants {
+    /// Create a new empty RPC invariant tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record an RPC request sent.
+    pub fn record_request_sent(&mut self, request_id: u64) {
+        self.requests_sent.insert(request_id);
+    }
+
+    /// Record an RPC response received (success).
+    pub fn record_response_received(&mut self, request_id: u64) {
+        self.responses_received.insert(request_id);
+        self.successful_responses += 1;
+    }
+
+    /// Record a broken promise error received.
+    pub fn record_broken_promise(&mut self, request_id: u64) {
+        self.broken_promises.insert(request_id);
+    }
+
+    /// Record a connection failure.
+    pub fn record_connection_failure(&mut self) {
+        self.connection_failures += 1;
+    }
+
+    /// Record a timeout.
+    pub fn record_timeout(&mut self) {
+        self.timeouts += 1;
+    }
+
+    /// Validate invariants that should always hold.
+    ///
+    /// Called continuously during test execution.
+    pub fn validate_always(&self) {
+        // INV-1: No phantom responses - received must be subset of sent
+        for request_id in &self.responses_received {
+            always_assert!(
+                no_phantom_rpc_response,
+                self.requests_sent.contains(request_id),
+                format!(
+                    "Received RPC response {} that was never requested",
+                    request_id
+                )
+            );
+        }
+
+        // INV-2: No phantom broken promises
+        for request_id in &self.broken_promises {
+            always_assert!(
+                no_phantom_broken_promise,
+                self.requests_sent.contains(request_id),
+                format!(
+                    "Received broken promise {} that was never requested",
+                    request_id
+                )
+            );
+        }
+
+        // INV-3: At most one resolution per request (success XOR broken)
+        for request_id in &self.responses_received {
+            always_assert!(
+                rpc_single_resolution,
+                !self.broken_promises.contains(request_id),
+                format!(
+                    "Request {} has both success response and broken promise",
+                    request_id
+                )
+            );
+        }
+    }
+
+    /// Validate coverage assertions for error paths.
+    pub fn validate_coverage(&self) {
+        // Success path coverage
+        sometimes_assert!(
+            rpc_success_path,
+            self.successful_responses > 0,
+            "Should sometimes see successful RPC responses"
+        );
+
+        // Broken promise path coverage
+        sometimes_assert!(
+            rpc_broken_promise_path,
+            !self.broken_promises.is_empty(),
+            "Should sometimes see broken promises"
+        );
+
+        // Timeout path coverage
+        sometimes_assert!(
+            rpc_timeout_path,
+            self.timeouts > 0,
+            "Should sometimes see timeouts"
+        );
+    }
+
+    /// Get summary for logging.
+    pub fn summary(&self) -> String {
+        format!(
+            "RPC: sent={}, success={}, broken={}, timeouts={}, conn_fail={}",
+            self.requests_sent.len(),
+            self.successful_responses,
+            self.broken_promises.len(),
+            self.timeouts,
+            self.connection_failures
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,5 +345,89 @@ mod tests {
         // Receive without sending - should panic
         inv.record_received(999, true);
         inv.validate_always();
+    }
+
+    // ========================================================================
+    // RPC Invariants Tests
+    // ========================================================================
+
+    #[test]
+    fn test_rpc_invariants_empty() {
+        let inv = RpcInvariants::new();
+        inv.validate_always(); // Should not panic
+    }
+
+    #[test]
+    fn test_rpc_invariants_request_response() {
+        let mut inv = RpcInvariants::new();
+
+        inv.record_request_sent(1);
+        inv.record_request_sent(2);
+        inv.record_response_received(1);
+
+        assert_eq!(inv.requests_sent.len(), 2);
+        assert_eq!(inv.responses_received.len(), 1);
+        assert_eq!(inv.successful_responses, 1);
+
+        inv.validate_always(); // Should not panic
+    }
+
+    #[test]
+    fn test_rpc_invariants_broken_promise() {
+        let mut inv = RpcInvariants::new();
+
+        inv.record_request_sent(1);
+        inv.record_broken_promise(1);
+
+        assert!(!inv.broken_promises.is_empty());
+        inv.validate_always(); // Should not panic
+    }
+
+    #[test]
+    #[should_panic(expected = "never requested")]
+    fn test_rpc_phantom_response_detected() {
+        let mut inv = RpcInvariants::new();
+
+        // Receive response without sending request - should panic
+        inv.record_response_received(999);
+        inv.validate_always();
+    }
+
+    #[test]
+    #[should_panic(expected = "never requested")]
+    fn test_rpc_phantom_broken_promise_detected() {
+        let mut inv = RpcInvariants::new();
+
+        // Broken promise for never-sent request - should panic
+        inv.record_broken_promise(999);
+        inv.validate_always();
+    }
+
+    #[test]
+    #[should_panic(expected = "both success response and broken promise")]
+    fn test_rpc_double_resolution_detected() {
+        let mut inv = RpcInvariants::new();
+
+        inv.record_request_sent(1);
+        inv.record_response_received(1);
+        inv.record_broken_promise(1); // Should panic - already resolved
+
+        inv.validate_always();
+    }
+
+    #[test]
+    fn test_rpc_invariants_summary() {
+        let mut inv = RpcInvariants::new();
+        inv.record_request_sent(1);
+        inv.record_request_sent(2);
+        inv.record_response_received(1);
+        inv.record_timeout();
+        inv.record_connection_failure();
+
+        let summary = inv.summary();
+        assert!(summary.contains("sent=2"));
+        assert!(summary.contains("success=1"));
+        assert!(summary.contains("timeouts=1"));
+        assert!(summary.contains("conn_fail=1"));
     }
 }

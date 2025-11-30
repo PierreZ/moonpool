@@ -1112,9 +1112,50 @@ The following are deferred per user's "minimal first" preference:
 
 **Validation**: 47 tests pass (29 unit + 18 simulation), fmt clean, clippy clean
 
-### 7b: Request-Response Tests (Deferred with Phase B)
-1. Integration tests for RequestStream/ReplyPromise
-2. Simulation tests for full RPC flow
+### 7b: Request-Response RPC (Phase 12B) ✅ DONE
+
+**Phase 12B Implementation Complete**:
+1. ✅ moonpool-traits crate with MessageCodec trait
+2. ✅ NetNotifiedQueue refactored for pluggable codec
+3. ✅ Foundation types serde support (UID, NetworkAddress, Endpoint)
+4. ✅ ReplyError types (BrokenPromise, ConnectionFailed, Timeout, Serialization, EndpointNotFound)
+5. ✅ ReplyPromise with Drop-based broken promise detection
+6. ✅ ReplyFuture for client-side response awaiting
+7. ✅ RequestStream with RequestEnvelope unpacking
+8. ✅ send_request() function
+9. ✅ Integration tests (5 tests passing)
+
+**New Files**:
+- `moonpool-traits/` - Pluggable serialization trait crate
+- `moonpool/src/messaging/static/reply_error.rs`
+- `moonpool/src/messaging/static/reply_promise.rs`
+- `moonpool/src/messaging/static/reply_future.rs`
+- `moonpool/src/messaging/static/request_stream.rs`
+- `moonpool/src/messaging/static/request.rs`
+- `moonpool/tests/rpc_integration.rs`
+
+**Validation**: All tests pass, fmt clean, clippy clean
+
+### 7c: RPC Simulation Tests (In Progress)
+
+**Goal**: Add simulation tests for RPC layer under chaos conditions.
+
+**Approach**: Extend existing `simulation/` infrastructure:
+- Add RPC message types (RpcTestRequest, RpcTestResponse)
+- Add RPC operations (SendRequest, AwaitResponse, DropPromise)
+- Add RPC invariants (correlation, broken promise tracking)
+- Add RPC workload exercising full request-response flow
+- Add 5 test scenarios (2 basic + 3 chaos)
+
+**sometimes_assert! coverage** (10 total):
+- Existing in RPC code (4): reply_sent, broken_promise_detected, reply_received, reply_queue_closed
+- New in simulation (6): rpc_request_sent, rpc_response_received, rpc_request_timeout, rpc_server_received, rpc_broken_promise_path, rpc_success_path
+
+**FDB Invariants to validate**:
+1. Request-Response Correlation - every response maps to sent request
+2. Promise Single-Fulfillment - at most one of send/error/drop per promise
+3. Broken Promise Guarantee - dropped promises send BrokenPromise error
+4. No Phantom Messages - can't receive response for unsent request
 
 ## Step 8: Migrate Existing Tests (Deferred)
 1. Update ping-pong tests to use new RPC layer
@@ -1154,11 +1195,21 @@ moonpool/src/messaging/static/mod.rs
 moonpool/src/messaging/static/endpoint_map.rs
 moonpool/src/messaging/static/flow_transport.rs
 moonpool/src/messaging/static/net_notified_queue.rs
-moonpool/src/messaging/static/request_stream.rs
-moonpool/src/messaging/static/reply_promise.rs
-moonpool/src/messaging/static/interface.rs
-moonpool/src/messaging/virtual/mod.rs          # Placeholder for future
+moonpool/src/messaging/static/request_stream.rs    # Phase 12B
+moonpool/src/messaging/static/reply_promise.rs     # Phase 12B
+moonpool/src/messaging/static/reply_future.rs      # Phase 12B
+moonpool/src/messaging/static/reply_error.rs       # Phase 12B
+moonpool/src/messaging/static/request.rs           # Phase 12B
+moonpool/src/messaging/virtual/mod.rs              # Placeholder for future
 moonpool/Cargo.toml
+moonpool/tests/rpc_integration.rs                  # Phase 12B
+```
+
+## moonpool-traits - NEW (Phase 12B)
+```
+moonpool-traits/Cargo.toml
+moonpool-traits/src/lib.rs
+moonpool-traits/src/codec.rs
 ```
 
 ---

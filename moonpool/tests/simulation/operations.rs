@@ -160,6 +160,188 @@ pub fn generate_server_op<R: RandomProvider>(random: &R, weights: &ServerOpWeigh
     ServerOp::SmallDelay
 }
 
+// ============================================================================
+// RPC Operations (Phase 12B)
+// ============================================================================
+
+/// Operations an RPC client can perform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RpcClientOp {
+    /// Send an RPC request
+    SendRequest { request_id: u64 },
+    /// Await a pending RPC response
+    AwaitResponse { request_id: u64 },
+    /// Small delay between operations
+    SmallDelay,
+}
+
+/// Operations an RPC server can perform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RpcServerOp {
+    /// Try to receive a request (non-blocking)
+    TryReceiveRequest,
+    /// Send a successful response for a pending request
+    SendResponse { request_id: u64 },
+    /// Drop a promise without responding (triggers BrokenPromise)
+    DropPromise { request_id: u64 },
+    /// Small delay between operations
+    SmallDelay,
+}
+
+/// Weights for RPC client operation selection.
+#[derive(Debug, Clone)]
+pub struct RpcClientOpWeights {
+    pub send_request: u32,
+    pub await_response: u32,
+    pub small_delay: u32,
+}
+
+impl Default for RpcClientOpWeights {
+    fn default() -> Self {
+        Self {
+            send_request: 40,
+            await_response: 45,
+            small_delay: 15,
+        }
+    }
+}
+
+impl RpcClientOpWeights {
+    /// Weights focused on sending many requests (high concurrency).
+    pub fn high_concurrency() -> Self {
+        Self {
+            send_request: 70,
+            await_response: 20,
+            small_delay: 10,
+        }
+    }
+
+    /// Weights focused on completing requests (low concurrency).
+    pub fn low_concurrency() -> Self {
+        Self {
+            send_request: 20,
+            await_response: 70,
+            small_delay: 10,
+        }
+    }
+
+    fn total_weight(&self) -> u32 {
+        self.send_request + self.await_response + self.small_delay
+    }
+}
+
+/// Weights for RPC server operation selection.
+#[derive(Debug, Clone)]
+pub struct RpcServerOpWeights {
+    pub try_receive: u32,
+    pub send_response: u32,
+    pub drop_promise: u32,
+    pub small_delay: u32,
+}
+
+impl Default for RpcServerOpWeights {
+    fn default() -> Self {
+        Self {
+            try_receive: 30,
+            send_response: 50,
+            drop_promise: 10,
+            small_delay: 10,
+        }
+    }
+}
+
+impl RpcServerOpWeights {
+    /// Weights for happy path (no broken promises).
+    pub fn happy_path() -> Self {
+        Self {
+            try_receive: 30,
+            send_response: 60,
+            drop_promise: 0,
+            small_delay: 10,
+        }
+    }
+
+    /// Weights focused on broken promise testing.
+    pub fn broken_promise_focused() -> Self {
+        Self {
+            try_receive: 30,
+            send_response: 30,
+            drop_promise: 30,
+            small_delay: 10,
+        }
+    }
+
+    fn total_weight(&self) -> u32 {
+        self.try_receive + self.send_response + self.drop_promise + self.small_delay
+    }
+}
+
+/// Generate a random RPC client operation.
+pub fn generate_rpc_client_op<R: RandomProvider>(
+    random: &R,
+    next_request_id: &mut u64,
+    pending_requests: &[u64],
+    weights: &RpcClientOpWeights,
+) -> RpcClientOp {
+    let total = weights.total_weight();
+    let choice = random.random_range(0..total);
+
+    let mut cumulative = 0;
+
+    cumulative += weights.send_request;
+    if choice < cumulative {
+        let request_id = *next_request_id;
+        *next_request_id += 1;
+        return RpcClientOp::SendRequest { request_id };
+    }
+
+    cumulative += weights.await_response;
+    if choice < cumulative && !pending_requests.is_empty() {
+        // Pick a random pending request to await
+        let idx = random.random_range(0..pending_requests.len() as u32) as usize;
+        return RpcClientOp::AwaitResponse {
+            request_id: pending_requests[idx],
+        };
+    }
+
+    RpcClientOp::SmallDelay
+}
+
+/// Generate a random RPC server operation.
+pub fn generate_rpc_server_op<R: RandomProvider>(
+    random: &R,
+    pending_promises: &[u64],
+    weights: &RpcServerOpWeights,
+) -> RpcServerOp {
+    let total = weights.total_weight();
+    let choice = random.random_range(0..total);
+
+    let mut cumulative = 0;
+
+    cumulative += weights.try_receive;
+    if choice < cumulative {
+        return RpcServerOp::TryReceiveRequest;
+    }
+
+    cumulative += weights.send_response;
+    if choice < cumulative && !pending_promises.is_empty() {
+        let idx = random.random_range(0..pending_promises.len() as u32) as usize;
+        return RpcServerOp::SendResponse {
+            request_id: pending_promises[idx],
+        };
+    }
+
+    cumulative += weights.drop_promise;
+    if choice < cumulative && !pending_promises.is_empty() {
+        let idx = random.random_range(0..pending_promises.len() as u32) as usize;
+        return RpcServerOp::DropPromise {
+            request_id: pending_promises[idx],
+        };
+    }
+
+    RpcServerOp::SmallDelay
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,5 +446,88 @@ mod tests {
         }
 
         assert_eq!(ops1, ops2);
+    }
+
+    // ========================================================================
+    // RPC Operations Tests
+    // ========================================================================
+
+    #[test]
+    fn test_rpc_client_op_weights_default() {
+        let weights = RpcClientOpWeights::default();
+        assert_eq!(weights.send_request, 40);
+        assert_eq!(weights.await_response, 45);
+        assert_eq!(weights.small_delay, 15);
+        assert_eq!(weights.total_weight(), 100);
+    }
+
+    #[test]
+    fn test_rpc_server_op_weights_presets() {
+        let happy = RpcServerOpWeights::happy_path();
+        assert_eq!(happy.drop_promise, 0);
+
+        let broken = RpcServerOpWeights::broken_promise_focused();
+        assert_eq!(broken.drop_promise, 30);
+    }
+
+    #[test]
+    fn test_generate_rpc_client_op_produces_valid_ops() {
+        let random = SimRandomProvider::new(42);
+        let weights = RpcClientOpWeights::default();
+        let mut next_id = 0;
+        let pending = vec![1, 2, 3];
+
+        for _ in 0..100 {
+            let op = generate_rpc_client_op(&random, &mut next_id, &pending, &weights);
+            match op {
+                RpcClientOp::SendRequest { request_id } => {
+                    assert!(request_id < 1000);
+                }
+                RpcClientOp::AwaitResponse { request_id } => {
+                    assert!(pending.contains(&request_id));
+                }
+                RpcClientOp::SmallDelay => {}
+            }
+        }
+    }
+
+    #[test]
+    fn test_generate_rpc_server_op_produces_valid_ops() {
+        let random = SimRandomProvider::new(42);
+        let weights = RpcServerOpWeights::default();
+        let pending = vec![10, 20, 30];
+
+        for _ in 0..100 {
+            let op = generate_rpc_server_op(&random, &pending, &weights);
+            match op {
+                RpcServerOp::TryReceiveRequest => {}
+                RpcServerOp::SendResponse { request_id } => {
+                    assert!(pending.contains(&request_id));
+                }
+                RpcServerOp::DropPromise { request_id } => {
+                    assert!(pending.contains(&request_id));
+                }
+                RpcServerOp::SmallDelay => {}
+            }
+        }
+    }
+
+    #[test]
+    fn test_rpc_server_op_no_promises_fallback() {
+        // With no pending promises, send_response/drop_promise fall back to delay
+        let random = SimRandomProvider::new(42);
+        let weights = RpcServerOpWeights {
+            try_receive: 0,
+            send_response: 50,
+            drop_promise: 50,
+            small_delay: 0,
+        };
+        let empty: Vec<u64> = vec![];
+
+        for _ in 0..100 {
+            let op = generate_rpc_server_op(&random, &empty, &weights);
+            // Without pending promises, can only get SmallDelay
+            assert!(matches!(op, RpcServerOp::SmallDelay));
+        }
     }
 }

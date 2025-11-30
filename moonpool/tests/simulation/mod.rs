@@ -59,6 +59,73 @@ impl TestMessage {
     }
 }
 
+// ============================================================================
+// RPC Message Types (Phase 12B)
+// ============================================================================
+
+/// RPC request message for simulation testing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RpcTestRequest {
+    /// Unique request identifier for correlation tracking
+    pub request_id: u64,
+    /// Identifier for the client sending the request
+    pub sender_id: String,
+    /// Optional payload for size testing
+    #[serde(default)]
+    pub payload: Vec<u8>,
+}
+
+impl RpcTestRequest {
+    /// Create a new RPC test request.
+    pub fn new(request_id: u64, sender_id: impl Into<String>) -> Self {
+        Self {
+            request_id,
+            sender_id: sender_id.into(),
+            payload: Vec::new(),
+        }
+    }
+
+    /// Create an RPC test request with payload.
+    pub fn with_payload(
+        request_id: u64,
+        sender_id: impl Into<String>,
+        payload_size: usize,
+    ) -> Self {
+        Self {
+            request_id,
+            sender_id: sender_id.into(),
+            payload: vec![0xAB; payload_size],
+        }
+    }
+}
+
+/// RPC response message for simulation testing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RpcTestResponse {
+    /// Request ID this response corresponds to
+    pub request_id: u64,
+    /// Whether the request was processed successfully
+    pub success: bool,
+}
+
+impl RpcTestResponse {
+    /// Create a successful response.
+    pub fn success(request_id: u64) -> Self {
+        Self {
+            request_id,
+            success: true,
+        }
+    }
+
+    /// Create a failed response.
+    pub fn failure(request_id: u64) -> Self {
+        Self {
+            request_id,
+            success: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,5 +144,21 @@ mod tests {
         let bytes = msg.to_bytes();
         let decoded: TestMessage = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn test_rpc_request_serialization() {
+        let req = RpcTestRequest::with_payload(123, "client_1", 50);
+        let bytes = serde_json::to_vec(&req).unwrap();
+        let decoded: RpcTestRequest = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn test_rpc_response_serialization() {
+        let resp = RpcTestResponse::success(456);
+        let bytes = serde_json::to_vec(&resp).unwrap();
+        let decoded: RpcTestResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(resp, decoded);
     }
 }
