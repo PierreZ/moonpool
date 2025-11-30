@@ -370,6 +370,7 @@ mod tests {
 
     use super::*;
     use crate::NetNotifiedQueue;
+    use moonpool_traits::JsonCodec;
 
     // Use foundation's TokioNetworkProvider and TokioTimeProvider for testing
     use moonpool_foundation::{TokioTaskProvider, TokioTimeProvider};
@@ -475,10 +476,10 @@ mod tests {
     fn test_register_well_known() {
         let transport = create_test_transport();
 
-        let queue: Rc<NetNotifiedQueue<String>> = Rc::new(NetNotifiedQueue::new(Endpoint::new(
-            test_address(),
-            UID::new(1, 1),
-        )));
+        let queue: Rc<NetNotifiedQueue<String, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+            Endpoint::new(test_address(), UID::new(1, 1)),
+            JsonCodec,
+        ));
 
         transport
             .register_well_known(WellKnownToken::Ping, queue)
@@ -492,8 +493,10 @@ mod tests {
         let transport = create_test_transport();
 
         let token = UID::new(0x1234, 0x5678);
-        let queue: Rc<NetNotifiedQueue<String>> =
-            Rc::new(NetNotifiedQueue::new(Endpoint::new(test_address(), token)));
+        let queue: Rc<NetNotifiedQueue<String, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+            Endpoint::new(test_address(), token),
+            JsonCodec,
+        ));
 
         let endpoint = transport.register(token, queue);
 
@@ -506,8 +509,10 @@ mod tests {
         let transport = create_test_transport();
 
         let token = UID::new(0x1234, 0x5678);
-        let queue: Rc<NetNotifiedQueue<String>> =
-            Rc::new(NetNotifiedQueue::new(Endpoint::new(test_address(), token)));
+        let queue: Rc<NetNotifiedQueue<String, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+            Endpoint::new(test_address(), token),
+            JsonCodec,
+        ));
 
         let endpoint = transport.register(token, Rc::clone(&queue) as Rc<dyn MessageReceiver>);
 
@@ -541,8 +546,10 @@ mod tests {
         let transport = create_test_transport();
 
         let token = UID::new(0x1234, 0x5678);
-        let queue: Rc<NetNotifiedQueue<String>> =
-            Rc::new(NetNotifiedQueue::new(Endpoint::new(test_address(), token)));
+        let queue: Rc<NetNotifiedQueue<String, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+            Endpoint::new(test_address(), token),
+            JsonCodec,
+        ));
 
         transport.register(token, queue as Rc<dyn MessageReceiver>);
         assert_eq!(transport.endpoint_count(), 1);
@@ -557,8 +564,10 @@ mod tests {
         let transport = create_test_transport();
 
         let token = UID::new(0x1234, 0x5678);
-        let queue: Rc<NetNotifiedQueue<String>> =
-            Rc::new(NetNotifiedQueue::new(Endpoint::new(test_address(), token)));
+        let queue: Rc<NetNotifiedQueue<String, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+            Endpoint::new(test_address(), token),
+            JsonCodec,
+        ));
 
         transport.register(token, Rc::clone(&queue) as Rc<dyn MessageReceiver>);
 

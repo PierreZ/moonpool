@@ -15,6 +15,7 @@ use moonpool_foundation::{
     NetworkProvider, SimRandomProvider, SimulationMetrics, SimulationResult, TaskProvider,
     TimeProvider, WorkloadTopology,
 };
+use moonpool_traits::JsonCodec;
 
 use super::TestMessage;
 use super::invariants::MessageInvariants;
@@ -71,10 +72,10 @@ where
 
     // Create message queue and register with transport
     let token = UID::new(0x1234, 0x5678);
-    let queue: Rc<NetNotifiedQueue<TestMessage>> = Rc::new(NetNotifiedQueue::new(Endpoint::new(
-        local_addr.clone(),
-        token,
-    )));
+    let queue: Rc<NetNotifiedQueue<TestMessage, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+        Endpoint::new(local_addr.clone(), token),
+        JsonCodec,
+    ));
     let endpoint = transport.register(token, queue.clone() as Rc<dyn MessageReceiver>);
 
     // Track invariants
@@ -190,18 +191,18 @@ where
 
     // Create initial endpoint
     let token1 = UID::new(0x1111, 0x1111);
-    let queue1: Rc<NetNotifiedQueue<TestMessage>> = Rc::new(NetNotifiedQueue::new(Endpoint::new(
-        local_addr.clone(),
-        token1,
-    )));
+    let queue1: Rc<NetNotifiedQueue<TestMessage, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+        Endpoint::new(local_addr.clone(), token1),
+        JsonCodec,
+    ));
     let endpoint1 = transport.register(token1, queue1.clone() as Rc<dyn MessageReceiver>);
 
     // Second endpoint for lifecycle testing
     let token2 = UID::new(0x2222, 0x2222);
-    let queue2: Rc<NetNotifiedQueue<TestMessage>> = Rc::new(NetNotifiedQueue::new(Endpoint::new(
-        local_addr.clone(),
-        token2,
-    )));
+    let queue2: Rc<NetNotifiedQueue<TestMessage, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+        Endpoint::new(local_addr.clone(), token2),
+        JsonCodec,
+    ));
 
     for i in 0..50 {
         // Send to endpoint1 (always registered)
