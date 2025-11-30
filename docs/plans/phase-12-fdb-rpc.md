@@ -1136,26 +1136,46 @@ The following are deferred per user's "minimal first" preference:
 
 **Validation**: All tests pass, fmt clean, clippy clean
 
-### 7c: RPC Simulation Tests (In Progress)
+### 7c: RPC Simulation Tests ✅ DONE
 
 **Goal**: Add simulation tests for RPC layer under chaos conditions.
 
-**Approach**: Extend existing `simulation/` infrastructure:
-- Add RPC message types (RpcTestRequest, RpcTestResponse)
-- Add RPC operations (SendRequest, AwaitResponse, DropPromise)
-- Add RPC invariants (correlation, broken promise tracking)
-- Add RPC workload exercising full request-response flow
-- Add 5 test scenarios (2 basic + 3 chaos)
+**Implementation** (`moonpool/tests/simulation/`):
+- `mod.rs` - Added RpcTestRequest, RpcTestResponse message types
+- `operations.rs` - Added RpcClientOp, RpcServerOp, weights, generators
+- `invariants.rs` - Added RpcInvariants with FDB-style validation
+- `workloads.rs` - Added rpc_workload with happy_path and broken_promise_focused configs
+- `test_scenarios.rs` - Added 4 test scenarios (2 basic + 2 chaos)
 
 **sometimes_assert! coverage** (10 total):
 - Existing in RPC code (4): reply_sent, broken_promise_detected, reply_received, reply_queue_closed
-- New in simulation (6): rpc_request_sent, rpc_response_received, rpc_request_timeout, rpc_server_received, rpc_broken_promise_path, rpc_success_path
+- New in simulation (6): rpc_request_sent, rpc_server_received_request, rpc_response_sent, rpc_promise_dropped, rpc_broken_promise_path, rpc_success_path
 
-**FDB Invariants to validate**:
-1. Request-Response Correlation - every response maps to sent request
-2. Promise Single-Fulfillment - at most one of send/error/drop per promise
-3. Broken Promise Guarantee - dropped promises send BrokenPromise error
-4. No Phantom Messages - can't receive response for unsent request
+**FDB Invariants validated**:
+1. ✅ Request-Response Correlation - every response maps to sent request (no_phantom_rpc_response)
+2. ✅ Promise Single-Fulfillment - at most one of send/error/drop per promise (rpc_single_resolution)
+3. ✅ Broken Promise Guarantee - dropped promises tracked (no_phantom_broken_promise)
+4. ✅ No Phantom Messages - can't receive response for unsent request
+
+**Test Scenarios**:
+- `test_rpc_basic_request_response` - Happy path validation
+- `test_rpc_broken_promise` - Server drops promise testing
+- `slow_simulation_rpc_happy_path` - Chaos test for success paths
+- `slow_simulation_rpc_error_paths` - Chaos test for error paths
+
+**Limitation**: Tests are local-only (single FlowTransport). Multi-node RPC testing deferred to Step 7d.
+
+**Validation**: 92 tests pass, fmt clean, clippy clean
+
+### 7d: Multi-Node RPC Simulation Tests (Future)
+
+**Goal**: Test RPC across separate nodes with actual network transport.
+
+**Requirements**:
+- Client and server on separate FlowTransport instances
+- Use NetworkProvider for inter-node communication
+- Enable chaos (packet loss, delays, disconnects) on network layer
+- Validate message ordering and delivery guarantees across nodes
 
 ## Step 8: Migrate Existing Tests (Deferred)
 1. Update ping-pong tests to use new RPC layer
