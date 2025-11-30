@@ -1092,10 +1092,25 @@ The following are deferred per user's "minimal first" preference:
 - `interface.rs` - Interface macro
 
 ## Step 7: Static Messaging Tests
-### 7a: Core Infrastructure Tests (Pending)
-1. ⏳ Simulation tests for EndpointMap + FlowTransport + NetNotifiedQueue
-2. ⏳ Chaos testing with connection failures
-3. ⏳ Local delivery under chaos
+### 7a: Core Infrastructure Tests ✅ DONE
+
+1. ✅ Simulation tests for EndpointMap + FlowTransport + NetNotifiedQueue
+2. ✅ Chaos testing with connection failures
+3. ✅ Local delivery under chaos
+
+**Test Infrastructure** (`moonpool/tests/simulation/`):
+- `mod.rs` - TestMessage with JSON serialization
+- `invariants.rs` - MessageInvariants tracking with always_assert!/sometimes_assert!
+- `operations.rs` - ClientOp/ServerOp alphabet with weighted selection
+- `workloads.rs` - local_delivery_workload, endpoint_lifecycle_workload
+- `test_scenarios.rs` - 6 test scenarios (4 basic + 2 chaos)
+
+**Component Assertions** (18 total):
+- EndpointMap (4): well_known_registered, dynamic_lookup_found, well_known_removal_rejected, endpoint_deregistered
+- FlowTransport (8): local_delivery_path, remote_peer_path, endpoint_found_local, endpoint_not_found_local, peer_created, peer_reused, dispatch_success, dispatch_undelivered
+- NetNotifiedQueue (6): deserialization_success, deserialization_failed, waker_notified, message_available, queue_closed_empty, recv_pending
+
+**Validation**: 47 tests pass (29 unit + 18 simulation), fmt clean, clippy clean
 
 ### 7b: Request-Response Tests (Deferred with Phase B)
 1. Integration tests for RequestStream/ReplyPromise

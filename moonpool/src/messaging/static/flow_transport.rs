@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use moonpool_foundation::{
     Endpoint, NetworkAddress, NetworkProvider, Peer, PeerConfig, TaskProvider, TimeProvider, UID,
-    WellKnownToken,
+    WellKnownToken, sometimes_assert,
 };
 
 use super::endpoint_map::{EndpointMap, MessageReceiver};
@@ -195,10 +195,20 @@ where
     ) -> Result<(), MessagingError> {
         // Check for local delivery
         if self.is_local_address(&endpoint.address) {
+            sometimes_assert!(
+                local_delivery_path,
+                true,
+                "Unreliable send uses local delivery path"
+            );
             return self.deliver_local(&endpoint.token, payload);
         }
 
         // Get or create peer for remote address
+        sometimes_assert!(
+            remote_peer_path,
+            true,
+            "Unreliable send uses remote peer path"
+        );
         let peer = self.get_or_open_peer(&endpoint.address);
         peer.borrow_mut()
             .send_unreliable(endpoint.token, payload)
@@ -249,10 +259,20 @@ where
             receiver.receive(payload);
             drop(data); // Release borrow before mutating stats
             self.data.borrow_mut().stats.packets_dispatched += 1;
+            sometimes_assert!(
+                endpoint_found_local,
+                true,
+                "Local delivery found registered endpoint"
+            );
             Ok(())
         } else {
             drop(data); // Release borrow before mutating stats
             self.data.borrow_mut().stats.packets_undelivered += 1;
+            sometimes_assert!(
+                endpoint_not_found_local,
+                true,
+                "Local delivery to unregistered endpoint"
+            );
             Err(MessagingError::EndpointNotFound { token: *token })
         }
     }
@@ -266,6 +286,7 @@ where
 
         // Check if peer already exists
         if let Some(peer) = self.data.borrow().peers.get(&addr_str) {
+            sometimes_assert!(peer_reused, true, "Existing peer reused for address");
             return Rc::clone(peer);
         }
 
@@ -282,6 +303,7 @@ where
         let mut data = self.data.borrow_mut();
         data.peers.insert(addr_str, Rc::clone(&peer));
         data.stats.peers_created += 1;
+        sometimes_assert!(peer_created, true, "New peer created for address");
 
         peer
     }
@@ -299,10 +321,16 @@ where
             receiver.receive(payload);
             drop(data); // Release borrow before mutating stats
             self.data.borrow_mut().stats.packets_dispatched += 1;
+            sometimes_assert!(dispatch_success, true, "Message dispatched to endpoint");
             Ok(())
         } else {
             drop(data); // Release borrow before mutating stats
             self.data.borrow_mut().stats.packets_undelivered += 1;
+            sometimes_assert!(
+                dispatch_undelivered,
+                true,
+                "Dispatch to unregistered endpoint"
+            );
             Err(MessagingError::EndpointNotFound { token: *token })
         }
     }

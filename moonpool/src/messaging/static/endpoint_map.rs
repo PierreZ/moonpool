@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use moonpool_foundation::{UID, WELL_KNOWN_RESERVED_COUNT, WellKnownToken};
+use moonpool_foundation::{UID, WELL_KNOWN_RESERVED_COUNT, WellKnownToken, sometimes_assert};
 
 use crate::error::MessagingError;
 
@@ -104,6 +104,11 @@ impl EndpointMap {
         }
         self.well_known[index] = Some(receiver);
         self.registration_count += 1;
+        sometimes_assert!(
+            well_known_registered,
+            true,
+            "Well-known endpoint registered successfully"
+        );
         Ok(())
     }
 
@@ -141,7 +146,13 @@ impl EndpointMap {
         }
 
         // Fall back to dynamic lookup
-        self.dynamic.get(token).cloned()
+        let result = self.dynamic.get(token).cloned();
+        sometimes_assert!(
+            dynamic_lookup_found,
+            result.is_some(),
+            "Dynamic endpoint lookup succeeds"
+        );
+        result
     }
 
     /// Remove a dynamic endpoint.
@@ -154,12 +165,22 @@ impl EndpointMap {
     pub fn remove(&mut self, token: &UID) -> Option<Rc<dyn MessageReceiver>> {
         if token.is_well_known() {
             // Well-known endpoints cannot be removed
+            sometimes_assert!(
+                well_known_removal_rejected,
+                true,
+                "Well-known endpoint removal correctly rejected"
+            );
             return None;
         }
 
         let result = self.dynamic.remove(token);
         if result.is_some() {
             self.deregistration_count += 1;
+            sometimes_assert!(
+                endpoint_deregistered,
+                true,
+                "Dynamic endpoint deregistered successfully"
+            );
         }
         result
     }

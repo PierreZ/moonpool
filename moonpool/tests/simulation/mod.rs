@@ -1,0 +1,81 @@
+//! Simulation test infrastructure for moonpool messaging layer.
+//!
+//! Provides shared utilities for testing EndpointMap, FlowTransport,
+//! and NetNotifiedQueue under chaos conditions.
+
+pub mod invariants;
+pub mod operations;
+#[cfg(test)]
+pub mod test_scenarios;
+pub mod workloads;
+
+use serde::{Deserialize, Serialize};
+
+/// Test message format for tracking delivery via FlowTransport.
+///
+/// Uses JSON serialization since NetNotifiedQueue uses serde_json.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestMessage {
+    /// Monotonically increasing sequence ID per sender
+    pub seq_id: u64,
+    /// Identifier for the sender workload
+    pub sender_id: String,
+    /// Whether this was sent via reliable queue
+    pub reliable: bool,
+    /// Optional payload for size testing
+    #[serde(default)]
+    pub payload: Vec<u8>,
+}
+
+impl TestMessage {
+    /// Create a new test message.
+    pub fn new(seq_id: u64, sender_id: impl Into<String>, reliable: bool) -> Self {
+        Self {
+            seq_id,
+            sender_id: sender_id.into(),
+            reliable,
+            payload: Vec::new(),
+        }
+    }
+
+    /// Create a test message with payload of specified size.
+    pub fn with_payload(
+        seq_id: u64,
+        sender_id: impl Into<String>,
+        reliable: bool,
+        payload_size: usize,
+    ) -> Self {
+        Self {
+            seq_id,
+            sender_id: sender_id.into(),
+            reliable,
+            payload: vec![0xAB; payload_size],
+        }
+    }
+
+    /// Serialize to JSON bytes for sending via FlowTransport.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("TestMessage serialization should not fail")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_message_serialization_roundtrip() {
+        let msg = TestMessage::with_payload(42, "client_1", true, 100);
+        let bytes = msg.to_bytes();
+        let decoded: TestMessage = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn test_message_minimal() {
+        let msg = TestMessage::new(0, "", false);
+        let bytes = msg.to_bytes();
+        let decoded: TestMessage = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(msg, decoded);
+    }
+}

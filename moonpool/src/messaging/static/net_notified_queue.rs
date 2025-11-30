@@ -15,7 +15,7 @@ use std::task::{Context, Poll, Waker};
 
 use serde::de::DeserializeOwned;
 
-use moonpool_foundation::{Endpoint, NetworkAddress, UID};
+use moonpool_foundation::{Endpoint, NetworkAddress, UID, sometimes_assert};
 
 use super::endpoint_map::MessageReceiver;
 
@@ -168,16 +168,30 @@ impl<T: DeserializeOwned + 'static> MessageReceiver for NetNotifiedQueue<T> {
         // Deserialize the message
         match serde_json::from_slice::<T>(payload) {
             Ok(message) => {
+                sometimes_assert!(
+                    deserialization_success,
+                    true,
+                    "Message deserialized successfully"
+                );
                 let mut inner = self.inner.borrow_mut();
                 inner.queue.push_back(message);
                 inner.messages_received += 1;
 
                 // Wake all waiters
+                let had_waiters = !inner.wakers.is_empty();
                 for waker in inner.wakers.drain(..) {
                     waker.wake();
                 }
+                if had_waiters {
+                    sometimes_assert!(waker_notified, true, "Wakers notified on new message");
+                }
             }
             Err(e) => {
+                sometimes_assert!(
+                    deserialization_failed,
+                    true,
+                    "Message deserialization failed"
+                );
                 // Log error and drop the message
                 tracing::warn!(
                     endpoint = %self.endpoint.token,
@@ -203,15 +217,18 @@ impl<T> Future for RecvFuture<'_, T> {
 
         // Try to get a message
         if let Some(message) = inner.queue.pop_front() {
+            sometimes_assert!(message_available, true, "Message available immediately");
             return Poll::Ready(Some(message));
         }
 
         // If closed and empty, return None
         if inner.closed {
+            sometimes_assert!(queue_closed_empty, true, "Queue closed and empty");
             return Poll::Ready(None);
         }
 
         // Register waker and wait
+        sometimes_assert!(recv_pending, true, "Recv waiting for message");
         inner.wakers.push(cx.waker().clone());
         Poll::Pending
     }
