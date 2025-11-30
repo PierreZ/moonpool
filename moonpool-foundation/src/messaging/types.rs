@@ -7,6 +7,8 @@
 
 use std::net::IpAddr;
 
+use serde::{Deserialize, Serialize};
+
 /// 128-bit unique identifier (FDB-compatible).
 ///
 /// FDB pattern: well-known UIDs use `first = u64::MAX` (equivalent to -1 in C++).
@@ -25,7 +27,7 @@ use std::net::IpAddr;
 /// let uid = UID::new(0x123, 0x456);
 /// assert!(!uid.is_well_known());
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct UID {
     /// First 64 bits. For well-known UIDs, this is `u64::MAX`.
     pub first: u64,
@@ -109,7 +111,7 @@ pub mod flags {
 /// let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4500);
 /// assert_eq!(addr.to_string(), "127.0.0.1:4500");
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NetworkAddress {
     /// IP address (IPv4 or IPv6).
     pub ip: IpAddr,
@@ -220,7 +222,7 @@ pub enum NetworkAddressParseError {
 ///
 /// assert!(endpoint.token.is_well_known());
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Endpoint {
     /// Network address for this endpoint.
     pub address: NetworkAddress,
@@ -377,5 +379,71 @@ mod tests {
         // Tokens should be different
         assert_ne!(base.token, adj1.token);
         assert_ne!(adj1.token, adj2.token);
+    }
+
+    #[test]
+    fn test_uid_serde_roundtrip() {
+        let uid = UID::new(0x123456789ABCDEF0, 0xFEDCBA9876543210);
+        let json = serde_json::to_string(&uid).expect("serialize");
+        let decoded: UID = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(uid, decoded);
+    }
+
+    #[test]
+    fn test_uid_well_known_serde() {
+        let uid = UID::well_known(42);
+        let json = serde_json::to_string(&uid).expect("serialize");
+        let decoded: UID = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(uid, decoded);
+        assert!(decoded.is_well_known());
+    }
+
+    #[test]
+    fn test_network_address_serde_ipv4() {
+        let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 4500);
+        let json = serde_json::to_string(&addr).expect("serialize");
+        let decoded: NetworkAddress = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(addr, decoded);
+    }
+
+    #[test]
+    fn test_network_address_serde_ipv6() {
+        let addr = NetworkAddress::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 4500);
+        let json = serde_json::to_string(&addr).expect("serialize");
+        let decoded: NetworkAddress = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(addr, decoded);
+    }
+
+    #[test]
+    fn test_network_address_serde_with_flags() {
+        let addr = NetworkAddress::with_flags(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            4500,
+            flags::FLAG_TLS | flags::FLAG_PUBLIC,
+        );
+        let json = serde_json::to_string(&addr).expect("serialize");
+        let decoded: NetworkAddress = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(addr, decoded);
+        assert!(decoded.is_tls());
+        assert!(decoded.is_public());
+    }
+
+    #[test]
+    fn test_endpoint_serde_roundtrip() {
+        let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4500);
+        let endpoint = Endpoint::new(addr, UID::new(100, 200));
+        let json = serde_json::to_string(&endpoint).expect("serialize");
+        let decoded: Endpoint = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(endpoint, decoded);
+    }
+
+    #[test]
+    fn test_endpoint_well_known_serde() {
+        let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4500);
+        let endpoint = Endpoint::well_known(addr, 1);
+        let json = serde_json::to_string(&endpoint).expect("serialize");
+        let decoded: Endpoint = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(endpoint, decoded);
+        assert!(decoded.token.is_well_known());
     }
 }
