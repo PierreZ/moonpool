@@ -22,9 +22,7 @@
 
 use std::rc::Rc;
 
-use moonpool_foundation::{
-    Endpoint, NetworkAddress, NetworkProvider, TaskProvider, TimeProvider, UID,
-};
+use moonpool_foundation::{Endpoint, NetworkProvider, TaskProvider, TimeProvider, UID};
 use moonpool_traits::MessageCodec;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
