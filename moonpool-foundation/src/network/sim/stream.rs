@@ -389,8 +389,15 @@ impl Future for AcceptFuture {
                     delay,
                 );
 
+                // FDB Pattern (sim2.actor.cpp:1149-1175):
+                // Return the synthesized ephemeral peer address, not the client's real address.
+                // This simulates real TCP where servers see client ephemeral ports.
+                let peer_addr = sim
+                    .get_connection_peer_address(connection_id)
+                    .unwrap_or_else(|| "unknown:0".to_string());
+
                 let stream = SimTcpStream::new(self.sim.clone(), connection_id);
-                Poll::Ready(Ok((stream, "127.0.0.1:12345".to_string())))
+                Poll::Ready(Ok((stream, peer_addr)))
             }
             Ok(None) => {
                 // No connection available yet - register waker for when connection becomes available

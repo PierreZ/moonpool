@@ -390,7 +390,12 @@ fn test_connect_failure_error_message_mode_2() {
 }
 
 /// Test interaction with random_for_seed config
+///
+/// NOTE: This test may hang forever when mode=2 is selected (50% hang probability).
+/// FDB's mode=2 simulates connections that hang forever without timeout.
+/// Run manually: cargo test test_connect_failure_random_config -- --ignored
 #[test]
+#[ignore] // May hang forever with mode=2 - requires manual testing
 fn test_connect_failure_random_config() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()

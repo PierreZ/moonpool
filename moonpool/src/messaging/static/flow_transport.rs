@@ -652,9 +652,12 @@ async fn listen_task<N, T, TP>(
 /// Note: FDB's connectionIncoming waits for ConnectPacket to identify the peer.
 /// We simplify by using the peer address directly since SimNetworkProvider
 /// already provides the peer address.
+///
+/// FDB Pattern: Use Peer::new_incoming() with the accepted stream, not Peer::new().
+/// This uses the already-established connection rather than trying to connect back.
 fn connection_incoming<N, T, TP>(
     transport_weak: Weak<FlowTransport<N, T, TP>>,
-    _stream: N::TcpStream,
+    stream: N::TcpStream,
     peer_addr: String,
     transport: &FlowTransport<N, T, TP>,
 ) where
@@ -669,42 +672,44 @@ fn connection_incoming<N, T, TP>(
 
     // Check if we already have a peer for this address (FDB: getOrOpenPeer in connectionReader:1555)
     // For incoming connections, we store in incoming_peers to avoid conflicts with outgoing peers
+    //
+    // Note: Unlike outgoing peers which can be reused, incoming peers with new streams
+    // should replace the old one since the old connection is stale.
     let peer = {
         let data = transport.data.borrow();
-        if let Some(existing) = data.incoming_peers.get(&peer_addr) {
+        if data.incoming_peers.contains_key(&peer_addr) {
             tracing::debug!(
-                "connection_incoming: reusing existing incoming peer for {}",
+                "connection_incoming: replacing stale incoming peer for {}",
                 peer_addr
             );
-            Rc::clone(existing)
-        } else {
-            drop(data); // Release borrow
-
-            // Create new peer for this connection
-            // Note: In Step 3, we'll use Peer::new_incoming() with the stream
-            // For now, create a regular peer (it will connect back)
-            let peer = Peer::new(
-                transport.network.clone(),
-                transport.time.clone(),
-                transport.task_provider.clone(),
-                peer_addr.clone(),
-                transport.peer_config.clone(),
-            );
-            let peer = Rc::new(RefCell::new(peer));
-
-            // Store in incoming_peers
-            transport
-                .data
-                .borrow_mut()
-                .incoming_peers
-                .insert(peer_addr.clone(), Rc::clone(&peer));
-
-            tracing::debug!(
-                "connection_incoming: created new incoming peer for {}",
-                peer_addr
-            );
-            peer
         }
+        drop(data); // Release borrow
+
+        // FDB Pattern: Use Peer::new_incoming() with the accepted stream
+        // (FlowTransport.actor.cpp:1123 Peer::onIncomingConnection)
+        // This uses the already-established connection rather than trying to connect back.
+        let peer = Peer::new_incoming(
+            transport.network.clone(),
+            transport.time.clone(),
+            transport.task_provider.clone(),
+            peer_addr.clone(),
+            stream,
+            transport.peer_config.clone(),
+        );
+        let peer = Rc::new(RefCell::new(peer));
+
+        // Store in incoming_peers (replaces any existing stale peer)
+        transport
+            .data
+            .borrow_mut()
+            .incoming_peers
+            .insert(peer_addr.clone(), Rc::clone(&peer));
+
+        tracing::debug!(
+            "connection_incoming: created new incoming peer for {}",
+            peer_addr
+        );
+        peer
     };
 
     // Spawn connection_reader to handle incoming packets

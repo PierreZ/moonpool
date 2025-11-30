@@ -350,19 +350,17 @@ fn debug_specific_seed() {
 // Multi-Node RPC Tests (Phase 12 Step 7d)
 // ============================================================================
 //
-// NOTE: These tests require further work on the underlying transport layer:
-// 1. connection_incoming() currently creates Peer::new() (outbound) instead of
-//    using Peer::new_incoming() with the accepted stream
-// 2. SimTcpListener returns placeholder address "127.0.0.1:12345" instead of
-//    tracking actual peer addresses
+// These tests verify RPC across separate nodes with actual network transport.
 //
-// Once those are fixed, remove #[ignore] from these tests.
-// See: moonpool/src/messaging/static/flow_transport.rs:655-715
-// See: moonpool-foundation/src/network/sim/stream.rs:393
+// Key implementation details (FDB patterns):
+// - connection_incoming() uses Peer::new_incoming() with the accepted stream
+// - SimTcpListener returns synthesized ephemeral addresses (FDB sim2.actor.cpp:1149-1175)
+// - Server-side connections see client ephemeral ports, not identity addresses
+// See: moonpool/src/messaging/static/flow_transport.rs:655-720
+// See: moonpool-foundation/src/network/sim/stream.rs:392-400
 
 /// Test multi-node RPC with 1 client and 1 server - basic connectivity.
 #[test]
-#[ignore] // TODO: Requires connection_incoming to use Peer::new_incoming with accepted stream
 fn test_multi_node_rpc_1x1() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -400,7 +398,7 @@ fn test_multi_node_rpc_1x1() {
 
 /// Test multi-node RPC with 2 clients and 1 server - verifies load handling.
 #[test]
-#[ignore] // TODO: Requires connection_incoming to use Peer::new_incoming with accepted stream
+#[ignore] // TODO: Timeout - listen_task stuck in shutdown loop, needs investigation
 fn test_multi_node_rpc_2x1() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -450,7 +448,6 @@ fn test_multi_node_rpc_2x1() {
 
 /// Chaos test for multi-node RPC - runs until sometimes_assert! coverage.
 #[test]
-#[ignore] // TODO: Requires connection_incoming to use Peer::new_incoming with accepted stream
 fn slow_simulation_multi_node_rpc() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)

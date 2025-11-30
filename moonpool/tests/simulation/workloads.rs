@@ -711,8 +711,9 @@ where
             }
         }
 
-        // Validate invariants after each operation
-        invariants.borrow().validate_always();
+        // Note: Server does NOT call validate_always() - that method checks if responses
+        // correspond to requests WE sent, but the server doesn't send requests.
+        // Server-side validation happens via cross-node invariants in MultiNodeRpcInvariants.
 
         // Publish state for cross-node validation
         state_registry.register_state(

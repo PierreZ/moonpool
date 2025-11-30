@@ -45,6 +45,17 @@ pub struct ConnectionState {
     /// Remote IP address for this connection
     pub remote_ip: Option<IpAddr>,
 
+    /// Peer address as seen by this connection.
+    ///
+    /// FDB Pattern (sim2.actor.cpp:1149-1175):
+    /// - For client-side connections: the destination address (server's listening address)
+    /// - For server-side connections: synthesized ephemeral address (random IP + port 40000-60000)
+    ///
+    /// This simulates real TCP behavior where servers see client ephemeral ports,
+    /// not the client's identity address. As FDB notes: "In the case of an incoming
+    /// connection, this may not be an address we can connect to!"
+    pub peer_address: String,
+
     /// FIFO buffer for incoming data that hasn't been read by the application yet.
     pub receive_buffer: VecDeque<u8>,
 

@@ -13,6 +13,16 @@ test-threads = "num-cpus"
 filter = 'test(slow_simulation)'
 slow-timeout = { period = "10m", terminate-after = 5 }
 
+# Multi-node RPC tests may require network simulation time
+[[profile.default.overrides]]
+filter = 'test(multi_node_rpc)'
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+# Connect failure tests with mode 2 can hang forever (FDB pattern)
+[[profile.default.overrides]]
+filter = 'test(connect_failure_random)'
+slow-timeout = { period = "10s", terminate-after = 2 }
+
 [profile.default.junit]
 # Store test results
 path = "target/nextest/default/junit.xml"

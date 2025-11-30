@@ -1167,68 +1167,44 @@ The following are deferred per user's "minimal first" preference:
 
 **Validation**: 92 tests pass, fmt clean, clippy clean
 
-### 7d: Multi-Node RPC Simulation Tests (In Progress)
+### 7d: Multi-Node RPC Simulation Tests ✅ DONE
 
 **Goal**: Test RPC across separate nodes with actual network transport.
 
-**Status**: Infrastructure complete, tests blocked on transport layer fixes.
+**Status**: Complete - transport layer fixes implemented, tests passing.
 
-**Completed Infrastructure**:
-- ✅ `FlowTransport::listen()` - Server listener using FDB pattern (FlowTransport.actor.cpp:1646)
-- ✅ `connection_incoming()` - Accept and spawn connection_reader (FlowTransport.actor.cpp:1604-1644)
-- ✅ `connection_reader()` - Background task to read from peer and dispatch (FlowTransport.actor.cpp:1534-1604)
-- ✅ `Peer::take_receiver()` - Safe ownership pattern for RefCell-across-await (like TcpStream::into_split)
-- ✅ `set_weak_self()` - Self-reference pattern for spawning from FlowTransport
-- ✅ `multi_node_rpc_server_workload()` - Server listens and processes RPC requests
-- ✅ `multi_node_rpc_client_workload()` - Client connects and sends RPC requests
-- ✅ `MultiNodeRpcInvariants` - Cross-node validation via StateRegistry
-- ✅ Test scenarios: 1x1, 2x1, slow_simulation_multi_node_rpc
+**Implementation** (FDB patterns):
 
-**Blocking Issues** (tests marked `#[ignore]`):
+1. **`connection_incoming()` now uses `Peer::new_incoming(stream)`**
+   - Location: `moonpool/src/messaging/static/flow_transport.rs:655-720`
+   - Uses accepted TCP stream instead of creating outbound connection
+   - Follows FDB FlowTransport.actor.cpp:1123 `Peer::onIncomingConnection`
 
-1. **connection_incoming uses Peer::new() instead of Peer::new_incoming()**
-   - Location: `moonpool/src/messaging/static/flow_transport.rs:683-692`
-   - Problem: Creates outbound connection instead of using accepted stream
-   - Fix needed: Pass accepted stream to `Peer::new_incoming()` and inject it
+2. **`SimTcpListener` returns synthesized ephemeral addresses**
+   - FDB Pattern (sim2.actor.cpp:1149-1175): Server-side connections see synthesized ephemeral addresses
+   - IP: base client IP + random offset (0-255)
+   - Port: random in range 40000-60000
+   - As FDB notes: "In the case of an incoming connection, this may not be an address we can connect to!"
 
-2. **SimTcpListener returns placeholder address**
-   - Location: `moonpool-foundation/src/network/sim/stream.rs:393`
-   - Problem: Returns `"127.0.0.1:12345"` instead of actual peer address
-   - Fix needed: Track source address in connection state
+3. **`ConnectionState` now tracks `peer_address`**
+   - For client-side: server's listening address
+   - For server-side: synthesized ephemeral address
+   - Stored during `create_connection_pair()`
 
-**Fix Plan**:
+**Files Modified**:
+- `moonpool/src/messaging/static/flow_transport.rs` - Use `Peer::new_incoming(stream)`
+- `moonpool-foundation/src/sim/state.rs` - Add `peer_address` field
+- `moonpool-foundation/src/sim/world.rs` - Synthesize ephemeral addresses, add getter
+- `moonpool-foundation/src/network/sim/stream.rs` - Return stored peer address
+- `moonpool/tests/simulation/workloads.rs` - Fix server invariant validation
+- `.config/nextest.toml` - Add timeout overrides for multi-node tests
 
-```rust
-// In connection_incoming():
-fn connection_incoming<N, T, TP>(
-    transport_weak: Weak<FlowTransport<N, T, TP>>,
-    stream: N::TcpStream,  // Use the accepted stream!
-    peer_addr: String,
-    transport: &FlowTransport<N, T, TP>,
-) {
-    // Use Peer::new_incoming() with the stream
-    let peer = Peer::new_incoming(
-        transport.network.clone(),
-        transport.time.clone(),
-        transport.task_provider.clone(),
-        peer_addr.clone(),
-        transport.peer_config.clone(),
-        stream,  // Pass the accepted connection
-    );
-    // ... rest unchanged
-}
+**Tests Enabled**:
+- `test_multi_node_rpc_1x1` - Basic 1 client + 1 server ✅
+- `test_multi_node_rpc_2x1` - Load test 2 clients + 1 server ✅
+- `slow_simulation_multi_node_rpc` - Full chaos testing ✅
 
-// In SimTcpListener::poll_accept():
-// Need to track actual peer address in connection state
-Poll::Ready(Ok((stream, actual_peer_addr)))
-```
-
-**Tests Added** (all `#[ignore]` pending fixes):
-- `test_multi_node_rpc_1x1` - Basic 1 client + 1 server
-- `test_multi_node_rpc_2x1` - Load test 2 clients + 1 server
-- `slow_simulation_multi_node_rpc` - Full chaos testing
-
-**sometimes_assert! coverage** (new multi-node assertions):
+**sometimes_assert! coverage** (multi-node assertions):
 - multi_node_server_listening
 - multi_node_server_received_request
 - multi_node_server_sent_response
@@ -1239,7 +1215,7 @@ Poll::Ready(Ok((stream, actual_peer_addr)))
 - multi_node_requests_sent
 - multi_node_responses_sent
 
-**Validation**: 96 tests pass + 4 skipped (3 multi-node + 1 debug), fmt clean, clippy clean
+**Validation**: 317 tests pass, fmt clean, clippy clean
 
 ## Step 8: Migrate Existing Tests (Deferred)
 1. Update ping-pong tests to use new RPC layer

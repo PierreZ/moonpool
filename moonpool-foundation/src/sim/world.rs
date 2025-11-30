@@ -498,6 +498,12 @@ impl SimWorld {
     }
 
     /// Create a bidirectional TCP connection pair for client-server communication.
+    ///
+    /// FDB Pattern (sim2.actor.cpp:1149-1175):
+    /// - Client connection stores server's real address as peer_address
+    /// - Server connection stores synthesized ephemeral address (random IP + port 40000-60000)
+    ///
+    /// This simulates real TCP behavior where servers see client ephemeral ports.
     pub(crate) fn create_connection_pair(
         &self,
         client_addr: String,
@@ -518,7 +524,38 @@ impl SimWorld {
         let client_ip = NetworkState::parse_ip_from_addr(&client_addr);
         let server_ip = NetworkState::parse_ip_from_addr(&server_addr);
 
+        // FDB Pattern: Synthesize ephemeral address for server-side connection
+        // sim2.actor.cpp:1149-1175: randomInt(0,256) for IP offset, randomInt(40000,60000) for port
+        // Use thread-local sim_random_range for deterministic randomness
+        let ephemeral_peer_addr = match client_ip {
+            Some(std::net::IpAddr::V4(ipv4)) => {
+                let octets = ipv4.octets();
+                let ip_offset = sim_random_range(0u32..256) as u8;
+                let new_last_octet = octets[3].wrapping_add(ip_offset);
+                let ephemeral_ip =
+                    std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], new_last_octet);
+                let ephemeral_port = sim_random_range(40000u16..60000);
+                format!("{}:{}", ephemeral_ip, ephemeral_port)
+            }
+            Some(std::net::IpAddr::V6(ipv6)) => {
+                // For IPv6, just modify the last segment
+                let segments = ipv6.segments();
+                let mut new_segments = segments;
+                let ip_offset = sim_random_range(0u16..256);
+                new_segments[7] = new_segments[7].wrapping_add(ip_offset);
+                let ephemeral_ip = std::net::Ipv6Addr::from(new_segments);
+                let ephemeral_port = sim_random_range(40000u16..60000);
+                format!("[{}]:{}", ephemeral_ip, ephemeral_port)
+            }
+            None => {
+                // Fallback: use client address with random port
+                let ephemeral_port = sim_random_range(40000u16..60000);
+                format!("unknown:{}", ephemeral_port)
+            }
+        };
+
         // Create paired connections
+        // Client stores server's real address as peer_address
         inner.network.connections.insert(
             client_id,
             ConnectionState {
@@ -526,6 +563,7 @@ impl SimWorld {
                 addr: client_addr,
                 local_ip: client_ip,
                 remote_ip: server_ip,
+                peer_address: server_addr.clone(),
                 receive_buffer: VecDeque::new(),
                 paired_connection: Some(server_id),
                 send_buffer: VecDeque::new(),
@@ -537,6 +575,7 @@ impl SimWorld {
             },
         );
 
+        // Server stores synthesized ephemeral address as peer_address
         inner.network.connections.insert(
             server_id,
             ConnectionState {
@@ -544,6 +583,7 @@ impl SimWorld {
                 addr: server_addr,
                 local_ip: server_ip,
                 remote_ip: client_ip,
+                peer_address: ephemeral_peer_addr,
                 receive_buffer: VecDeque::new(),
                 paired_connection: Some(client_id),
                 send_buffer: VecDeque::new(),
@@ -623,6 +663,26 @@ impl SimWorld {
     ) -> SimulationResult<Option<ConnectionId>> {
         let mut inner = self.inner.borrow_mut();
         Ok(inner.network.pending_connections.remove(addr))
+    }
+
+    /// Get the peer address for a connection.
+    ///
+    /// FDB Pattern (sim2.actor.cpp):
+    /// - For client-side connections: returns server's listening address
+    /// - For server-side connections: returns synthesized ephemeral address
+    ///
+    /// The returned address may not be connectable for server-side connections,
+    /// matching real TCP behavior where servers see client ephemeral ports.
+    pub(crate) fn get_connection_peer_address(
+        &self,
+        connection_id: ConnectionId,
+    ) -> Option<String> {
+        let inner = self.inner.borrow();
+        inner
+            .network
+            .connections
+            .get(&connection_id)
+            .map(|conn| conn.peer_address.clone())
     }
 
     /// Sleep for the specified duration in simulation time.
