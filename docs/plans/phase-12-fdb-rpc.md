@@ -1055,27 +1055,53 @@ But we do NOT validate:
 
 This requires StateRegistry integration in workloads, which can be implemented independently as a follow-up task.
 
-## Step 5: Moonpool Messaging Module Structure
-1. Create `moonpool/src/messaging/mod.rs`
-2. Create `moonpool/src/messaging/static/mod.rs`
-3. Create `moonpool/src/messaging/virtual/mod.rs` (placeholder)
-4. Update `moonpool/Cargo.toml` to depend on moonpool-foundation
+## Step 5: Moonpool Messaging Module Structure ✅ DONE
+1. ✅ Create `moonpool/src/messaging/mod.rs`
+2. ✅ Create `moonpool/src/messaging/static/mod.rs`
+3. ✅ Create `moonpool/src/messaging/virtual/mod.rs` (placeholder - deferred to future phase)
+4. ✅ Update `moonpool/Cargo.toml` to depend on moonpool-foundation
 
-## Step 6: Moonpool Static Messaging Implementation
-1. Create `moonpool/src/messaging/static/endpoint_map.rs`
-2. Create `moonpool/src/messaging/static/flow_transport.rs`
-3. Create `moonpool/src/messaging/static/net_notified_queue.rs`
-4. Create `moonpool/src/messaging/static/request_stream.rs`
-5. Create `moonpool/src/messaging/static/reply_promise.rs`
-6. Create `moonpool/src/messaging/static/interface.rs`
+## Step 6: Moonpool Static Messaging Implementation (Phase A: Core) ✅ DONE
+
+### 6.1 EndpointMap ✅ DONE
+- ✅ O(1) array lookup for well-known tokens (0-63)
+- ✅ HashMap for dynamic endpoints
+- ✅ `MessageReceiver` trait for byte-level dispatch
+- ✅ 11 unit tests
+
+### 6.2 FlowTransport ✅ DONE
+- ✅ Central coordinator managing peers and endpoints
+- ✅ `TransportData` struct for internal state (FDB pattern)
+- ✅ Synchronous send API (FDB: never await on send)
+- ✅ Local delivery optimization (same address = direct dispatch)
+- ✅ Lazy peer creation via `get_or_open_peer()` (FDB connectionKeeper pattern)
+- ✅ 7 unit tests
+
+### 6.3 NetNotifiedQueue ✅ DONE
+- ✅ Type-safe message queue with async notification
+- ✅ Waker-based async `recv()` future
+- ✅ JSON deserialization on receive
+- ✅ Queue closing with proper waker notification
+- ✅ `SharedNetNotifiedQueue` wrapper for registration
+- ✅ 11 unit tests
+
+### Phase B: Request-Response (Deferred)
+The following are deferred per user's "minimal first" preference:
+- `request_stream.rs` - RequestStream<T>
+- `reply_promise.rs` - ReplyPromise<T> + networkSender
+- `interface.rs` - Interface macro
 
 ## Step 7: Static Messaging Tests
-1. Unit tests for EndpointMap
-2. Unit tests for FlowTransport
-3. Integration tests for RequestStream/ReplyPromise
-4. Simulation tests for full RPC flow
+### 7a: Core Infrastructure Tests (Pending)
+1. ⏳ Simulation tests for EndpointMap + FlowTransport + NetNotifiedQueue
+2. ⏳ Chaos testing with connection failures
+3. ⏳ Local delivery under chaos
 
-## Step 8: Migrate Existing Tests
+### 7b: Request-Response Tests (Deferred with Phase B)
+1. Integration tests for RequestStream/ReplyPromise
+2. Simulation tests for full RPC flow
+
+## Step 8: Migrate Existing Tests (Deferred)
 1. Update ping-pong tests to use new RPC layer
 2. Verify all simulation tests pass
 3. Verify determinism is preserved
