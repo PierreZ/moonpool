@@ -9,8 +9,9 @@ use moonpool_foundation::{IterationControl, SimulationBuilder, SimulationReport}
 
 use super::operations::ClientOpWeights;
 use super::workloads::{
-    LocalDeliveryConfig, RpcWorkloadConfig, endpoint_lifecycle_workload, local_delivery_workload,
-    rpc_workload,
+    LocalDeliveryConfig, MultiNodeClientConfig, MultiNodeServerConfig, RpcWorkloadConfig,
+    endpoint_lifecycle_workload, local_delivery_workload, multi_node_rpc_client_workload,
+    multi_node_rpc_server_workload, rpc_workload,
 };
 
 // ============================================================================
@@ -339,6 +340,146 @@ fn debug_specific_seed() {
                     LocalDeliveryConfig::default(),
                 )
             }),
+    );
+
+    println!("{}", report);
+    assert_simulation_success(&report);
+}
+
+// ============================================================================
+// Multi-Node RPC Tests (Phase 12 Step 7d)
+// ============================================================================
+//
+// NOTE: These tests require further work on the underlying transport layer:
+// 1. connection_incoming() currently creates Peer::new() (outbound) instead of
+//    using Peer::new_incoming() with the accepted stream
+// 2. SimTcpListener returns placeholder address "127.0.0.1:12345" instead of
+//    tracking actual peer addresses
+//
+// Once those are fixed, remove #[ignore] from these tests.
+// See: moonpool/src/messaging/static/flow_transport.rs:655-715
+// See: moonpool-foundation/src/network/sim/stream.rs:393
+
+/// Test multi-node RPC with 1 client and 1 server - basic connectivity.
+#[test]
+#[ignore] // TODO: Requires connection_incoming to use Peer::new_incoming with accepted stream
+fn test_multi_node_rpc_1x1() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
+
+    let report = run_simulation(
+        SimulationBuilder::new()
+            // Server must be registered first to get IP 10.0.0.1
+            .register_workload("server", |random, network, time, task, topology| {
+                multi_node_rpc_server_workload(
+                    random,
+                    network,
+                    time,
+                    task,
+                    topology,
+                    MultiNodeServerConfig::happy_path(),
+                )
+            })
+            .register_workload("client", |random, network, time, task, topology| {
+                multi_node_rpc_client_workload(
+                    random,
+                    network,
+                    time,
+                    task,
+                    topology,
+                    MultiNodeClientConfig::happy_path(),
+                )
+            })
+            .set_iterations(5),
+    );
+
+    println!("{}", report);
+    assert_simulation_success(&report);
+}
+
+/// Test multi-node RPC with 2 clients and 1 server - verifies load handling.
+#[test]
+#[ignore] // TODO: Requires connection_incoming to use Peer::new_incoming with accepted stream
+fn test_multi_node_rpc_2x1() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
+
+    let report = run_simulation(
+        SimulationBuilder::new()
+            // Server gets IP 10.0.0.1
+            .register_workload("server", |random, network, time, task, topology| {
+                multi_node_rpc_server_workload(
+                    random,
+                    network,
+                    time,
+                    task,
+                    topology,
+                    MultiNodeServerConfig::happy_path(),
+                )
+            })
+            // Client 1 gets IP 10.0.0.2
+            .register_workload("client1", |random, network, time, task, topology| {
+                multi_node_rpc_client_workload(
+                    random,
+                    network,
+                    time,
+                    task,
+                    topology,
+                    MultiNodeClientConfig::happy_path(),
+                )
+            })
+            // Client 2 gets IP 10.0.0.3
+            .register_workload("client2", |random, network, time, task, topology| {
+                multi_node_rpc_client_workload(
+                    random,
+                    network,
+                    time,
+                    task,
+                    topology,
+                    MultiNodeClientConfig::happy_path(),
+                )
+            })
+            .set_iterations(5),
+    );
+
+    println!("{}", report);
+    assert_simulation_success(&report);
+}
+
+/// Chaos test for multi-node RPC - runs until sometimes_assert! coverage.
+#[test]
+#[ignore] // TODO: Requires connection_incoming to use Peer::new_incoming with accepted stream
+fn slow_simulation_multi_node_rpc() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
+
+    let report = run_simulation(
+        SimulationBuilder::new()
+            .use_random_config() // Enable chaos
+            .register_workload("server", |random, network, time, task, topology| {
+                multi_node_rpc_server_workload(
+                    random,
+                    network,
+                    time,
+                    task,
+                    topology,
+                    MultiNodeServerConfig::default(),
+                )
+            })
+            .register_workload("client", |random, network, time, task, topology| {
+                multi_node_rpc_client_workload(
+                    random,
+                    network,
+                    time,
+                    task,
+                    topology,
+                    MultiNodeClientConfig::default(),
+                )
+            })
+            .set_iteration_control(IterationControl::UntilAllSometimesReached(1000)),
     );
 
     println!("{}", report);
