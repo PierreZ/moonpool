@@ -15,7 +15,17 @@
 mod endpoint_map;
 mod flow_transport;
 mod net_notified_queue;
+mod reply_error;
+mod reply_future;
+mod reply_promise;
+mod request;
+mod request_stream;
 
 pub use endpoint_map::{EndpointMap, MessageReceiver};
 pub use flow_transport::FlowTransport;
 pub use net_notified_queue::{NetNotifiedQueue, RecvFuture, SharedNetNotifiedQueue};
+pub use reply_error::ReplyError;
+pub use reply_future::ReplyFuture;
+pub use reply_promise::ReplyPromise;
+pub use request::send_request;
+pub use request_stream::{RequestEnvelope, RequestStream};

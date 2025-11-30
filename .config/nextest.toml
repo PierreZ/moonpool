@@ -5,8 +5,8 @@ slow-timeout = { period = "1s", terminate-after = 2 }
 failure-output = "immediate"
 success-output = "never"
 
-# Run tests in parallel but limit concurrency for simulation tests
-test-threads = 1
+# Run tests in parallel
+test-threads = "num-cpus"
 
 # Slow simulation tests (using SimulationBuilder) get extra time
 [[profile.default.overrides]]
