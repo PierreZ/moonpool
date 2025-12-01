@@ -398,7 +398,6 @@ fn test_multi_node_rpc_1x1() {
 
 /// Test multi-node RPC with 2 clients and 1 server - verifies load handling.
 #[test]
-#[ignore] // TODO: Timeout - listen_task stuck in shutdown loop, needs investigation
 fn test_multi_node_rpc_2x1() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)

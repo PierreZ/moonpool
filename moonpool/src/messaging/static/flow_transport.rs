@@ -14,6 +14,7 @@ use moonpool_foundation::{
     Endpoint, NetworkAddress, NetworkProvider, Peer, PeerConfig, TaskProvider, TcpListenerTrait,
     TimeProvider, UID, WellKnownToken, sometimes_assert,
 };
+use tokio::sync::watch;
 
 use super::endpoint_map::{EndpointMap, MessageReceiver};
 use crate::error::MessagingError;
@@ -120,6 +121,10 @@ where
     /// Required for `connection_reader` tasks to dispatch back to this transport.
     /// Set via `set_weak_self()` after wrapping in `Rc`.
     weak_self: RefCell<Option<Weak<Self>>>,
+
+    /// Shutdown signal sender. When set to `true`, background tasks (listen_task) should exit.
+    /// Uses watch channel so multiple receivers can observe the same signal.
+    shutdown_tx: watch::Sender<bool>,
 }
 
 /// Statistics for the transport.
@@ -158,6 +163,7 @@ where
     /// transport.set_weak_self(Rc::downgrade(&transport));
     /// ```
     pub fn new(local_address: NetworkAddress, network: N, time: T, task_provider: TP) -> Self {
+        let (shutdown_tx, _) = watch::channel(false);
         Self {
             data: RefCell::new(TransportData::default()),
             local_address,
@@ -166,6 +172,7 @@ where
             task_provider,
             peer_config: PeerConfig::default(),
             weak_self: RefCell::new(None),
+            shutdown_tx,
         }
     }
 
@@ -496,11 +503,38 @@ where
         tracing::info!("FlowTransport: listening on {}", addr_str);
 
         // Spawn listen task (FDB: listen() actor)
+        // Pass shutdown receiver so the task can exit when transport is dropped
         let transport_weak = self.weak_self();
-        self.task_provider
-            .spawn_task("listen", listen_task(transport_weak, listener, addr_str));
+        let shutdown_rx = self.shutdown_tx.subscribe();
+        self.task_provider.spawn_task(
+            "listen",
+            listen_task(transport_weak, listener, addr_str, shutdown_rx),
+        );
 
         Ok(())
+    }
+
+    /// Get a shutdown receiver for background tasks.
+    #[allow(dead_code)]
+    fn shutdown_receiver(&self) -> watch::Receiver<bool> {
+        self.shutdown_tx.subscribe()
+    }
+}
+
+/// Implement Drop to signal shutdown to background tasks.
+///
+/// When FlowTransport is dropped, we signal all background tasks (listen_task)
+/// to exit gracefully. This prevents tasks from being stuck on accept() forever.
+impl<N, T, TP> Drop for FlowTransport<N, T, TP>
+where
+    N: NetworkProvider + 'static,
+    T: TimeProvider + 'static,
+    TP: TaskProvider + 'static,
+{
+    fn drop(&mut self) {
+        tracing::debug!("FlowTransport: signaling shutdown to background tasks");
+        // Signal shutdown - ignore error if no receivers
+        let _ = self.shutdown_tx.send(true);
     }
 }
 
@@ -586,6 +620,7 @@ async fn connection_reader<N, T, TP>(
 /// This is a background task that:
 /// 1. Accepts incoming connections
 /// 2. Spawns `connection_incoming` for each accepted connection
+/// 3. Exits gracefully when shutdown signal is received
 ///
 /// # FDB Reference
 /// From FlowTransport.actor.cpp:1646-1676 listen
@@ -593,6 +628,7 @@ async fn listen_task<N, T, TP>(
     transport: Weak<FlowTransport<N, T, TP>>,
     listener: N::TcpListener,
     listen_addr: String,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
@@ -601,38 +637,64 @@ async fn listen_task<N, T, TP>(
     tracing::debug!("listen_task: started on {}", listen_addr);
 
     loop {
-        // Accept next connection
-        match listener.accept().await {
-            Ok((stream, peer_addr)) => {
-                tracing::debug!(
-                    "listen_task: accepted connection from {} on {}",
-                    peer_addr,
-                    listen_addr
-                );
+        // Use select! to race between accept and shutdown signal
+        tokio::select! {
+            // Bias toward shutdown to ensure timely exit
+            biased;
 
-                // Get transport reference
-                let Some(transport_rc) = transport.upgrade() else {
-                    tracing::debug!("listen_task: transport dropped, exiting");
-                    break;
-                };
-
-                // Handle the incoming connection (FDB: connectionIncoming)
-                connection_incoming(
-                    Rc::downgrade(&transport_rc),
-                    stream,
-                    peer_addr,
-                    &transport_rc,
-                );
-
-                sometimes_assert!(
-                    connection_incoming_accepted,
-                    true,
-                    "listen() accepted incoming connection"
-                );
+            // Check shutdown signal first
+            result = shutdown_rx.changed() => {
+                match result {
+                    Ok(()) if *shutdown_rx.borrow() => {
+                        tracing::debug!("listen_task: shutdown signal received, exiting for {}", listen_addr);
+                        break;
+                    }
+                    Err(_) => {
+                        // Channel closed means transport was dropped
+                        tracing::debug!("listen_task: shutdown channel closed, exiting for {}", listen_addr);
+                        break;
+                    }
+                    _ => {
+                        // Value changed but not to true - continue
+                    }
+                }
             }
-            Err(e) => {
-                tracing::warn!("listen_task: accept error on {}: {:?}", listen_addr, e);
-                // Continue accepting - transient errors are expected
+
+            // Accept next connection
+            accept_result = listener.accept() => {
+                match accept_result {
+                    Ok((stream, peer_addr)) => {
+                        tracing::debug!(
+                            "listen_task: accepted connection from {} on {}",
+                            peer_addr,
+                            listen_addr
+                        );
+
+                        // Get transport reference
+                        let Some(transport_rc) = transport.upgrade() else {
+                            tracing::debug!("listen_task: transport dropped, exiting");
+                            break;
+                        };
+
+                        // Handle the incoming connection (FDB: connectionIncoming)
+                        connection_incoming(
+                            Rc::downgrade(&transport_rc),
+                            stream,
+                            peer_addr,
+                            &transport_rc,
+                        );
+
+                        sometimes_assert!(
+                            connection_incoming_accepted,
+                            true,
+                            "listen() accepted incoming connection"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("listen_task: accept error on {}: {:?}", listen_addr, e);
+                        // Continue accepting - transient errors are expected
+                    }
+                }
             }
         }
     }
