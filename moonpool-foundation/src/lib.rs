@@ -112,9 +112,9 @@ pub use chaos::{
 
 // Network exports
 pub use network::{
-    ChaosConfiguration, NetworkConfiguration, NetworkProvider, Peer, PeerConfig, PeerError,
-    PeerMetrics, PeerReceiver, SimNetworkProvider, TcpListenerTrait, TokioNetworkProvider,
-    sample_duration,
+    ChaosConfiguration, ConnectFailureMode, NetworkConfiguration, NetworkProvider, Peer,
+    PeerConfig, PeerError, PeerMetrics, PeerReceiver, SimNetworkProvider, TcpListenerTrait,
+    TokioNetworkProvider, sample_duration,
 };
 
 // Time provider exports

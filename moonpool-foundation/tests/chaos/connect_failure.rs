@@ -2,20 +2,21 @@
 //!
 //! Tests verify that connection failures:
 //! - Follow FDB's SIM_CONNECT_ERROR_MODE pattern (sim2.actor.cpp:1243-1250)
-//! - Mode 0: Normal operation (no failure injection)
-//! - Mode 1: Always fail with ConnectionRefused when buggified
-//! - Mode 2: 50% fail with error, 50% hang forever (tests timeout handling)
+//! - Disabled: Normal operation (no failure injection)
+//! - AlwaysFail: Always fail with ConnectionRefused when buggified
+//! - Probabilistic: 50% fail with error, 50% hang forever (tests timeout handling)
 //! - Can be disabled via configuration
 //! - Are deterministic across runs with the same seed
 
 use moonpool_foundation::{
-    NetworkConfiguration, NetworkProvider, SimWorld, buggify_init, buggify_reset,
+    ConnectFailureMode, NetworkConfiguration, NetworkProvider, SimWorld, buggify_init,
+    buggify_reset,
 };
 use std::time::Duration;
 
-/// Test that connection failure mode 0 (disabled) works normally
+/// Test that connection failure mode Disabled works normally
 #[test]
-fn test_connect_failure_mode_0_disabled() {
+fn test_connect_failure_mode_disabled() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
@@ -26,7 +27,7 @@ fn test_connect_failure_mode_0_disabled() {
         buggify_init(1.0, 1.0); // Enable buggify
 
         let mut config = NetworkConfiguration::fast_local();
-        config.chaos.connect_failure_mode = 0; // Disabled
+        config.chaos.connect_failure_mode = ConnectFailureMode::Disabled;
 
         let sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
@@ -34,25 +35,25 @@ fn test_connect_failure_mode_0_disabled() {
         let addr = "test-server";
         let _listener = provider.bind(addr).await.unwrap();
 
-        // All connections should succeed with mode 0
+        // All connections should succeed with Disabled mode
         for i in 0..10 {
             let result = provider.connect(addr).await;
             assert!(
                 result.is_ok(),
-                "Connection {} should succeed with mode 0, got {:?}",
+                "Connection {} should succeed with Disabled mode, got {:?}",
                 i,
                 result.err()
             );
         }
 
         buggify_reset();
-        println!("✅ Connection failure mode 0 (disabled) works correctly");
+        println!("✅ Connection failure mode Disabled works correctly");
     });
 }
 
-/// Test that connection failure mode 1 always fails when buggified
+/// Test that connection failure mode AlwaysFail fails when buggified
 #[test]
-fn test_connect_failure_mode_1_always_fail() {
+fn test_connect_failure_mode_always_fail() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
@@ -63,7 +64,7 @@ fn test_connect_failure_mode_1_always_fail() {
         buggify_init(1.0, 1.0); // Enable buggify with 100% activation
 
         let mut config = NetworkConfiguration::fast_local();
-        config.chaos.connect_failure_mode = 1; // Always fail when buggified
+        config.chaos.connect_failure_mode = ConnectFailureMode::AlwaysFail;
 
         let sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
@@ -71,7 +72,7 @@ fn test_connect_failure_mode_1_always_fail() {
         let addr = "fail-server";
         let _listener = provider.bind(addr).await.unwrap();
 
-        // With mode 1 and buggify enabled, connections should fail
+        // With AlwaysFail and buggify enabled, connections should fail
         // (depending on buggify activation for this location)
         let mut failure_count = 0;
         for _ in 0..10 {
@@ -82,19 +83,19 @@ fn test_connect_failure_mode_1_always_fail() {
         }
 
         println!(
-            "Mode 1 with buggify: {} failures out of 10 attempts",
+            "AlwaysFail mode with buggify: {} failures out of 10 attempts",
             failure_count
         );
 
         buggify_reset();
-        println!("✅ Connection failure mode 1 executed");
+        println!("✅ Connection failure mode AlwaysFail executed");
     });
 }
 
-/// Test that connection failure mode 2 produces errors (not hangs)
+/// Test that connection failure mode Probabilistic produces errors (not hangs)
 /// Note: We set connect_failure_probability=0.0 to force error path, not hang path
 #[test]
-fn test_connect_failure_mode_2_probabilistic_error() {
+fn test_connect_failure_mode_probabilistic_error() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
@@ -106,7 +107,7 @@ fn test_connect_failure_mode_2_probabilistic_error() {
         buggify_init(1.0, 1.0);
 
         let mut config = NetworkConfiguration::fast_local();
-        config.chaos.connect_failure_mode = 2; // Probabilistic
+        config.chaos.connect_failure_mode = ConnectFailureMode::Probabilistic;
         // Force error path (not hang) by setting probability to 0.0
         // With prob=0.0: random01() > 0.0 is always true, so we get errors
         config.chaos.connect_failure_probability = 0.0;
@@ -117,7 +118,7 @@ fn test_connect_failure_mode_2_probabilistic_error() {
         let addr = "prob-server";
         let _listener = provider.bind(addr).await.unwrap();
 
-        // With mode 2 and probability=0.0, connections should fail with error (not hang)
+        // With Probabilistic and probability=0.0, connections should fail with error (not hang)
         let mut success_count = 0;
         let mut error_count = 0;
 
@@ -130,12 +131,12 @@ fn test_connect_failure_mode_2_probabilistic_error() {
         }
 
         println!(
-            "Mode 2 results: {} successes, {} errors out of 20",
+            "Probabilistic mode results: {} successes, {} errors out of 20",
             success_count, error_count
         );
 
         buggify_reset();
-        println!("✅ Connection failure mode 2 probabilistic error executed");
+        println!("✅ Connection failure mode Probabilistic error executed");
     });
 }
 
@@ -152,7 +153,7 @@ fn test_connect_failure_requires_buggify() {
         buggify_reset(); // Ensure buggify is disabled
 
         let mut config = NetworkConfiguration::fast_local();
-        config.chaos.connect_failure_mode = 1; // Would fail if buggify active
+        config.chaos.connect_failure_mode = ConnectFailureMode::AlwaysFail; // Would fail if buggify active
 
         let sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
@@ -175,9 +176,9 @@ fn test_connect_failure_requires_buggify() {
     });
 }
 
-/// Test connection failure with timeout handling (mode 2 hang scenario)
+/// Test connection failure with timeout handling (Probabilistic hang scenario)
 #[test]
-fn test_connect_failure_mode_2_with_timeout() {
+fn test_connect_failure_mode_probabilistic_with_timeout() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
@@ -189,7 +190,7 @@ fn test_connect_failure_mode_2_with_timeout() {
         buggify_init(1.0, 1.0);
 
         let mut config = NetworkConfiguration::fast_local();
-        config.chaos.connect_failure_mode = 2;
+        config.chaos.connect_failure_mode = ConnectFailureMode::Probabilistic;
         config.chaos.connect_failure_probability = 1.0; // 100% hang (not error)
 
         let sim = SimWorld::new_with_network_config(config);
@@ -237,7 +238,7 @@ fn test_connect_failure_deterministic() {
             buggify_init(1.0, 1.0);
 
             let mut config = NetworkConfiguration::fast_local();
-            config.chaos.connect_failure_mode = 1;
+            config.chaos.connect_failure_mode = ConnectFailureMode::AlwaysFail;
 
             let sim = SimWorld::new_with_network_config(config);
             let provider = sim.network_provider();
@@ -280,7 +281,7 @@ fn test_connect_failure_existing_connections() {
 
     local_runtime.block_on(async move {
         let mut config = NetworkConfiguration::fast_local();
-        config.chaos.connect_failure_mode = 0; // Start with disabled
+        config.chaos.connect_failure_mode = ConnectFailureMode::Disabled; // Start with disabled
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
@@ -306,9 +307,9 @@ fn test_connect_failure_existing_connections() {
     });
 }
 
-/// Test error message content for mode 1
+/// Test error message content for AlwaysFail mode
 #[test]
-fn test_connect_failure_error_message_mode_1() {
+fn test_connect_failure_error_message_always_fail() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
@@ -320,7 +321,7 @@ fn test_connect_failure_error_message_mode_1() {
         buggify_init(1.0, 1.0);
 
         let mut config = NetworkConfiguration::fast_local();
-        config.chaos.connect_failure_mode = 1;
+        config.chaos.connect_failure_mode = ConnectFailureMode::AlwaysFail;
 
         let sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider();
@@ -332,11 +333,11 @@ fn test_connect_failure_error_message_mode_1() {
         for _ in 0..10 {
             if let Err(e) = provider.connect(addr).await {
                 assert!(
-                    e.to_string().contains("chaos mode 1"),
-                    "Error should mention chaos mode 1, got: {}",
+                    e.to_string().contains("AlwaysFail mode"),
+                    "Error should mention AlwaysFail mode, got: {}",
                     e
                 );
-                println!("✅ Error message correctly identifies chaos mode 1");
+                println!("✅ Error message correctly identifies AlwaysFail mode");
                 buggify_reset();
                 return;
             }
@@ -347,9 +348,9 @@ fn test_connect_failure_error_message_mode_1() {
     });
 }
 
-/// Test error message content for mode 2
+/// Test error message content for Probabilistic mode
 #[test]
-fn test_connect_failure_error_message_mode_2() {
+fn test_connect_failure_error_message_probabilistic() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
@@ -361,7 +362,7 @@ fn test_connect_failure_error_message_mode_2() {
         buggify_init(1.0, 1.0);
 
         let mut config = NetworkConfiguration::fast_local();
-        config.chaos.connect_failure_mode = 2;
+        config.chaos.connect_failure_mode = ConnectFailureMode::Probabilistic;
         config.chaos.connect_failure_probability = 0.0; // Force error path, not hang
 
         let sim = SimWorld::new_with_network_config(config);
@@ -374,11 +375,11 @@ fn test_connect_failure_error_message_mode_2() {
         for _ in 0..10 {
             if let Err(e) = provider.connect(addr).await {
                 assert!(
-                    e.to_string().contains("chaos mode 2"),
-                    "Error should mention chaos mode 2, got: {}",
+                    e.to_string().contains("Probabilistic mode"),
+                    "Error should mention Probabilistic mode, got: {}",
                     e
                 );
-                println!("✅ Error message correctly identifies chaos mode 2");
+                println!("✅ Error message correctly identifies Probabilistic mode");
                 buggify_reset();
                 return;
             }
@@ -391,11 +392,11 @@ fn test_connect_failure_error_message_mode_2() {
 
 /// Test interaction with random_for_seed config
 ///
-/// NOTE: This test may hang forever when mode=2 is selected (50% hang probability).
-/// FDB's mode=2 simulates connections that hang forever without timeout.
+/// NOTE: This test may hang forever when Probabilistic mode is selected (50% hang probability).
+/// FDB's Probabilistic mode simulates connections that hang forever without timeout.
 /// Run manually: cargo test test_connect_failure_random_config -- --ignored
 #[test]
-#[ignore] // May hang forever with mode=2 - requires manual testing
+#[ignore] // May hang forever with Probabilistic mode - requires manual testing
 fn test_connect_failure_random_config() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
@@ -411,7 +412,7 @@ fn test_connect_failure_random_config() {
         let config = NetworkConfiguration::random_for_seed();
 
         println!(
-            "Random config: mode={}, probability={}",
+            "Random config: mode={:?}, probability={}",
             config.chaos.connect_failure_mode, config.chaos.connect_failure_probability
         );
 

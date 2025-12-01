@@ -29,4 +29,4 @@ pub use tokio::TokioNetworkProvider;
 pub use peer::{Peer, PeerConfig, PeerError, PeerMetrics, PeerReceiver};
 
 // Re-export configuration
-pub use config::{ChaosConfiguration, NetworkConfiguration, sample_duration};
+pub use config::{ChaosConfiguration, ConnectFailureMode, NetworkConfiguration, sample_duration};

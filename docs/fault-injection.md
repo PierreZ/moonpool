@@ -104,13 +104,13 @@ Simulates TCP connect failures and hanging connections.
 
 | Setting | Default | FDB Reference |
 |---------|---------|---------------|
-| `connect_failure_mode` | 2 | `sim2.actor.cpp:1243-1250` |
+| `connect_failure_mode` | `Probabilistic` | `sim2.actor.cpp:1243-1250` |
 | `connect_failure_probability` | 50% | - |
 
-**Failure modes:**
-- **Mode 0**: Disabled
-- **Mode 1**: Always fail with `ConnectionRefused` when buggified
-- **Mode 2**: Probabilistic:
+**Failure modes (`ConnectFailureMode` enum):**
+- **`Disabled`**: No connection failures injected
+- **`AlwaysFail`**: Always fail with `ConnectionRefused` when buggified
+- **`Probabilistic`**:
   - 50%: Fail with `ConnectionRefused`
   - 50%: Hang forever (`pending()`)
 

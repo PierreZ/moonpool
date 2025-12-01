@@ -2,6 +2,32 @@ use crate::sim::rng::{sim_random_range, sim_random_range_or_default};
 use std::ops::Range;
 use std::time::Duration;
 
+/// Connection establishment failure mode for fault injection.
+///
+/// Controls how connection attempts fail during chaos testing.
+/// FDB ref: sim2.actor.cpp:1243-1250 (SIM_CONNECT_ERROR_MODE)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConnectFailureMode {
+    /// Disabled - no connection failures injected
+    #[default]
+    Disabled,
+    /// Always fail with `ConnectionRefused` when buggified
+    AlwaysFail,
+    /// Probabilistic: 50% fail with `ConnectionRefused`, 50% hang forever
+    Probabilistic,
+}
+
+impl ConnectFailureMode {
+    /// Create a random failure mode for chaos testing
+    pub fn random_for_seed() -> Self {
+        match sim_random_range(0..3) {
+            0 => Self::Disabled,
+            1 => Self::AlwaysFail,
+            _ => Self::Probabilistic,
+        }
+    }
+}
+
 /// Configuration for chaos injection in simulations.
 ///
 /// This struct contains all settings related to fault injection and chaos testing,
@@ -66,11 +92,10 @@ pub struct ChaosConfiguration {
     pub buggified_delay_probability: f64,
 
     /// Connection establishment failure mode (per FDB)
-    /// 0 = disabled, 1 = always fail when buggified, 2 = probabilistic (50% fail, 50% hang)
     /// FDB ref: sim2.actor.cpp:1243-1250 (SIM_CONNECT_ERROR_MODE)
-    pub connect_failure_mode: u8,
+    pub connect_failure_mode: ConnectFailureMode,
 
-    /// Probability of connect failure when mode 2 is enabled (default 50%)
+    /// Probability of connect failure when Probabilistic mode is enabled (default 50%)
     pub connect_failure_probability: f64,
 }
 
@@ -94,8 +119,8 @@ impl Default for ChaosConfiguration {
             buggified_delay_enabled: true,     // Enable by default for chaos testing
             buggified_delay_max: Duration::from_millis(100), // FDB: MAX_BUGGIFIED_DELAY
             buggified_delay_probability: 0.25, // FDB: random01() < 0.25
-            connect_failure_mode: 2,           // FDB: SIM_CONNECT_ERROR_MODE = 2 (probabilistic)
-            connect_failure_probability: 0.5,  // FDB: random01() > 0.5
+            connect_failure_mode: ConnectFailureMode::Probabilistic, // FDB: SIM_CONNECT_ERROR_MODE = 2
+            connect_failure_probability: 0.5,                        // FDB: random01() > 0.5
         }
     }
 }
@@ -121,7 +146,7 @@ impl ChaosConfiguration {
             buggified_delay_enabled: false,
             buggified_delay_max: Duration::from_millis(100),
             buggified_delay_probability: 0.25,
-            connect_failure_mode: 0, // Disabled
+            connect_failure_mode: ConnectFailureMode::Disabled,
             connect_failure_probability: 0.5,
         }
     }
@@ -150,8 +175,7 @@ impl ChaosConfiguration {
             buggified_delay_enabled: true,
             buggified_delay_max: Duration::from_millis(sim_random_range(50..150)), // 50-150ms
             buggified_delay_probability: sim_random_range(20..30) as f64 / 100.0,  // 20-30%
-            // Randomly choose connect failure mode: 0, 1, or 2
-            connect_failure_mode: sim_random_range(0..3) as u8,
+            connect_failure_mode: ConnectFailureMode::random_for_seed(),
             connect_failure_probability: sim_random_range(40..60) as f64 / 100.0, // 40-60%
         }
     }
