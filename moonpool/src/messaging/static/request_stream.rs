@@ -331,4 +331,235 @@ mod tests {
 
         assert!(result.is_none());
     }
+
+    // =========================================================================
+    // Phase 12C API Tests: recv_with_transport / try_recv_with_transport
+    // =========================================================================
+
+    use crate::FlowTransportBuilder;
+    use moonpool_foundation::{TokioTaskProvider, TokioTimeProvider};
+
+    // Simple mock network provider for testing
+    #[derive(Clone)]
+    struct MockNetworkProvider;
+
+    struct DummyStream;
+
+    impl tokio::io::AsyncRead for DummyStream {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::Error::other("dummy stream")))
+        }
+    }
+
+    impl tokio::io::AsyncWrite for DummyStream {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Err(std::io::Error::other("dummy stream")))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::Error::other("dummy stream")))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::Error::other("dummy stream")))
+        }
+    }
+
+    struct DummyListener;
+
+    #[async_trait::async_trait(?Send)]
+    impl moonpool_foundation::TcpListenerTrait for DummyListener {
+        type TcpStream = DummyStream;
+
+        async fn accept(&self) -> std::io::Result<(Self::TcpStream, String)> {
+            Err(std::io::Error::other("dummy listener"))
+        }
+
+        fn local_addr(&self) -> std::io::Result<String> {
+            Err(std::io::Error::other("dummy listener"))
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl moonpool_foundation::NetworkProvider for MockNetworkProvider {
+        type TcpStream = DummyStream;
+        type TcpListener = DummyListener;
+
+        async fn bind(&self, _addr: &str) -> std::io::Result<Self::TcpListener> {
+            Err(std::io::Error::other("mock bind"))
+        }
+
+        async fn connect(&self, _addr: &str) -> std::io::Result<Self::TcpStream> {
+            Err(std::io::Error::other("mock connection"))
+        }
+    }
+
+    fn create_test_transport()
+    -> Rc<crate::FlowTransport<MockNetworkProvider, TokioTimeProvider, TokioTaskProvider>> {
+        FlowTransportBuilder::new(
+            MockNetworkProvider,
+            TokioTimeProvider::new(),
+            TokioTaskProvider,
+        )
+        .local_address(test_endpoint().address.clone())
+        .build()
+    }
+
+    // Create a local reply endpoint (same address as transport for local delivery)
+    fn local_reply_endpoint() -> Endpoint {
+        let addr = test_endpoint().address;
+        Endpoint::new(addr, UID::new(0xFF, 0xFF))
+    }
+
+    #[test]
+    fn test_try_recv_with_transport_empty() {
+        let transport = create_test_transport();
+
+        // Register a handler using Phase 12C API
+        let token = UID::new(0xABCD, 0x1234);
+        let stream = transport.register_handler::<PingRequest, _>(token, JsonCodec);
+
+        // Should return None when queue is empty
+        let result: Option<(PingRequest, ReplyPromise<PingResponse, JsonCodec>)> =
+            stream.try_recv_with_transport(&transport);
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_try_recv_with_transport() {
+        let transport = create_test_transport();
+
+        // Register a dummy handler for broken promise errors (local delivery)
+        let reply_token = local_reply_endpoint().token;
+        let reply_queue: Rc<
+            crate::NetNotifiedQueue<Result<PingResponse, crate::ReplyError>, JsonCodec>,
+        > = Rc::new(crate::NetNotifiedQueue::new(
+            local_reply_endpoint(),
+            JsonCodec,
+        ));
+        transport.register(
+            reply_token,
+            Rc::clone(&reply_queue) as Rc<dyn crate::MessageReceiver>,
+        );
+
+        // Register a handler using Phase 12C API
+        let token = UID::new(0xABCD, 0x1234);
+        let stream = transport.register_handler::<PingRequest, _>(token, JsonCodec);
+
+        // Simulate receiving a request via the queue (with local reply endpoint)
+        let envelope = RequestEnvelope {
+            request: PingRequest { seq: 999 },
+            reply_to: local_reply_endpoint(),
+        };
+        let payload = serde_json::to_vec(&envelope).expect("serialize");
+        stream.queue().receive(&payload);
+
+        // Receive using Phase 12C API
+        let result: Option<(PingRequest, ReplyPromise<PingResponse, JsonCodec>)> =
+            stream.try_recv_with_transport(&transport);
+
+        assert!(result.is_some());
+        let (request, _reply) = result.unwrap();
+        assert_eq!(request.seq, 999);
+        // Note: _reply will be dropped, sending BrokenPromise to reply_queue (local)
+    }
+
+    #[tokio::test]
+    async fn test_recv_with_transport() {
+        let transport = create_test_transport();
+
+        // Register a dummy handler for broken promise errors (local delivery)
+        let reply_token = local_reply_endpoint().token;
+        let reply_queue: Rc<
+            crate::NetNotifiedQueue<Result<PingResponse, crate::ReplyError>, JsonCodec>,
+        > = Rc::new(crate::NetNotifiedQueue::new(
+            local_reply_endpoint(),
+            JsonCodec,
+        ));
+        transport.register(
+            reply_token,
+            Rc::clone(&reply_queue) as Rc<dyn crate::MessageReceiver>,
+        );
+
+        // Register a handler using Phase 12C API
+        let token = UID::new(0xABCD, 0x1234);
+        let stream = transport.register_handler::<PingRequest, _>(token, JsonCodec);
+
+        // Simulate receiving a request via the queue (with local reply endpoint)
+        let envelope = RequestEnvelope {
+            request: PingRequest { seq: 888 },
+            reply_to: local_reply_endpoint(),
+        };
+        let payload = serde_json::to_vec(&envelope).expect("serialize");
+        stream.queue().receive(&payload);
+
+        // Receive using Phase 12C API (async version)
+        let result: Option<(PingRequest, ReplyPromise<PingResponse, JsonCodec>)> =
+            stream.recv_with_transport(&transport).await;
+
+        assert!(result.is_some());
+        let (request, _reply) = result.unwrap();
+        assert_eq!(request.seq, 888);
+        // Note: _reply will be dropped, sending BrokenPromise to reply_queue (local)
+    }
+
+    #[test]
+    fn test_recv_with_transport_reply_sends() {
+        let transport = create_test_transport();
+
+        // Register a handler for the reply endpoint to track if response was sent
+        let reply_token = local_reply_endpoint().token;
+        let reply_queue: Rc<
+            crate::NetNotifiedQueue<Result<PingResponse, crate::ReplyError>, JsonCodec>,
+        > = Rc::new(crate::NetNotifiedQueue::new(
+            local_reply_endpoint(),
+            JsonCodec,
+        ));
+        transport.register(
+            reply_token,
+            Rc::clone(&reply_queue) as Rc<dyn crate::MessageReceiver>,
+        );
+
+        // Register request handler
+        let token = UID::new(0xABCD, 0x1234);
+        let stream = transport.register_handler::<PingRequest, _>(token, JsonCodec);
+
+        // Simulate receiving a request
+        let envelope = RequestEnvelope {
+            request: PingRequest { seq: 777 },
+            reply_to: local_reply_endpoint(),
+        };
+        let payload = serde_json::to_vec(&envelope).expect("serialize");
+        stream.queue().receive(&payload);
+
+        // Receive and send reply using Phase 12C API
+        let result: Option<(PingRequest, ReplyPromise<PingResponse, JsonCodec>)> =
+            stream.try_recv_with_transport(&transport);
+        let (request, reply) = result.expect("should receive request");
+        assert_eq!(request.seq, 777);
+
+        // Send response via ReplyPromise
+        reply.send(PingResponse { seq: 777 });
+
+        // Verify response was dispatched to reply endpoint
+        let received = reply_queue.try_recv();
+        assert!(received.is_some());
+        let response = received.unwrap();
+        assert_eq!(response.unwrap(), PingResponse { seq: 777 });
+    }
 }

@@ -1436,4 +1436,27 @@ mod tests {
         assert_eq!(add_stream.endpoint().token, add_token);
         assert_eq!(sub_stream.endpoint().token, sub_token);
     }
+
+    // =========================================================================
+    // Builder error path tests (Phase 12D Step 18)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_build_listening_bind_error() {
+        // MockNetworkProvider returns error on bind(), simulating port already in use
+        let result = FlowTransportBuilder::new(
+            MockNetworkProvider,
+            TokioTimeProvider::new(),
+            TokioTaskProvider,
+        )
+        .local_address(test_address())
+        .build_listening()
+        .await;
+
+        // Should return NetworkError when bind fails
+        assert!(matches!(
+            result,
+            Err(crate::error::MessagingError::NetworkError { .. })
+        ));
+    }
 }

@@ -171,6 +171,8 @@ pub enum RpcClientOp {
     SendRequest { request_id: u64 },
     /// Await a pending RPC response
     AwaitResponse { request_id: u64 },
+    /// Await a pending RPC response with timeout
+    AwaitWithTimeout { request_id: u64, timeout_ms: u64 },
     /// Small delay between operations
     SmallDelay,
 }
@@ -193,14 +195,16 @@ pub enum RpcServerOp {
 pub struct RpcClientOpWeights {
     pub send_request: u32,
     pub await_response: u32,
+    pub await_with_timeout: u32,
     pub small_delay: u32,
 }
 
 impl Default for RpcClientOpWeights {
     fn default() -> Self {
         Self {
-            send_request: 40,
-            await_response: 45,
+            send_request: 35,
+            await_response: 35,
+            await_with_timeout: 15,
             small_delay: 15,
         }
     }
@@ -210,23 +214,35 @@ impl RpcClientOpWeights {
     /// Weights focused on sending many requests (high concurrency).
     pub fn high_concurrency() -> Self {
         Self {
-            send_request: 70,
-            await_response: 20,
-            small_delay: 10,
+            send_request: 60,
+            await_response: 15,
+            await_with_timeout: 10,
+            small_delay: 15,
         }
     }
 
     /// Weights focused on completing requests (low concurrency).
     pub fn low_concurrency() -> Self {
         Self {
-            send_request: 20,
-            await_response: 70,
-            small_delay: 10,
+            send_request: 15,
+            await_response: 50,
+            await_with_timeout: 20,
+            small_delay: 15,
+        }
+    }
+
+    /// Weights focused on timeout path coverage.
+    pub fn timeout_focused() -> Self {
+        Self {
+            send_request: 30,
+            await_response: 10,
+            await_with_timeout: 45,
+            small_delay: 15,
         }
     }
 
     fn total_weight(&self) -> u32 {
-        self.send_request + self.await_response + self.small_delay
+        self.send_request + self.await_response + self.await_with_timeout + self.small_delay
     }
 }
 
@@ -301,6 +317,18 @@ pub fn generate_rpc_client_op<R: RandomProvider>(
         let idx = random.random_range(0..pending_requests.len() as u32) as usize;
         return RpcClientOp::AwaitResponse {
             request_id: pending_requests[idx],
+        };
+    }
+
+    cumulative += weights.await_with_timeout;
+    if choice < cumulative && !pending_requests.is_empty() {
+        // Pick a random pending request to await with timeout
+        let idx = random.random_range(0..pending_requests.len() as u32) as usize;
+        // Timeout between 1-100ms
+        let timeout_ms = random.random_range(1..100) as u64;
+        return RpcClientOp::AwaitWithTimeout {
+            request_id: pending_requests[idx],
+            timeout_ms,
         };
     }
 
@@ -455,8 +483,9 @@ mod tests {
     #[test]
     fn test_rpc_client_op_weights_default() {
         let weights = RpcClientOpWeights::default();
-        assert_eq!(weights.send_request, 40);
-        assert_eq!(weights.await_response, 45);
+        assert_eq!(weights.send_request, 35);
+        assert_eq!(weights.await_response, 35);
+        assert_eq!(weights.await_with_timeout, 15);
         assert_eq!(weights.small_delay, 15);
         assert_eq!(weights.total_weight(), 100);
     }
@@ -485,6 +514,13 @@ mod tests {
                 }
                 RpcClientOp::AwaitResponse { request_id } => {
                     assert!(pending.contains(&request_id));
+                }
+                RpcClientOp::AwaitWithTimeout {
+                    request_id,
+                    timeout_ms,
+                } => {
+                    assert!(pending.contains(&request_id));
+                    assert!(timeout_ms >= 1 && timeout_ms < 100);
                 }
                 RpcClientOp::SmallDelay => {}
             }

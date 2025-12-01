@@ -2,6 +2,13 @@
 //!
 //! Provides client and server workloads that exercise FlowTransport,
 //! EndpointMap, and NetNotifiedQueue under chaos conditions.
+//!
+//! # Phase 12C APIs
+//!
+//! These workloads use the Phase 12C developer experience improvements:
+//! - [`FlowTransportBuilder`] - Automatic `Rc` wrapping and `set_weak_self()`
+//! - [`register_handler()`] - Type-safe endpoint registration
+//! - [`recv_with_transport()`] - Clean async receive without closures
 
 #![allow(dead_code)] // Config fields may not all be used in every workload
 
@@ -10,7 +17,9 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::rc::Rc;
 use std::time::Duration;
 
-use moonpool::{Endpoint, FlowTransport, MessageReceiver, NetNotifiedQueue, NetworkAddress, UID};
+use moonpool::{
+    Endpoint, FlowTransportBuilder, MessageReceiver, NetNotifiedQueue, NetworkAddress, UID,
+};
 use moonpool_foundation::{
     NetworkProvider, SimRandomProvider, SimulationMetrics, SimulationResult, TaskProvider,
     TimeProvider, WorkloadTopology,
@@ -48,13 +57,16 @@ impl Default for LocalDeliveryConfig {
 /// Local delivery workload - tests FlowTransport dispatch to local endpoints.
 ///
 /// This workload:
-/// 1. Creates a FlowTransport with a local address
+/// 1. Creates a FlowTransport with a local address (using FlowTransportBuilder)
 /// 2. Registers a NetNotifiedQueue as an endpoint
 /// 3. Sends messages to the local endpoint
 /// 4. Verifies messages are dispatched correctly
+///
+/// Note: Uses raw NetNotifiedQueue (not RequestStream) since this tests direct
+/// message dispatch, not RPC patterns.
 pub async fn local_delivery_workload<N, T, TP>(
     random: SimRandomProvider,
-    _network: N,
+    network: N,
     time: T,
     task: TP,
     topology: WorkloadTopology,
@@ -70,10 +82,13 @@ where
     // Create local address from topology
     let local_addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
 
-    // Create FlowTransport - we won't use network provider for local delivery
-    let transport = FlowTransport::new(local_addr.clone(), _network, time.clone(), task);
+    // Create FlowTransport using Phase 12C builder (no listening needed for local delivery)
+    let transport = FlowTransportBuilder::new(network, time.clone(), task)
+        .local_address(local_addr.clone())
+        .build();
 
     // Create message queue and register with transport
+    // Note: Using raw NetNotifiedQueue since this tests direct dispatch, not RPC
     let token = UID::new(0x1234, 0x5678);
     let queue: Rc<NetNotifiedQueue<TestMessage, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
         Endpoint::new(local_addr.clone(), token),
@@ -167,12 +182,15 @@ where
 /// Endpoint lifecycle workload - tests register/unregister under send load.
 ///
 /// This workload:
-/// 1. Creates multiple endpoints
+/// 1. Creates multiple endpoints (using FlowTransportBuilder)
 /// 2. Sends messages while registering/unregistering endpoints
 /// 3. Verifies endpoint_not_found is triggered for unregistered endpoints
+///
+/// Note: Uses raw NetNotifiedQueue (not RequestStream) since this tests
+/// endpoint lifecycle management, not RPC patterns.
 pub async fn endpoint_lifecycle_workload<N, T, TP>(
     _random: SimRandomProvider,
-    _network: N,
+    network: N,
     time: T,
     task: TP,
     topology: WorkloadTopology,
@@ -185,7 +203,10 @@ where
     let my_id = topology.my_ip.clone();
     let local_addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
 
-    let transport = FlowTransport::new(local_addr.clone(), _network, time.clone(), task);
+    // Create FlowTransport using Phase 12C builder
+    let transport = FlowTransportBuilder::new(network, time.clone(), task)
+        .local_address(local_addr.clone())
+        .build();
 
     // Track sent/received
     let mut sent_count = 0u64;
@@ -269,7 +290,7 @@ where
 // RPC Workload (Phase 12B)
 // ============================================================================
 
-use moonpool::{RequestStream, send_request};
+use moonpool::{ReplyPromise, send_request};
 use moonpool_foundation::sometimes_assert;
 
 /// Configuration for RPC workload.
@@ -320,15 +341,15 @@ impl RpcWorkloadConfig {
 
 /// RPC workload - tests request-response patterns with ReplyPromise/ReplyFuture.
 ///
-/// This workload:
-/// 1. Creates a FlowTransport with local address
-/// 2. Sets up a RequestStream for the server
+/// This workload uses Phase 12C APIs:
+/// 1. Creates a FlowTransport with [`FlowTransportBuilder::build()`]
+/// 2. Registers RequestStream via [`register_handler()`]
 /// 3. Client sends RPC requests
-/// 4. Server processes requests and sends responses (or tracks broken promises)
+/// 4. Server processes requests via [`try_recv_with_transport()`]
 /// 5. Validates RPC invariants throughout
 pub async fn rpc_workload<N, T, TP>(
     random: SimRandomProvider,
-    _network: N,
+    network: N,
     time: T,
     task: TP,
     topology: WorkloadTopology,
@@ -344,20 +365,15 @@ where
     // Create local address from topology
     let local_addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
 
-    // Create FlowTransport
-    let transport = FlowTransport::new(local_addr.clone(), _network, time.clone(), task);
+    // Create FlowTransport using Phase 12C builder (local only, no network listening)
+    let transport = FlowTransportBuilder::new(network, time.clone(), task)
+        .local_address(local_addr.clone())
+        .build();
 
-    // Create server endpoint and RequestStream
+    // Register handler using Phase 12C API - creates RequestStream and registers in one call
     let server_token = UID::new(0xAABB, 0xCCDD);
-    let server_endpoint = Endpoint::new(local_addr.clone(), server_token);
-    let request_stream: RequestStream<RpcTestRequest, JsonCodec> =
-        RequestStream::new(server_endpoint.clone(), JsonCodec);
-
-    // Register request stream with transport
-    transport.register(
-        server_token,
-        request_stream.queue() as Rc<dyn MessageReceiver>,
-    );
+    let request_stream = transport.register_handler::<RpcTestRequest, _>(server_token, JsonCodec);
+    let server_endpoint = request_stream.endpoint().clone();
 
     // Track invariants
     let invariants = Rc::new(RefCell::new(RpcInvariants::new()));
@@ -365,8 +381,10 @@ where
     // State tracking
     let mut next_request_id = 0u64;
     let mut pending_requests: Vec<u64> = Vec::new();
-    // Track requests received by server but not yet responded to (stored with reply_to endpoint)
-    let mut pending_server_requests: Vec<(u64, Endpoint)> = Vec::new();
+    // Track requests received by server but not yet responded to
+    // Phase 12C: Store ReplyPromise instead of raw Endpoint
+    let mut pending_server_requests: Vec<(u64, ReplyPromise<RpcTestResponse, JsonCodec>)> =
+        Vec::new();
 
     // Perform operations
     for _op_num in 0..config.num_operations {
@@ -407,6 +425,33 @@ where
                 // For now, we just track that we attempted to await
                 pending_requests.retain(|&id| id != request_id);
             }
+            RpcClientOp::AwaitWithTimeout {
+                request_id,
+                timeout_ms,
+            } => {
+                // Simulate timeout-based await: wait for timeout, then check if response arrived
+                // In this local workload, responses are immediate if server processes them
+                let timeout_duration = Duration::from_millis(timeout_ms);
+
+                // Check if server has the request pending (hasn't responded yet)
+                let server_has_pending = pending_server_requests
+                    .iter()
+                    .any(|(id, _)| *id == request_id);
+
+                if server_has_pending {
+                    // Server hasn't responded - this will timeout
+                    let _ = time.sleep(timeout_duration).await;
+                    sometimes_assert!(
+                        rpc_timeout_path,
+                        true,
+                        "Client should exercise timeout paths when server is slow"
+                    );
+                    tracing::debug!(request_id, timeout_ms, "RPC request timed out");
+                }
+
+                // Remove from pending regardless (cleanup)
+                pending_requests.retain(|&id| id != request_id);
+            }
             RpcClientOp::SmallDelay => {
                 let _ = time.sleep(Duration::from_millis(1)).await;
             }
@@ -419,16 +464,18 @@ where
 
         match server_op {
             RpcServerOp::TryReceiveRequest => {
-                // Use the underlying queue to receive, then manually send response
-                if let Some(envelope) = request_stream.queue().try_recv() {
+                // Phase 12C: Use try_recv_with_transport() instead of queue().try_recv()
+                if let Some((request, reply)) =
+                    request_stream.try_recv_with_transport::<_, _, _, RpcTestResponse>(&transport)
+                {
                     sometimes_assert!(
                         rpc_server_received_request,
                         true,
                         "Server should receive RPC requests"
                     );
 
-                    // Track the pending request with its reply_to endpoint
-                    pending_server_requests.push((envelope.request.request_id, envelope.reply_to));
+                    // Track the pending request with its ReplyPromise
+                    pending_server_requests.push((request.request_id, reply));
                 }
             }
             RpcServerOp::SendResponse { request_id } => {
@@ -437,26 +484,24 @@ where
                     .iter()
                     .position(|(id, _)| *id == request_id)
                 {
-                    let (req_id, reply_to) = pending_server_requests.remove(pos);
+                    let (req_id, reply) = pending_server_requests.remove(pos);
 
-                    // Create and send response
-                    let response: Result<RpcTestResponse, moonpool::ReplyError> =
-                        Ok(RpcTestResponse::success(req_id));
-                    let payload = serde_json::to_vec(&response).expect("serialize response");
-
-                    let _ = transport.dispatch(&reply_to.token, &payload);
+                    // Phase 12C: Use ReplyPromise::send() instead of manual serialization
+                    reply.send(RpcTestResponse::success(req_id));
 
                     invariants.borrow_mut().record_response_received(req_id);
                     sometimes_assert!(rpc_response_sent, true, "Server should send RPC responses");
                 }
             }
             RpcServerOp::DropPromise { request_id } => {
-                // Drop the promise without responding (tracks broken promise)
+                // Drop the promise without responding (triggers broken promise automatically)
                 if let Some(pos) = pending_server_requests
                     .iter()
                     .position(|(id, _)| *id == request_id)
                 {
-                    let (req_id, _reply_to) = pending_server_requests.remove(pos);
+                    let (req_id, reply) = pending_server_requests.remove(pos);
+                    // Phase 12C: Dropping ReplyPromise triggers BrokenPromise automatically
+                    drop(reply);
                     invariants.borrow_mut().record_broken_promise(req_id);
                     sometimes_assert!(
                         rpc_promise_dropped,
@@ -475,16 +520,17 @@ where
     }
 
     // Drain remaining requests - respond to all pending
-    while let Some(envelope) = request_stream.queue().try_recv() {
-        pending_server_requests.push((envelope.request.request_id, envelope.reply_to));
+    // Phase 12C: Use try_recv_with_transport()
+    while let Some((request, reply)) =
+        request_stream.try_recv_with_transport::<_, _, _, RpcTestResponse>(&transport)
+    {
+        pending_server_requests.push((request.request_id, reply));
     }
 
     // Respond to all remaining pending requests
-    for (req_id, reply_to) in pending_server_requests.drain(..) {
-        let response: Result<RpcTestResponse, moonpool::ReplyError> =
-            Ok(RpcTestResponse::success(req_id));
-        let payload = serde_json::to_vec(&response).expect("serialize response");
-        let _ = transport.dispatch(&reply_to.token, &payload);
+    for (req_id, reply) in pending_server_requests.drain(..) {
+        // Phase 12C: Use ReplyPromise::send()
+        reply.send(RpcTestResponse::success(req_id));
         invariants.borrow_mut().record_response_received(req_id);
     }
 
@@ -504,8 +550,6 @@ where
 // ============================================================================
 // Multi-Node RPC Workloads (Phase 12 Step 7d)
 // ============================================================================
-
-use moonpool_foundation::StateRegistry;
 
 /// Configuration for multi-node RPC server workload.
 #[derive(Debug, Clone)]
@@ -569,11 +613,11 @@ impl MultiNodeClientConfig {
 
 /// Multi-node RPC server workload.
 ///
-/// This workload:
-/// 1. Creates a FlowTransport with the server's address
-/// 2. Calls `listen()` to accept incoming connections
-/// 3. Registers a RequestStream at a well-known token
-/// 4. Processes incoming RPC requests and sends responses
+/// This workload uses Phase 12C APIs:
+/// 1. Creates a listening FlowTransport with [`FlowTransportBuilder::build_listening()`]
+/// 2. Registers RequestStream via [`register_handler()`]
+/// 3. Processes incoming RPC requests via [`try_recv_with_transport()`]
+/// 4. Sends responses via [`ReplyPromise::send()`]
 /// 5. Publishes invariant state to StateRegistry for cross-node validation
 ///
 /// # FDB Alignment
@@ -605,19 +649,14 @@ where
     let local_addr =
         NetworkAddress::parse(&addr_with_port).expect("valid server address in topology");
 
-    // Create FlowTransport
-    let transport = Rc::new(FlowTransport::new(
-        local_addr.clone(),
-        network,
-        time.clone(),
-        task.clone(),
-    ));
+    // Phase 12C: Use FlowTransportBuilder::build_listening()
+    // Automatically handles Rc wrapping, set_weak_self(), and listen()
+    let transport = FlowTransportBuilder::new(network, time.clone(), task)
+        .local_address(local_addr.clone())
+        .build_listening()
+        .await
+        .expect("server listen failed");
 
-    // Set up weak self reference for background tasks
-    transport.set_weak_self(Rc::downgrade(&transport));
-
-    // Start listening for incoming connections
-    transport.listen().await.expect("server listen failed");
     tracing::info!(addr = %local_addr, "Server listening");
 
     sometimes_assert!(
@@ -626,23 +665,17 @@ where
         "Server should start listening"
     );
 
-    // Create server endpoint and RequestStream at well-known token
+    // Phase 12C: Use register_handler() instead of manual registration
     let server_token = UID::new(0xAABB, 0xCCDD);
-    let server_endpoint = Endpoint::new(local_addr.clone(), server_token);
-    let request_stream: RequestStream<RpcTestRequest, JsonCodec> =
-        RequestStream::new(server_endpoint.clone(), JsonCodec);
-
-    // Register request stream with transport
-    transport.register(
-        server_token,
-        request_stream.queue() as Rc<dyn MessageReceiver>,
-    );
+    let request_stream = transport.register_handler::<RpcTestRequest, _>(server_token, JsonCodec);
 
     // Track invariants
     let invariants = Rc::new(RefCell::new(RpcInvariants::new()));
 
     // Track pending requests (received but not yet responded)
-    let mut pending_server_requests: Vec<(u64, Endpoint)> = Vec::new();
+    // Phase 12C: Store ReplyPromise instead of raw Endpoint
+    let mut pending_server_requests: Vec<(u64, ReplyPromise<RpcTestResponse, JsonCodec>)> =
+        Vec::new();
 
     // Process operations
     for _op_num in 0..config.num_operations {
@@ -652,20 +685,19 @@ where
 
         match server_op {
             RpcServerOp::TryReceiveRequest => {
-                // Check for incoming requests
-                if let Some(envelope) = request_stream.queue().try_recv() {
+                // Phase 12C: Use try_recv_with_transport() instead of queue().try_recv()
+                if let Some((request, reply)) =
+                    request_stream.try_recv_with_transport::<_, _, _, RpcTestResponse>(&transport)
+                {
                     sometimes_assert!(
                         multi_node_server_received_request,
                         true,
                         "Server should receive RPC requests from network"
                     );
 
-                    tracing::debug!(
-                        request_id = envelope.request.request_id,
-                        "Server received request"
-                    );
+                    tracing::debug!(request_id = request.request_id, "Server received request");
 
-                    pending_server_requests.push((envelope.request.request_id, envelope.reply_to));
+                    pending_server_requests.push((request.request_id, reply));
                 }
             }
             RpcServerOp::SendResponse { request_id } => {
@@ -673,23 +705,18 @@ where
                     .iter()
                     .position(|(id, _)| *id == request_id)
                 {
-                    let (req_id, reply_to) = pending_server_requests.remove(pos);
+                    let (req_id, reply) = pending_server_requests.remove(pos);
 
-                    // Create and send response
-                    let response: Result<RpcTestResponse, moonpool::ReplyError> =
-                        Ok(RpcTestResponse::success(req_id));
-                    let payload = serde_json::to_vec(&response).expect("serialize response");
+                    // Phase 12C: Use ReplyPromise::send() instead of manual serialization
+                    reply.send(RpcTestResponse::success(req_id));
 
-                    // Send response back to client via their reply endpoint
-                    if transport.send_reliable(&reply_to, &payload).is_ok() {
-                        invariants.borrow_mut().record_response_received(req_id);
-                        sometimes_assert!(
-                            multi_node_server_sent_response,
-                            true,
-                            "Server should send RPC responses"
-                        );
-                        tracing::debug!(request_id = req_id, "Server sent response");
-                    }
+                    invariants.borrow_mut().record_response_received(req_id);
+                    sometimes_assert!(
+                        multi_node_server_sent_response,
+                        true,
+                        "Server should send RPC responses"
+                    );
+                    tracing::debug!(request_id = req_id, "Server sent response");
                 }
             }
             RpcServerOp::DropPromise { request_id } => {
@@ -697,7 +724,9 @@ where
                     .iter()
                     .position(|(id, _)| *id == request_id)
                 {
-                    let (req_id, _reply_to) = pending_server_requests.remove(pos);
+                    let (req_id, reply) = pending_server_requests.remove(pos);
+                    // Phase 12C: Dropping ReplyPromise triggers BrokenPromise automatically
+                    drop(reply);
                     invariants.borrow_mut().record_broken_promise(req_id);
                     sometimes_assert!(
                         multi_node_server_dropped_promise,
@@ -723,16 +752,17 @@ where
     }
 
     // Drain remaining requests - respond to all pending
-    while let Some(envelope) = request_stream.queue().try_recv() {
-        pending_server_requests.push((envelope.request.request_id, envelope.reply_to));
+    // Phase 12C: Use try_recv_with_transport()
+    while let Some((request, reply)) =
+        request_stream.try_recv_with_transport::<_, _, _, RpcTestResponse>(&transport)
+    {
+        pending_server_requests.push((request.request_id, reply));
     }
 
     // Respond to all remaining pending requests
-    for (req_id, reply_to) in pending_server_requests.drain(..) {
-        let response: Result<RpcTestResponse, moonpool::ReplyError> =
-            Ok(RpcTestResponse::success(req_id));
-        let payload = serde_json::to_vec(&response).expect("serialize response");
-        let _ = transport.send_reliable(&reply_to, &payload);
+    for (req_id, reply) in pending_server_requests.drain(..) {
+        // Phase 12C: Use ReplyPromise::send()
+        reply.send(RpcTestResponse::success(req_id));
         invariants.borrow_mut().record_response_received(req_id);
     }
 
@@ -752,8 +782,8 @@ where
 
 /// Multi-node RPC client workload.
 ///
-/// This workload:
-/// 1. Creates a FlowTransport with the client's address
+/// This workload uses Phase 12C APIs:
+/// 1. Creates a FlowTransport with [`FlowTransportBuilder::build()`]
 /// 2. Finds the server via topology
 /// 3. Sends RPC requests to the server over the network
 /// 4. Awaits responses via ReplyFuture
@@ -807,16 +837,12 @@ where
 
     tracing::info!(server = %server_addr, "Client connecting to server");
 
-    // Create FlowTransport
-    let transport = Rc::new(FlowTransport::new(
-        local_addr.clone(),
-        network,
-        time.clone(),
-        task.clone(),
-    ));
-
-    // Set up weak self reference for background tasks (to receive responses)
-    transport.set_weak_self(Rc::downgrade(&transport));
+    // Phase 12C: Use FlowTransportBuilder::build()
+    // Client doesn't need listen() - responses come on outbound connections
+    // The builder automatically handles Rc wrapping and set_weak_self()
+    let transport = FlowTransportBuilder::new(network, time.clone(), task)
+        .local_address(local_addr.clone())
+        .build();
 
     // Server endpoint (well-known token)
     let server_token = UID::new(0xAABB, 0xCCDD);
@@ -866,6 +892,26 @@ where
             RpcClientOp::AwaitResponse { request_id } => {
                 // In a real workload with actual futures, we'd await here
                 // For now, we simulate completion tracking
+                pending_requests.retain(|&id| id != request_id);
+            }
+            RpcClientOp::AwaitWithTimeout {
+                request_id,
+                timeout_ms,
+            } => {
+                // Simulate timeout-based await in multi-node scenario
+                // In real code, this would use time.timeout() around the future
+                let timeout_duration = Duration::from_millis(timeout_ms);
+                let _ = time.sleep(timeout_duration).await;
+
+                // In multi-node, we can't easily check server state, so just simulate
+                // that some timeouts occur (chaos will cause real timeouts)
+                sometimes_assert!(
+                    multi_node_client_timeout_path,
+                    pending_requests.contains(&request_id),
+                    "Client should exercise timeout paths in multi-node scenarios"
+                );
+                tracing::debug!(request_id, timeout_ms, "Client await with timeout");
+
                 pending_requests.retain(|&id| id != request_id);
             }
             RpcClientOp::SmallDelay => {

@@ -126,6 +126,63 @@ impl RpcTestResponse {
     }
 }
 
+// ============================================================================
+// Multi-Method Calculator Types (Phase 12D - Step 17)
+// ============================================================================
+
+/// Interface and method identifiers for calculator simulation.
+pub mod calculator {
+    pub const CALC_INTERFACE: u64 = 0xCA1C_0000;
+    pub const METHOD_ADD: u64 = 0;
+    pub const METHOD_SUB: u64 = 1;
+    pub const METHOD_MUL: u64 = 2;
+}
+
+/// Add request for multi-method simulation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalcAddRequest {
+    pub a: i64,
+    pub b: i64,
+    pub request_id: u64,
+}
+
+/// Add response for multi-method simulation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalcAddResponse {
+    pub result: i64,
+    pub request_id: u64,
+}
+
+/// Subtract request for multi-method simulation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalcSubRequest {
+    pub a: i64,
+    pub b: i64,
+    pub request_id: u64,
+}
+
+/// Subtract response for multi-method simulation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalcSubResponse {
+    pub result: i64,
+    pub request_id: u64,
+}
+
+/// Multiply request for multi-method simulation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalcMulRequest {
+    pub a: i64,
+    pub b: i64,
+    pub request_id: u64,
+}
+
+/// Multiply response for multi-method simulation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalcMulResponse {
+    pub result: i64,
+    pub request_id: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
