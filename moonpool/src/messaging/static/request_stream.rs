@@ -22,11 +22,12 @@
 
 use std::rc::Rc;
 
-use moonpool_foundation::Endpoint;
+use moonpool_foundation::{Endpoint, NetworkProvider, TaskProvider, TimeProvider};
 use moonpool_traits::MessageCodec;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use super::flow_transport::FlowTransport;
 use super::net_notified_queue::NetNotifiedQueue;
 use super::reply_promise::ReplyPromise;
 
@@ -113,6 +114,59 @@ where
         let reply = ReplyPromise::new(envelope.reply_to, self.codec.clone(), sender);
 
         Some((envelope.request, reply))
+    }
+
+    /// Receive the next request with embedded transport for replies.
+    ///
+    /// This is the preferred method for typical RPC usage. It eliminates
+    /// the need for a manual closure callback by using the transport directly.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Before (with closure):
+    /// let transport_clone = transport.clone();
+    /// let (req, reply) = stream.recv(move |ep, payload| {
+    ///     let _ = transport_clone.send_reliable(ep, payload);
+    /// }).await?;
+    ///
+    /// // After (cleaner):
+    /// let (req, reply) = stream.recv_with_transport(&transport).await?;
+    /// ```
+    pub async fn recv_with_transport<N, T, TP, Resp>(
+        &self,
+        transport: &Rc<FlowTransport<N, T, TP>>,
+    ) -> Option<(Req, ReplyPromise<Resp, C>)>
+    where
+        N: NetworkProvider + Clone + 'static,
+        T: TimeProvider + Clone + 'static,
+        TP: TaskProvider + Clone + 'static,
+        Resp: Serialize,
+    {
+        let transport_clone = Rc::clone(transport);
+        self.recv(move |endpoint, payload| {
+            let _ = transport_clone.send_reliable(endpoint, payload);
+        })
+        .await
+    }
+
+    /// Try to receive a request without blocking, with embedded transport.
+    ///
+    /// Non-blocking version of [`recv_with_transport`](Self::recv_with_transport).
+    pub fn try_recv_with_transport<N, T, TP, Resp>(
+        &self,
+        transport: &Rc<FlowTransport<N, T, TP>>,
+    ) -> Option<(Req, ReplyPromise<Resp, C>)>
+    where
+        N: NetworkProvider + Clone + 'static,
+        T: TimeProvider + Clone + 'static,
+        TP: TaskProvider + Clone + 'static,
+        Resp: Serialize,
+    {
+        let transport_clone = Rc::clone(transport);
+        self.try_recv(move |endpoint, payload| {
+            let _ = transport_clone.send_reliable(endpoint, payload);
+        })
     }
 
     /// Check if the stream is empty.

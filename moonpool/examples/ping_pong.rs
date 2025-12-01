@@ -1,6 +1,8 @@
 //! Ping-Pong Example: Real TCP RPC using Moonpool's static messaging.
 //!
-//! This example demonstrates moonpool's RPC over **real TCP sockets**.
+//! This example demonstrates moonpool's RPC over **real TCP sockets**
+//! using the improved Phase 12C APIs.
+//!
 //! Run as two separate processes:
 //!
 //! ```bash
@@ -14,28 +16,18 @@
 //! # Architecture
 //!
 //! The example shows:
-//! - Setting up a FlowTransport with real Tokio networking
+//! - `FlowTransportBuilder` for clean transport setup
+//! - `register_handler` for single-step endpoint registration
+//! - `recv_with_transport` for embedded transport in replies
 //! - Server: listening, receiving typed requests, sending responses
 //! - Client: connecting, sending requests, awaiting responses
-//!
-//! # Current API Pain Points (demonstrated in comments)
-//!
-//! 1. Must wrap FlowTransport in Rc and call set_weak_self() manually
-//! 2. RequestStream::recv() requires a closure callback for sending
-//! 3. Multiple steps to register an endpoint (UID + Endpoint + RequestStream + register)
-//!
-//! See the end of this file for the planned improved API.
 
 use std::env;
-use std::rc::Rc;
 use std::time::Duration;
 
-use moonpool::{
-    Endpoint, FlowTransport, MessageReceiver, NetworkAddress, ReplyFuture, RequestStream, UID,
-    send_request,
-};
+use moonpool::{Endpoint, FlowTransportBuilder, ReplyFuture, UID, send_request};
 use moonpool_foundation::{
-    TimeProvider, TokioNetworkProvider, TokioTaskProvider, TokioTimeProvider,
+    NetworkAddress, TimeProvider, TokioNetworkProvider, TokioTaskProvider, TokioTimeProvider,
 };
 use moonpool_traits::JsonCodec;
 use serde::{Deserialize, Serialize};
@@ -90,49 +82,34 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let local_addr = NetworkAddress::parse(SERVER_ADDR)?;
 
     // ========================================================================
-    // PAIN POINT 1: Manual Rc wrapping and set_weak_self()
-    // If you forget set_weak_self(), you get a runtime panic!
+    // FlowTransportBuilder handles Rc wrapping, set_weak_self(), and listen()
+    // No more runtime panics from forgetting set_weak_self()!
     // ========================================================================
-    let transport = Rc::new(FlowTransport::new(
-        local_addr.clone(),
-        network,
-        time.clone(),
-        task.clone(),
-    ));
-    transport.set_weak_self(Rc::downgrade(&transport));
+    let transport = FlowTransportBuilder::new(network, time, task)
+        .local_address(local_addr)
+        .build_listening()
+        .await?;
 
-    // Start listening for incoming connections
-    transport.listen().await?;
     println!("Server listening on {}\n", SERVER_ADDR);
 
     // ========================================================================
-    // PAIN POINT 2: Multiple steps to create an endpoint
-    // - Create UID manually
-    // - Create Endpoint from address + UID
-    // - Create RequestStream with endpoint
-    // - Cast queue to dyn MessageReceiver
-    // - Register with transport
+    // register_handler combines all endpoint setup into a single call:
+    // - Creates endpoint from local address + token
+    // - Creates RequestStream
+    // - Registers with transport
     // ========================================================================
-    let server_endpoint = Endpoint::new(local_addr.clone(), ping_token());
-    let ping_stream: RequestStream<PingRequest, JsonCodec> =
-        RequestStream::new(server_endpoint.clone(), JsonCodec);
-    transport.register(ping_token(), ping_stream.queue() as Rc<dyn MessageReceiver>);
+    let ping_stream = transport.register_handler::<PingRequest, _>(ping_token(), JsonCodec);
 
     println!("Waiting for ping requests...\n");
 
     // Server loop - handle requests
     loop {
         // ====================================================================
-        // PAIN POINT 3: Closure callback pattern for sending replies
-        // The closure captures the transport to send the response back.
-        // This is awkward and error-prone.
+        // recv_with_transport eliminates the closure callback pattern
+        // The transport reference is passed directly instead of captured
         // ====================================================================
-        let transport_clone = transport.clone();
         if let Some((request, reply)) = ping_stream
-            .recv::<_, PingResponse>(move |endpoint, payload| {
-                // This closure is called when reply.send() is invoked
-                let _ = transport_clone.send_reliable(endpoint, payload);
-            })
+            .recv_with_transport::<_, _, _, PingResponse>(&transport)
             .await
         {
             println!("Received ping seq={}: {:?}", request.seq, request.message);
@@ -171,21 +148,14 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     let local_addr = NetworkAddress::parse(CLIENT_ADDR)?;
     let server_addr = NetworkAddress::parse(SERVER_ADDR)?;
 
-    // Create FlowTransport for client (same boilerplate as server)
-    let transport = Rc::new(FlowTransport::new(
-        local_addr.clone(),
-        network,
-        time.clone(),
-        task.clone(),
-    ));
-    transport.set_weak_self(Rc::downgrade(&transport));
-
     // ========================================================================
-    // PAIN POINT 4: Client must call listen() to receive responses!
-    // This is NOT obvious - you'd think only servers need listen().
-    // Without this, responses from the server never get received.
+    // Client also uses build_listening() because it needs to receive responses
+    // The builder makes this requirement clear in the method name
     // ========================================================================
-    transport.listen().await?;
+    let transport = FlowTransportBuilder::new(network, time.clone(), task)
+        .local_address(local_addr)
+        .build_listening()
+        .await?;
 
     // Server endpoint
     let server_endpoint = Endpoint::new(server_addr, ping_token());
@@ -209,8 +179,6 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
             send_request(&transport, &server_endpoint, request, JsonCodec)?;
 
         // Await response with timeout
-        // timeout returns SimulationResult<Result<T, ()>> where T is the future's output
-        // ReplyFuture returns Result<PingResponse, ReplyError>
         match time.timeout(Duration::from_secs(5), future).await {
             Ok(Ok(Ok(response))) => {
                 println!("Received pong seq={}: {:?}\n", response.seq, response.echo);
@@ -279,46 +247,3 @@ fn main() {
         }
     }
 }
-
-// ============================================================================
-// Ideal API (Future Improvement)
-// ============================================================================
-//
-// The current API has several pain points. Here's what an improved API would
-// look like:
-//
-// ```rust,ignore
-// // === IMPROVED SERVER ===
-// let server = FlowTransportBuilder::new(SERVER_ADDR)
-//     .with_tokio()                    // Auto-creates Tokio providers
-//     .build_listening()               // Returns Rc, calls set_weak_self(), starts listen()
-//     .await?;
-//
-// // Single method to register typed endpoint
-// let ping = server.register_endpoint::<PingRequest, PingResponse>(ping_token())?;
-//
-// loop {
-//     // No closure needed - transport ref embedded in ReplyPromise
-//     let (request, reply) = ping.recv().await?;
-//     reply.send(PingResponse { echo: format!("pong: {}", request.message) });
-// }
-//
-// // === IMPROVED CLIENT ===
-// let client = FlowTransportBuilder::new(CLIENT_ADDR)
-//     .with_tokio()
-//     .build()?;
-//
-// // Simpler request API with built-in timeout
-// let response = client
-//     .request(&server_endpoint, PingRequest { seq: 0, message: "hello".into() })
-//     .timeout(Duration::from_secs(5))
-//     .await?;
-// ```
-//
-// Key improvements:
-// 1. FlowTransportBuilder eliminates set_weak_self() footgun
-// 2. with_tokio() auto-creates all providers
-// 3. build_listening() combines Rc wrap + set_weak_self + listen
-// 4. register_endpoint() combines UID + Endpoint + RequestStream + register
-// 5. ReplyPromise has embedded transport ref (no closure needed)
-// 6. Built-in timeout support on requests

@@ -22,7 +22,7 @@ mod request;
 mod request_stream;
 
 pub use endpoint_map::{EndpointMap, MessageReceiver};
-pub use flow_transport::FlowTransport;
+pub use flow_transport::{FlowTransport, FlowTransportBuilder};
 pub use net_notified_queue::{NetNotifiedQueue, RecvFuture, SharedNetNotifiedQueue};
 pub use reply_error::ReplyError;
 pub use reply_future::ReplyFuture;

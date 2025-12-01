@@ -43,7 +43,7 @@ pub use error::MessagingError;
 
 // Re-export messaging types
 pub use messaging::r#static::{
-    EndpointMap, FlowTransport, MessageReceiver, NetNotifiedQueue, RecvFuture, ReplyError,
-    ReplyFuture, ReplyPromise, RequestEnvelope, RequestStream, SharedNetNotifiedQueue,
-    send_request,
+    EndpointMap, FlowTransport, FlowTransportBuilder, MessageReceiver, NetNotifiedQueue,
+    RecvFuture, ReplyError, ReplyFuture, ReplyPromise, RequestEnvelope, RequestStream,
+    SharedNetNotifiedQueue, send_request,
 };

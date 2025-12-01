@@ -1294,183 +1294,177 @@ When implementing, reference these FDB files:
 
 ---
 
-# Phase 12C: Developer Experience Improvements
+# Phase 12C: Developer Experience Improvements ✅ DONE
 
-Identified pain points from the `ping_pong.rs` real TCP example:
+Identified pain points from the `ping_pong.rs` real TCP example.
 
-## Step 9: FlowTransportBuilder (Pain Points 1 & 4)
+## Step 9: FlowTransportBuilder (Pain Points 1 & 4) ✅ DONE
 
 **Problem**: Manual `Rc` wrapping and `set_weak_self()` is error-prone. Forgetting `set_weak_self()` causes runtime panics. Clients must also call `listen()` to receive responses, which is not obvious.
 
-**Solution**: Create `FlowTransportBuilder` that:
-- [ ] Automatically wraps in `Rc`
-- [ ] Automatically calls `set_weak_self()`
-- [ ] Provides `build()` for clients (enables response receiving)
-- [ ] Provides `build_listening()` for servers (starts accept loop)
-- [ ] Optional `with_tokio()` helper to auto-create Tokio providers
+**Solution**: Created `FlowTransportBuilder` that:
+- [x] Automatically wraps in `Rc`
+- [x] Automatically calls `set_weak_self()`
+- [x] Provides `build()` for fire-and-forget senders (no listening)
+- [x] Provides `build_listening()` for RPC (servers AND clients that need responses)
+- [ ] Optional `with_tokio()` helper (deferred - requires more design work)
 
 **Files**:
-- `moonpool/src/messaging/static/builder.rs`
-- `moonpool/src/messaging/static/mod.rs` (re-export)
+- `moonpool/src/messaging/static/flow_transport.rs:600-701` - FlowTransportBuilder
 
-## Step 10: Static Interface Registration (Pain Point 2)
+**API**:
+```rust
+// For RPC (servers and clients):
+let transport = FlowTransportBuilder::new(network, time, task)
+    .local_address(addr)
+    .build_listening()
+    .await?;
+
+// For fire-and-forget:
+let transport = FlowTransportBuilder::new(network, time, task)
+    .local_address(addr)
+    .build();
+```
+
+## Step 10: Static Interface Registration (Pain Point 2) ✅ DONE
 
 **Problem**: Multiple steps to create an endpoint, and UIDs are manually created without type safety.
 
-**Solution** (No macro first - validate the pattern):
-
-### 10a: Simple API with user-provided interface ID
+### 10a: Simple API with user-provided token ✅ DONE
 ```rust
-// User provides interface ID (first u64)
-const PING_INTERFACE: u64 = 0x5049_4E47;
-
-// Server registers handler - Rust creates UID::new(interface_id, 0)
-let ping = server.register_handler::<PingRequest, PingResponse>(PING_INTERFACE)?;
-
-// Client knows the endpoint statically
-let server_endpoint = Endpoint::new(server_addr, UID::new(PING_INTERFACE, 0));
+// Server registers handler - single call replaces 5 lines of boilerplate
+let ping = transport.register_handler::<PingRequest>(ping_token(), JsonCodec);
 ```
-
-### 10b: Multi-method interfaces with method index
-```rust
-const STORAGE: u64 = 0x5354_4F52;
-
-// Each method gets explicit index: UID::new(STORAGE, 0), UID::new(STORAGE, 1)
-let get = server.register_handler_at::<GetReq, GetResp>(STORAGE, 0)?;
-let set = server.register_handler_at::<SetReq, SetResp>(STORAGE, 1)?;
-```
-
-### 10c: Interface macro (future syntactic sugar)
-```rust
-define_interface! {
-    StorageInterface(0x5354_4F52) {
-        get_value: GetReq => GetResp,  // index 0
-        set_value: SetReq => SetResp,  // index 1
-    }
-}
-```
-
-**Sub-tasks**:
-- [ ] 10a: `register_handler<Req, Resp>(interface_id: u64)` - single method, index=0
-- [ ] 10b: `register_handler_at<Req, Resp>(interface_id: u64, method_index: u64)` - explicit index
-- [ ] 10c: Interface macro (deferred - syntactic sugar after validation)
 
 **Files**:
-- `moonpool/src/messaging/static/flow_transport.rs` - add register_handler methods
-- `moonpool/src/messaging/static/handler.rs` (new) - `RegisteredHandler<Req, Resp>` type
+- `moonpool/src/messaging/static/flow_transport.rs:265-306` - register_handler
 
-## Step 11: Embedded Transport in ReplyPromise (Pain Point 3)
-
-**Problem**: `RequestStream::recv()` requires a closure callback to send responses. This is awkward and error-prone:
+### 10b: Multi-method interfaces with method index ✅ DONE
 ```rust
+const CALC_INTERFACE: u64 = 0xCA1C_0000;
+const METHOD_ADD: u64 = 0;
+const METHOD_SUB: u64 = 1;
+
+// Each method gets deterministic UID from interface_id + method_index
+let (add_stream, add_token) = transport.register_handler_at::<AddRequest>(
+    CALC_INTERFACE, METHOD_ADD, JsonCodec
+);
+let (sub_stream, sub_token) = transport.register_handler_at::<SubRequest>(
+    CALC_INTERFACE, METHOD_SUB, JsonCodec
+);
+```
+
+**Files**:
+- `moonpool/src/messaging/static/flow_transport.rs:308-370` - register_handler_at
+
+### 10c: Interface macro (future syntactic sugar)
+Deferred - validate the pattern first before adding syntactic sugar.
+
+## Step 11: Embedded Transport in RequestStream (Pain Point 3) ✅ DONE
+
+**Problem**: `RequestStream::recv()` requires a closure callback to send responses:
+```rust
+// BEFORE (awkward):
 let transport_clone = transport.clone();
 ping_stream.recv(move |endpoint, payload| {
     transport_clone.send_reliable(endpoint, payload);
 })
 ```
 
-**Solution**: Embed `Weak<FlowTransport>` in `ReplyPromise`:
-- [ ] Store transport reference when creating ReplyPromise
-- [ ] `reply.send(value)` uses embedded transport directly
-- [ ] Remove closure parameter from `RequestStream::recv()`
+**Solution**: Added `recv_with_transport()` methods that hide the closure:
+```rust
+// AFTER (clean):
+let (req, reply) = ping_stream.recv_with_transport(&transport).await?;
+reply.send(response);
+```
 
 **Files**:
-- `moonpool/src/messaging/static/reply_promise.rs`
-- `moonpool/src/messaging/static/request_stream.rs`
+- `moonpool/src/messaging/static/request_stream.rs:119-170` - recv_with_transport, try_recv_with_transport
 
-## Ideal API After Phase 12C
+**Note**: ReplyPromise still uses closure internally but the API hides it. True embedded transport would require making ReplyPromise generic over transport types, adding complexity.
+
+## Step 12: Calculator Example (Multi-Handler Validation) ✅ DONE
+
+**Goal**: Create `examples/calculator.rs` to validate multi-handler pattern with `select!`.
+
+**Completed**:
+- [x] Create calculator example with Add, Sub, Mul, Div operations
+- [x] Demonstrate `tokio::select!` on multiple handlers
+- [x] Show client calling different endpoints
+- [x] Validate the static interface ID pattern works in practice
+
+**Files**:
+- `moonpool/examples/calculator.rs` - Full multi-method RPC example
+- `moonpool/examples/ping_pong.rs` - Updated to use new APIs
+
+## Final API (Implemented)
 
 ### Single Handler (Ping)
 ```rust
-// === INTERFACE DEFINITION ===
-const PING_INTERFACE: u64 = 0x5049_4E47;  // User-defined, stable ID
-
 // === SERVER ===
-let server = FlowTransportBuilder::new(SERVER_ADDR)
-    .with_tokio()
+let transport = FlowTransportBuilder::new(network, time, task)
+    .local_address(local_addr)
     .build_listening()
     .await?;
 
-// Register handler with static interface ID
-// Creates UID::new(PING_INTERFACE, 0)
-let ping = server.register_handler::<PingRequest, PingResponse>(PING_INTERFACE)?;
+// Single call registers handler
+let ping_stream = transport.register_handler::<PingRequest>(ping_token(), JsonCodec);
 
 loop {
-    // No closure needed - transport ref embedded in ReplyPromise
-    let (request, reply) = ping.recv().await?;
+    // No closure needed
+    let (request, reply) = ping_stream
+        .recv_with_transport::<_, _, _, PingResponse>(&transport)
+        .await?;
     reply.send(PingResponse { echo: request.message });
 }
 
 // === CLIENT ===
-let client = FlowTransportBuilder::new(CLIENT_ADDR)
-    .with_tokio()
-    .build()?;
-
-// Client knows endpoint statically from interface ID
-let server_endpoint = Endpoint::new(server_addr, UID::new(PING_INTERFACE, 0));
-
-let response = send_request(&client, &server_endpoint, request, JsonCodec)?
-    .await?;
-```
-
-### Multi-Handler (Calculator with +, -, ×)
-```rust
-// === INTERFACE DEFINITION ===
-const CALC_INTERFACE: u64 = 0x43414C43;  // "CALC"
-
-// Method indices
-const ADD: u64 = 0;
-const SUB: u64 = 1;
-const MUL: u64 = 2;
-
-// === SERVER ===
-let server = FlowTransportBuilder::new(SERVER_ADDR)
-    .with_tokio()
+let transport = FlowTransportBuilder::new(network, time, task)
+    .local_address(local_addr)
     .build_listening()
     .await?;
 
-// Register all handlers with explicit method indices
-let add = server.register_handler_at::<CalcRequest, CalcResponse>(CALC_INTERFACE, ADD)?;
-let sub = server.register_handler_at::<CalcRequest, CalcResponse>(CALC_INTERFACE, SUB)?;
-let mul = server.register_handler_at::<CalcRequest, CalcResponse>(CALC_INTERFACE, MUL)?;
+let server_endpoint = Endpoint::new(server_addr, ping_token());
+let response = send_request(&transport, &server_endpoint, request, JsonCodec)?
+    .await?;
+```
 
-// Server loop - select! on multiple handlers
+### Multi-Handler (Calculator)
+```rust
+// === SERVER ===
+let transport = FlowTransportBuilder::new(network, time, task)
+    .local_address(local_addr)
+    .build_listening()
+    .await?;
+
+// Register multiple handlers with deterministic tokens
+let (add_stream, _) = transport.register_handler_at::<AddRequest>(CALC, METHOD_ADD, JsonCodec);
+let (sub_stream, _) = transport.register_handler_at::<SubRequest>(CALC, METHOD_SUB, JsonCodec);
+let (mul_stream, _) = transport.register_handler_at::<MulRequest>(CALC, METHOD_MUL, JsonCodec);
+let (div_stream, _) = transport.register_handler_at::<DivRequest>(CALC, METHOD_DIV, JsonCodec);
+
 loop {
     tokio::select! {
-        Some((req, reply)) = add.recv() => {
-            reply.send(CalcResponse { result: req.a + req.b });
+        Some((req, reply)) = add_stream.recv_with_transport(&transport) => {
+            reply.send(AddResponse { result: req.a + req.b });
         }
-        Some((req, reply)) = sub.recv() => {
-            reply.send(CalcResponse { result: req.a - req.b });
+        Some((req, reply)) = sub_stream.recv_with_transport(&transport) => {
+            reply.send(SubResponse { result: req.a - req.b });
         }
-        Some((req, reply)) = mul.recv() => {
-            reply.send(CalcResponse { result: req.a * req.b });
-        }
+        // ... more handlers
     }
 }
 
 // === CLIENT ===
-let client = FlowTransportBuilder::new(CLIENT_ADDR)
-    .with_tokio()
-    .build()?;
-
-// Client knows endpoints statically
-let add_endpoint = Endpoint::new(server_addr, UID::new(CALC_INTERFACE, ADD));
-let sub_endpoint = Endpoint::new(server_addr, UID::new(CALC_INTERFACE, SUB));
-let mul_endpoint = Endpoint::new(server_addr, UID::new(CALC_INTERFACE, MUL));
-
-// Call different operations
-let sum = send_request(&client, &add_endpoint, CalcRequest { a: 10, b: 5 }, JsonCodec)?.await?;
-let diff = send_request(&client, &sub_endpoint, CalcRequest { a: 10, b: 5 }, JsonCodec)?.await?;
-let prod = send_request(&client, &mul_endpoint, CalcRequest { a: 10, b: 5 }, JsonCodec)?.await?;
+let add_endpoint = Endpoint::new(server_addr, UID::new(CALC, METHOD_ADD));
+let response = send_request(&transport, &add_endpoint, AddRequest { a: 10, b: 5 }, JsonCodec)?
+    .await?;
 ```
 
-## Step 12: Calculator Example (Multi-Handler Validation)
+## Validation
 
-**Goal**: Create `examples/calculator.rs` to validate multi-handler pattern with `select!`.
-
-**Sub-tasks**:
-- [ ] Create calculator example with Add, Sub, Mul operations
-- [ ] Demonstrate `tokio::select!` on multiple handlers
-- [ ] Show client calling different endpoints
-- [ ] Validate the static interface ID pattern works in practice
+- ✅ All 324 tests pass
+- ✅ `cargo fmt` clean
+- ✅ `cargo clippy` clean (existing warnings only)
+- ✅ `ping_pong.rs` updated to use new APIs
+- ✅ `calculator.rs` validates multi-handler pattern

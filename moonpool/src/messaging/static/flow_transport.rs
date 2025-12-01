@@ -5,6 +5,26 @@
 //!
 //! # FDB Reference
 //! From FlowTransport.actor.cpp:300-600, FlowTransport.h:195-314
+//!
+//! # Usage
+//!
+//! Use [`FlowTransportBuilder`] to create a properly configured transport:
+//!
+//! ```rust,ignore
+//! // For servers and clients that need RPC responses:
+//! let transport = FlowTransportBuilder::new(network, time, task)
+//!     .local_address(addr)
+//!     .build_listening()
+//!     .await?;
+//!
+//! // For fire-and-forget senders only (no listening):
+//! let transport = FlowTransportBuilder::new(network, time, task)
+//!     .local_address(addr)
+//!     .build();
+//! ```
+//!
+//! The builder automatically handles `Rc` wrapping and `set_weak_self()`,
+//! eliminating the most common footgun in FlowTransport usage.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -17,7 +37,10 @@ use moonpool_foundation::{
 use tokio::sync::watch;
 
 use super::endpoint_map::{EndpointMap, MessageReceiver};
+use super::request_stream::RequestStream;
 use crate::error::MessagingError;
+use moonpool_traits::MessageCodec;
+use serde::de::DeserializeOwned;
 
 /// Type alias for shared peer reference.
 type SharedPeer<N, T, TP> = Rc<RefCell<Peer<N, T, TP>>>;
@@ -237,6 +260,113 @@ where
     /// Unregister a dynamic endpoint.
     pub fn unregister(&self, token: &UID) -> Option<Rc<dyn MessageReceiver>> {
         self.data.borrow_mut().endpoints.remove(token)
+    }
+
+    /// Register a typed request handler in a single step.
+    ///
+    /// This is the preferred method for registering RPC handlers. It combines:
+    /// - Creating an endpoint from the local address and token
+    /// - Creating a `RequestStream` for the request type
+    /// - Registering the stream's queue with the transport
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Before (verbose):
+    /// let endpoint = Endpoint::new(local_addr.clone(), ping_token());
+    /// let stream: RequestStream<PingRequest, JsonCodec> =
+    ///     RequestStream::new(endpoint, JsonCodec);
+    /// transport.register(ping_token(), stream.queue() as Rc<dyn MessageReceiver>);
+    ///
+    /// // After (single call):
+    /// let stream = transport.register_handler::<PingRequest>(ping_token(), JsonCodec);
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `token` - Unique identifier for this handler
+    /// * `codec` - Codec for serializing/deserializing messages
+    ///
+    /// # Type Parameters
+    ///
+    /// * `Req` - The request type this handler will receive
+    /// * `C` - The codec type (e.g., `JsonCodec`)
+    pub fn register_handler<Req, C>(&self, token: UID, codec: C) -> RequestStream<Req, C>
+    where
+        Req: DeserializeOwned + 'static,
+        C: MessageCodec,
+    {
+        let endpoint = Endpoint::new(self.local_address.clone(), token);
+        let stream = RequestStream::new(endpoint, codec);
+        self.data
+            .borrow_mut()
+            .endpoints
+            .insert(token, stream.queue() as Rc<dyn MessageReceiver>);
+        stream
+    }
+
+    /// Register a handler for a multi-method interface.
+    ///
+    /// Use this when an interface has multiple methods (like a Calculator with
+    /// add, subtract, multiply, divide). Each method gets its own handler.
+    ///
+    /// The token is computed deterministically from `interface_id` and `method_index`,
+    /// making it easy to create matching client endpoints.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Calculator interface with multiple methods
+    /// const CALC_INTERFACE: u64 = 0xCA1C;
+    /// const METHOD_ADD: u64 = 0;
+    /// const METHOD_SUB: u64 = 1;
+    /// const METHOD_MUL: u64 = 2;
+    /// const METHOD_DIV: u64 = 3;
+    ///
+    /// let add_stream = transport.register_handler_at::<AddRequest>(
+    ///     CALC_INTERFACE, METHOD_ADD, JsonCodec
+    /// );
+    /// let sub_stream = transport.register_handler_at::<SubRequest>(
+    ///     CALC_INTERFACE, METHOD_SUB, JsonCodec
+    /// );
+    ///
+    /// // Handle requests with tokio::select!
+    /// loop {
+    ///     tokio::select! {
+    ///         Some((req, reply)) = add_stream.recv_with_transport(&transport) => {
+    ///             reply.send(AddResponse { result: req.a + req.b });
+    ///         }
+    ///         Some((req, reply)) = sub_stream.recv_with_transport(&transport) => {
+    ///             reply.send(SubResponse { result: req.a - req.b });
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `interface_id` - Unique identifier for the interface
+    /// * `method_index` - Index of the method within the interface (0, 1, 2, ...)
+    /// * `codec` - Codec for serializing/deserializing messages
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing:
+    /// - The `RequestStream` for receiving requests
+    /// - The token (`UID`) that clients should use to send requests to this handler
+    pub fn register_handler_at<Req, C>(
+        &self,
+        interface_id: u64,
+        method_index: u64,
+        codec: C,
+    ) -> (RequestStream<Req, C>, UID)
+    where
+        Req: DeserializeOwned + 'static,
+        C: MessageCodec,
+    {
+        let token = UID::new(interface_id, method_index);
+        let stream = self.register_handler(token, codec);
+        (stream, token)
     }
 
     /// Send packet unreliably (best-effort, dropped on failure).
@@ -535,6 +665,150 @@ where
         tracing::debug!("FlowTransport: signaling shutdown to background tasks");
         // Signal shutdown - ignore error if no receivers
         let _ = self.shutdown_tx.send(true);
+    }
+}
+
+// =============================================================================
+// FlowTransportBuilder
+// =============================================================================
+
+/// Builder for FlowTransport that eliminates common footguns.
+///
+/// The manual `Rc` wrapping and `set_weak_self()` pattern is error-prone:
+/// forgetting `set_weak_self()` causes a runtime panic. This builder handles
+/// both automatically.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // Standard usage - server or client that needs RPC responses:
+/// let transport = FlowTransportBuilder::new(network, time, task)
+///     .local_address(addr)
+///     .build_listening()
+///     .await?;
+///
+/// // Fire-and-forget sender (no listening needed):
+/// let transport = FlowTransportBuilder::new(network, time, task)
+///     .local_address(addr)
+///     .build();
+///
+/// // With custom peer config:
+/// let transport = FlowTransportBuilder::new(network, time, task)
+///     .local_address(addr)
+///     .peer_config(config)
+///     .build_listening()
+///     .await?;
+/// ```
+///
+/// # Why Build vs Build Listening?
+///
+/// - **`build_listening()`**: For most RPC use cases. Both servers AND clients
+///   need this because responses are sent to the client's listening address.
+///
+/// - **`build()`**: For fire-and-forget messaging where you don't expect responses.
+///   Also useful for testing where you control message flow manually.
+pub struct FlowTransportBuilder<N, T, TP>
+where
+    N: NetworkProvider + Clone + 'static,
+    T: TimeProvider + Clone + 'static,
+    TP: TaskProvider + Clone + 'static,
+{
+    network: N,
+    time: T,
+    task_provider: TP,
+    local_address: Option<NetworkAddress>,
+    peer_config: Option<PeerConfig>,
+}
+
+impl<N, T, TP> FlowTransportBuilder<N, T, TP>
+where
+    N: NetworkProvider + Clone + 'static,
+    T: TimeProvider + Clone + 'static,
+    TP: TaskProvider + Clone + 'static,
+{
+    /// Create a new builder with the required providers.
+    ///
+    /// # Arguments
+    ///
+    /// * `network` - Network provider for TCP connections
+    /// * `time` - Time provider for timing operations
+    /// * `task_provider` - Task provider for spawning background tasks
+    pub fn new(network: N, time: T, task_provider: TP) -> Self {
+        Self {
+            network,
+            time,
+            task_provider,
+            local_address: None,
+            peer_config: None,
+        }
+    }
+
+    /// Set the local address for this transport.
+    ///
+    /// This is required before calling `build()` or `build_listening()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `address` - The network address to bind to
+    pub fn local_address(mut self, address: NetworkAddress) -> Self {
+        self.local_address = Some(address);
+        self
+    }
+
+    /// Set custom peer configuration.
+    ///
+    /// If not set, uses `PeerConfig::default()`.
+    pub fn peer_config(mut self, config: PeerConfig) -> Self {
+        self.peer_config = Some(config);
+        self
+    }
+
+    /// Build the transport without starting the listener.
+    ///
+    /// Returns `Rc<FlowTransport>` with `set_weak_self()` already called.
+    /// Use this for fire-and-forget messaging or testing.
+    ///
+    /// For RPC (request/response), use `build_listening()` instead.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `local_address()` was not called.
+    pub fn build(self) -> Rc<FlowTransport<N, T, TP>> {
+        let address = self
+            .local_address
+            .expect("local_address is required - call .local_address(addr) before .build()");
+
+        let mut transport =
+            FlowTransport::new(address, self.network, self.time, self.task_provider);
+
+        if let Some(config) = self.peer_config {
+            transport = transport.with_peer_config(config);
+        }
+
+        let transport = Rc::new(transport);
+        transport.set_weak_self(Rc::downgrade(&transport));
+        transport
+    }
+
+    /// Build the transport and start listening for incoming connections.
+    ///
+    /// Returns `Rc<FlowTransport>` with `set_weak_self()` already called
+    /// and the listener started.
+    ///
+    /// Use this for typical RPC usage where you need to receive responses.
+    /// Both servers AND clients need this in a request/response pattern.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if binding to the local address fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `local_address()` was not called.
+    pub async fn build_listening(self) -> Result<Rc<FlowTransport<N, T, TP>>, MessagingError> {
+        let transport = self.build();
+        transport.listen().await?;
+        Ok(transport)
     }
 }
 
@@ -995,5 +1269,171 @@ mod tests {
             .expect("dispatch should succeed");
 
         assert_eq!(queue.try_recv(), Some("dispatched".to_string()));
+    }
+
+    // =========================================================================
+    // FlowTransportBuilder tests
+    // =========================================================================
+
+    #[test]
+    fn test_builder_build() {
+        let transport = FlowTransportBuilder::new(
+            MockNetworkProvider,
+            TokioTimeProvider::new(),
+            TokioTaskProvider,
+        )
+        .local_address(test_address())
+        .build();
+
+        // Should be properly initialized
+        assert_eq!(transport.peer_count(), 0);
+        assert_eq!(transport.endpoint_count(), 0);
+        assert_eq!(transport.packets_sent(), 0);
+        assert_eq!(*transport.local_address(), test_address());
+    }
+
+    #[test]
+    fn test_builder_weak_self_set() {
+        let transport = FlowTransportBuilder::new(
+            MockNetworkProvider,
+            TokioTimeProvider::new(),
+            TokioTaskProvider,
+        )
+        .local_address(test_address())
+        .build();
+
+        // weak_self should be set - verify by checking it doesn't panic
+        // This verifies the builder correctly calls set_weak_self()
+        assert!(transport.weak_self.borrow().is_some());
+    }
+
+    #[test]
+    fn test_builder_with_peer_config() {
+        let config = PeerConfig::default();
+        let transport = FlowTransportBuilder::new(
+            MockNetworkProvider,
+            TokioTimeProvider::new(),
+            TokioTaskProvider,
+        )
+        .local_address(test_address())
+        .peer_config(config)
+        .build();
+
+        // Transport should be created (peer_config is internal, but creation succeeds)
+        assert_eq!(transport.peer_count(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "local_address is required")]
+    fn test_builder_missing_address_panics() {
+        let _ = FlowTransportBuilder::new(
+            MockNetworkProvider,
+            TokioTimeProvider::new(),
+            TokioTaskProvider,
+        )
+        .build();
+    }
+
+    #[test]
+    fn test_builder_local_delivery_works() {
+        // Verify the built transport functions correctly
+        let transport = FlowTransportBuilder::new(
+            MockNetworkProvider,
+            TokioTimeProvider::new(),
+            TokioTaskProvider,
+        )
+        .local_address(test_address())
+        .build();
+
+        let token = UID::new(0x1234, 0x5678);
+        let queue: Rc<NetNotifiedQueue<String, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+            Endpoint::new(test_address(), token),
+            JsonCodec,
+        ));
+
+        let endpoint = transport.register(token, Rc::clone(&queue) as Rc<dyn MessageReceiver>);
+
+        // Send to local endpoint
+        let payload = br#""builder test""#;
+        transport
+            .send_unreliable(&endpoint, payload)
+            .expect("send should succeed");
+
+        assert_eq!(transport.packets_dispatched(), 1);
+        assert_eq!(queue.try_recv(), Some("builder test".to_string()));
+    }
+
+    #[test]
+    fn test_register_handler() {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        struct TestRequest {
+            value: i32,
+        }
+
+        let transport = FlowTransportBuilder::new(
+            MockNetworkProvider,
+            TokioTimeProvider::new(),
+            TokioTaskProvider,
+        )
+        .local_address(test_address())
+        .build();
+
+        let token = UID::new(0xDEAD, 0xBEEF);
+        let stream = transport.register_handler::<TestRequest, _>(token, JsonCodec);
+
+        // Handler should be registered
+        assert_eq!(transport.endpoint_count(), 1);
+
+        // Endpoint should match
+        assert_eq!(stream.endpoint().token, token);
+        assert_eq!(stream.endpoint().address, test_address());
+    }
+
+    #[test]
+    fn test_register_handler_at_multi_method() {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        struct AddRequest {
+            a: i32,
+            b: i32,
+        }
+
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        struct SubRequest {
+            a: i32,
+            b: i32,
+        }
+
+        const CALC_INTERFACE: u64 = 0xCA1C;
+        const METHOD_ADD: u64 = 0;
+        const METHOD_SUB: u64 = 1;
+
+        let transport = FlowTransportBuilder::new(
+            MockNetworkProvider,
+            TokioTimeProvider::new(),
+            TokioTaskProvider,
+        )
+        .local_address(test_address())
+        .build();
+
+        // Register multiple handlers for the same interface
+        let (add_stream, add_token) =
+            transport.register_handler_at::<AddRequest, _>(CALC_INTERFACE, METHOD_ADD, JsonCodec);
+        let (sub_stream, sub_token) =
+            transport.register_handler_at::<SubRequest, _>(CALC_INTERFACE, METHOD_SUB, JsonCodec);
+
+        // Both handlers should be registered
+        assert_eq!(transport.endpoint_count(), 2);
+
+        // Tokens should be deterministic
+        assert_eq!(add_token, UID::new(CALC_INTERFACE, METHOD_ADD));
+        assert_eq!(sub_token, UID::new(CALC_INTERFACE, METHOD_SUB));
+
+        // Streams should have correct endpoints
+        assert_eq!(add_stream.endpoint().token, add_token);
+        assert_eq!(sub_stream.endpoint().token, sub_token);
     }
 }
