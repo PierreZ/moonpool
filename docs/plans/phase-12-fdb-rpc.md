@@ -1554,3 +1554,234 @@ Analysis revealed that while Phase 12C APIs work in examples, simulation tests s
 **Files**:
 - `moonpool/src/messaging/static/flow_transport.rs` (mod tests)
 - `moonpool/tests/simulation/test_scenarios.rs` (SimNetworkProvider test)
+
+---
+
+# Phase 12E: TCP Simulation Layer Improvements
+
+## Overview
+
+Extend the TCP simulation layer with additional failure modes inspired by FoundationDB's sim2. These improvements increase bug-finding capability by simulating more realistic network failure scenarios.
+
+### References
+- `docs/references/foundationdb/FlowTransport.actor.cpp` - Connection handling patterns
+- `docs/references/foundationdb/Net2.actor.cpp` - Simulation implementation
+- `docs/references/foundationdb/sim2.actor.cpp` - Fault injection
+
+### Goals
+1. Fix existing copy-paste bug in stream.rs
+2. Add symmetric read clogging (complement to existing write clogging)
+3. Implement TCP-level failure modes for better bug detection
+4. Improve logging for easier debugging
+
+### Verification Summary
+
+**Already Exists** (no work needed):
+- Write clogging (`is_write_clogged`, `should_clog_write`, `clog_write`, `register_clog_waker`)
+- IP-level partitions (`partition_pair`, `partition_send_from`, `partition_recv_to`)
+- Asymmetric closure (`close_connection_asymmetric`)
+- Partial writes (`partial_write_max_bytes` + buggify truncation)
+- Connection establishment failures (in `NetworkConfiguration`)
+- Buggified delays
+
+**Missing** (to be implemented):
+- `is_connection_cut()` method - core bug fix
+- Read clogging (symmetric with write)
+- Per-connection asymmetric delays
+- Per-connection-pair base latency
+- Half-open connection simulation
+- Send buffer limits (BDP-based)
+- RST vs FIN distinction
+- Intermittent packet loss (probability-based)
+
+---
+
+## Step 19: Fix Copy-Paste Bug and Add Connection Cut Support
+
+**Goal**: Fix unreachable dead code in stream.rs where `is_connection_closed()` is called twice when the second check should distinguish temporary cuts from permanent closures.
+
+**Bug Location**: `moonpool-foundation/src/network/sim/stream.rs`
+- Lines 184-201: `poll_read` first check
+- Lines 232-248: `poll_read` recheck section
+- Lines 287-306: `poll_write` check
+
+**Root Cause**: `is_connection_cut()` method doesn't exist. The code has comments saying "connection is cut" but calls `is_connection_closed()` making the second branch unreachable.
+
+**Sub-tasks**:
+- [ ] Add `is_cut: bool` field to `ConnectionState` in `state.rs`
+- [ ] Add `cut_connection(ConnectionId, Duration)` method to SimWorld for temporary cuts
+- [ ] Add `is_connection_cut(ConnectionId)` method to SimWorld
+- [ ] Add `restore_connection(ConnectionId)` method to restore cut connections
+- [ ] Add `register_cut_waker(ConnectionId, Waker)` for wakeup on restore
+- [ ] Fix `stream.rs:poll_read` to use `is_connection_cut()` for second check
+- [ ] Fix `stream.rs:poll_write` to use `is_connection_cut()` for second check
+- [ ] Add tests for cut vs closed behavior
+
+**Files**:
+- `moonpool-foundation/src/sim/state.rs`
+- `moonpool-foundation/src/sim/world.rs`
+- `moonpool-foundation/src/network/sim/stream.rs`
+
+---
+
+## Step 20: Add Read Clogging (Symmetric with Write)
+
+**Goal**: Implement read clogging to complement existing write clogging. When read is clogged, `poll_read` returns `Poll::Pending` even if data is available in the buffer.
+
+**FDB Reference**: Symmetric with write clogging in `FlowTransport.actor.cpp`
+
+**Sub-tasks**:
+- [ ] Add `read_clogged: bool` field to `ConnectionState`
+- [ ] Add `read_clog_expiry: Option<Duration>` field
+- [ ] Add `is_read_clogged(ConnectionId)` method
+- [ ] Add `should_clog_read(ConnectionId)` probability check (buggify)
+- [ ] Add `clog_read(ConnectionId)` method
+- [ ] Add `register_read_clog_waker(ConnectionId, Waker)` method
+- [ ] Modify `poll_read` to check read clog state
+- [ ] Add read clog clearing to `clear_expired_clogs()`
+- [ ] Add tests for read clogging behavior
+
+**Files**:
+- `moonpool-foundation/src/sim/state.rs`
+- `moonpool-foundation/src/sim/world.rs`
+- `moonpool-foundation/src/network/sim/stream.rs`
+
+---
+
+## Step 21: Add RST vs FIN Distinction
+
+**Goal**: Distinguish between graceful close (FIN → peer gets EOF) and abrupt close (RST → peer gets ECONNRESET).
+
+**FDB Reference**: `FlowTransport.actor.cpp` connection termination handling
+
+**Sub-tasks**:
+- [ ] Add `close_reason: CloseReason` enum to `ConnectionState` (None, Graceful, Aborted)
+- [ ] Add `close_connection_graceful(ConnectionId)` method (FIN semantics)
+- [ ] Add `close_connection_abort(ConnectionId)` method (RST semantics)
+- [ ] Modify `poll_read` to return appropriate error based on close reason
+- [ ] Modify `poll_write` to return appropriate error based on close reason
+- [ ] Update `Drop` impl to use graceful close by default
+- [ ] Add chaos injection to randomly choose RST vs FIN
+- [ ] Add tests for both close types
+
+**Files**:
+- `moonpool-foundation/src/sim/state.rs`
+- `moonpool-foundation/src/sim/world.rs`
+- `moonpool-foundation/src/network/sim/stream.rs`
+
+---
+
+## Step 22: Add Send Buffer Limits
+
+**Goal**: Implement realistic send buffer behavior where `poll_write` returns `Pending` when buffer is full.
+
+**FDB Reference**: `Net2Packet.h:43-91` queuing implementation
+
+**Sub-tasks**:
+- [ ] Add `send_buffer_capacity: usize` to `ConnectionState`
+- [ ] Calculate capacity using BDP: `latency × bandwidth` (FDB pattern)
+- [ ] Add `send_buffer_capacity(ConnectionId)` method
+- [ ] Add `send_buffer_used(ConnectionId)` method
+- [ ] Add `available_send_buffer(ConnectionId)` method
+- [ ] Modify `poll_write` to return `Pending` when buffer full
+- [ ] Add `register_send_buffer_waker(ConnectionId, Waker)` for wakeup when space available
+- [ ] Add tests for buffer backpressure behavior
+
+**Files**:
+- `moonpool-foundation/src/sim/state.rs`
+- `moonpool-foundation/src/sim/world.rs`
+- `moonpool-foundation/src/network/sim/stream.rs`
+
+---
+
+## Step 23: Add Per-Connection Asymmetric Delays
+
+**Goal**: Allow send delay ≠ receive delay per connection for more realistic simulation.
+
+**Sub-tasks**:
+- [ ] Add `send_delay: Duration` field to `ConnectionState`
+- [ ] Add `recv_delay: Duration` field to `ConnectionState`
+- [ ] Add `get_send_delay(ConnectionId)` method
+- [ ] Add `get_recv_delay(ConnectionId)` method
+- [ ] Add `set_asymmetric_delays(ConnectionId, send: Duration, recv: Duration)` method
+- [ ] Modify data delivery to apply appropriate delay per direction
+- [ ] Add buggify to randomly set asymmetric delays on connection establishment
+- [ ] Add tests for asymmetric delay behavior
+
+**Files**:
+- `moonpool-foundation/src/sim/state.rs`
+- `moonpool-foundation/src/sim/world.rs`
+
+---
+
+## Step 24: Add Per-Connection-Pair Base Latency
+
+**Goal**: Each connection pair has consistent base latency (set once on establishment), with optional jitter.
+
+**Sub-tasks**:
+- [ ] Add `pair_latencies: HashMap<(IpAddr, IpAddr), Duration>` to SimWorld
+- [ ] Add `get_connection_latency(ConnectionId)` method
+- [ ] Add `set_pair_latency_if_not_set(src: IpAddr, dst: IpAddr, latency: Duration)` method
+- [ ] Add `get_pair_latency(src: IpAddr, dst: IpAddr)` method
+- [ ] Set latency on connection establishment if not already set
+- [ ] Add configurable jitter on top of base latency
+- [ ] Add tests for consistent latency behavior
+
+**Files**:
+- `moonpool-foundation/src/sim/world.rs`
+- `moonpool-foundation/src/network/sim/connect.rs`
+
+---
+
+## Step 25: Add Half-Open Connection Simulation
+
+**Goal**: Simulate peer crash where local side thinks it's connected but remote is gone.
+
+**FDB Reference**: Failure detection patterns in `sim2.actor.cpp`
+
+**Sub-tasks**:
+- [ ] Add `simulate_peer_crash(ConnectionId)` method
+- [ ] Mark connection such that:
+  - Local side still thinks connected
+  - Writes eventually return `ECONNRESET` or `ETIMEDOUT` (delayed, not immediate)
+  - Reads block, then eventually error
+- [ ] Add configurable delay before errors manifest
+- [ ] Add tests for half-open detection patterns
+
+**Files**:
+- `moonpool-foundation/src/sim/world.rs`
+- `moonpool-foundation/src/network/sim/stream.rs`
+
+---
+
+## Step 26: Add Intermittent Packet Loss
+
+**Goal**: Probabilistic packet drop where data is accepted by `poll_write` but never delivered.
+
+**Sub-tasks**:
+- [ ] Add `packet_loss_probability: f64` to `NetworkConfiguration`
+- [ ] Add `should_drop_packet(ConnectionId)` method using deterministic RNG
+- [ ] Modify data delivery path to probabilistically drop
+- [ ] Data accepted but silently discarded → eventually causes timeout
+- [ ] Add tests verifying timeout behavior under packet loss
+
+**Files**:
+- `moonpool-foundation/src/network/config.rs`
+- `moonpool-foundation/src/sim/world.rs`
+
+---
+
+## Step 27: Improve Logging
+
+**Goal**: Better logging for debugging without noise during normal operation.
+
+**Sub-tasks**:
+- [ ] Change routine poll operations from `info!`/`debug!` to `trace!`
+- [ ] Keep `info!` only for state changes (connection established, closed, cut, etc.)
+- [ ] Add connection ID to all error messages
+- [ ] Document logging levels in code comments
+
+**Files**:
+- `moonpool-foundation/src/network/sim/stream.rs`
+- `moonpool-foundation/src/network/sim/connect.rs`
+- `moonpool-foundation/src/network/sim/listener.rs`
