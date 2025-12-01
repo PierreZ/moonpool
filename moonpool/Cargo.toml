@@ -20,4 +20,8 @@ tokio = { version = "1", features = ["sync", "macros", "rt"] }
 tracing = "0.1"
 
 [dev-dependencies]
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[example]]
+name = "ping_pong"
+path = "examples/ping_pong.rs"
