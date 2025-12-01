@@ -1468,3 +1468,87 @@ let response = send_request(&transport, &add_endpoint, AddRequest { a: 10, b: 5 
 - ✅ `cargo clippy` clean (existing warnings only)
 - ✅ `ping_pong.rs` updated to use new APIs
 - ✅ `calculator.rs` validates multi-handler pattern
+
+---
+
+# Phase 12D: Testing Improvements
+
+Analysis revealed that while Phase 12C APIs work in examples, simulation tests still use the old manual patterns. This phase migrates tests and adds coverage for chaos scenarios.
+
+## Step 13: Migrate Simulation Tests to Phase 12C APIs
+
+**Goal**: Validate new APIs work under chaos conditions.
+
+**Sub-tasks**:
+- [ ] Refactor `multi_node_rpc_server_workload` to use `FlowTransportBuilder::build_listening()`
+- [ ] Refactor `multi_node_rpc_client_workload` to use `FlowTransportBuilder::build_listening()`
+- [ ] Replace manual endpoint registration with `register_handler()`
+- [ ] Replace closure pattern with `recv_with_transport()`
+
+**Files**:
+- `moonpool/tests/simulation/workloads.rs`
+
+## Step 14: Add Unit Tests for Phase 12C APIs
+
+**Goal**: Direct unit test coverage for new APIs.
+
+**Sub-tasks**:
+- [ ] `test_recv_with_transport` - async receive with transport reference
+- [ ] `test_try_recv_with_transport` - sync non-blocking version
+- [ ] `test_recv_with_transport_reply_works` - verify reply.send() actually sends
+
+**Files**:
+- `moonpool/src/messaging/static/request_stream.rs` (add to mod tests)
+
+## Step 15: Add Connection Clogging Test
+
+**Goal**: Test message delivery during network congestion (FDB pattern).
+
+**FDB Reference**: `ClogSingleConnection.actor.cpp`
+
+**Sub-tasks**:
+- [ ] New test `slow_simulation_rpc_with_clogging`
+- [ ] Use `SimWorld::clog_pair()` mid-RPC
+- [ ] Verify messages queue during clog
+- [ ] Unclog and verify eventual delivery
+
+**Files**:
+- `moonpool/tests/simulation/test_scenarios.rs`
+
+## Step 16: Add Timeout Path Coverage
+
+**Goal**: Ensure timeout handling is tested under chaos.
+
+**Sub-tasks**:
+- [ ] Add `AwaitWithTimeout { request_id, timeout_ms }` to `RpcClientOp`
+- [ ] Add `rpc_timeout_path` sometimes_assert trigger
+- [ ] Test client behavior when server is slow/unresponsive
+
+**Files**:
+- `moonpool/tests/simulation/operations.rs`
+- `moonpool/tests/simulation/workloads.rs`
+
+## Step 17: Add Multi-Method Interface Simulation Test
+
+**Goal**: Validate `register_handler_at` pattern under chaos.
+
+**Sub-tasks**:
+- [ ] Create calculator-style workload (Add, Sub, Mul, Div request types)
+- [ ] Verify messages route to correct handlers
+- [ ] Test `tokio::select!` on multiple streams under chaos
+
+**Files**:
+- `moonpool/tests/simulation/workloads.rs`
+- `moonpool/tests/simulation/test_scenarios.rs`
+
+## Step 18: Add Builder Error Path Tests
+
+**Goal**: Test error handling in FlowTransportBuilder.
+
+**Sub-tasks**:
+- [ ] Test `build_listening()` when port already in use
+- [ ] Test `build()` without `local_address()` panics with clear message
+- [ ] Test `build_listening()` with SimNetworkProvider
+
+**Files**:
+- `moonpool/src/messaging/static/flow_transport.rs` (add to mod tests)
