@@ -116,6 +116,16 @@ pub struct ConnectionState {
     /// When the send buffer reaches this limit, poll_write returns Pending.
     /// Calculated from BDP (Bandwidth-Delay Product): latency × bandwidth.
     pub send_buffer_capacity: usize,
+
+    /// Per-connection send delay override (asymmetric latency).
+    /// If set, this delay is applied when sending data from this connection.
+    /// If None, the global write_latency from NetworkConfiguration is used.
+    pub send_delay: Option<Duration>,
+
+    /// Per-connection receive delay override (asymmetric latency).
+    /// If set, this delay is applied when receiving data on this connection.
+    /// If None, the global read_latency from NetworkConfiguration is used.
+    pub recv_delay: Option<Duration>,
 }
 
 /// Internal listener state for simulation

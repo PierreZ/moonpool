@@ -1700,14 +1700,14 @@ Extend the TCP simulation layer with additional failure modes inspired by Founda
 **Goal**: Allow send delay ≠ receive delay per connection for more realistic simulation.
 
 **Sub-tasks**:
-- [ ] Add `send_delay: Duration` field to `ConnectionState`
-- [ ] Add `recv_delay: Duration` field to `ConnectionState`
-- [ ] Add `get_send_delay(ConnectionId)` method
-- [ ] Add `get_recv_delay(ConnectionId)` method
-- [ ] Add `set_asymmetric_delays(ConnectionId, send: Duration, recv: Duration)` method
-- [ ] Modify data delivery to apply appropriate delay per direction
-- [ ] Add buggify to randomly set asymmetric delays on connection establishment
-- [ ] Add tests for asymmetric delay behavior
+- [x] Add `send_delay: Option<Duration>` field to `ConnectionState`
+- [x] Add `recv_delay: Option<Duration>` field to `ConnectionState`
+- [x] Add `get_send_delay(ConnectionId)` method
+- [x] Add `get_recv_delay(ConnectionId)` method
+- [x] Add `set_asymmetric_delays(ConnectionId, send: Option<Duration>, recv: Option<Duration>)` method
+- [x] Modify ProcessSendBuffer to use per-connection send_delay
+- [x] Modify DataDelivery scheduling to add receiver's recv_delay
+- [x] Add tests for asymmetric delay behavior
 
 **Files**:
 - `moonpool-foundation/src/sim/state.rs`

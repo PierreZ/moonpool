@@ -581,6 +581,8 @@ impl SimWorld {
                 cut_expiry: None,
                 close_reason: CloseReason::None,
                 send_buffer_capacity: DEFAULT_SEND_BUFFER_CAPACITY,
+                send_delay: None,
+                recv_delay: None,
             },
         );
 
@@ -605,6 +607,8 @@ impl SimWorld {
                 cut_expiry: None,
                 close_reason: CloseReason::None,
                 send_buffer_capacity: DEFAULT_SEND_BUFFER_CAPACITY,
+                send_delay: None,
+                recv_delay: None,
             },
         );
 
@@ -1056,93 +1060,148 @@ impl SimWorld {
                                 } else {
                                     conn.send_in_progress = false;
                                 }
-                            } else if let Some(mut data) = conn.send_buffer.pop_front() {
-                                // Wake any tasks waiting for send buffer space
-                                Self::wake_all(&mut inner.wakers.send_buffer_wakers, connection_id);
+                            } else if let Some(conn) = inner.network.connections.get(&connection_id)
+                            {
+                                // Extract data we need before mutable operations
+                                let paired_id = conn.paired_connection;
+                                let send_delay = conn.send_delay;
+                                let next_send_time = conn.next_send_time;
+                                let has_data = !conn.send_buffer.is_empty();
 
-                                // BUGGIFY: Simulate partial/short writes
-                                if crate::buggify!() && !is_partitioned && !data.is_empty() {
-                                    let max_send = std::cmp::min(
-                                        data.len(),
-                                        inner.network.config.chaos.partial_write_max_bytes,
-                                    );
-                                    let truncate_to = sim_random_range(0..max_send + 1);
+                                // Get receiver's recv_delay if paired connection exists
+                                let recv_delay = paired_id.and_then(|pid| {
+                                    inner
+                                        .network
+                                        .connections
+                                        .get(&pid)
+                                        .and_then(|paired_conn| paired_conn.recv_delay)
+                                });
 
-                                    if truncate_to < data.len() {
-                                        let remainder = data.split_off(truncate_to);
-                                        conn.send_buffer.push_front(remainder);
+                                // Now get mutable reference and pop data
+                                if has_data {
+                                    if let Some(conn) =
+                                        inner.network.connections.get_mut(&connection_id)
+                                    {
+                                        if let Some(mut data) = conn.send_buffer.pop_front() {
+                                            // Wake any tasks waiting for send buffer space
+                                            Self::wake_all(
+                                                &mut inner.wakers.send_buffer_wakers,
+                                                connection_id,
+                                            );
 
-                                        tracing::debug!(
-                                            "BUGGIFY: Partial write on connection {} - sending {} bytes, {} bytes remain queued",
-                                            connection_id.0,
-                                            data.len(),
-                                            conn.send_buffer.front().map(|v| v.len()).unwrap_or(0)
-                                        );
+                                            // BUGGIFY: Simulate partial/short writes
+                                            if crate::buggify!()
+                                                && !is_partitioned
+                                                && !data.is_empty()
+                                            {
+                                                let max_send = std::cmp::min(
+                                                    data.len(),
+                                                    inner
+                                                        .network
+                                                        .config
+                                                        .chaos
+                                                        .partial_write_max_bytes,
+                                                );
+                                                let truncate_to = sim_random_range(0..max_send + 1);
+
+                                                if truncate_to < data.len() {
+                                                    let remainder = data.split_off(truncate_to);
+                                                    conn.send_buffer.push_front(remainder);
+
+                                                    tracing::debug!(
+                                                        "BUGGIFY: Partial write on connection {} - sending {} bytes, {} bytes remain queued",
+                                                        connection_id.0,
+                                                        data.len(),
+                                                        conn.send_buffer
+                                                            .front()
+                                                            .map(|v| v.len())
+                                                            .unwrap_or(0)
+                                                    );
+                                                }
+                                            }
+
+                                            let has_more_messages = !conn.send_buffer.is_empty();
+                                            let base_delay = if has_more_messages {
+                                                std::time::Duration::from_nanos(1)
+                                            } else {
+                                                // Use per-connection send delay if set, otherwise global config
+                                                send_delay.unwrap_or_else(|| {
+                                                    crate::network::config::sample_duration(
+                                                        &inner.network.config.write_latency,
+                                                    )
+                                                })
+                                            };
+
+                                            let earliest_time = std::cmp::max(
+                                                inner.current_time + base_delay,
+                                                next_send_time,
+                                            );
+                                            let actual_delay = earliest_time - inner.current_time;
+
+                                            conn.next_send_time =
+                                                earliest_time + std::time::Duration::from_nanos(1);
+
+                                            tracing::info!(
+                                                "Event::ProcessSendBuffer processing {} bytes from connection {} with delay {:?}, has_more_messages={} (TCP ordering: earliest_time={:?})",
+                                                data.len(),
+                                                connection_id.0,
+                                                actual_delay,
+                                                has_more_messages,
+                                                earliest_time
+                                            );
+
+                                            if let Some(paired_id) = paired_id {
+                                                // Add receiver's recv_delay if set
+                                                let scheduled_time = earliest_time
+                                                    + recv_delay.unwrap_or(Duration::ZERO);
+                                                let sequence = inner.next_sequence;
+                                                inner.next_sequence += 1;
+
+                                                let scheduled_event = ScheduledEvent::new(
+                                                    scheduled_time,
+                                                    Event::Network {
+                                                        connection_id: paired_id.0,
+                                                        operation: NetworkOperation::DataDelivery {
+                                                            data,
+                                                        },
+                                                    },
+                                                    sequence,
+                                                );
+                                                inner.event_queue.schedule(scheduled_event);
+                                            }
+
+                                            if !conn.send_buffer.is_empty() {
+                                                let scheduled_time = inner.current_time;
+                                                let sequence = inner.next_sequence;
+                                                inner.next_sequence += 1;
+
+                                                let scheduled_event = ScheduledEvent::new(
+                                                    scheduled_time,
+                                                    Event::Network {
+                                                        connection_id: connection_id.0,
+                                                        operation:
+                                                            NetworkOperation::ProcessSendBuffer,
+                                                    },
+                                                    sequence,
+                                                );
+                                                inner.event_queue.schedule(scheduled_event);
+                                            } else {
+                                                conn.send_in_progress = false;
+                                            }
+                                        } else {
+                                            conn.send_in_progress = false;
+                                        }
+                                    }
+                                } else {
+                                    // No data in buffer
+                                    if let Some(conn) =
+                                        inner.network.connections.get_mut(&connection_id)
+                                    {
+                                        conn.send_in_progress = false;
                                     }
                                 }
-
-                                let has_more_messages = !conn.send_buffer.is_empty();
-                                let base_delay = if has_more_messages {
-                                    std::time::Duration::from_nanos(1)
-                                } else {
-                                    crate::network::config::sample_duration(
-                                        &inner.network.config.write_latency,
-                                    )
-                                };
-
-                                let earliest_time = std::cmp::max(
-                                    inner.current_time + base_delay,
-                                    conn.next_send_time,
-                                );
-                                let actual_delay = earliest_time - inner.current_time;
-
-                                conn.next_send_time =
-                                    earliest_time + std::time::Duration::from_nanos(1);
-
-                                tracing::info!(
-                                    "Event::ProcessSendBuffer processing {} bytes from connection {} with delay {:?}, has_more_messages={} (TCP ordering: earliest_time={:?})",
-                                    data.len(),
-                                    connection_id.0,
-                                    actual_delay,
-                                    has_more_messages,
-                                    earliest_time
-                                );
-
-                                if let Some(paired_id) = conn.paired_connection {
-                                    let scheduled_time = earliest_time;
-                                    let sequence = inner.next_sequence;
-                                    inner.next_sequence += 1;
-
-                                    let scheduled_event = ScheduledEvent::new(
-                                        scheduled_time,
-                                        Event::Network {
-                                            connection_id: paired_id.0,
-                                            operation: NetworkOperation::DataDelivery { data },
-                                        },
-                                        sequence,
-                                    );
-                                    inner.event_queue.schedule(scheduled_event);
-                                }
-
-                                if !conn.send_buffer.is_empty() {
-                                    let scheduled_time = inner.current_time;
-                                    let sequence = inner.next_sequence;
-                                    inner.next_sequence += 1;
-
-                                    let scheduled_event = ScheduledEvent::new(
-                                        scheduled_time,
-                                        Event::Network {
-                                            connection_id: connection_id.0,
-                                            operation: NetworkOperation::ProcessSendBuffer,
-                                        },
-                                        sequence,
-                                    );
-                                    inner.event_queue.schedule(scheduled_event);
-                                } else {
-                                    conn.send_in_progress = false;
-                                }
                             } else {
-                                conn.send_in_progress = false;
+                                // Connection not found
                             }
                         }
                     }
@@ -1466,6 +1525,51 @@ impl SimWorld {
     fn wake_send_buffer_waiters(&self, connection_id: ConnectionId) {
         let mut inner = self.inner.borrow_mut();
         Self::wake_all(&mut inner.wakers.send_buffer_wakers, connection_id);
+    }
+
+    // Per-connection asymmetric delay methods
+
+    /// Get the send delay for a connection.
+    /// Returns the per-connection override if set, otherwise None.
+    pub fn get_send_delay(&self, connection_id: ConnectionId) -> Option<Duration> {
+        let inner = self.inner.borrow();
+        inner
+            .network
+            .connections
+            .get(&connection_id)
+            .and_then(|conn| conn.send_delay)
+    }
+
+    /// Get the receive delay for a connection.
+    /// Returns the per-connection override if set, otherwise None.
+    pub fn get_recv_delay(&self, connection_id: ConnectionId) -> Option<Duration> {
+        let inner = self.inner.borrow();
+        inner
+            .network
+            .connections
+            .get(&connection_id)
+            .and_then(|conn| conn.recv_delay)
+    }
+
+    /// Set asymmetric delays for a connection.
+    /// If a delay is None, the global configuration is used instead.
+    pub fn set_asymmetric_delays(
+        &self,
+        connection_id: ConnectionId,
+        send_delay: Option<Duration>,
+        recv_delay: Option<Duration>,
+    ) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
+            conn.send_delay = send_delay;
+            conn.recv_delay = recv_delay;
+            tracing::debug!(
+                "Connection {} asymmetric delays set: send={:?}, recv={:?}",
+                connection_id.0,
+                send_delay,
+                recv_delay
+            );
+        }
     }
 
     /// Check if a connection is permanently closed
