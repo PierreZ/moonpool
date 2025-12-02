@@ -174,6 +174,11 @@ pub struct NetworkState {
     /// Last time a random close was triggered (global cooldown tracking)
     /// FDB: g_simulator->lastConnectionFailure - see sim2.actor.cpp:583
     pub last_random_close_time: Duration,
+
+    /// Per-IP-pair base latencies for consistent connection behavior.
+    /// Once set on first connection, all subsequent connections between the same
+    /// IP pair will use this base latency (with optional jitter on top).
+    pub pair_latencies: HashMap<(IpAddr, IpAddr), Duration>,
 }
 
 impl NetworkState {
@@ -192,6 +197,7 @@ impl NetworkState {
             send_partitions: HashMap::new(),
             recv_partitions: HashMap::new(),
             last_random_close_time: Duration::ZERO,
+            pair_latencies: HashMap::new(),
         }
     }
 

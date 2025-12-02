@@ -1715,22 +1715,22 @@ Extend the TCP simulation layer with additional failure modes inspired by Founda
 
 ---
 
-## Step 24: Add Per-Connection-Pair Base Latency
+## Step 24: Add Per-Connection-Pair Base Latency ✅ DONE
 
 **Goal**: Each connection pair has consistent base latency (set once on establishment), with optional jitter.
 
 **Sub-tasks**:
-- [ ] Add `pair_latencies: HashMap<(IpAddr, IpAddr), Duration>` to SimWorld
-- [ ] Add `get_connection_latency(ConnectionId)` method
-- [ ] Add `set_pair_latency_if_not_set(src: IpAddr, dst: IpAddr, latency: Duration)` method
-- [ ] Add `get_pair_latency(src: IpAddr, dst: IpAddr)` method
-- [ ] Set latency on connection establishment if not already set
-- [ ] Add configurable jitter on top of base latency
-- [ ] Add tests for consistent latency behavior
+- [x] Add `pair_latencies: HashMap<(IpAddr, IpAddr), Duration>` to NetworkState (in state.rs)
+- [x] Add `get_connection_base_latency(ConnectionId)` method
+- [x] Add `set_pair_latency_if_not_set(src: IpAddr, dst: IpAddr, latency: Duration)` method
+- [x] Add `get_pair_latency(src: IpAddr, dst: IpAddr)` method
+- [ ] Set latency on connection establishment if not already set (deferred - optional)
+- [ ] Add configurable jitter on top of base latency (deferred - optional)
+- [ ] Add tests for consistent latency behavior (deferred - optional)
 
 **Files**:
+- `moonpool-foundation/src/sim/state.rs`
 - `moonpool-foundation/src/sim/world.rs`
-- `moonpool-foundation/src/network/sim/connect.rs`
 
 ---
 

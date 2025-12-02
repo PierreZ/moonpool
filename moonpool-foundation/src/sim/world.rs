@@ -6,6 +6,7 @@
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet, VecDeque},
+    net::IpAddr,
     rc::{Rc, Weak},
     task::Waker,
     time::Duration,
@@ -1525,6 +1526,58 @@ impl SimWorld {
     fn wake_send_buffer_waiters(&self, connection_id: ConnectionId) {
         let mut inner = self.inner.borrow_mut();
         Self::wake_all(&mut inner.wakers.send_buffer_wakers, connection_id);
+    }
+
+    // Per-IP-pair base latency methods
+
+    /// Get the base latency for a connection pair.
+    /// Returns the latency if already set, otherwise None.
+    pub fn get_pair_latency(&self, src: IpAddr, dst: IpAddr) -> Option<Duration> {
+        let inner = self.inner.borrow();
+        inner.network.pair_latencies.get(&(src, dst)).copied()
+    }
+
+    /// Set the base latency for a connection pair if not already set.
+    /// Returns the latency (existing or newly set).
+    pub fn set_pair_latency_if_not_set(&self, src: IpAddr, dst: IpAddr, latency: Duration) -> Duration {
+        let mut inner = self.inner.borrow_mut();
+        *inner
+            .network
+            .pair_latencies
+            .entry((src, dst))
+            .or_insert_with(|| {
+                tracing::debug!(
+                    "Setting base latency for IP pair {} -> {} to {:?}",
+                    src,
+                    dst,
+                    latency
+                );
+                latency
+            })
+    }
+
+    /// Get the base latency for a connection based on its IP pair.
+    /// If not set, samples from config and sets it.
+    pub fn get_connection_base_latency(&self, connection_id: ConnectionId) -> Duration {
+        let inner = self.inner.borrow();
+        let (local_ip, remote_ip) = inner
+            .network
+            .connections
+            .get(&connection_id)
+            .and_then(|conn| Some((conn.local_ip?, conn.remote_ip?)))
+            .unwrap_or_else(|| (IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)));
+        drop(inner);
+
+        // Check if latency is already set
+        if let Some(latency) = self.get_pair_latency(local_ip, remote_ip) {
+            return latency;
+        }
+
+        // Sample a new latency from config and set it
+        let latency = self.with_network_config(|config| {
+            crate::network::config::sample_duration(&config.write_latency)
+        });
+        self.set_pair_latency_if_not_set(local_ip, remote_ip, latency)
     }
 
     // Per-connection asymmetric delay methods
