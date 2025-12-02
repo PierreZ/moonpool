@@ -939,8 +939,7 @@ impl SimWorld {
                         }
 
                         // Also wake send buffer waiters
-                        if let Some(wakers) =
-                            inner.wakers.send_buffer_wakers.remove(&connection_id)
+                        if let Some(wakers) = inner.wakers.send_buffer_wakers.remove(&connection_id)
                         {
                             for waker in wakers {
                                 waker.wake();
@@ -957,7 +956,7 @@ impl SimWorld {
                     NetworkOperation::DataDelivery { data } => {
                         let data_preview =
                             String::from_utf8_lossy(&data[..std::cmp::min(data.len(), 20)]);
-                        tracing::info!(
+                        tracing::trace!(
                             "Event::DataDelivery processing delivery of {} bytes: '{}' to connection {}",
                             data.len(),
                             data_preview,
@@ -969,9 +968,7 @@ impl SimWorld {
                         // Check for packet loss (probabilistic drop)
                         // Data was accepted by poll_write but silently dropped here
                         let packet_loss_prob = inner.network.config.chaos.packet_loss_probability;
-                        if packet_loss_prob > 0.0
-                            && crate::buggify_with_prob!(packet_loss_prob)
-                        {
+                        if packet_loss_prob > 0.0 && crate::buggify_with_prob!(packet_loss_prob) {
                             tracing::info!(
                                 "PacketLoss: connection={} bytes={} data silently dropped",
                                 connection_id.0,
@@ -1032,7 +1029,7 @@ impl SimWorld {
                                 }
                             };
 
-                            tracing::debug!(
+                            tracing::trace!(
                                 "DataDelivery writing {} bytes to connection {} receive_buffer",
                                 data_to_deliver.len(),
                                 connection_id.0
@@ -1042,13 +1039,13 @@ impl SimWorld {
                             }
 
                             if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
-                                tracing::debug!(
+                                tracing::trace!(
                                     "DataDelivery waking up read waker for connection_id={}",
                                     connection_id.0
                                 );
                                 waker.wake();
                             } else {
-                                tracing::debug!(
+                                tracing::trace!(
                                     "DataDelivery no waker found for connection_id={}",
                                     connection_id.0
                                 );
@@ -1184,7 +1181,7 @@ impl SimWorld {
                                             conn.next_send_time =
                                                 earliest_time + std::time::Duration::from_nanos(1);
 
-                                            tracing::info!(
+                                            tracing::trace!(
                                                 "Event::ProcessSendBuffer processing {} bytes from connection {} with delay {:?}, has_more_messages={} (TCP ordering: earliest_time={:?})",
                                                 data.len(),
                                                 connection_id.0,
@@ -1581,7 +1578,12 @@ impl SimWorld {
 
     /// Set the base latency for a connection pair if not already set.
     /// Returns the latency (existing or newly set).
-    pub fn set_pair_latency_if_not_set(&self, src: IpAddr, dst: IpAddr, latency: Duration) -> Duration {
+    pub fn set_pair_latency_if_not_set(
+        &self,
+        src: IpAddr,
+        dst: IpAddr,
+        latency: Duration,
+    ) -> Duration {
         let mut inner = self.inner.borrow_mut();
         *inner
             .network
@@ -1607,7 +1609,12 @@ impl SimWorld {
             .connections
             .get(&connection_id)
             .and_then(|conn| Some((conn.local_ip?, conn.remote_ip?)))
-            .unwrap_or_else(|| (IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)));
+            .unwrap_or_else(|| {
+                (
+                    IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                    IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                )
+            });
         drop(inner);
 
         // Check if latency is already set

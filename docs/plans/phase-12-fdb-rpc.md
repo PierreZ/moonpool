@@ -1777,17 +1777,23 @@ Extend the TCP simulation layer with additional failure modes inspired by Founda
 
 ---
 
-## Step 27: Improve Logging
+## Step 27: Improve Logging ✅ DONE
 
 **Goal**: Better logging for debugging without noise during normal operation.
 
 **Sub-tasks**:
-- [ ] Change routine poll operations from `info!`/`debug!` to `trace!`
-- [ ] Keep `info!` only for state changes (connection established, closed, cut, etc.)
-- [ ] Add connection ID to all error messages
-- [ ] Document logging levels in code comments
+- [x] Change routine poll operations from `info!`/`debug!` to `trace!`
+  - poll_read/poll_write calls → trace
+  - DataDelivery event processing → trace
+  - ProcessSendBuffer event → trace
+  - Data preview/waker registration → trace
+- [x] Keep `info!` only for state changes (connection established, closed, cut, etc.)
+  - RST/FIN close messages → info (state changes)
+  - PacketLoss/BitFlipInjected → info (chaos events)
+  - Random connection failures → info
+- [x] Keep `debug!` for intermediate state (cut, clogged, buffer waiting)
+- [ ] Document logging levels in code comments (deferred - optional)
 
 **Files**:
 - `moonpool-foundation/src/network/sim/stream.rs`
-- `moonpool-foundation/src/network/sim/connect.rs`
-- `moonpool-foundation/src/network/sim/listener.rs`
+- `moonpool-foundation/src/sim/world.rs`

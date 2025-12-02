@@ -128,7 +128,7 @@ impl AsyncRead for SimTcpStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        tracing::info!(
+        tracing::trace!(
             "SimTcpStream::poll_read called on connection_id={}",
             self.connection_id.0
         );
@@ -196,7 +196,7 @@ impl AsyncRead for SimTcpStream {
             .read_from_connection(self.connection_id, &mut temp_buf)
             .map_err(|e| io::Error::other(format!("read error: {}", e)))?;
 
-        tracing::info!(
+        tracing::trace!(
             "SimTcpStream::poll_read connection_id={} read {} bytes",
             self.connection_id.0,
             bytes_read
@@ -204,7 +204,7 @@ impl AsyncRead for SimTcpStream {
 
         if bytes_read > 0 {
             let data_preview = String::from_utf8_lossy(&temp_buf[..std::cmp::min(bytes_read, 20)]);
-            tracing::info!(
+            tracing::trace!(
                 "SimTcpStream::poll_read connection_id={} returning data: '{}'",
                 self.connection_id.0,
                 data_preview
@@ -248,7 +248,7 @@ impl AsyncRead for SimTcpStream {
             }
 
             // Register for notification when data arrives
-            tracing::info!(
+            tracing::trace!(
                 "SimTcpStream::poll_read connection_id={} no data, registering waker",
                 self.connection_id.0
             );
@@ -266,7 +266,7 @@ impl AsyncRead for SimTcpStream {
                 let data_preview = String::from_utf8_lossy(
                     &temp_buf_recheck[..std::cmp::min(bytes_read_recheck, 20)],
                 );
-                tracing::info!(
+                tracing::trace!(
                     "SimTcpStream::poll_read connection_id={} found data on recheck: '{}' (race condition avoided)",
                     self.connection_id.0,
                     data_preview
@@ -419,7 +419,7 @@ impl AsyncWrite for SimTcpStream {
 
         // Use buffered send to maintain TCP ordering
         let data_preview = String::from_utf8_lossy(&buf[..std::cmp::min(buf.len(), 20)]);
-        tracing::info!(
+        tracing::trace!(
             "SimTcpStream::poll_write buffering {} bytes: '{}' for ordered delivery",
             buf.len(),
             data_preview
