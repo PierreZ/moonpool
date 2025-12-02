@@ -22,4 +22,6 @@ pub struct WakerRegistry {
     pub(crate) read_clog_wakers: HashMap<ConnectionId, Vec<Waker>>,
     /// Wakers waiting for cut connections to be restored
     pub(crate) cut_wakers: HashMap<ConnectionId, Vec<Waker>>,
+    /// Wakers waiting for send buffer space to become available
+    pub(crate) send_buffer_wakers: HashMap<ConnectionId, Vec<Waker>>,
 }

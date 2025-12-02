@@ -111,6 +111,11 @@ pub struct ConnectionState {
     /// Reason for connection closure - distinguishes FIN vs RST semantics.
     /// When `is_closed` is true, this indicates whether it was graceful or aborted.
     pub close_reason: CloseReason,
+
+    /// Send buffer capacity in bytes.
+    /// When the send buffer reaches this limit, poll_write returns Pending.
+    /// Calculated from BDP (Bandwidth-Delay Product): latency × bandwidth.
+    pub send_buffer_capacity: usize,
 }
 
 /// Internal listener state for simulation

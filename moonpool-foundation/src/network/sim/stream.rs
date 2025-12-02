@@ -355,6 +355,20 @@ impl AsyncWrite for SimTcpStream {
             return Poll::Pending;
         }
 
+        // Check for send buffer space (backpressure)
+        let available_buffer = sim.available_send_buffer(self.connection_id);
+        if available_buffer < buf.len() {
+            // Not enough buffer space, register waker and return Pending
+            tracing::debug!(
+                "SimTcpStream::poll_write connection_id={} buffer full (available={}, needed={}), waiting",
+                self.connection_id.0,
+                available_buffer,
+                buf.len()
+            );
+            sim.register_send_buffer_waker(self.connection_id, cx.waker().clone());
+            return Poll::Pending;
+        }
+
         // Phase 7: Check for write clogging
         if sim.is_write_clogged(self.connection_id) {
             // Already clogged, register waker and return Pending

@@ -554,6 +554,11 @@ impl SimWorld {
             }
         };
 
+        // Calculate send buffer capacity based on BDP (Bandwidth-Delay Product)
+        // Using a default of 64KB which is typical for TCP socket buffers
+        // In real simulations this could be: max_latency_ms * bandwidth_bytes_per_ms
+        const DEFAULT_SEND_BUFFER_CAPACITY: usize = 64 * 1024; // 64KB
+
         // Create paired connections
         // Client stores server's real address as peer_address
         inner.network.connections.insert(
@@ -575,6 +580,7 @@ impl SimWorld {
                 is_cut: false,
                 cut_expiry: None,
                 close_reason: CloseReason::None,
+                send_buffer_capacity: DEFAULT_SEND_BUFFER_CAPACITY,
             },
         );
 
@@ -598,6 +604,7 @@ impl SimWorld {
                 is_cut: false,
                 cut_expiry: None,
                 close_reason: CloseReason::None,
+                send_buffer_capacity: DEFAULT_SEND_BUFFER_CAPACITY,
             },
         );
 
@@ -1023,6 +1030,12 @@ impl SimWorld {
                                         data.len()
                                     );
 
+                                    // Wake any tasks waiting for send buffer space
+                                    Self::wake_all(
+                                        &mut inner.wakers.send_buffer_wakers,
+                                        connection_id,
+                                    );
+
                                     if !conn.send_buffer.is_empty() {
                                         let scheduled_time = inner.current_time;
                                         let sequence = inner.next_sequence;
@@ -1044,6 +1057,9 @@ impl SimWorld {
                                     conn.send_in_progress = false;
                                 }
                             } else if let Some(mut data) = conn.send_buffer.pop_front() {
+                                // Wake any tasks waiting for send buffer space
+                                Self::wake_all(&mut inner.wakers.send_buffer_wakers, connection_id);
+
                                 // BUGGIFY: Simulate partial/short writes
                                 if crate::buggify!() && !is_partitioned && !data.is_empty() {
                                     let max_send = std::cmp::min(
@@ -1401,6 +1417,55 @@ impl SimWorld {
             .entry(connection_id)
             .or_default()
             .push(waker);
+    }
+
+    // Send buffer management methods
+
+    /// Get the send buffer capacity for a connection.
+    pub fn send_buffer_capacity(&self, connection_id: ConnectionId) -> usize {
+        let inner = self.inner.borrow();
+        inner
+            .network
+            .connections
+            .get(&connection_id)
+            .map(|conn| conn.send_buffer_capacity)
+            .unwrap_or(0)
+    }
+
+    /// Get the current send buffer usage for a connection.
+    pub fn send_buffer_used(&self, connection_id: ConnectionId) -> usize {
+        let inner = self.inner.borrow();
+        inner
+            .network
+            .connections
+            .get(&connection_id)
+            .map(|conn| conn.send_buffer.iter().map(|v| v.len()).sum())
+            .unwrap_or(0)
+    }
+
+    /// Get the available send buffer space for a connection.
+    pub fn available_send_buffer(&self, connection_id: ConnectionId) -> usize {
+        let capacity = self.send_buffer_capacity(connection_id);
+        let used = self.send_buffer_used(connection_id);
+        capacity.saturating_sub(used)
+    }
+
+    /// Register a waker for when send buffer space becomes available.
+    pub fn register_send_buffer_waker(&self, connection_id: ConnectionId, waker: Waker) {
+        let mut inner = self.inner.borrow_mut();
+        inner
+            .wakers
+            .send_buffer_wakers
+            .entry(connection_id)
+            .or_default()
+            .push(waker);
+    }
+
+    /// Wake any tasks waiting for send buffer space on a connection.
+    #[allow(dead_code)] // May be used for external buffer management
+    fn wake_send_buffer_waiters(&self, connection_id: ConnectionId) {
+        let mut inner = self.inner.borrow_mut();
+        Self::wake_all(&mut inner.wakers.send_buffer_wakers, connection_id);
     }
 
     /// Check if a connection is permanently closed

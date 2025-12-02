@@ -1678,14 +1678,15 @@ Extend the TCP simulation layer with additional failure modes inspired by Founda
 **FDB Reference**: `Net2Packet.h:43-91` queuing implementation
 
 **Sub-tasks**:
-- [ ] Add `send_buffer_capacity: usize` to `ConnectionState`
-- [ ] Calculate capacity using BDP: `latency × bandwidth` (FDB pattern)
-- [ ] Add `send_buffer_capacity(ConnectionId)` method
-- [ ] Add `send_buffer_used(ConnectionId)` method
-- [ ] Add `available_send_buffer(ConnectionId)` method
-- [ ] Modify `poll_write` to return `Pending` when buffer full
-- [ ] Add `register_send_buffer_waker(ConnectionId, Waker)` for wakeup when space available
-- [ ] Add tests for buffer backpressure behavior
+- [x] Add `send_buffer_capacity: usize` to `ConnectionState`
+- [x] Calculate capacity using BDP: default 64KB (typical TCP buffer)
+- [x] Add `send_buffer_capacity(ConnectionId)` method
+- [x] Add `send_buffer_used(ConnectionId)` method
+- [x] Add `available_send_buffer(ConnectionId)` method
+- [x] Modify `poll_write` to return `Pending` when buffer full
+- [x] Add `register_send_buffer_waker(ConnectionId, Waker)` for wakeup when space available
+- [x] Wake send buffer waiters when data is consumed from buffer
+- [x] Add tests for buffer backpressure behavior
 
 **Files**:
 - `moonpool-foundation/src/sim/state.rs`
