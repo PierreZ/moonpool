@@ -1,5 +1,6 @@
 use super::types::{ConnectionId, ListenerId};
 use crate::network::traits::TcpListenerTrait;
+use crate::sim::state::CloseReason;
 use crate::{Event, WeakSimWorld};
 use async_trait::async_trait;
 use std::{
@@ -157,6 +158,20 @@ impl AsyncRead for SimTcpStream {
             return Poll::Ready(Ok(())); // EOF
         }
 
+        // Check for read clogging (symmetric with write clogging)
+        if sim.is_read_clogged(self.connection_id) {
+            // Already clogged, register waker and return Pending
+            sim.register_read_clog_waker(self.connection_id, cx.waker().clone());
+            return Poll::Pending;
+        }
+
+        // Check if this read should be clogged
+        if sim.should_clog_read(self.connection_id) {
+            sim.clog_read(self.connection_id);
+            sim.register_read_clog_waker(self.connection_id, cx.waker().clone());
+            return Poll::Pending;
+        }
+
         // Try to read from connection's receive buffer first
         // We should be able to read buffered data even if connection is currently cut
         let mut temp_buf = vec![0u8; buf.remaining()];
@@ -182,22 +197,36 @@ impl AsyncRead for SimTcpStream {
         } else {
             // No data available - check if connection is closed or cut
             if sim.is_connection_closed(self.connection_id) {
-                tracing::info!(
-                    "SimTcpStream::poll_read connection_id={} is closed, returning EOF (0 bytes)",
-                    self.connection_id.0
-                );
-                // Connection closed normally - return EOF (0 bytes read)
-                return Poll::Ready(Ok(()));
+                // Check how the connection was closed
+                match sim.get_close_reason(self.connection_id) {
+                    CloseReason::Aborted => {
+                        tracing::info!(
+                            "SimTcpStream::poll_read connection_id={} was aborted (RST), returning ECONNRESET",
+                            self.connection_id.0
+                        );
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::ConnectionReset,
+                            "Connection was aborted (RST)",
+                        )));
+                    }
+                    _ => {
+                        tracing::info!(
+                            "SimTcpStream::poll_read connection_id={} is closed gracefully (FIN), returning EOF (0 bytes)",
+                            self.connection_id.0
+                        );
+                        // Connection closed gracefully (FIN) - return EOF (0 bytes read)
+                        return Poll::Ready(Ok(()));
+                    }
+                }
             }
 
-            if sim.is_connection_closed(self.connection_id) {
-                // Connection is cut - register waker and wait for restoration
+            if sim.is_connection_cut(self.connection_id) {
+                // Connection is temporarily cut - register waker and wait for restoration
                 tracing::debug!(
-                    "SimTcpStream::poll_read connection_id={} is cut, registering waker",
+                    "SimTcpStream::poll_read connection_id={} is cut, registering cut waker",
                     self.connection_id.0
                 );
-                sim.register_read_waker(self.connection_id, cx.waker().clone())
-                    .map_err(|e| io::Error::other(format!("waker registration error: {}", e)))?;
+                sim.register_cut_waker(self.connection_id, cx.waker().clone());
                 return Poll::Pending;
             }
 
@@ -230,14 +259,28 @@ impl AsyncRead for SimTcpStream {
             } else {
                 // Final check - if connection is closed or cut and no data available
                 if sim.is_connection_closed(self.connection_id) {
-                    tracing::info!(
-                        "SimTcpStream::poll_read connection_id={} is closed on recheck, returning EOF (0 bytes)",
-                        self.connection_id.0
-                    );
-                    // Connection closed normally - return EOF (0 bytes read)
-                    Poll::Ready(Ok(()))
-                } else if sim.is_connection_closed(self.connection_id) {
-                    // Connection is cut - already registered waker above, just wait
+                    match sim.get_close_reason(self.connection_id) {
+                        CloseReason::Aborted => {
+                            tracing::info!(
+                                "SimTcpStream::poll_read connection_id={} was aborted on recheck (RST), returning ECONNRESET",
+                                self.connection_id.0
+                            );
+                            Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::ConnectionReset,
+                                "Connection was aborted (RST)",
+                            )))
+                        }
+                        _ => {
+                            tracing::info!(
+                                "SimTcpStream::poll_read connection_id={} is closed on recheck (FIN), returning EOF (0 bytes)",
+                                self.connection_id.0
+                            );
+                            // Connection closed gracefully - return EOF (0 bytes read)
+                            Poll::Ready(Ok(()))
+                        }
+                    }
+                } else if sim.is_connection_cut(self.connection_id) {
+                    // Connection is temporarily cut - already registered waker above, just wait
                     tracing::debug!(
                         "SimTcpStream::poll_read connection_id={} is cut on recheck, waiting",
                         self.connection_id.0
@@ -285,20 +328,26 @@ impl AsyncWrite for SimTcpStream {
 
         // Check if connection is closed or cut
         if sim.is_connection_closed(self.connection_id) {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "Connection was closed",
-            )));
+            // Check how the connection was closed
+            return match sim.get_close_reason(self.connection_id) {
+                CloseReason::Aborted => Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::ConnectionReset,
+                    "Connection was aborted (RST)",
+                ))),
+                _ => Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "Connection was closed (FIN)",
+                ))),
+            };
         }
 
-        if sim.is_connection_closed(self.connection_id) {
-            // Connection is cut - register waker and wait for restoration
+        if sim.is_connection_cut(self.connection_id) {
+            // Connection is temporarily cut - register waker and wait for restoration
             tracing::debug!(
-                "SimTcpStream::poll_write connection_id={} is cut, registering waker",
+                "SimTcpStream::poll_write connection_id={} is cut, registering cut waker",
                 self.connection_id.0
             );
-            sim.register_read_waker(self.connection_id, cx.waker().clone())
-                .map_err(|e| io::Error::other(format!("waker registration error: {}", e)))?;
+            sim.register_cut_waker(self.connection_id, cx.waker().clone());
             tracing::debug!(
                 "SimTcpStream::poll_write connection_id={} registered waker for cut connection",
                 self.connection_id.0

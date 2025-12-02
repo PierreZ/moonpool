@@ -24,7 +24,7 @@ use super::{
     events::{ConnectionStateChange, Event, EventQueue, NetworkOperation, ScheduledEvent},
     rng::{reset_sim_rng, set_sim_seed, sim_random, sim_random_range},
     sleep::SleepFuture,
-    state::{ClogState, ConnectionState, ListenerState, NetworkState, PartitionState},
+    state::{ClogState, CloseReason, ConnectionState, ListenerState, NetworkState, PartitionState},
     wakers::WakerRegistry,
 };
 
@@ -572,6 +572,9 @@ impl SimWorld {
                 is_closed: false,
                 send_closed: false,
                 recv_closed: false,
+                is_cut: false,
+                cut_expiry: None,
+                close_reason: CloseReason::None,
             },
         );
 
@@ -592,6 +595,9 @@ impl SimWorld {
                 is_closed: false,
                 send_closed: false,
                 recv_closed: false,
+                is_cut: false,
+                cut_expiry: None,
+                close_reason: CloseReason::None,
             },
         );
 
@@ -799,11 +805,22 @@ impl SimWorld {
                         // Connection establishment completed
                     }
                     ConnectionStateChange::ClogClear => {
-                        // Clear clog for the specified connection
+                        // Clear write clog for the specified connection
                         let connection_id = ConnectionId(id);
 
                         inner.network.connection_clogs.remove(&connection_id);
                         if let Some(wakers) = inner.wakers.clog_wakers.remove(&connection_id) {
+                            for waker in wakers {
+                                waker.wake();
+                            }
+                        }
+                    }
+                    ConnectionStateChange::ReadClogClear => {
+                        // Clear read clog for the specified connection
+                        let connection_id = ConnectionId(id);
+
+                        inner.network.read_clogs.remove(&connection_id);
+                        if let Some(wakers) = inner.wakers.read_clog_wakers.remove(&connection_id) {
                             for waker in wakers {
                                 waker.wake();
                             }
@@ -866,6 +883,29 @@ impl SimWorld {
                         for ip in expired_ips {
                             inner.network.recv_partitions.remove(&ip);
                             tracing::debug!("Cleared receive partition for {}", ip);
+                        }
+                    }
+                    ConnectionStateChange::CutRestore => {
+                        // Restore a temporarily cut connection
+                        let connection_id = ConnectionId(id);
+
+                        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
+                            if conn.is_cut {
+                                conn.is_cut = false;
+                                conn.cut_expiry = None;
+                                tracing::debug!(
+                                    "Connection {} restored via scheduled event",
+                                    connection_id.0
+                                );
+
+                                // Wake any tasks waiting for restoration
+                                if let Some(wakers) = inner.wakers.cut_wakers.remove(&connection_id)
+                                {
+                                    for waker in wakers {
+                                        waker.wake();
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1192,12 +1232,74 @@ impl SimWorld {
         }
     }
 
-    /// Register a waker for when clog clears
+    /// Register a waker for when write clog clears
     pub fn register_clog_waker(&self, connection_id: ConnectionId, waker: Waker) {
         let mut inner = self.inner.borrow_mut();
         inner
             .wakers
             .clog_wakers
+            .entry(connection_id)
+            .or_default()
+            .push(waker);
+    }
+
+    // Read clogging methods (symmetric with write clogging)
+
+    /// Check if a read should be clogged based on probability
+    pub fn should_clog_read(&self, connection_id: ConnectionId) -> bool {
+        let inner = self.inner.borrow();
+        let config = &inner.network.config;
+
+        // Skip if already clogged
+        if let Some(clog_state) = inner.network.read_clogs.get(&connection_id) {
+            return inner.current_time < clog_state.expires_at;
+        }
+
+        // Check probability (same as write clogging)
+        config.chaos.clog_probability > 0.0 && sim_random::<f64>() < config.chaos.clog_probability
+    }
+
+    /// Clog a connection's read operations
+    pub fn clog_read(&self, connection_id: ConnectionId) {
+        let mut inner = self.inner.borrow_mut();
+        let config = &inner.network.config;
+
+        let clog_duration = crate::network::config::sample_duration(&config.chaos.clog_duration);
+        let expires_at = inner.current_time + clog_duration;
+        inner
+            .network
+            .read_clogs
+            .insert(connection_id, ClogState { expires_at });
+
+        // Schedule an event to clear this read clog
+        let clear_event = Event::Connection {
+            id: connection_id.0,
+            state: ConnectionStateChange::ReadClogClear,
+        };
+        let sequence = inner.next_sequence;
+        inner.next_sequence += 1;
+        inner
+            .event_queue
+            .schedule(ScheduledEvent::new(expires_at, clear_event, sequence));
+    }
+
+    /// Check if a connection's reads are currently clogged
+    pub fn is_read_clogged(&self, connection_id: ConnectionId) -> bool {
+        let inner = self.inner.borrow();
+
+        if let Some(clog_state) = inner.network.read_clogs.get(&connection_id) {
+            inner.current_time < clog_state.expires_at
+        } else {
+            false
+        }
+    }
+
+    /// Register a waker for when read clog clears
+    pub fn register_read_clog_waker(&self, connection_id: ConnectionId, waker: Waker) {
+        let mut inner = self.inner.borrow_mut();
+        inner
+            .wakers
+            .read_clog_wakers
             .entry(connection_id)
             .or_default()
             .push(waker);
@@ -1220,6 +1322,87 @@ impl SimWorld {
         }
     }
 
+    // Connection Cut Methods (temporary network outage simulation)
+
+    /// Temporarily cut a connection for the specified duration.
+    ///
+    /// Unlike `close_connection`, a cut connection will be automatically restored
+    /// after the duration expires. This simulates temporary network outages where
+    /// the underlying connection remains but is temporarily unavailable.
+    ///
+    /// During a cut:
+    /// - `poll_read` returns `Poll::Pending` (waits for restore)
+    /// - `poll_write` returns `Poll::Pending` (waits for restore)
+    /// - Buffered data is preserved
+    pub fn cut_connection(&self, connection_id: ConnectionId, duration: Duration) {
+        let mut inner = self.inner.borrow_mut();
+        let expires_at = inner.current_time + duration;
+
+        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
+            conn.is_cut = true;
+            conn.cut_expiry = Some(expires_at);
+            tracing::debug!("Connection {} cut until {:?}", connection_id.0, expires_at);
+
+            // Schedule restoration event
+            let restore_event = Event::Connection {
+                id: connection_id.0,
+                state: ConnectionStateChange::CutRestore,
+            };
+            let sequence = inner.next_sequence;
+            inner.next_sequence += 1;
+            inner
+                .event_queue
+                .schedule(ScheduledEvent::new(expires_at, restore_event, sequence));
+        }
+    }
+
+    /// Check if a connection is temporarily cut.
+    ///
+    /// A cut connection is temporarily unavailable but will be restored.
+    /// This is different from `is_connection_closed` which indicates permanent closure.
+    pub fn is_connection_cut(&self, connection_id: ConnectionId) -> bool {
+        let inner = self.inner.borrow();
+        inner
+            .network
+            .connections
+            .get(&connection_id)
+            .is_some_and(|conn| {
+                conn.is_cut
+                    && conn
+                        .cut_expiry
+                        .is_some_and(|expiry| inner.current_time < expiry)
+            })
+    }
+
+    /// Restore a cut connection immediately.
+    ///
+    /// This cancels the cut state and wakes any tasks waiting for restoration.
+    pub fn restore_connection(&self, connection_id: ConnectionId) {
+        let mut inner = self.inner.borrow_mut();
+
+        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
+            if conn.is_cut {
+                conn.is_cut = false;
+                conn.cut_expiry = None;
+                tracing::debug!("Connection {} restored", connection_id.0);
+
+                // Wake any tasks waiting for restoration
+                Self::wake_all(&mut inner.wakers.cut_wakers, connection_id);
+            }
+        }
+    }
+
+    /// Register a waker for when a cut connection is restored.
+    pub fn register_cut_waker(&self, connection_id: ConnectionId, waker: Waker) {
+        let mut inner = self.inner.borrow_mut();
+        inner
+            .wakers
+            .cut_wakers
+            .entry(connection_id)
+            .or_default()
+            .push(waker);
+    }
+
     /// Check if a connection is permanently closed
     pub fn is_connection_closed(&self, connection_id: ConnectionId) -> bool {
         let inner = self.inner.borrow();
@@ -1230,8 +1413,41 @@ impl SimWorld {
             .is_some_and(|conn| conn.is_closed)
     }
 
-    /// Close a connection permanently (connection endpoint closed)
+    /// Close a connection gracefully (FIN semantics).
+    ///
+    /// The peer will receive EOF on read operations.
+    /// This is the default close behavior used by `close_connection`.
     pub fn close_connection(&self, connection_id: ConnectionId) {
+        self.close_connection_with_reason(connection_id, CloseReason::Graceful);
+    }
+
+    /// Close a connection gracefully (FIN semantics).
+    ///
+    /// Alias for `close_connection` - peer will receive EOF on read.
+    pub fn close_connection_graceful(&self, connection_id: ConnectionId) {
+        self.close_connection_with_reason(connection_id, CloseReason::Graceful);
+    }
+
+    /// Close a connection abruptly (RST semantics).
+    ///
+    /// The peer will receive ECONNRESET on both read and write operations.
+    pub fn close_connection_abort(&self, connection_id: ConnectionId) {
+        self.close_connection_with_reason(connection_id, CloseReason::Aborted);
+    }
+
+    /// Get the close reason for a connection.
+    pub fn get_close_reason(&self, connection_id: ConnectionId) -> CloseReason {
+        let inner = self.inner.borrow();
+        inner
+            .network
+            .connections
+            .get(&connection_id)
+            .map(|conn| conn.close_reason)
+            .unwrap_or(CloseReason::None)
+    }
+
+    /// Close a connection with a specific close reason.
+    fn close_connection_with_reason(&self, connection_id: ConnectionId, reason: CloseReason) {
         let mut inner = self.inner.borrow_mut();
 
         let paired_connection_id = inner
@@ -1244,7 +1460,12 @@ impl SimWorld {
             && !conn.is_closed
         {
             conn.is_closed = true;
-            tracing::debug!("Connection {} closed permanently", connection_id.0);
+            conn.close_reason = reason;
+            tracing::debug!(
+                "Connection {} closed permanently (reason: {:?})",
+                connection_id.0,
+                reason
+            );
         }
 
         if let Some(paired_id) = paired_connection_id
@@ -1252,7 +1473,12 @@ impl SimWorld {
             && !paired_conn.is_closed
         {
             paired_conn.is_closed = true;
-            tracing::debug!("Paired connection {} also closed", paired_id.0);
+            paired_conn.close_reason = reason;
+            tracing::debug!(
+                "Paired connection {} also closed (reason: {:?})",
+                paired_id.0,
+                reason
+            );
         }
 
         if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {

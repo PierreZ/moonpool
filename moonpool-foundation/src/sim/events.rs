@@ -46,7 +46,8 @@ impl Event {
             Event::Connection {
                 state: ConnectionStateChange::PartitionRestore
                     | ConnectionStateChange::SendPartitionClear
-                    | ConnectionStateChange::RecvPartitionClear,
+                    | ConnectionStateChange::RecvPartitionClear
+                    | ConnectionStateChange::CutRestore,
                 ..
             } // Could add other infrastructure events here if needed:
               // | Event::Connection { state: ConnectionStateChange::ClogClear, .. }
@@ -73,8 +74,12 @@ pub enum ConnectionStateChange {
     BindComplete,
     /// Connection establishment completed
     ConnectionReady,
-    /// Clear clog for a connection
+    /// Clear write clog for a connection
     ClogClear,
+    /// Clear read clog for a connection
+    ReadClogClear,
+    /// Restore a temporarily cut connection
+    CutRestore,
     /// Restore network partition between IPs
     PartitionRestore,
     /// Clear send partition for an IP

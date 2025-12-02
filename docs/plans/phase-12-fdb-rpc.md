@@ -1608,14 +1608,14 @@ Extend the TCP simulation layer with additional failure modes inspired by Founda
 **Root Cause**: `is_connection_cut()` method doesn't exist. The code has comments saying "connection is cut" but calls `is_connection_closed()` making the second branch unreachable.
 
 **Sub-tasks**:
-- [ ] Add `is_cut: bool` field to `ConnectionState` in `state.rs`
-- [ ] Add `cut_connection(ConnectionId, Duration)` method to SimWorld for temporary cuts
-- [ ] Add `is_connection_cut(ConnectionId)` method to SimWorld
-- [ ] Add `restore_connection(ConnectionId)` method to restore cut connections
-- [ ] Add `register_cut_waker(ConnectionId, Waker)` for wakeup on restore
-- [ ] Fix `stream.rs:poll_read` to use `is_connection_cut()` for second check
-- [ ] Fix `stream.rs:poll_write` to use `is_connection_cut()` for second check
-- [ ] Add tests for cut vs closed behavior
+- [x] Add `is_cut: bool` field to `ConnectionState` in `state.rs`
+- [x] Add `cut_connection(ConnectionId, Duration)` method to SimWorld for temporary cuts
+- [x] Add `is_connection_cut(ConnectionId)` method to SimWorld
+- [x] Add `restore_connection(ConnectionId)` method to restore cut connections
+- [x] Add `register_cut_waker(ConnectionId, Waker)` for wakeup on restore
+- [x] Fix `stream.rs:poll_read` to use `is_connection_cut()` for second check
+- [x] Fix `stream.rs:poll_write` to use `is_connection_cut()` for second check
+- [x] Add tests for cut vs closed behavior
 
 **Files**:
 - `moonpool-foundation/src/sim/state.rs`
@@ -1631,15 +1631,15 @@ Extend the TCP simulation layer with additional failure modes inspired by Founda
 **FDB Reference**: Symmetric with write clogging in `FlowTransport.actor.cpp`
 
 **Sub-tasks**:
-- [ ] Add `read_clogged: bool` field to `ConnectionState`
-- [ ] Add `read_clog_expiry: Option<Duration>` field
-- [ ] Add `is_read_clogged(ConnectionId)` method
-- [ ] Add `should_clog_read(ConnectionId)` probability check (buggify)
-- [ ] Add `clog_read(ConnectionId)` method
-- [ ] Add `register_read_clog_waker(ConnectionId, Waker)` method
-- [ ] Modify `poll_read` to check read clog state
-- [ ] Add read clog clearing to `clear_expired_clogs()`
-- [ ] Add tests for read clogging behavior
+- [x] Add `read_clogs: HashMap<ConnectionId, ClogState>` to `NetworkState`
+- [x] Add `read_clog_wakers` to `WakerRegistry`
+- [x] Add `is_read_clogged(ConnectionId)` method
+- [x] Add `should_clog_read(ConnectionId)` probability check (buggify)
+- [x] Add `clog_read(ConnectionId)` method
+- [x] Add `register_read_clog_waker(ConnectionId, Waker)` method
+- [x] Modify `poll_read` to check read clog state
+- [x] Add `ReadClogClear` event handling
+- [x] Add tests for read clogging behavior
 
 **Files**:
 - `moonpool-foundation/src/sim/state.rs`
@@ -1655,14 +1655,14 @@ Extend the TCP simulation layer with additional failure modes inspired by Founda
 **FDB Reference**: `FlowTransport.actor.cpp` connection termination handling
 
 **Sub-tasks**:
-- [ ] Add `close_reason: CloseReason` enum to `ConnectionState` (None, Graceful, Aborted)
-- [ ] Add `close_connection_graceful(ConnectionId)` method (FIN semantics)
-- [ ] Add `close_connection_abort(ConnectionId)` method (RST semantics)
-- [ ] Modify `poll_read` to return appropriate error based on close reason
-- [ ] Modify `poll_write` to return appropriate error based on close reason
-- [ ] Update `Drop` impl to use graceful close by default
-- [ ] Add chaos injection to randomly choose RST vs FIN
-- [ ] Add tests for both close types
+- [x] Add `CloseReason` enum to `state.rs` (None, Graceful, Aborted)
+- [x] Add `close_reason: CloseReason` field to `ConnectionState`
+- [x] Add `close_connection_graceful(ConnectionId)` method (FIN semantics)
+- [x] Add `close_connection_abort(ConnectionId)` method (RST semantics)
+- [x] Add `get_close_reason(ConnectionId)` method
+- [x] Modify `poll_read` to return appropriate error based on close reason
+- [x] Modify `poll_write` to return appropriate error based on close reason
+- [x] Add tests for both close types
 
 **Files**:
 - `moonpool-foundation/src/sim/state.rs`

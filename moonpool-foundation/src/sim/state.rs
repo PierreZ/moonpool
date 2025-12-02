@@ -21,6 +21,22 @@ pub struct ClogState {
     pub expires_at: Duration,
 }
 
+/// Reason for connection closure - distinguishes FIN vs RST semantics.
+///
+/// In real TCP:
+/// - FIN (graceful close): Peer gets EOF on read, writes may still work briefly
+/// - RST (aborted close): Peer gets ECONNRESET immediately on both read and write
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CloseReason {
+    /// Connection is not closed
+    #[default]
+    None,
+    /// Graceful close (FIN) - peer will get EOF on read
+    Graceful,
+    /// Aborted close (RST) - peer will get ECONNRESET
+    Aborted,
+}
+
 /// Network partition state between two IP addresses
 #[derive(Debug, Clone)]
 pub struct PartitionState {
@@ -81,6 +97,20 @@ pub struct ConnectionState {
     /// Whether the receive side is closed (reads return EOF) - for asymmetric closure
     /// FDB: closeInternal() on peer closes recv capability
     pub recv_closed: bool,
+
+    /// Whether this connection is temporarily cut (will be restored).
+    /// Unlike `is_closed`, a cut connection can be restored after a duration.
+    /// This simulates temporary network outages where the connection is not
+    /// permanently severed but temporarily unavailable.
+    pub is_cut: bool,
+
+    /// When the cut expires and the connection is restored (in simulation time).
+    /// Only meaningful when `is_cut` is true.
+    pub cut_expiry: Option<Duration>,
+
+    /// Reason for connection closure - distinguishes FIN vs RST semantics.
+    /// When `is_closed` is true, this indicates whether it was graceful or aborted.
+    pub close_reason: CloseReason,
 }
 
 /// Internal listener state for simulation
@@ -113,8 +143,11 @@ pub struct NetworkState {
     /// Connections pending acceptance, indexed by address.
     pub pending_connections: HashMap<String, ConnectionId>,
 
-    /// Connection clog state (temporary write blocking).
+    /// Write clog state (temporary write blocking).
     pub connection_clogs: HashMap<ConnectionId, ClogState>,
+
+    /// Read clog state (temporary read blocking, symmetric with write clogging).
+    pub read_clogs: HashMap<ConnectionId, ClogState>,
 
     /// Partitions between specific IP pairs (from, to) -> partition state
     pub ip_partitions: HashMap<(IpAddr, IpAddr), PartitionState>,
@@ -139,6 +172,7 @@ impl NetworkState {
             listeners: HashMap::new(),
             pending_connections: HashMap::new(),
             connection_clogs: HashMap::new(),
+            read_clogs: HashMap::new(),
             ip_partitions: HashMap::new(),
             send_partitions: HashMap::new(),
             recv_partitions: HashMap::new(),
