@@ -584,6 +584,8 @@ impl SimWorld {
                 send_buffer_capacity: DEFAULT_SEND_BUFFER_CAPACITY,
                 send_delay: None,
                 recv_delay: None,
+                is_half_open: false,
+                half_open_error_at: None,
             },
         );
 
@@ -610,6 +612,8 @@ impl SimWorld {
                 send_buffer_capacity: DEFAULT_SEND_BUFFER_CAPACITY,
                 send_delay: None,
                 recv_delay: None,
+                is_half_open: false,
+                half_open_error_at: None,
             },
         );
 
@@ -917,6 +921,29 @@ impl SimWorld {
                                         waker.wake();
                                     }
                                 }
+                            }
+                        }
+                    }
+                    ConnectionStateChange::HalfOpenError => {
+                        // Half-open connection now returns errors
+                        let connection_id = ConnectionId(id);
+
+                        tracing::debug!(
+                            "Connection {} half-open error time reached, waking readers",
+                            connection_id.0
+                        );
+
+                        // Wake any tasks waiting to read - they'll get errors now
+                        if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
+                            waker.wake();
+                        }
+
+                        // Also wake send buffer waiters
+                        if let Some(wakers) =
+                            inner.wakers.send_buffer_wakers.remove(&connection_id)
+                        {
+                            for waker in wakers {
+                                waker.wake();
                             }
                         }
                     }
@@ -1860,6 +1887,75 @@ impl SimWorld {
             .connections
             .get(&connection_id)
             .is_some_and(|conn| conn.recv_closed || conn.is_closed)
+    }
+
+    // Half-Open Connection Simulation Methods
+
+    /// Simulate a peer crash on a connection.
+    ///
+    /// This puts the connection in a half-open state where:
+    /// - The local side still thinks it's connected
+    /// - Writes succeed but data is silently discarded (peer is gone)
+    /// - Reads block waiting for data that will never come
+    /// - After `error_delay`, both read and write return ECONNRESET
+    ///
+    /// This simulates real-world scenarios where a remote peer crashes
+    /// or becomes unreachable, but the local TCP stack hasn't detected it yet.
+    pub fn simulate_peer_crash(&self, connection_id: ConnectionId, error_delay: Duration) {
+        let mut inner = self.inner.borrow_mut();
+        let current_time = inner.current_time;
+        let error_at = current_time + error_delay;
+
+        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
+            conn.is_half_open = true;
+            conn.half_open_error_at = Some(error_at);
+
+            // Clear the paired connection to simulate peer being gone
+            // Data sent will go nowhere
+            conn.paired_connection = None;
+
+            tracing::info!(
+                "Connection {} now half-open, errors manifest at {:?}",
+                connection_id.0,
+                error_at
+            );
+        }
+
+        // Schedule an event to wake any waiting readers when error time arrives
+        let wake_event = Event::Connection {
+            id: connection_id.0,
+            state: ConnectionStateChange::HalfOpenError,
+        };
+        let sequence = inner.next_sequence;
+        inner.next_sequence += 1;
+        let scheduled_event = ScheduledEvent::new(error_at, wake_event, sequence);
+        inner.event_queue.schedule(scheduled_event);
+    }
+
+    /// Check if a connection is in half-open state
+    pub fn is_half_open(&self, connection_id: ConnectionId) -> bool {
+        let inner = self.inner.borrow();
+        inner
+            .network
+            .connections
+            .get(&connection_id)
+            .is_some_and(|conn| conn.is_half_open)
+    }
+
+    /// Check if a half-open connection should return errors now
+    pub fn should_half_open_error(&self, connection_id: ConnectionId) -> bool {
+        let inner = self.inner.borrow();
+        let current_time = inner.current_time;
+        inner
+            .network
+            .connections
+            .get(&connection_id)
+            .is_some_and(|conn| {
+                conn.is_half_open
+                    && conn
+                        .half_open_error_at
+                        .is_some_and(|error_at| current_time >= error_at)
+            })
     }
 
     // Network Partition Control Methods

@@ -86,6 +86,8 @@ pub enum ConnectionStateChange {
     SendPartitionClear,
     /// Clear receive partition for an IP
     RecvPartitionClear,
+    /// Half-open connection starts returning errors
+    HalfOpenError,
 }
 
 /// An event scheduled for execution at a specific simulation time.

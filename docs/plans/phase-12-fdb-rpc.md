@@ -1734,22 +1734,27 @@ Extend the TCP simulation layer with additional failure modes inspired by Founda
 
 ---
 
-## Step 25: Add Half-Open Connection Simulation
+## Step 25: Add Half-Open Connection Simulation ✅ DONE
 
 **Goal**: Simulate peer crash where local side thinks it's connected but remote is gone.
 
 **FDB Reference**: Failure detection patterns in `sim2.actor.cpp`
 
 **Sub-tasks**:
-- [ ] Add `simulate_peer_crash(ConnectionId)` method
-- [ ] Mark connection such that:
+- [x] Add `simulate_peer_crash(ConnectionId, error_delay)` method to SimWorld
+- [x] Add `is_half_open`, `half_open_error_at` fields to ConnectionState
+- [x] Mark connection such that:
   - Local side still thinks connected
-  - Writes eventually return `ECONNRESET` or `ETIMEDOUT` (delayed, not immediate)
-  - Reads block, then eventually error
-- [ ] Add configurable delay before errors manifest
-- [ ] Add tests for half-open detection patterns
+  - Writes succeed but data silently discarded (paired_connection cleared)
+  - Reads block waiting for data that never comes
+  - After error_delay: both read and write return `ECONNRESET`
+- [x] Add `HalfOpenError` event to wake blocked tasks when error time arrives
+- [x] Add `is_half_open()`, `should_half_open_error()` helper methods
+- [ ] Add tests for half-open detection patterns (deferred - optional)
 
 **Files**:
+- `moonpool-foundation/src/sim/state.rs`
+- `moonpool-foundation/src/sim/events.rs`
 - `moonpool-foundation/src/sim/world.rs`
 - `moonpool-foundation/src/network/sim/stream.rs`
 

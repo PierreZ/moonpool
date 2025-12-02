@@ -126,6 +126,19 @@ pub struct ConnectionState {
     /// If set, this delay is applied when receiving data on this connection.
     /// If None, the global read_latency from NetworkConfiguration is used.
     pub recv_delay: Option<Duration>,
+
+    /// Whether this connection is in a half-open state (peer crashed).
+    /// In this state:
+    /// - Local side still thinks it's connected
+    /// - Writes succeed but data is silently discarded
+    /// - Reads block waiting for data that will never come
+    /// - After `half_open_error_at`, errors start manifesting
+    pub is_half_open: bool,
+
+    /// When a half-open connection starts returning errors (in simulation time).
+    /// Before this time: writes succeed (data dropped), reads block.
+    /// After this time: both read and write return ECONNRESET.
+    pub half_open_error_at: Option<Duration>,
 }
 
 /// Internal listener state for simulation
