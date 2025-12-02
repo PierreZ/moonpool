@@ -1760,16 +1760,16 @@ Extend the TCP simulation layer with additional failure modes inspired by Founda
 
 ---
 
-## Step 26: Add Intermittent Packet Loss
+## Step 26: Add Intermittent Packet Loss ✅ DONE
 
 **Goal**: Probabilistic packet drop where data is accepted by `poll_write` but never delivered.
 
 **Sub-tasks**:
-- [ ] Add `packet_loss_probability: f64` to `NetworkConfiguration`
-- [ ] Add `should_drop_packet(ConnectionId)` method using deterministic RNG
-- [ ] Modify data delivery path to probabilistically drop
-- [ ] Data accepted but silently discarded → eventually causes timeout
-- [ ] Add tests verifying timeout behavior under packet loss
+- [x] Add `packet_loss_probability: f64` to `ChaosConfiguration`
+- [x] Add default (0.0), disabled (0.0), and random_for_seed (0-5%)
+- [x] Modify DataDelivery event processing to probabilistically drop packets
+- [x] Data accepted but silently discarded (return early, no buffer write)
+- [ ] Add tests verifying timeout behavior under packet loss (deferred - optional)
 
 **Files**:
 - `moonpool-foundation/src/network/config.rs`

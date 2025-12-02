@@ -966,6 +966,21 @@ impl SimWorld {
 
                         let connection_id = ConnectionId(connection_id);
 
+                        // Check for packet loss (probabilistic drop)
+                        // Data was accepted by poll_write but silently dropped here
+                        let packet_loss_prob = inner.network.config.chaos.packet_loss_probability;
+                        if packet_loss_prob > 0.0
+                            && crate::buggify_with_prob!(packet_loss_prob)
+                        {
+                            tracing::info!(
+                                "PacketLoss: connection={} bytes={} data silently dropped",
+                                connection_id.0,
+                                data.len()
+                            );
+                            // Skip delivery entirely - data is lost, event processing done
+                            return;
+                        }
+
                         // Write data to the specified connection's receive buffer
                         if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
                             // Apply bit flipping chaos BEFORE writing to receive buffer

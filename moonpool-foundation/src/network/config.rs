@@ -69,6 +69,12 @@ pub struct ChaosConfiguration {
     /// FDB default: 0.3 (30% explicit) - see sim2.actor.cpp:602
     pub random_close_explicit_ratio: f64,
 
+    /// Packet loss probability (0.0 - 1.0)
+    /// When non-zero, poll_write succeeds but data is probabilistically dropped
+    /// and never delivered, simulating unreliable networks. Higher-level protocols
+    /// must rely on timeouts to detect this.
+    pub packet_loss_probability: f64,
+
     /// Enable clock drift simulation
     /// When enabled, timer() can return a time up to clock_drift_max ahead of now()
     /// FDB ref: sim2.actor.cpp:1058-1064
@@ -114,6 +120,7 @@ impl Default for ChaosConfiguration {
             random_close_probability: 0.00001, // 0.001% - matches FDB's sim2.actor.cpp:584
             random_close_cooldown: Duration::from_secs(5), // Reasonable default
             random_close_explicit_ratio: 0.3,  // 30% explicit - matches FDB's sim2.actor.cpp:602
+            packet_loss_probability: 0.0,      // Disabled by default
             clock_drift_enabled: true,         // Enable by default for chaos testing
             clock_drift_max: Duration::from_millis(100), // FDB default: 0.1 seconds
             buggified_delay_enabled: true,     // Enable by default for chaos testing
@@ -141,6 +148,7 @@ impl ChaosConfiguration {
             random_close_probability: 0.0,
             random_close_cooldown: Duration::ZERO,
             random_close_explicit_ratio: 0.3,
+            packet_loss_probability: 0.0,
             clock_drift_enabled: false,
             clock_drift_max: Duration::from_millis(100),
             buggified_delay_enabled: false,
@@ -170,6 +178,8 @@ impl ChaosConfiguration {
             random_close_probability: sim_random_range(1..100) as f64 / 1000000.0,
             random_close_cooldown: Duration::from_millis(sim_random_range(1000..10000)),
             random_close_explicit_ratio: sim_random_range(20..40) as f64 / 100.0, // 20-40%
+            // Packet loss probability: 0-5% (low but noticeable)
+            packet_loss_probability: sim_random_range(0..50) as f64 / 1000.0,
             clock_drift_enabled: true,
             clock_drift_max: Duration::from_millis(sim_random_range(50..150)), // 50-150ms
             buggified_delay_enabled: true,
