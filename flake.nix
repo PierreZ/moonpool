@@ -42,10 +42,7 @@
             pkg-config
             openssl
             cargo-nextest
-          ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-            # macOS specific dependencies
-            pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
-            pkgs.darwin.apple_sdk.frameworks.CoreFoundation
+	          cargo-edit
           ];
 
           shellHook = ''

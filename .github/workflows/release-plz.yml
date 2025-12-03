@@ -5,24 +5,26 @@ on:
     branches:
       - main
 
-jobs:
+permissions:
+  contents: write
+  pull-requests: write
 
+jobs:
   # Release unpublished packages.
   release-plz-release:
     name: Release-plz release
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    concurrency:
+      group: release-plz-release
+      cancel-in-progress: false
     steps:
-      - &checkout
-        name: Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
           persist-credentials: false
-      - &install-rust
-        name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.91.1
       - name: Run release-plz
         uses: release-plz/action@v0.5
         with:
@@ -35,15 +37,17 @@ jobs:
   release-plz-pr:
     name: Release-plz PR
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
     concurrency:
-      group: release-plz-${{ github.ref }}
+      group: release-plz-pr
       cancel-in-progress: false
     steps:
-      - *checkout
-      - *install-rust
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.91.1
       - name: Run release-plz
         uses: release-plz/action@v0.5
         with:
