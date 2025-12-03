@@ -20,7 +20,7 @@ use super::reply_error::ReplyError;
 
 /// Future that resolves when a reply is received from the server.
 ///
-/// Created by [`send_request`] and polls an internal queue for the response.
+/// Created by `send_request` and polls an internal queue for the response.
 /// The response is deserialized as `Result<T, ReplyError>` to handle both
 /// success and error cases.
 pub struct ReplyFuture<T: DeserializeOwned, C: MessageCodec> {
@@ -116,7 +116,7 @@ mod tests {
 
         // Simulate server response
         let response: Result<TestResponse, ReplyError> = Ok(TestResponse { value: 42 });
-        let payload = serde_json::to_vec(&response).unwrap();
+        let payload = serde_json::to_vec(&response).expect("serialize response");
         queue.receive(&payload);
 
         // Await the future
@@ -134,7 +134,7 @@ mod tests {
 
         // Simulate server error response
         let response: Result<TestResponse, ReplyError> = Err(ReplyError::BrokenPromise);
-        let payload = serde_json::to_vec(&response).unwrap();
+        let payload = serde_json::to_vec(&response).expect("serialize response");
         queue.receive(&payload);
 
         let result = future.await;

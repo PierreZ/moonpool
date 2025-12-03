@@ -98,7 +98,6 @@ fn test_bit_flip_injection_with_high_probability() {
 /// The power-law distribution (32 - floor(log2(random))) is implemented
 /// in SimInner::calculate_flip_bit_count and matches FDB's approach.
 /// Direct unit testing would require exposing internal implementation details.
-
 /// Test that cooldown prevents excessive bit flipping
 #[test]
 fn test_bit_flip_cooldown() {
@@ -200,11 +199,9 @@ fn test_bit_flip_with_message_exchange() {
         let (mut _server, _) = listener.accept().await.unwrap();
 
         // Simulate realistic workload
-        let test_messages = vec![
-            b"Short".to_vec(),
+        let test_messages = [b"Short".to_vec(),
             b"Medium length message".to_vec(),
-            b"This is a much longer message that contains more bytes and therefore has a higher chance of being corrupted by bit flipping chaos injection".to_vec(),
-        ];
+            b"This is a much longer message that contains more bytes and therefore has a higher chance of being corrupted by bit flipping chaos injection".to_vec()];
 
         for (i, msg) in test_messages.iter().enumerate() {
             println!("Sending message {} ({} bytes)", i, msg.len());

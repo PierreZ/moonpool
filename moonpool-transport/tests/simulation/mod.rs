@@ -76,15 +76,6 @@ pub struct RpcTestRequest {
 }
 
 impl RpcTestRequest {
-    /// Create a new RPC test request.
-    pub fn new(request_id: u64, sender_id: impl Into<String>) -> Self {
-        Self {
-            request_id,
-            sender_id: sender_id.into(),
-            payload: Vec::new(),
-        }
-    }
-
     /// Create an RPC test request with payload.
     pub fn with_payload(
         request_id: u64,
@@ -114,14 +105,6 @@ impl RpcTestResponse {
         Self {
             request_id,
             success: true,
-        }
-    }
-
-    /// Create a failed response.
-    pub fn failure(request_id: u64) -> Self {
-        Self {
-            request_id,
-            success: false,
         }
     }
 }

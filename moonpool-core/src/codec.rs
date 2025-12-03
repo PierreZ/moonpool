@@ -221,7 +221,7 @@ mod tests {
         let result: Result<TestMessage, CodecError> = codec.decode(invalid_json);
         assert!(result.is_err());
 
-        let err = result.unwrap_err();
+        let err = result.expect_err("decode should have failed");
         assert!(matches!(err, CodecError::Decode(_)));
         assert!(err.to_string().contains("decode error"));
     }
@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn test_json_codec_is_clone() {
         let codec1 = JsonCodec;
-        let codec2 = codec1.clone();
+        let codec2 = codec1;
 
         let msg = TestMessage {
             id: 1,
@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn test_json_codec_default() {
-        let codec = JsonCodec::default();
+        let codec = JsonCodec;
         let msg = TestMessage {
             id: 99,
             content: "default".to_string(),

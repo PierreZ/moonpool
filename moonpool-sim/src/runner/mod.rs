@@ -5,11 +5,11 @@
 //!
 //! ## Submodules
 //!
-//! - [`builder`] - SimulationBuilder for configuring experiments
-//! - [`report`] - SimulationMetrics and SimulationReport types
-//! - [`topology`] - WorkloadTopology and workload configuration
-//! - [`orchestrator`] - Internal workload orchestration
-//! - [`tokio`] - TokioRunner for real-world execution
+//! - `builder` - SimulationBuilder for configuring experiments
+//! - `report` - SimulationMetrics and SimulationReport types
+//! - `topology` - WorkloadTopology and workload configuration
+//! - `orchestrator` - Internal workload orchestration
+//! - `tokio` - TokioRunner for real-world execution
 
 pub mod builder;
 pub(crate) mod orchestrator;

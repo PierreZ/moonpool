@@ -284,15 +284,15 @@ mod tests {
         ));
 
         // Should pop in time order
-        let event1 = queue.pop_earliest().unwrap();
+        let event1 = queue.pop_earliest().expect("should have event");
         assert_eq!(event1.time(), Duration::from_millis(100));
         assert_eq!(event1.event(), &Event::Timer { task_id: 1 });
 
-        let event2 = queue.pop_earliest().unwrap();
+        let event2 = queue.pop_earliest().expect("should have event");
         assert_eq!(event2.time(), Duration::from_millis(200));
         assert_eq!(event2.event(), &Event::Timer { task_id: 2 });
 
-        let event3 = queue.pop_earliest().unwrap();
+        let event3 = queue.pop_earliest().expect("should have event");
         assert_eq!(event3.time(), Duration::from_millis(300));
         assert_eq!(event3.event(), &Event::Timer { task_id: 3 });
 
@@ -322,15 +322,15 @@ mod tests {
         ));
 
         // Should pop in sequence order when times are equal
-        let event1 = queue.pop_earliest().unwrap();
+        let event1 = queue.pop_earliest().expect("should have event");
         assert_eq!(event1.event(), &Event::Timer { task_id: 1 });
         assert_eq!(event1.sequence, 0);
 
-        let event2 = queue.pop_earliest().unwrap();
+        let event2 = queue.pop_earliest().expect("should have event");
         assert_eq!(event2.event(), &Event::Timer { task_id: 2 });
         assert_eq!(event2.sequence, 1);
 
-        let event3 = queue.pop_earliest().unwrap();
+        let event3 = queue.pop_earliest().expect("should have event");
         assert_eq!(event3.event(), &Event::Timer { task_id: 3 });
         assert_eq!(event3.sequence, 2);
 

@@ -199,10 +199,10 @@ pub async fn client_workload_with_config(
     // Close peer cleanly
     peer.close().await;
 
-    let mut metrics = SimulationMetrics::default();
-    metrics.events_processed = config.num_operations as u64;
-
-    Ok(metrics)
+    Ok(SimulationMetrics {
+        events_processed: config.num_operations as u64,
+        ..Default::default()
+    })
 }
 
 /// Configuration for a server workload.
@@ -313,7 +313,7 @@ pub async fn server_workload_with_config(
 
                             // Try to parse messages from buffer
                             // Note: This is simplified - real impl would use wire format
-                            while read_buffer.len() >= 14 {
+                            if read_buffer.len() >= 14 {
                                 // Try to deserialize TestMessage
                                 match TestMessage::from_bytes(&read_buffer) {
                                     Ok(msg) => {
@@ -334,12 +334,10 @@ pub async fn server_workload_with_config(
 
                                         // Clear buffer (simplified - assumes one message per read)
                                         read_buffer.clear();
-                                        break;
                                     }
                                     Err(_) => {
                                         // Invalid data - clear and continue
                                         read_buffer.clear();
-                                        break;
                                     }
                                 }
                             }
@@ -371,10 +369,10 @@ pub async fn server_workload_with_config(
     // Validate at quiescence
     invariants.borrow().validate_at_quiescence();
 
-    let mut metrics = SimulationMetrics::default();
-    metrics.events_processed = messages_received;
-
-    Ok(metrics)
+    Ok(SimulationMetrics {
+        events_processed: messages_received,
+        ..Default::default()
+    })
 }
 
 /// A simpler echo server that just reads from accepted connections
@@ -444,10 +442,10 @@ pub async fn echo_server_workload(
         total_bytes
     );
 
-    let mut metrics = SimulationMetrics::default();
-    metrics.events_processed = total_bytes;
-
-    Ok(metrics)
+    Ok(SimulationMetrics {
+        events_processed: total_bytes,
+        ..Default::default()
+    })
 }
 
 /// Configuration for wire-protocol server workload.
@@ -666,8 +664,8 @@ pub async fn wire_server_workload_with_config(
     // Currently, client tracks what it sent, server tracks what it received - separately.
     // True validation would need StateRegistry or shared state mechanism.
 
-    let mut metrics = SimulationMetrics::default();
-    metrics.events_processed = messages_received;
-
-    Ok(metrics)
+    Ok(SimulationMetrics {
+        events_processed: messages_received,
+        ..Default::default()
+    })
 }

@@ -159,21 +159,19 @@ impl AsyncRead for SimTcpStream {
         }
 
         // Check for half-open connection (peer crashed)
-        if sim.is_half_open(self.connection_id) {
-            if sim.should_half_open_error(self.connection_id) {
-                // Error time reached - return ECONNRESET
-                tracing::debug!(
-                    "SimTcpStream::poll_read connection_id={} half-open error time reached, returning ECONNRESET",
-                    self.connection_id.0
-                );
-                return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::ConnectionReset,
-                    "Connection reset (half-open timeout)",
-                )));
-            }
-            // Half-open but not yet error time - will block (Pending) below waiting for data
-            // that will never come, which is the correct half-open behavior
+        if sim.is_half_open(self.connection_id) && sim.should_half_open_error(self.connection_id) {
+            // Error time reached - return ECONNRESET
+            tracing::debug!(
+                "SimTcpStream::poll_read connection_id={} half-open error time reached, returning ECONNRESET",
+                self.connection_id.0
+            );
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "Connection reset (half-open timeout)",
+            )));
         }
+        // Half-open but not yet error time - will block (Pending) below waiting for data
+        // that will never come, which is the correct half-open behavior
 
         // Check for read clogging (symmetric with write clogging)
         if sim.is_read_clogged(self.connection_id) {
@@ -373,21 +371,19 @@ impl AsyncWrite for SimTcpStream {
         }
 
         // Check for half-open connection (peer crashed)
-        if sim.is_half_open(self.connection_id) {
-            if sim.should_half_open_error(self.connection_id) {
-                // Error time reached - return ECONNRESET
-                tracing::debug!(
-                    "SimTcpStream::poll_write connection_id={} half-open error time reached, returning ECONNRESET",
-                    self.connection_id.0
-                );
-                return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::ConnectionReset,
-                    "Connection reset (half-open timeout)",
-                )));
-            }
-            // Half-open but not yet error time - writes succeed but data goes nowhere
-            // (paired_connection is already None, so buffer_send will silently succeed)
+        if sim.is_half_open(self.connection_id) && sim.should_half_open_error(self.connection_id) {
+            // Error time reached - return ECONNRESET
+            tracing::debug!(
+                "SimTcpStream::poll_write connection_id={} half-open error time reached, returning ECONNRESET",
+                self.connection_id.0
+            );
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "Connection reset (half-open timeout)",
+            )));
         }
+        // Half-open but not yet error time - writes succeed but data goes nowhere
+        // (paired_connection is already None, so buffer_send will silently succeed)
 
         // Check for send buffer space (backpressure)
         let available_buffer = sim.available_send_buffer(self.connection_id);

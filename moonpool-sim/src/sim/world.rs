@@ -905,21 +905,20 @@ impl SimWorld {
                         // Restore a temporarily cut connection
                         let connection_id = ConnectionId(id);
 
-                        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-                            if conn.is_cut {
-                                conn.is_cut = false;
-                                conn.cut_expiry = None;
-                                tracing::debug!(
-                                    "Connection {} restored via scheduled event",
-                                    connection_id.0
-                                );
+                        if let Some(conn) = inner.network.connections.get_mut(&connection_id)
+                            && conn.is_cut
+                        {
+                            conn.is_cut = false;
+                            conn.cut_expiry = None;
+                            tracing::debug!(
+                                "Connection {} restored via scheduled event",
+                                connection_id.0
+                            );
 
-                                // Wake any tasks waiting for restoration
-                                if let Some(wakers) = inner.wakers.cut_wakers.remove(&connection_id)
-                                {
-                                    for waker in wakers {
-                                        waker.wake();
-                                    }
+                            // Wake any tasks waiting for restoration
+                            if let Some(wakers) = inner.wakers.cut_wakers.remove(&connection_id) {
+                                for waker in wakers {
+                                    waker.wake();
                                 }
                             }
                         }
@@ -1495,15 +1494,15 @@ impl SimWorld {
     pub fn restore_connection(&self, connection_id: ConnectionId) {
         let mut inner = self.inner.borrow_mut();
 
-        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-            if conn.is_cut {
-                conn.is_cut = false;
-                conn.cut_expiry = None;
-                tracing::debug!("Connection {} restored", connection_id.0);
+        if let Some(conn) = inner.network.connections.get_mut(&connection_id)
+            && conn.is_cut
+        {
+            conn.is_cut = false;
+            conn.cut_expiry = None;
+            tracing::debug!("Connection {} restored", connection_id.0);
 
-                // Wake any tasks waiting for restoration
-                Self::wake_all(&mut inner.wakers.cut_wakers, connection_id);
-            }
+            // Wake any tasks waiting for restoration
+            Self::wake_all(&mut inner.wakers.cut_wakers, connection_id);
         }
     }
 
@@ -1609,7 +1608,7 @@ impl SimWorld {
             .connections
             .get(&connection_id)
             .and_then(|conn| Some((conn.local_ip?, conn.remote_ip?)))
-            .unwrap_or_else(|| {
+            .unwrap_or({
                 (
                     IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
                     IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
@@ -2353,11 +2352,14 @@ mod tests {
         let weak = sim.downgrade();
 
         // Can upgrade and use weak reference
-        assert_eq!(weak.current_time().unwrap(), Duration::ZERO);
+        assert_eq!(
+            weak.current_time().expect("should get time"),
+            Duration::ZERO
+        );
 
         // Schedule event through weak reference
         weak.schedule_event(Event::Timer { task_id: 1 }, Duration::from_millis(100))
-            .unwrap();
+            .expect("should schedule event");
 
         // Verify event was scheduled
         assert!(sim.has_pending_events());

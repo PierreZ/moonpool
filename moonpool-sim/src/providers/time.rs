@@ -77,7 +77,7 @@ mod tests {
             .timeout(Duration::from_millis(100), async { 42 })
             .await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Ok(42));
+        assert_eq!(result.expect("timeout should complete"), Ok(42));
     }
 
     #[test]

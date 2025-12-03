@@ -1058,7 +1058,6 @@ async fn incoming_connection_task<N: NetworkProvider + 'static, T: TimeProvider 
                 match read_result {
                     Ok((_buffer, 0)) => {
                         // Connection closed
-                        current_connection = None;
                         read_buffer.clear();
                         {
                             let mut state = shared_state.borrow_mut();
@@ -1115,7 +1114,6 @@ async fn incoming_connection_task<N: NetworkProvider + 'static, T: TimeProvider 
                                         }
                                     }
 
-                                    current_connection = None;
                                     read_buffer.clear();
                                     {
                                         let mut state = shared_state.borrow_mut();
@@ -1134,7 +1132,6 @@ async fn incoming_connection_task<N: NetworkProvider + 'static, T: TimeProvider 
                         }
                     }
                     Err(_) => {
-                        current_connection = None;
                         read_buffer.clear();
                         {
                             let mut state = shared_state.borrow_mut();

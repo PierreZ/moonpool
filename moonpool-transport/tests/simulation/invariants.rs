@@ -334,24 +334,24 @@ impl MultiNodeRpcInvariants {
                     // Parse "RPC: sent=N, ..." format
                     if let Some(start) = summary.find("sent=") {
                         let rest = &summary[start + 5..];
-                        if let Some(end) = rest.find(',') {
-                            if let Ok(n) = rest[..end].parse::<u64>() {
-                                client_requests_sent += n;
-                            }
+                        if let Some(end) = rest.find(',')
+                            && let Ok(n) = rest[..end].parse::<u64>()
+                        {
+                            client_requests_sent += n;
                         }
                     }
                 }
             } else if node_id.starts_with("server:") {
                 server_count += 1;
                 // Parse server state - extract success count as "responses sent"
-                if let Some(summary) = state.as_str() {
-                    if let Some(start) = summary.find("success=") {
-                        let rest = &summary[start + 8..];
-                        if let Some(end) = rest.find(',') {
-                            if let Ok(n) = rest[..end].parse::<u64>() {
-                                server_responses_sent += n;
-                            }
-                        }
+                if let Some(summary) = state.as_str()
+                    && let Some(start) = summary.find("success=")
+                {
+                    let rest = &summary[start + 8..];
+                    if let Some(end) = rest.find(',')
+                        && let Ok(n) = rest[..end].parse::<u64>()
+                    {
+                        server_responses_sent += n;
                     }
                 }
             }

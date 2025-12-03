@@ -283,7 +283,7 @@ mod tests {
             });
 
         assert!(result.is_some());
-        let (request, reply) = result.unwrap();
+        let (request, reply) = result.expect("should receive request");
         assert_eq!(request, PingRequest { seq: 123 });
 
         // Send a reply
@@ -311,7 +311,7 @@ mod tests {
             stream.recv(|_, _| {}).await;
 
         assert!(result.is_some());
-        let (request, _reply) = result.unwrap();
+        let (request, _reply) = result.expect("should receive request");
         assert_eq!(request, PingRequest { seq: 456 });
     }
 
@@ -471,7 +471,7 @@ mod tests {
             stream.try_recv_with_transport(&transport);
 
         assert!(result.is_some());
-        let (request, _reply) = result.unwrap();
+        let (request, _reply) = result.expect("should receive request");
         assert_eq!(request.seq, 999);
         // Note: _reply will be dropped, sending BrokenPromise to reply_queue (local)
     }
@@ -510,7 +510,7 @@ mod tests {
             stream.recv_with_transport(&transport).await;
 
         assert!(result.is_some());
-        let (request, _reply) = result.unwrap();
+        let (request, _reply) = result.expect("should receive request");
         assert_eq!(request.seq, 888);
         // Note: _reply will be dropped, sending BrokenPromise to reply_queue (local)
     }
@@ -556,7 +556,10 @@ mod tests {
         // Verify response was dispatched to reply endpoint
         let received = reply_queue.try_recv();
         assert!(received.is_some());
-        let response = received.unwrap();
-        assert_eq!(response.unwrap(), PingResponse { seq: 777 });
+        let response = received.expect("should receive response");
+        assert_eq!(
+            response.expect("response should be Ok"),
+            PingResponse { seq: 777 }
+        );
     }
 }

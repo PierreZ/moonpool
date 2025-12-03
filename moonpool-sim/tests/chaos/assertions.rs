@@ -220,7 +220,7 @@ fn test_parallel_assertion_isolation() {
 fn test_assertion_with_complex_conditions() {
     let sim = SimWorld::new_with_seed(456);
 
-    let data = [1, 2, 3, 4, 5];
+    let data: Vec<i32> = vec![1, 2, 3, 4, 5];
     let sum: i32 = data.iter().sum();
     let avg = sum as f64 / data.len() as f64;
 

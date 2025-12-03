@@ -157,7 +157,7 @@ mod tests {
 
         registry.register_state("actor_1", json!({"count": 42}));
 
-        let state = registry.get_state("actor_1").unwrap();
+        let state = registry.get_state("actor_1").expect("state should exist");
         assert_eq!(state.get("count").and_then(|c| c.as_u64()), Some(42));
     }
 
@@ -174,7 +174,7 @@ mod tests {
         registry.register_state("actor_1", json!({"count": 1}));
         registry.register_state("actor_1", json!({"count": 2}));
 
-        let state = registry.get_state("actor_1").unwrap();
+        let state = registry.get_state("actor_1").expect("state should exist");
         assert_eq!(state.get("count").and_then(|c| c.as_u64()), Some(2));
     }
 
@@ -216,7 +216,7 @@ mod tests {
         registry1.register_state("actor_1", json!({"count": 1}));
 
         // Cloned registry sees the same state
-        let state = registry2.get_state("actor_1").unwrap();
+        let state = registry2.get_state("actor_1").expect("state should exist");
         assert_eq!(state.get("count").and_then(|c| c.as_u64()), Some(1));
 
         // Updates from clone visible in original

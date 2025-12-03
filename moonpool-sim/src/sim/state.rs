@@ -214,8 +214,8 @@ impl NetworkState {
         }
     }
 
-    /// Extract IP address from a network address string
-    /// Supports formats like "127.0.0.1:8080", "[::1]:8080", etc.
+    /// Extract IP address from a network address string.
+    /// Supports formats like "127.0.0.1:8080", "\[::1\]:8080", etc.
     pub fn parse_ip_from_addr(addr: &str) -> Option<IpAddr> {
         // Handle IPv6 addresses in brackets
         if addr.starts_with('[')

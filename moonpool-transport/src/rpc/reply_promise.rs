@@ -34,6 +34,9 @@ use serde::Serialize;
 
 use super::reply_error::ReplyError;
 
+/// Type alias for the sender function in ReplyPromise.
+type ReplySender = Box<dyn FnOnce(&Endpoint, &[u8])>;
+
 /// Promise for sending a reply to a request.
 ///
 /// The server receives this along with each request and must fulfill it
@@ -62,7 +65,7 @@ struct ReplyPromiseInner<T, C: MessageCodec> {
 
     /// Sender function - sends serialized bytes to the endpoint.
     /// This is injected to decouple from FlowTransport.
-    sender: Option<Box<dyn FnOnce(&Endpoint, &[u8])>>,
+    sender: Option<ReplySender>,
 
     /// Whether the promise has been fulfilled.
     fulfilled: bool,
@@ -116,10 +119,10 @@ impl<T: Serialize, C: MessageCodec> ReplyPromise<T, C> {
                 let error_result: Result<T, ReplyError> = Err(ReplyError::Serialization {
                     message: e.to_string(),
                 });
-                if let Ok(error_payload) = inner.codec.encode(&error_result) {
-                    if let Some(sender) = inner.sender.take() {
-                        sender(&inner.reply_endpoint, &error_payload);
-                    }
+                if let Ok(error_payload) = inner.codec.encode(&error_result)
+                    && let Some(sender) = inner.sender.take()
+                {
+                    sender(&inner.reply_endpoint, &error_payload);
                 }
             }
         }
@@ -137,10 +140,10 @@ impl<T: Serialize, C: MessageCodec> ReplyPromise<T, C> {
         }
 
         let result: Result<T, ReplyError> = Err(error);
-        if let Ok(payload) = inner.codec.encode(&result) {
-            if let Some(sender) = inner.sender.take() {
-                sender(&inner.reply_endpoint, &payload);
-            }
+        if let Ok(payload) = inner.codec.encode(&result)
+            && let Some(sender) = inner.sender.take()
+        {
+            sender(&inner.reply_endpoint, &payload);
         }
 
         inner.fulfilled = true;
@@ -169,14 +172,14 @@ impl<T: Serialize, C: MessageCodec> Drop for ReplyPromise<T, C> {
 
             // Send BrokenPromise error to client
             let result: Result<T, ReplyError> = Err(ReplyError::BrokenPromise);
-            if let Ok(payload) = inner.codec.encode(&result) {
-                if let Some(sender) = inner.sender.take() {
-                    sender(&inner.reply_endpoint, &payload);
-                    tracing::warn!(
-                        endpoint = %inner.reply_endpoint.token,
-                        "ReplyPromise dropped without fulfillment - sent BrokenPromise"
-                    );
-                }
+            if let Ok(payload) = inner.codec.encode(&result)
+                && let Some(sender) = inner.sender.take()
+            {
+                sender(&inner.reply_endpoint, &payload);
+                tracing::warn!(
+                    endpoint = %inner.reply_endpoint.token,
+                    "ReplyPromise dropped without fulfillment - sent BrokenPromise"
+                );
             }
             inner.fulfilled = true;
         }
@@ -223,7 +226,7 @@ mod tests {
         assert!(sent.is_some());
 
         // Decode and verify
-        let payload = sent.as_ref().unwrap();
+        let payload = sent.as_ref().expect("should have sent payload");
         let decoded: Result<TestResponse, ReplyError> =
             serde_json::from_slice(payload).expect("decode");
         assert_eq!(decoded, Ok(TestResponse { value: 42 }));
@@ -244,7 +247,7 @@ mod tests {
         let sent = sent_data.borrow();
         assert!(sent.is_some());
 
-        let payload = sent.as_ref().unwrap();
+        let payload = sent.as_ref().expect("should have sent payload");
         let decoded: Result<TestResponse, ReplyError> =
             serde_json::from_slice(payload).expect("decode");
         assert_eq!(decoded, Err(ReplyError::Timeout));
@@ -267,7 +270,7 @@ mod tests {
         let sent = sent_data.borrow();
         assert!(sent.is_some());
 
-        let payload = sent.as_ref().unwrap();
+        let payload = sent.as_ref().expect("should have sent payload");
         let decoded: Result<TestResponse, ReplyError> =
             serde_json::from_slice(payload).expect("decode");
         assert_eq!(decoded, Err(ReplyError::BrokenPromise));

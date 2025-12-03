@@ -113,7 +113,7 @@ fn rand_reply_id() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+
     use std::net::{IpAddr, Ipv4Addr};
     use std::rc::Rc;
 
@@ -121,7 +121,6 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     use super::*;
-    use crate::MessageReceiver;
 
     // Mock network provider for testing
     #[derive(Clone)]
@@ -226,10 +225,6 @@ mod tests {
         let server_token = UID::new(0x1234, 0x5678);
         let server_endpoint = Endpoint::new(test_address(), server_token);
 
-        // Capture the sent data
-        let sent_data: Rc<RefCell<Option<Vec<u8>>>> = Rc::new(RefCell::new(None));
-        let sent_clone = sent_data.clone();
-
         let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<PingRequest>, JsonCodec>> =
             Rc::new(NetNotifiedQueue::new(server_endpoint.clone(), JsonCodec));
 
@@ -244,7 +239,7 @@ mod tests {
         );
 
         assert!(result.is_ok());
-        let future: ReplyFuture<PingResponse, JsonCodec> = result.unwrap();
+        let _future: ReplyFuture<PingResponse, JsonCodec> = result.expect("should create future");
 
         // The reply endpoint should be registered
         assert!(transport.endpoint_count() >= 2); // server + reply
@@ -253,7 +248,7 @@ mod tests {
         assert_eq!(server_queue.len(), 1);
 
         // Verify the envelope
-        let envelope = server_queue.try_recv().unwrap();
+        let envelope = server_queue.try_recv().expect("should receive envelope");
         assert_eq!(envelope.request, PingRequest { seq: 42 });
         assert!(envelope.reply_to.token.is_valid());
     }
@@ -278,20 +273,20 @@ mod tests {
             PingRequest { seq: 99 },
             JsonCodec,
         )
-        .unwrap();
+        .expect("send_request should succeed");
 
         // Server receives and responds
-        let envelope = server_queue.try_recv().unwrap();
+        let envelope = server_queue.try_recv().expect("should receive request");
         assert_eq!(envelope.request, PingRequest { seq: 99 });
 
         // Simulate server sending response back to client's reply endpoint
         let response: Result<PingResponse, ReplyError> = Ok(PingResponse { seq: 99 });
-        let response_payload = serde_json::to_vec(&response).unwrap();
+        let response_payload = serde_json::to_vec(&response).expect("serialize response");
 
         // Send directly to the reply endpoint via dispatch
         transport
             .dispatch(&envelope.reply_to.token, &response_payload)
-            .unwrap();
+            .expect("dispatch should succeed");
 
         // Await the response
         let result = future.await;

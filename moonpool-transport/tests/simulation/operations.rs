@@ -211,36 +211,6 @@ impl Default for RpcClientOpWeights {
 }
 
 impl RpcClientOpWeights {
-    /// Weights focused on sending many requests (high concurrency).
-    pub fn high_concurrency() -> Self {
-        Self {
-            send_request: 60,
-            await_response: 15,
-            await_with_timeout: 10,
-            small_delay: 15,
-        }
-    }
-
-    /// Weights focused on completing requests (low concurrency).
-    pub fn low_concurrency() -> Self {
-        Self {
-            send_request: 15,
-            await_response: 50,
-            await_with_timeout: 20,
-            small_delay: 15,
-        }
-    }
-
-    /// Weights focused on timeout path coverage.
-    pub fn timeout_focused() -> Self {
-        Self {
-            send_request: 30,
-            await_response: 10,
-            await_with_timeout: 45,
-            small_delay: 15,
-        }
-    }
-
     fn total_weight(&self) -> u32 {
         self.send_request + self.await_response + self.await_with_timeout + self.small_delay
     }
@@ -520,7 +490,7 @@ mod tests {
                     timeout_ms,
                 } => {
                     assert!(pending.contains(&request_id));
-                    assert!(timeout_ms >= 1 && timeout_ms < 100);
+                    assert!((1..100).contains(&timeout_ms));
                 }
                 RpcClientOp::SmallDelay => {}
             }

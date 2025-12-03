@@ -4,7 +4,7 @@
 //!
 //! - **EndpointMap**: Token → receiver routing with O(1) well-known lookup
 //! - **FlowTransport**: Central coordinator managing peers and dispatch
-//! - **NetNotifiedQueue<T>**: Type-safe message queue with async notification
+//! - **`NetNotifiedQueue<T>`**: Type-safe message queue with async notification
 //!
 //! # Design Philosophy
 //!

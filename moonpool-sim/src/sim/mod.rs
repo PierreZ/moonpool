@@ -5,12 +5,12 @@
 //!
 //! ## Submodules
 //!
-//! - [`world`] - Core SimWorld and WeakSimWorld types
-//! - [`events`] - Event types and queue for scheduling
-//! - [`state`] - Network state management (connections, partitions, clogs)
-//! - [`wakers`] - Waker management for async coordination
-//! - [`sleep`] - Sleep future for simulation time
-//! - [`rng`] - Thread-local random number generation
+//! - `world` - Core SimWorld and WeakSimWorld types
+//! - `events` - Event types and queue for scheduling
+//! - `state` - Network state management (connections, partitions, clogs)
+//! - `wakers` - Waker management for async coordination
+//! - `sleep` - Sleep future for simulation time
+//! - `rng` - Thread-local random number generation
 
 pub mod events;
 pub mod rng;

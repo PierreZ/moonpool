@@ -337,10 +337,11 @@ mod tests {
                 .register_workload(
                     "test_workload",
                     |random, _provider, _time_provider, _task_provider, _topology| async move {
-                        let mut metrics = SimulationMetrics::default();
-                        metrics.simulated_time = Duration::from_millis(random.random_range(0..100));
-                        metrics.events_processed = random.random_range(0..10);
-                        Ok(metrics)
+                        Ok(SimulationMetrics {
+                            simulated_time: Duration::from_millis(random.random_range(0..100)),
+                            events_processed: random.random_range(0..10),
+                            ..Default::default()
+                        })
                     },
                 )
                 .set_iterations(3)
@@ -378,10 +379,11 @@ mod tests {
                                 "Test failure".to_string(),
                             ))
                         } else {
-                            let mut metrics = SimulationMetrics::default();
-                            metrics.simulated_time = Duration::from_millis(100);
-                            metrics.events_processed = 5;
-                            Ok(metrics)
+                            Ok(SimulationMetrics {
+                                simulated_time: Duration::from_millis(100),
+                                events_processed: 5,
+                                ..Default::default()
+                            })
                         }
                     },
                 )
@@ -403,9 +405,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_simulation_report_display() {
-        let mut metrics = SimulationMetrics::default();
-        metrics.simulated_time = Duration::from_millis(200);
-        metrics.events_processed = 10;
+        let metrics = SimulationMetrics {
+            simulated_time: Duration::from_millis(200),
+            events_processed: 10,
+            ..Default::default()
+        };
 
         let report = SimulationReport {
             iterations: 2,
@@ -437,10 +441,11 @@ mod tests {
                 .register_workload(
                     "network_test",
                     |_seed, _provider, _time_provider, _task_provider, _topology| async move {
-                        let mut metrics = SimulationMetrics::default();
-                        metrics.simulated_time = Duration::from_millis(50);
-                        metrics.events_processed = 10;
-                        Ok(metrics)
+                        Ok(SimulationMetrics {
+                            simulated_time: Duration::from_millis(50),
+                            events_processed: 10,
+                            ..Default::default()
+                        })
                     },
                 )
                 .set_iterations(2)
@@ -472,19 +477,21 @@ mod tests {
                 .register_workload(
                     "workload1",
                     |random, _provider, _time_provider, _task_provider, _topology| async move {
-                        let mut metrics = SimulationMetrics::default();
-                        metrics.simulated_time = Duration::from_millis(random.random_range(0..50));
-                        metrics.events_processed = random.random_range(0..5);
-                        Ok(metrics)
+                        Ok(SimulationMetrics {
+                            simulated_time: Duration::from_millis(random.random_range(0..50)),
+                            events_processed: random.random_range(0..5),
+                            ..Default::default()
+                        })
                     },
                 )
                 .register_workload(
                     "workload2",
                     |random, _provider, _time_provider, _task_provider, _topology| async move {
-                        let mut metrics = SimulationMetrics::default();
-                        metrics.simulated_time = Duration::from_millis(random.random_range(0..50));
-                        metrics.events_processed = random.random_range(0..5);
-                        Ok(metrics)
+                        Ok(SimulationMetrics {
+                            simulated_time: Duration::from_millis(random.random_range(0..50)),
+                            events_processed: random.random_range(0..5),
+                            ..Default::default()
+                        })
                     },
                 )
                 .set_iterations(2)
