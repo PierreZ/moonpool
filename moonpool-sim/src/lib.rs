@@ -1,35 +1,26 @@
 //! # Moonpool Simulation Framework
 //!
-//! A deterministic simulation framework for testing distributed systems,
-//! inspired by FoundationDB's simulation testing approach.
+//! Deterministic simulation for testing distributed systems, inspired by
+//! [FoundationDB's simulation testing](https://apple.github.io/foundationdb/testing.html).
 //!
-//! ## Key Features
+//! ## Why Deterministic Simulation?
 //!
-//! - **Deterministic execution**: Same seed produces identical behavior
-//! - **Fault injection**: Comprehensive chaos testing via [`buggify!`] macros
-//! - **Network simulation**: TCP-level faults, partitions, and latency
-//! - **Time control**: Logical time with clock drift simulation
+//! FoundationDB's insight: **bugs hide in error paths**. Production code rarely
+//! exercises timeout handlers, retry logic, or failure recovery. Deterministic
+//! simulation with fault injection finds these bugs before production does.
 //!
-//! ## Fault Injection
+//! Key properties:
+//! - **Reproducible**: Same seed produces identical execution
+//! - **Comprehensive**: Tests all failure modes (network, timing, corruption)
+//! - **Fast**: Logical time skips idle periods
 //!
-//! Moonpool provides extensive fault injection following FDB's buggify patterns.
+//! ## Core Components
 //!
-//! Quick overview of chaos mechanisms:
+//! - [`SimWorld`]: The simulation runtime managing events and time
+//! - [`SimulationBuilder`]: Configure and run simulations
+//! - [`chaos`]: Fault injection (buggify, assertions, invariants)
 //!
-//! | Mechanism | Default | What it tests |
-//! |-----------|---------|---------------|
-//! | TCP operation latencies | 1-11ms connect | Async scheduling |
-//! | Random connection close | 0.001% | Reconnection, redelivery |
-//! | Bit flip corruption | 0.01% | Checksum validation |
-//! | Connect failure | Mode 2 | Timeout handling, retries |
-//! | Clock drift | 100ms max | Leases, heartbeats |
-//! | Buggified delays | 25% | Race conditions |
-//! | Partial writes | 1000 bytes | Message fragmentation |
-//! | Network partitions | disabled | Split-brain handling |
-//!
-//! Configure via [`ChaosConfiguration`] and [`NetworkConfiguration`], or use defaults.
-//!
-//! ## Getting Started
+//! ## Quick Start
 //!
 //! ```ignore
 //! use moonpool_sim::{SimulationBuilder, WorkloadTopology};
@@ -37,8 +28,43 @@
 //! SimulationBuilder::new()
 //!     .topology(WorkloadTopology::ClientServer { clients: 2, servers: 1 })
 //!     .run(|ctx| async move {
-//!         // Your workload here
+//!         // Your distributed system workload
 //!     });
+//! ```
+//!
+//! ## Fault Injection Overview
+//!
+//! See [`chaos`] module for detailed documentation.
+//!
+//! | Mechanism | Default | What it tests |
+//! |-----------|---------|---------------|
+//! | TCP latencies | 1-11ms connect | Async scheduling |
+//! | Random connection close | 0.001% | Reconnection, redelivery |
+//! | Bit flip corruption | 0.01% | Checksum validation |
+//! | Connect failure | 50% probabilistic | Timeout handling, retries |
+//! | Clock drift | 100ms max | Leases, heartbeats |
+//! | Buggified delays | 25% | Race conditions |
+//! | Partial writes | 1000 bytes max | Message fragmentation |
+//! | Packet loss | disabled | At-least-once delivery |
+//! | Network partitions | disabled | Split-brain handling |
+//!
+//! ## Multi-Seed Testing
+//!
+//! Tests run across multiple seeds to explore the state space:
+//!
+//! ```ignore
+//! SimulationBuilder::new()
+//!     .run_count(IterationControl::UntilAllSometimesReached(1000))
+//!     .run(workload);
+//! ```
+//!
+//! Debugging a failing seed:
+//!
+//! ```ignore
+//! SimulationBuilder::new()
+//!     .set_seed(failing_seed)
+//!     .run_count(IterationControl::FixedCount(1))
+//!     .run(workload);
 //! ```
 
 #![deny(missing_docs)]

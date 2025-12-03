@@ -1,12 +1,53 @@
 //! # Moonpool Transport Layer
 //!
-//! FDB-style transport layer for the moonpool framework.
+//! FDB-style transport layer for the moonpool simulation framework.
 //!
-//! This crate provides:
-//! - **Peer**: Resilient connection management with automatic reconnection
-//! - **Wire format**: FDB-compatible packet serialization with CRC32C
-//! - **FlowTransport**: Endpoint routing and message dispatch
-//! - **RPC primitives**: Request/response patterns with typed messaging
+//! This crate provides networking primitives that work identically in
+//! simulation and production environments, following FoundationDB's
+//! FlowTransport patterns.
+//!
+//! ## Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────┐
+//! │              Application Code                    │
+//! │         Uses FlowTransport + RPC                 │
+//! ├─────────────────────────────────────────────────┤
+//! │     FlowTransport (endpoint routing)            │
+//! │     • Multiplexes connections per endpoint      │
+//! │     • Request/response with correlation         │
+//! ├─────────────────────────────────────────────────┤
+//! │     Peer (connection management)                │
+//! │     • Automatic reconnection with backoff       │
+//! │     • Message queuing during disconnection      │
+//! ├─────────────────────────────────────────────────┤
+//! │     Wire Format (serialization)                 │
+//! │     • Length-prefixed packets                   │
+//! │     • CRC32C checksums                          │
+//! └─────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Components
+//!
+//! | Component | Purpose |
+//! |-----------|---------|
+//! | [`Peer`] | Resilient connection with automatic reconnection |
+//! | [`FlowTransport`] | Endpoint routing and connection multiplexing |
+//! | [`wire`] | Binary serialization with CRC32C checksums |
+//! | [`rpc`] | Request/response patterns with typed messaging |
+//!
+//! ## Quick Start
+//!
+//! ```ignore
+//! use moonpool_transport::{FlowTransportBuilder, send_request};
+//!
+//! // Build transport with network provider
+//! let transport = FlowTransportBuilder::new(network_provider, time_provider)
+//!     .build();
+//!
+//! // Send typed request, get typed response
+//! let response: PongMessage = send_request(&transport, endpoint, ping).await?;
+//! ```
 
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]

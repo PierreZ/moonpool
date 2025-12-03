@@ -2,31 +2,55 @@
 //!
 //! Core abstractions for the moonpool simulation framework.
 //!
-//! This crate provides the fundamental traits and types that enable moonpool's
-//! simulation capabilities:
+//! This crate provides the foundational traits and types that enable
+//! moonpool's simulation capabilities. Application code depends on
+//! these abstractions rather than concrete implementations, allowing
+//! seamless switching between simulation and production environments.
 //!
-//! - **Provider traits**: Abstractions for time, tasks, randomness, and networking
-//! - **Core types**: UID, Endpoint, NetworkAddress for FDB-compatible addressing
-//! - **Codec trait**: Pluggable message serialization
+//! ## The Provider Pattern
+//!
+//! The key insight is that distributed systems interact with the outside
+//! world through a small set of operations: time, networking, task spawning,
+//! and randomness. By abstracting these behind traits, we can substitute
+//! deterministic simulation implementations during testing.
+//!
+//! ```text
+//! ┌──────────────────────────────────────────────────────┐
+//! │                 Application Code                      │
+//! │     Uses: TimeProvider, NetworkProvider, etc.         │
+//! └───────────────────────┬──────────────────────────────┘
+//!                         │ depends on traits
+//!          ┌──────────────┴──────────────┐
+//!          ▼                             ▼
+//!   ┌─────────────────┐         ┌─────────────────┐
+//!   │   Simulation    │         │   Production    │
+//!   │ SimTimeProvider │         │ TokioTimeProvider│
+//!   │ SimNetworkProv. │         │ TokioNetworkProv.│
+//!   │ (deterministic) │         │  (real I/O)     │
+//!   └─────────────────┘         └─────────────────┘
+//! ```
 //!
 //! ## Provider Traits
 //!
-//! The provider traits allow code to work seamlessly with both simulation and
-//! real execution environments:
+//! | Trait | Simulation | Production | Purpose |
+//! |-------|------------|------------|---------|
+//! | [`TimeProvider`] | Logical time | Wall clock | Sleep, timeout, now() |
+//! | [`TaskProvider`] | Event-driven | Tokio spawn | Task spawning |
+//! | [`RandomProvider`] | Seeded RNG | System RNG | Deterministic randomness |
+//! | [`NetworkProvider`] | Simulated TCP | Real TCP | Connect, listen, accept |
 //!
-//! - [`TimeProvider`]: Sleep, timeout, and time operations
-//! - [`TaskProvider`]: Task spawning for single-threaded environments
-//! - [`RandomProvider`]: Deterministic random number generation
-//! - [`NetworkProvider`]: Network connection and listener creation
+//! **Important**: Never call tokio directly in application code.
+//! - ❌ `tokio::time::sleep()`
+//! - ✅ `time_provider.sleep()`
 //!
 //! ## Core Types
 //!
 //! FDB-compatible types for endpoint addressing:
 //!
-//! - [`UID`]: 128-bit unique identifier
+//! - [`UID`]: 128-bit unique identifier (deterministically generated in simulation)
 //! - [`Endpoint`]: Network address + token for direct addressing
 //! - [`NetworkAddress`]: IP address + port
-//! - [`WellKnownToken`]: System service tokens
+//! - [`WellKnownToken`]: Reserved tokens for system services
 
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
