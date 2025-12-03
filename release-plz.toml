@@ -19,16 +19,32 @@ changelog_update = true
 # Update dependencies during release
 dependencies_update = true
 
-# Package-specific configurations
+# Disable semver checks (pre-1.0, API is unstable)
+semver_check = false
+
+# Features always bump minor version (even in 0.x)
+features_always_increment_minor = true
+
+# Package-specific configurations (ordered by dependency hierarchy: bottom → top)
 [[package]]
-name = "moonpool"
-# Custom changelog path for main package
-changelog_path = "moonpool/CHANGELOG.md"
+name = "moonpool-core"
+changelog_path = "moonpool-core/CHANGELOG.md"
+version_group = "moonpool"
 
 [[package]]
-name = "moonpool-foundation"
-# Custom changelog path for foundation package
-changelog_path = "moonpool-foundation/CHANGELOG.md"
+name = "moonpool-sim"
+changelog_path = "moonpool-sim/CHANGELOG.md"
+version_group = "moonpool"
+
+[[package]]
+name = "moonpool-transport"
+changelog_path = "moonpool-transport/CHANGELOG.md"
+version_group = "moonpool"
+
+[[package]]
+name = "moonpool"
+changelog_path = "moonpool/CHANGELOG.md"
+version_group = "moonpool"
 
 # Changelog configuration
 [changelog]
