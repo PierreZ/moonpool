@@ -25,3 +25,11 @@ tracing = "0.1"
 [dev-dependencies]
 moonpool-sim = { path = "../moonpool-sim" }
 tracing-subscriber = "0.3"
+
+[[example]]
+name = "ping_pong"
+path = "examples/ping_pong.rs"
+
+[[example]]
+name = "calculator"
+path = "examples/calculator.rs"
