@@ -1,49 +1,19 @@
-//! Moonpool: FDB-style static messaging for Rust.
+//! # Moonpool
 //!
-//! This crate provides a typed messaging layer on top of moonpool-foundation's
-//! raw transport primitives. It implements FoundationDB's proven patterns for
-//! reliable network communication.
+//! Deterministic simulation framework for distributed systems.
 //!
-//! # Architecture
+//! This is the main entry point crate that re-exports functionality from:
+//! - [`moonpool_core`]: Core types and traits (UID, Endpoint, providers)
+//! - [`moonpool_sim`]: Simulation runtime and chaos testing
+//! - [`moonpool_transport`]: Network transport and RPC layer
 //!
-//! ```text
-//! moonpool (this crate)
-//! ├── messaging/
-//! │   └── static/           # FDB-style fixed endpoints
-//! │       ├── EndpointMap   # Token → receiver routing
-//! │       ├── FlowTransport # Central coordinator
-//! │       └── NetNotifiedQueue<T> # Typed message queue
-//! │
-//! moonpool-foundation
-//! └── Raw transport primitives (Peer, wire format, UID, Endpoint)
-//! ```
+//! ## Future Development
 //!
-//! # Key Concepts
-//!
-//! - **EndpointMap**: Routes incoming packets by token to receivers.
-//!   Well-known tokens (Ping, EndpointNotFound) use O(1) array lookup.
-//!   Dynamic endpoints use HashMap.
-//!
-//! - **FlowTransport**: Central coordinator managing peer connections and
-//!   packet dispatch. Provides synchronous send API (FDB pattern: never await on send).
-//!
-//! - **NetNotifiedQueue<T>**: Type-safe message queue with async notification.
-//!   Deserializes incoming bytes into typed messages.
+//! This crate will eventually provide the actor runtime experience.
 
-pub mod error;
-pub mod messaging;
+#![deny(missing_docs)]
 
-// Re-export foundation types for convenience
-pub use moonpool_foundation::{
-    Endpoint, NetworkAddress, UID, WELL_KNOWN_RESERVED_COUNT, WellKnownToken,
-};
-
-// Re-export error types
-pub use error::MessagingError;
-
-// Re-export messaging types
-pub use messaging::r#static::{
-    EndpointMap, FlowTransport, FlowTransportBuilder, MessageReceiver, NetNotifiedQueue,
-    RecvFuture, ReplyError, ReplyFuture, ReplyPromise, RequestEnvelope, RequestStream,
-    SharedNetNotifiedQueue, send_request,
-};
+// Re-export all public items from sub-crates
+pub use moonpool_core::*;
+pub use moonpool_sim::*;
+pub use moonpool_transport::*;
