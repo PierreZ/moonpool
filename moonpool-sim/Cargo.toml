@@ -9,7 +9,7 @@ description = "Simulation engine for the moonpool framework"
 documentation = "https://docs.rs/moonpool-sim"
 
 [dependencies]
-moonpool-core = { path = "../moonpool-core" }
+moonpool-core = { path = "../moonpool-core", version = "0.2.0" }
 
 async-trait = "0.1"
 crc32c = "0.6"
