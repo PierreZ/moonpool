@@ -13,6 +13,6 @@ readme = "README.md"
 rustflags = ["--cfg", "tokio_unstable"]
 
 [dependencies]
-moonpool-core = { path = "../moonpool-core", version = "0.2.0" }
-moonpool-sim = { path = "../moonpool-sim", version = "0.2.0" }
-moonpool-transport = { path = "../moonpool-transport", version = "0.2.0" }
+moonpool-core = { path = "../moonpool-core", version = "0.2.1" }
+moonpool-sim = { path = "../moonpool-sim", version = "0.2.1" }
+moonpool-transport = { path = "../moonpool-transport", version = "0.2.1" }
