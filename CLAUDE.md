@@ -14,6 +14,13 @@
 - Default: `UntilAllSometimesReached(1000)` for comprehensive chaos testing
 - Debug faulty seeds: `FixedCount(1)` with specific seed and ERROR log level
 
+## Commit Messages
+Follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/):
+
+Format: `<type>(<crate>): <description>`
+
+Types: `fix` (bugfix), `feat` (new feature), `build`, `chore`, `ci`, `docs`, `style`, `refactor`, `perf`, `test`
+
 ## Core Constraints
 - Single-core execution (no Send/Sync)
 - No `unwrap()` - use `Result<T, E>` with `?`
