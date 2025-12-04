@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "FDB-style transport layer for the moonpool framework"
 documentation = "https://docs.rs/moonpool-transport"
+readme = "README.md"
+
+[package.metadata.docs.rs]
+rustflags = ["--cfg", "tokio_unstable"]
 
 [dependencies]
 moonpool-core = { path = "../moonpool-core", version = "0.2.0" }

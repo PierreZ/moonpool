@@ -7,6 +7,10 @@ documentation.workspace = true
 license.workspace = true
 repository.workspace = true
 edition.workspace = true
+readme = "README.md"
+
+[package.metadata.docs.rs]
+rustflags = ["--cfg", "tokio_unstable"]
 
 [dependencies]
 moonpool-core = { path = "../moonpool-core", version = "0.2.0" }
