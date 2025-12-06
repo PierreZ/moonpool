@@ -18,7 +18,7 @@
 //! │  moonpool-transport    │    moonpool-sim        │
 //! │  • Peer connections    │    • SimWorld runtime  │
 //! │  • Wire format         │    • Chaos testing     │
-//! │  • FlowTransport       │    • Buggify macros    │
+//! │  • NetTransport        │    • Buggify macros    │
 //! │  • RPC primitives      │    • Assertions        │
 //! ├─────────────────────────────────────────────────┤
 //! │              moonpool-core                      │

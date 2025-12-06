@@ -1,7 +1,7 @@
 //! Calculator Example: Multi-method RPC interface using Moonpool.
 //!
 //! This example demonstrates:
-//! - `FlowTransportBuilder` for cleaner transport setup (Step 9)
+//! - `NetTransportBuilder` for cleaner transport setup (Step 9)
 //! - `register_handler_at` for multi-method interfaces (Step 10b)
 //! - `recv_with_transport` for embedded transport in replies (Step 11)
 //! - Using `tokio::select!` to handle multiple request types
@@ -20,7 +20,7 @@ use std::env;
 use std::time::Duration;
 
 use moonpool_transport::{
-    Endpoint, FlowTransportBuilder, JsonCodec, NetworkAddress, ReplyFuture, TimeProvider,
+    Endpoint, JsonCodec, NetTransportBuilder, NetworkAddress, ReplyFuture, TimeProvider,
     TokioNetworkProvider, TokioTaskProvider, TokioTimeProvider, UID, send_request,
 };
 use serde::{Deserialize, Serialize};
@@ -102,9 +102,9 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let local_addr = NetworkAddress::parse(SERVER_ADDR)?;
 
     // ========================================================================
-    // NEW API: FlowTransportBuilder eliminates Rc/set_weak_self boilerplate
+    // NEW API: NetTransportBuilder eliminates Rc/set_weak_self boilerplate
     // ========================================================================
-    let transport = FlowTransportBuilder::new(network, time, task)
+    let transport = NetTransportBuilder::new(network, time, task)
         .local_address(local_addr)
         .build_listening()
         .await?;
@@ -184,8 +184,8 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     let local_addr = NetworkAddress::parse(CLIENT_ADDR)?;
     let server_addr = NetworkAddress::parse(SERVER_ADDR)?;
 
-    // Use FlowTransportBuilder (same as server)
-    let transport = FlowTransportBuilder::new(network, time.clone(), task)
+    // Use NetTransportBuilder (same as server)
+    let transport = NetTransportBuilder::new(network, time.clone(), task)
         .local_address(local_addr)
         .build_listening()
         .await?;
@@ -336,7 +336,7 @@ fn main() {
         _ => {
             println!("Calculator Example: Multi-method RPC with Moonpool\n");
             println!("This example demonstrates the improved Phase 12C APIs:\n");
-            println!("  - FlowTransportBuilder (eliminates Rc/set_weak_self boilerplate)");
+            println!("  - NetTransportBuilder (eliminates Rc/set_weak_self boilerplate)");
             println!("  - register_handler_at (multi-method interface registration)");
             println!("  - recv_with_transport (no closure callback needed)\n");
             println!("Usage:");

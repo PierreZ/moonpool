@@ -1,30 +1,30 @@
-//! FlowTransport: Central transport coordinator (FDB pattern).
+//! NetTransport: Central transport coordinator (FDB pattern).
 //!
 //! Manages peer connections and dispatches incoming packets to endpoints.
 //! Provides synchronous send API (FDB pattern: never await on send).
 //!
 //! # FDB Reference
-//! From FlowTransport.actor.cpp:300-600, FlowTransport.h:195-314
+//! From NetTransport.actor.cpp:300-600, NetTransport.h:195-314
 //!
 //! # Usage
 //!
-//! Use [`FlowTransportBuilder`] to create a properly configured transport:
+//! Use [`NetTransportBuilder`] to create a properly configured transport:
 //!
 //! ```rust,ignore
 //! // For servers and clients that need RPC responses:
-//! let transport = FlowTransportBuilder::new(network, time, task)
+//! let transport = NetTransportBuilder::new(network, time, task)
 //!     .local_address(addr)
 //!     .build_listening()
 //!     .await?;
 //!
 //! // For fire-and-forget senders only (no listening):
-//! let transport = FlowTransportBuilder::new(network, time, task)
+//! let transport = NetTransportBuilder::new(network, time, task)
 //!     .local_address(addr)
 //!     .build();
 //! ```
 //!
 //! The builder automatically handles `Rc` wrapping and `set_weak_self()`,
-//! eliminating the most common footgun in FlowTransport usage.
+//! eliminating the most common footgun in NetTransport usage.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -49,7 +49,7 @@ type SharedPeer<N, T, TP> = Rc<RefCell<Peer<N, T, TP>>>;
 /// Internal transport data (FDB TransportData equivalent).
 ///
 /// Separates internal mutable state from public API, matching FDB's pattern.
-/// See FlowTransport.actor.cpp:300-350 for the original TransportData struct.
+/// See NetTransport.actor.cpp:300-350 for the original TransportData struct.
 ///
 /// # FDB Reference
 /// ```cpp
@@ -96,28 +96,28 @@ where
     }
 }
 
-/// Central transport coordinator (FDB FlowTransport equivalent).
+/// Central transport coordinator (FDB NetTransport equivalent).
 ///
 /// # Design
 ///
 /// - Manages peer connections lazily (created on first send)
 /// - Routes incoming packets to registered endpoints
 /// - Synchronous send API - queues immediately, returns (FDB pattern)
-/// - Explicit `Rc<FlowTransport>` passing (testable, simulation-friendly)
+/// - Explicit `Rc<NetTransport>` passing (testable, simulation-friendly)
 /// - Internal state in `TransportData` (matches FDB: `TransportData* self`)
 ///
 /// # FDB Reference
-/// From FlowTransport.h:195-314
+/// From NetTransport.h:195-314
 ///
 /// # Multi-Node Support (Phase 12 Step 7d)
 ///
 /// For multi-node operation, wrap in `Rc` and call `set_weak_self()`:
 /// ```ignore
-/// let transport = Rc::new(FlowTransport::new(...));
+/// let transport = Rc::new(NetTransport::new(...));
 /// transport.set_weak_self(Rc::downgrade(&transport));
 /// transport.listen().await?; // Start accepting connections
 /// ```
-pub struct FlowTransport<N, T, TP>
+pub struct NetTransport<N, T, TP>
 where
     N: NetworkProvider + 'static,
     T: TimeProvider + 'static,
@@ -164,13 +164,13 @@ struct TransportStats {
     peers_created: u64,
 }
 
-impl<N, T, TP> FlowTransport<N, T, TP>
+impl<N, T, TP> NetTransport<N, T, TP>
 where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
 {
-    /// Create a new FlowTransport.
+    /// Create a new NetTransport.
     ///
     /// # Arguments
     ///
@@ -183,7 +183,7 @@ where
     ///
     /// For multi-node operation, wrap in `Rc` and call `set_weak_self()`:
     /// ```ignore
-    /// let transport = Rc::new(FlowTransport::new(...));
+    /// let transport = Rc::new(NetTransport::new(...));
     /// transport.set_weak_self(Rc::downgrade(&transport));
     /// ```
     pub fn new(local_address: NetworkAddress, network: N, time: T, task_provider: TP) -> Self {
@@ -210,7 +210,7 @@ where
     ///
     /// # Example
     /// ```ignore
-    /// let transport = Rc::new(FlowTransport::new(...));
+    /// let transport = Rc::new(NetTransport::new(...));
     /// transport.set_weak_self(Rc::downgrade(&transport));
     /// ```
     pub fn set_weak_self(&self, weak: Weak<Self>) {
@@ -601,7 +601,7 @@ where
 
     /// Start listening for incoming connections.
     ///
-    /// FDB Pattern: `listen()` (FlowTransport.actor.cpp:1646-1676)
+    /// FDB Pattern: `listen()` (NetTransport.actor.cpp:1646-1676)
     /// Binds to the local address and spawns an accept loop that handles
     /// incoming connections via `connection_incoming()`.
     ///
@@ -612,7 +612,7 @@ where
     /// # Example
     ///
     /// ```ignore
-    /// let transport = Rc::new(FlowTransport::new(...));
+    /// let transport = Rc::new(NetTransport::new(...));
     /// transport.set_weak_self(Rc::downgrade(&transport));
     /// transport.listen().await?;
     /// ```
@@ -634,7 +634,7 @@ where
                     message: format!("Failed to bind to {}: {}", addr_str, e),
                 })?;
 
-        tracing::info!("FlowTransport: listening on {}", addr_str);
+        tracing::info!("NetTransport: listening on {}", addr_str);
 
         // Spawn listen task (FDB: listen() actor)
         // Pass shutdown receiver so the task can exit when transport is dropped
@@ -657,26 +657,26 @@ where
 
 /// Implement Drop to signal shutdown to background tasks.
 ///
-/// When FlowTransport is dropped, we signal all background tasks (listen_task)
+/// When NetTransport is dropped, we signal all background tasks (listen_task)
 /// to exit gracefully. This prevents tasks from being stuck on accept() forever.
-impl<N, T, TP> Drop for FlowTransport<N, T, TP>
+impl<N, T, TP> Drop for NetTransport<N, T, TP>
 where
     N: NetworkProvider + 'static,
     T: TimeProvider + 'static,
     TP: TaskProvider + 'static,
 {
     fn drop(&mut self) {
-        tracing::debug!("FlowTransport: signaling shutdown to background tasks");
+        tracing::debug!("NetTransport: signaling shutdown to background tasks");
         // Signal shutdown - ignore error if no receivers
         let _ = self.shutdown_tx.send(true);
     }
 }
 
 // =============================================================================
-// FlowTransportBuilder
+// NetTransportBuilder
 // =============================================================================
 
-/// Builder for FlowTransport that eliminates common footguns.
+/// Builder for NetTransport that eliminates common footguns.
 ///
 /// The manual `Rc` wrapping and `set_weak_self()` pattern is error-prone:
 /// forgetting `set_weak_self()` causes a runtime panic. This builder handles
@@ -686,18 +686,18 @@ where
 ///
 /// ```rust,ignore
 /// // Standard usage - server or client that needs RPC responses:
-/// let transport = FlowTransportBuilder::new(network, time, task)
+/// let transport = NetTransportBuilder::new(network, time, task)
 ///     .local_address(addr)
 ///     .build_listening()
 ///     .await?;
 ///
 /// // Fire-and-forget sender (no listening needed):
-/// let transport = FlowTransportBuilder::new(network, time, task)
+/// let transport = NetTransportBuilder::new(network, time, task)
 ///     .local_address(addr)
 ///     .build();
 ///
 /// // With custom peer config:
-/// let transport = FlowTransportBuilder::new(network, time, task)
+/// let transport = NetTransportBuilder::new(network, time, task)
 ///     .local_address(addr)
 ///     .peer_config(config)
 ///     .build_listening()
@@ -711,7 +711,7 @@ where
 ///
 /// - **`build()`**: For fire-and-forget messaging where you don't expect responses.
 ///   Also useful for testing where you control message flow manually.
-pub struct FlowTransportBuilder<N, T, TP>
+pub struct NetTransportBuilder<N, T, TP>
 where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
@@ -724,7 +724,7 @@ where
     peer_config: Option<PeerConfig>,
 }
 
-impl<N, T, TP> FlowTransportBuilder<N, T, TP>
+impl<N, T, TP> NetTransportBuilder<N, T, TP>
 where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
@@ -769,7 +769,7 @@ where
 
     /// Build the transport without starting the listener.
     ///
-    /// Returns `Rc<FlowTransport>` with `set_weak_self()` already called.
+    /// Returns `Rc<NetTransport>` with `set_weak_self()` already called.
     /// Use this for fire-and-forget messaging or testing.
     ///
     /// For RPC (request/response), use `build_listening()` instead.
@@ -777,13 +777,12 @@ where
     /// # Panics
     ///
     /// Panics if `local_address()` was not called.
-    pub fn build(self) -> Rc<FlowTransport<N, T, TP>> {
+    pub fn build(self) -> Rc<NetTransport<N, T, TP>> {
         let address = self
             .local_address
             .expect("local_address is required - call .local_address(addr) before .build()");
 
-        let mut transport =
-            FlowTransport::new(address, self.network, self.time, self.task_provider);
+        let mut transport = NetTransport::new(address, self.network, self.time, self.task_provider);
 
         if let Some(config) = self.peer_config {
             transport = transport.with_peer_config(config);
@@ -796,7 +795,7 @@ where
 
     /// Build the transport and start listening for incoming connections.
     ///
-    /// Returns `Rc<FlowTransport>` with `set_weak_self()` already called
+    /// Returns `Rc<NetTransport>` with `set_weak_self()` already called
     /// and the listener started.
     ///
     /// Use this for typical RPC usage where you need to receive responses.
@@ -809,7 +808,7 @@ where
     /// # Panics
     ///
     /// Panics if `local_address()` was not called.
-    pub async fn build_listening(self) -> Result<Rc<FlowTransport<N, T, TP>>, MessagingError> {
+    pub async fn build_listening(self) -> Result<Rc<NetTransport<N, T, TP>>, MessagingError> {
         let transport = self.build();
         transport.listen().await?;
         Ok(transport)
@@ -824,12 +823,12 @@ where
 /// 3. Dispatches them to the appropriate endpoint via `transport.dispatch()`
 ///
 /// # FDB Reference
-/// From FlowTransport.actor.cpp:1401-1602 connectionReader
+/// From NetTransport.actor.cpp:1401-1602 connectionReader
 ///
 /// The FDB version is more complex (handles ConnectPacket, protocol negotiation),
 /// but the core loop is: read packets → scanPackets → deliver.
 async fn connection_reader<N, T, TP>(
-    transport: Weak<FlowTransport<N, T, TP>>,
+    transport: Weak<NetTransport<N, T, TP>>,
     peer: SharedPeer<N, T, TP>,
     peer_addr: String,
 ) where
@@ -901,9 +900,9 @@ async fn connection_reader<N, T, TP>(
 /// 3. Exits gracefully when shutdown signal is received
 ///
 /// # FDB Reference
-/// From FlowTransport.actor.cpp:1646-1676 listen
+/// From NetTransport.actor.cpp:1646-1676 listen
 async fn listen_task<N, T, TP>(
-    transport: Weak<FlowTransport<N, T, TP>>,
+    transport: Weak<NetTransport<N, T, TP>>,
     listener: N::TcpListener,
     listen_addr: String,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -987,7 +986,7 @@ async fn listen_task<N, T, TP>(
 /// 2. Spawns a connection_reader for the peer
 ///
 /// # FDB Reference
-/// From FlowTransport.actor.cpp:1604-1644 connectionIncoming
+/// From NetTransport.actor.cpp:1604-1644 connectionIncoming
 ///
 /// Note: FDB's connectionIncoming waits for ConnectPacket to identify the peer.
 /// We simplify by using the peer address directly since SimNetworkProvider
@@ -996,10 +995,10 @@ async fn listen_task<N, T, TP>(
 /// FDB Pattern: Use Peer::new_incoming() with the accepted stream, not Peer::new().
 /// This uses the already-established connection rather than trying to connect back.
 fn connection_incoming<N, T, TP>(
-    transport_weak: Weak<FlowTransport<N, T, TP>>,
+    transport_weak: Weak<NetTransport<N, T, TP>>,
     stream: N::TcpStream,
     peer_addr: String,
-    transport: &FlowTransport<N, T, TP>,
+    transport: &NetTransport<N, T, TP>,
 ) where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
@@ -1026,7 +1025,7 @@ fn connection_incoming<N, T, TP>(
         drop(data); // Release borrow
 
         // FDB Pattern: Use Peer::new_incoming() with the accepted stream
-        // (FlowTransport.actor.cpp:1123 Peer::onIncomingConnection)
+        // (NetTransport.actor.cpp:1123 Peer::onIncomingConnection)
         // This uses the already-established connection rather than trying to connect back.
         let peer = Peer::new_incoming(
             transport.network.clone(),
@@ -1145,8 +1144,8 @@ mod tests {
     }
 
     fn create_test_transport()
-    -> FlowTransport<MockNetworkProvider, TokioTimeProvider, TokioTaskProvider> {
-        FlowTransport::new(
+    -> NetTransport<MockNetworkProvider, TokioTimeProvider, TokioTaskProvider> {
+        NetTransport::new(
             test_address(),
             MockNetworkProvider,
             TokioTimeProvider::new(),
@@ -1272,12 +1271,12 @@ mod tests {
     }
 
     // =========================================================================
-    // FlowTransportBuilder tests
+    // NetTransportBuilder tests
     // =========================================================================
 
     #[test]
     fn test_builder_build() {
-        let transport = FlowTransportBuilder::new(
+        let transport = NetTransportBuilder::new(
             MockNetworkProvider,
             TokioTimeProvider::new(),
             TokioTaskProvider,
@@ -1294,7 +1293,7 @@ mod tests {
 
     #[test]
     fn test_builder_weak_self_set() {
-        let transport = FlowTransportBuilder::new(
+        let transport = NetTransportBuilder::new(
             MockNetworkProvider,
             TokioTimeProvider::new(),
             TokioTaskProvider,
@@ -1310,7 +1309,7 @@ mod tests {
     #[test]
     fn test_builder_with_peer_config() {
         let config = PeerConfig::default();
-        let transport = FlowTransportBuilder::new(
+        let transport = NetTransportBuilder::new(
             MockNetworkProvider,
             TokioTimeProvider::new(),
             TokioTaskProvider,
@@ -1326,7 +1325,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "local_address is required")]
     fn test_builder_missing_address_panics() {
-        let _ = FlowTransportBuilder::new(
+        let _ = NetTransportBuilder::new(
             MockNetworkProvider,
             TokioTimeProvider::new(),
             TokioTaskProvider,
@@ -1337,7 +1336,7 @@ mod tests {
     #[test]
     fn test_builder_local_delivery_works() {
         // Verify the built transport functions correctly
-        let transport = FlowTransportBuilder::new(
+        let transport = NetTransportBuilder::new(
             MockNetworkProvider,
             TokioTimeProvider::new(),
             TokioTaskProvider,
@@ -1372,7 +1371,7 @@ mod tests {
             value: i32,
         }
 
-        let transport = FlowTransportBuilder::new(
+        let transport = NetTransportBuilder::new(
             MockNetworkProvider,
             TokioTimeProvider::new(),
             TokioTaskProvider,
@@ -1411,7 +1410,7 @@ mod tests {
         const METHOD_ADD: u64 = 0;
         const METHOD_SUB: u64 = 1;
 
-        let transport = FlowTransportBuilder::new(
+        let transport = NetTransportBuilder::new(
             MockNetworkProvider,
             TokioTimeProvider::new(),
             TokioTaskProvider,
@@ -1444,7 +1443,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_listening_bind_error() {
         // MockNetworkProvider returns error on bind(), simulating port already in use
-        let result = FlowTransportBuilder::new(
+        let result = NetTransportBuilder::new(
             MockNetworkProvider,
             TokioTimeProvider::new(),
             TokioTaskProvider,

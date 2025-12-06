@@ -38,9 +38,9 @@ Build your transport once with provider traits. In production, inject tokio-base
 ```text
 ┌─────────────────────────────────────────────────┐
 │              Application Code                    │
-│         Uses FlowTransport + RPC                 │
+│         Uses NetTransport + RPC                  │
 ├─────────────────────────────────────────────────┤
-│     FlowTransport (endpoint routing)            │
+│     NetTransport (endpoint routing)             │
 │     • Multiplexes connections per endpoint      │
 │     • Request/response with correlation         │
 ├─────────────────────────────────────────────────┤

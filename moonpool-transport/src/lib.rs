@@ -4,16 +4,16 @@
 //!
 //! This crate provides networking primitives that work identically in
 //! simulation and production environments, following FoundationDB's
-//! FlowTransport patterns.
+//! NetTransport patterns.
 //!
 //! ## Architecture
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────┐
 //! │              Application Code                    │
-//! │         Uses FlowTransport + RPC                 │
+//! │         Uses NetTransport + RPC                 │
 //! ├─────────────────────────────────────────────────┤
-//! │     FlowTransport (endpoint routing)            │
+//! │     NetTransport (endpoint routing)            │
 //! │     • Multiplexes connections per endpoint      │
 //! │     • Request/response with correlation         │
 //! ├─────────────────────────────────────────────────┤
@@ -32,17 +32,17 @@
 //! | Component | Purpose |
 //! |-----------|---------|
 //! | [`Peer`] | Resilient connection with automatic reconnection |
-//! | [`FlowTransport`] | Endpoint routing and connection multiplexing |
+//! | [`NetTransport`] | Endpoint routing and connection multiplexing |
 //! | [`wire`] | Binary serialization with CRC32C checksums |
 //! | [`rpc`] | Request/response patterns with typed messaging |
 //!
 //! ## Quick Start
 //!
 //! ```ignore
-//! use moonpool_transport::{FlowTransportBuilder, send_request};
+//! use moonpool_transport::{NetTransportBuilder, send_request};
 //!
 //! // Build transport with network provider
-//! let transport = FlowTransportBuilder::new(network_provider, time_provider)
+//! let transport = NetTransportBuilder::new(network_provider, time_provider)
 //!     .build();
 //!
 //! // Send typed request, get typed response
@@ -94,6 +94,6 @@ pub use wire::{
 
 // RPC exports
 pub use rpc::{
-    EndpointMap, FlowTransport, FlowTransportBuilder, MessageReceiver, NetNotifiedQueue,
-    ReplyError, ReplyFuture, ReplyPromise, RequestEnvelope, RequestStream, send_request,
+    EndpointMap, MessageReceiver, NetNotifiedQueue, NetTransport, NetTransportBuilder, ReplyError,
+    ReplyFuture, ReplyPromise, RequestEnvelope, RequestStream, send_request,
 };

@@ -26,8 +26,8 @@ use crate::{Endpoint, MessageCodec, NetworkProvider, TaskProvider, TimeProvider}
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use super::flow_transport::FlowTransport;
 use super::net_notified_queue::NetNotifiedQueue;
+use super::net_transport::NetTransport;
 use super::reply_promise::ReplyPromise;
 
 /// Envelope wrapping a request with its reply endpoint.
@@ -77,7 +77,7 @@ where
 
     /// Get a reference to the internal queue for registration.
     ///
-    /// This is used to register the stream with FlowTransport.
+    /// This is used to register the stream with NetTransport.
     pub fn queue(&self) -> Rc<NetNotifiedQueue<RequestEnvelope<Req>, C>> {
         self.queue.clone()
     }
@@ -87,7 +87,7 @@ where
     /// Returns `None` if the stream is closed.
     ///
     /// The `sender` function is used to send the reply back to the client.
-    /// Typically this is provided by the FlowTransport.
+    /// Typically this is provided by the NetTransport.
     pub async fn recv<F, Resp>(&self, sender: F) -> Option<(Req, ReplyPromise<Resp, C>)>
     where
         Resp: Serialize,
@@ -134,7 +134,7 @@ where
     /// ```
     pub async fn recv_with_transport<N, T, TP, Resp>(
         &self,
-        transport: &Rc<FlowTransport<N, T, TP>>,
+        transport: &Rc<NetTransport<N, T, TP>>,
     ) -> Option<(Req, ReplyPromise<Resp, C>)>
     where
         N: NetworkProvider + Clone + 'static,
@@ -154,7 +154,7 @@ where
     /// Non-blocking version of [`recv_with_transport`](Self::recv_with_transport).
     pub fn try_recv_with_transport<N, T, TP, Resp>(
         &self,
-        transport: &Rc<FlowTransport<N, T, TP>>,
+        transport: &Rc<NetTransport<N, T, TP>>,
     ) -> Option<(Req, ReplyPromise<Resp, C>)>
     where
         N: NetworkProvider + Clone + 'static,
@@ -334,7 +334,7 @@ mod tests {
     // Phase 12C API Tests: recv_with_transport / try_recv_with_transport
     // =========================================================================
 
-    use crate::{FlowTransportBuilder, TokioTaskProvider, TokioTimeProvider};
+    use crate::{NetTransportBuilder, TokioTaskProvider, TokioTimeProvider};
 
     // Simple mock network provider for testing
     #[derive(Clone)]
@@ -406,8 +406,8 @@ mod tests {
     }
 
     fn create_test_transport()
-    -> Rc<crate::FlowTransport<MockNetworkProvider, TokioTimeProvider, TokioTaskProvider>> {
-        FlowTransportBuilder::new(
+    -> Rc<crate::NetTransport<MockNetworkProvider, TokioTimeProvider, TokioTaskProvider>> {
+        NetTransportBuilder::new(
             MockNetworkProvider,
             TokioTimeProvider::new(),
             TokioTaskProvider,

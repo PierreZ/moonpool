@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use moonpool::{send_request, FlowTransport, ReplyFuture};
+//! use moonpool::{send_request, NetTransport, ReplyFuture};
 //!
 //! // Send a request and get a future for the response
 //! let future: ReplyFuture<PingResponse, JsonCodec> = send_request(
@@ -26,8 +26,8 @@ use crate::{Endpoint, MessageCodec, NetworkProvider, TaskProvider, TimeProvider,
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use super::flow_transport::FlowTransport;
 use super::net_notified_queue::NetNotifiedQueue;
+use super::net_transport::NetTransport;
 use super::reply_error::ReplyError;
 use super::reply_future::ReplyFuture;
 use super::request_stream::RequestEnvelope;
@@ -43,7 +43,7 @@ use crate::error::MessagingError;
 ///
 /// # Arguments
 ///
-/// * `transport` - The FlowTransport to use for sending
+/// * `transport` - The NetTransport to use for sending
 /// * `destination` - The server endpoint to send the request to
 /// * `request` - The request payload
 /// * `codec` - The codec for serialization
@@ -56,7 +56,7 @@ use crate::error::MessagingError;
 ///
 /// Returns `MessagingError` if the request cannot be sent.
 pub fn send_request<Req, Resp, N, T, TP, C>(
-    transport: &FlowTransport<N, T, TP>,
+    transport: &NetTransport<N, T, TP>,
     destination: &Endpoint,
     request: Req,
     codec: C,
@@ -198,8 +198,8 @@ mod tests {
     }
 
     fn create_test_transport()
-    -> FlowTransport<MockNetworkProvider, TokioTimeProvider, TokioTaskProvider> {
-        FlowTransport::new(
+    -> NetTransport<MockNetworkProvider, TokioTimeProvider, TokioTaskProvider> {
+        NetTransport::new(
             test_address(),
             MockNetworkProvider,
             TokioTimeProvider::new(),
