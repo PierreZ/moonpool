@@ -1,6 +1,6 @@
 //! Simulation test infrastructure for moonpool messaging layer.
 //!
-//! Provides shared utilities for testing EndpointMap, FlowTransport,
+//! Provides shared utilities for testing EndpointMap, NetTransport,
 //! and NetNotifiedQueue under chaos conditions.
 
 pub mod invariants;
@@ -11,7 +11,7 @@ pub mod workloads;
 
 use serde::{Deserialize, Serialize};
 
-/// Test message format for tracking delivery via FlowTransport.
+/// Test message format for tracking delivery via NetTransport.
 ///
 /// Uses JSON serialization since NetNotifiedQueue uses serde_json.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,7 +53,7 @@ impl TestMessage {
         }
     }
 
-    /// Serialize to JSON bytes for sending via FlowTransport.
+    /// Serialize to JSON bytes for sending via NetTransport.
     pub fn to_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).expect("TestMessage serialization should not fail")
     }

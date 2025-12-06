@@ -16,7 +16,7 @@
 //! # Architecture
 //!
 //! The example shows:
-//! - `FlowTransportBuilder` for clean transport setup
+//! - `NetTransportBuilder` for clean transport setup
 //! - `register_handler` for single-step endpoint registration
 //! - `recv_with_transport` for embedded transport in replies
 //! - Server: listening, receiving typed requests, sending responses
@@ -26,7 +26,7 @@ use std::env;
 use std::time::Duration;
 
 use moonpool_transport::{
-    Endpoint, FlowTransportBuilder, JsonCodec, NetworkAddress, ReplyFuture, TimeProvider,
+    Endpoint, JsonCodec, NetTransportBuilder, NetworkAddress, ReplyFuture, TimeProvider,
     TokioNetworkProvider, TokioTaskProvider, TokioTimeProvider, UID, send_request,
 };
 use serde::{Deserialize, Serialize};
@@ -81,10 +81,10 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let local_addr = NetworkAddress::parse(SERVER_ADDR)?;
 
     // ========================================================================
-    // FlowTransportBuilder handles Rc wrapping, set_weak_self(), and listen()
+    // NetTransportBuilder handles Rc wrapping, set_weak_self(), and listen()
     // No more runtime panics from forgetting set_weak_self()!
     // ========================================================================
-    let transport = FlowTransportBuilder::new(network, time, task)
+    let transport = NetTransportBuilder::new(network, time, task)
         .local_address(local_addr)
         .build_listening()
         .await?;
@@ -151,7 +151,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     // Client also uses build_listening() because it needs to receive responses
     // The builder makes this requirement clear in the method name
     // ========================================================================
-    let transport = FlowTransportBuilder::new(network, time.clone(), task)
+    let transport = NetTransportBuilder::new(network, time.clone(), task)
         .local_address(local_addr)
         .build_listening()
         .await?;

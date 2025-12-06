@@ -64,7 +64,7 @@ struct ReplyPromiseInner<T, C: MessageCodec> {
     codec: C,
 
     /// Sender function - sends serialized bytes to the endpoint.
-    /// This is injected to decouple from FlowTransport.
+    /// This is injected to decouple from NetTransport.
     sender: Option<ReplySender>,
 
     /// Whether the promise has been fulfilled.

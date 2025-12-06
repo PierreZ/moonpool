@@ -1,6 +1,6 @@
 //! Simulation tests for moonpool messaging layer.
 //!
-//! Tests EndpointMap, FlowTransport, and NetNotifiedQueue under chaos conditions
+//! Tests EndpointMap, NetTransport, and NetNotifiedQueue under chaos conditions
 //! using the FoundationDB-inspired simulation framework.
 
 use std::time::Duration;
@@ -493,12 +493,12 @@ use super::{
     CalcSubResponse, calculator,
 };
 use moonpool_sim::{RandomProvider, sometimes_assert};
-use moonpool_transport::{FlowTransportBuilder, JsonCodec, ReplyPromise, send_request};
+use moonpool_transport::{JsonCodec, NetTransportBuilder, ReplyPromise, send_request};
 
 /// Local multi-method interface workload for testing register_handler_at().
 ///
 /// This workload:
-/// 1. Creates a FlowTransport with multiple handlers using register_handler_at
+/// 1. Creates a NetTransport with multiple handlers using register_handler_at
 /// 2. Sends requests to different methods (add, sub, mul)
 /// 3. Validates correct routing by checking request_id matches in responses
 async fn multi_method_workload<N, T, TP>(
@@ -522,8 +522,8 @@ where
         4500,
     );
 
-    // Phase 12C: Use FlowTransportBuilder
-    let transport = FlowTransportBuilder::new(network, time.clone(), task)
+    // Phase 12C: Use NetTransportBuilder
+    let transport = NetTransportBuilder::new(network, time.clone(), task)
         .local_address(local_addr.clone())
         .build();
 
@@ -792,7 +792,7 @@ fn slow_simulation_multi_method() {
 
 /// Verify build_listening() works correctly with SimNetworkProvider.
 ///
-/// This test explicitly validates that FlowTransportBuilder integrates properly
+/// This test explicitly validates that NetTransportBuilder integrates properly
 /// with the simulation infrastructure.
 async fn build_listening_sim_workload<N, T, TP>(
     _random: moonpool_sim::SimRandomProvider,
@@ -807,7 +807,7 @@ where
     T: moonpool_transport::TimeProvider + Clone + 'static,
     TP: moonpool_transport::TaskProvider + Clone + 'static,
 {
-    use moonpool_transport::FlowTransportBuilder;
+    use moonpool_transport::NetTransportBuilder;
 
     // Create local address from topology
     let port = 4500u16;
@@ -815,7 +815,7 @@ where
     let local_addr = moonpool_transport::NetworkAddress::new(ip, port);
 
     // Test: build_listening() should succeed with SimNetworkProvider
-    let transport = FlowTransportBuilder::new(network, time, task)
+    let transport = NetTransportBuilder::new(network, time, task)
         .local_address(local_addr.clone())
         .build_listening()
         .await

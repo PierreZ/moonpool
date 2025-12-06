@@ -1,12 +1,12 @@
 //! Workload implementations for simulation testing.
 //!
-//! Provides client and server workloads that exercise FlowTransport,
+//! Provides client and server workloads that exercise NetTransport,
 //! EndpointMap, and NetNotifiedQueue under chaos conditions.
 //!
 //! # Phase 12C APIs
 //!
 //! These workloads use the Phase 12C developer experience improvements:
-//! - [`FlowTransportBuilder`] - Automatic `Rc` wrapping and `set_weak_self()`
+//! - [`NetTransportBuilder`] - Automatic `Rc` wrapping and `set_weak_self()`
 //! - [`register_handler()`] - Type-safe endpoint registration
 //! - [`recv_with_transport()`] - Clean async receive without closures
 
@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use moonpool_sim::{SimRandomProvider, SimulationMetrics, WorkloadTopology};
 use moonpool_transport::{
-    Endpoint, FlowTransportBuilder, JsonCodec, MessageReceiver, NetNotifiedQueue, NetworkAddress,
+    Endpoint, JsonCodec, MessageReceiver, NetNotifiedQueue, NetTransportBuilder, NetworkAddress,
     NetworkProvider, SimulationResult, TaskProvider, TimeProvider, UID,
 };
 
@@ -51,10 +51,10 @@ impl Default for LocalDeliveryConfig {
     }
 }
 
-/// Local delivery workload - tests FlowTransport dispatch to local endpoints.
+/// Local delivery workload - tests NetTransport dispatch to local endpoints.
 ///
 /// This workload:
-/// 1. Creates a FlowTransport with a local address (using FlowTransportBuilder)
+/// 1. Creates a NetTransport with a local address (using NetTransportBuilder)
 /// 2. Registers a NetNotifiedQueue as an endpoint
 /// 3. Sends messages to the local endpoint
 /// 4. Verifies messages are dispatched correctly
@@ -79,8 +79,8 @@ where
     // Create local address from topology
     let local_addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
 
-    // Create FlowTransport using Phase 12C builder (no listening needed for local delivery)
-    let transport = FlowTransportBuilder::new(network, time.clone(), task)
+    // Create NetTransport using Phase 12C builder (no listening needed for local delivery)
+    let transport = NetTransportBuilder::new(network, time.clone(), task)
         .local_address(local_addr.clone())
         .build();
 
@@ -179,7 +179,7 @@ where
 /// Endpoint lifecycle workload - tests register/unregister under send load.
 ///
 /// This workload:
-/// 1. Creates multiple endpoints (using FlowTransportBuilder)
+/// 1. Creates multiple endpoints (using NetTransportBuilder)
 /// 2. Sends messages while registering/unregistering endpoints
 /// 3. Verifies endpoint_not_found is triggered for unregistered endpoints
 ///
@@ -200,8 +200,8 @@ where
     let my_id = topology.my_ip.clone();
     let local_addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
 
-    // Create FlowTransport using Phase 12C builder
-    let transport = FlowTransportBuilder::new(network, time.clone(), task)
+    // Create NetTransport using Phase 12C builder
+    let transport = NetTransportBuilder::new(network, time.clone(), task)
         .local_address(local_addr.clone())
         .build();
 
@@ -339,7 +339,7 @@ impl RpcWorkloadConfig {
 /// RPC workload - tests request-response patterns with ReplyPromise/ReplyFuture.
 ///
 /// This workload uses Phase 12C APIs:
-/// 1. Creates a FlowTransport with [`FlowTransportBuilder::build()`]
+/// 1. Creates a NetTransport with [`NetTransportBuilder::build()`]
 /// 2. Registers RequestStream via [`register_handler()`]
 /// 3. Client sends RPC requests
 /// 4. Server processes requests via [`try_recv_with_transport()`]
@@ -362,8 +362,8 @@ where
     // Create local address from topology
     let local_addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
 
-    // Create FlowTransport using Phase 12C builder (local only, no network listening)
-    let transport = FlowTransportBuilder::new(network, time.clone(), task)
+    // Create NetTransport using Phase 12C builder (local only, no network listening)
+    let transport = NetTransportBuilder::new(network, time.clone(), task)
         .local_address(local_addr.clone())
         .build();
 
@@ -611,7 +611,7 @@ impl MultiNodeClientConfig {
 /// Multi-node RPC server workload.
 ///
 /// This workload uses Phase 12C APIs:
-/// 1. Creates a listening FlowTransport with [`FlowTransportBuilder::build_listening()`]
+/// 1. Creates a listening NetTransport with [`NetTransportBuilder::build_listening()`]
 /// 2. Registers RequestStream via [`register_handler()`]
 /// 3. Processes incoming RPC requests via [`try_recv_with_transport()`]
 /// 4. Sends responses via [`ReplyPromise::send()`]
@@ -646,9 +646,9 @@ where
     let local_addr =
         NetworkAddress::parse(&addr_with_port).expect("valid server address in topology");
 
-    // Phase 12C: Use FlowTransportBuilder::build_listening()
+    // Phase 12C: Use NetTransportBuilder::build_listening()
     // Automatically handles Rc wrapping, set_weak_self(), and listen()
-    let transport = FlowTransportBuilder::new(network, time.clone(), task)
+    let transport = NetTransportBuilder::new(network, time.clone(), task)
         .local_address(local_addr.clone())
         .build_listening()
         .await
@@ -780,7 +780,7 @@ where
 /// Multi-node RPC client workload.
 ///
 /// This workload uses Phase 12C APIs:
-/// 1. Creates a FlowTransport with [`FlowTransportBuilder::build()`]
+/// 1. Creates a NetTransport with [`NetTransportBuilder::build()`]
 /// 2. Finds the server via topology
 /// 3. Sends RPC requests to the server over the network
 /// 4. Awaits responses via ReplyFuture
@@ -834,10 +834,10 @@ where
 
     tracing::info!(server = %server_addr, "Client connecting to server");
 
-    // Phase 12C: Use FlowTransportBuilder::build()
+    // Phase 12C: Use NetTransportBuilder::build()
     // Client doesn't need listen() - responses come on outbound connections
     // The builder automatically handles Rc wrapping and set_weak_self()
-    let transport = FlowTransportBuilder::new(network, time.clone(), task)
+    let transport = NetTransportBuilder::new(network, time.clone(), task)
         .local_address(local_addr.clone())
         .build();
 
