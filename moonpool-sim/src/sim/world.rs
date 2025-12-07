@@ -1671,15 +1671,7 @@ impl SimWorld {
     /// Close a connection gracefully (FIN semantics).
     ///
     /// The peer will receive EOF on read operations.
-    /// This is the default close behavior used by `close_connection`.
     pub fn close_connection(&self, connection_id: ConnectionId) {
-        self.close_connection_with_reason(connection_id, CloseReason::Graceful);
-    }
-
-    /// Close a connection gracefully (FIN semantics).
-    ///
-    /// Alias for `close_connection` - peer will receive EOF on read.
-    pub fn close_connection_graceful(&self, connection_id: ConnectionId) {
         self.close_connection_with_reason(connection_id, CloseReason::Graceful);
     }
 
