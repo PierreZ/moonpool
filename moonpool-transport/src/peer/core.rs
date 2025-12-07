@@ -119,6 +119,13 @@ struct PeerSharedState<N: NetworkProvider, T: TimeProvider> {
     metrics: PeerMetrics,
 }
 
+impl<N: NetworkProvider, T: TimeProvider> PeerSharedState<N, T> {
+    /// Check if both message queues are empty.
+    fn are_queues_empty(&self) -> bool {
+        self.reliable_queue.is_empty() && self.unreliable_queue.is_empty()
+    }
+}
+
 impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider + 'static>
     Peer<N, T, TP>
 {
@@ -320,7 +327,7 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
                 state.metrics.record_message_dropped();
             }
 
-            let first_unsent = state.reliable_queue.is_empty() && state.unreliable_queue.is_empty();
+            let first_unsent = state.are_queues_empty();
             state.reliable_queue.push_back(packet);
             state.metrics.record_message_queued();
             tracing::debug!(
@@ -371,7 +378,7 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
         // Queue packet in unreliable queue (will be discarded on failure)
         {
             let mut state = self.shared_state.borrow_mut();
-            let first_unsent = state.reliable_queue.is_empty() && state.unreliable_queue.is_empty();
+            let first_unsent = state.are_queues_empty();
             state.unreliable_queue.push_back(packet);
             state.metrics.record_message_queued();
 
