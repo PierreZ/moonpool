@@ -12,6 +12,13 @@ use std::{
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tracing::instrument;
 
+/// Create an io::Error for simulation shutdown.
+///
+/// Used when the simulation world has been dropped but stream operations are still attempted.
+fn sim_shutdown_error() -> io::Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown")
+}
+
 /// Simulated TCP stream that implements async read/write operations.
 ///
 /// `SimTcpStream` provides a realistic simulation of TCP socket behavior by implementing
@@ -132,10 +139,7 @@ impl AsyncRead for SimTcpStream {
             "SimTcpStream::poll_read called on connection_id={}",
             self.connection_id.0
         );
-        let sim = self
-            .sim
-            .upgrade()
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown"))?;
+        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Random close chaos injection (FDB rollRandomClose pattern)
         // Check at start of every read operation - sim2.actor.cpp:408
@@ -316,10 +320,7 @@ impl AsyncWrite for SimTcpStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, io::Error>> {
-        let sim = self
-            .sim
-            .upgrade()
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown"))?;
+        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Random close chaos injection (FDB rollRandomClose pattern)
         // Check at start of every write operation - sim2.actor.cpp:423
@@ -433,10 +434,7 @@ impl AsyncWrite for SimTcpStream {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        let sim = self
-            .sim
-            .upgrade()
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown"))?;
+        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Close the connection in the simulation when shutdown is called
         tracing::debug!(
@@ -463,7 +461,7 @@ impl Future for AcceptFuture {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let sim = match self.sim.upgrade() {
             Ok(sim) => sim,
-            Err(_) => return Poll::Ready(Err(io::Error::other("simulation shutdown"))),
+            Err(_) => return Poll::Ready(Err(sim_shutdown_error())),
         };
 
         match sim.get_pending_connection(&self.local_addr) {
