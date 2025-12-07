@@ -293,13 +293,7 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
     ///
     /// Returns error if payload is too large for wire format.
     pub fn send_reliable(&mut self, token: UID, payload: &[u8]) -> PeerResult<()> {
-        // Serialize packet with wire format
-        let packet = serialize_packet(token, payload).map_err(|e| match e {
-            WireError::PacketTooLarge { size } => {
-                PeerError::InvalidOperation(format!("payload too large: {} bytes", size))
-            }
-            _ => PeerError::InvalidOperation(format!("serialization error: {}", e)),
-        })?;
+        let packet = Self::serialize_message(token, payload)?;
 
         tracing::debug!(
             "Peer::send_reliable called with token={}, payload={} bytes, packet={} bytes",
@@ -366,13 +360,7 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
     ///
     /// Returns error if payload is too large for wire format.
     pub fn send_unreliable(&mut self, token: UID, payload: &[u8]) -> PeerResult<()> {
-        // Serialize packet with wire format
-        let packet = serialize_packet(token, payload).map_err(|e| match e {
-            WireError::PacketTooLarge { size } => {
-                PeerError::InvalidOperation(format!("payload too large: {} bytes", size))
-            }
-            _ => PeerError::InvalidOperation(format!("serialization error: {}", e)),
-        })?;
+        let packet = Self::serialize_message(token, payload)?;
 
         tracing::debug!(
             "Peer::send_unreliable called with token={}, payload={} bytes",
@@ -393,6 +381,16 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
         }
 
         Ok(())
+    }
+
+    /// Serialize a message with wire format, mapping errors appropriately.
+    fn serialize_message(token: UID, payload: &[u8]) -> PeerResult<Vec<u8>> {
+        serialize_packet(token, payload).map_err(|e| match e {
+            WireError::PacketTooLarge { size } => {
+                PeerError::InvalidOperation(format!("payload too large: {} bytes", size))
+            }
+            _ => PeerError::InvalidOperation(format!("serialization error: {}", e)),
+        })
     }
 
     /// Take ownership of the receive channel.
