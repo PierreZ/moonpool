@@ -159,7 +159,8 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
                 config.clone(),
                 receive_tx,
                 shutdown_rx,
-                task_provider.clone(),
+                None, // No initial stream - will establish connection
+                ConnectionLossBehavior::Reconnect,
             ),
         );
 
@@ -230,13 +231,14 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
         // Spawn background connection task with the existing stream
         let writer_handle = task_provider.spawn_task(
             "incoming_connection_task",
-            incoming_connection_task(
+            connection_task(
                 shared_state.clone(),
                 data_to_send.clone(),
                 config.clone(),
                 receive_tx,
                 shutdown_rx,
-                stream,
+                Some(stream),
+                ConnectionLossBehavior::Exit,
             ),
         );
 
@@ -493,28 +495,34 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
     }
 }
 
+/// Behavior when connection is lost.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConnectionLossBehavior {
+    /// Attempt to reconnect (outbound connections)
+    Reconnect,
+    /// Exit the task (incoming connections - client must reconnect)
+    Exit,
+}
+
 /// Background connection task that handles all async TCP I/O.
 ///
 /// Matches FoundationDB's connectionWriter pattern:
 /// - Waits for dataToSend trigger
 /// - Drains unsent queue continuously
-/// - Handles connection failures and reconnection
+/// - Handles connection failures and reconnection (or exit for incoming)
 /// - Owns the connection exclusively to avoid RefCell conflicts
 /// - Handles both reading and writing operations
 /// - Parses wire format packets from the read stream
-async fn connection_task<
-    N: NetworkProvider + 'static,
-    T: TimeProvider + 'static,
-    TP: TaskProvider + 'static,
->(
+async fn connection_task<N: NetworkProvider + 'static, T: TimeProvider + 'static>(
     shared_state: Rc<RefCell<PeerSharedState<N, T>>>,
     data_to_send: Rc<Notify>,
     config: PeerConfig,
     receive_tx: mpsc::UnboundedSender<(UID, Vec<u8>)>,
     mut shutdown_rx: mpsc::UnboundedReceiver<()>,
-    _task_provider: TP,
+    initial_stream: Option<N::TcpStream>,
+    on_connection_loss: ConnectionLossBehavior,
 ) {
-    let mut current_connection: Option<N::TcpStream> = None;
+    let mut current_connection: Option<N::TcpStream> = initial_stream;
     // Buffer for accumulating partial packet reads
     let mut read_buffer: Vec<u8> = Vec::with_capacity(4096);
 
@@ -527,7 +535,6 @@ async fn connection_task<
 
             // Wait for data to send (FoundationDB pattern)
             _ = data_to_send.notified() => {
-                tracing::debug!("connection_task: notified to wake up, checking for messages");
                 // First, ensure we have messages to send
                 let has_messages = {
                     let state = shared_state.borrow();
@@ -542,29 +549,33 @@ async fn connection_task<
                     continue; // Spurious wakeup, wait for real data
                 }
 
-                tracing::debug!("connection_task: has messages to send, proceeding");
-
                 // Ensure we have a connection
                 if current_connection.is_none() {
-                    tracing::debug!("connection_task: no connection, establishing new connection");
-                    match establish_connection(&shared_state, &config).await {
-                        Ok(stream) => {
-                            tracing::debug!("connection_task: successfully established connection");
-                            current_connection = Some(stream);
-                            read_buffer.clear(); // Clear buffer on new connection
-                            {
-                                let mut state = shared_state.borrow_mut();
-                                state.connection = Some(()); // Mark as connected
-                                state.metrics.is_connected = true;
+                    match on_connection_loss {
+                        ConnectionLossBehavior::Reconnect => {
+                            tracing::debug!("connection_task: no connection, establishing new connection");
+                            match establish_connection(&shared_state, &config).await {
+                                Ok(stream) => {
+                                    tracing::debug!("connection_task: successfully established connection");
+                                    current_connection = Some(stream);
+                                    read_buffer.clear();
+                                    {
+                                        let mut state = shared_state.borrow_mut();
+                                        state.connection = Some(());
+                                        state.metrics.is_connected = true;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::debug!("connection_task: failed to establish connection: {:?}", e);
+                                    continue; // Will retry on next notification
+                                }
                             }
                         }
-                        Err(e) => {
-                            tracing::debug!("connection_task: failed to establish connection: {:?}", e);
-                            continue; // Will retry on next notification
+                        ConnectionLossBehavior::Exit => {
+                            tracing::debug!("connection_task: connection lost, exiting (client must reconnect)");
+                            break;
                         }
                     }
-                } else {
-                    tracing::debug!("connection_task: using existing connection");
                 }
 
                 // Process send queues - drain reliable first, then unreliable (FDB pattern)
@@ -597,38 +608,12 @@ async fn connection_task<
                     // Buggify: Sometimes force write failures to test requeuing
                     if moonpool_sim::buggify_with_prob!(0.02) {
                         tracing::debug!("Buggify forcing write failure for requeue testing");
-                        // Simulate write failure - handle like real failure
-                        current_connection = None;
-                        read_buffer.clear();
-                        {
-                            let mut state = shared_state.borrow_mut();
-                            state.connection = None;
-                            state.metrics.is_connected = false;
-
-                            // Only requeue if reliable (FDB pattern: discardUnreliablePackets)
-                            if is_reliable {
-                                sometimes_assert!(
-                                    peer_requeues_on_failure,
-                                    true,
-                                    "Peer should sometimes re-queue reliable messages after send failure"
-                                );
-                                state.reliable_queue.push_front(data);
-                            } else {
-                                // Unreliable packet is dropped
-                                state.metrics.record_message_dropped();
-                            }
-
-                            // Discard all remaining unreliable packets (FDB pattern)
-                            let unreliable_count = state.unreliable_queue.len();
-                            if unreliable_count > 0 {
-                                tracing::debug!("connection_task: discarding {} unreliable packets on failure",
-                                    unreliable_count);
-                                for _ in 0..unreliable_count {
-                                    state.metrics.record_message_dropped();
-                                }
-                                state.unreliable_queue.clear();
-                            }
-                        }
+                        handle_connection_failure(
+                            &shared_state,
+                            &mut current_connection,
+                            &mut read_buffer,
+                            Some((data, is_reliable)),
+                        );
                         break; // Exit send loop, will retry on next trigger
                     }
 
@@ -636,7 +621,6 @@ async fn connection_task<
                     tracing::debug!("connection_task: calling stream.write_all() with {} bytes", data.len());
                     match stream.write_all(&data).await {
                         Ok(_) => {
-                            // Success
                             tracing::debug!("connection_task: write_all succeeded");
                             {
                                 let mut state = shared_state.borrow_mut();
@@ -646,38 +630,12 @@ async fn connection_task<
                         }
                         Err(e) => {
                             tracing::debug!("connection_task: write_all failed: {:?}", e);
-                            // Write failed - connection is bad
-                            current_connection = None;
-                            read_buffer.clear();
-                            {
-                                let mut state = shared_state.borrow_mut();
-                                state.connection = None;
-                                state.metrics.is_connected = false;
-
-                                // Only requeue if reliable (FDB pattern: discardUnreliablePackets)
-                                if is_reliable {
-                                    sometimes_assert!(
-                                        peer_requeues_on_failure,
-                                        true,
-                                        "Peer should sometimes re-queue reliable messages after send failure"
-                                    );
-                                    state.reliable_queue.push_front(data);
-                                } else {
-                                    // Unreliable packet is dropped
-                                    state.metrics.record_message_dropped();
-                                }
-
-                                // Discard all remaining unreliable packets (FDB pattern)
-                                let unreliable_count = state.unreliable_queue.len();
-                                if unreliable_count > 0 {
-                                    tracing::debug!("connection_task: discarding {} unreliable packets on failure",
-                                        unreliable_count);
-                                    for _ in 0..unreliable_count {
-                                        state.metrics.record_message_dropped();
-                                    }
-                                    state.unreliable_queue.clear();
-                                }
-                            }
+                            handle_connection_failure(
+                                &shared_state,
+                                &mut current_connection,
+                                &mut read_buffer,
+                                Some((data, is_reliable)),
+                            );
                             break; // Exit send loop, will retry on next trigger
                         }
                     }
@@ -697,12 +655,14 @@ async fn connection_task<
                 match read_result {
                     Ok((_buffer, 0)) => {
                         // Connection closed
-                        current_connection = None;
-                        read_buffer.clear();
-                        {
-                            let mut state = shared_state.borrow_mut();
-                            state.connection = None;
-                            state.metrics.is_connected = false;
+                        handle_connection_failure(
+                            &shared_state,
+                            &mut current_connection,
+                            &mut read_buffer,
+                            None,
+                        );
+                        if on_connection_loss == ConnectionLossBehavior::Exit {
+                            break;
                         }
                     }
                     Ok((buffer, n)) => {
@@ -711,121 +671,174 @@ async fn connection_task<
                         tracing::debug!("connection_task: received {} bytes, buffer now {} bytes", n, read_buffer.len());
 
                         // Try to parse complete packets from buffer
-                        loop {
-                            if read_buffer.len() < HEADER_SIZE {
-                                break; // Need more data for header
-                            }
-
-                            match try_deserialize_packet(&read_buffer) {
-                                Ok(Some((token, payload, consumed))) => {
-                                    // Successfully parsed a packet
-                                    tracing::debug!(
-                                        "connection_task: parsed packet token={}, payload={} bytes, consumed={} bytes",
-                                        token,
-                                        payload.len(),
-                                        consumed
-                                    );
-
-                                    {
-                                        let mut state = shared_state.borrow_mut();
-                                        state.metrics.record_message_received(consumed);
-                                    }
-
-                                    // Remove consumed bytes from buffer
-                                    read_buffer.drain(..consumed);
-
-                                    // Send to receiver
-                                    if receive_tx.send((token, payload)).is_err() {
-                                        return; // Receiver dropped
-                                    }
-                                }
-                                Ok(None) => {
-                                    // Need more data
-                                    break;
-                                }
-                                Err(e) => {
-                                    // Protocol error - invalid packet
-                                    // FDB pattern: Tear down connection on wire errors
-                                    // (FlowTransport.actor.cpp:889-960, 1325)
-                                    use crate::WireError;
-                                    match &e {
-                                        WireError::ChecksumMismatch { expected, actual } => {
-                                            // Checksum validation caught corruption
-                                            // This could be:
-                                            // 1. Expected: intentional chaos injection (check for BitFlipInjected log)
-                                            // 2. Unexpected: real bug in network/serialization code (BUG!)
-                                            tracing::warn!(
-                                                "ChecksumMismatch: expected={:#010x} actual={:#010x} - tearing down connection (FDB pattern)",
-                                                expected,
-                                                actual
-                                            );
-                                            sometimes_assert!(
-                                                checksum_caught_corruption,
-                                                true,
-                                                "Checksum validation should sometimes catch corrupted packets"
-                                            );
-                                        }
-                                        _ => {
-                                            tracing::warn!(
-                                                "connection_task: wire format error: {} - tearing down connection",
-                                                e
-                                            );
-                                        }
-                                    }
-
-                                    // FDB pattern: Full connection teardown on wire errors
-                                    // Matches FlowTransport.actor.cpp:889-960 error handling
-                                    sometimes_assert!(
-                                        connection_teardown_on_wire_error,
-                                        true,
-                                        "Connection should sometimes be torn down on wire format errors"
-                                    );
-                                    current_connection = None;
-                                    read_buffer.clear();
-
-                                    {
-                                        let mut state = shared_state.borrow_mut();
-                                        state.connection = None;
-                                        state.metrics.is_connected = false;
-
-                                        // FDB's discardUnreliablePackets() pattern (line 923, 1072-1082)
-                                        // Drop all unreliable messages, keep reliable for retry
-                                        let unreliable_count = state.unreliable_queue.len();
-                                        if unreliable_count > 0 {
-                                            tracing::debug!(
-                                                "connection_task: discarding {} unreliable packets after wire error (FDB pattern)",
-                                                unreliable_count
-                                            );
-                                            sometimes_assert!(
-                                                unreliable_discarded_on_error,
-                                                true,
-                                                "Unreliable packets should sometimes be discarded on connection errors"
-                                            );
-                                            for _ in 0..unreliable_count {
-                                                state.metrics.record_message_dropped();
-                                            }
-                                            state.unreliable_queue.clear();
-                                        }
-                                        // Note: reliable_queue remains intact for automatic retry
-                                    }
-
-                                    // Break exits packet parse loop -> select! continues -> will reconnect
-                                    break;
-                                }
-                            }
+                        let should_exit = process_read_buffer(
+                            &shared_state,
+                            &mut current_connection,
+                            &mut read_buffer,
+                            &receive_tx,
+                            on_connection_loss,
+                        );
+                        if should_exit {
+                            break;
                         }
                     }
                     Err(_) => {
                         // Read error - connection likely broken
-                        current_connection = None;
-                        read_buffer.clear();
-                        {
-                            let mut state = shared_state.borrow_mut();
-                            state.connection = None;
-                            state.metrics.is_connected = false;
+                        handle_connection_failure(
+                            &shared_state,
+                            &mut current_connection,
+                            &mut read_buffer,
+                            None,
+                        );
+                        if on_connection_loss == ConnectionLossBehavior::Exit {
+                            break;
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Handle connection failure by clearing state and optionally requeuing data.
+fn handle_connection_failure<N: NetworkProvider, T: TimeProvider>(
+    shared_state: &Rc<RefCell<PeerSharedState<N, T>>>,
+    current_connection: &mut Option<N::TcpStream>,
+    read_buffer: &mut Vec<u8>,
+    failed_send: Option<(Vec<u8>, bool)>, // (data, is_reliable)
+) {
+    *current_connection = None;
+    read_buffer.clear();
+
+    let mut state = shared_state.borrow_mut();
+    state.connection = None;
+    state.metrics.is_connected = false;
+
+    // Handle the failed send if provided
+    if let Some((data, is_reliable)) = failed_send {
+        if is_reliable {
+            sometimes_assert!(
+                peer_requeues_on_failure,
+                true,
+                "Peer should sometimes re-queue reliable messages after send failure"
+            );
+            state.reliable_queue.push_front(data);
+        } else {
+            state.metrics.record_message_dropped();
+        }
+    }
+
+    // Discard all remaining unreliable packets (FDB pattern: discardUnreliablePackets)
+    let unreliable_count = state.unreliable_queue.len();
+    if unreliable_count > 0 {
+        tracing::debug!(
+            "connection_task: discarding {} unreliable packets on failure",
+            unreliable_count
+        );
+        for _ in 0..unreliable_count {
+            state.metrics.record_message_dropped();
+        }
+        state.unreliable_queue.clear();
+    }
+}
+
+/// Process the read buffer and parse packets.
+/// Returns true if the task should exit.
+fn process_read_buffer<N: NetworkProvider, T: TimeProvider>(
+    shared_state: &Rc<RefCell<PeerSharedState<N, T>>>,
+    current_connection: &mut Option<N::TcpStream>,
+    read_buffer: &mut Vec<u8>,
+    receive_tx: &mpsc::UnboundedSender<(UID, Vec<u8>)>,
+    on_connection_loss: ConnectionLossBehavior,
+) -> bool {
+    loop {
+        if read_buffer.len() < HEADER_SIZE {
+            return false; // Need more data for header
+        }
+
+        match try_deserialize_packet(read_buffer) {
+            Ok(Some((token, payload, consumed))) => {
+                tracing::debug!(
+                    "connection_task: parsed packet token={}, payload={} bytes, consumed={} bytes",
+                    token,
+                    payload.len(),
+                    consumed
+                );
+
+                {
+                    let mut state = shared_state.borrow_mut();
+                    state.metrics.record_message_received(consumed);
+                }
+
+                // Remove consumed bytes from buffer
+                read_buffer.drain(..consumed);
+
+                // Send to receiver
+                if receive_tx.send((token, payload)).is_err() {
+                    return true; // Receiver dropped, exit
+                }
+            }
+            Ok(None) => {
+                return false; // Need more data
+            }
+            Err(e) => {
+                // Protocol error - invalid packet
+                // FDB pattern: Tear down connection on wire errors
+                use crate::WireError;
+                match &e {
+                    WireError::ChecksumMismatch { expected, actual } => {
+                        tracing::warn!(
+                            "ChecksumMismatch: expected={:#010x} actual={:#010x} - tearing down connection (FDB pattern)",
+                            expected,
+                            actual
+                        );
+                        sometimes_assert!(
+                            checksum_caught_corruption,
+                            true,
+                            "Checksum validation should sometimes catch corrupted packets"
+                        );
+                    }
+                    _ => {
+                        tracing::warn!(
+                            "connection_task: wire format error: {} - tearing down connection",
+                            e
+                        );
+                    }
+                }
+
+                sometimes_assert!(
+                    connection_teardown_on_wire_error,
+                    true,
+                    "Connection should sometimes be torn down on wire format errors"
+                );
+
+                *current_connection = None;
+                read_buffer.clear();
+
+                {
+                    let mut state = shared_state.borrow_mut();
+                    state.connection = None;
+                    state.metrics.is_connected = false;
+
+                    let unreliable_count = state.unreliable_queue.len();
+                    if unreliable_count > 0 {
+                        tracing::debug!(
+                            "connection_task: discarding {} unreliable packets after wire error (FDB pattern)",
+                            unreliable_count
+                        );
+                        sometimes_assert!(
+                            unreliable_discarded_on_error,
+                            true,
+                            "Unreliable packets should sometimes be discarded on connection errors"
+                        );
+                        for _ in 0..unreliable_count {
+                            state.metrics.record_message_dropped();
+                        }
+                        state.unreliable_queue.clear();
+                    }
+                }
+
+                return on_connection_loss == ConnectionLossBehavior::Exit;
             }
         }
     }
@@ -923,225 +936,6 @@ async fn establish_connection<N: NetworkProvider + 'static, T: TimeProvider + 's
                     state.metrics.record_connection_failure_at(now, next_delay);
                 }
                 // Continue loop to retry
-            }
-        }
-    }
-}
-
-/// Background connection task for incoming (already-connected) streams.
-///
-/// FDB Pattern: `Peer::onIncomingConnection()` (FlowTransport.actor.cpp:1123)
-///
-/// Unlike `connection_task`, this starts with an existing stream and does NOT
-/// attempt reconnection if the connection is lost (server-side connections
-/// are not re-established - the client must reconnect).
-async fn incoming_connection_task<N: NetworkProvider + 'static, T: TimeProvider + 'static>(
-    shared_state: Rc<RefCell<PeerSharedState<N, T>>>,
-    data_to_send: Rc<Notify>,
-    _config: PeerConfig,
-    receive_tx: mpsc::UnboundedSender<(UID, Vec<u8>)>,
-    mut shutdown_rx: mpsc::UnboundedReceiver<()>,
-    initial_stream: N::TcpStream,
-) {
-    let mut current_connection: Option<N::TcpStream> = Some(initial_stream);
-    let mut read_buffer: Vec<u8> = Vec::with_capacity(4096);
-
-    loop {
-        tokio::select! {
-            // Check for shutdown
-            _ = shutdown_rx.recv() => {
-                break;
-            }
-
-            // Wait for data to send
-            _ = data_to_send.notified() => {
-                let has_messages = {
-                    let state = shared_state.borrow();
-                    state.reliable_queue.len() + state.unreliable_queue.len() > 0
-                };
-
-                if !has_messages {
-                    continue;
-                }
-
-                // For incoming connections, if disconnected we just stop
-                // (no reconnection - client must reconnect)
-                if current_connection.is_none() {
-                    tracing::debug!("incoming_connection_task: connection lost, cannot send (client must reconnect)");
-                    break;
-                }
-
-                // Process send queues
-                while let Some(ref mut stream) = current_connection {
-                    let (message, is_reliable) = {
-                        let mut state = shared_state.borrow_mut();
-                        if let Some(msg) = state.reliable_queue.pop_front() {
-                            (Some(msg), true)
-                        } else if let Some(msg) = state.unreliable_queue.pop_front() {
-                            (Some(msg), false)
-                        } else {
-                            (None, false)
-                        }
-                    };
-
-                    let Some(data) = message else {
-                        break;
-                    };
-
-                    // Buggify: Sometimes force write failures
-                    if moonpool_sim::buggify_with_prob!(0.02) {
-                        tracing::debug!("Buggify forcing write failure on incoming connection");
-                        current_connection = None;
-                        read_buffer.clear();
-                        {
-                            let mut state = shared_state.borrow_mut();
-                            state.connection = None;
-                            state.metrics.is_connected = false;
-
-                            if is_reliable {
-                                state.reliable_queue.push_front(data);
-                            } else {
-                                state.metrics.record_message_dropped();
-                            }
-
-                            let unreliable_count = state.unreliable_queue.len();
-                            for _ in 0..unreliable_count {
-                                state.metrics.record_message_dropped();
-                            }
-                            state.unreliable_queue.clear();
-                        }
-                        break;
-                    }
-
-                    match stream.write_all(&data).await {
-                        Ok(_) => {
-                            let mut state = shared_state.borrow_mut();
-                            state.metrics.record_message_sent(data.len());
-                            state.metrics.record_message_dequeued();
-                        }
-                        Err(_) => {
-                            current_connection = None;
-                            read_buffer.clear();
-                            {
-                                let mut state = shared_state.borrow_mut();
-                                state.connection = None;
-                                state.metrics.is_connected = false;
-
-                                if is_reliable {
-                                    state.reliable_queue.push_front(data);
-                                } else {
-                                    state.metrics.record_message_dropped();
-                                }
-
-                                let unreliable_count = state.unreliable_queue.len();
-                                for _ in 0..unreliable_count {
-                                    state.metrics.record_message_dropped();
-                                }
-                                state.unreliable_queue.clear();
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // Handle reading
-            read_result = async {
-                match &mut current_connection {
-                    Some(stream) => {
-                        let mut buffer = vec![0u8; 4096];
-                        stream.read(&mut buffer).await.map(|n| (buffer, n))
-                    }
-                    None => std::future::pending().await
-                }
-            } => {
-                match read_result {
-                    Ok((_buffer, 0)) => {
-                        // Connection closed
-                        read_buffer.clear();
-                        {
-                            let mut state = shared_state.borrow_mut();
-                            state.connection = None;
-                            state.metrics.is_connected = false;
-                        }
-                        // For incoming connections, exit when closed
-                        break;
-                    }
-                    Ok((buffer, n)) => {
-                        read_buffer.extend_from_slice(&buffer[..n]);
-                        tracing::debug!("incoming_connection_task: received {} bytes", n);
-
-                        // Parse packets
-                        loop {
-                            if read_buffer.len() < HEADER_SIZE {
-                                break;
-                            }
-
-                            match try_deserialize_packet(&read_buffer) {
-                                Ok(Some((token, payload, consumed))) => {
-                                    tracing::debug!(
-                                        "incoming_connection_task: parsed packet token={}, payload={} bytes",
-                                        token,
-                                        payload.len()
-                                    );
-
-                                    {
-                                        let mut state = shared_state.borrow_mut();
-                                        state.metrics.record_message_received(consumed);
-                                    }
-
-                                    read_buffer.drain(..consumed);
-
-                                    if receive_tx.send((token, payload)).is_err() {
-                                        return;
-                                    }
-                                }
-                                Ok(None) => {
-                                    break;
-                                }
-                                Err(e) => {
-                                    use crate::WireError;
-                                    match &e {
-                                        WireError::ChecksumMismatch { expected, actual } => {
-                                            tracing::warn!(
-                                                "ChecksumMismatch on incoming: expected={:#010x} actual={:#010x}",
-                                                expected,
-                                                actual
-                                            );
-                                        }
-                                        _ => {
-                                            tracing::warn!("Wire format error on incoming: {}", e);
-                                        }
-                                    }
-
-                                    read_buffer.clear();
-                                    {
-                                        let mut state = shared_state.borrow_mut();
-                                        state.connection = None;
-                                        state.metrics.is_connected = false;
-
-                                        let unreliable_count = state.unreliable_queue.len();
-                                        for _ in 0..unreliable_count {
-                                            state.metrics.record_message_dropped();
-                                        }
-                                        state.unreliable_queue.clear();
-                                    }
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        read_buffer.clear();
-                        {
-                            let mut state = shared_state.borrow_mut();
-                            state.connection = None;
-                            state.metrics.is_connected = false;
-                        }
-                        // For incoming connections, exit on error
-                        break;
-                    }
-                }
             }
         }
     }
