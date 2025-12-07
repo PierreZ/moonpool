@@ -2146,6 +2146,32 @@ pub struct WeakSimWorld {
     pub(crate) inner: Weak<RefCell<SimInner>>,
 }
 
+/// Macro to generate WeakSimWorld forwarding methods that wrap SimWorld results.
+macro_rules! weak_forward {
+    // For methods returning T that need Ok() wrapping
+    (wrap $(#[$meta:meta])* $method:ident(&self $(, $arg:ident : $arg_ty:ty)*) -> $ret:ty) => {
+        $(#[$meta])*
+        pub fn $method(&self $(, $arg: $arg_ty)*) -> SimulationResult<$ret> {
+            Ok(self.upgrade()?.$method($($arg),*))
+        }
+    };
+    // For methods already returning SimulationResult
+    (pass $(#[$meta:meta])* $method:ident(&self $(, $arg:ident : $arg_ty:ty)*) -> $ret:ty) => {
+        $(#[$meta])*
+        pub fn $method(&self $(, $arg: $arg_ty)*) -> SimulationResult<$ret> {
+            self.upgrade()?.$method($($arg),*)
+        }
+    };
+    // For methods returning () that need Ok(()) wrapping
+    (unit $(#[$meta:meta])* $method:ident(&self $(, $arg:ident : $arg_ty:ty)*)) => {
+        $(#[$meta])*
+        pub fn $method(&self $(, $arg: $arg_ty)*) -> SimulationResult<()> {
+            self.upgrade()?.$method($($arg),*);
+            Ok(())
+        }
+    };
+}
+
 impl WeakSimWorld {
     /// Attempts to upgrade this weak reference to a strong reference.
     pub fn upgrade(&self) -> SimulationResult<SimWorld> {
@@ -2155,89 +2181,24 @@ impl WeakSimWorld {
             .ok_or(SimulationError::SimulationShutdown)
     }
 
-    /// Returns the current simulation time.
-    pub fn current_time(&self) -> SimulationResult<Duration> {
-        let sim = self.upgrade()?;
-        Ok(sim.current_time())
-    }
-
-    /// Returns the exact simulation time (equivalent to FDB's now()).
-    pub fn now(&self) -> SimulationResult<Duration> {
-        let sim = self.upgrade()?;
-        Ok(sim.now())
-    }
-
-    /// Returns the drifted timer time (equivalent to FDB's timer()).
-    pub fn timer(&self) -> SimulationResult<Duration> {
-        let sim = self.upgrade()?;
-        Ok(sim.timer())
-    }
-
-    /// Schedules an event to execute after the specified delay.
-    pub fn schedule_event(&self, event: Event, delay: Duration) -> SimulationResult<()> {
-        let sim = self.upgrade()?;
-        sim.schedule_event(event, delay);
-        Ok(())
-    }
-
-    /// Schedules an event to execute at the specified absolute time.
-    pub fn schedule_event_at(&self, event: Event, time: Duration) -> SimulationResult<()> {
-        let sim = self.upgrade()?;
-        sim.schedule_event_at(event, time);
-        Ok(())
-    }
+    weak_forward!(wrap #[doc = "Returns the current simulation time."] current_time(&self) -> Duration);
+    weak_forward!(wrap #[doc = "Returns the exact simulation time (equivalent to FDB's now())."] now(&self) -> Duration);
+    weak_forward!(wrap #[doc = "Returns the drifted timer time (equivalent to FDB's timer())."] timer(&self) -> Duration);
+    weak_forward!(unit #[doc = "Schedules an event to execute after the specified delay."] schedule_event(&self, event: Event, delay: Duration));
+    weak_forward!(unit #[doc = "Schedules an event to execute at the specified absolute time."] schedule_event_at(&self, event: Event, time: Duration));
+    weak_forward!(pass #[doc = "Read data from connection's receive buffer."] read_from_connection(&self, connection_id: ConnectionId, buf: &mut [u8]) -> usize);
+    weak_forward!(pass #[doc = "Write data to connection's receive buffer."] write_to_connection(&self, connection_id: ConnectionId, data: &[u8]) -> ());
+    weak_forward!(pass #[doc = "Buffer data for ordered sending on a connection."] buffer_send(&self, connection_id: ConnectionId, data: Vec<u8>) -> ());
+    weak_forward!(wrap #[doc = "Get a network provider for the simulation."] network_provider(&self) -> SimNetworkProvider);
+    weak_forward!(wrap #[doc = "Get a time provider for the simulation."] time_provider(&self) -> crate::providers::SimTimeProvider);
+    weak_forward!(wrap #[doc = "Sleep for the specified duration in simulation time."] sleep(&self, duration: Duration) -> SleepFuture);
 
     /// Access network configuration for latency calculations.
     pub fn with_network_config<F, R>(&self, f: F) -> SimulationResult<R>
     where
         F: FnOnce(&NetworkConfiguration) -> R,
     {
-        let sim = self.upgrade()?;
-        Ok(sim.with_network_config(f))
-    }
-
-    /// Read data from connection's receive buffer
-    pub fn read_from_connection(
-        &self,
-        connection_id: ConnectionId,
-        buf: &mut [u8],
-    ) -> SimulationResult<usize> {
-        let sim = self.upgrade()?;
-        sim.read_from_connection(connection_id, buf)
-    }
-
-    /// Write data to connection's receive buffer
-    pub fn write_to_connection(
-        &self,
-        connection_id: ConnectionId,
-        data: &[u8],
-    ) -> SimulationResult<()> {
-        let sim = self.upgrade()?;
-        sim.write_to_connection(connection_id, data)
-    }
-
-    /// Buffer data for ordered sending on a connection.
-    pub fn buffer_send(&self, connection_id: ConnectionId, data: Vec<u8>) -> SimulationResult<()> {
-        let sim = self.upgrade()?;
-        sim.buffer_send(connection_id, data)
-    }
-
-    /// Get a network provider for the simulation.
-    pub fn network_provider(&self) -> SimulationResult<SimNetworkProvider> {
-        let sim = self.upgrade()?;
-        Ok(sim.network_provider())
-    }
-
-    /// Get a time provider for the simulation.
-    pub fn time_provider(&self) -> SimulationResult<crate::providers::SimTimeProvider> {
-        let sim = self.upgrade()?;
-        Ok(sim.time_provider())
-    }
-
-    /// Sleep for the specified duration in simulation time.
-    pub fn sleep(&self, duration: Duration) -> SimulationResult<SleepFuture> {
-        let sim = self.upgrade()?;
-        Ok(sim.sleep(duration))
+        Ok(self.upgrade()?.with_network_config(f))
     }
 }
 
