@@ -12,6 +12,37 @@ use std::{
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tracing::instrument;
 
+/// Create an io::Error for simulation shutdown.
+///
+/// Used when the simulation world has been dropped but stream operations are still attempted.
+fn sim_shutdown_error() -> io::Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown")
+}
+
+/// Create an io::Error for random connection failure (chaos injection).
+fn random_connection_failure_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::ConnectionReset,
+        "Random connection failure (explicit)",
+    )
+}
+
+/// Create an io::Error for half-open connection timeout.
+fn half_open_timeout_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::ConnectionReset,
+        "Connection reset (half-open timeout)",
+    )
+}
+
+/// Create an io::Error for aborted connection (RST).
+fn connection_aborted_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::ConnectionReset,
+        "Connection was aborted (RST)",
+    )
+}
+
 /// Simulated TCP stream that implements async read/write operations.
 ///
 /// `SimTcpStream` provides a realistic simulation of TCP socket behavior by implementing
@@ -132,20 +163,14 @@ impl AsyncRead for SimTcpStream {
             "SimTcpStream::poll_read called on connection_id={}",
             self.connection_id.0
         );
-        let sim = self
-            .sim
-            .upgrade()
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown"))?;
+        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Random close chaos injection (FDB rollRandomClose pattern)
         // Check at start of every read operation - sim2.actor.cpp:408
         // Returns Some(true) for explicit error, Some(false) for silent (connection marked closed)
         if let Some(true) = sim.roll_random_close(self.connection_id) {
             // 30% explicit exception - throw connection_failed immediately
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::ConnectionReset,
-                "Random connection failure (explicit)",
-            )));
+            return Poll::Ready(Err(random_connection_failure_error()));
             // 70% silent case: connection already marked as closed, will return EOF below
         }
 
@@ -165,10 +190,7 @@ impl AsyncRead for SimTcpStream {
                 "SimTcpStream::poll_read connection_id={} half-open error time reached, returning ECONNRESET",
                 self.connection_id.0
             );
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::ConnectionReset,
-                "Connection reset (half-open timeout)",
-            )));
+            return Poll::Ready(Err(half_open_timeout_error()));
         }
         // Half-open but not yet error time - will block (Pending) below waiting for data
         // that will never come, which is the correct half-open behavior
@@ -219,10 +241,7 @@ impl AsyncRead for SimTcpStream {
                             "SimTcpStream::poll_read connection_id={} was aborted (RST), returning ECONNRESET",
                             self.connection_id.0
                         );
-                        return Poll::Ready(Err(io::Error::new(
-                            io::ErrorKind::ConnectionReset,
-                            "Connection was aborted (RST)",
-                        )));
+                        return Poll::Ready(Err(connection_aborted_error()));
                     }
                     _ => {
                         tracing::info!(
@@ -280,10 +299,7 @@ impl AsyncRead for SimTcpStream {
                                 "SimTcpStream::poll_read connection_id={} was aborted on recheck (RST), returning ECONNRESET",
                                 self.connection_id.0
                             );
-                            Poll::Ready(Err(io::Error::new(
-                                io::ErrorKind::ConnectionReset,
-                                "Connection was aborted (RST)",
-                            )))
+                            Poll::Ready(Err(connection_aborted_error()))
                         }
                         _ => {
                             tracing::info!(
@@ -316,20 +332,14 @@ impl AsyncWrite for SimTcpStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, io::Error>> {
-        let sim = self
-            .sim
-            .upgrade()
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown"))?;
+        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Random close chaos injection (FDB rollRandomClose pattern)
         // Check at start of every write operation - sim2.actor.cpp:423
         // Returns Some(true) for explicit error, Some(false) for silent (connection marked closed)
         if let Some(true) = sim.roll_random_close(self.connection_id) {
             // 30% explicit exception - throw connection_failed immediately
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::ConnectionReset,
-                "Random connection failure (explicit)",
-            )));
+            return Poll::Ready(Err(random_connection_failure_error()));
             // 70% silent case: connection already marked as closed, will fail below
         }
 
@@ -345,10 +355,7 @@ impl AsyncWrite for SimTcpStream {
         if sim.is_connection_closed(self.connection_id) {
             // Check how the connection was closed
             return match sim.get_close_reason(self.connection_id) {
-                CloseReason::Aborted => Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::ConnectionReset,
-                    "Connection was aborted (RST)",
-                ))),
+                CloseReason::Aborted => Poll::Ready(Err(connection_aborted_error())),
                 _ => Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
                     "Connection was closed (FIN)",
@@ -377,10 +384,7 @@ impl AsyncWrite for SimTcpStream {
                 "SimTcpStream::poll_write connection_id={} half-open error time reached, returning ECONNRESET",
                 self.connection_id.0
             );
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::ConnectionReset,
-                "Connection reset (half-open timeout)",
-            )));
+            return Poll::Ready(Err(half_open_timeout_error()));
         }
         // Half-open but not yet error time - writes succeed but data goes nowhere
         // (paired_connection is already None, so buffer_send will silently succeed)
@@ -433,10 +437,7 @@ impl AsyncWrite for SimTcpStream {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        let sim = self
-            .sim
-            .upgrade()
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown"))?;
+        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Close the connection in the simulation when shutdown is called
         tracing::debug!(
@@ -463,7 +464,7 @@ impl Future for AcceptFuture {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let sim = match self.sim.upgrade() {
             Ok(sim) => sim,
-            Err(_) => return Poll::Ready(Err(io::Error::other("simulation shutdown"))),
+            Err(_) => return Poll::Ready(Err(sim_shutdown_error())),
         };
 
         match sim.get_pending_connection(&self.local_addr) {

@@ -647,12 +647,6 @@ where
 
         Ok(())
     }
-
-    /// Get a shutdown receiver for background tasks.
-    #[allow(dead_code)]
-    fn shutdown_receiver(&self) -> watch::Receiver<bool> {
-        self.shutdown_tx.subscribe()
-    }
 }
 
 /// Implement Drop to signal shutdown to background tasks.

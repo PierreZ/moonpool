@@ -111,24 +111,6 @@ pub fn set_sim_seed(seed: u64) {
     });
 }
 
-/// Generate a random unique identifier using the simulation RNG.
-///
-/// This function generates deterministic unique IDs for the simulation,
-/// following the FoundationDB pattern from `deterministicRandom()->randomUniqueID()`.
-/// Uses u128 for sufficient uniqueness space in simulation scenarios.
-///
-/// # Returns
-///
-/// A deterministic u128 unique ID that is unique within the simulation.
-///
-/// Generate a unique identifier using the simulation RNG.
-#[allow(dead_code)]
-pub fn random_unique_id() -> u128 {
-    let high: u64 = sim_random();
-    let low: u64 = sim_random();
-    ((high as u128) << 64) | (low as u128)
-}
-
 /// Generate a random f64 in the range [0.0, 1.0) using the simulation RNG.
 ///
 /// This is a convenience function matching FDB's `deterministicRandom()->random01()`.
