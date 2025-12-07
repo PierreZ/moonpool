@@ -395,60 +395,82 @@ impl MetricsCollector {
         all_results: Vec<SimulationResult<SimulationMetrics>>,
         sim_metrics: SimulationMetrics,
     ) {
-        // Aggregate results from all workloads
-        let mut iteration_successful = true;
-        let mut iteration_metrics = SimulationMetrics::default();
-
-        for result in &all_results {
-            match result {
-                Ok(metrics) => {
-                    // Aggregate metrics from this workload
-                    iteration_metrics.simulated_time =
-                        iteration_metrics.simulated_time.max(metrics.simulated_time);
-                    iteration_metrics.events_processed += metrics.events_processed;
-                }
-                Err(_) => {
-                    iteration_successful = false;
-                }
-            }
-        }
+        let (iteration_successful, workload_metrics) =
+            Self::aggregate_workload_results(&all_results);
 
         if iteration_successful {
-            self.successful_runs += 1;
-            tracing::info!("✅ Iteration completed successfully with seed {}", seed);
-
-            // Combine workload and simulation metrics for this iteration
-            let mut combined_metrics = iteration_metrics;
-
-            // For simulated time: prefer simulation world time when it's significantly larger,
-            // as this represents actual time advancement in the simulation
-            if sim_metrics.simulated_time > combined_metrics.simulated_time {
-                combined_metrics.simulated_time = sim_metrics.simulated_time;
-            }
-
-            // For events processed: prefer workload metrics when available, as these represent
-            // the meaningful work done by workloads. Only use simulation metrics if workloads
-            // didn't report any events (i.e., they are 0).
-            if combined_metrics.events_processed == 0 && sim_metrics.events_processed > 0 {
-                combined_metrics.events_processed = sim_metrics.events_processed;
-            }
-
-            // Aggregate metrics across iterations
-            self.aggregated_metrics.wall_time += wall_time;
-            self.aggregated_metrics.simulated_time += combined_metrics.simulated_time;
-            self.aggregated_metrics.events_processed += combined_metrics.events_processed;
-
-            self.individual_metrics.push(Ok(combined_metrics));
+            self.record_success(seed, wall_time, workload_metrics, sim_metrics);
         } else {
-            self.failed_runs += 1;
-            tracing::error!("❌ Iteration FAILED with seed {}", seed);
-            self.individual_metrics
-                .push(Err(crate::SimulationError::InvalidState(format!(
-                    "One or more workloads failed (seed {})",
-                    seed
-                ))));
-            self.faulty_seeds.push(seed);
+            self.record_failure(seed);
         }
+    }
+
+    /// Aggregate metrics from all workload results.
+    /// Returns (success, aggregated_metrics).
+    fn aggregate_workload_results(
+        results: &[SimulationResult<SimulationMetrics>],
+    ) -> (bool, SimulationMetrics) {
+        let mut success = true;
+        let mut metrics = SimulationMetrics::default();
+
+        for result in results {
+            match result {
+                Ok(m) => {
+                    metrics.simulated_time = metrics.simulated_time.max(m.simulated_time);
+                    metrics.events_processed += m.events_processed;
+                }
+                Err(_) => success = false,
+            }
+        }
+
+        (success, metrics)
+    }
+
+    /// Record a successful iteration.
+    fn record_success(
+        &mut self,
+        seed: u64,
+        wall_time: Duration,
+        workload_metrics: SimulationMetrics,
+        sim_metrics: SimulationMetrics,
+    ) {
+        self.successful_runs += 1;
+        tracing::info!("✅ Iteration completed successfully with seed {}", seed);
+
+        // Merge workload and simulation metrics
+        let combined = Self::merge_metrics(workload_metrics, sim_metrics);
+
+        // Aggregate across iterations
+        self.aggregated_metrics.wall_time += wall_time;
+        self.aggregated_metrics.simulated_time += combined.simulated_time;
+        self.aggregated_metrics.events_processed += combined.events_processed;
+
+        self.individual_metrics.push(Ok(combined));
+    }
+
+    /// Merge workload metrics with simulation metrics.
+    fn merge_metrics(mut workload: SimulationMetrics, sim: SimulationMetrics) -> SimulationMetrics {
+        // Prefer larger simulated time (simulation world tracks actual time advancement)
+        if sim.simulated_time > workload.simulated_time {
+            workload.simulated_time = sim.simulated_time;
+        }
+        // Use simulation events only if workloads reported none
+        if workload.events_processed == 0 {
+            workload.events_processed = sim.events_processed;
+        }
+        workload
+    }
+
+    /// Record a failed iteration.
+    fn record_failure(&mut self, seed: u64) {
+        self.failed_runs += 1;
+        tracing::error!("❌ Iteration FAILED with seed {}", seed);
+        self.individual_metrics
+            .push(Err(crate::SimulationError::InvalidState(format!(
+                "One or more workloads failed (seed {})",
+                seed
+            ))));
+        self.faulty_seeds.push(seed);
     }
 
     /// Add faulty seeds from external sources (e.g., deadlock detection).
