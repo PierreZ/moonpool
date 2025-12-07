@@ -121,19 +121,28 @@ pub struct SimWorld {
 }
 
 impl SimWorld {
+    /// Internal constructor that handles all initialization logic.
+    fn create(network_config: Option<NetworkConfiguration>, seed: u64) -> Self {
+        reset_sim_rng();
+        set_sim_seed(seed);
+        crate::chaos::assertions::reset_assertion_results();
+
+        let inner = match network_config {
+            Some(config) => SimInner::new_with_config(config),
+            None => SimInner::new(),
+        };
+
+        Self {
+            inner: Rc::new(RefCell::new(inner)),
+        }
+    }
+
     /// Creates a new simulation world with default network configuration.
     ///
     /// Uses default seed (0) for reproducible testing. For custom seeds,
     /// use [`SimWorld::new_with_seed`].
     pub fn new() -> Self {
-        // Initialize with default seed for deterministic behavior
-        reset_sim_rng();
-        set_sim_seed(0);
-        crate::chaos::assertions::reset_assertion_results();
-
-        Self {
-            inner: Rc::new(RefCell::new(SimInner::new())),
-        }
+        Self::create(None, 0)
     }
 
     /// Creates a new simulation world with a specific seed for deterministic randomness.
@@ -144,28 +153,13 @@ impl SimWorld {
     /// # Parameters
     ///
     /// * `seed` - The seed value for deterministic randomness
-    ///
-    /// Create simulation with specific seed for reproducible behavior.
     pub fn new_with_seed(seed: u64) -> Self {
-        reset_sim_rng();
-        set_sim_seed(seed);
-        crate::chaos::assertions::reset_assertion_results();
-
-        Self {
-            inner: Rc::new(RefCell::new(SimInner::new())),
-        }
+        Self::create(None, seed)
     }
 
     /// Creates a new simulation world with custom network configuration.
     pub fn new_with_network_config(network_config: NetworkConfiguration) -> Self {
-        // Initialize with default seed for deterministic behavior
-        reset_sim_rng();
-        set_sim_seed(0);
-        crate::chaos::assertions::reset_assertion_results();
-
-        Self {
-            inner: Rc::new(RefCell::new(SimInner::new_with_config(network_config))),
-        }
+        Self::create(Some(network_config), 0)
     }
 
     /// Creates a new simulation world with both custom network configuration and seed.
@@ -174,19 +168,11 @@ impl SimWorld {
     ///
     /// * `network_config` - Network configuration for latency and fault simulation
     /// * `seed` - The seed value for deterministic randomness
-    ///
-    /// Create simulation with specific network configuration and seed.
     pub fn new_with_network_config_and_seed(
         network_config: NetworkConfiguration,
         seed: u64,
     ) -> Self {
-        reset_sim_rng();
-        set_sim_seed(seed);
-        crate::chaos::assertions::reset_assertion_results();
-
-        Self {
-            inner: Rc::new(RefCell::new(SimInner::new_with_config(network_config))),
-        }
+        Self::create(Some(network_config), seed)
     }
 
     /// Processes the next scheduled event and advances time.
