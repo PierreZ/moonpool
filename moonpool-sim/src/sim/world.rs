@@ -784,478 +784,382 @@ impl SimWorld {
     /// Static event processor for simulation events.
     #[instrument(skip(inner))]
     fn process_event_with_inner(inner: &mut SimInner, event: Event) {
-        // Increment event processing counter for metrics
         inner.events_processed += 1;
 
-        // Process different event types
         match event {
-            Event::Timer { task_id } => {
-                // Mark this task as awakened
-                inner.awakened_tasks.insert(task_id);
-
-                // Wake the future that was sleeping
-                if let Some(waker) = inner.wakers.task_wakers.remove(&task_id) {
-                    waker.wake();
-                }
-            }
-            Event::Connection { id, state } => {
-                match state {
-                    ConnectionStateChange::BindComplete => {
-                        // Network bind completed
-                    }
-                    ConnectionStateChange::ConnectionReady => {
-                        // Connection establishment completed
-                    }
-                    ConnectionStateChange::ClogClear => {
-                        // Clear write clog for the specified connection
-                        let connection_id = ConnectionId(id);
-
-                        inner.network.connection_clogs.remove(&connection_id);
-                        if let Some(wakers) = inner.wakers.clog_wakers.remove(&connection_id) {
-                            for waker in wakers {
-                                waker.wake();
-                            }
-                        }
-                    }
-                    ConnectionStateChange::ReadClogClear => {
-                        // Clear read clog for the specified connection
-                        let connection_id = ConnectionId(id);
-
-                        inner.network.read_clogs.remove(&connection_id);
-                        if let Some(wakers) = inner.wakers.read_clog_wakers.remove(&connection_id) {
-                            for waker in wakers {
-                                waker.wake();
-                            }
-                        }
-                    }
-                    ConnectionStateChange::PartitionRestore => {
-                        // Clear expired IP partitions
-                        let now = inner.current_time;
-                        let expired_partitions: Vec<_> = inner
-                            .network
-                            .ip_partitions
-                            .iter()
-                            .filter_map(|(pair, state)| {
-                                if now >= state.expires_at {
-                                    Some(*pair)
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-
-                        for pair in expired_partitions {
-                            inner.network.ip_partitions.remove(&pair);
-                            tracing::debug!("Restored IP partition {} -> {}", pair.0, pair.1);
-                        }
-                    }
-                    ConnectionStateChange::SendPartitionClear => {
-                        // Clear expired send partitions
-                        let now = inner.current_time;
-                        let expired_ips: Vec<_> = inner
-                            .network
-                            .send_partitions
-                            .iter()
-                            .filter_map(
-                                |(ip, &expires_at)| {
-                                    if now >= expires_at { Some(*ip) } else { None }
-                                },
-                            )
-                            .collect();
-
-                        for ip in expired_ips {
-                            inner.network.send_partitions.remove(&ip);
-                            tracing::debug!("Cleared send partition for {}", ip);
-                        }
-                    }
-                    ConnectionStateChange::RecvPartitionClear => {
-                        // Clear expired receive partitions
-                        let now = inner.current_time;
-                        let expired_ips: Vec<_> = inner
-                            .network
-                            .recv_partitions
-                            .iter()
-                            .filter_map(
-                                |(ip, &expires_at)| {
-                                    if now >= expires_at { Some(*ip) } else { None }
-                                },
-                            )
-                            .collect();
-
-                        for ip in expired_ips {
-                            inner.network.recv_partitions.remove(&ip);
-                            tracing::debug!("Cleared receive partition for {}", ip);
-                        }
-                    }
-                    ConnectionStateChange::CutRestore => {
-                        // Restore a temporarily cut connection
-                        let connection_id = ConnectionId(id);
-
-                        if let Some(conn) = inner.network.connections.get_mut(&connection_id)
-                            && conn.is_cut
-                        {
-                            conn.is_cut = false;
-                            conn.cut_expiry = None;
-                            tracing::debug!(
-                                "Connection {} restored via scheduled event",
-                                connection_id.0
-                            );
-
-                            // Wake any tasks waiting for restoration
-                            if let Some(wakers) = inner.wakers.cut_wakers.remove(&connection_id) {
-                                for waker in wakers {
-                                    waker.wake();
-                                }
-                            }
-                        }
-                    }
-                    ConnectionStateChange::HalfOpenError => {
-                        // Half-open connection now returns errors
-                        let connection_id = ConnectionId(id);
-
-                        tracing::debug!(
-                            "Connection {} half-open error time reached, waking readers",
-                            connection_id.0
-                        );
-
-                        // Wake any tasks waiting to read - they'll get errors now
-                        if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
-                            waker.wake();
-                        }
-
-                        // Also wake send buffer waiters
-                        if let Some(wakers) = inner.wakers.send_buffer_wakers.remove(&connection_id)
-                        {
-                            for waker in wakers {
-                                waker.wake();
-                            }
-                        }
-                    }
-                }
-            }
+            Event::Timer { task_id } => Self::handle_timer_event(inner, task_id),
+            Event::Connection { id, state } => Self::handle_connection_event(inner, id, state),
             Event::Network {
                 connection_id,
                 operation,
-            } => {
-                match operation {
-                    NetworkOperation::DataDelivery { data } => {
-                        let data_preview =
-                            String::from_utf8_lossy(&data[..std::cmp::min(data.len(), 20)]);
-                        tracing::trace!(
-                            "Event::DataDelivery processing delivery of {} bytes: '{}' to connection {}",
-                            data.len(),
-                            data_preview,
-                            connection_id
-                        );
+            } => Self::handle_network_event(inner, connection_id, operation),
+            Event::Shutdown => Self::handle_shutdown_event(inner),
+        }
+    }
 
-                        let connection_id = ConnectionId(connection_id);
+    /// Handle timer events - wake sleeping tasks.
+    fn handle_timer_event(inner: &mut SimInner, task_id: u64) {
+        inner.awakened_tasks.insert(task_id);
+        if let Some(waker) = inner.wakers.task_wakers.remove(&task_id) {
+            waker.wake();
+        }
+    }
 
-                        // Check for packet loss (probabilistic drop)
-                        // Data was accepted by poll_write but silently dropped here
-                        let packet_loss_prob = inner.network.config.chaos.packet_loss_probability;
-                        if packet_loss_prob > 0.0 && crate::buggify_with_prob!(packet_loss_prob) {
-                            tracing::info!(
-                                "PacketLoss: connection={} bytes={} data silently dropped",
-                                connection_id.0,
-                                data.len()
-                            );
-                            // Skip delivery entirely - data is lost, event processing done
-                            return;
-                        }
+    /// Handle connection state change events.
+    fn handle_connection_event(inner: &mut SimInner, id: u64, state: ConnectionStateChange) {
+        let connection_id = ConnectionId(id);
 
-                        // Write data to the specified connection's receive buffer
-                        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-                            // Apply bit flipping chaos BEFORE writing to receive buffer
-                            let data_to_deliver = if data.is_empty() {
-                                data
-                            } else {
-                                let chaos = &inner.network.config.chaos;
-                                let now = inner.current_time;
-                                let cooldown_elapsed = now.saturating_sub(inner.last_bit_flip_time)
-                                    >= chaos.bit_flip_cooldown;
-
-                                if cooldown_elapsed
-                                    && crate::buggify_with_prob!(chaos.bit_flip_probability)
-                                {
-                                    let random_value = sim_random::<u32>();
-                                    let flip_count = SimInner::calculate_flip_bit_count(
-                                        random_value,
-                                        chaos.bit_flip_min_bits,
-                                        chaos.bit_flip_max_bits,
-                                    );
-
-                                    let mut corrupted_data = data.clone();
-                                    let mut flipped_positions = std::collections::HashSet::new();
-                                    for _ in 0..flip_count {
-                                        let byte_idx =
-                                            (sim_random::<u64>() as usize) % corrupted_data.len();
-                                        let bit_idx = (sim_random::<u64>() as usize) % 8;
-
-                                        let position = (byte_idx, bit_idx);
-                                        if !flipped_positions.contains(&position) {
-                                            flipped_positions.insert(position);
-                                            corrupted_data[byte_idx] ^= 1 << bit_idx;
-                                        }
-                                    }
-
-                                    inner.last_bit_flip_time = now;
-
-                                    tracing::info!(
-                                        "BitFlipInjected: connection={} bytes={} bits_flipped={} unique_positions={}",
-                                        connection_id.0,
-                                        data.len(),
-                                        flip_count,
-                                        flipped_positions.len()
-                                    );
-
-                                    corrupted_data
-                                } else {
-                                    data
-                                }
-                            };
-
-                            tracing::trace!(
-                                "DataDelivery writing {} bytes to connection {} receive_buffer",
-                                data_to_deliver.len(),
-                                connection_id.0
-                            );
-                            for &byte in &data_to_deliver {
-                                conn.receive_buffer.push_back(byte);
-                            }
-
-                            if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
-                                tracing::trace!(
-                                    "DataDelivery waking up read waker for connection_id={}",
-                                    connection_id.0
-                                );
-                                waker.wake();
-                            } else {
-                                tracing::trace!(
-                                    "DataDelivery no waker found for connection_id={}",
-                                    connection_id.0
-                                );
-                            }
-                        } else {
-                            tracing::warn!(
-                                "DataDelivery failed: connection_id={} not found in connections HashMap",
-                                connection_id.0
-                            );
-                        }
-                    }
-                    NetworkOperation::ProcessSendBuffer => {
-                        let connection_id = ConnectionId(connection_id);
-
-                        // Check if this connection is partitioned before processing
-                        let is_partitioned = inner
-                            .network
-                            .is_connection_partitioned(connection_id, inner.current_time);
-
-                        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-                            if is_partitioned {
-                                if let Some(data) = conn.send_buffer.pop_front() {
-                                    tracing::debug!(
-                                        "Connection {} partitioned, failing send of {} bytes",
-                                        connection_id.0,
-                                        data.len()
-                                    );
-
-                                    // Wake any tasks waiting for send buffer space
-                                    Self::wake_all(
-                                        &mut inner.wakers.send_buffer_wakers,
-                                        connection_id,
-                                    );
-
-                                    if !conn.send_buffer.is_empty() {
-                                        let scheduled_time = inner.current_time;
-                                        let sequence = inner.next_sequence;
-                                        inner.next_sequence += 1;
-
-                                        let scheduled_event = ScheduledEvent::new(
-                                            scheduled_time,
-                                            Event::Network {
-                                                connection_id: connection_id.0,
-                                                operation: NetworkOperation::ProcessSendBuffer,
-                                            },
-                                            sequence,
-                                        );
-                                        inner.event_queue.schedule(scheduled_event);
-                                    } else {
-                                        conn.send_in_progress = false;
-                                    }
-                                } else {
-                                    conn.send_in_progress = false;
-                                }
-                            } else if let Some(conn) = inner.network.connections.get(&connection_id)
-                            {
-                                // Extract data we need before mutable operations
-                                let paired_id = conn.paired_connection;
-                                let send_delay = conn.send_delay;
-                                let next_send_time = conn.next_send_time;
-                                let has_data = !conn.send_buffer.is_empty();
-
-                                // Get receiver's recv_delay if paired connection exists
-                                let recv_delay = paired_id.and_then(|pid| {
-                                    inner
-                                        .network
-                                        .connections
-                                        .get(&pid)
-                                        .and_then(|paired_conn| paired_conn.recv_delay)
-                                });
-
-                                // Now get mutable reference and pop data
-                                if has_data {
-                                    if let Some(conn) =
-                                        inner.network.connections.get_mut(&connection_id)
-                                    {
-                                        if let Some(mut data) = conn.send_buffer.pop_front() {
-                                            // Wake any tasks waiting for send buffer space
-                                            Self::wake_all(
-                                                &mut inner.wakers.send_buffer_wakers,
-                                                connection_id,
-                                            );
-
-                                            // BUGGIFY: Simulate partial/short writes
-                                            if crate::buggify!()
-                                                && !is_partitioned
-                                                && !data.is_empty()
-                                            {
-                                                let max_send = std::cmp::min(
-                                                    data.len(),
-                                                    inner
-                                                        .network
-                                                        .config
-                                                        .chaos
-                                                        .partial_write_max_bytes,
-                                                );
-                                                let truncate_to = sim_random_range(0..max_send + 1);
-
-                                                if truncate_to < data.len() {
-                                                    let remainder = data.split_off(truncate_to);
-                                                    conn.send_buffer.push_front(remainder);
-
-                                                    tracing::debug!(
-                                                        "BUGGIFY: Partial write on connection {} - sending {} bytes, {} bytes remain queued",
-                                                        connection_id.0,
-                                                        data.len(),
-                                                        conn.send_buffer
-                                                            .front()
-                                                            .map(|v| v.len())
-                                                            .unwrap_or(0)
-                                                    );
-                                                }
-                                            }
-
-                                            let has_more_messages = !conn.send_buffer.is_empty();
-                                            let base_delay = if has_more_messages {
-                                                std::time::Duration::from_nanos(1)
-                                            } else {
-                                                // Use per-connection send delay if set, otherwise global config
-                                                send_delay.unwrap_or_else(|| {
-                                                    crate::network::sample_duration(
-                                                        &inner.network.config.write_latency,
-                                                    )
-                                                })
-                                            };
-
-                                            let earliest_time = std::cmp::max(
-                                                inner.current_time + base_delay,
-                                                next_send_time,
-                                            );
-                                            let actual_delay = earliest_time - inner.current_time;
-
-                                            conn.next_send_time =
-                                                earliest_time + std::time::Duration::from_nanos(1);
-
-                                            tracing::trace!(
-                                                "Event::ProcessSendBuffer processing {} bytes from connection {} with delay {:?}, has_more_messages={} (TCP ordering: earliest_time={:?})",
-                                                data.len(),
-                                                connection_id.0,
-                                                actual_delay,
-                                                has_more_messages,
-                                                earliest_time
-                                            );
-
-                                            if let Some(paired_id) = paired_id {
-                                                // Add receiver's recv_delay if set
-                                                let scheduled_time = earliest_time
-                                                    + recv_delay.unwrap_or(Duration::ZERO);
-                                                let sequence = inner.next_sequence;
-                                                inner.next_sequence += 1;
-
-                                                let scheduled_event = ScheduledEvent::new(
-                                                    scheduled_time,
-                                                    Event::Network {
-                                                        connection_id: paired_id.0,
-                                                        operation: NetworkOperation::DataDelivery {
-                                                            data,
-                                                        },
-                                                    },
-                                                    sequence,
-                                                );
-                                                inner.event_queue.schedule(scheduled_event);
-                                            }
-
-                                            if !conn.send_buffer.is_empty() {
-                                                let scheduled_time = inner.current_time;
-                                                let sequence = inner.next_sequence;
-                                                inner.next_sequence += 1;
-
-                                                let scheduled_event = ScheduledEvent::new(
-                                                    scheduled_time,
-                                                    Event::Network {
-                                                        connection_id: connection_id.0,
-                                                        operation:
-                                                            NetworkOperation::ProcessSendBuffer,
-                                                    },
-                                                    sequence,
-                                                );
-                                                inner.event_queue.schedule(scheduled_event);
-                                            } else {
-                                                conn.send_in_progress = false;
-                                            }
-                                        } else {
-                                            conn.send_in_progress = false;
-                                        }
-                                    }
-                                } else {
-                                    // No data in buffer
-                                    if let Some(conn) =
-                                        inner.network.connections.get_mut(&connection_id)
-                                    {
-                                        conn.send_in_progress = false;
-                                    }
-                                }
-                            } else {
-                                // Connection not found
-                            }
-                        }
-                    }
+        match state {
+            ConnectionStateChange::BindComplete | ConnectionStateChange::ConnectionReady => {
+                // No action needed for these states
+            }
+            ConnectionStateChange::ClogClear => {
+                inner.network.connection_clogs.remove(&connection_id);
+                Self::wake_all(&mut inner.wakers.clog_wakers, connection_id);
+            }
+            ConnectionStateChange::ReadClogClear => {
+                inner.network.read_clogs.remove(&connection_id);
+                Self::wake_all(&mut inner.wakers.read_clog_wakers, connection_id);
+            }
+            ConnectionStateChange::PartitionRestore => {
+                Self::clear_expired_partitions(inner);
+            }
+            ConnectionStateChange::SendPartitionClear => {
+                Self::clear_expired_send_partitions(inner);
+            }
+            ConnectionStateChange::RecvPartitionClear => {
+                Self::clear_expired_recv_partitions(inner);
+            }
+            ConnectionStateChange::CutRestore => {
+                if let Some(conn) = inner.network.connections.get_mut(&connection_id)
+                    && conn.is_cut
+                {
+                    conn.is_cut = false;
+                    conn.cut_expiry = None;
+                    tracing::debug!("Connection {} restored via scheduled event", id);
+                    Self::wake_all(&mut inner.wakers.cut_wakers, connection_id);
                 }
             }
-            Event::Shutdown => {
-                tracing::debug!("Processing Shutdown event - waking all pending tasks");
-
-                let task_wakers: Vec<_> = inner.wakers.task_wakers.drain().collect();
-
-                for (task_id, waker) in task_wakers {
-                    tracing::trace!("Waking task {}", task_id);
+            ConnectionStateChange::HalfOpenError => {
+                tracing::debug!("Connection {} half-open error time reached", id);
+                if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
                     waker.wake();
                 }
-
-                let read_wakers: Vec<_> = inner
-                    .wakers
-                    .read_wakers
-                    .drain()
-                    .map(|(_conn_id, waker)| waker)
-                    .collect();
-
-                for waker in read_wakers {
-                    waker.wake();
-                }
-
-                tracing::debug!("Shutdown event processed - woke all pending tasks");
+                Self::wake_all(&mut inner.wakers.send_buffer_wakers, connection_id);
             }
         }
+    }
+
+    /// Clear expired IP partitions.
+    fn clear_expired_partitions(inner: &mut SimInner) {
+        let now = inner.current_time;
+        let expired: Vec<_> = inner
+            .network
+            .ip_partitions
+            .iter()
+            .filter_map(|(pair, state)| (now >= state.expires_at).then_some(*pair))
+            .collect();
+
+        for pair in expired {
+            inner.network.ip_partitions.remove(&pair);
+            tracing::debug!("Restored IP partition {} -> {}", pair.0, pair.1);
+        }
+    }
+
+    /// Clear expired send partitions.
+    fn clear_expired_send_partitions(inner: &mut SimInner) {
+        let now = inner.current_time;
+        let expired: Vec<_> = inner
+            .network
+            .send_partitions
+            .iter()
+            .filter_map(|(ip, &expires_at)| (now >= expires_at).then_some(*ip))
+            .collect();
+
+        for ip in expired {
+            inner.network.send_partitions.remove(&ip);
+            tracing::debug!("Cleared send partition for {}", ip);
+        }
+    }
+
+    /// Clear expired receive partitions.
+    fn clear_expired_recv_partitions(inner: &mut SimInner) {
+        let now = inner.current_time;
+        let expired: Vec<_> = inner
+            .network
+            .recv_partitions
+            .iter()
+            .filter_map(|(ip, &expires_at)| (now >= expires_at).then_some(*ip))
+            .collect();
+
+        for ip in expired {
+            inner.network.recv_partitions.remove(&ip);
+            tracing::debug!("Cleared receive partition for {}", ip);
+        }
+    }
+
+    /// Handle network events (data delivery and send buffer processing).
+    fn handle_network_event(inner: &mut SimInner, conn_id: u64, operation: NetworkOperation) {
+        let connection_id = ConnectionId(conn_id);
+
+        match operation {
+            NetworkOperation::DataDelivery { data } => {
+                Self::handle_data_delivery(inner, connection_id, data);
+            }
+            NetworkOperation::ProcessSendBuffer => {
+                Self::handle_process_send_buffer(inner, connection_id);
+            }
+        }
+    }
+
+    /// Handle data delivery to a connection's receive buffer.
+    fn handle_data_delivery(inner: &mut SimInner, connection_id: ConnectionId, data: Vec<u8>) {
+        tracing::trace!(
+            "DataDelivery: {} bytes to connection {}",
+            data.len(),
+            connection_id.0
+        );
+
+        // Check for packet loss
+        let packet_loss_prob = inner.network.config.chaos.packet_loss_probability;
+        if packet_loss_prob > 0.0 && crate::buggify_with_prob!(packet_loss_prob) {
+            tracing::info!(
+                "PacketLoss: connection={} bytes={} dropped",
+                connection_id.0,
+                data.len()
+            );
+            return;
+        }
+
+        // Check connection exists before potentially corrupting data
+        if !inner.network.connections.contains_key(&connection_id) {
+            tracing::warn!("DataDelivery: connection {} not found", connection_id.0);
+            return;
+        }
+
+        // Apply bit flipping chaos (needs mutable inner access)
+        let data_to_deliver = Self::maybe_corrupt_data(inner, &data);
+
+        // Now get connection reference and deliver data
+        let Some(conn) = inner.network.connections.get_mut(&connection_id) else {
+            return;
+        };
+
+        for &byte in &data_to_deliver {
+            conn.receive_buffer.push_back(byte);
+        }
+
+        if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
+            waker.wake();
+        }
+    }
+
+    /// Maybe corrupt data with bit flips based on chaos configuration.
+    fn maybe_corrupt_data(inner: &mut SimInner, data: &[u8]) -> Vec<u8> {
+        if data.is_empty() {
+            return data.to_vec();
+        }
+
+        let chaos = &inner.network.config.chaos;
+        let now = inner.current_time;
+        let cooldown_elapsed =
+            now.saturating_sub(inner.last_bit_flip_time) >= chaos.bit_flip_cooldown;
+
+        if !cooldown_elapsed || !crate::buggify_with_prob!(chaos.bit_flip_probability) {
+            return data.to_vec();
+        }
+
+        let random_value = sim_random::<u32>();
+        let flip_count = SimInner::calculate_flip_bit_count(
+            random_value,
+            chaos.bit_flip_min_bits,
+            chaos.bit_flip_max_bits,
+        );
+
+        let mut corrupted_data = data.to_vec();
+        let mut flipped_positions = std::collections::HashSet::new();
+
+        for _ in 0..flip_count {
+            let byte_idx = (sim_random::<u64>() as usize) % corrupted_data.len();
+            let bit_idx = (sim_random::<u64>() as usize) % 8;
+            let position = (byte_idx, bit_idx);
+
+            if !flipped_positions.contains(&position) {
+                flipped_positions.insert(position);
+                corrupted_data[byte_idx] ^= 1 << bit_idx;
+            }
+        }
+
+        inner.last_bit_flip_time = now;
+        tracing::info!(
+            "BitFlipInjected: bytes={} bits_flipped={} unique_positions={}",
+            data.len(),
+            flip_count,
+            flipped_positions.len()
+        );
+
+        corrupted_data
+    }
+
+    /// Handle processing of a connection's send buffer.
+    fn handle_process_send_buffer(inner: &mut SimInner, connection_id: ConnectionId) {
+        let is_partitioned = inner
+            .network
+            .is_connection_partitioned(connection_id, inner.current_time);
+
+        if is_partitioned {
+            Self::handle_partitioned_send(inner, connection_id);
+        } else {
+            Self::handle_normal_send(inner, connection_id);
+        }
+    }
+
+    /// Handle send when connection is partitioned.
+    fn handle_partitioned_send(inner: &mut SimInner, connection_id: ConnectionId) {
+        let Some(conn) = inner.network.connections.get_mut(&connection_id) else {
+            return;
+        };
+
+        if let Some(data) = conn.send_buffer.pop_front() {
+            tracing::debug!(
+                "Connection {} partitioned, failing send of {} bytes",
+                connection_id.0,
+                data.len()
+            );
+            Self::wake_all(&mut inner.wakers.send_buffer_wakers, connection_id);
+
+            if !conn.send_buffer.is_empty() {
+                Self::schedule_process_send_buffer(inner, connection_id);
+            } else {
+                conn.send_in_progress = false;
+            }
+        } else {
+            conn.send_in_progress = false;
+        }
+    }
+
+    /// Handle normal (non-partitioned) send.
+    fn handle_normal_send(inner: &mut SimInner, connection_id: ConnectionId) {
+        // Extract connection info first
+        let Some(conn) = inner.network.connections.get(&connection_id) else {
+            return;
+        };
+
+        let paired_id = conn.paired_connection;
+        let send_delay = conn.send_delay;
+        let next_send_time = conn.next_send_time;
+        let has_data = !conn.send_buffer.is_empty();
+
+        let recv_delay = paired_id.and_then(|pid| {
+            inner
+                .network
+                .connections
+                .get(&pid)
+                .and_then(|c| c.recv_delay)
+        });
+
+        if !has_data {
+            if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
+                conn.send_in_progress = false;
+            }
+            return;
+        }
+
+        let Some(conn) = inner.network.connections.get_mut(&connection_id) else {
+            return;
+        };
+
+        let Some(mut data) = conn.send_buffer.pop_front() else {
+            conn.send_in_progress = false;
+            return;
+        };
+
+        Self::wake_all(&mut inner.wakers.send_buffer_wakers, connection_id);
+
+        // BUGGIFY: Simulate partial/short writes
+        if crate::buggify!() && !data.is_empty() {
+            let max_send = std::cmp::min(
+                data.len(),
+                inner.network.config.chaos.partial_write_max_bytes,
+            );
+            let truncate_to = sim_random_range(0..max_send + 1);
+
+            if truncate_to < data.len() {
+                let remainder = data.split_off(truncate_to);
+                conn.send_buffer.push_front(remainder);
+                tracing::debug!(
+                    "BUGGIFY: Partial write on connection {} - sending {} bytes",
+                    connection_id.0,
+                    data.len()
+                );
+            }
+        }
+
+        let has_more = !conn.send_buffer.is_empty();
+        let base_delay = if has_more {
+            Duration::from_nanos(1)
+        } else {
+            send_delay.unwrap_or_else(|| {
+                crate::network::sample_duration(&inner.network.config.write_latency)
+            })
+        };
+
+        let earliest_time = std::cmp::max(inner.current_time + base_delay, next_send_time);
+        conn.next_send_time = earliest_time + Duration::from_nanos(1);
+
+        // Schedule data delivery to paired connection
+        if let Some(paired_id) = paired_id {
+            let scheduled_time = earliest_time + recv_delay.unwrap_or(Duration::ZERO);
+            let sequence = inner.next_sequence;
+            inner.next_sequence += 1;
+
+            inner.event_queue.schedule(ScheduledEvent::new(
+                scheduled_time,
+                Event::Network {
+                    connection_id: paired_id.0,
+                    operation: NetworkOperation::DataDelivery { data },
+                },
+                sequence,
+            ));
+        }
+
+        // Schedule next send if more data
+        if !conn.send_buffer.is_empty() {
+            Self::schedule_process_send_buffer(inner, connection_id);
+        } else {
+            conn.send_in_progress = false;
+        }
+    }
+
+    /// Schedule a ProcessSendBuffer event for the given connection.
+    fn schedule_process_send_buffer(inner: &mut SimInner, connection_id: ConnectionId) {
+        let sequence = inner.next_sequence;
+        inner.next_sequence += 1;
+
+        inner.event_queue.schedule(ScheduledEvent::new(
+            inner.current_time,
+            Event::Network {
+                connection_id: connection_id.0,
+                operation: NetworkOperation::ProcessSendBuffer,
+            },
+            sequence,
+        ));
+    }
+
+    /// Handle shutdown event - wake all pending tasks.
+    fn handle_shutdown_event(inner: &mut SimInner) {
+        tracing::debug!("Processing Shutdown event - waking all pending tasks");
+
+        for (task_id, waker) in inner.wakers.task_wakers.drain() {
+            tracing::trace!("Waking task {}", task_id);
+            waker.wake();
+        }
+
+        for (_conn_id, waker) in inner.wakers.read_wakers.drain() {
+            waker.wake();
+        }
+
+        tracing::debug!("Shutdown event processed");
     }
 
     /// Get current assertion results for all tracked assertions.
