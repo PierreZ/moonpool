@@ -10,7 +10,8 @@ documentation = "https://docs.rs/moonpool-core"
 readme = "README.md"
 
 [package.metadata.docs.rs]
-rustflags = ["--cfg", "tokio_unstable"]
+rustdoc-args = ["--cfg", "tokio_unstable"]
+rustc-args = ["--cfg", "tokio_unstable"]
 
 [dependencies]
 async-trait = "0.1"

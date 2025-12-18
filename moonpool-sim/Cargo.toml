@@ -10,7 +10,8 @@ documentation = "https://docs.rs/moonpool-sim"
 readme = "README.md"
 
 [package.metadata.docs.rs]
-rustflags = ["--cfg", "tokio_unstable"]
+rustdoc-args = ["--cfg", "tokio_unstable"]
+rustc-args = ["--cfg", "tokio_unstable"]
 
 [dependencies]
 moonpool-core = { path = "../moonpool-core", version = "0.2.1" }
