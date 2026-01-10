@@ -31,8 +31,8 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
 use crate::{
-    Endpoint, NetworkAddress, NetworkProvider, Peer, PeerConfig, TaskProvider, TcpListenerTrait,
-    TimeProvider, UID, WellKnownToken,
+    Endpoint, NetworkAddress, NetworkProvider, Peer, PeerConfig, RandomProvider, TaskProvider,
+    TcpListenerTrait, ThreadRngRandomProvider, TimeProvider, UID, WellKnownToken,
 };
 use moonpool_sim::sometimes_assert;
 use tokio::sync::watch;
@@ -117,11 +117,12 @@ where
 /// transport.set_weak_self(Rc::downgrade(&transport));
 /// transport.listen().await?; // Start accepting connections
 /// ```
-pub struct NetTransport<N, T, TP>
+pub struct NetTransport<N, T, TP, R = ThreadRngRandomProvider>
 where
     N: NetworkProvider + 'static,
     T: TimeProvider + 'static,
     TP: TaskProvider + 'static,
+    R: RandomProvider + 'static,
 {
     /// Internal transport data (FDB: TransportData* self).
     data: RefCell<TransportData<N, T, TP>>,
@@ -137,6 +138,10 @@ where
 
     /// Task provider for spawning background tasks.
     task_provider: TP,
+
+    /// Random provider for generating unique tokens.
+    /// Used for reply endpoint tokens in RPC calls.
+    random: R,
 
     /// Peer configuration.
     peer_config: PeerConfig,
@@ -164,13 +169,13 @@ struct TransportStats {
     peers_created: u64,
 }
 
-impl<N, T, TP> NetTransport<N, T, TP>
+impl<N, T, TP> NetTransport<N, T, TP, ThreadRngRandomProvider>
 where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
 {
-    /// Create a new NetTransport.
+    /// Create a new NetTransport with the default random provider.
     ///
     /// # Arguments
     ///
@@ -187,6 +192,41 @@ where
     /// transport.set_weak_self(Rc::downgrade(&transport));
     /// ```
     pub fn new(local_address: NetworkAddress, network: N, time: T, task_provider: TP) -> Self {
+        Self::new_with_random(
+            local_address,
+            network,
+            time,
+            task_provider,
+            ThreadRngRandomProvider,
+        )
+    }
+}
+
+impl<N, T, TP, R> NetTransport<N, T, TP, R>
+where
+    N: NetworkProvider + Clone + 'static,
+    T: TimeProvider + Clone + 'static,
+    TP: TaskProvider + Clone + 'static,
+    R: RandomProvider + Clone + 'static,
+{
+    /// Create a new NetTransport with a custom random provider.
+    ///
+    /// Use this constructor when you need deterministic randomness (e.g., in simulation).
+    ///
+    /// # Arguments
+    ///
+    /// * `local_address` - Address of this transport (for local delivery checks)
+    /// * `network` - Network provider for connections
+    /// * `time` - Time provider for timing
+    /// * `task_provider` - Task provider for background tasks
+    /// * `random` - Random provider for generating unique tokens
+    pub fn new_with_random(
+        local_address: NetworkAddress,
+        network: N,
+        time: T,
+        task_provider: TP,
+        random: R,
+    ) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
         Self {
             data: RefCell::new(TransportData::default()),
@@ -194,6 +234,7 @@ where
             network,
             time,
             task_provider,
+            random,
             peer_config: PeerConfig::default(),
             weak_self: RefCell::new(None),
             shutdown_tx,
@@ -234,6 +275,20 @@ where
     /// Get the local address.
     pub fn local_address(&self) -> &NetworkAddress {
         &self.local_address
+    }
+
+    /// Get the random provider.
+    ///
+    /// Used internally for generating unique reply tokens.
+    pub fn random(&self) -> &R {
+        &self.random
+    }
+
+    /// Generate a unique UID using the random provider.
+    ///
+    /// This is used for reply endpoint tokens in RPC calls.
+    pub fn generate_uid(&self) -> UID {
+        UID::new(self.random.random(), self.random.random())
     }
 
     /// Register a well-known endpoint.
@@ -653,11 +708,12 @@ where
 ///
 /// When NetTransport is dropped, we signal all background tasks (listen_task)
 /// to exit gracefully. This prevents tasks from being stuck on accept() forever.
-impl<N, T, TP> Drop for NetTransport<N, T, TP>
+impl<N, T, TP, R> Drop for NetTransport<N, T, TP, R>
 where
     N: NetworkProvider + 'static,
     T: TimeProvider + 'static,
     TP: TaskProvider + 'static,
+    R: RandomProvider + 'static,
 {
     fn drop(&mut self) {
         tracing::debug!("NetTransport: signaling shutdown to background tasks");
@@ -705,26 +761,30 @@ where
 ///
 /// - **`build()`**: For fire-and-forget messaging where you don't expect responses.
 ///   Also useful for testing where you control message flow manually.
-pub struct NetTransportBuilder<N, T, TP>
+pub struct NetTransportBuilder<N, T, TP, R = ThreadRngRandomProvider>
 where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
+    R: RandomProvider + Clone + 'static,
 {
     network: N,
     time: T,
     task_provider: TP,
+    random: R,
     local_address: Option<NetworkAddress>,
     peer_config: Option<PeerConfig>,
 }
 
-impl<N, T, TP> NetTransportBuilder<N, T, TP>
+impl<N, T, TP> NetTransportBuilder<N, T, TP, ThreadRngRandomProvider>
 where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
 {
     /// Create a new builder with the required providers.
+    ///
+    /// Uses the default `ThreadRngRandomProvider` for random number generation.
     ///
     /// # Arguments
     ///
@@ -736,6 +796,36 @@ where
             network,
             time,
             task_provider,
+            random: ThreadRngRandomProvider,
+            local_address: None,
+            peer_config: None,
+        }
+    }
+}
+
+impl<N, T, TP, R> NetTransportBuilder<N, T, TP, R>
+where
+    N: NetworkProvider + Clone + 'static,
+    T: TimeProvider + Clone + 'static,
+    TP: TaskProvider + Clone + 'static,
+    R: RandomProvider + Clone + 'static,
+{
+    /// Create a new builder with a custom random provider.
+    ///
+    /// Use this when you need deterministic randomness (e.g., in simulation).
+    ///
+    /// # Arguments
+    ///
+    /// * `network` - Network provider for TCP connections
+    /// * `time` - Time provider for timing operations
+    /// * `task_provider` - Task provider for spawning background tasks
+    /// * `random` - Random provider for generating unique tokens
+    pub fn new_with_random(network: N, time: T, task_provider: TP, random: R) -> Self {
+        Self {
+            network,
+            time,
+            task_provider,
+            random,
             local_address: None,
             peer_config: None,
         }
@@ -771,12 +861,18 @@ where
     /// # Panics
     ///
     /// Panics if `local_address()` was not called.
-    pub fn build(self) -> Rc<NetTransport<N, T, TP>> {
+    pub fn build(self) -> Rc<NetTransport<N, T, TP, R>> {
         let address = self
             .local_address
             .expect("local_address is required - call .local_address(addr) before .build()");
 
-        let mut transport = NetTransport::new(address, self.network, self.time, self.task_provider);
+        let mut transport = NetTransport::new_with_random(
+            address,
+            self.network,
+            self.time,
+            self.task_provider,
+            self.random,
+        );
 
         if let Some(config) = self.peer_config {
             transport = transport.with_peer_config(config);
@@ -802,7 +898,7 @@ where
     /// # Panics
     ///
     /// Panics if `local_address()` was not called.
-    pub async fn build_listening(self) -> Result<Rc<NetTransport<N, T, TP>>, MessagingError> {
+    pub async fn build_listening(self) -> Result<Rc<NetTransport<N, T, TP, R>>, MessagingError> {
         let transport = self.build();
         transport.listen().await?;
         Ok(transport)
@@ -821,14 +917,15 @@ where
 ///
 /// The FDB version is more complex (handles ConnectPacket, protocol negotiation),
 /// but the core loop is: read packets → scanPackets → deliver.
-async fn connection_reader<N, T, TP>(
-    transport: Weak<NetTransport<N, T, TP>>,
+async fn connection_reader<N, T, TP, R>(
+    transport: Weak<NetTransport<N, T, TP, R>>,
     peer: SharedPeer<N, T, TP>,
     peer_addr: String,
 ) where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
+    R: RandomProvider + Clone + 'static,
 {
     tracing::debug!("connection_reader: started for peer {}", peer_addr);
 
@@ -895,8 +992,8 @@ async fn connection_reader<N, T, TP>(
 ///
 /// # FDB Reference
 /// From NetTransport.actor.cpp:1646-1676 listen
-async fn listen_task<N, T, TP>(
-    transport: Weak<NetTransport<N, T, TP>>,
+async fn listen_task<N, T, TP, R>(
+    transport: Weak<NetTransport<N, T, TP, R>>,
     listener: N::TcpListener,
     listen_addr: String,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -904,6 +1001,7 @@ async fn listen_task<N, T, TP>(
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
+    R: RandomProvider + Clone + 'static,
 {
     tracing::debug!("listen_task: started on {}", listen_addr);
 
@@ -988,15 +1086,16 @@ async fn listen_task<N, T, TP>(
 ///
 /// FDB Pattern: Use Peer::new_incoming() with the accepted stream, not Peer::new().
 /// This uses the already-established connection rather than trying to connect back.
-fn connection_incoming<N, T, TP>(
-    transport_weak: Weak<NetTransport<N, T, TP>>,
+fn connection_incoming<N, T, TP, R>(
+    transport_weak: Weak<NetTransport<N, T, TP, R>>,
     stream: N::TcpStream,
     peer_addr: String,
-    transport: &NetTransport<N, T, TP>,
+    transport: &NetTransport<N, T, TP, R>,
 ) where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
+    R: RandomProvider + Clone + 'static,
 {
     tracing::debug!(
         "connection_incoming: handling connection from {}",

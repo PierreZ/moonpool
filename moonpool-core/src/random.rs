@@ -3,7 +3,13 @@
 //! This module provides a provider pattern for random number generation,
 //! consistent with other provider abstractions in the simulation framework
 //! like TimeProvider, NetworkProvider, and TaskProvider.
+//!
+//! # Providers
+//!
+//! - [`ThreadRngRandomProvider`]: Production provider using thread-local RNG
+//! - `SimRandomProvider` (in moonpool-sim): Deterministic simulation provider
 
+use rand::Rng;
 use rand::distr::{Distribution, StandardUniform, uniform::SampleUniform};
 use std::ops::Range;
 
@@ -37,4 +43,54 @@ pub trait RandomProvider: Clone {
     ///
     /// The probability should be between 0.0 and 1.0.
     fn random_bool(&self, probability: f64) -> bool;
+}
+
+/// Production random provider using thread-local RNG.
+///
+/// This provider uses `rand::thread_rng()` for random number generation,
+/// which is suitable for production use but NOT for deterministic simulation.
+///
+/// For simulation testing, use `SimRandomProvider` from moonpool-sim instead.
+///
+/// # Example
+///
+/// ```
+/// use moonpool_core::{RandomProvider, ThreadRngRandomProvider};
+///
+/// let random = ThreadRngRandomProvider::new();
+/// let value: u64 = random.random();
+/// let in_range = random.random_range(1..100);
+/// ```
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ThreadRngRandomProvider;
+
+impl ThreadRngRandomProvider {
+    /// Create a new thread-local RNG provider.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl RandomProvider for ThreadRngRandomProvider {
+    fn random<T>(&self) -> T
+    where
+        StandardUniform: Distribution<T>,
+    {
+        rand::rng().random()
+    }
+
+    fn random_range<T>(&self, range: Range<T>) -> T
+    where
+        T: SampleUniform + PartialOrd,
+    {
+        rand::rng().random_range(range)
+    }
+
+    fn random_ratio(&self) -> f64 {
+        rand::rng().random()
+    }
+
+    fn random_bool(&self, probability: f64) -> bool {
+        rand::rng().random_bool(probability)
+    }
 }

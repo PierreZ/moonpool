@@ -573,7 +573,7 @@ where
                 let b = random.random_range(0..100) as i64;
                 let request = CalcAddRequest { a, b, request_id };
 
-                if send_request::<_, CalcAddResponse, _, _, _, _>(
+                if send_request::<_, CalcAddResponse, _, _, _, _, _>(
                     &transport,
                     &add_endpoint,
                     request,
@@ -593,7 +593,7 @@ where
                 let b = random.random_range(0..100) as i64;
                 let request = CalcSubRequest { a, b, request_id };
 
-                if send_request::<_, CalcSubResponse, _, _, _, _>(
+                if send_request::<_, CalcSubResponse, _, _, _, _, _>(
                     &transport,
                     &sub_endpoint,
                     request,
@@ -613,7 +613,7 @@ where
                 let b = random.random_range(0..100) as i64;
                 let request = CalcMulRequest { a, b, request_id };
 
-                if send_request::<_, CalcMulResponse, _, _, _, _>(
+                if send_request::<_, CalcMulResponse, _, _, _, _, _>(
                     &transport,
                     &mul_endpoint,
                     request,

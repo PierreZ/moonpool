@@ -72,7 +72,7 @@ pub use error::{SimulationError, SimulationResult};
 
 // Provider trait exports
 pub use network::{NetworkProvider, TcpListenerTrait, TokioNetworkProvider, TokioTcpListener};
-pub use random::RandomProvider;
+pub use random::{RandomProvider, ThreadRngRandomProvider};
 pub use task::{TaskProvider, TokioTaskProvider};
 pub use time::{TimeProvider, TokioTimeProvider};
 

@@ -22,7 +22,7 @@
 
 use std::rc::Rc;
 
-use crate::{Endpoint, MessageCodec, NetworkProvider, TaskProvider, TimeProvider, UID};
+use crate::{Endpoint, MessageCodec, NetworkProvider, RandomProvider, TaskProvider, TimeProvider};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -36,7 +36,7 @@ use crate::error::MessagingError;
 /// Send a typed request and return a future for the response.
 ///
 /// This is the primary client-side RPC function. It:
-/// 1. Creates a temporary endpoint for receiving the reply
+/// 1. Creates a temporary endpoint for receiving the reply (using transport's RandomProvider)
 /// 2. Wraps the request in a `RequestEnvelope` with the reply endpoint
 /// 3. Sends the envelope to the destination
 /// 4. Returns a `ReplyFuture` that resolves when the server responds
@@ -55,8 +55,13 @@ use crate::error::MessagingError;
 /// # Errors
 ///
 /// Returns `MessagingError` if the request cannot be sent.
-pub fn send_request<Req, Resp, N, T, TP, C>(
-    transport: &NetTransport<N, T, TP>,
+///
+/// # Determinism
+///
+/// Reply tokens are generated using the transport's `RandomProvider`, ensuring
+/// deterministic behavior in simulation when using `SimRandomProvider`.
+pub fn send_request<Req, Resp, N, T, TP, R, C>(
+    transport: &NetTransport<N, T, TP, R>,
     destination: &Endpoint,
     request: Req,
     codec: C,
@@ -67,11 +72,12 @@ where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
+    R: RandomProvider + Clone + 'static,
     C: MessageCodec,
 {
-    // Generate a unique token for the reply endpoint
-    // Note: In production, use RandomProvider for deterministic IDs
-    let reply_token = UID::new(rand_reply_id(), rand_reply_id());
+    // Generate a unique token using the transport's random provider
+    // This ensures deterministic behavior in simulation
+    let reply_token = transport.generate_uid();
 
     // Create reply endpoint using transport's local address
     let reply_endpoint = Endpoint::new(transport.local_address().clone(), reply_token);
@@ -101,14 +107,6 @@ where
 
     // Return the reply future
     Ok(ReplyFuture::new(reply_queue, reply_endpoint))
-}
-
-/// Simple sequential ID generator for reply endpoints.
-/// In production, use RandomProvider for deterministic IDs in simulation.
-fn rand_reply_id() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0x1_0000_0000);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 #[cfg(test)]

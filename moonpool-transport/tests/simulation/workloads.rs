@@ -396,7 +396,7 @@ where
         match client_op {
             RpcClientOp::SendRequest { request_id } => {
                 let request = RpcTestRequest::with_payload(request_id, &my_id, 32);
-                match send_request::<_, RpcTestResponse, _, _, _, _>(
+                match send_request::<_, RpcTestResponse, _, _, _, _, _>(
                     &transport,
                     &server_endpoint,
                     request,
@@ -864,7 +864,7 @@ where
         match client_op {
             RpcClientOp::SendRequest { request_id } => {
                 let request = RpcTestRequest::with_payload(request_id, &my_id, 32);
-                match send_request::<_, RpcTestResponse, _, _, _, _>(
+                match send_request::<_, RpcTestResponse, _, _, _, _, _>(
                     &transport,
                     &server_endpoint,
                     request,
