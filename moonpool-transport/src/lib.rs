@@ -97,3 +97,34 @@ pub use rpc::{
     EndpointMap, MessageReceiver, NetNotifiedQueue, NetTransport, NetTransportBuilder, ReplyError,
     ReplyFuture, ReplyPromise, RequestEnvelope, RequestStream, send_request,
 };
+
+// =============================================================================
+// Type Aliases for Common Configurations
+// =============================================================================
+
+/// Type alias for tokio-based transport (production use).
+///
+/// This is the standard transport configuration for production environments
+/// using tokio's networking, time, and task primitives with thread-local RNG.
+///
+/// # Example
+///
+/// ```ignore
+/// use moonpool_transport::TokioTransport;
+/// use std::rc::Rc;
+///
+/// let transport: Rc<TokioTransport> = NetTransportBuilder::new(
+///     TokioNetworkProvider::new(),
+///     TokioTimeProvider::new(),
+///     TokioTaskProvider,
+/// )
+/// .local_address(addr)
+/// .build_listening()
+/// .await?;
+/// ```
+pub type TokioTransport = NetTransport<
+    TokioNetworkProvider,
+    TokioTimeProvider,
+    TokioTaskProvider,
+    ThreadRngRandomProvider,
+>;
