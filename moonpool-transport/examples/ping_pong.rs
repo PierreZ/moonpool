@@ -19,7 +19,7 @@
 //! - `rpc_messages!` macro for message type definitions
 //! - `rpc_interface!` macro for interface token generation
 //! - `NetTransportBuilder` for clean transport setup
-//! - `transport.call()` convenience method for RPC calls
+//! - `transport.request().with_timeout().send()` fluent builder for RPC calls
 //! - `register_handler` for single-step endpoint registration
 //! - `recv_with_transport` for embedded transport in replies
 
@@ -165,20 +165,19 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
 
         println!("Sending ping seq={}: {:?}", seq, request.message);
 
-        // Use transport.call() convenience method
-        let future = transport.call::<_, PingResponse, _>(&server_endpoint, request, JsonCodec)?;
-
-        // Await response with timeout
-        match time.timeout(Duration::from_secs(5), future).await {
-            Ok(Ok(Ok(response))) => {
+        // Use request builder with built-in timeout handling
+        match transport
+            .request(&server_endpoint, request)
+            .with_timeout(Duration::from_secs(5), &time)
+            .send::<PingResponse, _>(JsonCodec)
+            .await
+        {
+            Ok(response) => {
                 println!("Received pong seq={}: {:?}\n", response.seq, response.echo);
                 success_count += 1;
             }
-            Ok(Ok(Err(e))) => {
+            Err(e) => {
                 println!("RPC error: {:?}\n", e);
-            }
-            Ok(Err(())) | Err(_) => {
-                println!("Timeout waiting for response\n");
             }
         }
 
@@ -233,7 +232,7 @@ fn main() {
             println!("This example demonstrates the DX improvements:\n");
             println!("  - rpc_messages! macro (auto-derive Serialize/Deserialize)");
             println!("  - rpc_interface! macro (generate interface tokens)");
-            println!("  - transport.call() (convenience method for RPC)");
+            println!("  - transport.request().with_timeout().send() (fluent RPC builder)");
             println!("  - NetTransportBuilder (eliminates Rc/set_weak_self boilerplate)");
             println!("  - register_handler (single-step endpoint registration)");
             println!("  - recv_with_transport (no closure callback needed)\n");

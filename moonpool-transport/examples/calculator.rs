@@ -4,7 +4,7 @@
 //! - `rpc_messages!` macro for message type definitions
 //! - `rpc_interface!` macro for interface token generation
 //! - `NetTransportBuilder` for cleaner transport setup
-//! - `transport.call()` convenience method for RPC calls
+//! - `transport.request().with_timeout().send()` fluent builder for RPC calls
 //! - `register_handler_at` for multi-method interfaces
 //! - `recv_with_transport` for embedded transport in replies
 //!
@@ -216,60 +216,43 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     for (desc, op) in tests.iter() {
         println!("Sending: {}", desc);
 
-        // Use transport.call() convenience method instead of send_request()
+        // Use request builder with built-in timeout handling
         let result = match op {
-            Operation::Add(a, b) => {
-                let future = transport.call::<_, AddResponse, _>(
-                    &add_endpoint,
-                    AddRequest { a: *a, b: *b },
-                    JsonCodec,
-                )?;
+            Operation::Add(a, b) => transport
+                .request(&add_endpoint, AddRequest { a: *a, b: *b })
+                .with_timeout(Duration::from_secs(5), &time)
+                .send::<AddResponse, _>(JsonCodec)
+                .await
+                .ok()
+                .map(|resp| format!("{}", resp.result)),
 
-                match time.timeout(Duration::from_secs(5), future).await {
-                    Ok(Ok(Ok(resp))) => Some(format!("{}", resp.result)),
-                    _ => None,
-                }
-            }
-            Operation::Sub(a, b) => {
-                let future = transport.call::<_, SubResponse, _>(
-                    &sub_endpoint,
-                    SubRequest { a: *a, b: *b },
-                    JsonCodec,
-                )?;
+            Operation::Sub(a, b) => transport
+                .request(&sub_endpoint, SubRequest { a: *a, b: *b })
+                .with_timeout(Duration::from_secs(5), &time)
+                .send::<SubResponse, _>(JsonCodec)
+                .await
+                .ok()
+                .map(|resp| format!("{}", resp.result)),
 
-                match time.timeout(Duration::from_secs(5), future).await {
-                    Ok(Ok(Ok(resp))) => Some(format!("{}", resp.result)),
-                    _ => None,
-                }
-            }
-            Operation::Mul(a, b) => {
-                let future = transport.call::<_, MulResponse, _>(
-                    &mul_endpoint,
-                    MulRequest { a: *a, b: *b },
-                    JsonCodec,
-                )?;
+            Operation::Mul(a, b) => transport
+                .request(&mul_endpoint, MulRequest { a: *a, b: *b })
+                .with_timeout(Duration::from_secs(5), &time)
+                .send::<MulResponse, _>(JsonCodec)
+                .await
+                .ok()
+                .map(|resp| format!("{}", resp.result)),
 
-                match time.timeout(Duration::from_secs(5), future).await {
-                    Ok(Ok(Ok(resp))) => Some(format!("{}", resp.result)),
-                    _ => None,
-                }
-            }
-            Operation::Div(a, b) => {
-                let future = transport.call::<_, DivResponse, _>(
-                    &div_endpoint,
-                    DivRequest { a: *a, b: *b },
-                    JsonCodec,
-                )?;
-
-                match time.timeout(Duration::from_secs(5), future).await {
-                    Ok(Ok(Ok(resp))) => Some(
-                        resp.result
-                            .map(|r| r.to_string())
-                            .unwrap_or_else(|| "ERROR (division by zero)".to_string()),
-                    ),
-                    _ => None,
-                }
-            }
+            Operation::Div(a, b) => transport
+                .request(&div_endpoint, DivRequest { a: *a, b: *b })
+                .with_timeout(Duration::from_secs(5), &time)
+                .send::<DivResponse, _>(JsonCodec)
+                .await
+                .ok()
+                .map(|resp| {
+                    resp.result
+                        .map(|r| r.to_string())
+                        .unwrap_or_else(|| "ERROR (division by zero)".to_string())
+                }),
         };
 
         match result {

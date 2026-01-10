@@ -19,6 +19,7 @@ mod reply_error;
 mod reply_future;
 mod reply_promise;
 mod request;
+mod request_builder;
 mod request_stream;
 
 pub use endpoint_map::{EndpointMap, MessageReceiver};
@@ -28,4 +29,5 @@ pub use reply_error::ReplyError;
 pub use reply_future::ReplyFuture;
 pub use reply_promise::ReplyPromise;
 pub use request::send_request;
+pub use request_builder::{RequestBuilder, RpcError};
 pub use request_stream::{RequestEnvelope, RequestStream};

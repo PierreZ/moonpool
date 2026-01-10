@@ -40,7 +40,7 @@
 
 /// Define RPC message types with required derives.
 ///
-/// This macro automatically adds `#[derive(Debug, Clone, Serialize, Deserialize)]`
+/// This macro automatically adds `#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]`
 /// to each struct, reducing boilerplate for message definitions.
 ///
 /// # Example
@@ -67,12 +67,12 @@
 /// ```rust
 /// use serde::{Serialize, Deserialize};
 ///
-/// #[derive(Debug, Clone, Serialize, Deserialize)]
+/// #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 /// pub struct PingRequest {
 ///     pub seq: u32,
 /// }
 ///
-/// #[derive(Debug, Clone, Serialize, Deserialize)]
+/// #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 /// pub struct PingResponse {
 ///     pub seq: u32,
 ///     pub timestamp: u64,
@@ -93,7 +93,7 @@ macro_rules! rpc_messages {
     ) => {
         $(
             $(#[$meta])*
-            #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+            #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
             $vis struct $name {
                 $(
                     $(#[$field_meta])*

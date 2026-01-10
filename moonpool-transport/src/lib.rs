@@ -99,7 +99,8 @@ pub use wire::{
 // RPC exports
 pub use rpc::{
     EndpointMap, MessageReceiver, NetNotifiedQueue, NetTransport, NetTransportBuilder, ReplyError,
-    ReplyFuture, ReplyPromise, RequestEnvelope, RequestStream, send_request,
+    ReplyFuture, ReplyPromise, RequestBuilder, RequestEnvelope, RequestStream, RpcError,
+    send_request,
 };
 
 // =============================================================================

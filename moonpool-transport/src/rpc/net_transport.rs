@@ -341,6 +341,41 @@ where
         super::send_request(self, destination, request, codec)
     }
 
+    /// Create a request builder for fluent RPC calls.
+    ///
+    /// This provides a builder pattern for sending requests with optional timeout.
+    /// The builder eliminates the need for manual timeout wrapping.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use moonpool_transport::JsonCodec;
+    /// use std::time::Duration;
+    ///
+    /// // With timeout (recommended)
+    /// let response: MyResponse = transport
+    ///     .request(&endpoint, MyRequest { id: 1 })
+    ///     .with_timeout(Duration::from_secs(5), &time)
+    ///     .send(JsonCodec)
+    ///     .await?;
+    ///
+    /// // Without timeout (may wait indefinitely)
+    /// let response: MyResponse = transport
+    ///     .request(&endpoint, MyRequest { id: 1 })
+    ///     .send(JsonCodec)
+    ///     .await?;
+    /// ```
+    pub fn request<'a, Req>(
+        &'a self,
+        destination: &'a Endpoint,
+        request: Req,
+    ) -> super::RequestBuilder<'a, Req, N, T, TP, R>
+    where
+        Req: serde::Serialize,
+    {
+        super::RequestBuilder::new(self, destination, request)
+    }
+
     /// Register a well-known endpoint.
     ///
     /// Well-known endpoints have deterministic tokens for O(1) lookup.
