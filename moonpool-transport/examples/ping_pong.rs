@@ -1,7 +1,7 @@
 //! Ping-Pong Example: Real TCP RPC using Moonpool's static messaging.
 //!
 //! This example demonstrates moonpool's RPC over **real TCP sockets**
-//! using the improved Phase 12C APIs.
+//! using the improved DX APIs.
 //!
 //! Run as two separate processes:
 //!
@@ -16,20 +16,20 @@
 //! # Architecture
 //!
 //! The example shows:
+//! - `rpc_messages!` macro for message type definitions
+//! - `rpc_interface!` macro for interface token generation
 //! - `NetTransportBuilder` for clean transport setup
+//! - `transport.call()` convenience method for RPC calls
 //! - `register_handler` for single-step endpoint registration
 //! - `recv_with_transport` for embedded transport in replies
-//! - Server: listening, receiving typed requests, sending responses
-//! - Client: connecting, sending requests, awaiting responses
 
 use std::env;
 use std::time::Duration;
 
 use moonpool_transport::{
-    Endpoint, JsonCodec, NetTransportBuilder, NetworkAddress, ReplyFuture, TimeProvider,
-    TokioNetworkProvider, TokioTaskProvider, TokioTimeProvider, UID, send_request,
+    JsonCodec, NetTransportBuilder, NetworkAddress, TimeProvider, TokioNetworkProvider,
+    TokioTaskProvider, TokioTimeProvider, rpc_interface, rpc_messages,
 };
-use serde::{Deserialize, Serialize};
 
 // ============================================================================
 // Configuration
@@ -38,31 +38,38 @@ use serde::{Deserialize, Serialize};
 const SERVER_ADDR: &str = "127.0.0.1:4500";
 const CLIENT_ADDR: &str = "127.0.0.1:4501";
 
-// Well-known token for the ping service
-fn ping_token() -> UID {
-    UID::new(0x5049_4E47, 0x504F_4E47) // "PING" "PONG" in hex
+// ============================================================================
+// Message Types - using rpc_messages! macro
+// ============================================================================
+
+rpc_messages! {
+    /// Request message for ping-pong RPC.
+    pub struct PingRequest {
+        /// Sequence number for tracking.
+        pub seq: u32,
+        /// Payload message.
+        pub message: String,
+    }
+
+    /// Response message for ping-pong RPC.
+    pub struct PingResponse {
+        /// Echoed sequence number.
+        pub seq: u32,
+        /// Echoed message with "pong:" prefix.
+        pub echo: String,
+    }
 }
 
 // ============================================================================
-// Message Types
+// Interface Definition - using rpc_interface! macro
 // ============================================================================
 
-/// Request message for ping-pong RPC.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct PingRequest {
-    /// Sequence number for tracking.
-    seq: u32,
-    /// Payload message.
-    message: String,
-}
-
-/// Response message for ping-pong RPC.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct PingResponse {
-    /// Echoed sequence number.
-    seq: u32,
-    /// Echoed message with "pong:" prefix.
-    echo: String,
+rpc_interface! {
+    /// Ping-Pong service interface
+    pub PingPong(0x5049_4E47) {  // "PING" in hex
+        /// The ping method
+        ping: 0x504F_4E47,  // "PONG" in hex - maintains backward compat with old token
+    }
 }
 
 // ============================================================================
@@ -80,10 +87,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     // Parse server address
     let local_addr = NetworkAddress::parse(SERVER_ADDR)?;
 
-    // ========================================================================
     // NetTransportBuilder handles Rc wrapping, set_weak_self(), and listen()
-    // No more runtime panics from forgetting set_weak_self()!
-    // ========================================================================
     let transport = NetTransportBuilder::new(network, time, task)
         .local_address(local_addr)
         .build_listening()
@@ -91,22 +95,13 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Server listening on {}\n", SERVER_ADDR);
 
-    // ========================================================================
-    // register_handler combines all endpoint setup into a single call:
-    // - Creates endpoint from local address + token
-    // - Creates RequestStream
-    // - Registers with transport
-    // ========================================================================
-    let ping_stream = transport.register_handler::<PingRequest, _>(ping_token(), JsonCodec);
+    // Register handler using interface token from rpc_interface! macro
+    let ping_stream = transport.register_handler::<PingRequest, _>(PingPong::ping, JsonCodec);
 
     println!("Waiting for ping requests...\n");
 
     // Server loop - handle requests
     loop {
-        // ====================================================================
-        // recv_with_transport eliminates the closure callback pattern
-        // The transport reference is passed directly instead of captured
-        // ====================================================================
         if let Some((request, reply)) = ping_stream
             .recv_with_transport::<_, _, _, PingResponse>(&transport)
             .await
@@ -147,17 +142,14 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     let local_addr = NetworkAddress::parse(CLIENT_ADDR)?;
     let server_addr = NetworkAddress::parse(SERVER_ADDR)?;
 
-    // ========================================================================
     // Client also uses build_listening() because it needs to receive responses
-    // The builder makes this requirement clear in the method name
-    // ========================================================================
     let transport = NetTransportBuilder::new(network, time.clone(), task)
         .local_address(local_addr)
         .build_listening()
         .await?;
 
-    // Server endpoint
-    let server_endpoint = Endpoint::new(server_addr, ping_token());
+    // Create server endpoint using rpc_interface! generated helper
+    let server_endpoint = PingPong::endpoint(&server_addr, PingPong::ping);
 
     println!("Connecting to server at {}\n", SERVER_ADDR);
 
@@ -173,9 +165,8 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
 
         println!("Sending ping seq={}: {:?}", seq, request.message);
 
-        // Send request and get future for response
-        let future: ReplyFuture<PingResponse, JsonCodec> =
-            send_request(&transport, &server_endpoint, request, JsonCodec)?;
+        // Use transport.call() convenience method
+        let future = transport.call::<_, PingResponse, _>(&server_endpoint, request, JsonCodec)?;
 
         // Await response with timeout
         match time.timeout(Duration::from_secs(5), future).await {
@@ -239,6 +230,13 @@ fn main() {
         }
         _ => {
             println!("Ping-Pong Example: Real TCP RPC with Moonpool\n");
+            println!("This example demonstrates the DX improvements:\n");
+            println!("  - rpc_messages! macro (auto-derive Serialize/Deserialize)");
+            println!("  - rpc_interface! macro (generate interface tokens)");
+            println!("  - transport.call() (convenience method for RPC)");
+            println!("  - NetTransportBuilder (eliminates Rc/set_weak_self boilerplate)");
+            println!("  - register_handler (single-step endpoint registration)");
+            println!("  - recv_with_transport (no closure callback needed)\n");
             println!("Usage:");
             println!("  cargo run --example ping_pong -- server   # Start the server");
             println!("  cargo run --example ping_pong -- client   # Run the client\n");
