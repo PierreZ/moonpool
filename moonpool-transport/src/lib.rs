@@ -76,6 +76,10 @@ pub mod wire;
 /// RPC layer with typed request/response patterns.
 pub mod rpc;
 
+/// Macros for reducing RPC boilerplate.
+#[macro_use]
+pub mod macros;
+
 // =============================================================================
 // Public API Re-exports
 // =============================================================================
