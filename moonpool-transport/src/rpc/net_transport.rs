@@ -291,6 +291,56 @@ where
         UID::new(self.random.random(), self.random.random())
     }
 
+    /// Send a typed request and return a future for the response.
+    ///
+    /// This is a convenience method that wraps [`send_request`] for a more
+    /// ergonomic API. Instead of passing the transport as a parameter, you
+    /// call this method directly on the transport.
+    ///
+    /// # Arguments
+    ///
+    /// * `destination` - The server endpoint to send the request to
+    /// * `request` - The request payload
+    /// * `codec` - The codec for serialization
+    ///
+    /// # Returns
+    ///
+    /// A `ReplyFuture` that resolves to the response or an error.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use moonpool_transport::{JsonCodec, ReplyFuture};
+    ///
+    /// // Before: using standalone function
+    /// let future: ReplyFuture<Response, _> = send_request(
+    ///     &transport,
+    ///     &endpoint,
+    ///     request,
+    ///     JsonCodec,
+    /// )?;
+    ///
+    /// // After: using method on transport
+    /// let future: ReplyFuture<Response, _> = transport.call(
+    ///     &endpoint,
+    ///     request,
+    ///     JsonCodec,
+    /// )?;
+    /// ```
+    pub fn call<Req, Resp, C>(
+        &self,
+        destination: &Endpoint,
+        request: Req,
+        codec: C,
+    ) -> Result<super::ReplyFuture<Resp, C>, MessagingError>
+    where
+        Req: serde::Serialize,
+        Resp: serde::de::DeserializeOwned + 'static,
+        C: crate::MessageCodec,
+    {
+        super::send_request(self, destination, request, codec)
+    }
+
     /// Register a well-known endpoint.
     ///
     /// Well-known endpoints have deterministic tokens for O(1) lookup.
