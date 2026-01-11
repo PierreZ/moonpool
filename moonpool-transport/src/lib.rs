@@ -99,5 +99,5 @@ pub use rpc::{
     send_request,
 };
 
-// Interface derive macro
-pub use moonpool_transport_derive::Interface;
+// Interface attribute macro
+pub use moonpool_transport_derive::interface;

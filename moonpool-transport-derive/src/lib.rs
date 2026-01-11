@@ -1,91 +1,88 @@
-//! Proc-macro for deriving FDB-style Interface pattern.
+//! Proc-macro for FDB-style Interface pattern.
 //!
-//! This crate provides the `#[derive(Interface)]` macro that generates
-//! `{Name}Server` and `{Name}Client` structs from an interface definition.
+//! This crate provides the `#[interface]` attribute macro that generates
+//! `{Name}Server` and `{Name}Client` structs from a trait definition.
 //!
 //! # Example
 //!
 //! ```rust,ignore
-//! use moonpool_transport_derive::Interface;
+//! use moonpool_transport::interface;
 //!
-//! #[derive(Interface)]
 //! #[interface(id = 0xCA1C_0000)]
-//! struct Calculator {
-//!     add: (AddRequest, AddResponse),
-//!     sub: (SubRequest, SubResponse),
+//! trait Calculator {
+//!     async fn add(&self, req: AddRequest) -> AddResponse;
+//!     async fn sub(&self, req: SubRequest) -> SubResponse;
 //! }
 //! ```
 //!
 //! This generates:
 //! - `CalculatorServer<C>` with `RequestStream` fields and `init()` method
 //! - `CalculatorClient` with method accessors returning `Endpoint`
+//! - The trait itself with `#[async_trait(?Send)]`
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{
-    Attribute, Data, DeriveInput, Expr, ExprLit, Fields, GenericArgument, Ident, Lit, Meta,
-    PathArguments, Type, parse_macro_input,
-};
+use syn::{Expr, ExprLit, FnArg, Ident, ItemTrait, Lit, TraitItem, parse_macro_input};
 
-/// Derive macro for FDB-style Interface pattern.
+/// Attribute macro for FDB-style Interface pattern.
 ///
-/// Generates `{Name}Server` and `{Name}Client` structs from the interface definition.
+/// Generates `{Name}Server` and `{Name}Client` structs from the trait definition.
 ///
 /// # Attributes
 ///
 /// - `#[interface(id = 0x...)]` - Required. Sets the interface ID (u64).
 ///
-/// # Fields
+/// # Methods
 ///
-/// Each field must be a tuple type `(RequestType, ResponseType)`.
-/// Method indices are derived from field declaration order.
-#[proc_macro_derive(Interface, attributes(interface))]
-pub fn derive_interface(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
+/// Each method must be async with signature `async fn name(&self, req: ReqType) -> RespType`.
+/// Method indices are derived from method declaration order.
+#[proc_macro_attribute]
+pub fn interface(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let attr = parse_macro_input!(attr as InterfaceAttr);
+    let item = parse_macro_input!(item as ItemTrait);
 
-    match derive_interface_impl(&input) {
+    match interface_impl(attr, item) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
-fn derive_interface_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
-    // Extract interface ID from #[interface(id = 0x...)]
-    let interface_id = extract_interface_id(&input.attrs)?;
+/// Method info extracted from trait methods.
+struct MethodInfo {
+    index: u32,
+    name: Ident,
+    req_type: syn::Type,
+}
 
-    // Get struct name and fields
-    let name = &input.ident;
+fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
+    let interface_id = attr.id;
+    let name = &item.ident;
     let server_name = format_ident!("{}Server", name);
     let client_name = format_ident!("{}Client", name);
 
-    let fields = match &input.data {
-        Data::Struct(data) => match &data.fields {
-            Fields::Named(fields) => &fields.named,
-            _ => {
-                return Err(syn::Error::new_spanned(
-                    input,
-                    "Interface must have named fields",
-                ));
-            }
-        },
-        _ => return Err(syn::Error::new_spanned(input, "Interface must be a struct")),
-    };
+    // Parse trait methods
+    let mut method_infos: Vec<MethodInfo> = Vec::new();
+    for (index, trait_item) in item.items.iter().enumerate() {
+        if let TraitItem::Fn(method) = trait_item {
+            let method_name = &method.sig.ident;
 
-    // Parse fields: name: (RequestType, ResponseType)
-    let mut method_infos: Vec<(u32, Ident, Type)> = Vec::new();
-    for (index, field) in fields.iter().enumerate() {
-        let field_name = field
-            .ident
-            .as_ref()
-            .ok_or_else(|| syn::Error::new_spanned(field, "Field must have a name"))?;
-        let req_type = parse_tuple_request_type(&field.ty)?;
-        method_infos.push((index as u32, field_name.clone(), req_type));
+            // Extract request type from method signature: async fn name(&self, req: ReqType) -> RespType
+            let req_type = extract_request_type(&method.sig)?;
+
+            method_infos.push(MethodInfo {
+                index: index as u32,
+                name: method_name.clone(),
+                req_type,
+            });
+        }
     }
 
     let method_count = method_infos.len() as u32;
 
     // Generate server fields
-    let server_fields = method_infos.iter().map(|(_, name, req_type)| {
+    let server_fields = method_infos.iter().map(|m| {
+        let name = &m.name;
+        let req_type = &m.req_type;
         quote! { pub #name: moonpool_transport::RequestStream<#req_type, C> }
     });
 
@@ -93,7 +90,9 @@ fn derive_interface_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenS
     let server_inits: Vec<_> = method_infos
         .iter()
         .enumerate()
-        .map(|(i, (idx, name, _))| {
+        .map(|(i, m)| {
+            let name = &m.name;
+            let idx = m.index;
             let is_last = i == method_infos.len() - 1;
             if is_last {
                 quote! {
@@ -107,11 +106,12 @@ fn derive_interface_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenS
         })
         .collect();
 
-    let server_field_names: Vec<_> = method_infos.iter().map(|(_, name, _)| name).collect();
+    let server_field_names: Vec<_> = method_infos.iter().map(|m| &m.name).collect();
 
     // Generate client methods
-    // Use UID::new() to match server's register_handler_at which also uses UID::new()
-    let client_methods = method_infos.iter().map(|(idx, name, _)| {
+    let client_methods = method_infos.iter().map(|m| {
+        let name = &m.name;
+        let idx = m.index;
         quote! {
             /// Get endpoint for this method.
             pub fn #name(&self) -> moonpool_transport::Endpoint {
@@ -123,10 +123,20 @@ fn derive_interface_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenS
         }
     });
 
+    // Generate the trait with async_trait attribute
+    let trait_vis = &item.vis;
+    let trait_items = &item.items;
+
     let expanded = quote! {
+        // Emit the original trait with async_trait(?Send)
+        #[async_trait::async_trait(?Send)]
+        #trait_vis trait #name {
+            #(#trait_items)*
+        }
+
         /// Server-side interface with RequestStreams.
         ///
-        /// Generated by `#[derive(Interface)]`.
+        /// Generated by `#[interface]`.
         pub struct #server_name<C: moonpool_transport::MessageCodec> {
             #(#server_fields,)*
         }
@@ -152,7 +162,7 @@ fn derive_interface_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenS
 
         /// Client-side interface with Endpoints.
         ///
-        /// Generated by `#[derive(Interface)]`.
+        /// Generated by `#[interface]`.
         /// Only the base endpoint is serialized; method endpoints are derived.
         #[derive(Clone)]
         pub struct #client_name {
@@ -203,23 +213,30 @@ fn derive_interface_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenS
     Ok(expanded)
 }
 
-/// Extract interface ID from `#[interface(id = 0x...)]` attribute.
-fn extract_interface_id(attrs: &[Attribute]) -> syn::Result<u64> {
-    for attr in attrs {
-        if attr.path().is_ident("interface") {
-            let meta = attr.meta.clone();
-            if let Meta::List(list) = meta {
-                let tokens = list.tokens;
-                // Parse: id = 0x...
-                let parsed: InterfaceAttr = syn::parse2(tokens)?;
-                return Ok(parsed.id);
-            }
+/// Extract request type from method signature: async fn name(&self, req: ReqType) -> RespType
+fn extract_request_type(sig: &syn::Signature) -> syn::Result<syn::Type> {
+    // Skip &self, get the second argument
+    let mut inputs = sig.inputs.iter();
+
+    // First should be &self
+    match inputs.next() {
+        Some(FnArg::Receiver(_)) => {}
+        _ => {
+            return Err(syn::Error::new_spanned(
+                sig,
+                "Interface method must have &self as first parameter",
+            ));
         }
     }
-    Err(syn::Error::new(
-        proc_macro2::Span::call_site(),
-        "#[interface(id = ...)] attribute is required",
-    ))
+
+    // Second should be the request parameter
+    match inputs.next() {
+        Some(FnArg::Typed(pat_type)) => Ok((*pat_type.ty).clone()),
+        _ => Err(syn::Error::new_spanned(
+            sig,
+            "Interface method must have a request parameter: async fn name(&self, req: ReqType) -> RespType",
+        )),
+    }
 }
 
 /// Parsed interface attribute.
@@ -254,39 +271,5 @@ impl syn::parse::Parse for InterfaceAttr {
         };
 
         Ok(InterfaceAttr { id })
-    }
-}
-
-/// Parse tuple type `(RequestType, ResponseType)` and extract the request type.
-fn parse_tuple_request_type(ty: &Type) -> syn::Result<Type> {
-    match ty {
-        Type::Tuple(tuple) => {
-            if tuple.elems.len() != 2 {
-                return Err(syn::Error::new_spanned(
-                    ty,
-                    "expected tuple (RequestType, ResponseType)",
-                ));
-            }
-            Ok(tuple.elems.first().cloned().unwrap())
-        }
-        Type::Path(path) => {
-            // Handle case where it might be a type alias or fully qualified path
-            // Try to get generic arguments if it's something like Tuple<A, B>
-            if let Some(segment) = path.path.segments.last()
-                && let PathArguments::AngleBracketed(args) = &segment.arguments
-                && !args.args.is_empty()
-                && let Some(GenericArgument::Type(first)) = args.args.first()
-            {
-                return Ok(first.clone());
-            }
-            Err(syn::Error::new_spanned(
-                ty,
-                "expected tuple (RequestType, ResponseType)",
-            ))
-        }
-        _ => Err(syn::Error::new_spanned(
-            ty,
-            "expected tuple (RequestType, ResponseType)",
-        )),
     }
 }

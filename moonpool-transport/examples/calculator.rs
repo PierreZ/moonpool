@@ -1,12 +1,12 @@
 //! Calculator Example: Multi-method RPC interface using Moonpool.
 //!
-//! This example demonstrates the `#[derive(Interface)]` macro that generates
-//! server and client interface structs from a single definition.
+//! This example demonstrates the `#[interface]` attribute macro that generates
+//! server and client interface structs from a trait definition.
 //!
 //! # Key Features
 //!
-//! - `#[derive(Interface)]` generates `CalculatorServer` and `CalculatorClient`
-//! - Single source of truth for interface definition
+//! - `#[interface(id = ...)]` generates `CalculatorServer` and `CalculatorClient`
+//! - Trait-based interface definition (idiomatic Rust)
 //! - Type-safe method endpoints
 //! - Only base endpoint is serialized (FDB pattern)
 //!
@@ -24,8 +24,8 @@ use std::env;
 use std::time::Duration;
 
 use moonpool_transport::{
-    Interface, JsonCodec, NetTransportBuilder, NetworkAddress, ReplyFuture, TimeProvider,
-    TokioNetworkProvider, TokioTaskProvider, TokioTimeProvider, send_request,
+    JsonCodec, NetTransportBuilder, NetworkAddress, ReplyFuture, TimeProvider,
+    TokioNetworkProvider, TokioTaskProvider, TokioTimeProvider, interface, send_request,
 };
 use serde::{Deserialize, Serialize};
 
@@ -90,17 +90,15 @@ struct DivResponse {
 
 /// Calculator interface definition.
 ///
-/// The `#[derive(Interface)]` macro generates:
+/// The `#[interface]` macro generates:
 /// - `CalculatorServer<C>` with `RequestStream` fields (add, sub, mul, div)
 /// - `CalculatorClient` with endpoint accessors (add(), sub(), mul(), div())
-#[allow(dead_code)] // The struct itself is never used, only the generated types
-#[derive(Interface)]
 #[interface(id = 0xCA1C_0000)]
-struct Calculator {
-    add: (AddRequest, AddResponse),
-    sub: (SubRequest, SubResponse),
-    mul: (MulRequest, MulResponse),
-    div: (DivRequest, DivResponse),
+trait Calculator {
+    async fn add(&self, req: AddRequest) -> AddResponse;
+    async fn sub(&self, req: SubRequest) -> SubResponse;
+    async fn mul(&self, req: MulRequest) -> MulResponse;
+    async fn div(&self, req: DivRequest) -> DivResponse;
 }
 
 // ============================================================================
@@ -354,7 +352,7 @@ fn main() {
         }
         _ => {
             println!("Calculator Example: FDB-style Interface Pattern\n");
-            println!("This example demonstrates the #[derive(Interface)] macro:\n");
+            println!("This example demonstrates the #[interface] macro:\n");
             println!("  - Single interface definition generates Server and Client types");
             println!("  - CalculatorServer<C> with RequestStream fields");
             println!("  - CalculatorClient with method endpoint accessors");
