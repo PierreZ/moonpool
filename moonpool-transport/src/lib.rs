@@ -95,5 +95,9 @@ pub use wire::{
 // RPC exports
 pub use rpc::{
     EndpointMap, MessageReceiver, NetNotifiedQueue, NetTransport, NetTransportBuilder, ReplyError,
-    ReplyFuture, ReplyPromise, RequestEnvelope, RequestStream, send_request,
+    ReplyFuture, ReplyPromise, RequestEnvelope, RequestStream, method_endpoint, method_uid,
+    send_request,
 };
+
+// Interface derive macro
+pub use moonpool_transport_derive::Interface;

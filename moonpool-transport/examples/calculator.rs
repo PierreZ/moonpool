@@ -1,12 +1,16 @@
 //! Calculator Example: Multi-method RPC interface using Moonpool.
 //!
-//! This example demonstrates:
-//! - `NetTransportBuilder` for cleaner transport setup (Step 9)
-//! - `register_handler_at` for multi-method interfaces (Step 10b)
-//! - `recv_with_transport` for embedded transport in replies (Step 11)
-//! - Using `tokio::select!` to handle multiple request types
+//! This example demonstrates the `#[derive(Interface)]` macro that generates
+//! server and client interface structs from a single definition.
 //!
-//! Run as two separate processes:
+//! # Key Features
+//!
+//! - `#[derive(Interface)]` generates `CalculatorServer` and `CalculatorClient`
+//! - Single source of truth for interface definition
+//! - Type-safe method endpoints
+//! - Only base endpoint is serialized (FDB pattern)
+//!
+//! # Run
 //!
 //! ```bash
 //! # Terminal 1 - Start the server
@@ -20,8 +24,8 @@ use std::env;
 use std::time::Duration;
 
 use moonpool_transport::{
-    Endpoint, JsonCodec, NetTransportBuilder, NetworkAddress, ReplyFuture, TimeProvider,
-    TokioNetworkProvider, TokioTaskProvider, TokioTimeProvider, UID, send_request,
+    Interface, JsonCodec, NetTransportBuilder, NetworkAddress, ReplyFuture, TimeProvider,
+    TokioNetworkProvider, TokioTaskProvider, TokioTimeProvider, send_request,
 };
 use serde::{Deserialize, Serialize};
 
@@ -31,13 +35,6 @@ use serde::{Deserialize, Serialize};
 
 const SERVER_ADDR: &str = "127.0.0.1:4600";
 const CLIENT_ADDR: &str = "127.0.0.1:4601";
-
-// Interface and method identifiers
-const CALC_INTERFACE: u64 = 0xCA1C_0000;
-const METHOD_ADD: u64 = 0;
-const METHOD_SUB: u64 = 1;
-const METHOD_MUL: u64 = 2;
-const METHOD_DIV: u64 = 3;
 
 // ============================================================================
 // Message Types
@@ -88,6 +85,25 @@ struct DivResponse {
 }
 
 // ============================================================================
+// Interface Definition - Generated Server and Client Types
+// ============================================================================
+
+/// Calculator interface definition.
+///
+/// The `#[derive(Interface)]` macro generates:
+/// - `CalculatorServer<C>` with `RequestStream` fields (add, sub, mul, div)
+/// - `CalculatorClient` with endpoint accessors (add(), sub(), mul(), div())
+#[allow(dead_code)] // The struct itself is never used, only the generated types
+#[derive(Interface)]
+#[interface(id = 0xCA1C_0000)]
+struct Calculator {
+    add: (AddRequest, AddResponse),
+    sub: (SubRequest, SubResponse),
+    mul: (MulRequest, MulResponse),
+    div: (DivRequest, DivResponse),
+}
+
+// ============================================================================
 // Server
 // ============================================================================
 
@@ -101,9 +117,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 
     let local_addr = NetworkAddress::parse(SERVER_ADDR)?;
 
-    // ========================================================================
-    // NEW API: NetTransportBuilder eliminates Rc/set_weak_self boilerplate
-    // ========================================================================
+    // Build transport
     let transport = NetTransportBuilder::new(network, time, task)
         .local_address(local_addr)
         .build_listening()
@@ -112,48 +126,39 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     println!("Server listening on {}\n", SERVER_ADDR);
 
     // ========================================================================
-    // NEW API: register_handler_at for multi-method interfaces
-    // Each method gets its own stream with a deterministic token
+    // NEW: Single line registers all 4 handlers
     // ========================================================================
-    let (add_stream, _) =
-        transport.register_handler_at::<AddRequest, _>(CALC_INTERFACE, METHOD_ADD, JsonCodec);
-    let (sub_stream, _) =
-        transport.register_handler_at::<SubRequest, _>(CALC_INTERFACE, METHOD_SUB, JsonCodec);
-    let (mul_stream, _) =
-        transport.register_handler_at::<MulRequest, _>(CALC_INTERFACE, METHOD_MUL, JsonCodec);
-    let (div_stream, _) =
-        transport.register_handler_at::<DivRequest, _>(CALC_INTERFACE, METHOD_DIV, JsonCodec);
+    let calc = CalculatorServer::init(&transport, JsonCodec);
 
-    println!("Registered 4 calculator methods (add, sub, mul, div)\n");
+    println!(
+        "Registered {} calculator methods (interface ID: 0x{:X})\n",
+        CalculatorServer::<JsonCodec>::METHOD_COUNT,
+        CalculatorServer::<JsonCodec>::INTERFACE_ID
+    );
     println!("Waiting for requests...\n");
 
-    // ========================================================================
-    // Using tokio::select! to handle multiple request types concurrently
-    // ========================================================================
+    // Handle requests
     loop {
         tokio::select! {
-            // ================================================================
-            // NEW API: recv_with_transport - no closure callback needed!
-            // ================================================================
-            Some((req, reply)) = add_stream.recv_with_transport::<_, _, _, AddResponse>(&transport) => {
+            Some((req, reply)) = calc.add.recv_with_transport::<_, _, _, AddResponse>(&transport) => {
                 let result = req.a + req.b;
                 println!("ADD: {} + {} = {}", req.a, req.b, result);
                 reply.send(AddResponse { result });
             }
 
-            Some((req, reply)) = sub_stream.recv_with_transport::<_, _, _, SubResponse>(&transport) => {
+            Some((req, reply)) = calc.sub.recv_with_transport::<_, _, _, SubResponse>(&transport) => {
                 let result = req.a - req.b;
                 println!("SUB: {} - {} = {}", req.a, req.b, result);
                 reply.send(SubResponse { result });
             }
 
-            Some((req, reply)) = mul_stream.recv_with_transport::<_, _, _, MulResponse>(&transport) => {
+            Some((req, reply)) = calc.mul.recv_with_transport::<_, _, _, MulResponse>(&transport) => {
                 let result = req.a * req.b;
                 println!("MUL: {} * {} = {}", req.a, req.b, result);
                 reply.send(MulResponse { result });
             }
 
-            Some((req, reply)) = div_stream.recv_with_transport::<_, _, _, DivResponse>(&transport) => {
+            Some((req, reply)) = calc.div.recv_with_transport::<_, _, _, DivResponse>(&transport) => {
                 let result = if req.b != 0 {
                     Some(req.a / req.b)
                 } else {
@@ -184,7 +189,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     let local_addr = NetworkAddress::parse(CLIENT_ADDR)?;
     let server_addr = NetworkAddress::parse(SERVER_ADDR)?;
 
-    // Use NetTransportBuilder (same as server)
+    // Build transport
     let transport = NetTransportBuilder::new(network, time.clone(), task)
         .local_address(local_addr)
         .build_listening()
@@ -192,19 +197,24 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Client started, connecting to server at {}\n", SERVER_ADDR);
 
-    // Create endpoints for each method using the same deterministic tokens
-    let add_endpoint = Endpoint::new(server_addr.clone(), UID::new(CALC_INTERFACE, METHOD_ADD));
-    let sub_endpoint = Endpoint::new(server_addr.clone(), UID::new(CALC_INTERFACE, METHOD_SUB));
-    let mul_endpoint = Endpoint::new(server_addr.clone(), UID::new(CALC_INTERFACE, METHOD_MUL));
-    let div_endpoint = Endpoint::new(server_addr.clone(), UID::new(CALC_INTERFACE, METHOD_DIV));
+    // ========================================================================
+    // NEW: Single line creates all endpoints
+    // ========================================================================
+    let calc = CalculatorClient::new(server_addr);
+
+    println!(
+        "Using interface ID: 0x{:X} with {} methods\n",
+        CalculatorClient::INTERFACE_ID,
+        CalculatorClient::METHOD_COUNT
+    );
 
     // Test calculations
     let tests = [
-        ("10 + 5", Operation::Add(10, 5)),
-        ("20 - 7", Operation::Sub(20, 7)),
-        ("6 * 8", Operation::Mul(6, 8)),
-        ("100 / 4", Operation::Div(100, 4)),
-        ("42 / 0", Operation::Div(42, 0)), // Division by zero test
+        ("10 + 5", Op::Add(10, 5)),
+        ("20 - 7", Op::Sub(20, 7)),
+        ("6 * 8", Op::Mul(6, 8)),
+        ("100 / 4", Op::Div(100, 4)),
+        ("42 / 0", Op::Div(42, 0)), // Division by zero test
     ];
 
     let mut success_count = 0;
@@ -213,10 +223,11 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
         println!("Sending: {}", desc);
 
         let result = match op {
-            Operation::Add(a, b) => {
+            Op::Add(a, b) => {
+                // NEW: calc.add() returns the endpoint directly
                 let future: ReplyFuture<AddResponse, JsonCodec> = send_request(
                     &transport,
-                    &add_endpoint,
+                    &calc.add(),
                     AddRequest { a: *a, b: *b },
                     JsonCodec,
                 )?;
@@ -226,10 +237,10 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
                     _ => None,
                 }
             }
-            Operation::Sub(a, b) => {
+            Op::Sub(a, b) => {
                 let future: ReplyFuture<SubResponse, JsonCodec> = send_request(
                     &transport,
-                    &sub_endpoint,
+                    &calc.sub(),
                     SubRequest { a: *a, b: *b },
                     JsonCodec,
                 )?;
@@ -239,10 +250,10 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
                     _ => None,
                 }
             }
-            Operation::Mul(a, b) => {
+            Op::Mul(a, b) => {
                 let future: ReplyFuture<MulResponse, JsonCodec> = send_request(
                     &transport,
-                    &mul_endpoint,
+                    &calc.mul(),
                     MulRequest { a: *a, b: *b },
                     JsonCodec,
                 )?;
@@ -252,10 +263,10 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
                     _ => None,
                 }
             }
-            Operation::Div(a, b) => {
+            Op::Div(a, b) => {
                 let future: ReplyFuture<DivResponse, JsonCodec> = send_request(
                     &transport,
-                    &div_endpoint,
+                    &calc.div(),
                     DivRequest { a: *a, b: *b },
                     JsonCodec,
                 )?;
@@ -292,10 +303,18 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
         tests.len()
     );
 
+    // Demonstrate serialization (only base endpoint is serialized)
+    println!("\n=== Serialization Demo ===");
+    let json = serde_json::to_string_pretty(&calc)?;
+    println!(
+        "Serialized CalculatorClient (only base endpoint):\n{}",
+        json
+    );
+
     Ok(())
 }
 
-enum Operation {
+enum Op {
     Add(i64, i64),
     Sub(i64, i64),
     Mul(i64, i64),
@@ -334,11 +353,12 @@ fn main() {
             });
         }
         _ => {
-            println!("Calculator Example: Multi-method RPC with Moonpool\n");
-            println!("This example demonstrates the improved Phase 12C APIs:\n");
-            println!("  - NetTransportBuilder (eliminates Rc/set_weak_self boilerplate)");
-            println!("  - register_handler_at (multi-method interface registration)");
-            println!("  - recv_with_transport (no closure callback needed)\n");
+            println!("Calculator Example: FDB-style Interface Pattern\n");
+            println!("This example demonstrates the #[derive(Interface)] macro:\n");
+            println!("  - Single interface definition generates Server and Client types");
+            println!("  - CalculatorServer<C> with RequestStream fields");
+            println!("  - CalculatorClient with method endpoint accessors");
+            println!("  - Only base endpoint is serialized (FDB pattern)\n");
             println!("Usage:");
             println!("  cargo run --example calculator -- server   # Start the server");
             println!("  cargo run --example calculator -- client   # Run the client\n");
