@@ -66,6 +66,10 @@ pub enum MessagingError {
         /// Details about the network error.
         message: String,
     },
+
+    /// Builder missing required local address.
+    #[error("local_address is required - call .local_address(addr) before .build()")]
+    MissingLocalAddress,
 }
 
 impl From<serde_json::Error> for MessagingError {

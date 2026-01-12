@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use moonpool_transport::{
     JsonCodec, NetTransportBuilder, NetworkAddress, RpcError, TimeProvider, TokioNetworkProvider,
-    TokioTaskProvider, TokioTimeProvider, interface,
+    TokioRandomProvider, TokioTaskProvider, TokioTimeProvider, interface,
 };
 use serde::{Deserialize, Serialize};
 
@@ -113,11 +113,12 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let network = TokioNetworkProvider::new();
     let time = TokioTimeProvider::new();
     let task = TokioTaskProvider;
+    let random = TokioRandomProvider::new();
 
     let local_addr = NetworkAddress::parse(SERVER_ADDR)?;
 
     // Build transport
-    let transport = NetTransportBuilder::new(network, time, task)
+    let transport = NetTransportBuilder::new(network, time, task, random)
         .local_address(local_addr)
         .build_listening()
         .await?;
@@ -139,25 +140,25 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     // Handle requests
     loop {
         tokio::select! {
-            Some((req, reply)) = calc.add.recv_with_transport::<_, _, _, AddResponse>(&transport) => {
+            Some((req, reply)) = calc.add.recv_with_transport::<_, _, _, _, AddResponse>(&transport) => {
                 let result = req.a + req.b;
                 println!("ADD: {} + {} = {}", req.a, req.b, result);
                 reply.send(AddResponse { result });
             }
 
-            Some((req, reply)) = calc.sub.recv_with_transport::<_, _, _, SubResponse>(&transport) => {
+            Some((req, reply)) = calc.sub.recv_with_transport::<_, _, _, _, SubResponse>(&transport) => {
                 let result = req.a - req.b;
                 println!("SUB: {} - {} = {}", req.a, req.b, result);
                 reply.send(SubResponse { result });
             }
 
-            Some((req, reply)) = calc.mul.recv_with_transport::<_, _, _, MulResponse>(&transport) => {
+            Some((req, reply)) = calc.mul.recv_with_transport::<_, _, _, _, MulResponse>(&transport) => {
                 let result = req.a * req.b;
                 println!("MUL: {} * {} = {}", req.a, req.b, result);
                 reply.send(MulResponse { result });
             }
 
-            Some((req, reply)) = calc.div.recv_with_transport::<_, _, _, DivResponse>(&transport) => {
+            Some((req, reply)) = calc.div.recv_with_transport::<_, _, _, _, DivResponse>(&transport) => {
                 let result = if req.b != 0 {
                     Some(req.a / req.b)
                 } else {
@@ -184,12 +185,13 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     let network = TokioNetworkProvider::new();
     let time = TokioTimeProvider::new();
     let task = TokioTaskProvider;
+    let random = TokioRandomProvider::new();
 
     let local_addr = NetworkAddress::parse(CLIENT_ADDR)?;
     let server_addr = NetworkAddress::parse(SERVER_ADDR)?;
 
     // Build transport
-    let transport = NetTransportBuilder::new(network, time.clone(), task)
+    let transport = NetTransportBuilder::new(network, time.clone(), task, random)
         .local_address(local_addr)
         .build_listening()
         .await?;

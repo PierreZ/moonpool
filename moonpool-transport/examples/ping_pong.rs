@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use moonpool_transport::{
     JsonCodec, NetTransportBuilder, NetworkAddress, RpcError, TimeProvider, TokioNetworkProvider,
-    TokioTaskProvider, TokioTimeProvider, interface,
+    TokioRandomProvider, TokioTaskProvider, TokioTimeProvider, interface,
 };
 use serde::{Deserialize, Serialize};
 
@@ -86,6 +86,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let network = TokioNetworkProvider::new();
     let time = TokioTimeProvider::new();
     let task = TokioTaskProvider;
+    let random = TokioRandomProvider::new();
 
     // Parse server address
     let local_addr = NetworkAddress::parse(SERVER_ADDR)?;
@@ -94,7 +95,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     // NetTransportBuilder handles Rc wrapping, set_weak_self(), and listen()
     // No more runtime panics from forgetting set_weak_self()!
     // ========================================================================
-    let transport = NetTransportBuilder::new(network, time, task)
+    let transport = NetTransportBuilder::new(network, time, task, random)
         .local_address(local_addr)
         .build_listening()
         .await?;
@@ -121,7 +122,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
         // ====================================================================
         if let Some((request, reply)) = ping_server
             .ping
-            .recv_with_transport::<_, _, _, PingResponse>(&transport)
+            .recv_with_transport::<_, _, _, _, PingResponse>(&transport)
             .await
         {
             println!("Received ping seq={}: {:?}", request.seq, request.message);
@@ -155,6 +156,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     let network = TokioNetworkProvider::new();
     let time = TokioTimeProvider::new();
     let task = TokioTaskProvider;
+    let random = TokioRandomProvider::new();
 
     // Parse addresses
     let local_addr = NetworkAddress::parse(CLIENT_ADDR)?;
@@ -164,7 +166,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     // Client also uses build_listening() because it needs to receive responses
     // The builder makes this requirement clear in the method name
     // ========================================================================
-    let transport = NetTransportBuilder::new(network, time.clone(), task)
+    let transport = NetTransportBuilder::new(network, time.clone(), task, random)
         .local_address(local_addr)
         .build_listening()
         .await?;

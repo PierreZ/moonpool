@@ -31,8 +31,8 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
 use crate::{
-    Endpoint, NetworkAddress, NetworkProvider, Peer, PeerConfig, TaskProvider, TcpListenerTrait,
-    TimeProvider, UID, WellKnownToken,
+    Endpoint, NetworkAddress, NetworkProvider, Peer, PeerConfig, RandomProvider, TaskProvider,
+    TcpListenerTrait, TimeProvider, UID, WellKnownToken,
 };
 use moonpool_sim::sometimes_assert;
 use tokio::sync::watch;
@@ -117,11 +117,12 @@ where
 /// transport.set_weak_self(Rc::downgrade(&transport));
 /// transport.listen().await?; // Start accepting connections
 /// ```
-pub struct NetTransport<N, T, TP>
+pub struct NetTransport<N, T, TP, R>
 where
     N: NetworkProvider + 'static,
     T: TimeProvider + 'static,
     TP: TaskProvider + 'static,
+    R: RandomProvider + 'static,
 {
     /// Internal transport data (FDB: TransportData* self).
     data: RefCell<TransportData<N, T, TP>>,
@@ -137,6 +138,9 @@ where
 
     /// Task provider for spawning background tasks.
     task_provider: TP,
+
+    /// Random provider for generating unique IDs.
+    random: R,
 
     /// Peer configuration.
     peer_config: PeerConfig,
@@ -164,11 +168,12 @@ struct TransportStats {
     peers_created: u64,
 }
 
-impl<N, T, TP> NetTransport<N, T, TP>
+impl<N, T, TP, R> NetTransport<N, T, TP, R>
 where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
+    R: RandomProvider + Clone + 'static,
 {
     /// Create a new NetTransport.
     ///
@@ -178,6 +183,7 @@ where
     /// * `network` - Network provider for connections
     /// * `time` - Time provider for timing
     /// * `task_provider` - Task provider for background tasks
+    /// * `random` - Random provider for generating unique IDs
     ///
     /// # Multi-Node Usage
     ///
@@ -186,7 +192,13 @@ where
     /// let transport = Rc::new(NetTransport::new(...));
     /// transport.set_weak_self(Rc::downgrade(&transport));
     /// ```
-    pub fn new(local_address: NetworkAddress, network: N, time: T, task_provider: TP) -> Self {
+    pub fn new(
+        local_address: NetworkAddress,
+        network: N,
+        time: T,
+        task_provider: TP,
+        random: R,
+    ) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
         Self {
             data: RefCell::new(TransportData::default()),
@@ -194,10 +206,16 @@ where
             network,
             time,
             task_provider,
+            random,
             peer_config: PeerConfig::default(),
             weak_self: RefCell::new(None),
             shutdown_tx,
         }
+    }
+
+    /// Get the random provider for generating unique IDs.
+    pub fn random(&self) -> &R {
+        &self.random
     }
 
     /// Set the weak self-reference for background task spawning.
@@ -653,11 +671,12 @@ where
 ///
 /// When NetTransport is dropped, we signal all background tasks (listen_task)
 /// to exit gracefully. This prevents tasks from being stuck on accept() forever.
-impl<N, T, TP> Drop for NetTransport<N, T, TP>
+impl<N, T, TP, R> Drop for NetTransport<N, T, TP, R>
 where
     N: NetworkProvider + 'static,
     T: TimeProvider + 'static,
     TP: TaskProvider + 'static,
+    R: RandomProvider + 'static,
 {
     fn drop(&mut self) {
         tracing::debug!("NetTransport: signaling shutdown to background tasks");
@@ -680,18 +699,18 @@ where
 ///
 /// ```rust,ignore
 /// // Standard usage - server or client that needs RPC responses:
-/// let transport = NetTransportBuilder::new(network, time, task)
+/// let transport = NetTransportBuilder::new(network, time, task, random)
 ///     .local_address(addr)
 ///     .build_listening()
 ///     .await?;
 ///
 /// // Fire-and-forget sender (no listening needed):
-/// let transport = NetTransportBuilder::new(network, time, task)
+/// let transport = NetTransportBuilder::new(network, time, task, random)
 ///     .local_address(addr)
 ///     .build();
 ///
 /// // With custom peer config:
-/// let transport = NetTransportBuilder::new(network, time, task)
+/// let transport = NetTransportBuilder::new(network, time, task, random)
 ///     .local_address(addr)
 ///     .peer_config(config)
 ///     .build_listening()
@@ -705,24 +724,27 @@ where
 ///
 /// - **`build()`**: For fire-and-forget messaging where you don't expect responses.
 ///   Also useful for testing where you control message flow manually.
-pub struct NetTransportBuilder<N, T, TP>
+pub struct NetTransportBuilder<N, T, TP, R>
 where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
+    R: RandomProvider + Clone + 'static,
 {
     network: N,
     time: T,
     task_provider: TP,
+    random: R,
     local_address: Option<NetworkAddress>,
     peer_config: Option<PeerConfig>,
 }
 
-impl<N, T, TP> NetTransportBuilder<N, T, TP>
+impl<N, T, TP, R> NetTransportBuilder<N, T, TP, R>
 where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
+    R: RandomProvider + Clone + 'static,
 {
     /// Create a new builder with the required providers.
     ///
@@ -731,11 +753,13 @@ where
     /// * `network` - Network provider for TCP connections
     /// * `time` - Time provider for timing operations
     /// * `task_provider` - Task provider for spawning background tasks
-    pub fn new(network: N, time: T, task_provider: TP) -> Self {
+    /// * `random` - Random provider for generating unique IDs
+    pub fn new(network: N, time: T, task_provider: TP, random: R) -> Self {
         Self {
             network,
             time,
             task_provider,
+            random,
             local_address: None,
             peer_config: None,
         }
@@ -768,15 +792,21 @@ where
     ///
     /// For RPC (request/response), use `build_listening()` instead.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `local_address()` was not called.
-    pub fn build(self) -> Rc<NetTransport<N, T, TP>> {
+    /// Returns `MessagingError::MissingLocalAddress` if `local_address()` was not called.
+    pub fn build(self) -> Result<Rc<NetTransport<N, T, TP, R>>, MessagingError> {
         let address = self
             .local_address
-            .expect("local_address is required - call .local_address(addr) before .build()");
+            .ok_or(MessagingError::MissingLocalAddress)?;
 
-        let mut transport = NetTransport::new(address, self.network, self.time, self.task_provider);
+        let mut transport = NetTransport::new(
+            address,
+            self.network,
+            self.time,
+            self.task_provider,
+            self.random,
+        );
 
         if let Some(config) = self.peer_config {
             transport = transport.with_peer_config(config);
@@ -784,7 +814,7 @@ where
 
         let transport = Rc::new(transport);
         transport.set_weak_self(Rc::downgrade(&transport));
-        transport
+        Ok(transport)
     }
 
     /// Build the transport and start listening for incoming connections.
@@ -797,13 +827,10 @@ where
     ///
     /// # Errors
     ///
-    /// Returns an error if binding to the local address fails.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `local_address()` was not called.
-    pub async fn build_listening(self) -> Result<Rc<NetTransport<N, T, TP>>, MessagingError> {
-        let transport = self.build();
+    /// Returns `MessagingError::MissingLocalAddress` if `local_address()` was not called,
+    /// or a network error if binding to the local address fails.
+    pub async fn build_listening(self) -> Result<Rc<NetTransport<N, T, TP, R>>, MessagingError> {
+        let transport = self.build()?;
         transport.listen().await?;
         Ok(transport)
     }
@@ -821,14 +848,15 @@ where
 ///
 /// The FDB version is more complex (handles ConnectPacket, protocol negotiation),
 /// but the core loop is: read packets → scanPackets → deliver.
-async fn connection_reader<N, T, TP>(
-    transport: Weak<NetTransport<N, T, TP>>,
+async fn connection_reader<N, T, TP, R>(
+    transport: Weak<NetTransport<N, T, TP, R>>,
     peer: SharedPeer<N, T, TP>,
     peer_addr: String,
 ) where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
+    R: RandomProvider + Clone + 'static,
 {
     tracing::debug!("connection_reader: started for peer {}", peer_addr);
 
@@ -895,8 +923,8 @@ async fn connection_reader<N, T, TP>(
 ///
 /// # FDB Reference
 /// From NetTransport.actor.cpp:1646-1676 listen
-async fn listen_task<N, T, TP>(
-    transport: Weak<NetTransport<N, T, TP>>,
+async fn listen_task<N, T, TP, R>(
+    transport: Weak<NetTransport<N, T, TP, R>>,
     listener: N::TcpListener,
     listen_addr: String,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -904,6 +932,7 @@ async fn listen_task<N, T, TP>(
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
+    R: RandomProvider + Clone + 'static,
 {
     tracing::debug!("listen_task: started on {}", listen_addr);
 
@@ -988,15 +1017,16 @@ async fn listen_task<N, T, TP>(
 ///
 /// FDB Pattern: Use Peer::new_incoming() with the accepted stream, not Peer::new().
 /// This uses the already-established connection rather than trying to connect back.
-fn connection_incoming<N, T, TP>(
-    transport_weak: Weak<NetTransport<N, T, TP>>,
+fn connection_incoming<N, T, TP, R>(
+    transport_weak: Weak<NetTransport<N, T, TP, R>>,
     stream: N::TcpStream,
     peer_addr: String,
-    transport: &NetTransport<N, T, TP>,
+    transport: &NetTransport<N, T, TP, R>,
 ) where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
+    R: RandomProvider + Clone + 'static,
 {
     tracing::debug!(
         "connection_incoming: handling connection from {}",
@@ -1057,7 +1087,9 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
     use super::*;
-    use crate::{JsonCodec, NetNotifiedQueue, TokioTaskProvider, TokioTimeProvider};
+    use crate::{
+        JsonCodec, NetNotifiedQueue, TokioRandomProvider, TokioTaskProvider, TokioTimeProvider,
+    };
 
     // Simple mock network provider that fails all connections
     // (we only test local delivery, so connections are never actually made)
@@ -1138,12 +1170,14 @@ mod tests {
     }
 
     fn create_test_transport()
-    -> NetTransport<MockNetworkProvider, TokioTimeProvider, TokioTaskProvider> {
+    -> NetTransport<MockNetworkProvider, TokioTimeProvider, TokioTaskProvider, TokioRandomProvider>
+    {
         NetTransport::new(
             test_address(),
             MockNetworkProvider,
             TokioTimeProvider::new(),
             TokioTaskProvider,
+            TokioRandomProvider::new(),
         )
     }
 
@@ -1274,9 +1308,11 @@ mod tests {
             MockNetworkProvider,
             TokioTimeProvider::new(),
             TokioTaskProvider,
+            TokioRandomProvider::new(),
         )
         .local_address(test_address())
-        .build();
+        .build()
+        .expect("build should succeed");
 
         // Should be properly initialized
         assert_eq!(transport.peer_count(), 0);
@@ -1291,9 +1327,11 @@ mod tests {
             MockNetworkProvider,
             TokioTimeProvider::new(),
             TokioTaskProvider,
+            TokioRandomProvider::new(),
         )
         .local_address(test_address())
-        .build();
+        .build()
+        .expect("build should succeed");
 
         // weak_self should be set - verify by checking it doesn't panic
         // This verifies the builder correctly calls set_weak_self()
@@ -1307,24 +1345,28 @@ mod tests {
             MockNetworkProvider,
             TokioTimeProvider::new(),
             TokioTaskProvider,
+            TokioRandomProvider::new(),
         )
         .local_address(test_address())
         .peer_config(config)
-        .build();
+        .build()
+        .expect("build should succeed");
 
         // Transport should be created (peer_config is internal, but creation succeeds)
         assert_eq!(transport.peer_count(), 0);
     }
 
     #[test]
-    #[should_panic(expected = "local_address is required")]
-    fn test_builder_missing_address_panics() {
-        let _ = NetTransportBuilder::new(
+    fn test_builder_missing_address_returns_error() {
+        let result = NetTransportBuilder::new(
             MockNetworkProvider,
             TokioTimeProvider::new(),
             TokioTaskProvider,
+            TokioRandomProvider::new(),
         )
         .build();
+
+        assert!(matches!(result, Err(MessagingError::MissingLocalAddress)));
     }
 
     #[test]
@@ -1334,9 +1376,11 @@ mod tests {
             MockNetworkProvider,
             TokioTimeProvider::new(),
             TokioTaskProvider,
+            TokioRandomProvider::new(),
         )
         .local_address(test_address())
-        .build();
+        .build()
+        .expect("build should succeed");
 
         let token = UID::new(0x1234, 0x5678);
         let queue: Rc<NetNotifiedQueue<String, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
@@ -1369,9 +1413,11 @@ mod tests {
             MockNetworkProvider,
             TokioTimeProvider::new(),
             TokioTaskProvider,
+            TokioRandomProvider::new(),
         )
         .local_address(test_address())
-        .build();
+        .build()
+        .expect("build should succeed");
 
         let token = UID::new(0xDEAD, 0xBEEF);
         let stream = transport.register_handler::<TestRequest, _>(token, JsonCodec);
@@ -1408,9 +1454,11 @@ mod tests {
             MockNetworkProvider,
             TokioTimeProvider::new(),
             TokioTaskProvider,
+            TokioRandomProvider::new(),
         )
         .local_address(test_address())
-        .build();
+        .build()
+        .expect("build should succeed");
 
         // Register multiple handlers for the same interface
         let (add_stream, add_token) =
@@ -1441,6 +1489,7 @@ mod tests {
             MockNetworkProvider,
             TokioTimeProvider::new(),
             TokioTaskProvider,
+            TokioRandomProvider::new(),
         )
         .local_address(test_address())
         .build_listening()

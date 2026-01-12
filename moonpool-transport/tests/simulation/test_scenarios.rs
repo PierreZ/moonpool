@@ -523,9 +523,10 @@ where
     );
 
     // Phase 12C: Use NetTransportBuilder
-    let transport = NetTransportBuilder::new(network, time.clone(), task)
+    let transport = NetTransportBuilder::new(network, time.clone(), task, random.clone())
         .local_address(local_addr.clone())
-        .build();
+        .build()
+        .expect("build should succeed");
 
     // Phase 12C: Register multiple handlers using register_handler_at
     let (add_stream, add_token) = transport.register_handler_at::<CalcAddRequest, _>(
@@ -573,7 +574,7 @@ where
                 let b = random.random_range(0..100) as i64;
                 let request = CalcAddRequest { a, b, request_id };
 
-                if send_request::<_, CalcAddResponse, _, _, _, _>(
+                if send_request::<_, CalcAddResponse, _, _, _, _, _>(
                     &transport,
                     &add_endpoint,
                     request,
@@ -593,7 +594,7 @@ where
                 let b = random.random_range(0..100) as i64;
                 let request = CalcSubRequest { a, b, request_id };
 
-                if send_request::<_, CalcSubResponse, _, _, _, _>(
+                if send_request::<_, CalcSubResponse, _, _, _, _, _>(
                     &transport,
                     &sub_endpoint,
                     request,
@@ -613,7 +614,7 @@ where
                 let b = random.random_range(0..100) as i64;
                 let request = CalcMulRequest { a, b, request_id };
 
-                if send_request::<_, CalcMulResponse, _, _, _, _>(
+                if send_request::<_, CalcMulResponse, _, _, _, _, _>(
                     &transport,
                     &mul_endpoint,
                     request,
@@ -629,7 +630,7 @@ where
 
         // Process received requests for each method
         if let Some((request, reply)) =
-            add_stream.try_recv_with_transport::<_, _, _, CalcAddResponse>(&transport)
+            add_stream.try_recv_with_transport::<_, _, _, _, CalcAddResponse>(&transport)
         {
             pending_add.push((request.request_id, reply));
             sometimes_assert!(
@@ -640,7 +641,7 @@ where
         }
 
         if let Some((request, reply)) =
-            sub_stream.try_recv_with_transport::<_, _, _, CalcSubResponse>(&transport)
+            sub_stream.try_recv_with_transport::<_, _, _, _, CalcSubResponse>(&transport)
         {
             pending_sub.push((request.request_id, reply));
             sometimes_assert!(
@@ -651,7 +652,7 @@ where
         }
 
         if let Some((request, reply)) =
-            mul_stream.try_recv_with_transport::<_, _, _, CalcMulResponse>(&transport)
+            mul_stream.try_recv_with_transport::<_, _, _, _, CalcMulResponse>(&transport)
         {
             pending_mul.push((request.request_id, reply));
             sometimes_assert!(
@@ -690,7 +691,7 @@ where
 
     // Drain all pending requests
     while let Some((request, reply)) =
-        add_stream.try_recv_with_transport::<_, _, _, CalcAddResponse>(&transport)
+        add_stream.try_recv_with_transport::<_, _, _, _, CalcAddResponse>(&transport)
     {
         reply.send(CalcAddResponse {
             result: 0,
@@ -698,7 +699,7 @@ where
         });
     }
     while let Some((request, reply)) =
-        sub_stream.try_recv_with_transport::<_, _, _, CalcSubResponse>(&transport)
+        sub_stream.try_recv_with_transport::<_, _, _, _, CalcSubResponse>(&transport)
     {
         reply.send(CalcSubResponse {
             result: 0,
@@ -706,7 +707,7 @@ where
         });
     }
     while let Some((request, reply)) =
-        mul_stream.try_recv_with_transport::<_, _, _, CalcMulResponse>(&transport)
+        mul_stream.try_recv_with_transport::<_, _, _, _, CalcMulResponse>(&transport)
     {
         reply.send(CalcMulResponse {
             result: 0,
@@ -815,7 +816,7 @@ where
     let local_addr = moonpool_transport::NetworkAddress::new(ip, port);
 
     // Test: build_listening() should succeed with SimNetworkProvider
-    let transport = NetTransportBuilder::new(network, time, task)
+    let transport = NetTransportBuilder::new(network, time, task, _random)
         .local_address(local_addr.clone())
         .build_listening()
         .await

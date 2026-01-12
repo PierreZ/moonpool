@@ -11,7 +11,8 @@ use std::rc::Rc;
 
 use moonpool_transport::{
     Endpoint, JsonCodec, NetTransport, NetworkAddress, NetworkProvider, ReplyError, ReplyFuture,
-    RequestEnvelope, RequestStream, TokioTaskProvider, TokioTimeProvider, UID, send_request,
+    RequestEnvelope, RequestStream, TokioRandomProvider, TokioTaskProvider, TokioTimeProvider, UID,
+    send_request,
 };
 use serde::{Deserialize, Serialize};
 
@@ -90,12 +91,14 @@ fn test_address() -> NetworkAddress {
     NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500)
 }
 
-fn create_transport() -> NetTransport<MockNetworkProvider, TokioTimeProvider, TokioTaskProvider> {
+fn create_transport()
+-> NetTransport<MockNetworkProvider, TokioTimeProvider, TokioTaskProvider, TokioRandomProvider> {
     NetTransport::new(
         test_address(),
         MockNetworkProvider,
         TokioTimeProvider::new(),
         TokioTaskProvider,
+        TokioRandomProvider::new(),
     )
 }
 

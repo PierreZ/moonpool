@@ -65,10 +65,8 @@ impl<T: DeserializeOwned, C: MessageCodec> Future for ReplyFuture<T, C> {
 
         // Poll the recv future to register the waker
         // We create a recv future each time to register the waker
-        let mut recv_future = self.queue.recv();
-        // SAFETY: We're pinning a local future that we immediately poll
-        let pinned = unsafe { Pin::new_unchecked(&mut recv_future) };
-        match pinned.poll(cx) {
+        let mut recv_future = Box::pin(self.queue.recv());
+        match recv_future.as_mut().poll(cx) {
             Poll::Ready(Some(result)) => {
                 sometimes_assert!(reply_received, true, "Reply received from server");
                 Poll::Ready(result)

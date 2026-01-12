@@ -22,7 +22,9 @@
 
 use std::rc::Rc;
 
-use crate::{Endpoint, MessageCodec, NetworkProvider, TaskProvider, TimeProvider, UID};
+use crate::{
+    Endpoint, MessageCodec, NetworkProvider, RandomProvider, TaskProvider, TimeProvider, UID,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -55,8 +57,8 @@ use crate::error::MessagingError;
 /// # Errors
 ///
 /// Returns `MessagingError` if the request cannot be sent.
-pub fn send_request<Req, Resp, N, T, TP, C>(
-    transport: &NetTransport<N, T, TP>,
+pub fn send_request<Req, Resp, N, T, TP, R, C>(
+    transport: &NetTransport<N, T, TP, R>,
     destination: &Endpoint,
     request: Req,
     codec: C,
@@ -67,11 +69,14 @@ where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
+    R: RandomProvider + Clone + 'static,
     C: MessageCodec,
 {
-    // Generate a unique token for the reply endpoint
-    // Note: In production, use RandomProvider for deterministic IDs
-    let reply_token = UID::new(rand_reply_id(), rand_reply_id());
+    // Generate a unique token for the reply endpoint using deterministic random
+    let reply_token = UID::new(
+        transport.random().random::<u64>(),
+        transport.random().random::<u64>(),
+    );
 
     // Create reply endpoint using transport's local address
     let reply_endpoint = Endpoint::new(transport.local_address().clone(), reply_token);
@@ -103,21 +108,15 @@ where
     Ok(ReplyFuture::new(reply_queue, reply_endpoint))
 }
 
-/// Simple sequential ID generator for reply endpoints.
-/// In production, use RandomProvider for deterministic IDs in simulation.
-fn rand_reply_id() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0x1_0000_0000);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
-}
-
 #[cfg(test)]
 mod tests {
 
     use std::net::{IpAddr, Ipv4Addr};
     use std::rc::Rc;
 
-    use crate::{JsonCodec, NetworkAddress, TokioTaskProvider, TokioTimeProvider, UID};
+    use crate::{
+        JsonCodec, NetworkAddress, TokioRandomProvider, TokioTaskProvider, TokioTimeProvider, UID,
+    };
     use serde::{Deserialize, Serialize};
 
     use super::*;
@@ -198,12 +197,14 @@ mod tests {
     }
 
     fn create_test_transport()
-    -> NetTransport<MockNetworkProvider, TokioTimeProvider, TokioTaskProvider> {
+    -> NetTransport<MockNetworkProvider, TokioTimeProvider, TokioTaskProvider, TokioRandomProvider>
+    {
         NetTransport::new(
             test_address(),
             MockNetworkProvider,
             TokioTimeProvider::new(),
             TokioTaskProvider,
+            TokioRandomProvider::new(),
         )
     }
 
