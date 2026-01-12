@@ -1,7 +1,7 @@
-//! Ping-Pong Example: Real TCP RPC using Moonpool's static messaging.
+//! Ping-Pong Example: Real TCP RPC using Moonpool's `#[interface]` macro.
 //!
 //! This example demonstrates moonpool's RPC over **real TCP sockets**
-//! using the improved Phase 12C APIs.
+//! using the ergonomic `#[interface]` macro and bound client pattern.
 //!
 //! Run as two separate processes:
 //!
@@ -16,18 +16,18 @@
 //! # Architecture
 //!
 //! The example shows:
+//! - `#[interface]` macro for generating Server, Client, and BoundClient types
 //! - `NetTransportBuilder` for clean transport setup
-//! - `register_handler` for single-step endpoint registration
-//! - `recv_with_transport` for embedded transport in replies
+//! - `.bind()` pattern for Orleans-style ergonomic client calls
 //! - Server: listening, receiving typed requests, sending responses
-//! - Client: connecting, sending requests, awaiting responses
+//! - Client: direct trait method calls that feel like local function calls
 
 use std::env;
 use std::time::Duration;
 
 use moonpool_transport::{
-    Endpoint, JsonCodec, NetTransportBuilder, NetworkAddress, ReplyFuture, TimeProvider,
-    TokioNetworkProvider, TokioTaskProvider, TokioTimeProvider, UID, send_request,
+    JsonCodec, NetTransportBuilder, NetworkAddress, RpcError, TimeProvider, TokioNetworkProvider,
+    TokioTaskProvider, TokioTimeProvider, interface,
 };
 use serde::{Deserialize, Serialize};
 
@@ -37,11 +37,6 @@ use serde::{Deserialize, Serialize};
 
 const SERVER_ADDR: &str = "127.0.0.1:4500";
 const CLIENT_ADDR: &str = "127.0.0.1:4501";
-
-// Well-known token for the ping service
-fn ping_token() -> UID {
-    UID::new(0x5049_4E47, 0x504F_4E47) // "PING" "PONG" in hex
-}
 
 // ============================================================================
 // Message Types
@@ -63,6 +58,21 @@ struct PingResponse {
     seq: u32,
     /// Echoed message with "pong:" prefix.
     echo: String,
+}
+
+// ============================================================================
+// Interface Definition
+// ============================================================================
+
+/// PingPong interface definition.
+///
+/// The `#[interface]` macro generates:
+/// - `PingPongServer<C>` with `RequestStream` field (ping)
+/// - `PingPongClient` with `bind()` method
+/// - `BoundPingPongClient<N, T, TP, C>` implementing the `PingPong` trait
+#[interface(id = 0x5049_4E47)]
+trait PingPong {
+    async fn ping(&self, req: PingRequest) -> Result<PingResponse, RpcError>;
 }
 
 // ============================================================================
@@ -92,13 +102,15 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     println!("Server listening on {}\n", SERVER_ADDR);
 
     // ========================================================================
-    // register_handler combines all endpoint setup into a single call:
-    // - Creates endpoint from local address + token
-    // - Creates RequestStream
-    // - Registers with transport
+    // Single line registers the handler using the interface macro
     // ========================================================================
-    let ping_stream = transport.register_handler::<PingRequest, _>(ping_token(), JsonCodec);
+    let ping_server = PingPongServer::init(&transport, JsonCodec);
 
+    println!(
+        "Registered {} method(s) (interface ID: 0x{:X})\n",
+        PingPongServer::<JsonCodec>::METHOD_COUNT,
+        PingPongServer::<JsonCodec>::INTERFACE_ID
+    );
     println!("Waiting for ping requests...\n");
 
     // Server loop - handle requests
@@ -107,7 +119,8 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
         // recv_with_transport eliminates the closure callback pattern
         // The transport reference is passed directly instead of captured
         // ====================================================================
-        if let Some((request, reply)) = ping_stream
+        if let Some((request, reply)) = ping_server
+            .ping
             .recv_with_transport::<_, _, _, PingResponse>(&transport)
             .await
         {
@@ -156,10 +169,18 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
         .build_listening()
         .await?;
 
-    // Server endpoint
-    let server_endpoint = Endpoint::new(server_addr, ping_token());
-
     println!("Connecting to server at {}\n", SERVER_ADDR);
+
+    // ========================================================================
+    // NEW: Ergonomic bound client - implements PingPong trait!
+    // ========================================================================
+    let ping_client = PingPongClient::new(server_addr).bind(transport.clone(), JsonCodec);
+
+    println!(
+        "Using interface ID: 0x{:X} with {} method(s)\n",
+        PingPongClient::INTERFACE_ID,
+        PingPongClient::METHOD_COUNT
+    );
 
     // Send ping requests
     let num_pings = 5;
@@ -173,12 +194,15 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
 
         println!("Sending ping seq={}: {:?}", seq, request.message);
 
-        // Send request and get future for response
-        let future: ReplyFuture<PingResponse, JsonCodec> =
-            send_request(&transport, &server_endpoint, request, JsonCodec)?;
-
-        // Await response with timeout
-        match time.timeout(Duration::from_secs(5), future).await {
+        // ====================================================================
+        // NEW: Clean trait method call with .await
+        // No more manual send_request or type annotations!
+        // Note: timeout returns SimulationResult<Result<T, ()>> so we have 3 levels
+        // ====================================================================
+        match time
+            .timeout(Duration::from_secs(5), ping_client.ping(request))
+            .await
+        {
             Ok(Ok(Ok(response))) => {
                 println!("Received pong seq={}: {:?}\n", response.seq, response.echo);
                 success_count += 1;
@@ -186,8 +210,11 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
             Ok(Ok(Err(e))) => {
                 println!("RPC error: {:?}\n", e);
             }
-            Ok(Err(())) | Err(_) => {
+            Ok(Err(())) => {
                 println!("Timeout waiting for response\n");
+            }
+            Err(e) => {
+                println!("Simulation error: {:?}\n", e);
             }
         }
 
@@ -239,6 +266,11 @@ fn main() {
         }
         _ => {
             println!("Ping-Pong Example: Real TCP RPC with Moonpool\n");
+            println!("This example demonstrates the #[interface] macro:\n");
+            println!("  - PingPongServer<C> with RequestStream field");
+            println!("  - PingPongClient with .bind() for creating BoundPingPongClient");
+            println!("  - BoundPingPongClient implements PingPong trait for ergonomic calls");
+            println!("  - Clean syntax: ping_client.ping(request).await?\n");
             println!("Usage:");
             println!("  cargo run --example ping_pong -- server   # Start the server");
             println!("  cargo run --example ping_pong -- client   # Run the client\n");

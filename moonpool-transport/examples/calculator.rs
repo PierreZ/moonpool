@@ -5,9 +5,9 @@
 //!
 //! # Key Features
 //!
-//! - `#[interface(id = ...)]` generates `CalculatorServer` and `CalculatorClient`
+//! - `#[interface(id = ...)]` generates `CalculatorServer`, `CalculatorClient`, and `BoundCalculatorClient`
 //! - Trait-based interface definition (idiomatic Rust)
-//! - Type-safe method endpoints
+//! - Orleans-style ergonomic client calls via `.bind()`
 //! - Only base endpoint is serialized (FDB pattern)
 //!
 //! # Run
@@ -24,8 +24,8 @@ use std::env;
 use std::time::Duration;
 
 use moonpool_transport::{
-    JsonCodec, NetTransportBuilder, NetworkAddress, ReplyFuture, TimeProvider,
-    TokioNetworkProvider, TokioTaskProvider, TokioTimeProvider, interface, send_request,
+    JsonCodec, NetTransportBuilder, NetworkAddress, RpcError, TimeProvider, TokioNetworkProvider,
+    TokioTaskProvider, TokioTimeProvider, interface,
 };
 use serde::{Deserialize, Serialize};
 
@@ -92,13 +92,14 @@ struct DivResponse {
 ///
 /// The `#[interface]` macro generates:
 /// - `CalculatorServer<C>` with `RequestStream` fields (add, sub, mul, div)
-/// - `CalculatorClient` with endpoint accessors (add(), sub(), mul(), div())
+/// - `CalculatorClient` with `bind()` method for creating bound clients
+/// - `BoundCalculatorClient<N, T, TP, C>` implementing the `Calculator` trait
 #[interface(id = 0xCA1C_0000)]
 trait Calculator {
-    async fn add(&self, req: AddRequest) -> AddResponse;
-    async fn sub(&self, req: SubRequest) -> SubResponse;
-    async fn mul(&self, req: MulRequest) -> MulResponse;
-    async fn div(&self, req: DivRequest) -> DivResponse;
+    async fn add(&self, req: AddRequest) -> Result<AddResponse, RpcError>;
+    async fn sub(&self, req: SubRequest) -> Result<SubResponse, RpcError>;
+    async fn mul(&self, req: MulRequest) -> Result<MulResponse, RpcError>;
+    async fn div(&self, req: DivRequest) -> Result<DivResponse, RpcError>;
 }
 
 // ============================================================================
@@ -124,7 +125,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     println!("Server listening on {}\n", SERVER_ADDR);
 
     // ========================================================================
-    // NEW: Single line registers all 4 handlers
+    // Single line registers all 4 handlers
     // ========================================================================
     let calc = CalculatorServer::init(&transport, JsonCodec);
 
@@ -196,9 +197,9 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     println!("Client started, connecting to server at {}\n", SERVER_ADDR);
 
     // ========================================================================
-    // NEW: Single line creates all endpoints
+    // NEW: Ergonomic bound client - implements Calculator trait!
     // ========================================================================
-    let calc = CalculatorClient::new(server_addr);
+    let calc = CalculatorClient::new(server_addr).bind(transport.clone(), JsonCodec);
 
     println!(
         "Using interface ID: 0x{:X} with {} methods\n",
@@ -206,7 +207,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
         CalculatorClient::METHOD_COUNT
     );
 
-    // Test calculations
+    // Test calculations - now with clean trait method calls!
     let tests = [
         ("10 + 5", Op::Add(10, 5)),
         ("20 - 7", Op::Sub(20, 7)),
@@ -220,56 +221,53 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     for (desc, op) in tests.iter() {
         println!("Sending: {}", desc);
 
+        // NEW: Clean trait method calls with .await?
+        // Note: timeout returns SimulationResult<Result<T, ()>> so we have 3 levels
         let result = match op {
             Op::Add(a, b) => {
-                // NEW: calc.add() returns the endpoint directly
-                let future: ReplyFuture<AddResponse, JsonCodec> = send_request(
-                    &transport,
-                    &calc.add(),
-                    AddRequest { a: *a, b: *b },
-                    JsonCodec,
-                )?;
-
-                match time.timeout(Duration::from_secs(5), future).await {
+                match time
+                    .timeout(
+                        Duration::from_secs(5),
+                        calc.add(AddRequest { a: *a, b: *b }),
+                    )
+                    .await
+                {
                     Ok(Ok(Ok(resp))) => Some(format!("{}", resp.result)),
                     _ => None,
                 }
             }
             Op::Sub(a, b) => {
-                let future: ReplyFuture<SubResponse, JsonCodec> = send_request(
-                    &transport,
-                    &calc.sub(),
-                    SubRequest { a: *a, b: *b },
-                    JsonCodec,
-                )?;
-
-                match time.timeout(Duration::from_secs(5), future).await {
+                match time
+                    .timeout(
+                        Duration::from_secs(5),
+                        calc.sub(SubRequest { a: *a, b: *b }),
+                    )
+                    .await
+                {
                     Ok(Ok(Ok(resp))) => Some(format!("{}", resp.result)),
                     _ => None,
                 }
             }
             Op::Mul(a, b) => {
-                let future: ReplyFuture<MulResponse, JsonCodec> = send_request(
-                    &transport,
-                    &calc.mul(),
-                    MulRequest { a: *a, b: *b },
-                    JsonCodec,
-                )?;
-
-                match time.timeout(Duration::from_secs(5), future).await {
+                match time
+                    .timeout(
+                        Duration::from_secs(5),
+                        calc.mul(MulRequest { a: *a, b: *b }),
+                    )
+                    .await
+                {
                     Ok(Ok(Ok(resp))) => Some(format!("{}", resp.result)),
                     _ => None,
                 }
             }
             Op::Div(a, b) => {
-                let future: ReplyFuture<DivResponse, JsonCodec> = send_request(
-                    &transport,
-                    &calc.div(),
-                    DivRequest { a: *a, b: *b },
-                    JsonCodec,
-                )?;
-
-                match time.timeout(Duration::from_secs(5), future).await {
+                match time
+                    .timeout(
+                        Duration::from_secs(5),
+                        calc.div(DivRequest { a: *a, b: *b }),
+                    )
+                    .await
+                {
                     Ok(Ok(Ok(resp))) => Some(
                         resp.result
                             .map(|r| r.to_string())
@@ -303,7 +301,8 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
 
     // Demonstrate serialization (only base endpoint is serialized)
     println!("\n=== Serialization Demo ===");
-    let json = serde_json::to_string_pretty(&calc)?;
+    let unbound = CalculatorClient::new(NetworkAddress::parse(SERVER_ADDR)?);
+    let json = serde_json::to_string_pretty(&unbound)?;
     println!(
         "Serialized CalculatorClient (only base endpoint):\n{}",
         json
@@ -353,9 +352,12 @@ fn main() {
         _ => {
             println!("Calculator Example: FDB-style Interface Pattern\n");
             println!("This example demonstrates the #[interface] macro:\n");
-            println!("  - Single interface definition generates Server and Client types");
+            println!(
+                "  - Single interface definition generates Server, Client, and BoundClient types"
+            );
             println!("  - CalculatorServer<C> with RequestStream fields");
-            println!("  - CalculatorClient with method endpoint accessors");
+            println!("  - CalculatorClient with .bind() for creating BoundCalculatorClient");
+            println!("  - BoundCalculatorClient implements Calculator trait for ergonomic calls");
             println!("  - Only base endpoint is serialized (FDB pattern)\n");
             println!("Usage:");
             println!("  cargo run --example calculator -- server   # Start the server");

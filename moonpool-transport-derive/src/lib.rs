@@ -1,32 +1,36 @@
 //! Proc-macro for FDB-style Interface pattern.
 //!
 //! This crate provides the `#[interface]` attribute macro that generates
-//! `{Name}Server` and `{Name}Client` structs from a trait definition.
+//! server and client types from a trait definition.
 //!
 //! # Example
 //!
 //! ```rust,ignore
-//! use moonpool_transport::interface;
+//! use moonpool_transport::{interface, RpcError};
 //!
 //! #[interface(id = 0xCA1C_0000)]
 //! trait Calculator {
-//!     async fn add(&self, req: AddRequest) -> AddResponse;
-//!     async fn sub(&self, req: SubRequest) -> SubResponse;
+//!     async fn add(&self, req: AddRequest) -> Result<AddResponse, RpcError>;
+//!     async fn sub(&self, req: SubRequest) -> Result<SubResponse, RpcError>;
 //! }
 //! ```
 //!
 //! This generates:
 //! - `CalculatorServer<C>` with `RequestStream` fields and `init()` method
-//! - `CalculatorClient` with method accessors returning `Endpoint`
+//! - `CalculatorClient` with endpoint accessors and `bind()` method
+//! - `BoundCalculatorClient<N, T, TP, C>` implementing the `Calculator` trait
 //! - The trait itself with `#[async_trait(?Send)]`
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Expr, ExprLit, FnArg, Ident, ItemTrait, Lit, TraitItem, parse_macro_input};
+use syn::{
+    Expr, ExprLit, FnArg, GenericArgument, Ident, ItemTrait, Lit, PathArguments, ReturnType,
+    TraitItem, Type, parse_macro_input,
+};
 
 /// Attribute macro for FDB-style Interface pattern.
 ///
-/// Generates `{Name}Server` and `{Name}Client` structs from the trait definition.
+/// Generates server, client, and bound client types from the trait definition.
 ///
 /// # Attributes
 ///
@@ -34,7 +38,9 @@ use syn::{Expr, ExprLit, FnArg, Ident, ItemTrait, Lit, TraitItem, parse_macro_in
 ///
 /// # Methods
 ///
-/// Each method must be async with signature `async fn name(&self, req: ReqType) -> RespType`.
+/// Each method must be async with signature:
+/// `async fn name(&self, req: ReqType) -> Result<RespType, RpcError>`
+///
 /// Method indices are derived from method declaration order.
 #[proc_macro_attribute]
 pub fn interface(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -51,7 +57,8 @@ pub fn interface(attr: TokenStream, item: TokenStream) -> TokenStream {
 struct MethodInfo {
     index: u32,
     name: Ident,
-    req_type: syn::Type,
+    req_type: Type,
+    resp_type: Type,
 }
 
 fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
@@ -59,6 +66,7 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
     let name = &item.ident;
     let server_name = format_ident!("{}Server", name);
     let client_name = format_ident!("{}Client", name);
+    let bound_client_name = format_ident!("Bound{}Client", name);
 
     // Parse trait methods
     let mut method_infos: Vec<MethodInfo> = Vec::new();
@@ -66,13 +74,14 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
         if let TraitItem::Fn(method) = trait_item {
             let method_name = &method.sig.ident;
 
-            // Extract request type from method signature: async fn name(&self, req: ReqType) -> RespType
-            let req_type = extract_request_type(&method.sig)?;
+            // Extract request and response types from method signature
+            let (req_type, resp_type) = extract_method_types(&method.sig)?;
 
             method_infos.push(MethodInfo {
                 index: index as u32,
                 name: method_name.clone(),
                 req_type,
+                resp_type,
             });
         }
     }
@@ -108,17 +117,47 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
 
     let server_field_names: Vec<_> = method_infos.iter().map(|m| &m.name).collect();
 
-    // Generate client methods
-    let client_methods = method_infos.iter().map(|m| {
+    // Generate client endpoint methods (for manual usage)
+    let client_endpoint_methods = method_infos.iter().map(|m| {
         let name = &m.name;
+        let endpoint_name = format_ident!("{}_endpoint", m.name);
         let idx = m.index;
         quote! {
-            /// Get endpoint for this method.
-            pub fn #name(&self) -> moonpool_transport::Endpoint {
+            /// Get endpoint for this method (for manual send_request usage).
+            pub fn #endpoint_name(&self) -> moonpool_transport::Endpoint {
                 moonpool_transport::Endpoint::new(
                     self.base.address.clone(),
                     moonpool_transport::UID::new(Self::INTERFACE_ID, #idx as u64)
                 )
+            }
+
+            #[doc(hidden)]
+            #[deprecated(note = "use bind() for ergonomic calls, or method_endpoint() for manual usage")]
+            pub fn #name(&self) -> moonpool_transport::Endpoint {
+                self.#endpoint_name()
+            }
+        }
+    });
+
+    // Generate bound client trait implementation methods
+    let bound_client_methods = method_infos.iter().map(|m| {
+        let name = &m.name;
+        let idx = m.index;
+        let req_type = &m.req_type;
+        let resp_type = &m.resp_type;
+        quote! {
+            async fn #name(&self, req: #req_type) -> Result<#resp_type, moonpool_transport::RpcError> {
+                let endpoint = moonpool_transport::Endpoint::new(
+                    self.base.address.clone(),
+                    moonpool_transport::UID::new(Self::INTERFACE_ID, #idx as u64)
+                );
+                let future = moonpool_transport::send_request(
+                    &self.transport,
+                    &endpoint,
+                    req,
+                    self.codec.clone()
+                )?;
+                Ok(future.await?)
             }
         }
     });
@@ -164,6 +203,8 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
         ///
         /// Generated by `#[interface]`.
         /// Only the base endpoint is serialized; method endpoints are derived.
+        ///
+        /// Use `bind()` to create a bound client that implements the trait.
         #[derive(Clone)]
         pub struct #client_name {
             base: moonpool_transport::Endpoint,
@@ -193,7 +234,37 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
                 &self.base
             }
 
-            #(#client_methods)*
+            /// Bind this client to a transport and codec for making RPC calls.
+            ///
+            /// The bound client implements the interface trait, allowing
+            /// direct method calls like `bound_client.method(req).await?`.
+            ///
+            /// # Example
+            ///
+            /// ```rust,ignore
+            /// let client = CalculatorClient::new(server_addr);
+            /// let bound = client.bind(transport.clone(), JsonCodec);
+            /// let result = bound.add(AddRequest { a: 1, b: 2 }).await?;
+            /// ```
+            pub fn bind<N, T, TP, C>(
+                &self,
+                transport: std::rc::Rc<moonpool_transport::NetTransport<N, T, TP>>,
+                codec: C,
+            ) -> #bound_client_name<N, T, TP, C>
+            where
+                N: moonpool_transport::NetworkProvider + Clone + 'static,
+                T: moonpool_transport::TimeProvider + Clone + 'static,
+                TP: moonpool_transport::TaskProvider + Clone + 'static,
+                C: moonpool_transport::MessageCodec + Clone,
+            {
+                #bound_client_name {
+                    base: self.base.clone(),
+                    transport,
+                    codec,
+                }
+            }
+
+            #(#client_endpoint_methods)*
         }
 
         impl serde::Serialize for #client_name {
@@ -208,13 +279,61 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
                 Ok(Self { base })
             }
         }
+
+        /// Bound client that implements the interface trait.
+        ///
+        /// Generated by `#[interface]`.
+        /// Created by calling `bind()` on the client.
+        pub struct #bound_client_name<N, T, TP, C>
+        where
+            N: moonpool_transport::NetworkProvider + Clone + 'static,
+            T: moonpool_transport::TimeProvider + Clone + 'static,
+            TP: moonpool_transport::TaskProvider + Clone + 'static,
+            C: moonpool_transport::MessageCodec + Clone,
+        {
+            base: moonpool_transport::Endpoint,
+            transport: std::rc::Rc<moonpool_transport::NetTransport<N, T, TP>>,
+            codec: C,
+        }
+
+        impl<N, T, TP, C> #bound_client_name<N, T, TP, C>
+        where
+            N: moonpool_transport::NetworkProvider + Clone + 'static,
+            T: moonpool_transport::TimeProvider + Clone + 'static,
+            TP: moonpool_transport::TaskProvider + Clone + 'static,
+            C: moonpool_transport::MessageCodec + Clone,
+        {
+            /// Interface identifier.
+            pub const INTERFACE_ID: u64 = #interface_id;
+
+            /// Number of methods in this interface.
+            pub const METHOD_COUNT: u32 = #method_count;
+
+            /// Get the server address this client is bound to.
+            pub fn address(&self) -> &moonpool_transport::NetworkAddress {
+                &self.base.address
+            }
+        }
+
+        #[async_trait::async_trait(?Send)]
+        impl<N, T, TP, C> #name for #bound_client_name<N, T, TP, C>
+        where
+            N: moonpool_transport::NetworkProvider + Clone + 'static,
+            T: moonpool_transport::TimeProvider + Clone + 'static,
+            TP: moonpool_transport::TaskProvider + Clone + 'static,
+            C: moonpool_transport::MessageCodec + Clone,
+        {
+            #(#bound_client_methods)*
+        }
     };
 
     Ok(expanded)
 }
 
-/// Extract request type from method signature: async fn name(&self, req: ReqType) -> RespType
-fn extract_request_type(sig: &syn::Signature) -> syn::Result<syn::Type> {
+/// Extract request and response types from method signature.
+///
+/// Expected signature: `async fn name(&self, req: ReqType) -> Result<RespType, RpcError>`
+fn extract_method_types(sig: &syn::Signature) -> syn::Result<(Type, Type)> {
     // Skip &self, get the second argument
     let mut inputs = sig.inputs.iter();
 
@@ -230,13 +349,45 @@ fn extract_request_type(sig: &syn::Signature) -> syn::Result<syn::Type> {
     }
 
     // Second should be the request parameter
-    match inputs.next() {
-        Some(FnArg::Typed(pat_type)) => Ok((*pat_type.ty).clone()),
-        _ => Err(syn::Error::new_spanned(
-            sig,
-            "Interface method must have a request parameter: async fn name(&self, req: ReqType) -> RespType",
-        )),
+    let req_type = match inputs.next() {
+        Some(FnArg::Typed(pat_type)) => (*pat_type.ty).clone(),
+        _ => {
+            return Err(syn::Error::new_spanned(
+                sig,
+                "Interface method must have a request parameter: async fn name(&self, req: ReqType) -> Result<RespType, RpcError>",
+            ));
+        }
+    };
+
+    // Extract response type from return type: Result<RespType, RpcError>
+    let resp_type = match &sig.output {
+        ReturnType::Type(_, ty) => extract_result_ok_type(ty)?,
+        ReturnType::Default => {
+            return Err(syn::Error::new_spanned(
+                sig,
+                "Interface method must return Result<RespType, RpcError>",
+            ));
+        }
+    };
+
+    Ok((req_type, resp_type))
+}
+
+/// Extract the Ok type from `Result<T, E>`.
+fn extract_result_ok_type(ty: &Type) -> syn::Result<Type> {
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last()
+        && segment.ident == "Result"
+        && let PathArguments::AngleBracketed(args) = &segment.arguments
+        && let Some(GenericArgument::Type(ok_type)) = args.args.first()
+    {
+        return Ok(ok_type.clone());
     }
+
+    Err(syn::Error::new_spanned(
+        ty,
+        "Interface method must return Result<RespType, RpcError>",
+    ))
 }
 
 /// Parsed interface attribute.
