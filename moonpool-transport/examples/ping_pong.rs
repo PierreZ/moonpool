@@ -26,8 +26,8 @@ use std::env;
 use std::time::Duration;
 
 use moonpool_transport::{
-    JsonCodec, NetTransportBuilder, NetworkAddress, RpcError, TimeProvider, TokioNetworkProvider,
-    TokioRandomProvider, TokioTaskProvider, TokioTimeProvider, interface,
+    JsonCodec, NetTransportBuilder, NetworkAddress, Providers, RpcError, TimeProvider,
+    TokioProviders, interface,
 };
 use serde::{Deserialize, Serialize};
 
@@ -82,11 +82,8 @@ trait PingPong {
 async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Ping-Pong Server ===\n");
 
-    // Create providers for real networking
-    let network = TokioNetworkProvider::new();
-    let time = TokioTimeProvider::new();
-    let task = TokioTaskProvider;
-    let random = TokioRandomProvider::new();
+    // Create providers bundle for real networking
+    let providers = TokioProviders::new();
 
     // Parse server address
     let local_addr = NetworkAddress::parse(SERVER_ADDR)?;
@@ -95,7 +92,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     // NetTransportBuilder handles Rc wrapping, set_weak_self(), and listen()
     // No more runtime panics from forgetting set_weak_self()!
     // ========================================================================
-    let transport = NetTransportBuilder::new(network, time, task, random)
+    let transport = NetTransportBuilder::new(providers)
         .local_address(local_addr)
         .build_listening()
         .await?;
@@ -122,7 +119,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
         // ====================================================================
         if let Some((request, reply)) = ping_server
             .ping
-            .recv_with_transport::<_, _, _, _, PingResponse>(&transport)
+            .recv_with_transport::<_, PingResponse>(&transport)
             .await
         {
             println!("Received ping seq={}: {:?}", request.seq, request.message);
@@ -152,11 +149,9 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Ping-Pong Client ===\n");
 
-    // Create providers for real networking
-    let network = TokioNetworkProvider::new();
-    let time = TokioTimeProvider::new();
-    let task = TokioTaskProvider;
-    let random = TokioRandomProvider::new();
+    // Create providers bundle for real networking
+    let providers = TokioProviders::new();
+    let time = providers.time().clone();
 
     // Parse addresses
     let local_addr = NetworkAddress::parse(CLIENT_ADDR)?;
@@ -166,7 +161,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     // Client also uses build_listening() because it needs to receive responses
     // The builder makes this requirement clear in the method name
     // ========================================================================
-    let transport = NetTransportBuilder::new(network, time.clone(), task, random)
+    let transport = NetTransportBuilder::new(providers)
         .local_address(local_addr)
         .build_listening()
         .await?;

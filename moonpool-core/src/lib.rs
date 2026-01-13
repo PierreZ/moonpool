@@ -58,6 +58,7 @@
 mod codec;
 mod error;
 mod network;
+mod providers;
 mod random;
 mod task;
 mod time;
@@ -72,6 +73,7 @@ pub use error::{SimulationError, SimulationResult};
 
 // Provider trait exports
 pub use network::{NetworkProvider, TcpListenerTrait, TokioNetworkProvider, TokioTcpListener};
+pub use providers::{Providers, TokioProviders};
 pub use random::{RandomProvider, TokioRandomProvider};
 pub use task::{TaskProvider, TokioTaskProvider};
 pub use time::{TimeProvider, TokioTimeProvider};

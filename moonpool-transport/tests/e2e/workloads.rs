@@ -12,9 +12,54 @@ use moonpool_sim::{
     sometimes_assert,
 };
 use moonpool_transport::{
-    NetworkProvider, Peer, SimulationResult, TcpListenerTrait, TimeProvider, TokioTaskProvider,
-    try_deserialize_packet,
+    NetworkProvider, Peer, Providers, SimulationResult, TcpListenerTrait, TimeProvider,
+    TokioTaskProvider, try_deserialize_packet,
 };
+
+/// Providers bundle for e2e workloads.
+#[derive(Clone)]
+struct E2eProviders {
+    network: SimNetworkProvider,
+    time: SimTimeProvider,
+    task: TokioTaskProvider,
+    random: SimRandomProvider,
+}
+
+impl E2eProviders {
+    fn new(
+        network: SimNetworkProvider,
+        time: SimTimeProvider,
+        task: TokioTaskProvider,
+        random: SimRandomProvider,
+    ) -> Self {
+        Self {
+            network,
+            time,
+            task,
+            random,
+        }
+    }
+}
+
+impl Providers for E2eProviders {
+    type Network = SimNetworkProvider;
+    type Time = SimTimeProvider;
+    type Task = TokioTaskProvider;
+    type Random = SimRandomProvider;
+
+    fn network(&self) -> &Self::Network {
+        &self.network
+    }
+    fn time(&self) -> &Self::Time {
+        &self.time
+    }
+    fn task(&self) -> &Self::Task {
+        &self.task
+    }
+    fn random(&self) -> &Self::Random {
+        &self.random
+    }
+}
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::TestMessage;
@@ -97,13 +142,11 @@ pub async fn client_workload_with_config(
         server_addr
     );
 
+    // Bundle providers
+    let providers = E2eProviders::new(network, time.clone(), task_provider, random.clone());
+
     // Create peer with default config
-    let mut peer = Peer::new_with_defaults(
-        network.clone(),
-        time.clone(),
-        task_provider.clone(),
-        server_addr.clone(),
-    );
+    let mut peer = Peer::new_with_defaults(providers, server_addr.clone());
 
     // Track messages for invariant validation
     let invariants = Rc::new(RefCell::new(MessageInvariants::new()));

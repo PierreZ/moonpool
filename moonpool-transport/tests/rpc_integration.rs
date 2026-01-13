@@ -10,9 +10,9 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::rc::Rc;
 
 use moonpool_transport::{
-    Endpoint, JsonCodec, NetTransport, NetworkAddress, NetworkProvider, ReplyError, ReplyFuture,
-    RequestEnvelope, RequestStream, TokioRandomProvider, TokioTaskProvider, TokioTimeProvider, UID,
-    send_request,
+    Endpoint, JsonCodec, NetTransport, NetworkAddress, NetworkProvider, Providers, ReplyError,
+    ReplyFuture, RequestEnvelope, RequestStream, TokioRandomProvider, TokioTaskProvider,
+    TokioTimeProvider, UID, send_request,
 };
 use serde::{Deserialize, Serialize};
 
@@ -87,19 +87,52 @@ impl NetworkProvider for MockNetworkProvider {
     }
 }
 
+/// Mock providers bundle for testing
+#[derive(Clone)]
+struct MockProviders {
+    network: MockNetworkProvider,
+    time: TokioTimeProvider,
+    task: TokioTaskProvider,
+    random: TokioRandomProvider,
+}
+
+impl MockProviders {
+    fn new() -> Self {
+        Self {
+            network: MockNetworkProvider,
+            time: TokioTimeProvider::new(),
+            task: TokioTaskProvider,
+            random: TokioRandomProvider::new(),
+        }
+    }
+}
+
+impl Providers for MockProviders {
+    type Network = MockNetworkProvider;
+    type Time = TokioTimeProvider;
+    type Task = TokioTaskProvider;
+    type Random = TokioRandomProvider;
+
+    fn network(&self) -> &Self::Network {
+        &self.network
+    }
+    fn time(&self) -> &Self::Time {
+        &self.time
+    }
+    fn task(&self) -> &Self::Task {
+        &self.task
+    }
+    fn random(&self) -> &Self::Random {
+        &self.random
+    }
+}
+
 fn test_address() -> NetworkAddress {
     NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500)
 }
 
-fn create_transport()
--> NetTransport<MockNetworkProvider, TokioTimeProvider, TokioTaskProvider, TokioRandomProvider> {
-    NetTransport::new(
-        test_address(),
-        MockNetworkProvider,
-        TokioTimeProvider::new(),
-        TokioTaskProvider,
-        TokioRandomProvider::new(),
-    )
+fn create_transport() -> NetTransport<MockProviders> {
+    NetTransport::new(test_address(), MockProviders::new())
 }
 
 // Test message types

@@ -3,9 +3,7 @@
 //! Defines all possible operations that can be performed on a Peer,
 //! enabling randomized exploration of the state space.
 
-use moonpool_transport::{
-    NetworkProvider, Peer, PeerError, RandomProvider, TaskProvider, TimeProvider,
-};
+use moonpool_transport::{PeerError, Providers, RandomProvider, TimeProvider};
 
 use super::{TestMessage, test_message_token};
 
@@ -219,16 +217,14 @@ impl OpWeights {
 ///
 /// This function handles the actual execution of operations on the Peer,
 /// recording results for invariant validation.
-pub async fn execute_operation<N, T, TP>(
-    peer: &mut Peer<N, T, TP>,
+pub async fn execute_operation<P>(
+    peer: &mut moonpool_transport::Peer<P>,
     op: PeerOp,
     sender_id: &str,
-    time: &T,
+    time: &P::Time,
 ) -> OpResult
 where
-    N: NetworkProvider + 'static,
-    T: TimeProvider + 'static,
-    TP: TaskProvider + 'static,
+    P: Providers,
 {
     match op {
         PeerOp::SendReliable {

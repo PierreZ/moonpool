@@ -22,9 +22,7 @@
 
 use std::rc::Rc;
 
-use crate::{
-    Endpoint, MessageCodec, NetworkProvider, RandomProvider, TaskProvider, TimeProvider, UID,
-};
+use crate::{Endpoint, MessageCodec, Providers, RandomProvider, UID};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -57,8 +55,8 @@ use crate::error::MessagingError;
 /// # Errors
 ///
 /// Returns `MessagingError` if the request cannot be sent.
-pub fn send_request<Req, Resp, N, T, TP, R, C>(
-    transport: &NetTransport<N, T, TP, R>,
+pub fn send_request<Req, Resp, P, C>(
+    transport: &NetTransport<P>,
     destination: &Endpoint,
     request: Req,
     codec: C,
@@ -66,10 +64,7 @@ pub fn send_request<Req, Resp, N, T, TP, R, C>(
 where
     Req: Serialize,
     Resp: DeserializeOwned + 'static,
-    N: NetworkProvider + Clone + 'static,
-    T: TimeProvider + Clone + 'static,
-    TP: TaskProvider + Clone + 'static,
-    R: RandomProvider + Clone + 'static,
+    P: Providers,
     C: MessageCodec,
 {
     // Generate a unique token for the reply endpoint using deterministic random
@@ -115,7 +110,8 @@ mod tests {
     use std::rc::Rc;
 
     use crate::{
-        JsonCodec, NetworkAddress, TokioRandomProvider, TokioTaskProvider, TokioTimeProvider, UID,
+        JsonCodec, NetworkAddress, NetworkProvider, Providers, TokioRandomProvider,
+        TokioTaskProvider, TokioTimeProvider, UID,
     };
     use serde::{Deserialize, Serialize};
 
@@ -192,20 +188,52 @@ mod tests {
         }
     }
 
+    /// Mock providers bundle for testing
+    #[derive(Clone)]
+    struct MockProviders {
+        network: MockNetworkProvider,
+        time: TokioTimeProvider,
+        task: TokioTaskProvider,
+        random: TokioRandomProvider,
+    }
+
+    impl MockProviders {
+        fn new() -> Self {
+            Self {
+                network: MockNetworkProvider,
+                time: TokioTimeProvider::new(),
+                task: TokioTaskProvider,
+                random: TokioRandomProvider::new(),
+            }
+        }
+    }
+
+    impl Providers for MockProviders {
+        type Network = MockNetworkProvider;
+        type Time = TokioTimeProvider;
+        type Task = TokioTaskProvider;
+        type Random = TokioRandomProvider;
+
+        fn network(&self) -> &Self::Network {
+            &self.network
+        }
+        fn time(&self) -> &Self::Time {
+            &self.time
+        }
+        fn task(&self) -> &Self::Task {
+            &self.task
+        }
+        fn random(&self) -> &Self::Random {
+            &self.random
+        }
+    }
+
     fn test_address() -> NetworkAddress {
         NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500)
     }
 
-    fn create_test_transport()
-    -> NetTransport<MockNetworkProvider, TokioTimeProvider, TokioTaskProvider, TokioRandomProvider>
-    {
-        NetTransport::new(
-            test_address(),
-            MockNetworkProvider,
-            TokioTimeProvider::new(),
-            TokioTaskProvider,
-            TokioRandomProvider::new(),
-        )
+    fn create_test_transport() -> NetTransport<MockProviders> {
+        NetTransport::new(test_address(), MockProviders::new())
     }
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -14,8 +14,8 @@ use super::config::PeerConfig;
 use super::error::{PeerError, PeerResult};
 use super::metrics::PeerMetrics;
 use crate::{
-    HEADER_SIZE, NetworkProvider, TaskProvider, TimeProvider, UID, WireError, serialize_packet,
-    try_deserialize_packet,
+    HEADER_SIZE, NetworkProvider, Providers, TaskProvider, TimeProvider, UID, WireError,
+    serialize_packet, try_deserialize_packet,
 };
 use moonpool_sim::sometimes_assert;
 
@@ -60,14 +60,14 @@ impl ReconnectState {
 /// A resilient peer that manages connections to a remote address.
 ///
 /// Provides automatic reconnection and message queuing while abstracting
-/// over NetworkProvider, TimeProvider, and TaskProvider implementations.
+/// over provider implementations via the [`Providers`] trait bundle.
 ///
 /// Uses FDB-compatible wire format: `[length:4][checksum:4][token:16][payload]`
 ///
 /// Follows FoundationDB's architecture: synchronous API with background actors.
-pub struct Peer<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> {
+pub struct Peer<P: Providers> {
     /// Shared state accessible to background actors
-    shared_state: Rc<RefCell<PeerSharedState<N, T>>>,
+    shared_state: Rc<RefCell<PeerSharedState<P>>>,
 
     /// Trigger to wake writer actor when data is queued
     data_to_send: Rc<Notify>,
@@ -85,18 +85,18 @@ pub struct Peer<N: NetworkProvider, T: TimeProvider, TP: TaskProvider> {
     /// Configuration (owned by Peer)
     config: PeerConfig,
 
-    /// Task provider for spawning background actors
+    /// Providers bundle for spawning background actors
     #[allow(dead_code)]
-    task_provider: TP,
+    providers: P,
 }
 
 /// Shared state for background actors - each actor accesses different fields
-struct PeerSharedState<N: NetworkProvider, T: TimeProvider> {
+struct PeerSharedState<P: Providers> {
     /// Network provider for creating connections
-    network: N,
+    network: P::Network,
 
     /// Time provider for delays and timing
-    time: T,
+    time: P::Time,
 
     /// Destination address
     destination: String,
@@ -119,31 +119,23 @@ struct PeerSharedState<N: NetworkProvider, T: TimeProvider> {
     metrics: PeerMetrics,
 }
 
-impl<N: NetworkProvider, T: TimeProvider> PeerSharedState<N, T> {
+impl<P: Providers> PeerSharedState<P> {
     /// Check if both message queues are empty.
     fn are_queues_empty(&self) -> bool {
         self.reliable_queue.is_empty() && self.unreliable_queue.is_empty()
     }
 }
 
-impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider + 'static>
-    Peer<N, T, TP>
-{
+impl<P: Providers> Peer<P> {
     /// Create a new peer for the destination address.
-    pub fn new(
-        network: N,
-        time: T,
-        task_provider: TP,
-        destination: String,
-        config: PeerConfig,
-    ) -> Self {
+    pub fn new(providers: P, destination: String, config: PeerConfig) -> Self {
         let reconnect_state = ReconnectState::new(config.initial_reconnect_delay);
-        let now = time.now();
+        let now = providers.time().now();
 
         // Create shared state
         let shared_state = Rc::new(RefCell::new(PeerSharedState {
-            network,
-            time,
+            network: providers.network().clone(),
+            time: providers.time().clone(),
             destination,
             connection: None,
             reliable_queue: VecDeque::new(),
@@ -158,7 +150,7 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
         let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
 
         // Spawn background connection task
-        let writer_handle = task_provider.spawn_task(
+        let writer_handle = providers.task().spawn_task(
             "connection_task",
             connection_task(
                 shared_state.clone(),
@@ -178,19 +170,13 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
             receive_rx: Some(receive_rx),
             shutdown_tx,
             config,
-            task_provider,
+            providers,
         }
     }
 
     /// Create a new peer with default configuration.
-    pub fn new_with_defaults(network: N, time: T, task_provider: TP, destination: String) -> Self {
-        Self::new(
-            network,
-            time,
-            task_provider,
-            destination,
-            PeerConfig::default(),
-        )
+    pub fn new_with_defaults(providers: P, destination: String) -> Self {
+        Self::new(providers, destination, PeerConfig::default())
     }
 
     /// Create a new peer from an incoming (already-connected) stream.
@@ -201,20 +187,18 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
     /// Unlike `new()`, this starts with an established connection instead of
     /// initiating an outbound connection.
     pub fn new_incoming(
-        network: N,
-        time: T,
-        task_provider: TP,
+        providers: P,
         peer_address: String,
-        stream: N::TcpStream,
+        stream: <P::Network as moonpool_core::NetworkProvider>::TcpStream,
         config: PeerConfig,
     ) -> Self {
         let reconnect_state = ReconnectState::new(config.initial_reconnect_delay);
-        let now = time.now();
+        let now = providers.time().now();
 
         // Create shared state - mark as connected since we have an existing stream
         let shared_state = Rc::new(RefCell::new(PeerSharedState {
-            network,
-            time,
+            network: providers.network().clone(),
+            time: providers.time().clone(),
             destination: peer_address,
             connection: Some(()), // Already connected
             reliable_queue: VecDeque::new(),
@@ -236,7 +220,7 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
         let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
 
         // Spawn background connection task with the existing stream
-        let writer_handle = task_provider.spawn_task(
+        let writer_handle = providers.task().spawn_task(
             "incoming_connection_task",
             connection_task(
                 shared_state.clone(),
@@ -256,7 +240,7 @@ impl<N: NetworkProvider + 'static, T: TimeProvider + 'static, TP: TaskProvider +
             receive_rx: Some(receive_rx),
             shutdown_tx,
             config,
-            task_provider,
+            providers,
         }
     }
 
@@ -518,16 +502,17 @@ enum ConnectionLossBehavior {
 /// - Owns the connection exclusively to avoid RefCell conflicts
 /// - Handles both reading and writing operations
 /// - Parses wire format packets from the read stream
-async fn connection_task<N: NetworkProvider + 'static, T: TimeProvider + 'static>(
-    shared_state: Rc<RefCell<PeerSharedState<N, T>>>,
+async fn connection_task<P: Providers>(
+    shared_state: Rc<RefCell<PeerSharedState<P>>>,
     data_to_send: Rc<Notify>,
     config: PeerConfig,
     receive_tx: mpsc::UnboundedSender<(UID, Vec<u8>)>,
     mut shutdown_rx: mpsc::UnboundedReceiver<()>,
-    initial_stream: Option<N::TcpStream>,
+    initial_stream: Option<<P::Network as moonpool_core::NetworkProvider>::TcpStream>,
     on_connection_loss: ConnectionLossBehavior,
 ) {
-    let mut current_connection: Option<N::TcpStream> = initial_stream;
+    let mut current_connection: Option<<P::Network as moonpool_core::NetworkProvider>::TcpStream> =
+        initial_stream;
     // Buffer for accumulating partial packet reads
     let mut read_buffer: Vec<u8> = Vec::with_capacity(4096);
 
@@ -706,9 +691,9 @@ async fn connection_task<N: NetworkProvider + 'static, T: TimeProvider + 'static
 }
 
 /// Handle connection failure by clearing state and optionally requeuing data.
-fn handle_connection_failure<N: NetworkProvider, T: TimeProvider>(
-    shared_state: &Rc<RefCell<PeerSharedState<N, T>>>,
-    current_connection: &mut Option<N::TcpStream>,
+fn handle_connection_failure<P: Providers>(
+    shared_state: &Rc<RefCell<PeerSharedState<P>>>,
+    current_connection: &mut Option<<P::Network as moonpool_core::NetworkProvider>::TcpStream>,
     read_buffer: &mut Vec<u8>,
     failed_send: Option<(Vec<u8>, bool)>, // (data, is_reliable)
 ) {
@@ -749,9 +734,9 @@ fn handle_connection_failure<N: NetworkProvider, T: TimeProvider>(
 
 /// Process the read buffer and parse packets.
 /// Returns true if the task should exit.
-fn process_read_buffer<N: NetworkProvider, T: TimeProvider>(
-    shared_state: &Rc<RefCell<PeerSharedState<N, T>>>,
-    current_connection: &mut Option<N::TcpStream>,
+fn process_read_buffer<P: Providers>(
+    shared_state: &Rc<RefCell<PeerSharedState<P>>>,
+    current_connection: &mut Option<<P::Network as moonpool_core::NetworkProvider>::TcpStream>,
     read_buffer: &mut Vec<u8>,
     receive_tx: &mpsc::UnboundedSender<(UID, Vec<u8>)>,
     on_connection_loss: ConnectionLossBehavior,
@@ -850,10 +835,10 @@ fn process_read_buffer<N: NetworkProvider, T: TimeProvider>(
 }
 
 /// Establish a connection with exponential backoff.
-async fn establish_connection<N: NetworkProvider + 'static, T: TimeProvider + 'static>(
-    shared_state: &Rc<RefCell<PeerSharedState<N, T>>>,
+async fn establish_connection<P: Providers>(
+    shared_state: &Rc<RefCell<PeerSharedState<P>>>,
     config: &PeerConfig,
-) -> PeerResult<N::TcpStream> {
+) -> PeerResult<<P::Network as moonpool_core::NetworkProvider>::TcpStream> {
     loop {
         // Check failure limits and get connection params
         let (network, time, destination, should_backoff, delay) = {
