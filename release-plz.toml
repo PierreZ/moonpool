@@ -37,6 +37,11 @@ changelog_path = "moonpool-sim/CHANGELOG.md"
 version_group = "moonpool"
 
 [[package]]
+name = "moonpool-transport-derive"
+changelog_path = "moonpool-transport-derive/CHANGELOG.md"
+version_group = "moonpool"
+
+[[package]]
 name = "moonpool-transport"
 changelog_path = "moonpool-transport/CHANGELOG.md"
 version_group = "moonpool"
