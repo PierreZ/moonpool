@@ -55,9 +55,9 @@
 // Re-export core types for convenience
 pub use moonpool_core::{
     CodecError, Endpoint, JsonCodec, MessageCodec, NetworkAddress, NetworkAddressParseError,
-    NetworkProvider, RandomProvider, SimulationError, SimulationResult, TaskProvider,
-    TcpListenerTrait, TimeProvider, TokioNetworkProvider, TokioTaskProvider, TokioTimeProvider,
-    UID, WELL_KNOWN_RESERVED_COUNT, WellKnownToken,
+    NetworkProvider, Providers, RandomProvider, SimulationError, SimulationResult, TaskProvider,
+    TcpListenerTrait, TimeProvider, TokioNetworkProvider, TokioProviders, TokioRandomProvider,
+    TokioTaskProvider, TokioTimeProvider, UID, WELL_KNOWN_RESERVED_COUNT, WellKnownToken,
 };
 
 // =============================================================================
@@ -95,5 +95,9 @@ pub use wire::{
 // RPC exports
 pub use rpc::{
     EndpointMap, MessageReceiver, NetNotifiedQueue, NetTransport, NetTransportBuilder, ReplyError,
-    ReplyFuture, ReplyPromise, RequestEnvelope, RequestStream, send_request,
+    ReplyFuture, ReplyPromise, RequestEnvelope, RequestStream, RpcError, method_endpoint,
+    method_uid, send_request,
 };
+
+// Interface attribute macro
+pub use moonpool_transport_derive::interface;

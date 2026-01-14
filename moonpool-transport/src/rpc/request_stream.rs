@@ -22,7 +22,7 @@
 
 use std::rc::Rc;
 
-use crate::{Endpoint, MessageCodec, NetworkProvider, TaskProvider, TimeProvider};
+use crate::{Endpoint, MessageCodec, Providers};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -132,14 +132,12 @@ where
     /// // After (cleaner):
     /// let (req, reply) = stream.recv_with_transport(&transport).await?;
     /// ```
-    pub async fn recv_with_transport<N, T, TP, Resp>(
+    pub async fn recv_with_transport<P, Resp>(
         &self,
-        transport: &Rc<NetTransport<N, T, TP>>,
+        transport: &Rc<NetTransport<P>>,
     ) -> Option<(Req, ReplyPromise<Resp, C>)>
     where
-        N: NetworkProvider + Clone + 'static,
-        T: TimeProvider + Clone + 'static,
-        TP: TaskProvider + Clone + 'static,
+        P: Providers,
         Resp: Serialize,
     {
         let transport_clone = Rc::clone(transport);
@@ -152,14 +150,12 @@ where
     /// Try to receive a request without blocking, with embedded transport.
     ///
     /// Non-blocking version of [`recv_with_transport`](Self::recv_with_transport).
-    pub fn try_recv_with_transport<N, T, TP, Resp>(
+    pub fn try_recv_with_transport<P, Resp>(
         &self,
-        transport: &Rc<NetTransport<N, T, TP>>,
+        transport: &Rc<NetTransport<P>>,
     ) -> Option<(Req, ReplyPromise<Resp, C>)>
     where
-        N: NetworkProvider + Clone + 'static,
-        T: TimeProvider + Clone + 'static,
-        TP: TaskProvider + Clone + 'static,
+        P: Providers,
         Resp: Serialize,
     {
         let transport_clone = Rc::clone(transport);
@@ -334,7 +330,9 @@ mod tests {
     // Phase 12C API Tests: recv_with_transport / try_recv_with_transport
     // =========================================================================
 
-    use crate::{NetTransportBuilder, TokioTaskProvider, TokioTimeProvider};
+    use crate::{
+        NetTransportBuilder, Providers, TokioRandomProvider, TokioTaskProvider, TokioTimeProvider,
+    };
 
     // Simple mock network provider for testing
     #[derive(Clone)]
@@ -405,15 +403,51 @@ mod tests {
         }
     }
 
-    fn create_test_transport()
-    -> Rc<crate::NetTransport<MockNetworkProvider, TokioTimeProvider, TokioTaskProvider>> {
-        NetTransportBuilder::new(
-            MockNetworkProvider,
-            TokioTimeProvider::new(),
-            TokioTaskProvider,
-        )
-        .local_address(test_endpoint().address.clone())
-        .build()
+    /// Mock providers bundle for testing
+    #[derive(Clone)]
+    struct MockProviders {
+        network: MockNetworkProvider,
+        time: TokioTimeProvider,
+        task: TokioTaskProvider,
+        random: TokioRandomProvider,
+    }
+
+    impl MockProviders {
+        fn new() -> Self {
+            Self {
+                network: MockNetworkProvider,
+                time: TokioTimeProvider::new(),
+                task: TokioTaskProvider,
+                random: TokioRandomProvider::new(),
+            }
+        }
+    }
+
+    impl Providers for MockProviders {
+        type Network = MockNetworkProvider;
+        type Time = TokioTimeProvider;
+        type Task = TokioTaskProvider;
+        type Random = TokioRandomProvider;
+
+        fn network(&self) -> &Self::Network {
+            &self.network
+        }
+        fn time(&self) -> &Self::Time {
+            &self.time
+        }
+        fn task(&self) -> &Self::Task {
+            &self.task
+        }
+        fn random(&self) -> &Self::Random {
+            &self.random
+        }
+    }
+
+    fn create_test_transport() -> Rc<crate::NetTransport<MockProviders>> {
+        NetTransportBuilder::new(MockProviders::new())
+            .local_address(test_endpoint().address.clone())
+            .build()
+            .expect("build should succeed")
     }
 
     // Create a local reply endpoint (same address as transport for local delivery)

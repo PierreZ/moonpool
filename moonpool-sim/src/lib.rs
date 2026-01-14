@@ -73,9 +73,9 @@
 // Re-export core types for convenience
 pub use moonpool_core::{
     CodecError, Endpoint, JsonCodec, MessageCodec, NetworkAddress, NetworkAddressParseError,
-    NetworkProvider, RandomProvider, SimulationError, SimulationResult, TaskProvider,
-    TcpListenerTrait, TimeProvider, TokioNetworkProvider, TokioTaskProvider, TokioTimeProvider,
-    UID, WELL_KNOWN_RESERVED_COUNT, WellKnownToken,
+    NetworkProvider, Providers, RandomProvider, SimulationError, SimulationResult, TaskProvider,
+    TcpListenerTrait, TimeProvider, TokioNetworkProvider, TokioProviders, TokioTaskProvider,
+    TokioTimeProvider, UID, WELL_KNOWN_RESERVED_COUNT, WellKnownToken,
 };
 
 // =============================================================================
@@ -128,6 +128,6 @@ pub use network::{
 };
 
 // Provider exports
-pub use providers::{SimRandomProvider, SimTimeProvider};
+pub use providers::{SimProviders, SimRandomProvider, SimTimeProvider};
 
 // Macros are automatically available at crate root when defined with #[macro_export]

@@ -1,12 +1,16 @@
 //! Calculator Example: Multi-method RPC interface using Moonpool.
 //!
-//! This example demonstrates:
-//! - `NetTransportBuilder` for cleaner transport setup (Step 9)
-//! - `register_handler_at` for multi-method interfaces (Step 10b)
-//! - `recv_with_transport` for embedded transport in replies (Step 11)
-//! - Using `tokio::select!` to handle multiple request types
+//! This example demonstrates the `#[interface]` attribute macro that generates
+//! server and client interface structs from a trait definition.
 //!
-//! Run as two separate processes:
+//! # Key Features
+//!
+//! - `#[interface(id = ...)]` generates `CalculatorServer`, `CalculatorClient`, and `BoundCalculatorClient`
+//! - Trait-based interface definition (idiomatic Rust)
+//! - Orleans-style ergonomic client calls via `.bind()`
+//! - Only base endpoint is serialized (FDB pattern)
+//!
+//! # Run
 //!
 //! ```bash
 //! # Terminal 1 - Start the server
@@ -20,8 +24,8 @@ use std::env;
 use std::time::Duration;
 
 use moonpool_transport::{
-    Endpoint, JsonCodec, NetTransportBuilder, NetworkAddress, ReplyFuture, TimeProvider,
-    TokioNetworkProvider, TokioTaskProvider, TokioTimeProvider, UID, send_request,
+    JsonCodec, NetTransportBuilder, NetworkAddress, Providers, RpcError, TimeProvider,
+    TokioProviders, interface,
 };
 use serde::{Deserialize, Serialize};
 
@@ -31,13 +35,6 @@ use serde::{Deserialize, Serialize};
 
 const SERVER_ADDR: &str = "127.0.0.1:4600";
 const CLIENT_ADDR: &str = "127.0.0.1:4601";
-
-// Interface and method identifiers
-const CALC_INTERFACE: u64 = 0xCA1C_0000;
-const METHOD_ADD: u64 = 0;
-const METHOD_SUB: u64 = 1;
-const METHOD_MUL: u64 = 2;
-const METHOD_DIV: u64 = 3;
 
 // ============================================================================
 // Message Types
@@ -88,23 +85,37 @@ struct DivResponse {
 }
 
 // ============================================================================
+// Interface Definition - Generated Server and Client Types
+// ============================================================================
+
+/// Calculator interface definition.
+///
+/// The `#[interface]` macro generates:
+/// - `CalculatorServer<C>` with `RequestStream` fields (add, sub, mul, div)
+/// - `CalculatorClient` with `bind()` method for creating bound clients
+/// - `BoundCalculatorClient<N, T, TP, C>` implementing the `Calculator` trait
+#[interface(id = 0xCA1C_0000)]
+trait Calculator {
+    async fn add(&self, req: AddRequest) -> Result<AddResponse, RpcError>;
+    async fn sub(&self, req: SubRequest) -> Result<SubResponse, RpcError>;
+    async fn mul(&self, req: MulRequest) -> Result<MulResponse, RpcError>;
+    async fn div(&self, req: DivRequest) -> Result<DivResponse, RpcError>;
+}
+
+// ============================================================================
 // Server
 // ============================================================================
 
 async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Calculator Server ===\n");
 
-    // Create providers
-    let network = TokioNetworkProvider::new();
-    let time = TokioTimeProvider::new();
-    let task = TokioTaskProvider;
+    // Create providers bundle
+    let providers = TokioProviders::new();
 
     let local_addr = NetworkAddress::parse(SERVER_ADDR)?;
 
-    // ========================================================================
-    // NEW API: NetTransportBuilder eliminates Rc/set_weak_self boilerplate
-    // ========================================================================
-    let transport = NetTransportBuilder::new(network, time, task)
+    // Build transport
+    let transport = NetTransportBuilder::new(providers)
         .local_address(local_addr)
         .build_listening()
         .await?;
@@ -112,48 +123,39 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     println!("Server listening on {}\n", SERVER_ADDR);
 
     // ========================================================================
-    // NEW API: register_handler_at for multi-method interfaces
-    // Each method gets its own stream with a deterministic token
+    // Single line registers all 4 handlers
     // ========================================================================
-    let (add_stream, _) =
-        transport.register_handler_at::<AddRequest, _>(CALC_INTERFACE, METHOD_ADD, JsonCodec);
-    let (sub_stream, _) =
-        transport.register_handler_at::<SubRequest, _>(CALC_INTERFACE, METHOD_SUB, JsonCodec);
-    let (mul_stream, _) =
-        transport.register_handler_at::<MulRequest, _>(CALC_INTERFACE, METHOD_MUL, JsonCodec);
-    let (div_stream, _) =
-        transport.register_handler_at::<DivRequest, _>(CALC_INTERFACE, METHOD_DIV, JsonCodec);
+    let calc = CalculatorServer::init(&transport, JsonCodec);
 
-    println!("Registered 4 calculator methods (add, sub, mul, div)\n");
+    println!(
+        "Registered {} calculator methods (interface ID: 0x{:X})\n",
+        CalculatorServer::<JsonCodec>::METHOD_COUNT,
+        CalculatorServer::<JsonCodec>::INTERFACE_ID
+    );
     println!("Waiting for requests...\n");
 
-    // ========================================================================
-    // Using tokio::select! to handle multiple request types concurrently
-    // ========================================================================
+    // Handle requests
     loop {
         tokio::select! {
-            // ================================================================
-            // NEW API: recv_with_transport - no closure callback needed!
-            // ================================================================
-            Some((req, reply)) = add_stream.recv_with_transport::<_, _, _, AddResponse>(&transport) => {
+            Some((req, reply)) = calc.add.recv_with_transport::<_, AddResponse>(&transport) => {
                 let result = req.a + req.b;
                 println!("ADD: {} + {} = {}", req.a, req.b, result);
                 reply.send(AddResponse { result });
             }
 
-            Some((req, reply)) = sub_stream.recv_with_transport::<_, _, _, SubResponse>(&transport) => {
+            Some((req, reply)) = calc.sub.recv_with_transport::<_, SubResponse>(&transport) => {
                 let result = req.a - req.b;
                 println!("SUB: {} - {} = {}", req.a, req.b, result);
                 reply.send(SubResponse { result });
             }
 
-            Some((req, reply)) = mul_stream.recv_with_transport::<_, _, _, MulResponse>(&transport) => {
+            Some((req, reply)) = calc.mul.recv_with_transport::<_, MulResponse>(&transport) => {
                 let result = req.a * req.b;
                 println!("MUL: {} * {} = {}", req.a, req.b, result);
                 reply.send(MulResponse { result });
             }
 
-            Some((req, reply)) = div_stream.recv_with_transport::<_, _, _, DivResponse>(&transport) => {
+            Some((req, reply)) = calc.div.recv_with_transport::<_, DivResponse>(&transport) => {
                 let result = if req.b != 0 {
                     Some(req.a / req.b)
                 } else {
@@ -176,35 +178,39 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Calculator Client ===\n");
 
-    // Create providers
-    let network = TokioNetworkProvider::new();
-    let time = TokioTimeProvider::new();
-    let task = TokioTaskProvider;
+    // Create providers bundle
+    let providers = TokioProviders::new();
+    let time = providers.time().clone();
 
     let local_addr = NetworkAddress::parse(CLIENT_ADDR)?;
     let server_addr = NetworkAddress::parse(SERVER_ADDR)?;
 
-    // Use NetTransportBuilder (same as server)
-    let transport = NetTransportBuilder::new(network, time.clone(), task)
+    // Build transport
+    let transport = NetTransportBuilder::new(providers)
         .local_address(local_addr)
         .build_listening()
         .await?;
 
     println!("Client started, connecting to server at {}\n", SERVER_ADDR);
 
-    // Create endpoints for each method using the same deterministic tokens
-    let add_endpoint = Endpoint::new(server_addr.clone(), UID::new(CALC_INTERFACE, METHOD_ADD));
-    let sub_endpoint = Endpoint::new(server_addr.clone(), UID::new(CALC_INTERFACE, METHOD_SUB));
-    let mul_endpoint = Endpoint::new(server_addr.clone(), UID::new(CALC_INTERFACE, METHOD_MUL));
-    let div_endpoint = Endpoint::new(server_addr.clone(), UID::new(CALC_INTERFACE, METHOD_DIV));
+    // ========================================================================
+    // NEW: Ergonomic bound client - implements Calculator trait!
+    // ========================================================================
+    let calc = CalculatorClient::new(server_addr).bind(transport.clone(), JsonCodec);
 
-    // Test calculations
+    println!(
+        "Using interface ID: 0x{:X} with {} methods\n",
+        CalculatorClient::INTERFACE_ID,
+        CalculatorClient::METHOD_COUNT
+    );
+
+    // Test calculations - now with clean trait method calls!
     let tests = [
-        ("10 + 5", Operation::Add(10, 5)),
-        ("20 - 7", Operation::Sub(20, 7)),
-        ("6 * 8", Operation::Mul(6, 8)),
-        ("100 / 4", Operation::Div(100, 4)),
-        ("42 / 0", Operation::Div(42, 0)), // Division by zero test
+        ("10 + 5", Op::Add(10, 5)),
+        ("20 - 7", Op::Sub(20, 7)),
+        ("6 * 8", Op::Mul(6, 8)),
+        ("100 / 4", Op::Div(100, 4)),
+        ("42 / 0", Op::Div(42, 0)), // Division by zero test
     ];
 
     let mut success_count = 0;
@@ -212,55 +218,53 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     for (desc, op) in tests.iter() {
         println!("Sending: {}", desc);
 
+        // NEW: Clean trait method calls with .await?
+        // Note: timeout returns SimulationResult<Result<T, ()>> so we have 3 levels
         let result = match op {
-            Operation::Add(a, b) => {
-                let future: ReplyFuture<AddResponse, JsonCodec> = send_request(
-                    &transport,
-                    &add_endpoint,
-                    AddRequest { a: *a, b: *b },
-                    JsonCodec,
-                )?;
-
-                match time.timeout(Duration::from_secs(5), future).await {
+            Op::Add(a, b) => {
+                match time
+                    .timeout(
+                        Duration::from_secs(5),
+                        calc.add(AddRequest { a: *a, b: *b }),
+                    )
+                    .await
+                {
                     Ok(Ok(Ok(resp))) => Some(format!("{}", resp.result)),
                     _ => None,
                 }
             }
-            Operation::Sub(a, b) => {
-                let future: ReplyFuture<SubResponse, JsonCodec> = send_request(
-                    &transport,
-                    &sub_endpoint,
-                    SubRequest { a: *a, b: *b },
-                    JsonCodec,
-                )?;
-
-                match time.timeout(Duration::from_secs(5), future).await {
+            Op::Sub(a, b) => {
+                match time
+                    .timeout(
+                        Duration::from_secs(5),
+                        calc.sub(SubRequest { a: *a, b: *b }),
+                    )
+                    .await
+                {
                     Ok(Ok(Ok(resp))) => Some(format!("{}", resp.result)),
                     _ => None,
                 }
             }
-            Operation::Mul(a, b) => {
-                let future: ReplyFuture<MulResponse, JsonCodec> = send_request(
-                    &transport,
-                    &mul_endpoint,
-                    MulRequest { a: *a, b: *b },
-                    JsonCodec,
-                )?;
-
-                match time.timeout(Duration::from_secs(5), future).await {
+            Op::Mul(a, b) => {
+                match time
+                    .timeout(
+                        Duration::from_secs(5),
+                        calc.mul(MulRequest { a: *a, b: *b }),
+                    )
+                    .await
+                {
                     Ok(Ok(Ok(resp))) => Some(format!("{}", resp.result)),
                     _ => None,
                 }
             }
-            Operation::Div(a, b) => {
-                let future: ReplyFuture<DivResponse, JsonCodec> = send_request(
-                    &transport,
-                    &div_endpoint,
-                    DivRequest { a: *a, b: *b },
-                    JsonCodec,
-                )?;
-
-                match time.timeout(Duration::from_secs(5), future).await {
+            Op::Div(a, b) => {
+                match time
+                    .timeout(
+                        Duration::from_secs(5),
+                        calc.div(DivRequest { a: *a, b: *b }),
+                    )
+                    .await
+                {
                     Ok(Ok(Ok(resp))) => Some(
                         resp.result
                             .map(|r| r.to_string())
@@ -292,10 +296,19 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
         tests.len()
     );
 
+    // Demonstrate serialization (only base endpoint is serialized)
+    println!("\n=== Serialization Demo ===");
+    let unbound = CalculatorClient::new(NetworkAddress::parse(SERVER_ADDR)?);
+    let json = serde_json::to_string_pretty(&unbound)?;
+    println!(
+        "Serialized CalculatorClient (only base endpoint):\n{}",
+        json
+    );
+
     Ok(())
 }
 
-enum Operation {
+enum Op {
     Add(i64, i64),
     Sub(i64, i64),
     Mul(i64, i64),
@@ -334,11 +347,15 @@ fn main() {
             });
         }
         _ => {
-            println!("Calculator Example: Multi-method RPC with Moonpool\n");
-            println!("This example demonstrates the improved Phase 12C APIs:\n");
-            println!("  - NetTransportBuilder (eliminates Rc/set_weak_self boilerplate)");
-            println!("  - register_handler_at (multi-method interface registration)");
-            println!("  - recv_with_transport (no closure callback needed)\n");
+            println!("Calculator Example: FDB-style Interface Pattern\n");
+            println!("This example demonstrates the #[interface] macro:\n");
+            println!(
+                "  - Single interface definition generates Server, Client, and BoundClient types"
+            );
+            println!("  - CalculatorServer<C> with RequestStream fields");
+            println!("  - CalculatorClient with .bind() for creating BoundCalculatorClient");
+            println!("  - BoundCalculatorClient implements Calculator trait for ergonomic calls");
+            println!("  - Only base endpoint is serialized (FDB pattern)\n");
             println!("Usage:");
             println!("  cargo run --example calculator -- server   # Start the server");
             println!("  cargo run --example calculator -- client   # Run the client\n");

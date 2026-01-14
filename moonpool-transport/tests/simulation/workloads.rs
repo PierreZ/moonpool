@@ -20,8 +20,65 @@ use std::time::Duration;
 use moonpool_sim::{SimRandomProvider, SimulationMetrics, WorkloadTopology};
 use moonpool_transport::{
     Endpoint, JsonCodec, MessageReceiver, NetNotifiedQueue, NetTransportBuilder, NetworkAddress,
-    NetworkProvider, SimulationResult, TaskProvider, TimeProvider, UID,
+    NetworkProvider, Providers, SimulationResult, TaskProvider, TimeProvider, UID,
 };
+
+/// Providers bundle for simulation workloads.
+///
+/// This struct bundles the individual providers passed to workloads by the simulation
+/// framework into a single `Providers` implementation.
+#[derive(Clone)]
+pub struct WorkloadProviders<N, T, TP> {
+    network: N,
+    time: T,
+    task: TP,
+    random: SimRandomProvider,
+}
+
+impl<N, T, TP> WorkloadProviders<N, T, TP>
+where
+    N: NetworkProvider + Clone + 'static,
+    T: TimeProvider + Clone + 'static,
+    TP: TaskProvider + Clone + 'static,
+{
+    /// Create a new workload providers bundle.
+    pub fn new(network: N, time: T, task: TP, random: SimRandomProvider) -> Self {
+        Self {
+            network,
+            time,
+            task,
+            random,
+        }
+    }
+}
+
+impl<N, T, TP> Providers for WorkloadProviders<N, T, TP>
+where
+    N: NetworkProvider + Clone + 'static,
+    T: TimeProvider + Clone + 'static,
+    TP: TaskProvider + Clone + 'static,
+{
+    type Network = N;
+    type Time = T;
+    type Task = TP;
+    type Random = SimRandomProvider;
+
+    fn network(&self) -> &Self::Network {
+        &self.network
+    }
+
+    fn time(&self) -> &Self::Time {
+        &self.time
+    }
+
+    fn task(&self) -> &Self::Task {
+        &self.task
+    }
+
+    fn random(&self) -> &Self::Random {
+        &self.random
+    }
+}
 
 use super::invariants::{MessageInvariants, RpcInvariants};
 use super::operations::{
@@ -79,10 +136,14 @@ where
     // Create local address from topology
     let local_addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
 
+    // Bundle providers for NetTransportBuilder
+    let providers = WorkloadProviders::new(network, time.clone(), task, random.clone());
+
     // Create NetTransport using Phase 12C builder (no listening needed for local delivery)
-    let transport = NetTransportBuilder::new(network, time.clone(), task)
+    let transport = NetTransportBuilder::new(providers)
         .local_address(local_addr.clone())
-        .build();
+        .build()
+        .expect("build should succeed");
 
     // Create message queue and register with transport
     // Note: Using raw NetNotifiedQueue since this tests direct dispatch, not RPC
@@ -186,7 +247,7 @@ where
 /// Note: Uses raw NetNotifiedQueue (not RequestStream) since this tests
 /// endpoint lifecycle management, not RPC patterns.
 pub async fn endpoint_lifecycle_workload<N, T, TP>(
-    _random: SimRandomProvider,
+    random: SimRandomProvider,
     network: N,
     time: T,
     task: TP,
@@ -200,10 +261,14 @@ where
     let my_id = topology.my_ip.clone();
     let local_addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
 
+    // Bundle providers for NetTransportBuilder
+    let providers = WorkloadProviders::new(network, time.clone(), task, random);
+
     // Create NetTransport using Phase 12C builder
-    let transport = NetTransportBuilder::new(network, time.clone(), task)
+    let transport = NetTransportBuilder::new(providers)
         .local_address(local_addr.clone())
-        .build();
+        .build()
+        .expect("build should succeed");
 
     // Track sent/received
     let mut sent_count = 0u64;
@@ -362,10 +427,14 @@ where
     // Create local address from topology
     let local_addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
 
+    // Bundle providers for NetTransportBuilder
+    let providers = WorkloadProviders::new(network, time.clone(), task, random.clone());
+
     // Create NetTransport using Phase 12C builder (local only, no network listening)
-    let transport = NetTransportBuilder::new(network, time.clone(), task)
+    let transport = NetTransportBuilder::new(providers)
         .local_address(local_addr.clone())
-        .build();
+        .build()
+        .expect("build should succeed");
 
     // Register handler using Phase 12C API - creates RequestStream and registers in one call
     let server_token = UID::new(0xAABB, 0xCCDD);
@@ -396,7 +465,7 @@ where
         match client_op {
             RpcClientOp::SendRequest { request_id } => {
                 let request = RpcTestRequest::with_payload(request_id, &my_id, 32);
-                match send_request::<_, RpcTestResponse, _, _, _, _>(
+                match send_request::<_, RpcTestResponse, _, _>(
                     &transport,
                     &server_endpoint,
                     request,
@@ -463,7 +532,7 @@ where
             RpcServerOp::TryReceiveRequest => {
                 // Phase 12C: Use try_recv_with_transport() instead of queue().try_recv()
                 if let Some((request, reply)) =
-                    request_stream.try_recv_with_transport::<_, _, _, RpcTestResponse>(&transport)
+                    request_stream.try_recv_with_transport::<_, RpcTestResponse>(&transport)
                 {
                     sometimes_assert!(
                         rpc_server_received_request,
@@ -519,7 +588,7 @@ where
     // Drain remaining requests - respond to all pending
     // Phase 12C: Use try_recv_with_transport()
     while let Some((request, reply)) =
-        request_stream.try_recv_with_transport::<_, _, _, RpcTestResponse>(&transport)
+        request_stream.try_recv_with_transport::<_, RpcTestResponse>(&transport)
     {
         pending_server_requests.push((request.request_id, reply));
     }
@@ -646,9 +715,12 @@ where
     let local_addr =
         NetworkAddress::parse(&addr_with_port).expect("valid server address in topology");
 
+    // Bundle providers for NetTransportBuilder
+    let providers = WorkloadProviders::new(network, time.clone(), task, random.clone());
+
     // Phase 12C: Use NetTransportBuilder::build_listening()
     // Automatically handles Rc wrapping, set_weak_self(), and listen()
-    let transport = NetTransportBuilder::new(network, time.clone(), task)
+    let transport = NetTransportBuilder::new(providers)
         .local_address(local_addr.clone())
         .build_listening()
         .await
@@ -684,7 +756,7 @@ where
             RpcServerOp::TryReceiveRequest => {
                 // Phase 12C: Use try_recv_with_transport() instead of queue().try_recv()
                 if let Some((request, reply)) =
-                    request_stream.try_recv_with_transport::<_, _, _, RpcTestResponse>(&transport)
+                    request_stream.try_recv_with_transport::<_, RpcTestResponse>(&transport)
                 {
                     sometimes_assert!(
                         multi_node_server_received_request,
@@ -751,7 +823,7 @@ where
     // Drain remaining requests - respond to all pending
     // Phase 12C: Use try_recv_with_transport()
     while let Some((request, reply)) =
-        request_stream.try_recv_with_transport::<_, _, _, RpcTestResponse>(&transport)
+        request_stream.try_recv_with_transport::<_, RpcTestResponse>(&transport)
     {
         pending_server_requests.push((request.request_id, reply));
     }
@@ -834,12 +906,16 @@ where
 
     tracing::info!(server = %server_addr, "Client connecting to server");
 
+    // Bundle providers for NetTransportBuilder
+    let providers = WorkloadProviders::new(network, time.clone(), task, random.clone());
+
     // Phase 12C: Use NetTransportBuilder::build()
     // Client doesn't need listen() - responses come on outbound connections
     // The builder automatically handles Rc wrapping and set_weak_self()
-    let transport = NetTransportBuilder::new(network, time.clone(), task)
+    let transport = NetTransportBuilder::new(providers)
         .local_address(local_addr.clone())
-        .build();
+        .build()
+        .expect("build should succeed");
 
     // Server endpoint (well-known token)
     let server_token = UID::new(0xAABB, 0xCCDD);
@@ -864,7 +940,7 @@ where
         match client_op {
             RpcClientOp::SendRequest { request_id } => {
                 let request = RpcTestRequest::with_payload(request_id, &my_id, 32);
-                match send_request::<_, RpcTestResponse, _, _, _, _>(
+                match send_request::<_, RpcTestResponse, _, _>(
                     &transport,
                     &server_endpoint,
                     request,

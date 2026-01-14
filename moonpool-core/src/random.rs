@@ -5,6 +5,8 @@
 //! like TimeProvider, NetworkProvider, and TaskProvider.
 
 use rand::distr::{Distribution, StandardUniform, uniform::SampleUniform};
+use rand::prelude::*;
+use std::cell::RefCell;
 use std::ops::Range;
 
 /// Provider trait for random number generation.
@@ -37,4 +39,57 @@ pub trait RandomProvider: Clone {
     ///
     /// The probability should be between 0.0 and 1.0.
     fn random_bool(&self, probability: f64) -> bool;
+}
+
+/// Production random provider using thread-local RNG.
+///
+/// Uses `rand::rng()` (thread-local, non-cryptographic) for efficient
+/// random number generation in production environments.
+///
+/// # Example
+///
+/// ```rust
+/// use moonpool_core::{RandomProvider, TokioRandomProvider};
+///
+/// let random = TokioRandomProvider::new();
+/// let value: u64 = random.random();
+/// let in_range = random.random_range(1..100);
+/// ```
+#[derive(Clone, Default)]
+pub struct TokioRandomProvider;
+
+impl TokioRandomProvider {
+    /// Create a new production random provider.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+// Thread-local RNG for TokioRandomProvider
+thread_local! {
+    static RNG: RefCell<rand::rngs::ThreadRng> = RefCell::new(rand::rng());
+}
+
+impl RandomProvider for TokioRandomProvider {
+    fn random<T>(&self) -> T
+    where
+        StandardUniform: Distribution<T>,
+    {
+        RNG.with(|rng| rng.borrow_mut().random())
+    }
+
+    fn random_range<T>(&self, range: Range<T>) -> T
+    where
+        T: SampleUniform + PartialOrd,
+    {
+        RNG.with(|rng| rng.borrow_mut().random_range(range))
+    }
+
+    fn random_ratio(&self) -> f64 {
+        RNG.with(|rng| rng.borrow_mut().random())
+    }
+
+    fn random_bool(&self, probability: f64) -> bool {
+        self.random_ratio() < probability
+    }
 }
