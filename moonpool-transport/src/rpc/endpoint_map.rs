@@ -34,7 +34,7 @@ pub trait MessageReceiver {
     }
 }
 
-/// Maps endpoint tokens to message receivers (FDB-compatible pattern).
+/// Maps endpoint tokens to message receivers.
 ///
 /// # Design
 ///

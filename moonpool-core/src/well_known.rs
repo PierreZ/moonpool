@@ -6,7 +6,7 @@
 
 use crate::types::UID;
 
-/// Well-known endpoint tokens (FDB-compatible pattern).
+/// Well-known endpoint tokens.
 ///
 /// These tokens are used for system services that need deterministic addressing
 /// without service discovery. Clients can construct endpoints directly using
