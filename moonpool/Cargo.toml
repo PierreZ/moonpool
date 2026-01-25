@@ -14,6 +14,6 @@ rustdoc-args = ["--cfg", "tokio_unstable"]
 rustc-args = ["--cfg", "tokio_unstable"]
 
 [dependencies]
-moonpool-core = { path = "../moonpool-core", version = "0.2.2" }
-moonpool-sim = { path = "../moonpool-sim", version = "0.2.2" }
-moonpool-transport = { path = "../moonpool-transport", version = "0.2.2" }
+moonpool-core = { path = "../moonpool-core", version = "0.3.0" }
+moonpool-sim = { path = "../moonpool-sim", version = "0.3.0" }
+moonpool-transport = { path = "../moonpool-transport", version = "0.3.0" }
