@@ -70,7 +70,7 @@ pub mod error;
 /// Resilient peer connection management.
 pub mod peer;
 
-/// FDB-compatible wire format with CRC32C checksums.
+/// Wire format with CRC32C checksums.
 pub mod wire;
 
 /// RPC layer with typed request/response patterns.

@@ -1,4 +1,4 @@
-//! Wire format for FDB-compatible packet serialization.
+//! Wire format for packet serialization.
 //!
 //! Packet format: `[length:4][checksum:4][token:16][payload:N]`
 //!
@@ -6,8 +6,6 @@
 //! - **checksum**: CRC32C of (token + payload) for integrity verification
 //! - **token**: Destination endpoint UID (two little-endian u64)
 //! - **payload**: Application data (custom serialization)
-//!
-//! This matches FDB's wire format for compatibility.
 
 use crate::UID;
 
@@ -112,7 +110,7 @@ impl PacketHeader {
     }
 }
 
-/// Compute CRC32C checksum over token + payload (FDB-compatible).
+/// Compute CRC32C checksum over token + payload.
 fn compute_checksum(token: UID, payload: &[u8]) -> u32 {
     let mut data = Vec::with_capacity(16 + payload.len());
     data.extend_from_slice(&token.first.to_le_bytes());

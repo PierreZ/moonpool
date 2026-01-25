@@ -27,7 +27,7 @@ Instead of `tokio::time::sleep()`, use `time_provider.sleep()`. This ensures you
 
 ## Core Types
 
-FDB-compatible types for endpoint addressing:
+Types for endpoint addressing:
 
 - `UID`: 128-bit unique identifier (deterministically generated in simulation)
 - `Endpoint`: Network address + token for direct addressing

@@ -1,7 +1,7 @@
-//! Core types for FDB-compatible endpoint addressing.
+//! Core types for endpoint addressing.
 //!
 //! This module provides the fundamental types for network addressing in moonpool:
-//! - [`UID`]: 128-bit unique identifier for endpoints (FDB-compatible)
+//! - [`UID`]: 128-bit unique identifier for endpoints
 //! - [`NetworkAddress`]: IP address + port + flags
 //! - [`Endpoint`]: Complete destination = address + token
 
@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::well_known::WellKnownToken;
 
-/// 128-bit unique identifier (FDB-compatible).
+/// 128-bit unique identifier.
 ///
-/// FDB pattern: well-known UIDs use `first = u64::MAX` (equivalent to -1 in C++).
-/// Random UIDs have both parts randomly generated.
+/// Well-known UIDs use `first = u64::MAX`. Random UIDs have both parts
+/// randomly generated.
 ///
 /// # Examples
 ///
@@ -94,7 +94,7 @@ impl std::fmt::Display for UID {
     }
 }
 
-/// Address flags (FDB-compatible).
+/// Address flags.
 pub mod flags {
     /// Connection uses TLS encryption.
     pub const FLAG_TLS: u16 = 1;
@@ -207,7 +207,7 @@ pub enum NetworkAddressParseError {
     MissingPort,
 }
 
-/// Endpoint = Address + Token (FDB-compatible).
+/// Endpoint = Address + Token.
 ///
 /// Represents a unique destination for messages. The combination of
 /// network address and UID token allows direct addressing without

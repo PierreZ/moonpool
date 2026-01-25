@@ -1,6 +1,6 @@
 //! Core peer implementation with automatic reconnection and message queuing.
 //!
-//! Provides FDB-compatible wire format with UID-based endpoint addressing.
+//! Provides wire format with UID-based endpoint addressing.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -62,7 +62,7 @@ impl ReconnectState {
 /// Provides automatic reconnection and message queuing while abstracting
 /// over provider implementations via the [`Providers`] trait bundle.
 ///
-/// Uses FDB-compatible wire format: `[length:4][checksum:4][token:16][payload]`
+/// Uses wire format: `[length:4][checksum:4][token:16][payload]`
 ///
 /// Follows FoundationDB's architecture: synchronous API with background actors.
 pub struct Peer<P: Providers> {
