@@ -14,9 +14,9 @@ rustdoc-args = ["--cfg", "tokio_unstable"]
 rustc-args = ["--cfg", "tokio_unstable"]
 
 [dependencies]
-moonpool-core = { path = "../moonpool-core", version = "0.2.2" }
-moonpool-sim = { path = "../moonpool-sim", version = "0.2.2" }
-moonpool-transport-derive = { path = "../moonpool-transport-derive", version = "0.2.2" }
+moonpool-core = { path = "../moonpool-core", version = "0.3.0" }
+moonpool-sim = { path = "../moonpool-sim", version = "0.3.0" }
+moonpool-transport-derive = { path = "../moonpool-transport-derive", version = "0.3.0" }
 
 async-trait = "0.1"
 crc32c = "0.6"
@@ -29,7 +29,7 @@ tokio-util = "0.7"
 tracing = "0.1"
 
 [dev-dependencies]
-moonpool-sim = { path = "../moonpool-sim", version = "0.2.2" }
+moonpool-sim = { path = "../moonpool-sim", version = "0.3.0" }
 tracing-subscriber = "0.3"
 
 [[example]]

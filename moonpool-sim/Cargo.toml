@@ -14,7 +14,7 @@ rustdoc-args = ["--cfg", "tokio_unstable"]
 rustc-args = ["--cfg", "tokio_unstable"]
 
 [dependencies]
-moonpool-core = { path = "../moonpool-core", version = "0.2.2" }
+moonpool-core = { path = "../moonpool-core", version = "0.3.0" }
 
 async-trait = "0.1"
 crc32c = "0.6"
