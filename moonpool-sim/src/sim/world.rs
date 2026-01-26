@@ -16,7 +16,7 @@ use tracing::instrument;
 use crate::{
     SimulationError, SimulationResult,
     network::{
-        NetworkConfiguration,
+        NetworkConfiguration, PartitionStrategy,
         sim::{ConnectionId, ListenerId, SimNetworkProvider},
     },
 };
@@ -572,6 +572,7 @@ impl SimWorld {
                 recv_delay: None,
                 is_half_open: false,
                 half_open_error_at: None,
+                is_stable: false,
             },
         );
 
@@ -600,6 +601,7 @@ impl SimWorld {
                 recv_delay: None,
                 is_half_open: false,
                 half_open_error_at: None,
+                is_stable: false,
             },
         );
 
@@ -920,25 +922,24 @@ impl SimWorld {
             connection_id.0
         );
 
-        // Check for packet loss
-        let packet_loss_prob = inner.network.config.chaos.packet_loss_probability;
-        if packet_loss_prob > 0.0 && crate::buggify_with_prob!(packet_loss_prob) {
-            tracing::info!(
-                "PacketLoss: connection={} bytes={} dropped",
-                connection_id.0,
-                data.len()
-            );
-            return;
-        }
+        // Check connection exists and if it's stable
+        let is_stable = inner
+            .network
+            .connections
+            .get(&connection_id)
+            .is_some_and(|conn| conn.is_stable);
 
-        // Check connection exists before potentially corrupting data
         if !inner.network.connections.contains_key(&connection_id) {
             tracing::warn!("DataDelivery: connection {} not found", connection_id.0);
             return;
         }
 
-        // Apply bit flipping chaos (needs mutable inner access)
-        let data_to_deliver = Self::maybe_corrupt_data(inner, &data);
+        // Apply bit flipping chaos (needs mutable inner access) - skip for stable connections
+        let data_to_deliver = if is_stable {
+            data
+        } else {
+            Self::maybe_corrupt_data(inner, &data)
+        };
 
         // Now get connection reference and deliver data
         let Some(conn) = inner.network.connections.get_mut(&connection_id) else {
@@ -1049,6 +1050,7 @@ impl SimWorld {
         let send_delay = conn.send_delay;
         let next_send_time = conn.next_send_time;
         let has_data = !conn.send_buffer.is_empty();
+        let is_stable = conn.is_stable; // For stable connection checks
 
         let recv_delay = paired_id.and_then(|pid| {
             inner
@@ -1076,8 +1078,8 @@ impl SimWorld {
 
         Self::wake_all(&mut inner.wakers.send_buffer_wakers, connection_id);
 
-        // BUGGIFY: Simulate partial/short writes
-        if crate::buggify!() && !data.is_empty() {
+        // BUGGIFY: Simulate partial/short writes (skip for stable connections)
+        if !is_stable && crate::buggify!() && !data.is_empty() {
             let max_send = std::cmp::min(
                 data.len(),
                 inner.network.config.chaos.partial_write_max_bytes,
@@ -1192,6 +1194,16 @@ impl SimWorld {
         let inner = self.inner.borrow();
         let config = &inner.network.config;
 
+        // Skip stable connections (FDB: stableConnection exempt from chaos)
+        if inner
+            .network
+            .connections
+            .get(&connection_id)
+            .is_some_and(|conn| conn.is_stable)
+        {
+            return false;
+        }
+
         // Skip if already clogged
         if let Some(clog_state) = inner.network.connection_clogs.get(&connection_id) {
             return inner.current_time < clog_state.expires_at;
@@ -1253,6 +1265,16 @@ impl SimWorld {
     pub fn should_clog_read(&self, connection_id: ConnectionId) -> bool {
         let inner = self.inner.borrow();
         let config = &inner.network.config;
+
+        // Skip stable connections (FDB: stableConnection exempt from chaos)
+        if inner
+            .network
+            .connections
+            .get(&connection_id)
+            .is_some_and(|conn| conn.is_stable)
+        {
+            return false;
+        }
 
         // Skip if already clogged
         if let Some(clog_state) = inner.network.read_clogs.get(&connection_id) {
@@ -1702,6 +1724,16 @@ impl SimWorld {
         let mut inner = self.inner.borrow_mut();
         let config = &inner.network.config;
 
+        // Skip stable connections (FDB: stableConnection exempt from chaos)
+        if inner
+            .network
+            .connections
+            .get(&connection_id)
+            .is_some_and(|conn| conn.is_stable)
+        {
+            return None;
+        }
+
         if config.chaos.random_close_probability <= 0.0 {
             return None;
         }
@@ -1860,6 +1892,48 @@ impl SimWorld {
             })
     }
 
+    // Stable Connection Methods
+
+    /// Mark a connection as stable, exempting it from chaos injection.
+    ///
+    /// Stable connections are exempt from:
+    /// - Random close (`roll_random_close`)
+    /// - Write clogging
+    /// - Read clogging
+    /// - Bit flip corruption
+    /// - Partial write truncation
+    ///
+    /// FDB ref: sim2.actor.cpp:357-362 (`stableConnection` flag)
+    ///
+    /// # Real-World Scenario
+    /// Use this for parent-child process connections or supervision channels
+    /// that should remain reliable even during chaos testing.
+    pub fn mark_connection_stable(&self, connection_id: ConnectionId) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
+            conn.is_stable = true;
+            tracing::debug!("Connection {} marked as stable", connection_id.0);
+
+            // Also mark the paired connection as stable
+            if let Some(paired_id) = conn.paired_connection
+                && let Some(paired_conn) = inner.network.connections.get_mut(&paired_id)
+            {
+                paired_conn.is_stable = true;
+                tracing::debug!("Paired connection {} also marked as stable", paired_id.0);
+            }
+        }
+    }
+
+    /// Check if a connection is marked as stable.
+    pub fn is_connection_stable(&self, connection_id: ConnectionId) -> bool {
+        let inner = self.inner.borrow();
+        inner
+            .network
+            .connections
+            .get(&connection_id)
+            .is_some_and(|conn| conn.is_stable)
+    }
+
     // Network Partition Control Methods
 
     /// Partition communication between two IP addresses for a specified duration
@@ -1968,6 +2042,11 @@ impl SimWorld {
     }
 
     /// Helper method for use with SimInner - randomly trigger partitions
+    ///
+    /// Supports different partition strategies based on configuration:
+    /// - Random: randomly partition individual IP pairs
+    /// - UniformSize: create uniform-sized partition groups
+    /// - IsolateSingle: isolate exactly one node from the rest
     fn randomly_trigger_partitions_with_inner(inner: &mut SimInner) {
         let partition_config = &inner.network.config;
 
@@ -1975,55 +2054,108 @@ impl SimWorld {
             return;
         }
 
-        let ip_pairs: Vec<(std::net::IpAddr, std::net::IpAddr)> = inner
+        // Check if we should trigger a partition this step
+        if sim_random::<f64>() >= partition_config.chaos.partition_probability {
+            return;
+        }
+
+        // Collect unique IPs from connections
+        let unique_ips: HashSet<IpAddr> = inner
             .network
             .connections
             .values()
-            .filter_map(|conn| {
-                if let (Some(local), Some(remote)) = (conn.local_ip, conn.remote_ip) {
-                    Some((local, remote))
-                } else {
-                    None
-                }
-            })
+            .filter_map(|conn| conn.local_ip)
             .collect();
 
-        for (from_ip, to_ip) in ip_pairs {
-            if inner
-                .network
-                .is_partitioned(from_ip, to_ip, inner.current_time)
-            {
-                continue;
+        if unique_ips.len() < 2 {
+            return; // Need at least 2 IPs to partition
+        }
+
+        let ip_list: Vec<IpAddr> = unique_ips.into_iter().collect();
+        let partition_duration =
+            crate::network::sample_duration(&partition_config.chaos.partition_duration);
+        let expires_at = inner.current_time + partition_duration;
+
+        // Select IPs to partition based on strategy
+        let partitioned_ips: Vec<IpAddr> = match partition_config.chaos.partition_strategy {
+            PartitionStrategy::Random => {
+                // Original behavior: randomly decide for each IP
+                ip_list
+                    .iter()
+                    .filter(|_| sim_random::<f64>() < 0.5)
+                    .copied()
+                    .collect()
             }
+            PartitionStrategy::UniformSize => {
+                // TigerBeetle-style: random partition size from 1 to n-1
+                let partition_size = sim_random_range(1..ip_list.len());
+                // Shuffle and take first N IPs
+                let mut shuffled = ip_list.clone();
+                // Simple Fisher-Yates shuffle
+                for i in (1..shuffled.len()).rev() {
+                    let j = sim_random_range(0..i + 1);
+                    shuffled.swap(i, j);
+                }
+                shuffled.into_iter().take(partition_size).collect()
+            }
+            PartitionStrategy::IsolateSingle => {
+                // Isolate exactly one node
+                let idx = sim_random_range(0..ip_list.len());
+                vec![ip_list[idx]]
+            }
+        };
 
-            if sim_random::<f64>() < partition_config.chaos.partition_probability {
-                let partition_duration =
-                    crate::network::sample_duration(&partition_config.chaos.partition_duration);
-                let expires_at = inner.current_time + partition_duration;
+        // Don't partition if we selected all IPs or none
+        if partitioned_ips.is_empty() || partitioned_ips.len() == ip_list.len() {
+            return;
+        }
 
+        // Create bi-directional partitions between partitioned and non-partitioned groups
+        let non_partitioned: Vec<IpAddr> = ip_list
+            .iter()
+            .filter(|ip| !partitioned_ips.contains(ip))
+            .copied()
+            .collect();
+
+        for &from_ip in &partitioned_ips {
+            for &to_ip in &non_partitioned {
+                // Skip if already partitioned
+                if inner
+                    .network
+                    .is_partitioned(from_ip, to_ip, inner.current_time)
+                {
+                    continue;
+                }
+
+                // Partition in both directions
                 inner
                     .network
                     .ip_partitions
                     .insert((from_ip, to_ip), PartitionState { expires_at });
-
-                let restore_event = Event::Connection {
-                    id: 0,
-                    state: ConnectionStateChange::PartitionRestore,
-                };
-                let sequence = inner.next_sequence;
-                inner.next_sequence += 1;
-                let scheduled_event = ScheduledEvent::new(expires_at, restore_event, sequence);
-                inner.event_queue.schedule(scheduled_event);
+                inner
+                    .network
+                    .ip_partitions
+                    .insert((to_ip, from_ip), PartitionState { expires_at });
 
                 tracing::debug!(
-                    "Randomly triggered partition {} -> {} until {:?}, restoration event scheduled with sequence {}",
+                    "Partition triggered: {} <-> {} until {:?} (strategy: {:?})",
                     from_ip,
                     to_ip,
                     expires_at,
-                    sequence
+                    partition_config.chaos.partition_strategy
                 );
             }
         }
+
+        // Schedule restoration event
+        let restore_event = Event::Connection {
+            id: 0,
+            state: ConnectionStateChange::PartitionRestore,
+        };
+        let sequence = inner.next_sequence;
+        inner.next_sequence += 1;
+        let scheduled_event = ScheduledEvent::new(expires_at, restore_event, sequence);
+        inner.event_queue.schedule(scheduled_event);
     }
 }
 

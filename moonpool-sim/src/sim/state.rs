@@ -139,6 +139,21 @@ pub struct ConnectionState {
     /// Before this time: writes succeed (data dropped), reads block.
     /// After this time: both read and write return ECONNRESET.
     pub half_open_error_at: Option<Duration>,
+
+    /// Whether this connection is stable (exempt from chaos).
+    ///
+    /// FDB ref: sim2.actor.cpp:357-362, 427, 440, 581-582 (stableConnection flag)
+    ///
+    /// Stable connections are exempt from:
+    /// - Random close (`roll_random_close`)
+    /// - Write clogging
+    /// - Read clogging
+    /// - Bit flip corruption
+    /// - Partial write truncation
+    ///
+    /// This is used for parent-child process connections or supervision channels
+    /// that should remain reliable even during chaos testing.
+    pub is_stable: bool,
 }
 
 /// Internal listener state for simulation
