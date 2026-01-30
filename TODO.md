@@ -61,7 +61,7 @@ moonpool-sim/src/
 
 Each task: implement → `cargo fmt` → `cargo clippy` → `cargo nextest run`
 
-**Commit after each phase**, not after each task.
+**Commit after each phase**, not after each task. **Update progress in this file before committing.**
 
 ### Phase 1: Core Traits (moonpool-core) ✓
 
