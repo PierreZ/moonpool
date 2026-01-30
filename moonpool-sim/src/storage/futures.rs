@@ -91,6 +91,7 @@ impl Future for SyncFuture {
 pub struct SetLenFuture {
     sim: WeakSimWorld,
     file_id: FileId,
+    /// The new length to set the file to.
     new_len: u64,
     /// Pending operation sequence number
     pending_op: Cell<Option<u64>>,
