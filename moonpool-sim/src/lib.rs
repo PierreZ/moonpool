@@ -131,7 +131,7 @@ pub use network::{
 };
 
 // Storage exports
-pub use storage::StorageConfiguration;
+pub use storage::{InMemoryStorage, SECTOR_SIZE, SectorBitSet, StorageConfiguration};
 
 // Provider exports
 pub use providers::{SimProviders, SimRandomProvider, SimTimeProvider};

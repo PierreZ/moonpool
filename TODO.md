@@ -105,28 +105,28 @@ Each task: implement → `cargo fmt` → `cargo clippy` → `cargo nextest run`
   }
   ```
 
-### Phase 3: In-Memory Storage (moonpool-sim)
+### Phase 3: In-Memory Storage (moonpool-sim) ✓
 
-- [ ] **3.1** Create `storage/memory.rs` with `InMemoryStorage`
+- [x] **3.1** Create `storage/memory.rs` with `InMemoryStorage`
   - `data: Vec<u8>` (pristine)
   - `written: BitSet` (512B sectors)
   - `faults: BitSet`
 
-- [ ] **3.2** Implement `read()` with fault application
+- [x] **3.2** Implement `read()` with fault application
   - Copy pristine data
   - Fill unwritten sectors with deterministic random
   - Apply corruption (deterministic seed from pristine bytes)
 
-- [ ] **3.3** Implement `write()`
+- [x] **3.3** Implement `write()`
   - Clear faults, copy to pristine, mark written
 
-- [ ] **3.4** Add misdirection overlay system (write misdirection)
+- [x] **3.4** Add misdirection overlay system (write misdirection)
 
-- [ ] **3.5** Add misdirected read support
+- [x] **3.5** Add misdirected read support
 
-- [ ] **3.6** Add phantom write tracking
+- [x] **3.6** Add phantom write tracking
 
-- [ ] **3.7** Implement `apply_crash()` for torn writes
+- [x] **3.7** Implement `apply_crash()` for torn writes
 
 ### Phase 4: Storage Events (moonpool-sim)
 
