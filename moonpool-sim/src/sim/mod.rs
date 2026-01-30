@@ -16,6 +16,7 @@ pub mod events;
 pub mod rng;
 pub mod sleep;
 pub mod state;
+pub mod storage_ops;
 pub mod wakers;
 pub mod world;
 
