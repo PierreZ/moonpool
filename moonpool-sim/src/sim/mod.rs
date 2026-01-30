@@ -20,7 +20,9 @@ pub mod wakers;
 pub mod world;
 
 // Re-export main types at module level
-pub use events::{ConnectionStateChange, Event, EventQueue, NetworkOperation, ScheduledEvent};
+pub use events::{
+    ConnectionStateChange, Event, EventQueue, NetworkOperation, ScheduledEvent, StorageOperation,
+};
 pub use rng::{
     get_current_sim_seed, reset_sim_rng, set_sim_seed, sim_random, sim_random_f64,
     sim_random_range, sim_random_range_or_default,

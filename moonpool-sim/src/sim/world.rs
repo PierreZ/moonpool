@@ -22,7 +22,10 @@ use crate::{
 };
 
 use super::{
-    events::{ConnectionStateChange, Event, EventQueue, NetworkOperation, ScheduledEvent},
+    events::{
+        ConnectionStateChange, Event, EventQueue, NetworkOperation, ScheduledEvent,
+        StorageOperation,
+    },
     rng::{reset_sim_rng, set_sim_seed, sim_random, sim_random_range},
     sleep::SleepFuture,
     state::{ClogState, CloseReason, ConnectionState, ListenerState, NetworkState, PartitionState},
@@ -795,6 +798,9 @@ impl SimWorld {
                 connection_id,
                 operation,
             } => Self::handle_network_event(inner, connection_id, operation),
+            Event::Storage { file_id, operation } => {
+                Self::handle_storage_event(inner, file_id, operation)
+            }
             Event::Shutdown => Self::handle_shutdown_event(inner),
         }
     }
@@ -1146,6 +1152,16 @@ impl SimWorld {
             },
             sequence,
         ));
+    }
+
+    /// Handle storage I/O events.
+    ///
+    /// Storage events represent the completion of I/O operations. Processing
+    /// is delegated to phases 5-7 when SimStorageFile is implemented.
+    fn handle_storage_event(_inner: &mut SimInner, _file_id: u64, _operation: StorageOperation) {
+        // Storage event processing will be implemented in later phases.
+        // For now, we just acknowledge the event type exists.
+        tracing::trace!("Storage event received (not yet implemented)");
     }
 
     /// Handle shutdown event - wake all pending tasks.

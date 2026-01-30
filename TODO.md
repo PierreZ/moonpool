@@ -128,11 +128,11 @@ Each task: implement → `cargo fmt` → `cargo clippy` → `cargo nextest run`
 
 - [x] **3.7** Implement `apply_crash()` for torn writes
 
-### Phase 4: Storage Events (moonpool-sim)
+### Phase 4: Storage Events (moonpool-sim) ✓
 
-- [ ] **4.1** Create `storage/events.rs` with `StorageOperation`
+- [x] **4.1** Create `storage/events.rs` with `StorageOperation`
 
-- [ ] **4.2** Add `Storage(StorageOperation)` to `Event` enum
+- [x] **4.2** Add `Storage(StorageOperation)` to `Event` enum
 
 ### Phase 5: SimWorld Integration (moonpool-sim)
 
