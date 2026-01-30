@@ -53,6 +53,12 @@ impl Future for SyncFuture {
             if sim.is_storage_op_complete(self.file_id, op_seq) {
                 // Clear pending state
                 self.pending_op.set(None);
+
+                // Check if sync failed due to fault injection
+                if sim.take_sync_failure(self.file_id, op_seq) {
+                    return Poll::Ready(Err(io::Error::other("sync failed (simulated I/O error)")));
+                }
+
                 return Poll::Ready(Ok(()));
             }
 

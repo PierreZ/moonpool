@@ -379,6 +379,8 @@ pub struct StorageState {
     pub path_to_file: HashMap<String, FileId>,
     /// Set of paths that have been deleted (for create_new semantics)
     pub deleted_paths: HashSet<String>,
+    /// Set of (file_id, op_seq) pairs for sync operations that failed
+    pub sync_failures: HashSet<(FileId, u64)>,
 }
 
 impl StorageState {
@@ -390,6 +392,7 @@ impl StorageState {
             files: HashMap::new(),
             path_to_file: HashMap::new(),
             deleted_paths: HashSet::new(),
+            sync_failures: HashSet::new(),
         }
     }
 }

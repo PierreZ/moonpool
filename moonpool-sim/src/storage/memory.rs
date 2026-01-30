@@ -204,6 +204,73 @@ impl InMemoryStorage {
         self.written.len()
     }
 
+    /// Resize the storage to a new size.
+    ///
+    /// If the new size is larger, the storage is extended with zeros.
+    /// If the new size is smaller, the storage is truncated.
+    pub fn resize(&mut self, new_size: u64) {
+        let old_size = self.size;
+        self.size = new_size;
+
+        // Resize data buffer
+        self.data.resize(new_size as usize, 0);
+
+        // Resize sector bitmaps
+        let new_num_sectors = (new_size as usize).div_ceil(SECTOR_SIZE);
+        let old_num_sectors = self.written.len();
+
+        if new_num_sectors > old_num_sectors {
+            // Extend bitmaps
+            self.written = {
+                let mut new_written = SectorBitSet::new(new_num_sectors);
+                for sector in 0..old_num_sectors {
+                    if self.written.is_set(sector) {
+                        new_written.set(sector);
+                    }
+                }
+                new_written
+            };
+            self.faults = {
+                let mut new_faults = SectorBitSet::new(new_num_sectors);
+                for sector in 0..old_num_sectors {
+                    if self.faults.is_set(sector) {
+                        new_faults.set(sector);
+                    }
+                }
+                new_faults
+            };
+        } else if new_num_sectors < old_num_sectors {
+            // Shrink bitmaps
+            self.written = {
+                let mut new_written = SectorBitSet::new(new_num_sectors);
+                for sector in 0..new_num_sectors {
+                    if self.written.is_set(sector) {
+                        new_written.set(sector);
+                    }
+                }
+                new_written
+            };
+            self.faults = {
+                let mut new_faults = SectorBitSet::new(new_num_sectors);
+                for sector in 0..new_num_sectors {
+                    if self.faults.is_set(sector) {
+                        new_faults.set(sector);
+                    }
+                }
+                new_faults
+            };
+        }
+
+        // Log resize for debugging
+        tracing::trace!(
+            "InMemoryStorage resized from {} to {} bytes ({} to {} sectors)",
+            old_size,
+            new_size,
+            old_num_sectors,
+            new_num_sectors
+        );
+    }
+
     /// Read data from storage, applying faults as needed.
     ///
     /// # Fault Application
@@ -362,6 +429,9 @@ impl InMemoryStorage {
 
     /// Write data to storage.
     ///
+    /// The storage automatically extends to accommodate writes past the current size,
+    /// similar to how real file systems work.
+    ///
     /// # Arguments
     ///
     /// * `offset` - Starting byte offset
@@ -370,23 +440,16 @@ impl InMemoryStorage {
     ///
     /// # Errors
     ///
-    /// Returns an error if the write would go past the end of storage.
+    /// Returns an error on overflow.
     pub fn write(&mut self, offset: u64, data: &[u8], is_synced: bool) -> io::Result<()> {
-        // Bounds check
+        // Bounds check (only for overflow)
         let end = offset
             .checked_add(data.len() as u64)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "offset overflow"))?;
 
+        // Auto-extend storage if writing past current size
         if end > self.size {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "write past end of storage: offset={}, len={}, size={}",
-                    offset,
-                    data.len(),
-                    self.size
-                ),
-            ));
+            self.resize(end);
         }
 
         let offset_usize = offset as usize;
@@ -440,14 +503,14 @@ impl InMemoryStorage {
     ///
     /// # Errors
     ///
-    /// Returns an error if either offset would go past the end of storage.
+    /// Returns an error on overflow.
     pub fn apply_misdirected_write(
         &mut self,
         intended_offset: u64,
         mistaken_offset: u64,
         data: &[u8],
     ) -> io::Result<()> {
-        // Bounds checks
+        // Bounds checks (only for overflow)
         let intended_end = intended_offset
             .checked_add(data.len() as u64)
             .ok_or_else(|| {
@@ -460,11 +523,10 @@ impl InMemoryStorage {
                 io::Error::new(io::ErrorKind::InvalidInput, "mistaken offset overflow")
             })?;
 
-        if intended_end > self.size || mistaken_end > self.size {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "misdirected write past end of storage",
-            ));
+        // Auto-extend storage to fit both intended and mistaken locations
+        let required_size = intended_end.max(mistaken_end);
+        if required_size > self.size {
+            self.resize(required_size);
         }
 
         // Save old data at intended target
@@ -866,13 +928,20 @@ mod tests {
     }
 
     #[test]
-    fn test_write_past_end() {
+    fn test_write_past_end_auto_extends() {
         let mut storage = InMemoryStorage::new(1024, 42);
 
-        let data = vec![0u8; 100];
+        // Writing past end should auto-extend the storage (like real file systems)
+        let data = vec![0xAB; 100];
         let result = storage.write(1000, &data, true);
 
-        assert!(result.is_err());
+        assert!(result.is_ok());
+        assert_eq!(storage.size(), 1100); // Extended to fit write
+
+        // Verify the data was written
+        let mut read_buf = vec![0u8; 100];
+        storage.read(1000, &mut read_buf).expect("read failed");
+        assert_eq!(read_buf, data);
     }
 
     #[test]

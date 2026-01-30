@@ -352,6 +352,18 @@ impl SimWorld {
         crate::TokioTaskProvider
     }
 
+    /// Create a storage provider for this simulation.
+    pub fn storage_provider(&self) -> crate::storage::SimStorageProvider {
+        crate::storage::SimStorageProvider::new(self.downgrade())
+    }
+
+    /// Set storage configuration for this simulation.
+    ///
+    /// Must be called before any storage operations are performed.
+    pub fn set_storage_config(&mut self, config: crate::storage::StorageConfiguration) {
+        self.inner.borrow_mut().storage.config = config;
+    }
+
     /// Access network configuration for latency calculations using thread-local RNG.
     ///
     /// This method provides access to the network configuration for calculating
@@ -1190,30 +1202,51 @@ impl SimWorld {
 
     /// Handle read operation completion.
     fn handle_read_complete(inner: &mut SimInner, file_id: FileId) {
+        let read_fault_probability = inner.storage.config.read_fault_probability;
+
         // Find and remove the oldest pending read operation
-        let op_seq = if let Some(file_state) = inner.storage.files.get_mut(&file_id) {
+        let op_info = if let Some(file_state) = inner.storage.files.get_mut(&file_id) {
             // Find the first pending read operation
-            let op_seq = file_state
+            let op_info = file_state
                 .pending_ops
                 .iter()
                 .find(|(_, op)| op.op_type == PendingOpType::Read)
-                .map(|(&seq, _)| seq);
+                .map(|(&seq, op)| (seq, op.offset, op.len));
 
-            if let Some(seq) = op_seq {
+            if let Some((seq, _, _)) = op_info {
                 file_state.pending_ops.remove(&seq);
             }
-            op_seq
+            op_info
         } else {
             tracing::warn!("ReadComplete for unknown file {:?}", file_id);
             return;
         };
 
-        // Wake the waker for this operation
-        if let Some(seq) = op_seq
-            && let Some(waker) = inner.wakers.storage_wakers.remove(&(file_id, seq))
-        {
-            tracing::trace!("Waking read waker for file {:?}, op {}", file_id, seq);
-            waker.wake();
+        // Apply read fault injection - mark sectors as faulted based on probability
+        if let Some((op_seq, offset, len)) = op_info {
+            if read_fault_probability > 0.0
+                && let Some(file_state) = inner.storage.files.get_mut(&file_id)
+            {
+                let start_sector = (offset as usize) / crate::storage::SECTOR_SIZE;
+                let end_sector = (offset as usize + len).div_ceil(crate::storage::SECTOR_SIZE);
+
+                for sector in start_sector..end_sector {
+                    if sim_random::<f64>() < read_fault_probability {
+                        file_state.storage.set_fault(sector);
+                        tracing::info!(
+                            "Read fault injected for file {:?}, sector {}",
+                            file_id,
+                            sector
+                        );
+                    }
+                }
+            }
+
+            // Wake the waker for this operation
+            if let Some(waker) = inner.wakers.storage_wakers.remove(&(file_id, op_seq)) {
+                tracing::trace!("Waking read waker for file {:?}, op {}", file_id, op_seq);
+                waker.wake();
+            }
         }
     }
 
@@ -1285,6 +1318,24 @@ impl SimWorld {
                 // Normal write (not synced - may be lost on crash)
                 else if let Err(e) = file_state.storage.write(offset, &data, false) {
                     tracing::warn!("Write failed for file {:?}: {}", file_id, e);
+                } else {
+                    // Check for write corruption - mark sectors as faulted after successful write
+                    if config.write_fault_probability > 0.0 {
+                        let start_sector = (offset as usize) / crate::storage::SECTOR_SIZE;
+                        let end_sector =
+                            (offset as usize + data.len()).div_ceil(crate::storage::SECTOR_SIZE);
+
+                        for sector in start_sector..end_sector {
+                            if sim_random::<f64>() < config.write_fault_probability {
+                                file_state.storage.set_fault(sector);
+                                tracing::info!(
+                                    "Write fault injected for file {:?}, sector {}",
+                                    file_id,
+                                    sector
+                                );
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1316,6 +1367,8 @@ impl SimWorld {
                 // Check for sync failure
                 if sim_random::<f64>() < sync_failure_prob {
                     tracing::info!("Sync failure injected for file {:?}", file_id);
+                    // Record the failure so SyncFuture can return an error
+                    inner.storage.sync_failures.insert((file_id, seq));
                     // On sync failure, we don't call storage.sync()
                     // Data remains in pending state and may be lost on crash
                 } else {
@@ -2468,15 +2521,29 @@ impl SimWorld {
 
         // If file already exists and we're opening it, return existing file ID
         if let Some(&existing_id) = inner.storage.path_to_file.get(&path_str) {
-            // If truncate is set, reset the storage
-            if options.truncate
-                && let Some(file_state) = inner.storage.files.get_mut(&existing_id)
-            {
-                let seed = sim_random::<u64>();
-                file_state.storage = InMemoryStorage::new(0, seed);
-                file_state.position = 0;
+            if let Some(file_state) = inner.storage.files.get_mut(&existing_id) {
+                // If truncate is set, reset the storage
+                if options.truncate {
+                    let seed = sim_random::<u64>();
+                    file_state.storage = InMemoryStorage::new(0, seed);
+                    file_state.position = 0;
+                } else if options.append {
+                    // For append mode, seek to end
+                    file_state.position = file_state.storage.size();
+                } else {
+                    // For normal reopen, reset position to start
+                    file_state.position = 0;
+                }
+                // Update options for the new open
+                file_state.options = options;
+                file_state.is_closed = false;
             }
             return Ok(existing_id);
+        }
+
+        // File doesn't exist - check if we're allowed to create it
+        if !options.create && !options.create_new {
+            return Err(SimulationError::IoError("File not found".to_string()));
         }
 
         // Create new file
@@ -2794,6 +2861,14 @@ impl SimWorld {
             // File not found means operation is effectively "complete" (failed)
             true
         }
+    }
+
+    /// Check if a sync operation failed and clear the failure flag.
+    ///
+    /// Returns true if the sync failed due to fault injection.
+    pub(crate) fn take_sync_failure(&self, file_id: FileId, op_seq: u64) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        inner.storage.sync_failures.remove(&(file_id, op_seq))
     }
 
     /// Register a waker for a storage operation.

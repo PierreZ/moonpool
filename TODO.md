@@ -180,33 +180,28 @@ Each task: implement → `cargo fmt` → `cargo clippy` → `cargo nextest run`
 
 - [x] **8.3** Update `lib.rs` exports
 
-### Phase 9: Testing (Simple, following moonpool patterns)
+### Phase 9: Testing (Simple, following moonpool patterns) ✅
 
-- [ ] **9.1** Create `tests/storage/mod.rs`
+- [x] **9.1** Create `tests/storage/mod.rs` (storage.rs + storage/ directory)
 
-- [ ] **9.2** Basic workload tests
-  ```rust
-  async fn simple_write_read<S: StorageProvider>(storage: S, path: &str) -> SimulationResult<()> {
-      let mut file = storage.open(path, OpenOptions::create_write()).await?;
-      file.write_all(b"hello").await?;
-      file.sync_all().await?;
-      file.seek(SeekFrom::Start(0)).await?;
-      let mut buf = [0u8; 5];
-      file.read_exact(&mut buf).await?;
-      assert_eq!(&buf, b"hello");
-      Ok(())
-  }
-  ```
+- [x] **9.2** Basic workload tests (8 tests in basic.rs)
+  - test_create_write_read, test_seek_operations, test_file_size, test_set_len
+  - test_sync_operations, test_file_not_found, test_file_already_exists, test_delete_and_rename
 
-- [ ] **9.3** Determinism tests
-  - Same seed = same timing
-  - Same seed = same corruption pattern
+- [x] **9.3** Determinism tests (4 tests in determinism.rs)
+  - test_same_seed_same_timing, test_same_seed_same_corruption
+  - test_different_seeds_different_timing, test_deterministic_misdirection
 
-- [ ] **9.4** Fault trigger tests (one per fault type)
-  - Enable fault, run workload, verify `sometimes_assert!` fires
+- [x] **9.4** Fault trigger tests (8 tests in faults.rs)
+  - test_read_corruption_fault, test_write_corruption_fault
+  - test_misdirected_write_fault, test_misdirected_read_fault
+  - test_phantom_write_fault, test_sync_failure_fault
+  - test_crash_torn_writes, test_uninitialized_reads
 
-- [ ] **9.5** Latency formula test
-  - Verify timing matches `1/iops + size/bandwidth`
+- [x] **9.5** Latency formula tests (6 tests in latency.rs)
+  - test_fast_storage_config, test_default_storage_config
+  - test_custom_latency_ranges, test_latency_formula
+  - test_read_latency_scales_with_size, test_write_latency_scales_with_size
 
 **Deferred (for file transport layer):**
 - Crash-recovery workflows
@@ -219,6 +214,63 @@ Each task: implement → `cargo fmt` → `cargo clippy` → `cargo nextest run`
 - [ ] **10.1** Doc comments on public items
 
 - [ ] **10.2** Update CLAUDE.md with storage patterns
+
+---
+
+## How to Write Simulation Tests
+
+### The Step Loop Pattern
+
+Storage operations return `Poll::Pending` and require simulation stepping (unlike network which buffers and returns `Poll::Ready` immediately). The correct pattern:
+
+1. `spawn_local` the async workload
+2. Loop: `sim.step()` → check `is_finished()` → `yield_now()`
+3. Await the handle when finished
+
+### Example
+
+```rust
+#[test]
+fn test_storage_operation() {
+    let local_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build_local(Default::default())
+        .expect("Failed to build local runtime");
+
+    local_runtime.block_on(async {
+        let mut sim = SimWorld::new();
+        let provider = sim.storage_provider();
+
+        // Spawn the async workload as a local task
+        let handle = tokio::task::spawn_local(async move {
+            let mut file = provider.open("test.txt", OpenOptions::create_write()).await?;
+            file.write_all(b"hello").await?;
+            file.sync_all().await?;
+            Ok::<_, std::io::Error>(())
+        });
+
+        // Step loop: process simulation events + yield to tasks
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+
+        handle.await.unwrap().unwrap();
+    });
+}
+```
+
+### Key Functions
+
+- `sim.step()` - Process one event
+- `sim.run_until_empty()` - Process all events (network-style, may not work for storage)
+- `sim.pending_event_count()` - Check pending events
+- `tokio::task::yield_now()` - Let spawned tasks run
+- `handle.is_finished()` - Check task completion
+- `sim.storage_provider()` - Create a storage provider for this simulation
 
 ---
 
