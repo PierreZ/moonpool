@@ -20,6 +20,26 @@ use super::{
 // Storage Event Handlers
 // =============================================================================
 
+/// Find and remove the first pending operation of the given type for a file.
+///
+/// Returns the sequence number and operation if found, or None if no such operation exists.
+fn take_pending_op(
+    inner: &mut SimInner,
+    file_id: FileId,
+    op_type: PendingOpType,
+) -> Option<(u64, PendingStorageOp)> {
+    let file_state = inner.storage.files.get_mut(&file_id)?;
+
+    let op_seq = file_state
+        .pending_ops
+        .iter()
+        .find(|(_, op)| op.op_type == op_type)
+        .map(|(&seq, _)| seq)?;
+
+    let op = file_state.pending_ops.remove(&op_seq)?;
+    Some((op_seq, op))
+}
+
 /// Handle storage I/O events.
 ///
 /// Storage events represent the completion of I/O operations.
@@ -55,48 +75,36 @@ fn handle_read_complete(inner: &mut SimInner, file_id: FileId) {
     let read_fault_probability = inner.storage.config.read_fault_probability;
 
     // Find and remove the oldest pending read operation
-    let op_info = if let Some(file_state) = inner.storage.files.get_mut(&file_id) {
-        // Find the first pending read operation
-        let op_info = file_state
-            .pending_ops
-            .iter()
-            .find(|(_, op)| op.op_type == PendingOpType::Read)
-            .map(|(&seq, op)| (seq, op.offset, op.len));
-
-        if let Some((seq, _, _)) = op_info {
-            file_state.pending_ops.remove(&seq);
-        }
-        op_info
-    } else {
+    let Some((op_seq, op)) = take_pending_op(inner, file_id, PendingOpType::Read) else {
         tracing::warn!("ReadComplete for unknown file {:?}", file_id);
         return;
     };
 
-    // Apply read fault injection - mark sectors as faulted based on probability
-    if let Some((op_seq, offset, len)) = op_info {
-        if read_fault_probability > 0.0
-            && let Some(file_state) = inner.storage.files.get_mut(&file_id)
-        {
-            let start_sector = (offset as usize) / crate::storage::SECTOR_SIZE;
-            let end_sector = (offset as usize + len).div_ceil(crate::storage::SECTOR_SIZE);
+    let (offset, len) = (op.offset, op.len);
 
-            for sector in start_sector..end_sector {
-                if sim_random::<f64>() < read_fault_probability {
-                    file_state.storage.set_fault(sector);
-                    tracing::info!(
-                        "Read fault injected for file {:?}, sector {}",
-                        file_id,
-                        sector
-                    );
-                }
+    // Apply read fault injection - mark sectors as faulted based on probability
+    if read_fault_probability > 0.0
+        && let Some(file_state) = inner.storage.files.get_mut(&file_id)
+    {
+        let start_sector = (offset as usize) / crate::storage::SECTOR_SIZE;
+        let end_sector = (offset as usize + len).div_ceil(crate::storage::SECTOR_SIZE);
+
+        for sector in start_sector..end_sector {
+            if sim_random::<f64>() < read_fault_probability {
+                file_state.storage.set_fault(sector);
+                tracing::info!(
+                    "Read fault injected for file {:?}, sector {}",
+                    file_id,
+                    sector
+                );
             }
         }
+    }
 
-        // Wake the waker for this operation
-        if let Some(waker) = inner.wakers.storage_wakers.remove(&(file_id, op_seq)) {
-            tracing::trace!("Waking read waker for file {:?}, op {}", file_id, op_seq);
-            waker.wake();
-        }
+    // Wake the waker for this operation
+    if let Some(waker) = inner.wakers.storage_wakers.remove(&(file_id, op_seq)) {
+        tracing::trace!("Waking read waker for file {:?}, op {}", file_id, op_seq);
+        waker.wake();
     }
 }
 
@@ -108,92 +116,79 @@ fn handle_read_complete(inner: &mut SimInner, file_id: FileId) {
 fn handle_write_complete(inner: &mut SimInner, file_id: FileId) {
     let config = inner.storage.config.clone();
 
-    // Find the oldest pending write operation and extract its data
-    let op_info = if let Some(file_state) = inner.storage.files.get_mut(&file_id) {
-        let op_seq = file_state
-            .pending_ops
-            .iter()
-            .find(|(_, op)| op.op_type == PendingOpType::Write)
-            .map(|(&seq, _)| seq);
-
-        if let Some(seq) = op_seq {
-            let op = file_state.pending_ops.remove(&seq);
-            op.map(|o| (seq, o.offset, o.data))
-        } else {
-            None
-        }
-    } else {
+    // Find and remove the oldest pending write operation
+    let Some((op_seq, op)) = take_pending_op(inner, file_id, PendingOpType::Write) else {
         tracing::warn!("WriteComplete for unknown file {:?}", file_id);
         return;
     };
 
-    // Apply the write with potential fault injection
-    if let Some((op_seq, offset, data_opt)) = op_info {
-        if let Some(data) = data_opt
-            && let Some(file_state) = inner.storage.files.get_mut(&file_id)
-        {
-            // Check for phantom write (write appears to succeed but doesn't persist)
-            if sim_random::<f64>() < config.phantom_write_probability {
-                tracing::info!(
-                    "Phantom write injected for file {:?}, offset {}, len {}",
-                    file_id,
-                    offset,
-                    data.len()
-                );
-                file_state.storage.record_phantom_write(offset, &data);
-            }
-            // Check for misdirected write
-            else if sim_random::<f64>() < config.misdirect_write_probability {
-                // Pick a random different offset
-                let max_offset = file_state.storage.size().saturating_sub(data.len() as u64);
-                let mistaken_offset = if max_offset > 0 {
-                    sim_random_range(0..max_offset)
-                } else {
-                    0
-                };
-                tracing::info!(
-                    "Misdirected write injected for file {:?}: intended={}, actual={}",
-                    file_id,
-                    offset,
-                    mistaken_offset
-                );
-                if let Err(e) =
-                    file_state
-                        .storage
-                        .apply_misdirected_write(offset, mistaken_offset, &data)
-                {
-                    tracing::warn!("Failed to apply misdirected write: {}", e);
-                }
-            }
-            // Normal write (not synced - may be lost on crash)
-            else if let Err(e) = file_state.storage.write(offset, &data, false) {
-                tracing::warn!("Write failed for file {:?}: {}", file_id, e);
-            } else {
-                // Check for write corruption - mark sectors as faulted after successful write
-                if config.write_fault_probability > 0.0 {
-                    let start_sector = (offset as usize) / crate::storage::SECTOR_SIZE;
-                    let end_sector =
-                        (offset as usize + data.len()).div_ceil(crate::storage::SECTOR_SIZE);
+    let (offset, data_opt) = (op.offset, op.data);
 
-                    for sector in start_sector..end_sector {
-                        if sim_random::<f64>() < config.write_fault_probability {
-                            file_state.storage.set_fault(sector);
-                            tracing::info!(
-                                "Write fault injected for file {:?}, sector {}",
-                                file_id,
-                                sector
-                            );
-                        }
+    // Apply the write with potential fault injection
+    if let Some(data) = data_opt
+        && let Some(file_state) = inner.storage.files.get_mut(&file_id)
+    {
+        // Check for phantom write (write appears to succeed but doesn't persist)
+        if sim_random::<f64>() < config.phantom_write_probability {
+            tracing::info!(
+                "Phantom write injected for file {:?}, offset {}, len {}",
+                file_id,
+                offset,
+                data.len()
+            );
+            file_state.storage.record_phantom_write(offset, &data);
+        }
+        // Check for misdirected write
+        else if sim_random::<f64>() < config.misdirect_write_probability {
+            // Pick a random different offset
+            let max_offset = file_state.storage.size().saturating_sub(data.len() as u64);
+            let mistaken_offset = if max_offset > 0 {
+                sim_random_range(0..max_offset)
+            } else {
+                0
+            };
+            tracing::info!(
+                "Misdirected write injected for file {:?}: intended={}, actual={}",
+                file_id,
+                offset,
+                mistaken_offset
+            );
+            if let Err(e) =
+                file_state
+                    .storage
+                    .apply_misdirected_write(offset, mistaken_offset, &data)
+            {
+                tracing::warn!("Failed to apply misdirected write: {}", e);
+            }
+        }
+        // Normal write (not synced - may be lost on crash)
+        else if let Err(e) = file_state.storage.write(offset, &data, false) {
+            tracing::warn!("Write failed for file {:?}: {}", file_id, e);
+        } else {
+            // Check for write corruption - mark sectors as faulted after successful write
+            if config.write_fault_probability > 0.0 {
+                let start_sector = (offset as usize) / crate::storage::SECTOR_SIZE;
+                let end_sector =
+                    (offset as usize + data.len()).div_ceil(crate::storage::SECTOR_SIZE);
+
+                for sector in start_sector..end_sector {
+                    if sim_random::<f64>() < config.write_fault_probability {
+                        file_state.storage.set_fault(sector);
+                        tracing::info!(
+                            "Write fault injected for file {:?}, sector {}",
+                            file_id,
+                            sector
+                        );
                     }
                 }
             }
         }
+    }
 
-        // Wake the waker for this operation
-        if let Some(waker) = inner.wakers.storage_wakers.remove(&(file_id, op_seq)) {
-            tracing::trace!("Waking write waker for file {:?}, op {}", file_id, op_seq);
-            waker.wake();
-        }
+    // Wake the waker for this operation
+    if let Some(waker) = inner.wakers.storage_wakers.remove(&(file_id, op_seq)) {
+        tracing::trace!("Waking write waker for file {:?}, op {}", file_id, op_seq);
+        waker.wake();
     }
 }
 
@@ -204,39 +199,26 @@ fn handle_sync_complete(inner: &mut SimInner, file_id: FileId) {
     let sync_failure_prob = inner.storage.config.sync_failure_probability;
 
     // Find and remove the oldest pending sync operation
-    let op_seq = if let Some(file_state) = inner.storage.files.get_mut(&file_id) {
-        let op_seq = file_state
-            .pending_ops
-            .iter()
-            .find(|(_, op)| op.op_type == PendingOpType::Sync)
-            .map(|(&seq, _)| seq);
-
-        if let Some(seq) = op_seq {
-            file_state.pending_ops.remove(&seq);
-
-            // Check for sync failure
-            if sim_random::<f64>() < sync_failure_prob {
-                tracing::info!("Sync failure injected for file {:?}", file_id);
-                // Record the failure so SyncFuture can return an error
-                inner.storage.sync_failures.insert((file_id, seq));
-                // On sync failure, we don't call storage.sync()
-                // Data remains in pending state and may be lost on crash
-            } else {
-                // Successful sync - make all pending writes durable
-                file_state.storage.sync();
-            }
-        }
-        op_seq
-    } else {
+    let Some((op_seq, _)) = take_pending_op(inner, file_id, PendingOpType::Sync) else {
         tracing::warn!("SyncComplete for unknown file {:?}", file_id);
         return;
     };
 
+    // Check for sync failure
+    if sim_random::<f64>() < sync_failure_prob {
+        tracing::info!("Sync failure injected for file {:?}", file_id);
+        // Record the failure so SyncFuture can return an error
+        inner.storage.sync_failures.insert((file_id, op_seq));
+        // On sync failure, we don't call storage.sync()
+        // Data remains in pending state and may be lost on crash
+    } else if let Some(file_state) = inner.storage.files.get_mut(&file_id) {
+        // Successful sync - make all pending writes durable
+        file_state.storage.sync();
+    }
+
     // Wake the waker for this operation
-    if let Some(seq) = op_seq
-        && let Some(waker) = inner.wakers.storage_wakers.remove(&(file_id, seq))
-    {
-        tracing::trace!("Waking sync waker for file {:?}, op {}", file_id, seq);
+    if let Some(waker) = inner.wakers.storage_wakers.remove(&(file_id, op_seq)) {
+        tracing::trace!("Waking sync waker for file {:?}, op {}", file_id, op_seq);
         waker.wake();
     }
 }
@@ -244,28 +226,15 @@ fn handle_sync_complete(inner: &mut SimInner, file_id: FileId) {
 /// Handle open operation completion.
 fn handle_open_complete(inner: &mut SimInner, file_id: FileId) {
     // Find and remove the oldest pending open operation
-    let op_seq = if let Some(file_state) = inner.storage.files.get_mut(&file_id) {
-        let op_seq = file_state
-            .pending_ops
-            .iter()
-            .find(|(_, op)| op.op_type == PendingOpType::Open)
-            .map(|(&seq, _)| seq);
-
-        if let Some(seq) = op_seq {
-            file_state.pending_ops.remove(&seq);
-        }
-        op_seq
-    } else {
+    let Some((op_seq, _)) = take_pending_op(inner, file_id, PendingOpType::Open) else {
         // File might not have pending open op (it was already "open" on creation)
         tracing::trace!("OpenComplete for file {:?} (no pending op)", file_id);
         return;
     };
 
     // Wake the waker for this operation
-    if let Some(seq) = op_seq
-        && let Some(waker) = inner.wakers.storage_wakers.remove(&(file_id, seq))
-    {
-        tracing::trace!("Waking open waker for file {:?}, op {}", file_id, seq);
+    if let Some(waker) = inner.wakers.storage_wakers.remove(&(file_id, op_seq)) {
+        tracing::trace!("Waking open waker for file {:?}, op {}", file_id, op_seq);
         waker.wake();
     }
 }
@@ -273,46 +242,22 @@ fn handle_open_complete(inner: &mut SimInner, file_id: FileId) {
 /// Handle set_len operation completion.
 fn handle_set_len_complete(inner: &mut SimInner, file_id: FileId, new_len: u64) {
     // Find and remove the oldest pending set_len operation
-    let op_seq = if let Some(file_state) = inner.storage.files.get_mut(&file_id) {
-        let op_seq = file_state
-            .pending_ops
-            .iter()
-            .find(|(_, op)| op.op_type == PendingOpType::SetLen)
-            .map(|(&seq, _)| seq);
-
-        if let Some(seq) = op_seq {
-            file_state.pending_ops.remove(&seq);
-
-            // Resize the storage
-            // Note: InMemoryStorage doesn't have a resize method, so we create a new one
-            // This is a simplification - in a real implementation we'd preserve existing data
-            let seed = sim_random::<u64>();
-            let mut new_storage = crate::storage::InMemoryStorage::new(new_len, seed);
-
-            // Copy existing data up to the minimum of old and new sizes
-            let copy_len = file_state.storage.size().min(new_len) as usize;
-            if copy_len > 0 {
-                let mut buf = vec![0u8; copy_len];
-                if file_state.storage.read(0, &mut buf).is_ok() {
-                    let _ = new_storage.write(0, &buf, true);
-                }
-            }
-            file_state.storage = new_storage;
-        }
-        op_seq
-    } else {
+    let Some((op_seq, _)) = take_pending_op(inner, file_id, PendingOpType::SetLen) else {
         tracing::warn!("SetLenComplete for unknown file {:?}", file_id);
         return;
     };
 
+    // Resize the storage (preserves seed, written/fault bitmaps, and overlays)
+    if let Some(file_state) = inner.storage.files.get_mut(&file_id) {
+        file_state.storage.resize(new_len);
+    }
+
     // Wake the waker for this operation
-    if let Some(seq) = op_seq
-        && let Some(waker) = inner.wakers.storage_wakers.remove(&(file_id, seq))
-    {
+    if let Some(waker) = inner.wakers.storage_wakers.remove(&(file_id, op_seq)) {
         tracing::trace!(
             "Waking set_len waker for file {:?}, op {}, new_len={}",
             file_id,
-            seq,
+            op_seq,
             new_len
         );
         waker.wake();

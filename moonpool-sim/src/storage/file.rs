@@ -11,11 +11,7 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 
 use super::futures::{SetLenFuture, SyncFuture};
-
-/// Create an io::Error for simulation shutdown.
-fn sim_shutdown_error() -> io::Error {
-    io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown")
-}
+use super::sim_shutdown_error;
 
 /// State for an in-progress seek operation.
 #[derive(Debug, Clone, Copy)]

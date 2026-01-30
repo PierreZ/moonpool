@@ -12,10 +12,7 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-/// Create an io::Error for simulation shutdown.
-fn sim_shutdown_error() -> io::Error {
-    io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown")
-}
+use super::sim_shutdown_error;
 
 /// Future for sync_all and sync_data operations.
 ///

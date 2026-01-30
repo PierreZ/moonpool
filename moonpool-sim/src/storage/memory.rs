@@ -54,15 +54,23 @@ impl SectorBitSet {
         }
     }
 
+    /// Calculate word and bit indices for a sector.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `sector` is out of bounds.
+    fn indices(&self, sector: usize) -> (usize, usize) {
+        assert!(sector < self.len, "sector index out of bounds");
+        (sector / 64, sector % 64)
+    }
+
     /// Set the bit for the given sector.
     ///
     /// # Panics
     ///
     /// Panics if `sector` is out of bounds.
     pub fn set(&mut self, sector: usize) {
-        assert!(sector < self.len, "sector index out of bounds");
-        let word = sector / 64;
-        let bit = sector % 64;
+        let (word, bit) = self.indices(sector);
         self.bits[word] |= 1 << bit;
     }
 
@@ -72,9 +80,7 @@ impl SectorBitSet {
     ///
     /// Panics if `sector` is out of bounds.
     pub fn clear(&mut self, sector: usize) {
-        assert!(sector < self.len, "sector index out of bounds");
-        let word = sector / 64;
-        let bit = sector % 64;
+        let (word, bit) = self.indices(sector);
         self.bits[word] &= !(1 << bit);
     }
 
@@ -84,9 +90,7 @@ impl SectorBitSet {
     ///
     /// Panics if `sector` is out of bounds.
     pub fn is_set(&self, sector: usize) -> bool {
-        assert!(sector < self.len, "sector index out of bounds");
-        let word = sector / 64;
-        let bit = sector % 64;
+        let (word, bit) = self.indices(sector);
         (self.bits[word] & (1 << bit)) != 0
     }
 
@@ -98,6 +102,20 @@ impl SectorBitSet {
     /// Check if the bitset is empty (has zero capacity).
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    /// Create a new bitset by copying set bits from another bitset.
+    ///
+    /// Only copies bits up to the minimum of both bitsets' lengths.
+    pub fn resize_copy(other: &Self, new_len: usize) -> Self {
+        let mut new_bitset = Self::new(new_len);
+        let copy_len = other.len.min(new_len);
+        for sector in 0..copy_len {
+            if other.is_set(sector) {
+                new_bitset.set(sector);
+            }
+        }
+        new_bitset
     }
 }
 
@@ -215,50 +233,13 @@ impl InMemoryStorage {
         // Resize data buffer
         self.data.resize(new_size as usize, 0);
 
-        // Resize sector bitmaps
+        // Resize sector bitmaps if needed
         let new_num_sectors = (new_size as usize).div_ceil(SECTOR_SIZE);
         let old_num_sectors = self.written.len();
 
-        if new_num_sectors > old_num_sectors {
-            // Extend bitmaps
-            self.written = {
-                let mut new_written = SectorBitSet::new(new_num_sectors);
-                for sector in 0..old_num_sectors {
-                    if self.written.is_set(sector) {
-                        new_written.set(sector);
-                    }
-                }
-                new_written
-            };
-            self.faults = {
-                let mut new_faults = SectorBitSet::new(new_num_sectors);
-                for sector in 0..old_num_sectors {
-                    if self.faults.is_set(sector) {
-                        new_faults.set(sector);
-                    }
-                }
-                new_faults
-            };
-        } else if new_num_sectors < old_num_sectors {
-            // Shrink bitmaps
-            self.written = {
-                let mut new_written = SectorBitSet::new(new_num_sectors);
-                for sector in 0..new_num_sectors {
-                    if self.written.is_set(sector) {
-                        new_written.set(sector);
-                    }
-                }
-                new_written
-            };
-            self.faults = {
-                let mut new_faults = SectorBitSet::new(new_num_sectors);
-                for sector in 0..new_num_sectors {
-                    if self.faults.is_set(sector) {
-                        new_faults.set(sector);
-                    }
-                }
-                new_faults
-            };
+        if new_num_sectors != old_num_sectors {
+            self.written = SectorBitSet::resize_copy(&self.written, new_num_sectors);
+            self.faults = SectorBitSet::resize_copy(&self.faults, new_num_sectors);
         }
 
         // Log resize for debugging
@@ -384,13 +365,10 @@ impl InMemoryStorage {
 
         // Use pristine bytes as seed so retries don't help
         let sector_start = sector * SECTOR_SIZE;
-        let seed_bytes = if sector_start + 8 <= self.data.len() {
-            self.data[sector_start..sector_start + 8]
-                .try_into()
-                .unwrap_or([0u8; 8])
-        } else {
-            [0u8; 8]
-        };
+        let mut seed_bytes = [0u8; 8];
+        if sector_start + 8 <= self.data.len() {
+            seed_bytes.copy_from_slice(&self.data[sector_start..sector_start + 8]);
+        }
         let seed = u64::from_le_bytes(seed_bytes);
 
         let mut rng = ChaCha8Rng::seed_from_u64(seed);

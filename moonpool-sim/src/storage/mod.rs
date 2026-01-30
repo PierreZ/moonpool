@@ -21,6 +21,15 @@ pub mod memory;
 /// Storage provider implementation
 pub mod provider;
 
+use std::io;
+
+/// Create an io::Error for simulation shutdown.
+///
+/// Used by storage futures and file operations when the simulation has been dropped.
+pub(crate) fn sim_shutdown_error() -> io::Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown")
+}
+
 // Re-export configuration
 pub use config::StorageConfiguration;
 
