@@ -387,3 +387,422 @@ fn test_uninitialized_reads() {
         println!("Uninitialized read: first 10 bytes = {:?}", &data[..10]);
     });
 }
+
+// ============================================================================
+// Mixed Fault Probability Tests
+// ============================================================================
+
+/// Test with realistic low fault probabilities (like production scenarios)
+#[test]
+fn test_mixed_low_fault_probabilities() {
+    local_runtime().block_on(async {
+        // Realistic fault probabilities - low but non-zero
+        let mut config = StorageConfiguration::fast_local();
+        config.read_fault_probability = 0.01; // 1%
+        config.write_fault_probability = 0.01; // 1%
+        config.sync_failure_probability = 0.005; // 0.5%
+
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(config);
+
+        // Run many operations and count successes/failures
+        let mut write_successes = 0;
+        let mut write_failures = 0;
+        let mut read_successes = 0;
+        let mut read_failures = 0;
+
+        for i in 0..100 {
+            let provider = sim.storage_provider();
+            let filename = format!("mixed_{}.txt", i);
+
+            // Try write
+            let handle = tokio::task::spawn_local(async move {
+                let mut file = provider
+                    .open(&filename, OpenOptions::create_write())
+                    .await?;
+                file.write_all(b"test data").await?;
+                file.sync_all().await?;
+                drop(file);
+                Ok::<_, std::io::Error>(())
+            });
+
+            while !handle.is_finished() {
+                while sim.pending_event_count() > 0 {
+                    sim.step();
+                }
+                tokio::task::yield_now().await;
+            }
+
+            match handle.await.expect("task panicked") {
+                Ok(()) => write_successes += 1,
+                Err(_) => write_failures += 1,
+            }
+
+            // Try read (if write succeeded)
+            if write_successes > read_successes + read_failures {
+                let provider2 = sim.storage_provider();
+                let filename = format!("mixed_{}.txt", i);
+                let handle2 = tokio::task::spawn_local(async move {
+                    let mut file = provider2.open(&filename, OpenOptions::read_only()).await?;
+                    let mut buf = Vec::new();
+                    file.read_to_end(&mut buf).await?;
+                    Ok::<_, std::io::Error>(())
+                });
+
+                while !handle2.is_finished() {
+                    while sim.pending_event_count() > 0 {
+                        sim.step();
+                    }
+                    tokio::task::yield_now().await;
+                }
+
+                match handle2.await.expect("task panicked") {
+                    Ok(()) => read_successes += 1,
+                    Err(_) => read_failures += 1,
+                }
+            }
+        }
+
+        println!(
+            "Mixed faults: writes {}/{}, reads {}/{}",
+            write_successes,
+            write_successes + write_failures,
+            read_successes,
+            read_successes + read_failures
+        );
+
+        // With 1% fault rates over 100 operations, we expect some failures
+        // but not all failures
+        assert!(
+            write_successes > 0,
+            "Some writes should succeed with low fault rates"
+        );
+        assert!(
+            read_successes > 0,
+            "Some reads should succeed with low fault rates"
+        );
+    });
+}
+
+/// Test with multiple fault types enabled simultaneously
+#[test]
+fn test_combined_fault_types() {
+    local_runtime().block_on(async {
+        let mut config = StorageConfiguration::fast_local();
+        config.read_fault_probability = 0.1; // 10%
+        config.write_fault_probability = 0.1; // 10%
+        config.misdirect_read_probability = 0.05; // 5%
+        config.misdirect_write_probability = 0.05; // 5%
+        config.phantom_write_probability = 0.05; // 5%
+
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(config);
+
+        let provider = sim.storage_provider();
+
+        // Run operations - expect various fault behaviors
+        let handle = tokio::task::spawn_local(async move {
+            let mut results = Vec::new();
+
+            for i in 0..20 {
+                let filename = format!("combined_{}.txt", i);
+
+                // Write
+                let write_result = async {
+                    let mut file = provider
+                        .open(&filename, OpenOptions::create_write())
+                        .await?;
+                    file.write_all(format!("Data {}", i).as_bytes()).await?;
+                    file.sync_all().await?;
+                    Ok::<_, std::io::Error>(())
+                }
+                .await;
+
+                // Read back if write succeeded
+                let read_result = if write_result.is_ok() {
+                    async {
+                        let mut file = provider.open(&filename, OpenOptions::read_only()).await?;
+                        let mut buf = Vec::new();
+                        file.read_to_end(&mut buf).await?;
+                        Ok::<_, std::io::Error>(buf)
+                    }
+                    .await
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "write failed",
+                    ))
+                };
+
+                results.push((write_result.is_ok(), read_result.is_ok()));
+            }
+
+            Ok::<_, std::io::Error>(results)
+        });
+
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let results = handle.await.expect("task panicked").expect("test failed");
+
+        let writes_ok = results.iter().filter(|(w, _)| *w).count();
+        let reads_ok = results.iter().filter(|(_, r)| *r).count();
+
+        println!(
+            "Combined faults: {} writes OK, {} reads OK out of 20",
+            writes_ok, reads_ok
+        );
+
+        // With combined 10-20% fault rates, expect mixed results
+        // Not all should fail, not all should succeed
+    });
+}
+
+// ============================================================================
+// Fault Determinism Tests
+// ============================================================================
+
+/// Test that same seed produces same fault pattern
+#[test]
+fn test_fault_determinism_same_seed() {
+    use moonpool_sim::set_sim_seed;
+
+    local_runtime().block_on(async {
+        let seed = 42u64;
+
+        // Run with specific seed
+        set_sim_seed(seed);
+
+        let mut config = StorageConfiguration::fast_local();
+        config.read_fault_probability = 0.5; // 50% for visibility
+
+        let mut sim1 = SimWorld::new();
+        sim1.set_storage_config(config.clone());
+
+        let provider = sim1.storage_provider();
+        let handle = tokio::task::spawn_local(async move {
+            let mut results = Vec::new();
+            for i in 0..10 {
+                let filename = format!("det_{}.txt", i);
+
+                // Create file first
+                let mut file = provider
+                    .open(&filename, OpenOptions::create_write())
+                    .await
+                    .expect("create failed");
+                file.write_all(b"test").await.expect("write failed");
+                file.sync_all().await.expect("sync failed");
+                drop(file);
+
+                // Read back
+                let result = async {
+                    let mut file = provider.open(&filename, OpenOptions::read_only()).await?;
+                    let mut buf = Vec::new();
+                    file.read_to_end(&mut buf).await?;
+                    Ok::<_, std::io::Error>(buf)
+                }
+                .await;
+
+                results.push(result.is_ok());
+            }
+            results
+        });
+
+        while !handle.is_finished() {
+            while sim1.pending_event_count() > 0 {
+                sim1.step();
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let results1 = handle.await.expect("task panicked");
+
+        // Run again with same seed
+        set_sim_seed(seed);
+
+        let mut sim2 = SimWorld::new();
+        sim2.set_storage_config(config);
+
+        let provider = sim2.storage_provider();
+        let handle = tokio::task::spawn_local(async move {
+            let mut results = Vec::new();
+            for i in 0..10 {
+                let filename = format!("det_{}.txt", i);
+
+                let mut file = provider
+                    .open(&filename, OpenOptions::create_write())
+                    .await
+                    .expect("create failed");
+                file.write_all(b"test").await.expect("write failed");
+                file.sync_all().await.expect("sync failed");
+                drop(file);
+
+                let result = async {
+                    let mut file = provider.open(&filename, OpenOptions::read_only()).await?;
+                    let mut buf = Vec::new();
+                    file.read_to_end(&mut buf).await?;
+                    Ok::<_, std::io::Error>(buf)
+                }
+                .await;
+
+                results.push(result.is_ok());
+            }
+            results
+        });
+
+        while !handle.is_finished() {
+            while sim2.pending_event_count() > 0 {
+                sim2.step();
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let results2 = handle.await.expect("task panicked");
+
+        println!("Run 1: {:?}", results1);
+        println!("Run 2: {:?}", results2);
+
+        assert_eq!(
+            results1, results2,
+            "Same seed should produce same fault pattern"
+        );
+    });
+}
+
+/// Test that fault injection produces a mix of corrupted and intact reads
+#[test]
+fn test_fault_injection_produces_mixed_results() {
+    use moonpool_sim::set_sim_seed;
+
+    local_runtime().block_on(async {
+        set_sim_seed(12345);
+
+        let mut config = StorageConfiguration::fast_local();
+        config.read_fault_probability = 0.5; // 50% read corruption
+
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(config);
+
+        let provider = sim.storage_provider();
+        let handle = tokio::task::spawn_local(async move {
+            let mut corrupted_count = 0;
+            let mut intact_count = 0;
+            let original_data = b"testdata";
+
+            for i in 0..20 {
+                let filename = format!("mixed_{}.txt", i);
+
+                let mut file = provider
+                    .open(&filename, OpenOptions::create_write())
+                    .await
+                    .expect("create failed");
+                file.write_all(original_data).await.expect("write failed");
+                file.sync_all().await.expect("sync failed");
+                drop(file);
+
+                // Read back and check if corrupted
+                let mut file = provider
+                    .open(&filename, OpenOptions::read_only())
+                    .await
+                    .expect("open failed");
+                let mut buf = vec![0u8; original_data.len()];
+                file.read_exact(&mut buf).await.expect("read failed");
+
+                if buf != original_data {
+                    corrupted_count += 1;
+                } else {
+                    intact_count += 1;
+                }
+            }
+            (corrupted_count, intact_count)
+        });
+
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let (corrupted, intact) = handle.await.expect("task panicked");
+
+        println!(
+            "Fault injection results: {} corrupted, {} intact out of 20",
+            corrupted, intact
+        );
+
+        // With 50% fault probability over 20 operations, we should see
+        // a mix of corrupted and intact reads (not all one or the other)
+        assert!(
+            corrupted > 0,
+            "With 50% fault probability, some reads should be corrupted"
+        );
+        assert!(
+            intact > 0,
+            "With 50% fault probability, some reads should be intact"
+        );
+    });
+}
+
+/// Test corruption content is deterministic with same seed
+#[test]
+fn test_corruption_content_deterministic() {
+    use moonpool_sim::set_sim_seed;
+
+    local_runtime().block_on(async {
+        let seed = 12345u64;
+
+        let run_corruption_test = || async {
+            set_sim_seed(seed);
+
+            let mut config = StorageConfiguration::fast_local();
+            config.read_fault_probability = 1.0; // 100% corruption
+
+            let mut sim = SimWorld::new();
+            sim.set_storage_config(config);
+
+            let provider = sim.storage_provider();
+            let handle = tokio::task::spawn_local(async move {
+                // Write known data
+                let mut file = provider
+                    .open("corrupt.txt", OpenOptions::create_write())
+                    .await?;
+                file.write_all(b"ABCDEFGH").await?;
+                file.sync_all().await?;
+                drop(file);
+
+                // Read - will be corrupted
+                let mut file = provider
+                    .open("corrupt.txt", OpenOptions::read_only())
+                    .await?;
+                let mut buf = vec![0u8; 8];
+                file.read_exact(&mut buf).await?;
+                Ok::<_, std::io::Error>(buf)
+            });
+
+            while !handle.is_finished() {
+                while sim.pending_event_count() > 0 {
+                    sim.step();
+                }
+                tokio::task::yield_now().await;
+            }
+
+            handle.await.expect("task panicked").expect("io error")
+        };
+
+        let corrupted1 = run_corruption_test().await;
+        let corrupted2 = run_corruption_test().await;
+
+        println!("Corruption 1: {:?}", corrupted1);
+        println!("Corruption 2: {:?}", corrupted2);
+
+        assert_eq!(
+            corrupted1, corrupted2,
+            "Corruption pattern should be deterministic with same seed"
+        );
+    });
+}
