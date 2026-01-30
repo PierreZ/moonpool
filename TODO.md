@@ -150,17 +150,17 @@ Each task: implement → `cargo fmt` → `cargo clippy` → `cargo nextest run`
 
 - [x] **5.7** Handle storage events in `step()`
 
-### Phase 6: SimStorageProvider (moonpool-sim)
+### Phase 6: SimStorageProvider (moonpool-sim) ✓
 
-- [ ] **6.1** Create `storage/provider.rs`
+- [x] **6.1** Create `storage/provider.rs`
 
-- [ ] **6.2** Implement `open()` with latency scheduling
+- [x] **6.2** Implement `open()` with latency scheduling
 
-- [ ] **6.3** Implement `exists()`, `delete()`, `rename()`
+- [x] **6.3** Implement `exists()`, `delete()`, `rename()`
 
 ### Phase 7: SimStorageFile (moonpool-sim)
 
-- [ ] **7.1** Create `storage/file.rs` with `SimStorageFile`
+- [x] **7.1** Create `storage/file.rs` with `SimStorageFile` (stub created in Phase 6)
 
 - [ ] **7.2** Implement `AsyncRead` with fault injection
 
