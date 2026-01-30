@@ -97,6 +97,9 @@ pub mod providers;
 /// Network simulation and configuration.
 pub mod network;
 
+/// Storage simulation and configuration.
+pub mod storage;
+
 // =============================================================================
 // Public API Re-exports
 // =============================================================================
@@ -126,6 +129,9 @@ pub use network::{
     ChaosConfiguration, ConnectFailureMode, NetworkConfiguration, SimNetworkProvider,
     sample_duration,
 };
+
+// Storage exports
+pub use storage::StorageConfiguration;
 
 // Provider exports
 pub use providers::{SimProviders, SimRandomProvider, SimTimeProvider};

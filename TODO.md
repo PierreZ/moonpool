@@ -80,11 +80,11 @@ Each task: implement → `cargo fmt` → `cargo clippy` → `cargo nextest run`
 
 - [x] **1.6** Update `lib.rs` exports
 
-### Phase 2: Storage Configuration (moonpool-sim)
+### Phase 2: Storage Configuration (moonpool-sim) ✓
 
-- [ ] **2.1** Create `storage/mod.rs`
+- [x] **2.1** Create `storage/mod.rs`
 
-- [ ] **2.2** Create `storage/config.rs` with `StorageConfiguration`
+- [x] **2.2** Create `storage/config.rs` with `StorageConfiguration`
   ```rust
   pub struct StorageConfiguration {
       // Timing (FDB formula)
