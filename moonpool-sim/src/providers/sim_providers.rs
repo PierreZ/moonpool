@@ -1,9 +1,10 @@
 //! Simulation providers bundle implementation.
 
-use moonpool_core::{Providers, TokioStorageProvider, TokioTaskProvider};
+use moonpool_core::{Providers, TokioTaskProvider};
 
 use crate::network::SimNetworkProvider;
 use crate::sim::WeakSimWorld;
+use crate::storage::SimStorageProvider;
 
 use super::{SimRandomProvider, SimTimeProvider};
 
@@ -34,14 +35,14 @@ use super::{SimRandomProvider, SimTimeProvider};
 /// - Uses `SimTimeProvider` for logical/simulated time
 /// - Uses `TokioTaskProvider` for task spawning (same as production)
 /// - Uses `SimRandomProvider` for seeded deterministic randomness
+/// - Uses `SimStorageProvider` for simulated file I/O with fault injection
 #[derive(Clone)]
 pub struct SimProviders {
     network: SimNetworkProvider,
     time: SimTimeProvider,
     task: TokioTaskProvider,
     random: SimRandomProvider,
-    // TODO: Replace with SimStorageProvider when implemented
-    storage: TokioStorageProvider,
+    storage: SimStorageProvider,
 }
 
 impl SimProviders {
@@ -54,11 +55,10 @@ impl SimProviders {
     pub fn new(sim: WeakSimWorld, seed: u64) -> Self {
         Self {
             network: SimNetworkProvider::new(sim.clone()),
-            time: SimTimeProvider::new(sim),
+            time: SimTimeProvider::new(sim.clone()),
             task: TokioTaskProvider,
             random: SimRandomProvider::new(seed),
-            // TODO: Replace with SimStorageProvider when implemented
-            storage: TokioStorageProvider::new(),
+            storage: SimStorageProvider::new(sim),
         }
     }
 }
@@ -85,8 +85,7 @@ impl Providers for SimProviders {
         &self.random
     }
 
-    // TODO: Replace with SimStorageProvider when implemented
-    type Storage = TokioStorageProvider;
+    type Storage = SimStorageProvider;
 
     fn storage(&self) -> &Self::Storage {
         &self.storage

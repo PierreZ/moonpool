@@ -158,27 +158,27 @@ Each task: implement → `cargo fmt` → `cargo clippy` → `cargo nextest run`
 
 - [x] **6.3** Implement `exists()`, `delete()`, `rename()`
 
-### Phase 7: SimStorageFile (moonpool-sim)
+### Phase 7: SimStorageFile (moonpool-sim) ✓
 
 - [x] **7.1** Create `storage/file.rs` with `SimStorageFile` (stub created in Phase 6)
 
-- [ ] **7.2** Implement `AsyncRead` with fault injection
+- [x] **7.2** Implement `AsyncRead` with fault injection
 
-- [ ] **7.3** Implement `AsyncWrite` with phantom/misdirection
+- [x] **7.3** Implement `AsyncWrite` with phantom/misdirection
 
-- [ ] **7.4** Implement `AsyncSeek`
+- [x] **7.4** Implement `AsyncSeek`
 
-- [ ] **7.5** Implement `StorageFile` trait (sync with failure probability)
+- [x] **7.5** Implement `StorageFile` trait (sync with failure probability)
 
-- [ ] **7.6** Create `storage/futures.rs`
+- [x] **7.6** Create `storage/futures.rs`
 
-### Phase 8: Provider Bundle (moonpool-sim)
+### Phase 8: Provider Bundle (moonpool-sim) ✓
 
-- [ ] **8.1** Update `SimProviders` with storage field
+- [x] **8.1** Update `SimProviders` with storage field
 
-- [ ] **8.2** Implement `Providers` trait
+- [x] **8.2** Implement `Providers` trait
 
-- [ ] **8.3** Update `lib.rs` exports
+- [x] **8.3** Update `lib.rs` exports
 
 ### Phase 9: Testing (Simple, following moonpool patterns)
 

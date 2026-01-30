@@ -2560,19 +2560,6 @@ impl SimWorld {
         }
     }
 
-    /// Close a file by its ID.
-    pub(crate) fn close_file(&self, file_id: FileId) -> SimulationResult<()> {
-        let mut inner = self.inner.borrow_mut();
-
-        if let Some(file_state) = inner.storage.files.get_mut(&file_id) {
-            file_state.is_closed = true;
-            tracing::debug!("Closed file {:?}", file_id);
-            Ok(())
-        } else {
-            Err(SimulationError::IoError("File not found".to_string()))
-        }
-    }
-
     /// Schedule a read operation on a file.
     ///
     /// Returns an operation sequence number that can be used to check completion.
