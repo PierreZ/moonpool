@@ -134,21 +134,21 @@ Each task: implement → `cargo fmt` → `cargo clippy` → `cargo nextest run`
 
 - [x] **4.2** Add `Storage(StorageOperation)` to `Event` enum
 
-### Phase 5: SimWorld Integration (moonpool-sim)
+### Phase 5: SimWorld Integration (moonpool-sim) ✓
 
-- [ ] **5.1** Add storage state to `SimInner`
+- [x] **5.1** Add storage state to `SimInner`
 
-- [ ] **5.2** Add `StorageFileState` struct
+- [x] **5.2** Add `StorageFileState` struct
 
-- [ ] **5.3** Implement file management methods
+- [x] **5.3** Implement file management methods
 
-- [ ] **5.4** Implement I/O request methods
+- [x] **5.4** Implement I/O request methods
 
-- [ ] **5.5** Implement latency calculation (FDB formula)
+- [x] **5.5** Implement latency calculation (FDB formula)
 
-- [ ] **5.6** Implement `simulate_crash()`
+- [x] **5.6** Implement `simulate_crash()`
 
-- [ ] **5.7** Handle storage events in `step()`
+- [x] **5.7** Handle storage events in `step()`
 
 ### Phase 6: SimStorageProvider (moonpool-sim)
 

@@ -7,7 +7,7 @@
 //!
 //! - `world` - Core SimWorld and WeakSimWorld types
 //! - `events` - Event types and queue for scheduling
-//! - `state` - Network state management (connections, partitions, clogs)
+//! - `state` - Network and storage state management
 //! - `wakers` - Waker management for async coordination
 //! - `sleep` - Sleep future for simulation time
 //! - `rng` - Thread-local random number generation
@@ -28,4 +28,5 @@ pub use rng::{
     sim_random_range, sim_random_range_or_default,
 };
 pub use sleep::SleepFuture;
+pub use state::{FileId, PendingOpType, PendingStorageOp, StorageFileState, StorageState};
 pub use world::{SimWorld, WeakSimWorld};
