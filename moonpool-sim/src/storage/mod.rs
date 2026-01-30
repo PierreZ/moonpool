@@ -12,6 +12,9 @@ pub mod events;
 /// Storage file implementation
 pub mod file;
 
+/// Future types for async storage operations
+pub mod futures;
+
 /// In-memory storage with deterministic fault injection
 pub mod memory;
 
