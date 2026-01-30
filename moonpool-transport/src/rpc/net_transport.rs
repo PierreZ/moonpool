@@ -999,9 +999,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        JsonCodec, NetNotifiedQueue, TokioRandomProvider, TokioTaskProvider, TokioTimeProvider,
+        JsonCodec, NetNotifiedQueue, TokioRandomProvider, TokioStorageProvider, TokioTaskProvider,
+        TokioTimeProvider,
     };
-    use moonpool_core::{RandomProvider, TaskProvider, TimeProvider};
 
     // Simple mock network provider that fails all connections
     // (we only test local delivery, so connections are never actually made)
@@ -1084,6 +1084,7 @@ mod tests {
         time: TokioTimeProvider,
         task: TokioTaskProvider,
         random: TokioRandomProvider,
+        storage: TokioStorageProvider,
     }
 
     impl MockProviders {
@@ -1093,6 +1094,7 @@ mod tests {
                 time: TokioTimeProvider::new(),
                 task: TokioTaskProvider,
                 random: TokioRandomProvider::new(),
+                storage: TokioStorageProvider::new(),
             }
         }
     }
@@ -1102,6 +1104,7 @@ mod tests {
         type Time = TokioTimeProvider;
         type Task = TokioTaskProvider;
         type Random = TokioRandomProvider;
+        type Storage = TokioStorageProvider;
 
         fn network(&self) -> &Self::Network {
             &self.network
@@ -1114,6 +1117,9 @@ mod tests {
         }
         fn random(&self) -> &Self::Random {
             &self.random
+        }
+        fn storage(&self) -> &Self::Storage {
+            &self.storage
         }
     }
 

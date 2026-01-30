@@ -63,22 +63,22 @@ Each task: implement → `cargo fmt` → `cargo clippy` → `cargo nextest run`
 
 **Commit after each phase**, not after each task.
 
-### Phase 1: Core Traits (moonpool-core)
+### Phase 1: Core Traits (moonpool-core) ✓
 
-- [ ] **1.1** Create `storage.rs` with `OpenOptions` struct
+- [x] **1.1** Create `storage.rs` with `OpenOptions` struct
 
-- [ ] **1.2** Define `StorageProvider` trait
+- [x] **1.2** Define `StorageProvider` trait
   - `open`, `exists`, `delete`, `rename`
 
-- [ ] **1.3** Define `StorageFile` trait
+- [x] **1.3** Define `StorageFile` trait
   - Supertraits: `AsyncRead + AsyncWrite + AsyncSeek + Unpin`
   - Methods: `sync_all`, `sync_data`, `size`, `set_len`
 
-- [ ] **1.4** Implement `TokioStorageProvider` + `TokioStorageFile`
+- [x] **1.4** Implement `TokioStorageProvider` + `TokioStorageFile`
 
-- [ ] **1.5** Update `Providers` trait with `Storage` associated type
+- [x] **1.5** Update `Providers` trait with `Storage` associated type
 
-- [ ] **1.6** Update `lib.rs` exports
+- [x] **1.6** Update `lib.rs` exports
 
 ### Phase 2: Storage Configuration (moonpool-sim)
 

@@ -1,6 +1,6 @@
 //! Simulation providers bundle implementation.
 
-use moonpool_core::{Providers, TokioTaskProvider};
+use moonpool_core::{Providers, TokioStorageProvider, TokioTaskProvider};
 
 use crate::network::SimNetworkProvider;
 use crate::sim::WeakSimWorld;
@@ -40,6 +40,8 @@ pub struct SimProviders {
     time: SimTimeProvider,
     task: TokioTaskProvider,
     random: SimRandomProvider,
+    // TODO: Replace with SimStorageProvider when implemented
+    storage: TokioStorageProvider,
 }
 
 impl SimProviders {
@@ -55,6 +57,8 @@ impl SimProviders {
             time: SimTimeProvider::new(sim),
             task: TokioTaskProvider,
             random: SimRandomProvider::new(seed),
+            // TODO: Replace with SimStorageProvider when implemented
+            storage: TokioStorageProvider::new(),
         }
     }
 }
@@ -79,5 +83,12 @@ impl Providers for SimProviders {
 
     fn random(&self) -> &Self::Random {
         &self.random
+    }
+
+    // TODO: Replace with SimStorageProvider when implemented
+    type Storage = TokioStorageProvider;
+
+    fn storage(&self) -> &Self::Storage {
+        &self.storage
     }
 }

@@ -55,9 +55,11 @@
 // Re-export core types for convenience
 pub use moonpool_core::{
     CodecError, Endpoint, JsonCodec, MessageCodec, NetworkAddress, NetworkAddressParseError,
-    NetworkProvider, Providers, RandomProvider, SimulationError, SimulationResult, TaskProvider,
-    TcpListenerTrait, TimeProvider, TokioNetworkProvider, TokioProviders, TokioRandomProvider,
-    TokioTaskProvider, TokioTimeProvider, UID, WELL_KNOWN_RESERVED_COUNT, WellKnownToken,
+    NetworkProvider, OpenOptions, Providers, RandomProvider, SimulationError, SimulationResult,
+    StorageFile, StorageProvider, TaskProvider, TcpListenerTrait, TimeProvider,
+    TokioNetworkProvider, TokioProviders, TokioRandomProvider, TokioStorageFile,
+    TokioStorageProvider, TokioTaskProvider, TokioTimeProvider, UID, WELL_KNOWN_RESERVED_COUNT,
+    WellKnownToken,
 };
 
 // =============================================================================

@@ -13,7 +13,7 @@ use moonpool_sim::{
 };
 use moonpool_transport::{
     NetworkProvider, Peer, Providers, SimulationResult, TcpListenerTrait, TimeProvider,
-    TokioTaskProvider, try_deserialize_packet,
+    TokioStorageProvider, TokioTaskProvider, try_deserialize_packet,
 };
 
 /// Providers bundle for e2e workloads.
@@ -23,6 +23,8 @@ struct E2eProviders {
     time: SimTimeProvider,
     task: TokioTaskProvider,
     random: SimRandomProvider,
+    // TODO: Replace with SimStorageProvider when implemented
+    storage: TokioStorageProvider,
 }
 
 impl E2eProviders {
@@ -37,6 +39,7 @@ impl E2eProviders {
             time,
             task,
             random,
+            storage: TokioStorageProvider::new(),
         }
     }
 }
@@ -46,6 +49,8 @@ impl Providers for E2eProviders {
     type Time = SimTimeProvider;
     type Task = TokioTaskProvider;
     type Random = SimRandomProvider;
+    // TODO: Replace with SimStorageProvider when implemented
+    type Storage = TokioStorageProvider;
 
     fn network(&self) -> &Self::Network {
         &self.network
@@ -58,6 +63,9 @@ impl Providers for E2eProviders {
     }
     fn random(&self) -> &Self::Random {
         &self.random
+    }
+    fn storage(&self) -> &Self::Storage {
+        &self.storage
     }
 }
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
