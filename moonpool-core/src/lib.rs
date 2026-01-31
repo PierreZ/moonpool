@@ -60,6 +60,7 @@ mod error;
 mod network;
 mod providers;
 mod random;
+mod storage;
 mod task;
 mod time;
 mod types;
@@ -75,6 +76,9 @@ pub use error::{SimulationError, SimulationResult};
 pub use network::{NetworkProvider, TcpListenerTrait, TokioNetworkProvider, TokioTcpListener};
 pub use providers::{Providers, TokioProviders};
 pub use random::{RandomProvider, TokioRandomProvider};
+pub use storage::{
+    OpenOptions, StorageFile, StorageProvider, TokioStorageFile, TokioStorageProvider,
+};
 pub use task::{TaskProvider, TokioTaskProvider};
 pub use time::{TimeProvider, TokioTimeProvider};
 

@@ -25,7 +25,10 @@ use super::{
     events::{ConnectionStateChange, Event, EventQueue, NetworkOperation, ScheduledEvent},
     rng::{reset_sim_rng, set_sim_seed, sim_random, sim_random_range},
     sleep::SleepFuture,
-    state::{ClogState, CloseReason, ConnectionState, ListenerState, NetworkState, PartitionState},
+    state::{
+        ClogState, CloseReason, ConnectionState, ListenerState, NetworkState, PartitionState,
+        StorageState,
+    },
     wakers::WakerRegistry,
 };
 
@@ -41,6 +44,9 @@ pub(crate) struct SimInner {
 
     // Network management
     pub(crate) network: NetworkState,
+
+    // Storage management
+    pub(crate) storage: StorageState,
 
     // Async coordination
     pub(crate) wakers: WakerRegistry,
@@ -64,6 +70,7 @@ impl SimInner {
             event_queue: EventQueue::new(),
             next_sequence: 0,
             network: NetworkState::new(NetworkConfiguration::default()),
+            storage: StorageState::default(),
             wakers: WakerRegistry::default(),
             next_task_id: 0,
             awakened_tasks: HashSet::new(),
@@ -79,6 +86,7 @@ impl SimInner {
             event_queue: EventQueue::new(),
             next_sequence: 0,
             network: NetworkState::new(network_config),
+            storage: StorageState::default(),
             wakers: WakerRegistry::default(),
             next_task_id: 0,
             awakened_tasks: HashSet::new(),
@@ -339,6 +347,18 @@ impl SimWorld {
     /// Create a task provider for this simulation
     pub fn task_provider(&self) -> crate::TokioTaskProvider {
         crate::TokioTaskProvider
+    }
+
+    /// Create a storage provider for this simulation.
+    pub fn storage_provider(&self) -> crate::storage::SimStorageProvider {
+        crate::storage::SimStorageProvider::new(self.downgrade())
+    }
+
+    /// Set storage configuration for this simulation.
+    ///
+    /// Must be called before any storage operations are performed.
+    pub fn set_storage_config(&mut self, config: crate::storage::StorageConfiguration) {
+        self.inner.borrow_mut().storage.config = config;
     }
 
     /// Access network configuration for latency calculations using thread-local RNG.
@@ -795,6 +815,9 @@ impl SimWorld {
                 connection_id,
                 operation,
             } => Self::handle_network_event(inner, connection_id, operation),
+            Event::Storage { file_id, operation } => {
+                super::storage_ops::handle_storage_event(inner, file_id, operation)
+            }
             Event::Shutdown => Self::handle_shutdown_event(inner),
         }
     }

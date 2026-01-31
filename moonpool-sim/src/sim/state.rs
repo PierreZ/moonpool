@@ -4,14 +4,19 @@
 //! listeners, partitions, and clogs in the simulation environment.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     net::IpAddr,
     time::Duration,
 };
 
-use crate::network::{
-    NetworkConfiguration,
-    sim::{ConnectionId, ListenerId},
+use moonpool_core::OpenOptions;
+
+use crate::{
+    network::{
+        NetworkConfiguration,
+        sim::{ConnectionId, ListenerId},
+    },
+    storage::{InMemoryStorage, StorageConfiguration},
 };
 
 /// Simple clog state - just tracks when it expires
@@ -285,5 +290,115 @@ impl NetworkState {
             return self.is_partitioned(local_ip, remote_ip, current_time);
         }
         false
+    }
+}
+
+// =============================================================================
+// Storage State Types
+// =============================================================================
+
+/// Unique identifier for a simulated file within the simulation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FileId(pub u64);
+
+/// Type of pending storage operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingOpType {
+    /// Read operation
+    Read,
+    /// Write operation
+    Write,
+    /// Sync/flush operation
+    Sync,
+    /// Set file length operation
+    SetLen,
+    /// File open operation
+    Open,
+}
+
+/// A pending storage operation awaiting completion.
+#[derive(Debug, Clone)]
+pub struct PendingStorageOp {
+    /// Type of the operation
+    pub op_type: PendingOpType,
+    /// Offset within the file (for read/write)
+    pub offset: u64,
+    /// Length of the operation in bytes
+    pub len: usize,
+    /// Data for write operations
+    pub data: Option<Vec<u8>>,
+}
+
+/// State of an individual simulated file.
+#[derive(Debug)]
+pub struct StorageFileState {
+    /// Unique identifier for this file
+    pub id: FileId,
+    /// Path this file was opened with
+    pub path: String,
+    /// Current file position for sequential operations
+    pub position: u64,
+    /// Options the file was opened with
+    pub options: OpenOptions,
+    /// In-memory storage backing this file
+    pub storage: InMemoryStorage,
+    /// Whether the file has been closed
+    pub is_closed: bool,
+    /// Pending operations keyed by sequence number
+    pub pending_ops: HashMap<u64, PendingStorageOp>,
+    /// Next sequence number for operations on this file
+    pub next_op_seq: u64,
+}
+
+impl StorageFileState {
+    /// Create a new storage file state.
+    pub fn new(id: FileId, path: String, options: OpenOptions, storage: InMemoryStorage) -> Self {
+        Self {
+            id,
+            path,
+            position: 0,
+            options,
+            storage,
+            is_closed: false,
+            pending_ops: HashMap::new(),
+            next_op_seq: 0,
+        }
+    }
+}
+
+/// Storage-related state management for the simulation.
+#[derive(Debug)]
+pub struct StorageState {
+    /// Counter for generating unique file IDs
+    pub next_file_id: u64,
+    /// Storage configuration for latencies and fault injection
+    pub config: StorageConfiguration,
+    /// Active files indexed by their ID
+    pub files: HashMap<FileId, StorageFileState>,
+    /// Mapping from path to file ID for quick lookup
+    pub path_to_file: HashMap<String, FileId>,
+    /// Set of paths that have been deleted (for create_new semantics)
+    pub deleted_paths: HashSet<String>,
+    /// Set of (file_id, op_seq) pairs for sync operations that failed
+    pub sync_failures: HashSet<(FileId, u64)>,
+}
+
+impl StorageState {
+    /// Create a new storage state with the given configuration.
+    pub fn new(config: StorageConfiguration) -> Self {
+        Self {
+            next_file_id: 0,
+            config,
+            files: HashMap::new(),
+            path_to_file: HashMap::new(),
+            deleted_paths: HashSet::new(),
+            sync_failures: HashSet::new(),
+        }
+    }
+}
+
+impl Default for StorageState {
+    fn default() -> Self {
+        Self::new(StorageConfiguration::default())
     }
 }

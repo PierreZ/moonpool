@@ -20,7 +20,8 @@ use std::time::Duration;
 use moonpool_sim::{SimRandomProvider, SimulationMetrics, WorkloadTopology};
 use moonpool_transport::{
     Endpoint, JsonCodec, MessageReceiver, NetNotifiedQueue, NetTransportBuilder, NetworkAddress,
-    NetworkProvider, Providers, SimulationResult, TaskProvider, TimeProvider, UID,
+    NetworkProvider, Providers, SimulationResult, StorageProvider, TaskProvider, TimeProvider,
+    TokioStorageProvider, UID,
 };
 
 /// Providers bundle for simulation workloads.
@@ -28,14 +29,19 @@ use moonpool_transport::{
 /// This struct bundles the individual providers passed to workloads by the simulation
 /// framework into a single `Providers` implementation.
 #[derive(Clone)]
-pub struct WorkloadProviders<N, T, TP> {
+pub struct WorkloadProviders<N, T, TP, S = TokioStorageProvider>
+where
+    S: StorageProvider + Clone + 'static,
+{
     network: N,
     time: T,
     task: TP,
     random: SimRandomProvider,
+    // TODO: Replace default with SimStorageProvider when implemented
+    storage: S,
 }
 
-impl<N, T, TP> WorkloadProviders<N, T, TP>
+impl<N, T, TP> WorkloadProviders<N, T, TP, TokioStorageProvider>
 where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
@@ -48,20 +54,24 @@ where
             time,
             task,
             random,
+            storage: TokioStorageProvider::new(),
         }
     }
 }
 
-impl<N, T, TP> Providers for WorkloadProviders<N, T, TP>
+impl<N, T, TP, S> Providers for WorkloadProviders<N, T, TP, S>
 where
     N: NetworkProvider + Clone + 'static,
     T: TimeProvider + Clone + 'static,
     TP: TaskProvider + Clone + 'static,
+    S: StorageProvider + Clone + 'static,
 {
     type Network = N;
     type Time = T;
     type Task = TP;
     type Random = SimRandomProvider;
+    // TODO: Replace with SimStorageProvider when implemented
+    type Storage = S;
 
     fn network(&self) -> &Self::Network {
         &self.network
@@ -77,6 +87,10 @@ where
 
     fn random(&self) -> &Self::Random {
         &self.random
+    }
+
+    fn storage(&self) -> &Self::Storage {
+        &self.storage
     }
 }
 

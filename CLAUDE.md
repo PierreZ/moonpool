@@ -51,6 +51,39 @@ moonpool-transport/ - Peer connections, wire format, FlowTransport, RPC
 **Invariant checking**: Cross-workload properties validated after every simulation event
 **Goal**: Find bugs, not regression testing
 
+## Storage Testing Patterns
+**Key difference from network**: Storage operations return `Poll::Pending` and require simulation stepping. Network operations buffer and return `Poll::Ready` immediately.
+
+**The Step Loop Pattern** (required for storage tests):
+```rust
+let handle = tokio::task::spawn_local(async move {
+    let mut file = provider.open("test.txt", OpenOptions::create_write()).await?;
+    file.write_all(b"hello").await?;
+    file.sync_all().await
+});
+
+while !handle.is_finished() {
+    while sim.pending_event_count() > 0 {
+        sim.step();
+    }
+    tokio::task::yield_now().await;
+}
+handle.await.unwrap().unwrap();
+```
+
+**Key functions**:
+- `sim.step()` - Process one simulation event
+- `sim.pending_event_count()` - Check for pending events
+- `sim.storage_provider()` - Create storage provider for simulation
+- `tokio::task::yield_now()` - Yield to spawned tasks
+- `handle.is_finished()` - Check task completion
+
+**Fault coverage** (TigerBeetle + FDB patterns):
+- Read/write corruption, crash/torn writes
+- Misdirected reads/writes, phantom writes
+- Sync failures, uninitialized reads
+- IOPS/bandwidth timing simulation
+
 ## Assertions & Buggify
 **Always**: Guard invariants (never fail)
 **Sometimes**: Test error paths (statistical coverage)

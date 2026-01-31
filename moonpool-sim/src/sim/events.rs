@@ -5,6 +5,8 @@
 
 use std::{cmp::Ordering, collections::BinaryHeap, time::Duration};
 
+pub use crate::storage::StorageOperation;
+
 /// Events that can be scheduled in the simulation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
@@ -28,6 +30,14 @@ pub enum Event {
         id: u64,
         /// The state change type
         state: ConnectionStateChange,
+    },
+
+    /// Storage I/O operations
+    Storage {
+        /// The file involved
+        file_id: u64,
+        /// The operation type
+        operation: StorageOperation,
     },
 
     /// Shutdown event to wake all tasks for graceful termination

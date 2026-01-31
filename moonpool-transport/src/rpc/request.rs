@@ -111,7 +111,7 @@ mod tests {
 
     use crate::{
         JsonCodec, NetworkAddress, NetworkProvider, Providers, TokioRandomProvider,
-        TokioTaskProvider, TokioTimeProvider, UID,
+        TokioStorageProvider, TokioTaskProvider, TokioTimeProvider, UID,
     };
     use serde::{Deserialize, Serialize};
 
@@ -195,6 +195,7 @@ mod tests {
         time: TokioTimeProvider,
         task: TokioTaskProvider,
         random: TokioRandomProvider,
+        storage: TokioStorageProvider,
     }
 
     impl MockProviders {
@@ -204,6 +205,7 @@ mod tests {
                 time: TokioTimeProvider::new(),
                 task: TokioTaskProvider,
                 random: TokioRandomProvider::new(),
+                storage: TokioStorageProvider::new(),
             }
         }
     }
@@ -213,6 +215,7 @@ mod tests {
         type Time = TokioTimeProvider;
         type Task = TokioTaskProvider;
         type Random = TokioRandomProvider;
+        type Storage = TokioStorageProvider;
 
         fn network(&self) -> &Self::Network {
             &self.network
@@ -225,6 +228,9 @@ mod tests {
         }
         fn random(&self) -> &Self::Random {
             &self.random
+        }
+        fn storage(&self) -> &Self::Storage {
+            &self.storage
         }
     }
 

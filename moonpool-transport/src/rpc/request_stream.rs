@@ -331,7 +331,8 @@ mod tests {
     // =========================================================================
 
     use crate::{
-        NetTransportBuilder, Providers, TokioRandomProvider, TokioTaskProvider, TokioTimeProvider,
+        NetTransportBuilder, Providers, TokioRandomProvider, TokioStorageProvider,
+        TokioTaskProvider, TokioTimeProvider,
     };
 
     // Simple mock network provider for testing
@@ -410,6 +411,7 @@ mod tests {
         time: TokioTimeProvider,
         task: TokioTaskProvider,
         random: TokioRandomProvider,
+        storage: TokioStorageProvider,
     }
 
     impl MockProviders {
@@ -419,6 +421,7 @@ mod tests {
                 time: TokioTimeProvider::new(),
                 task: TokioTaskProvider,
                 random: TokioRandomProvider::new(),
+                storage: TokioStorageProvider::new(),
             }
         }
     }
@@ -428,6 +431,7 @@ mod tests {
         type Time = TokioTimeProvider;
         type Task = TokioTaskProvider;
         type Random = TokioRandomProvider;
+        type Storage = TokioStorageProvider;
 
         fn network(&self) -> &Self::Network {
             &self.network
@@ -440,6 +444,9 @@ mod tests {
         }
         fn random(&self) -> &Self::Random {
             &self.random
+        }
+        fn storage(&self) -> &Self::Storage {
+            &self.storage
         }
     }
 

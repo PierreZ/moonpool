@@ -29,4 +29,5 @@ tokio-util = "0.7"
 tracing = "0.1"
 
 [dev-dependencies]
+tempfile = "3"
 tracing-subscriber = "0.3"
