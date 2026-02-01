@@ -33,8 +33,9 @@
 //! ```
 
 use crate::{
-    NetworkProvider, RandomProvider, TaskProvider, TimeProvider, TokioNetworkProvider,
-    TokioRandomProvider, TokioTaskProvider, TokioTimeProvider,
+    NetworkProvider, RandomProvider, StorageProvider, TaskProvider, TimeProvider,
+    TokioNetworkProvider, TokioRandomProvider, TokioStorageProvider, TokioTaskProvider,
+    TokioTimeProvider,
 };
 
 /// Bundle of all provider types for a runtime environment.
@@ -66,6 +67,9 @@ pub trait Providers: Clone + 'static {
     /// Random provider type for deterministic or real randomness.
     type Random: RandomProvider + Clone + 'static;
 
+    /// Storage provider type for file I/O operations.
+    type Storage: StorageProvider + Clone + 'static;
+
     /// Get the network provider instance.
     fn network(&self) -> &Self::Network;
 
@@ -77,6 +81,9 @@ pub trait Providers: Clone + 'static {
 
     /// Get the random provider instance.
     fn random(&self) -> &Self::Random;
+
+    /// Get the storage provider instance.
+    fn storage(&self) -> &Self::Storage;
 }
 
 /// Production providers using Tokio runtime.
@@ -103,6 +110,7 @@ pub struct TokioProviders {
     time: TokioTimeProvider,
     task: TokioTaskProvider,
     random: TokioRandomProvider,
+    storage: TokioStorageProvider,
 }
 
 impl TokioProviders {
@@ -116,6 +124,7 @@ impl TokioProviders {
             time: TokioTimeProvider::new(),
             task: TokioTaskProvider,
             random: TokioRandomProvider::new(),
+            storage: TokioStorageProvider::new(),
         }
     }
 }
@@ -146,5 +155,11 @@ impl Providers for TokioProviders {
 
     fn random(&self) -> &Self::Random {
         &self.random
+    }
+
+    type Storage = TokioStorageProvider;
+
+    fn storage(&self) -> &Self::Storage {
+        &self.storage
     }
 }

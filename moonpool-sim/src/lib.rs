@@ -97,6 +97,9 @@ pub mod providers;
 /// Network simulation and configuration.
 pub mod network;
 
+/// Storage simulation and configuration.
+pub mod storage;
+
 // =============================================================================
 // Public API Re-exports
 // =============================================================================
@@ -104,8 +107,8 @@ pub mod network;
 // Sim module re-exports
 pub use sim::{
     ConnectionStateChange, Event, EventQueue, NetworkOperation, ScheduledEvent, SimWorld,
-    SleepFuture, WeakSimWorld, get_current_sim_seed, reset_sim_rng, set_sim_seed, sim_random,
-    sim_random_range, sim_random_range_or_default,
+    SleepFuture, StorageOperation, WeakSimWorld, get_current_sim_seed, reset_sim_rng, set_sim_seed,
+    sim_random, sim_random_range, sim_random_range_or_default,
 };
 
 // Runner module re-exports
@@ -125,6 +128,11 @@ pub use chaos::{
 pub use network::{
     ChaosConfiguration, ConnectFailureMode, NetworkConfiguration, SimNetworkProvider,
     sample_duration,
+};
+
+// Storage exports
+pub use storage::{
+    InMemoryStorage, SECTOR_SIZE, SectorBitSet, SimStorageProvider, StorageConfiguration,
 };
 
 // Provider exports

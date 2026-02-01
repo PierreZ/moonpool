@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::task::Waker;
 
 use crate::network::sim::{ConnectionId, ListenerId};
+use crate::sim::state::FileId;
 
 /// Waker management for async coordination.
 #[derive(Debug, Default)]
@@ -24,4 +25,7 @@ pub struct WakerRegistry {
     pub(crate) cut_wakers: HashMap<ConnectionId, Vec<Waker>>,
     /// Wakers waiting for send buffer space to become available
     pub(crate) send_buffer_wakers: HashMap<ConnectionId, Vec<Waker>>,
+    /// Wakers waiting for storage operations to complete.
+    /// Keyed by (FileId, operation_sequence_number).
+    pub(crate) storage_wakers: HashMap<(FileId, u64), Waker>,
 }

@@ -11,8 +11,8 @@ use std::rc::Rc;
 
 use moonpool_transport::{
     Endpoint, JsonCodec, NetTransport, NetworkAddress, NetworkProvider, Providers, ReplyError,
-    ReplyFuture, RequestEnvelope, RequestStream, TokioRandomProvider, TokioTaskProvider,
-    TokioTimeProvider, UID, send_request,
+    ReplyFuture, RequestEnvelope, RequestStream, TokioRandomProvider, TokioStorageProvider,
+    TokioTaskProvider, TokioTimeProvider, UID, send_request,
 };
 use serde::{Deserialize, Serialize};
 
@@ -94,6 +94,7 @@ struct MockProviders {
     time: TokioTimeProvider,
     task: TokioTaskProvider,
     random: TokioRandomProvider,
+    storage: TokioStorageProvider,
 }
 
 impl MockProviders {
@@ -103,6 +104,7 @@ impl MockProviders {
             time: TokioTimeProvider::new(),
             task: TokioTaskProvider,
             random: TokioRandomProvider::new(),
+            storage: TokioStorageProvider::new(),
         }
     }
 }
@@ -112,6 +114,7 @@ impl Providers for MockProviders {
     type Time = TokioTimeProvider;
     type Task = TokioTaskProvider;
     type Random = TokioRandomProvider;
+    type Storage = TokioStorageProvider;
 
     fn network(&self) -> &Self::Network {
         &self.network
@@ -124,6 +127,9 @@ impl Providers for MockProviders {
     }
     fn random(&self) -> &Self::Random {
         &self.random
+    }
+    fn storage(&self) -> &Self::Storage {
+        &self.storage
     }
 }
 
