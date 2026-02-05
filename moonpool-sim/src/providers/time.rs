@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use std::time::Duration;
 
-use moonpool_core::{SimulationResult, TimeProvider};
+use moonpool_core::{TimeError, TimeProvider};
 
 use crate::sim::WeakSimWorld;
 
@@ -22,8 +22,8 @@ impl SimTimeProvider {
 
 #[async_trait(?Send)]
 impl TimeProvider for SimTimeProvider {
-    async fn sleep(&self, duration: Duration) -> SimulationResult<()> {
-        let sleep_future = self.sim.sleep(duration)?;
+    async fn sleep(&self, duration: Duration) -> Result<(), TimeError> {
+        let sleep_future = self.sim.sleep(duration).map_err(|_| TimeError::Shutdown)?;
         let _ = sleep_future.await;
         Ok(())
     }
@@ -39,17 +39,17 @@ impl TimeProvider for SimTimeProvider {
         self.sim.timer().unwrap_or(Duration::ZERO)
     }
 
-    async fn timeout<F, T>(&self, duration: Duration, future: F) -> SimulationResult<Result<T, ()>>
+    async fn timeout<F, T>(&self, duration: Duration, future: F) -> Result<T, TimeError>
     where
         F: std::future::Future<Output = T>,
     {
-        let sleep_future = self.sim.sleep(duration)?;
+        let sleep_future = self.sim.sleep(duration).map_err(|_| TimeError::Shutdown)?;
 
         // Race the future against the timeout using tokio::select!
         // Both futures respect simulation time through the event system
         tokio::select! {
-            result = future => Ok(Ok(result)),
-            _ = sleep_future => Ok(Err(())),
+            result = future => Ok(result),
+            _ = sleep_future => Err(TimeError::Elapsed),
         }
     }
 }
@@ -76,8 +76,7 @@ mod tests {
         let result = time_provider
             .timeout(Duration::from_millis(100), async { 42 })
             .await;
-        assert!(result.is_ok());
-        assert_eq!(result.expect("timeout should complete"), Ok(42));
+        assert_eq!(result, Ok(42));
     }
 
     #[test]

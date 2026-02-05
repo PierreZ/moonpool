@@ -5,8 +5,19 @@
 
 use async_trait::async_trait;
 use std::time::Duration;
+use thiserror::Error;
 
-use crate::SimulationResult;
+/// Errors that can occur during time operations.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum TimeError {
+    /// The operation timed out.
+    #[error("operation timed out")]
+    Elapsed,
+
+    /// The time provider has been shut down and is no longer accessible.
+    #[error("time provider shut down")]
+    Shutdown,
+}
 
 /// Provider trait for time operations.
 ///
@@ -27,7 +38,7 @@ pub trait TimeProvider: Clone {
     ///
     /// In simulation, this advances simulation time. In real time,
     /// this uses actual wall-clock delays.
-    async fn sleep(&self, duration: Duration) -> SimulationResult<()>;
+    async fn sleep(&self, duration: Duration) -> Result<(), TimeError>;
 
     /// Get exact current time.
     ///
@@ -52,8 +63,8 @@ pub trait TimeProvider: Clone {
     /// Run a future with a timeout.
     ///
     /// Returns `Ok(result)` if the future completes within the timeout,
-    /// or `Err(())` if it times out.
-    async fn timeout<F, T>(&self, duration: Duration, future: F) -> SimulationResult<Result<T, ()>>
+    /// or `Err(TimeError::Elapsed)` if it times out.
+    async fn timeout<F, T>(&self, duration: Duration, future: F) -> Result<T, TimeError>
     where
         F: std::future::Future<Output = T>;
 }
@@ -82,7 +93,7 @@ impl Default for TokioTimeProvider {
 
 #[async_trait(?Send)]
 impl TimeProvider for TokioTimeProvider {
-    async fn sleep(&self, duration: Duration) -> SimulationResult<()> {
+    async fn sleep(&self, duration: Duration) -> Result<(), TimeError> {
         tokio::time::sleep(duration).await;
         Ok(())
     }
@@ -97,13 +108,13 @@ impl TimeProvider for TokioTimeProvider {
         self.now()
     }
 
-    async fn timeout<F, T>(&self, duration: Duration, future: F) -> SimulationResult<Result<T, ()>>
+    async fn timeout<F, T>(&self, duration: Duration, future: F) -> Result<T, TimeError>
     where
         F: std::future::Future<Output = T>,
     {
         match tokio::time::timeout(duration, future).await {
-            Ok(result) => Ok(Ok(result)),
-            Err(_) => Ok(Err(())),
+            Ok(result) => Ok(result),
+            Err(_) => Err(TimeError::Elapsed),
         }
     }
 }

@@ -80,7 +80,7 @@ pub use storage::{
     OpenOptions, StorageFile, StorageProvider, TokioStorageFile, TokioStorageProvider,
 };
 pub use task::{TaskProvider, TokioTaskProvider};
-pub use time::{TimeProvider, TokioTimeProvider};
+pub use time::{TimeError, TimeProvider, TokioTimeProvider};
 
 // Core type exports
 pub use types::{Endpoint, NetworkAddress, NetworkAddressParseError, UID, flags};

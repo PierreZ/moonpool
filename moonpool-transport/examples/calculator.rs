@@ -219,7 +219,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
         println!("Sending: {}", desc);
 
         // NEW: Clean trait method calls with .await?
-        // Note: timeout returns SimulationResult<Result<T, ()>> so we have 3 levels
+        // Note: timeout returns Result<T, TimeError>, inner T is Result<Response, RpcError>
         let result = match op {
             Op::Add(a, b) => {
                 match time
@@ -229,7 +229,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
                     )
                     .await
                 {
-                    Ok(Ok(Ok(resp))) => Some(format!("{}", resp.result)),
+                    Ok(Ok(resp)) => Some(format!("{}", resp.result)),
                     _ => None,
                 }
             }
@@ -241,7 +241,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
                     )
                     .await
                 {
-                    Ok(Ok(Ok(resp))) => Some(format!("{}", resp.result)),
+                    Ok(Ok(resp)) => Some(format!("{}", resp.result)),
                     _ => None,
                 }
             }
@@ -253,7 +253,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
                     )
                     .await
                 {
-                    Ok(Ok(Ok(resp))) => Some(format!("{}", resp.result)),
+                    Ok(Ok(resp)) => Some(format!("{}", resp.result)),
                     _ => None,
                 }
             }
@@ -265,7 +265,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
                     )
                     .await
                 {
-                    Ok(Ok(Ok(resp))) => Some(
+                    Ok(Ok(resp)) => Some(
                         resp.result
                             .map(|r| r.to_string())
                             .unwrap_or_else(|| "ERROR (division by zero)".to_string()),
