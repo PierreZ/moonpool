@@ -337,7 +337,7 @@ pub async fn server_workload_with_config(
             .await;
 
         match accept_result {
-            Ok(Ok(Ok((mut stream, peer_addr)))) => {
+            Ok(Ok((mut stream, peer_addr))) => {
                 tracing::debug!("Server {} accepted connection from {}", my_addr, peer_addr);
 
                 // Read messages from this connection
@@ -350,7 +350,7 @@ pub async fn server_workload_with_config(
                         .await;
 
                     match read_result {
-                        Ok(Ok(Ok(0))) => {
+                        Ok(Ok(0)) => {
                             // Connection closed
                             sometimes_assert!(
                                 server_connection_closed,
@@ -359,7 +359,7 @@ pub async fn server_workload_with_config(
                             );
                             break;
                         }
-                        Ok(Ok(Ok(n))) => {
+                        Ok(Ok(n)) => {
                             read_buffer.extend_from_slice(&buffer[..n]);
 
                             // Try to parse messages from buffer
@@ -400,10 +400,10 @@ pub async fn server_workload_with_config(
                     }
                 }
             }
-            Ok(Ok(Err(e))) => {
+            Ok(Err(e)) => {
                 tracing::trace!("Server {} accept error: {:?}", my_addr, e);
             }
-            Ok(Err(_)) | Err(_) => {
+            Err(_) => {
                 // Accept timeout - continue loop
             }
         }
@@ -462,7 +462,7 @@ pub async fn echo_server_workload(
             .timeout(Duration::from_millis(100), listener.accept())
             .await;
 
-        if let Ok(Ok(Ok((mut stream, peer_addr)))) = accept_result {
+        if let Ok(Ok((mut stream, peer_addr))) = accept_result {
             tracing::debug!("Echo server accepted connection from {}", peer_addr);
 
             // Echo data back
@@ -473,8 +473,8 @@ pub async fn echo_server_workload(
                     .await;
 
                 match read_result {
-                    Ok(Ok(Ok(0))) => break, // Connection closed
-                    Ok(Ok(Ok(n))) => {
+                    Ok(Ok(0)) => break, // Connection closed
+                    Ok(Ok(n)) => {
                         total_bytes += n as u64;
                         // Echo back
                         if stream.write_all(&buffer[..n]).await.is_err() {
@@ -578,7 +578,7 @@ pub async fn wire_server_workload_with_config(
             .await;
 
         match accept_result {
-            Ok(Ok(Ok((mut stream, peer_addr)))) => {
+            Ok(Ok((mut stream, peer_addr))) => {
                 tracing::debug!(
                     "Wire server {} accepted connection from {}",
                     my_addr,
@@ -596,7 +596,7 @@ pub async fn wire_server_workload_with_config(
                         .await;
 
                     match read_result {
-                        Ok(Ok(Ok(0))) => {
+                        Ok(Ok(0)) => {
                             // Connection closed
                             sometimes_assert!(
                                 wire_server_connection_closed,
@@ -605,7 +605,7 @@ pub async fn wire_server_workload_with_config(
                             );
                             break;
                         }
-                        Ok(Ok(Ok(n))) => {
+                        Ok(Ok(n)) => {
                             wire_buffer.extend_from_slice(&read_buffer[..n]);
 
                             // Try to parse complete packets from the buffer
@@ -681,7 +681,7 @@ pub async fn wire_server_workload_with_config(
                                 }
                             }
                         }
-                        Ok(Ok(Err(e))) => {
+                        Ok(Err(e)) => {
                             tracing::trace!("Wire server {} read error: {:?}", my_addr, e);
                             break;
                         }
@@ -692,10 +692,10 @@ pub async fn wire_server_workload_with_config(
                     }
                 }
             }
-            Ok(Ok(Err(e))) => {
+            Ok(Err(e)) => {
                 tracing::trace!("Wire server {} accept error: {:?}", my_addr, e);
             }
-            Ok(Err(_)) | Err(_) => {
+            Err(_) => {
                 // Accept timeout - continue loop
             }
         }

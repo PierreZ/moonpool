@@ -891,7 +891,7 @@ async fn establish_connection<P: Providers>(
             .timeout(config.connection_timeout, network.connect(&destination))
             .await
         {
-            Ok(Ok(Ok(stream))) => {
+            Ok(Ok(stream)) => {
                 // Success - check if this was a recovery after failures
                 {
                     let mut state = shared_state.borrow_mut();
@@ -912,7 +912,7 @@ async fn establish_connection<P: Providers>(
                 }
                 return Ok(stream);
             }
-            Ok(Ok(Err(_))) | Ok(Err(())) | Err(_) => {
+            Ok(Err(_)) | Err(_) => {
                 // Connection failed - update state and retry
                 {
                     let mut state = shared_state.borrow_mut();

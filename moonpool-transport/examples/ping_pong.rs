@@ -194,24 +194,21 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
         // ====================================================================
         // NEW: Clean trait method call with .await
         // No more manual send_request or type annotations!
-        // Note: timeout returns SimulationResult<Result<T, ()>> so we have 3 levels
+        // Note: timeout returns Result<T, TimeError>, inner T is Result<Response, RpcError>
         // ====================================================================
         match time
             .timeout(Duration::from_secs(5), ping_client.ping(request))
             .await
         {
-            Ok(Ok(Ok(response))) => {
+            Ok(Ok(response)) => {
                 println!("Received pong seq={}: {:?}\n", response.seq, response.echo);
                 success_count += 1;
             }
-            Ok(Ok(Err(e))) => {
+            Ok(Err(e)) => {
                 println!("RPC error: {:?}\n", e);
             }
-            Ok(Err(())) => {
-                println!("Timeout waiting for response\n");
-            }
             Err(e) => {
-                println!("Simulation error: {:?}\n", e);
+                println!("Timeout or shutdown: {:?}\n", e);
             }
         }
 

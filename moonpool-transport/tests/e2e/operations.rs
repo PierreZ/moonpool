@@ -271,20 +271,20 @@ where
                 .timeout(std::time::Duration::from_millis(100), peer.receive())
                 .await
             {
-                Ok(Ok(Ok((_token, payload)))) => match TestMessage::from_bytes(&payload) {
+                Ok(Ok((_token, payload))) => match TestMessage::from_bytes(&payload) {
                     Ok(message) => OpResult::Received { message },
                     Err(e) => OpResult::Failed {
                         error: format!("deserialization failed: {:?}", e),
                     },
                 },
-                Ok(Ok(Err(PeerError::Disconnected))) => OpResult::Failed {
+                Ok(Err(PeerError::Disconnected)) => OpResult::Failed {
                     error: "peer disconnected".to_string(),
                 },
-                Ok(Ok(Err(e))) => OpResult::Failed {
+                Ok(Err(e)) => OpResult::Failed {
                     error: format!("receive error: {:?}", e),
                 },
-                Ok(Err(())) | Err(_) => {
-                    // Timeout - no message available
+                Err(_) => {
+                    // Timeout or shutdown - no message available
                     OpResult::NoMessage
                 }
             }

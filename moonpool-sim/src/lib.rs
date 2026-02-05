@@ -74,8 +74,8 @@
 pub use moonpool_core::{
     CodecError, Endpoint, JsonCodec, MessageCodec, NetworkAddress, NetworkAddressParseError,
     NetworkProvider, Providers, RandomProvider, SimulationError, SimulationResult, TaskProvider,
-    TcpListenerTrait, TimeProvider, TokioNetworkProvider, TokioProviders, TokioTaskProvider,
-    TokioTimeProvider, UID, WELL_KNOWN_RESERVED_COUNT, WellKnownToken,
+    TcpListenerTrait, TimeError, TimeProvider, TokioNetworkProvider, TokioProviders,
+    TokioTaskProvider, TokioTimeProvider, UID, WELL_KNOWN_RESERVED_COUNT, WellKnownToken,
 };
 
 // =============================================================================
