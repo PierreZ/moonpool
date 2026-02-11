@@ -7,7 +7,7 @@
 
 use rand::SeedableRng;
 use rand::{
-    Rng,
+    RngExt,
     distr::{Distribution, StandardUniform, uniform::SampleUniform},
 };
 use rand_chacha::ChaCha8Rng;
