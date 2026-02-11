@@ -15,7 +15,7 @@
 //! - Misdirected writes: lines 476-480
 //! - Overlay system for read-time fault injection
 
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::io;
 
