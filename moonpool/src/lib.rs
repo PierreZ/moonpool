@@ -60,3 +60,5 @@
 pub use moonpool_core::*;
 pub use moonpool_sim::*;
 pub use moonpool_transport::*;
+
+pub mod actors;
