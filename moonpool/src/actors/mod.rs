@@ -40,8 +40,10 @@
 
 mod directory;
 mod placement;
+mod router;
 mod types;
 
 pub use directory::{ActorDirectory, DirectoryError, InMemoryDirectory};
 pub use placement::{LocalPlacement, PlacementError, PlacementStrategy};
+pub use router::{ActorError, ActorRouter};
 pub use types::{ActorId, ActorMessage, ActorResponse, ActorType};
