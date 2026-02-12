@@ -126,10 +126,7 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
         let endpoint = self.resolve(target).await?;
 
         // 2. Serialize the method body
-        let body = self
-            .codec
-            .encode(req)
-            .map_err(ActorError::Codec)?;
+        let body = self.codec.encode(req).map_err(ActorError::Codec)?;
 
         // 3. Build ActorMessage
         let actor_msg = ActorMessage {
@@ -141,16 +138,8 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
         };
 
         // 4. Send via transport to the actor type's dispatch token (index 0)
-        let dest = Endpoint::new(
-            endpoint.address.clone(),
-            UID::new(target.actor_type.0, 0),
-        );
-        let future = send_request(
-            &self.transport,
-            &dest,
-            actor_msg,
-            self.codec.clone(),
-        )?;
+        let dest = Endpoint::new(endpoint.address.clone(), UID::new(target.actor_type.0, 0));
+        let future = send_request(&self.transport, &dest, actor_msg, self.codec.clone())?;
 
         // 5. Await and decode response
         let response: ActorResponse = future.await?;
@@ -326,8 +315,7 @@ mod tests {
 
         let local_endpoint = Endpoint::new(test_address(), UID::new(0xBA4E_4B00, 0));
         let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
-        let placement: Rc<dyn PlacementStrategy> =
-            Rc::new(LocalPlacement::new(local_endpoint));
+        let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(local_endpoint));
 
         let _router = ActorRouter::new(transport, directory, placement, JsonCodec);
     }
@@ -352,11 +340,17 @@ mod tests {
         };
 
         // Resolve should place the actor and register it
-        let resolved = router.resolve(&actor_id).await.expect("resolve should succeed");
+        let resolved = router
+            .resolve(&actor_id)
+            .await
+            .expect("resolve should succeed");
         assert_eq!(resolved, local_endpoint);
 
         // Directory should now have the entry
-        let lookup = directory.lookup(&actor_id).await.expect("lookup should succeed");
+        let lookup = directory
+            .lookup(&actor_id)
+            .await
+            .expect("lookup should succeed");
         assert_eq!(lookup, Some(local_endpoint));
     }
 
@@ -369,8 +363,7 @@ mod tests {
 
         let local_endpoint = Endpoint::new(test_address(), UID::new(0xBA4E_4B00, 0));
         let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
-        let placement: Rc<dyn PlacementStrategy> =
-            Rc::new(LocalPlacement::new(local_endpoint));
+        let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(local_endpoint));
 
         let router = ActorRouter::new(transport, directory.clone(), placement, JsonCodec);
 
@@ -390,7 +383,10 @@ mod tests {
             .expect("register should succeed");
 
         // Resolve should find the existing entry
-        let resolved = router.resolve(&actor_id).await.expect("resolve should succeed");
+        let resolved = router
+            .resolve(&actor_id)
+            .await
+            .expect("resolve should succeed");
         assert_eq!(resolved, remote_endpoint);
     }
 }

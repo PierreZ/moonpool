@@ -159,7 +159,10 @@ mod tests {
             .await
             .expect("register should succeed");
 
-        let result = dir.lookup(&alice_id()).await.expect("lookup should succeed");
+        let result = dir
+            .lookup(&alice_id())
+            .await
+            .expect("lookup should succeed");
         assert_eq!(result, Some(endpoint));
     }
 
@@ -192,7 +195,10 @@ mod tests {
             .await
             .expect("unregister should succeed");
 
-        let result = dir.lookup(&alice_id()).await.expect("lookup should succeed");
+        let result = dir
+            .lookup(&alice_id())
+            .await
+            .expect("lookup should succeed");
         assert!(result.is_none());
     }
 

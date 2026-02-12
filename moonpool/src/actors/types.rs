@@ -161,11 +161,13 @@ mod tests {
         };
 
         let serialized = serde_json::to_vec(&msg).expect("serialize");
-        let deserialized: ActorMessage =
-            serde_json::from_slice(&serialized).expect("deserialize");
+        let deserialized: ActorMessage = serde_json::from_slice(&serialized).expect("deserialize");
 
         assert_eq!(deserialized.target.identity, "account-123");
-        assert_eq!(deserialized.sender.as_ref().map(|s| &s.identity[..]), Some("player-42"));
+        assert_eq!(
+            deserialized.sender.as_ref().map(|s| &s.identity[..]),
+            Some("player-42")
+        );
         assert_eq!(deserialized.method, 1);
         assert_eq!(deserialized.body, vec![1, 2, 3, 4]);
         assert_eq!(deserialized.forward_count, 0);
@@ -185,8 +187,7 @@ mod tests {
         };
 
         let serialized = serde_json::to_vec(&msg).expect("serialize");
-        let deserialized: ActorMessage =
-            serde_json::from_slice(&serialized).expect("deserialize");
+        let deserialized: ActorMessage = serde_json::from_slice(&serialized).expect("deserialize");
 
         assert_eq!(deserialized.target.identity, "account-456");
         assert!(deserialized.sender.is_none());
@@ -202,8 +203,7 @@ mod tests {
         };
 
         let serialized = serde_json::to_vec(&resp).expect("serialize");
-        let deserialized: ActorResponse =
-            serde_json::from_slice(&serialized).expect("deserialize");
+        let deserialized: ActorResponse = serde_json::from_slice(&serialized).expect("deserialize");
 
         assert_eq!(deserialized.body, vec![10, 20, 30]);
     }
