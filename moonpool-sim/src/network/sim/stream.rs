@@ -174,13 +174,31 @@ impl AsyncRead for SimTcpStream {
             // 70% silent case: connection already marked as closed, will return EOF below
         }
 
-        // Check if receive side is closed (asymmetric closure)
+        // Check if receive side is closed (asymmetric chaos closure — immediate EOF)
         if sim.is_recv_closed(self.connection_id) {
             tracing::debug!(
                 "SimTcpStream::poll_read connection_id={} recv side closed, returning EOF",
                 self.connection_id.0
             );
             return Poll::Ready(Ok(())); // EOF
+        }
+
+        // Check for abort (RST) — immediate error, no data recovery
+        if sim.is_connection_closed(self.connection_id) {
+            match sim.get_close_reason(self.connection_id) {
+                CloseReason::Aborted => {
+                    tracing::info!(
+                        "SimTcpStream::poll_read connection_id={} was aborted (RST), returning ECONNRESET",
+                        self.connection_id.0
+                    );
+                    return Poll::Ready(Err(connection_aborted_error()));
+                }
+                _ => {
+                    // is_closed with Graceful shouldn't happen with new half-close path,
+                    // but handle defensively: return EOF
+                    return Poll::Ready(Ok(()));
+                }
+            }
         }
 
         // Check for half-open connection (peer crashed)
@@ -209,8 +227,9 @@ impl AsyncRead for SimTcpStream {
             return Poll::Pending;
         }
 
-        // Try to read from connection's receive buffer first
-        // We should be able to read buffered data even if connection is currently cut
+        // Try to read from connection's receive buffer.
+        // IMPORTANT: Always return buffered data first, regardless of close state.
+        // This is the core of TCP half-close: data sent before FIN must be readable.
         let mut temp_buf = vec![0u8; buf.remaining()];
         let bytes_read = sim
             .read_from_connection(self.connection_id, &mut temp_buf)
@@ -232,26 +251,15 @@ impl AsyncRead for SimTcpStream {
             buf.put_slice(&temp_buf[..bytes_read]);
             Poll::Ready(Ok(()))
         } else {
-            // No data available - check if connection is closed or cut
-            if sim.is_connection_closed(self.connection_id) {
-                // Check how the connection was closed
-                match sim.get_close_reason(self.connection_id) {
-                    CloseReason::Aborted => {
-                        tracing::info!(
-                            "SimTcpStream::poll_read connection_id={} was aborted (RST), returning ECONNRESET",
-                            self.connection_id.0
-                        );
-                        return Poll::Ready(Err(connection_aborted_error()));
-                    }
-                    _ => {
-                        tracing::info!(
-                            "SimTcpStream::poll_read connection_id={} is closed gracefully (FIN), returning EOF (0 bytes)",
-                            self.connection_id.0
-                        );
-                        // Connection closed gracefully (FIN) - return EOF (0 bytes read)
-                        return Poll::Ready(Ok(()));
-                    }
-                }
+            // No data available — check terminal states
+
+            // TCP half-close: peer's write side closed and all data delivered → EOF
+            if sim.is_remote_write_closed(self.connection_id) {
+                tracing::info!(
+                    "SimTcpStream::poll_read connection_id={} remote write closed (FIN received), buffer empty, returning EOF",
+                    self.connection_id.0
+                );
+                return Poll::Ready(Ok(()));
             }
 
             if sim.is_connection_cut(self.connection_id) {
@@ -273,7 +281,8 @@ impl AsyncRead for SimTcpStream {
                 .map_err(|e| io::Error::other(format!("waker registration error: {}", e)))?;
 
             // Double-check for data after registering waker to handle race conditions
-            // This prevents deadlocks where DataDelivery arrives between initial check and waker registration
+            // This prevents deadlocks where DataDelivery/FinDelivery arrives between
+            // initial check and waker registration
             let mut temp_buf_recheck = vec![0u8; buf.remaining()];
             let bytes_read_recheck = sim
                 .read_from_connection(self.connection_id, &mut temp_buf_recheck)
@@ -291,8 +300,14 @@ impl AsyncRead for SimTcpStream {
                 buf.put_slice(&temp_buf_recheck[..bytes_read_recheck]);
                 Poll::Ready(Ok(()))
             } else {
-                // Final check - if connection is closed or cut and no data available
-                if sim.is_connection_closed(self.connection_id) {
+                // Final check for terminal states after waker registration
+                if sim.is_remote_write_closed(self.connection_id) {
+                    tracing::info!(
+                        "SimTcpStream::poll_read connection_id={} remote write closed on recheck (FIN), returning EOF",
+                        self.connection_id.0
+                    );
+                    Poll::Ready(Ok(()))
+                } else if sim.is_connection_closed(self.connection_id) {
                     match sim.get_close_reason(self.connection_id) {
                         CloseReason::Aborted => {
                             tracing::info!(
@@ -301,17 +316,9 @@ impl AsyncRead for SimTcpStream {
                             );
                             Poll::Ready(Err(connection_aborted_error()))
                         }
-                        _ => {
-                            tracing::info!(
-                                "SimTcpStream::poll_read connection_id={} is closed on recheck (FIN), returning EOF (0 bytes)",
-                                self.connection_id.0
-                            );
-                            // Connection closed gracefully - return EOF (0 bytes read)
-                            Poll::Ready(Ok(()))
-                        }
+                        _ => Poll::Ready(Ok(())),
                     }
                 } else if sim.is_connection_cut(self.connection_id) {
-                    // Connection is temporarily cut - already registered waker above, just wait
                     tracing::debug!(
                         "SimTcpStream::poll_read connection_id={} is cut on recheck, waiting",
                         self.connection_id.0

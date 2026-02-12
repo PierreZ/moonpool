@@ -75,6 +75,12 @@ pub enum NetworkOperation {
     },
     /// Process next message from connection's send buffer
     ProcessSendBuffer,
+    /// Deliver FIN (graceful close) to connection.
+    ///
+    /// Scheduled after the last DataDelivery from the closing peer.
+    /// When processed, sets `remote_write_closed = true` on the receiver,
+    /// signaling that no more data will arrive from the peer.
+    FinDelivery,
 }
 
 /// Connection state changes

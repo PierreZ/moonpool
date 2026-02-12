@@ -592,6 +592,9 @@ impl SimWorld {
                 recv_delay: None,
                 is_half_open: false,
                 half_open_error_at: None,
+                local_write_closed: false,
+                remote_write_closed: false,
+                fin_pending: false,
                 is_stable: false,
             },
         );
@@ -621,6 +624,9 @@ impl SimWorld {
                 recv_delay: None,
                 is_half_open: false,
                 half_open_error_at: None,
+                local_write_closed: false,
+                remote_write_closed: false,
+                fin_pending: false,
                 is_stable: false,
             },
         );
@@ -923,7 +929,7 @@ impl SimWorld {
         }
     }
 
-    /// Handle network events (data delivery and send buffer processing).
+    /// Handle network events (data delivery, send buffer processing, and FIN delivery).
     fn handle_network_event(inner: &mut SimInner, conn_id: u64, operation: NetworkOperation) {
         let connection_id = ConnectionId(conn_id);
 
@@ -933,6 +939,9 @@ impl SimWorld {
             }
             NetworkOperation::ProcessSendBuffer => {
                 Self::handle_process_send_buffer(inner, connection_id);
+            }
+            NetworkOperation::FinDelivery => {
+                Self::handle_fin_delivery(inner, connection_id);
             }
         }
     }
@@ -973,6 +982,25 @@ impl SimWorld {
             conn.receive_buffer.push_back(byte);
         }
 
+        if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
+            waker.wake();
+        }
+    }
+
+    /// Handle FIN delivery — the peer has closed its write side and all data
+    /// has been delivered. Sets `remote_write_closed` so the receiver's next
+    /// `poll_read` on an empty buffer returns EOF.
+    fn handle_fin_delivery(inner: &mut SimInner, connection_id: ConnectionId) {
+        tracing::debug!(
+            "FinDelivery: connection {} — peer write side closed, all data delivered",
+            connection_id.0
+        );
+
+        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
+            conn.remote_write_closed = true;
+        }
+
+        // Wake read waker so poll_read can return EOF
         if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
             waker.wake();
         }
@@ -1044,6 +1072,8 @@ impl SimWorld {
             return;
         };
 
+        let paired_id = conn.paired_connection;
+
         if let Some(data) = conn.send_buffer.pop_front() {
             tracing::debug!(
                 "Connection {} partitioned, failing send of {} bytes",
@@ -1056,9 +1086,25 @@ impl SimWorld {
                 Self::schedule_process_send_buffer(inner, connection_id);
             } else {
                 conn.send_in_progress = false;
+
+                // Check deferred FIN even during partition — data was lost but
+                // the peer should eventually learn the sender closed.
+                if conn.fin_pending {
+                    conn.fin_pending = false;
+                    if let Some(paired_id) = paired_id {
+                        Self::schedule_fin_delivery(inner, connection_id, paired_id);
+                    }
+                }
             }
         } else {
             conn.send_in_progress = false;
+
+            if conn.fin_pending {
+                conn.fin_pending = false;
+                if let Some(paired_id) = paired_id {
+                    Self::schedule_fin_delivery(inner, connection_id, paired_id);
+                }
+            }
         }
     }
 
@@ -1153,6 +1199,18 @@ impl SimWorld {
             Self::schedule_process_send_buffer(inner, connection_id);
         } else {
             conn.send_in_progress = false;
+
+            // Check if a graceful close (FIN) was deferred until buffer drained
+            if conn.fin_pending {
+                conn.fin_pending = false;
+                tracing::debug!(
+                    "Connection {} send buffer drained, delivering deferred FIN",
+                    connection_id.0
+                );
+                if let Some(paired_id) = paired_id {
+                    Self::schedule_fin_delivery(inner, connection_id, paired_id);
+                }
+            }
         }
     }
 
@@ -1643,9 +1701,92 @@ impl SimWorld {
     }
 
     /// Close a connection with a specific close reason.
+    ///
+    /// For **Graceful** (FIN) close: implements TCP half-close semantics.
+    /// Only the local write side is closed. The peer can still read buffered
+    /// and in-flight data. A `FinDelivery` event is scheduled to notify the
+    /// peer after all data has been delivered.
+    ///
+    /// For **Aborted** (RST) close: immediately closes both directions.
+    /// The peer gets `ECONNRESET` on both read and write operations.
+    /// All buffered data is discarded.
     fn close_connection_with_reason(&self, connection_id: ConnectionId, reason: CloseReason) {
         let mut inner = self.inner.borrow_mut();
 
+        match reason {
+            CloseReason::Graceful => {
+                Self::close_connection_graceful(&mut inner, connection_id);
+            }
+            CloseReason::Aborted => {
+                Self::close_connection_aborted(&mut inner, connection_id);
+            }
+            CloseReason::None => {}
+        }
+    }
+
+    /// Graceful close (FIN semantics) — implements TCP half-close.
+    ///
+    /// Marks the local write side as closed. The peer can still read any
+    /// buffered or in-flight data. After all data is delivered, a `FinDelivery`
+    /// event sets `remote_write_closed` on the peer.
+    fn close_connection_graceful(inner: &mut SimInner, connection_id: ConnectionId) {
+        // Determine action needed (extract all info in one borrow)
+        enum Action {
+            Skip,
+            ScheduleFin(ConnectionId),
+            DeferFin,
+        }
+
+        let action = {
+            let Some(conn) = inner.network.connections.get_mut(&connection_id) else {
+                return;
+            };
+
+            // Already closed (graceful or abort) — nothing to do
+            if conn.local_write_closed || conn.is_closed {
+                Action::Skip
+            } else {
+                let paired_id = conn.paired_connection;
+                let can_deliver_now = conn.send_buffer.is_empty() && !conn.send_in_progress;
+
+                // Mark local write as closed
+                conn.local_write_closed = true;
+                conn.close_reason = CloseReason::Graceful;
+
+                tracing::debug!(
+                    "Connection {} local write closed (FIN), can_deliver_now={}",
+                    connection_id.0,
+                    can_deliver_now
+                );
+
+                if can_deliver_now {
+                    if let Some(paired_id) = paired_id {
+                        Action::ScheduleFin(paired_id)
+                    } else {
+                        Action::Skip
+                    }
+                } else {
+                    conn.fin_pending = true;
+                    tracing::debug!(
+                        "Connection {} FIN deferred (data still pending)",
+                        connection_id.0
+                    );
+                    Action::DeferFin
+                }
+            }
+        };
+
+        // Execute action (conn borrow is dropped, safe to borrow inner again)
+        if let Action::ScheduleFin(paired_id) = action {
+            Self::schedule_fin_delivery(inner, connection_id, paired_id);
+        }
+    }
+
+    /// Aborted close (RST semantics) — immediately kills both directions.
+    ///
+    /// Sets `is_closed = true` on both endpoints. The peer gets
+    /// `ECONNRESET` on read/write. All buffered data is discarded.
+    fn close_connection_aborted(inner: &mut SimInner, connection_id: ConnectionId) {
         let paired_connection_id = inner
             .network
             .connections
@@ -1656,12 +1797,8 @@ impl SimWorld {
             && !conn.is_closed
         {
             conn.is_closed = true;
-            conn.close_reason = reason;
-            tracing::debug!(
-                "Connection {} closed permanently (reason: {:?})",
-                connection_id.0,
-                reason
-            );
+            conn.close_reason = CloseReason::Aborted;
+            tracing::debug!("Connection {} aborted (RST)", connection_id.0);
         }
 
         if let Some(paired_id) = paired_connection_id
@@ -1669,31 +1806,68 @@ impl SimWorld {
             && !paired_conn.is_closed
         {
             paired_conn.is_closed = true;
-            paired_conn.close_reason = reason;
-            tracing::debug!(
-                "Paired connection {} also closed (reason: {:?})",
-                paired_id.0,
-                reason
-            );
+            paired_conn.close_reason = CloseReason::Aborted;
+            tracing::debug!("Paired connection {} also aborted (RST)", paired_id.0);
         }
 
         if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
-            tracing::debug!(
-                "Waking read waker for closed connection {}",
-                connection_id.0
-            );
             waker.wake();
         }
 
         if let Some(paired_id) = paired_connection_id
             && let Some(paired_waker) = inner.wakers.read_wakers.remove(&paired_id)
         {
-            tracing::debug!(
-                "Waking read waker for paired closed connection {}",
-                paired_id.0
-            );
             paired_waker.wake();
         }
+    }
+
+    /// Schedule a FinDelivery event to notify the peer that the sender has
+    /// closed its write side and all data has been sent.
+    fn schedule_fin_delivery(
+        inner: &mut SimInner,
+        sender_id: ConnectionId,
+        receiver_id: ConnectionId,
+    ) {
+        // Use the sender's next_send_time to ensure FIN arrives after all DataDelivery events.
+        // next_send_time is always advanced past the latest scheduled DataDelivery base time.
+        let send_conn = inner.network.connections.get(&sender_id);
+        let recv_conn = inner.network.connections.get(&receiver_id);
+
+        let send_delay = send_conn.and_then(|c| c.send_delay).unwrap_or_else(|| {
+            crate::network::sample_duration(&inner.network.config.write_latency)
+        });
+        let recv_delay = recv_conn
+            .and_then(|c| c.recv_delay)
+            .unwrap_or(Duration::ZERO);
+        let next_send_time = send_conn
+            .map(|c| c.next_send_time)
+            .unwrap_or(inner.current_time);
+
+        // Schedule FIN after any pending DataDelivery by using max of current_time + delays
+        // and the sender's next_send_time (which is past the last scheduled send).
+        let fin_time = std::cmp::max(
+            inner.current_time + send_delay + recv_delay,
+            next_send_time + recv_delay,
+        );
+
+        let sequence = inner.next_sequence;
+        inner.next_sequence += 1;
+
+        tracing::debug!(
+            "Scheduling FinDelivery for connection {} at {:?} (sender={})",
+            receiver_id.0,
+            fin_time,
+            sender_id.0,
+        );
+
+        inner.event_queue.schedule(ScheduledEvent::new(
+            fin_time,
+            Event::Network {
+                connection_id: receiver_id.0,
+                operation: NetworkOperation::FinDelivery,
+            },
+            sequence,
+        ));
     }
 
     /// Close connection asymmetrically (FDB rollRandomClose pattern)
@@ -1833,17 +2007,35 @@ impl SimWorld {
             .network
             .connections
             .get(&connection_id)
-            .is_some_and(|conn| conn.send_closed || conn.is_closed)
+            .is_some_and(|conn| conn.send_closed || conn.local_write_closed || conn.is_closed)
     }
 
-    /// Check if a connection's receive side is closed
+    /// Check if a connection's receive side is closed (asymmetric chaos closure).
+    ///
+    /// Only checks `recv_closed` (set by chaos injection via `close_connection_asymmetric`
+    /// or `roll_random_close`). Does NOT check `is_closed` — the abort (RST) case is
+    /// handled separately in `poll_read` via `is_connection_closed()`.
     pub fn is_recv_closed(&self, connection_id: ConnectionId) -> bool {
         let inner = self.inner.borrow();
         inner
             .network
             .connections
             .get(&connection_id)
-            .is_some_and(|conn| conn.recv_closed || conn.is_closed)
+            .is_some_and(|conn| conn.recv_closed)
+    }
+
+    /// Check if the peer's write side has been closed and all data delivered (FIN received).
+    ///
+    /// When this returns true and the receive buffer is empty, `poll_read` should
+    /// return EOF (0 bytes). Unlike `is_recv_closed()` (which is for chaos-injected
+    /// asymmetric closure), this represents the natural TCP FIN delivery.
+    pub fn is_remote_write_closed(&self, connection_id: ConnectionId) -> bool {
+        let inner = self.inner.borrow();
+        inner
+            .network
+            .connections
+            .get(&connection_id)
+            .is_some_and(|conn| conn.remote_write_closed)
     }
 
     // Half-Open Connection Simulation Methods

@@ -145,6 +145,29 @@ pub struct ConnectionState {
     /// After this time: both read and write return ECONNRESET.
     pub half_open_error_at: Option<Duration>,
 
+    /// Whether this side has initiated a graceful close (sent FIN).
+    ///
+    /// When true, this endpoint can no longer write data, but the peer
+    /// can still read any buffered or in-flight data. This implements
+    /// TCP half-close semantics where `shutdown(SHUT_WR)` or dropping
+    /// the stream sends a FIN but doesn't affect the read direction.
+    pub local_write_closed: bool,
+
+    /// Whether the peer has completed a graceful close (received FIN).
+    ///
+    /// Set to true only after ALL data from the peer has been delivered
+    /// to this connection's receive buffer. When `receive_buffer` is empty
+    /// and this flag is true, `poll_read` returns EOF (0 bytes).
+    pub remote_write_closed: bool,
+
+    /// Whether a graceful close (FIN) is pending delivery to the peer.
+    ///
+    /// Set when `local_write_closed` becomes true but there is still data
+    /// in the send buffer or a `ProcessSendBuffer` event in progress.
+    /// The FIN will be delivered (via `FinDelivery` event) after the send
+    /// buffer is fully drained.
+    pub fin_pending: bool,
+
     /// Whether this connection is stable (exempt from chaos).
     ///
     /// FDB ref: sim2.actor.cpp:357-362, 427, 440, 581-582 (stableConnection flag)
