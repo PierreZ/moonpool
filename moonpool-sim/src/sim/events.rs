@@ -75,6 +75,9 @@ pub enum NetworkOperation {
     },
     /// Process next message from connection's send buffer
     ProcessSendBuffer,
+    /// Deliver FIN (graceful close) to a connection's receive side.
+    /// Scheduled after the last DataDelivery to ensure all data arrives first.
+    FinDelivery,
 }
 
 /// Connection state changes

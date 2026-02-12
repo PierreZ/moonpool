@@ -159,6 +159,20 @@ pub struct ConnectionState {
     /// This is used for parent-child process connections or supervision channels
     /// that should remain reliable even during chaos testing.
     pub is_stable: bool,
+
+    /// Whether a graceful close (FIN) is pending delivery to the peer.
+    /// Set when close_connection is called while the send pipeline still has data.
+    /// The FIN is delivered after the last DataDelivery event.
+    pub graceful_close_pending: bool,
+
+    /// Time of the most recently scheduled DataDelivery event from this connection.
+    /// Used to ensure FinDelivery is scheduled after the last data arrives at the peer.
+    pub last_data_delivery_scheduled_at: Option<Duration>,
+
+    /// Whether a FIN has been received from the remote peer (graceful close completed).
+    /// Distinct from `recv_closed` which is for chaos/asymmetric closure (immediate EOF).
+    /// This flag allows the reader to drain the receive buffer before seeing EOF.
+    pub remote_fin_received: bool,
 }
 
 /// Internal listener state for simulation
