@@ -39,7 +39,9 @@
 //! calls the method, sends the response, then processes the next message.
 
 mod directory;
+mod placement;
 mod types;
 
 pub use directory::{ActorDirectory, DirectoryError, InMemoryDirectory};
+pub use placement::{LocalPlacement, PlacementError, PlacementStrategy};
 pub use types::{ActorId, ActorMessage, ActorResponse, ActorType};
