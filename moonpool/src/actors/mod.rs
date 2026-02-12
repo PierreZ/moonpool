@@ -38,6 +38,8 @@
 //! The processing loop dequeues a message, finds/activates the actor,
 //! calls the method, sends the response, then processes the next message.
 
+mod directory;
 mod types;
 
+pub use directory::{ActorDirectory, DirectoryError, InMemoryDirectory};
 pub use types::{ActorId, ActorMessage, ActorResponse, ActorType};
