@@ -232,9 +232,19 @@ impl AsyncRead for SimTcpStream {
             buf.put_slice(&temp_buf[..bytes_read]);
             Poll::Ready(Ok(()))
         } else {
-            // No data available - check if connection is closed or cut
+            // No data available - check if connection has received FIN, is closed, or cut
+
+            // Check for remote FIN (graceful close, all data delivered via FinDelivery event)
+            if sim.is_remote_fin_received(self.connection_id) {
+                tracing::info!(
+                    "SimTcpStream::poll_read connection_id={} remote FIN received, returning EOF (0 bytes)",
+                    self.connection_id.0
+                );
+                return Poll::Ready(Ok(()));
+            }
+
             if sim.is_connection_closed(self.connection_id) {
-                // Check how the connection was closed
+                // Local side was closed or connection was aborted
                 match sim.get_close_reason(self.connection_id) {
                     CloseReason::Aborted => {
                         tracing::info!(
@@ -248,7 +258,6 @@ impl AsyncRead for SimTcpStream {
                             "SimTcpStream::poll_read connection_id={} is closed gracefully (FIN), returning EOF (0 bytes)",
                             self.connection_id.0
                         );
-                        // Connection closed gracefully (FIN) - return EOF (0 bytes read)
                         return Poll::Ready(Ok(()));
                     }
                 }
@@ -291,7 +300,17 @@ impl AsyncRead for SimTcpStream {
                 buf.put_slice(&temp_buf_recheck[..bytes_read_recheck]);
                 Poll::Ready(Ok(()))
             } else {
-                // Final check - if connection is closed or cut and no data available
+                // Final check - if connection has received FIN, is closed, or cut and no data available
+
+                // Check for remote FIN (recheck after waker registration)
+                if sim.is_remote_fin_received(self.connection_id) {
+                    tracing::info!(
+                        "SimTcpStream::poll_read connection_id={} remote FIN received on recheck, returning EOF (0 bytes)",
+                        self.connection_id.0
+                    );
+                    return Poll::Ready(Ok(()));
+                }
+
                 if sim.is_connection_closed(self.connection_id) {
                     match sim.get_close_reason(self.connection_id) {
                         CloseReason::Aborted => {
@@ -306,7 +325,6 @@ impl AsyncRead for SimTcpStream {
                                 "SimTcpStream::poll_read connection_id={} is closed on recheck (FIN), returning EOF (0 bytes)",
                                 self.connection_id.0
                             );
-                            // Connection closed gracefully - return EOF (0 bytes read)
                             Poll::Ready(Ok(()))
                         }
                     }
