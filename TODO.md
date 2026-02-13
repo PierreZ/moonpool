@@ -2,23 +2,50 @@
 
 ## Context
 
-moonpool-sim runs one seed per simulation. Finding bugs that require N independent rare events costs P(e1) x P(e2) x ... x P(eN) seeds — exponential in N. The Antithesis/maze-explorer approach: checkpoint when something interesting happens, fork(), branch children with different seeds. This reduces cost from product to sum of probabilities.
+moonpool-sim runs one seed per simulation. Finding bugs requiring N independent rare events costs P(e1) x P(e2) x ... x P(eN) seeds — exponential. Antithesis approach: checkpoint when interesting, fork(), branch with different seeds. Reduces cost from product to sum.
 
-moonpool-sim is ideal for fork(): single-threaded, no real I/O, no file descriptors, no mutexes. After fork, the child has a complete COW copy of SimWorld (event queue, network, storage), the tokio runtime, and all thread-local state. It reseeds the RNG and continues stepping — all future decisions diverge.
+moonpool-sim is ideal for fork(): single-threaded, no real I/O, no file descriptors, no mutexes. After fork, child has complete COW copy of SimWorld. Reseeds RNG and continues — all future decisions diverge.
 
-The implementation ports the core mechanisms from the maze-explorer PoC into moonpool-sim's architecture, split into 3 incremental PRs.
+## Crate Structure
+
+```
+moonpool-explorer/  NEW (deps: libc only)  <- leaf, no moonpool knowledge
+     ^
+moonpool-sim/       (adds dep on moonpool-explorer)
+     ^
+moonpool/           (re-exports via moonpool-sim, no direct dep needed)
+```
+
+**No cycles.** moonpool-explorer never imports moonpool-sim/core. Talks to the RNG through 2 function pointers set at init:
+
+```rust
+// moonpool-explorer — the entire coupling surface
+thread_local! {
+    static RNG_GET_COUNT: Cell<fn() -> u64> = const { Cell::new(|| 0) };
+    static RNG_RESEED: Cell<fn(u64)> = const { Cell::new(|_| {}) };
+}
+pub fn set_rng_hooks(get_count: fn() -> u64, reseed: fn(u64));
+```
+
+```rust
+// moonpool-sim runner init — wires the hooks
+moonpool_explorer::set_rng_hooks(
+    get_rng_call_count,                                        // fn() -> u64
+    |seed| { set_sim_seed(seed); reset_rng_call_count(); },   // fn(u64)
+);
+```
 
 ---
 
 ## PR 1: RNG Call Counting + Breakpoints
 
-**Goal**: Make the RNG replay-capable. This is the foundation for both fork recording and deterministic replay of discovered timelines.
+**Goal**: Make the RNG replay-capable. Foundation for fork recording and deterministic replay.
 
 **File**: `moonpool-sim/src/sim/rng.rs` (only file changed)
 
 ### Changes
 
-Add two thread-locals alongside existing `SIM_RNG` and `CURRENT_SEED`:
+Add two thread-locals:
 
 ```rust
 thread_local! {
@@ -27,7 +54,7 @@ thread_local! {
 }
 ```
 
-Add `check_rng_breakpoint()` (called after count increment, before sample):
+Add `check_rng_breakpoint()`:
 
 ```rust
 fn check_rng_breakpoint() {
@@ -35,11 +62,9 @@ fn check_rng_breakpoint() {
         let mut breakpoints = bp.borrow_mut();
         while let Some(&(target_count, new_seed)) = breakpoints.front() {
             let count = RNG_CALL_COUNT.with(|c| c.get());
-            if count > target_count {  // > not >= (PoC lesson: fork fires BETWEEN calls)
+            if count > target_count {  // > not >= (fork fires BETWEEN calls)
                 breakpoints.pop_front();
-                SIM_RNG.with(|rng| {
-                    *rng.borrow_mut() = ChaCha8Rng::seed_from_u64(new_seed);
-                });
+                SIM_RNG.with(|rng| *rng.borrow_mut() = ChaCha8Rng::seed_from_u64(new_seed));
                 CURRENT_SEED.with(|s| *s.borrow_mut() = new_seed);
                 RNG_CALL_COUNT.with(|c| c.set(1)); // 1 not 0: current call IS first of new segment
             } else {
@@ -50,190 +75,49 @@ fn check_rng_breakpoint() {
 }
 ```
 
-Modify all 4 RNG consumption functions (`sim_random`, `sim_random_range`, `sim_random_range_or_default`, `sim_random_f64`) to:
+Modify all 4 RNG functions (`sim_random`, `sim_random_range`, `sim_random_range_or_default`, `sim_random_f64`):
 1. Increment `RNG_CALL_COUNT`
 2. Call `check_rng_breakpoint()`
-3. Sample (existing code)
+3. Sample (existing)
 
-Add public API:
-- `get_rng_call_count() -> u64`
-- `reset_rng_call_count()`
-- `set_rng_breakpoints(breakpoints: &[(u64, u64)])` — each entry is (target_count, new_seed)
-- `clear_rng_breakpoints()`
+Add public API: `get_rng_call_count()`, `reset_rng_call_count()`, `set_rng_breakpoints()`, `clear_rng_breakpoints()`
 
-Update `reset_sim_rng()` to also reset call count and clear breakpoints.
+Update `reset_sim_rng()` to also reset count and clear breakpoints.
 
 ### Tests
 
-1. `test_call_counting` — generate N values, verify count == N
-2. `test_breakpoint_reseed` — breakpoint at count=5 with new seed. Verify calls 1-5 use old seed, calls 6+ use new seed
-3. `test_chained_breakpoints` — multiple breakpoints, verify correct reseed chain
-4. `test_replay_determinism` — record a sequence of (seed, count) pairs, then replay via breakpoints, verify identical output
-5. `test_reset_clears_everything` — set breakpoints and advance count, reset, verify clean state
+1. `test_call_counting` — N values -> count == N
+2. `test_breakpoint_reseed` — breakpoint at count=5, verify calls 1-5 use old seed, 6+ use new
+3. `test_chained_breakpoints` — multiple breakpoints in sequence
+4. `test_replay_determinism` — record recipe, replay via breakpoints, verify identical output
+5. `test_reset_clears_everything`
 
-**~60 new lines of code. Zero breaking changes.**
+**~60 LOC. Zero breaking changes.**
 
 ---
 
-## PR 2: Explorer Module + Fork Loop
+## PR 2: moonpool-explorer Crate + Fork Loop
 
-**Goal**: Add MAP_SHARED infrastructure, assertion-triggered forking, and the core fork loop. After this PR, moonpool-sim can explore alternate timelines.
+**Goal**: New `moonpool-explorer` crate with MAP_SHARED infrastructure, assertion-triggered forking, and the core fork loop. Wire into moonpool-sim.
 
-### New dependency
+### New crate: `moonpool-explorer/`
 
-`moonpool-sim/Cargo.toml`: add `libc = "0.2"`
+**`Cargo.toml`**: only dep is `libc = "0.2"`
 
-### New files
+#### `src/shared_mem.rs`
+- `alloc_shared(size) -> Result<*mut u8, io::Error>` — `mmap(MAP_SHARED | MAP_ANONYMOUS)`
+- `free_shared(ptr, size)`
 
-#### `moonpool-sim/src/explorer/mod.rs`
-Module root. Re-exports key types.
-
-#### `moonpool-sim/src/explorer/shared_mem.rs`
-- `alloc_shared(size: usize) -> Result<*mut u8, std::io::Error>` — `mmap(MAP_SHARED | MAP_ANONYMOUS)`
-- `free_shared(ptr: *mut u8, size: usize)` — `munmap`
-- Atomic helper functions for casting raw pointers to `AtomicU8`/`AtomicI64`/`AtomicU64`
-
-#### `moonpool-sim/src/explorer/coverage.rs`
+#### `src/coverage.rs`
 ```rust
 pub const COVERAGE_MAP_SIZE: usize = 1024;
-
-pub struct CoverageBitmap { ptr: *mut u8 }  // per-child, cleared before each fork
+pub struct CoverageBitmap { ptr: *mut u8 }  // per-child, cleared before fork
 pub struct VirginMap { ptr: *mut u8 }        // cross-process, OR'd by all
-
-impl CoverageBitmap {
-    pub fn clear(&self);
-    pub fn merge_into_virgin(&self, virgin: &VirginMap) -> usize; // returns new edges found
-}
-impl VirginMap {
-    pub fn count_edges(&self) -> usize;
-}
 ```
 
-#### `moonpool-sim/src/explorer/context.rs`
+#### `src/assertion_slots.rs`
 ```rust
-thread_local! {
-    static EXPLORER_CTX: RefCell<ExplorerCtx> = RefCell::new(ExplorerCtx::inactive());
-}
-
-pub struct ExplorerCtx {
-    pub active: bool,
-    pub is_child: bool,
-    pub depth: u32,
-    pub max_depth: u32,
-    pub current_seed: u64,
-    pub recipe: Vec<(u64, u64)>,         // (seed, rng_count_at_fork) per segment
-    pub children_per_fork: u32,          // fixed-count for now
-    pub global_energy: *mut AtomicI64,   // pointer into MAP_SHARED
-}
-
-pub fn explorer_init(seed: u64, config: &ExplorationConfig, energy_ptr: *mut AtomicI64);
-pub fn explorer_is_active() -> bool;
-pub fn explorer_is_child() -> bool;
-pub fn explorer_get_recipe() -> Vec<(u64, u64)>;
-```
-
-#### `moonpool-sim/src/explorer/fork_loop.rs`
-The core `branch_on_discovery()`:
-
-```rust
-pub fn branch_on_discovery(mark_name: &str) {
-    // 1. Check: active? depth < max_depth? global_energy > 0?
-    // 2. Record recipe segment: (current_seed, rng_call_count)
-    // 3. Save parent bitmap
-    // 4. For each child 0..children_per_fork:
-    //    a. Atomic decrement global_energy, break if exhausted
-    //    b. Clear coverage bitmap
-    //    c. Compute child_seed = hash(parent_seed, depth, mark_hash, child_idx)
-    //    d. fork()
-    //    e. CHILD: set is_child, depth++, push recipe, reseed RNG, RETURN
-    //    f. PARENT: waitpid(), merge coverage into virgin, check exit code 42
-    // 5. Restore parent bitmap, pop recipe segment
-}
-```
-
-`child_seed_for_mark()` — FNV-1a hash of (parent_seed, depth, mark_hash, child_index).
-
-#### `moonpool-sim/src/explorer/replay.rs`
-- `format_timeline(recipe: &[(u64, u64)]) -> String` — "seed0:count0,seed1:count1,..."
-- `parse_timeline(s: &str) -> Result<Vec<(u64, u64)>, String>`
-
-#### `moonpool-sim/src/explorer/shared_stats.rs`
-```rust
-#[repr(C)]
-pub struct SharedStats {
-    pub global_energy: AtomicI64,
-    pub total_timelines: AtomicU64,
-    pub fork_points: AtomicU64,
-    pub bug_found: AtomicU64,        // 0 or 1
-}
-
-#[repr(C)]
-pub struct SharedRecipe {
-    pub claimed: AtomicU32,           // CAS guard: 0->1
-    pub len: u32,
-    pub entries: [(u64, u64); 128],   // (seed, rng_count) segments
-}
-```
-
-### Modified files
-
-#### `moonpool-sim/src/chaos/assertions.rs`
-Add dual-path to `sometimes_assert!`:
-
-```rust
-#[macro_export]
-macro_rules! sometimes_assert {
-    ($name:ident, $condition:expr, $message:expr) => {
-        let result = $condition;
-        $crate::chaos::assertions::record_assertion(stringify!($name), result);
-        if result {
-            $crate::explorer::maybe_fork_on_assertion(stringify!($name));
-        }
-    };
-}
-```
-
-New function `maybe_fork_on_assertion(name)`:
-- Hash the name, look up/allocate a MAP_SHARED assertion slot
-- CAS `fork_triggered` from false to true (fire-once)
-- If CAS wins AND explorer active: call `branch_on_discovery(name)`
-
-#### `moonpool-sim/src/chaos/mod.rs`
-Add `pub mod explorer;` (or wire via lib.rs). Re-export key types.
-
-#### `moonpool-sim/src/lib.rs`
-Add `pub mod explorer;` module and re-exports.
-
-#### `moonpool-sim/src/runner/builder.rs`
-Add `ExplorationConfig` and builder method:
-
-```rust
-pub struct ExplorationConfig {
-    pub max_depth: u32,              // default: 3
-    pub children_per_fork: u32,      // default: 8
-    pub global_energy: i64,          // default: 1024
-}
-
-impl SimulationBuilder {
-    pub fn enable_exploration(mut self, config: ExplorationConfig) -> Self { ... }
-}
-```
-
-In `run()`: if exploration enabled, allocate shared memory once before the loop, initialize explorer context per iteration, teardown after.
-
-#### `moonpool-sim/src/runner/orchestrator.rs`
-At the end of `orchestrate_workloads()`, before returning:
-
-```rust
-if crate::explorer::explorer_is_child() {
-    let exit_code = if results.iter().all(|r| r.is_ok()) { 0 } else { 42 };
-    unsafe { libc::_exit(exit_code); }
-}
-```
-
-### Assertion Slots (MAP_SHARED)
-
-```rust
+pub const MAX_ASSERTION_SLOTS: usize = 128;
 #[repr(C)]
 pub struct AssertionSlot {
     pub name_hash: u64,
@@ -241,70 +125,101 @@ pub struct AssertionSlot {
     pub pass_count: u64,
     pub fail_count: u64,
 }
-pub const MAX_ASSERTION_SLOTS: usize = 128;
+```
+- `maybe_fork_on_assertion(name: &str)` — hash name, find/alloc slot, CAS fork_triggered, call `branch_on_discovery()`
+
+#### `src/context.rs`
+```rust
+thread_local! {
+    static EXPLORER_CTX: RefCell<ExplorerCtx> = RefCell::new(ExplorerCtx::inactive());
+}
+pub struct ExplorerCtx {
+    pub active: bool,
+    pub is_child: bool,
+    pub depth: u32,
+    pub max_depth: u32,
+    pub current_seed: u64,
+    pub recipe: Vec<(u64, u64)>,
+    pub children_per_fork: u32,
+}
 ```
 
-Located in `explorer/shared_stats.rs` or a dedicated `explorer/assertion_slots.rs`.
+#### `src/fork_loop.rs`
+`branch_on_discovery(mark_name)`:
+1. Check: active? depth < max_depth? energy > 0?
+2. Record recipe segment via `RNG_GET_COUNT` hook
+3. Save parent bitmap
+4. For each child: decrement energy -> clear bitmap -> compute child_seed (FNV-1a) -> `fork()` -> CHILD: reseed via `RNG_RESEED` hook, set is_child, depth++, RETURN -> PARENT: `waitpid()`, merge coverage, check exit 42
+5. Restore parent bitmap, pop recipe
+
+#### `src/replay.rs`
+- `format_timeline(&[(u64, u64)]) -> String`
+- `parse_timeline(&str) -> Result<Vec<(u64, u64)>>`
+
+#### `src/shared_stats.rs`
+```rust
+#[repr(C)]
+pub struct SharedStats { global_energy: AtomicI64, total_timelines: AtomicU64, fork_points: AtomicU64, bug_found: AtomicU64 }
+#[repr(C)]
+pub struct SharedRecipe { claimed: AtomicU32, len: u32, entries: [(u64, u64); 128] }
+```
+
+#### `src/lib.rs`
+- `ExplorationConfig { max_depth, children_per_fork, global_energy }`
+- `set_rng_hooks(get_count, reseed)`
+- `init(config)` / `cleanup()` / `explorer_is_child() -> bool`
+
+### moonpool-sim changes
+
+**`Cargo.toml`**: add `moonpool-explorer = { path = "../moonpool-explorer" }`
+
+**`src/chaos/assertions.rs`** — add `on_sometimes_success()`:
+```rust
+pub fn on_sometimes_success(name: &str) {
+    moonpool_explorer::maybe_fork_on_assertion(name);
+}
+```
+Modify `sometimes_assert!` macro to call `$crate::chaos::assertions::on_sometimes_success(stringify!($name))` when result is true.
+
+**`src/lib.rs`** — re-export explorer types
+
+**`src/runner/builder.rs`** — add `enable_exploration(config)` builder method. In `run()`: call `set_rng_hooks()`, `moonpool_explorer::init()` before loop, `cleanup()` after.
+
+**`src/runner/orchestrator.rs`** — at end of `orchestrate_workloads()`:
+```rust
+if moonpool_explorer::explorer_is_child() {
+    let code = if results.iter().all(|r| r.is_ok()) { 0 } else { 42 };
+    unsafe { libc::_exit(code); }
+}
+```
 
 ### Tests
 
-1. `test_fork_basic` — workload with `sometimes_assert!(rare_event, cond)`. Enable exploration, verify SharedStats.total_timelines > 0
-2. `test_child_exit_code` — workload that hits `always_assert!` failure in forked child. Verify parent detects exit code 42
-3. `test_depth_limit` — set max_depth=1. Child also hits assertion. Verify no grandchildren (shared stats)
-4. `test_energy_limit` — global_energy=2, children_per_fork=8. Verify only 2 children forked
-5. `test_replay_matches_fork` — run exploration, capture recipe, replay with breakpoints, verify same assertion results
-6. `test_exploration_disabled_default` — without enable_exploration(), old behavior unchanged
-7. `test_planted_bug` — workload with nested rare conditions (mini-maze: 3 gates at P=0.1). Verify exploration finds all gates opened within reasonable energy budget, while brute-force (1000 seeds) does not
+1. `test_fork_basic` — workload with `sometimes_assert!`, verify SharedStats.total_timelines > 0
+2. `test_child_exit_code` — child hits always_assert! failure, parent detects exit 42
+3. `test_depth_limit` — max_depth=1, no grandchildren
+4. `test_energy_limit` — global_energy=2, children_per_fork=8, only 2 forked
+5. `test_replay_matches_fork` — capture recipe, replay with breakpoints, identical results
+6. `test_exploration_disabled_default` — old behavior unchanged
+7. `test_planted_bug` — nested rare conditions (mini-maze: 3 gates at P=0.1), exploration finds it, brute-force doesn't
 
-### Key safety notes
-- Children call `libc::_exit()` (not `std::process::exit()`) to avoid running destructors
-- Fork only happens between RNG sample boundaries (inside assertion macros, not mid-borrow)
-- All MAP_SHARED access uses atomics with Relaxed ordering (sufficient: single parent waits on each child sequentially)
-
-**~500 lines of new code. Breaking change: `sometimes_assert!` now forks when explorer active.**
+**moonpool-explorer: ~600 LOC. moonpool-sim changes: ~40 LOC.**
 
 ---
 
 ## PR 3: Adaptive Forking + Energy Budgets + Reporting
 
-**Goal**: Replace fixed-count forking with yield-driven adaptive decisions. Add per-fork-point energy budgets with reallocation. Produce an exploration report.
+**Goal**: Replace fixed-count with yield-driven adaptive forking. Add 3-level energy budgets. Produce exploration report.
 
-### Modified files
+### moonpool-explorer changes
 
-#### `moonpool-sim/src/explorer/fork_loop.rs`
-Replace fixed-count loop with adaptive batching:
-
+**`src/fork_loop.rs`** — adaptive batch loop:
 ```rust
-// Adaptive config
-pub struct AdaptiveConfig {
-    pub batch_size: u32,        // initial batch (default: 4)
-    pub min_timelines: u32,     // minimum before early-stop (default: 8)
-    pub max_timelines: u32,     // cap per fork point (default: 64)
-}
-
-// In branch_on_discovery():
-let mut batch_remaining = config.batch_size;
-let mut timelines_spawned = 0;
-loop {
-    let virgin_before = virgin.count_edges();
-    // Fork batch_remaining children...
-    timelines_spawned += batch_count;
-
-    if timelines_spawned >= config.max_timelines { break; }
-
-    let batch_yield = virgin.count_edges() - virgin_before;
-    if batch_yield == 0 && timelines_spawned >= config.min_timelines {
-        // Barren: collapse, donate savings to realloc pool
-        break;
-    }
-    if batch_yield > 0 {
-        batch_remaining = (batch_remaining * 2).min(config.max_timelines - timelines_spawned);
-        // If mark budget depleted, try realloc from pool
-    }
-}
+pub struct AdaptiveConfig { batch_size: u32, min_timelines: u32, max_timelines: u32 }
+// Measure virgin edge yield per batch. Escalate if productive, collapse if barren.
 ```
 
-#### `moonpool-sim/src/explorer/energy.rs` (new file)
+**`src/energy.rs`** (new):
 ```rust
 #[repr(C)]
 pub struct EnergyBudget {
@@ -316,86 +231,49 @@ pub struct EnergyBudget {
 }
 ```
 
-Three-level budgets (global, per-seed via reset, per-mark-slot). Reallocation pool receives savings from collapsed fork points.
-
-#### `moonpool-sim/src/explorer/corpus.rs` (new file)
+**`src/corpus.rs`** (new):
 ```rust
 #[repr(C)]
-pub struct Checkpoint {
-    pub id: u32,
-    pub mark_hash: u32,
-    pub depth: u8,
-    pub parent_seed: u64,
-    pub rng_count_at_fork: u64,
-    pub virgin_edges_before: u16,
-    pub virgin_edges_after: u16,
-    pub timelines_spawned: u16,
-    pub collapsed: bool,
-    pub depleted: bool,
-}
+pub struct Checkpoint { id: u32, mark_hash: u32, depth: u8, parent_seed: u64, ... }
 pub const MAX_CHECKPOINTS: usize = 4096;
 ```
 
-#### `moonpool-sim/src/runner/builder.rs`
-Extend `ExplorationConfig` with adaptive fields:
+### moonpool-sim changes
 
-```rust
-pub struct ExplorationConfig {
-    pub max_depth: u32,
-    pub global_energy: i64,
-    pub per_mark_energy: i64,
-    pub adaptive: AdaptiveConfig,
-    pub realloc_fraction_pct: u8,
-}
-```
-
-#### `moonpool-sim/src/runner/report.rs`
-Add `ExplorationReport`:
-
-```rust
-pub struct ExplorationReport {
-    pub timelines_explored: u64,
-    pub fork_points: u64,
-    pub new_edges_discovered: u64,
-    pub bug_found: bool,
-    pub bug_recipe: Option<String>,
-    pub checkpoints: Vec<Checkpoint>,
-}
-```
-
-Wire into `SimulationReport` as `pub exploration: Option<ExplorationReport>`.
+**`src/runner/builder.rs`** — extend ExplorationConfig with adaptive fields
+**`src/runner/report.rs`** — add `ExplorationReport { timelines, fork_points, bug_recipe, checkpoints }`
 
 ### Tests
 
-1. `test_adaptive_collapses_barren` — fork point that produces no new edges. Verify timelines_spawned ~ min_timelines
-2. `test_adaptive_escalates_productive` — fork point where each child discovers edges. Verify batch size doubles
-3. `test_energy_realloc` — barren point donates savings, productive point draws from pool
-4. `test_exploration_report` — full run, verify report fields populated
-5. `test_checkpoint_tracking` — verify corpus records fork points with correct metadata
+1. `test_adaptive_collapses_barren`
+2. `test_adaptive_escalates_productive`
+3. `test_energy_realloc`
+4. `test_exploration_report`
+5. `test_checkpoint_tracking`
 
-**~300 lines of new code.**
+**~300 LOC.**
 
 ---
 
 ## Summary
 
 ```
-PR1: RNG Breakpoints (~60 LOC)     -- foundation, no fork needed
+PR1: RNG Breakpoints (~60 LOC)          moonpool-sim only
  |
-PR2: Explorer + Fork Loop (~500 LOC) -- the core capability
+PR2: Explorer crate + fork (~640 LOC)   NEW moonpool-explorer + moonpool-sim wiring
  |
-PR3: Adaptive + Report (~300 LOC)   -- intelligence layer
+PR3: Adaptive + report (~300 LOC)       moonpool-explorer + moonpool-sim report
 ```
 
-Total: ~860 lines across 3 PRs. Each is independently testable.
+Total: ~1000 lines across 3 PRs.
 
-### What's deferred (future PRs)
-- `assert_sometimes_greater_than!` (watermark-based forking)
-- `assert_sometimes_each!` (SOMETIMES_EACH bucketed exploration)
-- `assert_sometimes_all!` (frontier-based forking)
-- Multi-core workers (fork N worker processes, per-worker maps, merge)
-- Coverage integration into `step()` (hash prev_event_type x curr_event_type)
-- Buggify transformation (fault injection as branch points)
+### Deferred
+- `assert_sometimes_greater_than!` (watermark forking)
+- `assert_sometimes_each!` (SOMETIMES_EACH bucketed)
+- `assert_sometimes_all!` (frontier forking)
+- Multi-core workers
+- Coverage in `step()` (hash prev_event x curr_event)
+- Buggify as branch points
 
 ### Verification
-After each PR, run: `nix develop --command cargo fmt && nix develop --command cargo clippy && nix develop --command cargo nextest run`
+After each PR: `nix develop --command cargo fmt && nix develop --command cargo clippy && nix develop --command cargo nextest run`
