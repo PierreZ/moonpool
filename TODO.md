@@ -691,7 +691,7 @@ Commit: `feat(moonpool): FDB-style alphabet workloads with reference model invar
 
 ## Phase 4: Virtual actor simulation workloads
 
-**Status**: NOT STARTED
+**Status**: COMPLETE
 
 **Goal**: Build FDB-style alphabet workloads for the virtual actor system in `moonpool/`. The actor system has rich state (Orleans-style lifecycle, persistent state with ETag concurrency, directory + placement, turn-based per-identity concurrency) — ideal for finding bugs with chaos + exploration.
 

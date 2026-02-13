@@ -163,6 +163,7 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
 
         // 6. Handle cache invalidation if present
         if let Some(invalidation) = &response.cache_invalidation {
+            moonpool_sim::assert_sometimes!(true, "cache_invalidation");
             // Update our directory cache with the correct endpoint
             let _ = self.directory.unregister(&invalidation.actor_id).await;
             if let Some(valid) = &invalidation.valid_endpoint {
@@ -182,11 +183,13 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
     async fn resolve(&self, target: &ActorId) -> Result<Endpoint, ActorError> {
         // Check directory first
         if let Some(endpoint) = self.directory.lookup(target).await? {
+            moonpool_sim::assert_sometimes!(true, "directory_cache_hit");
             return Ok(endpoint);
         }
 
         // Not found — place the actor
         let endpoint = self.placement.place(target, &[]).await?;
+        moonpool_sim::assert_sometimes!(true, "placement_invoked");
 
         // Register in directory (ignore AlreadyRegistered race — another caller
         // may have placed the same actor concurrently)

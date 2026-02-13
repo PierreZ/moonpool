@@ -156,12 +156,14 @@ impl ActorStateStore for InMemoryStateStore {
         if let Some(expected) = expected_etag {
             match entries.get(&key) {
                 Some(existing) if existing.etag != expected => {
+                    moonpool_sim::assert_sometimes!(true, "etag_conflict");
                     return Err(ActorStateError::ETagMismatch {
                         expected: expected.to_string(),
                         actual: existing.etag.clone(),
                     });
                 }
                 None => {
+                    moonpool_sim::assert_sometimes!(true, "etag_conflict");
                     return Err(ActorStateError::ETagMismatch {
                         expected: expected.to_string(),
                         actual: String::new(),

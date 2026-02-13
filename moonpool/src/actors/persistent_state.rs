@@ -63,6 +63,7 @@ impl<T: Serialize + DeserializeOwned + Default> PersistentState<T> {
 
         match stored {
             Some(entry) => {
+                moonpool_sim::assert_sometimes!(true, "state_loaded");
                 let value: T = serde_json::from_slice(&entry.data)
                     .map_err(|e| ActorStateError::SerializationError(e.to_string()))?;
                 Ok(Self {
@@ -127,6 +128,7 @@ impl<T: Serialize + DeserializeOwned + Default> PersistentState<T> {
 
         self.etag = Some(new_etag);
         self.record_exists = true;
+        moonpool_sim::assert_sometimes!(true, "state_persisted");
         Ok(())
     }
 

@@ -376,6 +376,7 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
         match dir_lookup {
             Ok(Some(registered_endpoint)) if registered_endpoint.address != local_address => {
                 // Actor is registered on another node — forward
+                moonpool_sim::assert_sometimes!(true, "actor_message_forwarded");
                 forward_message::<P, C>(
                     &transport,
                     &actor_msg,
@@ -445,6 +446,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                     Ok(msg) => msg,
                     Err(_) => {
                         // Idle timeout elapsed — deactivate the actor
+                        moonpool_sim::assert_sometimes!(true, "deactivate_after_idle_timeout");
                         let actor_id = ActorId::new(actor_type, identity.clone());
                         if let Some(ref mut a) = actor {
                             let ctx = ActorContext {
@@ -453,6 +455,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                                 state_store: state_store.clone(),
                             };
                             let _ = a.on_deactivate(&ctx).await;
+                            moonpool_sim::assert_sometimes!(true, "actor_deactivated");
                         }
                         actor = None;
                         let _ = directory.unregister(&actor_id).await;
@@ -468,6 +471,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
 
         let Some((actor_msg, reply)) = msg_opt else {
             // Mailbox closed — shutdown
+            moonpool_sim::assert_sometimes!(true, "identity_mailbox_closed");
             break;
         };
 
@@ -493,6 +497,10 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
             let endpoint = Endpoint::new(local_address.clone(), UID::new(actor_type.0, 0));
             let _ = directory.register(&actor_id, endpoint).await;
 
+            moonpool_sim::assert_sometimes_each!(
+                "actor_activated",
+                [("type", actor_type.0 as i64)]
+            );
             actor = Some(new_actor);
         }
 
@@ -533,6 +541,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
             .as_ref()
             .is_some_and(|a| a.deactivation_hint() == DeactivationHint::DeactivateOnIdle)
         {
+            moonpool_sim::assert_sometimes!(true, "deactivate_on_idle");
             let actor_id = ActorId::new(actor_type, identity.clone());
             if let Some(a) = actor.as_mut() {
                 let ctx = ActorContext {
@@ -541,6 +550,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                     state_store: state_store.clone(),
                 };
                 let _ = a.on_deactivate(&ctx).await;
+                moonpool_sim::assert_sometimes!(true, "actor_deactivated");
             }
             actor = None;
             let _ = directory.unregister(&actor_id).await;
@@ -556,6 +566,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
             state_store: state_store.clone(),
         };
         let _ = a.on_deactivate(&ctx).await;
+        moonpool_sim::assert_sometimes!(true, "actor_deactivated");
         let _ = directory.unregister(&actor_id).await;
     }
 
