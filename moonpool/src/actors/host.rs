@@ -17,7 +17,7 @@
 //! host.register::<BankAccountImpl>()?;
 //! ```
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::task::{Poll, Waker};
@@ -256,6 +256,9 @@ trait ActorTypeDispatcher<P: Providers, C: MessageCodec> {
     ///
     /// Spawns a task that receives `ActorMessage`s from the transport,
     /// looks up/creates actor instances, and dispatches method calls.
+    ///
+    /// Returns a closure that closes the request stream, triggering graceful
+    /// shutdown of the routing loop and all per-identity tasks.
     fn start(
         &self,
         transport: Rc<NetTransport<P>>,
@@ -263,7 +266,8 @@ trait ActorTypeDispatcher<P: Providers, C: MessageCodec> {
         directory: Rc<dyn ActorDirectory>,
         state_store: Option<Rc<dyn ActorStateStore>>,
         providers: P,
-    );
+        pending_tasks: Rc<Cell<usize>>,
+    ) -> Box<dyn Fn()>;
 }
 
 /// Type-erased dispatcher for a specific actor handler type.
@@ -289,16 +293,28 @@ impl<H: ActorHandler, P: Providers, C: MessageCodec> ActorTypeDispatcher<P, C>
         directory: Rc<dyn ActorDirectory>,
         state_store: Option<Rc<dyn ActorStateStore>>,
         providers: P,
-    ) {
+        pending_tasks: Rc<Cell<usize>>,
+    ) -> Box<dyn Fn()> {
         let actor_type = H::actor_type();
         let token = UID::new(actor_type.0, 0);
         let stream: RequestStream<ActorMessage, C> =
             transport.register_handler(token, router.codec().clone());
 
+        let close_handle = stream.queue();
+        pending_tasks.set(pending_tasks.get() + 1);
         providers.task().spawn_task(
             "actor_host_loop",
-            actor_processing_loop::<H, P, C>(transport, router, directory, state_store, stream),
+            actor_processing_loop::<H, P, C>(
+                transport,
+                router,
+                directory,
+                state_store,
+                stream,
+                pending_tasks,
+            ),
         );
+
+        Box::new(move || close_handle.close())
     }
 }
 
@@ -325,6 +341,7 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
     directory: Rc<dyn ActorDirectory>,
     state_store: Option<Rc<dyn ActorStateStore>>,
     stream: RequestStream<ActorMessage, C>,
+    pending_tasks: Rc<Cell<usize>>,
 ) {
     let mut mailboxes: HashMap<String, Rc<IdentityMailbox<C>>> = HashMap::new();
     let actor_type = H::actor_type();
@@ -372,6 +389,7 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
             _ => {
                 // Actor not registered, or registered on this node — create mailbox + task
                 let mailbox = IdentityMailbox::new();
+                pending_tasks.set(pending_tasks.get() + 1);
                 transport.providers().task().spawn_task(
                     "actor_identity_loop",
                     identity_processing_loop::<H, P, C>(
@@ -383,6 +401,7 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
                         actor_type,
                         local_address.clone(),
                         transport.providers().time().clone(),
+                        pending_tasks.clone(),
                     ),
                 );
                 mailbox.send(actor_msg, reply);
@@ -390,6 +409,9 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
             }
         }
     }
+
+    // Signal routing loop completion to the host.
+    pending_tasks.set(pending_tasks.get() - 1);
 }
 
 /// Per-identity processing loop for a single actor instance.
@@ -408,6 +430,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
     actor_type: ActorType,
     local_address: crate::NetworkAddress,
     time: P::Time,
+    pending_tasks: Rc<Cell<usize>>,
 ) {
     let mut actor: Option<H> = None;
 
@@ -535,6 +558,9 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
         let _ = a.on_deactivate(&ctx).await;
         let _ = directory.unregister(&actor_id).await;
     }
+
+    // Signal identity task completion to the host.
+    pending_tasks.set(pending_tasks.get() - 1);
 }
 
 /// Forward a message to the correct node when the actor lives elsewhere.
@@ -655,6 +681,17 @@ pub struct ActorHost<P: Providers, C: MessageCodec = JsonCodec> {
     state_store: Option<Rc<dyn ActorStateStore>>,
     /// Providers bundle for spawning tasks.
     providers: P,
+    /// Close handles for registered request streams.
+    ///
+    /// When called, these close the request stream for each actor type,
+    /// causing the routing loop to exit and trigger deactivation.
+    close_handles: RefCell<Vec<Box<dyn Fn()>>>,
+    /// Number of actor tasks (routing loops + identity tasks) still running.
+    ///
+    /// Incremented when a routing loop or identity task is spawned,
+    /// decremented by each when it exits. Used by `stop()` to wait
+    /// for all tasks to complete.
+    pending_tasks: Rc<Cell<usize>>,
 }
 
 impl<P: Providers, C: MessageCodec> ActorHost<P, C> {
@@ -677,6 +714,8 @@ impl<P: Providers, C: MessageCodec> ActorHost<P, C> {
             directory,
             state_store: None,
             providers,
+            close_handles: RefCell::new(Vec::new()),
+            pending_tasks: Rc::new(Cell::new(0)),
         }
     }
 
@@ -701,13 +740,51 @@ impl<P: Providers, C: MessageCodec> ActorHost<P, C> {
     /// * `H` - The actor handler type (must implement `ActorHandler` + `Default`)
     pub fn register<H: ActorHandler>(&self) {
         let dispatcher = TypedDispatcher::<H>::new();
-        dispatcher.start(
+        let close_handle = dispatcher.start(
             self.transport.clone(),
             self.router.clone(),
             self.directory.clone(),
             self.state_store.clone(),
             self.providers.clone(),
+            self.pending_tasks.clone(),
         );
+        self.close_handles.borrow_mut().push(close_handle);
+    }
+
+    /// Gracefully stop all actor processing loops.
+    ///
+    /// This:
+    /// 1. Closes all request streams (no new messages accepted)
+    /// 2. Yields until all routing loop tasks complete, which in turn
+    ///    wait for all per-identity tasks to finish deactivation
+    ///
+    /// After `stop()` returns, all actors have been deactivated via
+    /// `on_deactivate` and all processing tasks have exited.
+    ///
+    /// Calling `stop()` multiple times is safe — close handles are
+    /// idempotent and the yield loop exits immediately when no loops
+    /// are pending.
+    pub async fn stop(&self) {
+        // Phase 1: Close all request streams.
+        for close_fn in self.close_handles.borrow().iter() {
+            close_fn();
+        }
+
+        // Phase 2: Yield until all routing loops (and their identity tasks)
+        // have finished. Each routing loop decrements pending_tasks on exit.
+        while self.pending_tasks.get() > 0 {
+            self.providers.task().yield_now().await;
+        }
+    }
+}
+
+impl<P: Providers, C: MessageCodec> Drop for ActorHost<P, C> {
+    fn drop(&mut self) {
+        // Fire-and-forget: close all request streams so processing loops
+        // exit on their next poll. Cannot await JoinHandles in Drop.
+        for close_fn in self.close_handles.borrow().iter() {
+            close_fn();
+        }
     }
 }
 
@@ -972,6 +1049,110 @@ mod tests {
                 .await
                 .expect("bob get");
             assert_eq!(resp.value, 50);
+        });
+    }
+
+    /// Actor that tracks deactivation via a shared flag.
+    struct DeactivationTracker {
+        deactivated: Rc<Cell<bool>>,
+    }
+
+    impl Default for DeactivationTracker {
+        fn default() -> Self {
+            Self {
+                deactivated: Rc::new(Cell::new(false)),
+            }
+        }
+    }
+
+    const TRACKER_TYPE: ActorType = ActorType(0xDEAC_0001);
+
+    // Thread-local slot to inject the shared flag into the actor on activation.
+    thread_local! {
+        static DEACTIVATED_FLAG: RefCell<Option<Rc<Cell<bool>>>> = const { RefCell::new(None) };
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl ActorHandler for DeactivationTracker {
+        fn actor_type() -> ActorType {
+            TRACKER_TYPE
+        }
+
+        async fn on_activate<P: Providers, C: MessageCodec>(
+            &mut self,
+            _ctx: &ActorContext<P, C>,
+        ) -> Result<(), ActorError> {
+            DEACTIVATED_FLAG.with(|f| {
+                if let Some(flag) = f.borrow().as_ref() {
+                    self.deactivated = flag.clone();
+                }
+            });
+            Ok(())
+        }
+
+        async fn on_deactivate<P: Providers, C: MessageCodec>(
+            &mut self,
+            _ctx: &ActorContext<P, C>,
+        ) -> Result<(), ActorError> {
+            self.deactivated.set(true);
+            Ok(())
+        }
+
+        async fn dispatch<P: Providers, C: MessageCodec>(
+            &mut self,
+            _ctx: &ActorContext<P, C>,
+            _method: u32,
+            _body: &[u8],
+        ) -> Result<Vec<u8>, ActorError> {
+            let codec = JsonCodec;
+            Ok(codec.encode(&ValueResponse { value: 0 })?)
+        }
+    }
+
+    #[test]
+    fn test_stop_deactivates_actors() {
+        run_local_test(async {
+            let local_addr = test_addr();
+            let providers = TokioProviders::new();
+            let transport = NetTransportBuilder::new(providers)
+                .local_address(local_addr.clone())
+                .build()
+                .expect("build transport");
+
+            let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
+            let local_endpoint = Endpoint::new(local_addr, UID::new(TRACKER_TYPE.0, 0));
+            let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(local_endpoint));
+            let router = Rc::new(ActorRouter::new(
+                transport.clone(),
+                directory.clone(),
+                placement,
+                JsonCodec,
+            ));
+
+            let host = ActorHost::new(transport, router.clone(), directory.clone());
+            host.register::<DeactivationTracker>();
+
+            // Inject the shared flag before sending a message
+            let deactivated = Rc::new(Cell::new(false));
+            DEACTIVATED_FLAG.with(|f| {
+                *f.borrow_mut() = Some(deactivated.clone());
+            });
+
+            tokio::task::yield_now().await;
+
+            // Send a message to activate the actor
+            let actor_id = ActorId::new(TRACKER_TYPE, "tracker1");
+            let _resp: ValueResponse = router
+                .send_actor_request(&actor_id, 1, &GetValueRequest {})
+                .await
+                .expect("activate actor");
+
+            assert!(!deactivated.get(), "should not be deactivated yet");
+
+            // Stop the host — should deactivate all actors
+            host.stop().await;
+
+            assert!(deactivated.get(), "actor should have been deactivated");
         });
     }
 }

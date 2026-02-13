@@ -266,6 +266,10 @@ where
         }
     }
 
+    // Drop triggers close handles; the sim orchestrator processes remaining
+    // events (including deactivation) via run_until_empty after all workloads exit.
+    drop(host);
+
     Ok(SimulationMetrics {
         events_processed: 0,
         ..Default::default()
