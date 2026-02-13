@@ -21,9 +21,11 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::task::{Poll, Waker};
+use std::time::Duration;
 
 use crate::{
-    Endpoint, JsonCodec, MessageCodec, NetTransport, Providers, RequestStream, TaskProvider, UID,
+    Endpoint, JsonCodec, MessageCodec, NetTransport, Providers, RequestStream, TaskProvider,
+    TimeProvider, UID,
 };
 
 use super::router::ActorError;
@@ -118,6 +120,15 @@ pub enum DeactivationHint {
     /// from memory. The next message will re-activate it (calling
     /// `on_activate` again), loading state from the store.
     DeactivateOnIdle,
+    /// Actor is deactivated after the given duration of inactivity.
+    ///
+    /// The idle timer resets on every message. If no message arrives before
+    /// the duration elapses, `on_deactivate` is called and the actor is
+    /// removed from memory. The next message re-activates it.
+    ///
+    /// This is the Orleans default behavior — keeps hot actors cached while
+    /// reclaiming memory from cold ones.
+    DeactivateAfterIdle(Duration),
 }
 
 /// Context provided to actor methods during dispatch.
@@ -187,6 +198,8 @@ pub trait ActorHandler: Default + 'static {
     ///
     /// - `KeepAlive` (default): actor stays in memory between messages.
     /// - `DeactivateOnIdle`: actor is deactivated after each dispatch.
+    /// - `DeactivateAfterIdle(duration)`: actor is deactivated after a period
+    ///   of inactivity. The timer resets on every message.
     fn deactivation_hint(&self) -> DeactivationHint {
         DeactivationHint::KeepAlive
     }
@@ -369,6 +382,7 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
                         state_store.clone(),
                         actor_type,
                         local_address.clone(),
+                        transport.providers().time().clone(),
                     ),
                 );
                 mailbox.send(actor_msg, reply);
@@ -384,6 +398,7 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
 /// message (or after deactivation), dispatches method calls, and handles
 /// deactivation. Runs as a spawned task, maintaining turn-based concurrency
 /// for this identity while allowing other identities to process concurrently.
+#[allow(clippy::too_many_arguments)]
 async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
     mailbox: Rc<IdentityMailbox<C>>,
     identity: String,
@@ -392,11 +407,43 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
     state_store: Option<Rc<dyn ActorStateStore>>,
     actor_type: ActorType,
     local_address: crate::NetworkAddress,
+    time: P::Time,
 ) {
     let mut actor: Option<H> = None;
 
     loop {
-        let Some((actor_msg, reply)) = IdentityMailbox::recv(&mailbox).await else {
+        // Wait for next message, with optional idle timeout when actor is active.
+        let msg_opt = if let Some(ref a) = actor {
+            if let DeactivationHint::DeactivateAfterIdle(duration) = a.deactivation_hint() {
+                match time
+                    .timeout(duration, IdentityMailbox::recv(&mailbox))
+                    .await
+                {
+                    Ok(msg) => msg,
+                    Err(_) => {
+                        // Idle timeout elapsed — deactivate the actor
+                        let actor_id = ActorId::new(actor_type, identity.clone());
+                        if let Some(ref mut a) = actor {
+                            let ctx = ActorContext {
+                                id: actor_id.clone(),
+                                router: router.clone(),
+                                state_store: state_store.clone(),
+                            };
+                            let _ = a.on_deactivate(&ctx).await;
+                        }
+                        actor = None;
+                        let _ = directory.unregister(&actor_id).await;
+                        continue;
+                    }
+                }
+            } else {
+                IdentityMailbox::recv(&mailbox).await
+            }
+        } else {
+            IdentityMailbox::recv(&mailbox).await
+        };
+
+        let Some((actor_msg, reply)) = msg_opt else {
             // Mailbox closed — shutdown
             break;
         };

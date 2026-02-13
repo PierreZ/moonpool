@@ -9,7 +9,7 @@
 //! - A static `PingPong` interface (existing pattern, proves coexistence)
 //! - A virtual `BankAccount` actor defined with `#[virtual_actor]` macro
 //! - **State persistence**: `PersistentState<BankAccountData>` + `InMemoryStateStore`
-//! - **Lifecycle**: `on_activate` loads state, `DeactivateOnIdle` removes actor after each call
+//! - **Lifecycle**: `on_activate` loads state, `DeactivateAfterIdle` removes actor after idle timeout
 //! - Typed `BankAccountRef` for ergonomic actor calls
 //! - Single process, local delivery, single transport
 //!
@@ -22,6 +22,7 @@
 //! ```
 
 use std::rc::Rc;
+use std::time::Duration;
 
 use moonpool::actors::{
     ActorContext, ActorDirectory, ActorError, ActorHandler, ActorHost, ActorRouter,
@@ -98,8 +99,9 @@ struct BankAccountData {
 
 /// BankAccount actor implementation with persistent state.
 ///
-/// Uses `DeactivateOnIdle` — the actor is removed from memory after each
-/// message. State is persisted to the store and reloaded on reactivation.
+/// Uses `DeactivateAfterIdle(30s)` — the actor stays in memory for 30 seconds
+/// after the last message, then is deactivated. State is persisted to the store
+/// and reloaded on reactivation.
 #[derive(Default)]
 struct BankAccountImpl {
     state: Option<PersistentState<BankAccountData>>,
@@ -160,7 +162,7 @@ impl ActorHandler for BankAccountImpl {
     }
 
     fn deactivation_hint(&self) -> DeactivationHint {
-        DeactivationHint::DeactivateOnIdle
+        DeactivationHint::DeactivateAfterIdle(Duration::from_secs(30))
     }
 
     async fn on_activate<P: Providers, C: MessageCodec>(
