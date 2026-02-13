@@ -25,6 +25,7 @@ use crate::{
 };
 
 use super::router::ActorError;
+use super::state::ActorStateStore;
 use super::types::{ActorId, ActorMessage, ActorResponse, ActorType, CacheInvalidation};
 use super::{ActorDirectory, ActorRouter};
 
@@ -32,23 +33,60 @@ use super::{ActorDirectory, ActorRouter};
 /// Prevents infinite forwarding loops.
 const MAX_FORWARD_COUNT: u8 = 2;
 
+/// Hint from an actor type about when it should be deactivated.
+///
+/// Returned by [`ActorHandler::deactivation_hint`] to control the actor's
+/// lifetime in memory. This is a per-actor-type setting, not per-message.
+///
+/// # Orleans Reference
+///
+/// This is a simplified version of Orleans' `DeactivateOnIdle` /
+/// `DelayDeactivation` / `KeepAlive` mechanisms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeactivationHint {
+    /// Actor stays in memory between messages (default, backward compatible).
+    KeepAlive,
+    /// Actor is deactivated after each message dispatch completes.
+    /// On deactivation, `on_deactivate` is called and the actor is removed
+    /// from memory. The next message will re-activate it (calling
+    /// `on_activate` again), loading state from the store.
+    DeactivateOnIdle,
+}
+
 /// Context provided to actor methods during dispatch.
 ///
-/// Gives the actor access to its own identity and a router for calling
-/// other actors (grain-to-grain communication, Orleans pattern).
+/// Gives the actor access to its own identity, a router for calling
+/// other actors, and an optional state store for persistent state.
 pub struct ActorContext<P: Providers, C: MessageCodec = JsonCodec> {
     /// The identity of the actor currently being invoked.
     pub id: ActorId,
     /// Router for calling other actors.
     pub router: Rc<ActorRouter<P, C>>,
+    state_store: Option<Rc<dyn ActorStateStore>>,
 }
 
-/// Trait implemented by each actor type for method dispatch.
+impl<P: Providers, C: MessageCodec> ActorContext<P, C> {
+    /// Get the state store, if one was configured on the host.
+    ///
+    /// Returns `None` if the host was created without a state store.
+    /// Use this in `on_activate` to load persistent state.
+    pub fn state_store(&self) -> Option<&Rc<dyn ActorStateStore>> {
+        self.state_store.as_ref()
+    }
+}
+
+/// Trait implemented by each actor type for method dispatch and lifecycle.
 ///
-/// The host calls `dispatch()` after looking up the actor instance.
-/// Actor state requires `Default` — no activation hooks, no lifecycle,
-/// no persistence. An actor is created via `Default::default()` on first
-/// message and lives forever.
+/// The host calls `on_activate()` when an actor is first created (or
+/// re-activated after deactivation), `dispatch()` for each message, and
+/// `on_deactivate()` before removal. The `deactivation_hint()` controls
+/// when the actor is removed from memory.
+///
+/// # Lifecycle
+///
+/// ```text
+/// Default::default() → on_activate() → [dispatch()...] → on_deactivate() → dropped
+/// ```
 ///
 /// # Example
 ///
@@ -77,6 +115,37 @@ pub struct ActorContext<P: Providers, C: MessageCodec = JsonCodec> {
 pub trait ActorHandler: Default + 'static {
     /// The actor type ID (matches the token registered in the transport).
     fn actor_type() -> ActorType;
+
+    /// Hint about when this actor type should be deactivated.
+    ///
+    /// - `KeepAlive` (default): actor stays in memory between messages.
+    /// - `DeactivateOnIdle`: actor is deactivated after each dispatch.
+    fn deactivation_hint(&self) -> DeactivationHint {
+        DeactivationHint::KeepAlive
+    }
+
+    /// Called after the actor is created and before the first message.
+    ///
+    /// Use this to load persistent state from `ctx.state_store()`.
+    /// If this returns an error, the actor is not activated and the
+    /// triggering message receives an error response.
+    async fn on_activate<P: Providers, C: MessageCodec>(
+        &mut self,
+        _ctx: &ActorContext<P, C>,
+    ) -> Result<(), ActorError> {
+        Ok(())
+    }
+
+    /// Called before the actor is removed from memory.
+    ///
+    /// Use this for cleanup. Errors are logged but do not prevent
+    /// deactivation.
+    async fn on_deactivate<P: Providers, C: MessageCodec>(
+        &mut self,
+        _ctx: &ActorContext<P, C>,
+    ) -> Result<(), ActorError> {
+        Ok(())
+    }
 
     /// Dispatch a method call. The host calls this after looking up the
     /// actor instance.
@@ -112,6 +181,7 @@ trait ActorTypeDispatcher<P: Providers, C: MessageCodec> {
         transport: Rc<NetTransport<P>>,
         router: Rc<ActorRouter<P, C>>,
         directory: Rc<dyn ActorDirectory>,
+        state_store: Option<Rc<dyn ActorStateStore>>,
         providers: P,
     );
 }
@@ -137,6 +207,7 @@ impl<H: ActorHandler, P: Providers, C: MessageCodec> ActorTypeDispatcher<P, C>
         transport: Rc<NetTransport<P>>,
         router: Rc<ActorRouter<P, C>>,
         directory: Rc<dyn ActorDirectory>,
+        state_store: Option<Rc<dyn ActorStateStore>>,
         providers: P,
     ) {
         let actor_type = H::actor_type();
@@ -146,7 +217,7 @@ impl<H: ActorHandler, P: Providers, C: MessageCodec> ActorTypeDispatcher<P, C>
 
         providers.task().spawn_task(
             "actor_host_loop",
-            actor_processing_loop::<H, P, C>(transport, router, directory, stream),
+            actor_processing_loop::<H, P, C>(transport, router, directory, state_store, stream),
         );
     }
 }
@@ -161,6 +232,12 @@ impl<H: ActorHandler, P: Providers, C: MessageCodec> ActorTypeDispatcher<P, C>
 /// One message at a time per actor instance. The loop processes messages
 /// sequentially — no concurrent access to the same actor.
 ///
+/// # Lifecycle
+///
+/// When an actor is first activated: `Default::default()` → `on_activate()`.
+/// After each dispatch, if `deactivation_hint()` returns `DeactivateOnIdle`,
+/// the actor is deactivated: `on_deactivate()` → removed from memory.
+///
 /// # Forwarding
 ///
 /// When a message arrives for an actor not hosted locally, and the directory
@@ -171,6 +248,7 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
     transport: Rc<NetTransport<P>>,
     router: Rc<ActorRouter<P, C>>,
     directory: Rc<dyn ActorDirectory>,
+    state_store: Option<Rc<dyn ActorStateStore>>,
     stream: RequestStream<ActorMessage, C>,
 ) {
     let mut actors: HashMap<String, H> = HashMap::new();
@@ -183,7 +261,9 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
             .recv_with_transport::<_, ActorResponse>(&transport)
             .await
         else {
-            // Stream closed — shutdown
+            // Stream closed — shutdown. Deactivate all remaining actors.
+            deactivate_all::<H, P, C>(&mut actors, &router, &directory, &state_store, actor_type)
+                .await;
             break;
         };
 
@@ -197,8 +277,20 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
                 &identity,
                 &actor_msg,
                 &router,
+                &state_store,
                 actor_type,
                 reply,
+            )
+            .await;
+
+            // Check deactivation hint
+            maybe_deactivate::<H, P, C>(
+                &mut actors,
+                &identity,
+                &router,
+                &directory,
+                &state_store,
+                actor_type,
             )
             .await;
             continue;
@@ -223,7 +315,23 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
             }
             _ => {
                 // Actor not registered, or registered on this node — activate locally
-                actors.insert(identity.clone(), H::default());
+                let mut actor = H::default();
+                let ctx = ActorContext {
+                    id: ActorId::new(actor_type, identity.clone()),
+                    router: router.clone(),
+                    state_store: state_store.clone(),
+                };
+
+                // Call on_activate — if it fails, send error response and skip
+                if let Err(e) = actor.on_activate(&ctx).await {
+                    reply.send(ActorResponse {
+                        body: Err(format!("activation failed: {e}")),
+                        cache_invalidation: None,
+                    });
+                    continue;
+                }
+
+                actors.insert(identity.clone(), actor);
 
                 // Register in directory (best-effort, ignore race conditions)
                 let endpoint = Endpoint::new(local_address.clone(), UID::new(actor_type.0, 0));
@@ -234,8 +342,20 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
                     &identity,
                     &actor_msg,
                     &router,
+                    &state_store,
                     actor_type,
                     reply,
+                )
+                .await;
+
+                // Check deactivation hint
+                maybe_deactivate::<H, P, C>(
+                    &mut actors,
+                    &identity,
+                    &router,
+                    &directory,
+                    &state_store,
+                    actor_type,
                 )
                 .await;
             }
@@ -249,16 +369,22 @@ async fn dispatch_local<H: ActorHandler, P: Providers, C: MessageCodec>(
     identity: &str,
     actor_msg: &ActorMessage,
     router: &Rc<ActorRouter<P, C>>,
+    state_store: &Option<Rc<dyn ActorStateStore>>,
     actor_type: ActorType,
     reply: crate::ReplyPromise<ActorResponse, C>,
 ) {
-    let actor = actors
-        .get_mut(identity)
-        .expect("actor was just inserted or already exists");
+    let Some(actor) = actors.get_mut(identity) else {
+        reply.send(ActorResponse {
+            body: Err("actor not found after activation".to_string()),
+            cache_invalidation: None,
+        });
+        return;
+    };
 
     let ctx = ActorContext {
         id: ActorId::new(actor_type, identity.to_string()),
         router: router.clone(),
+        state_store: state_store.clone(),
     };
 
     let result = actor
@@ -277,6 +403,66 @@ async fn dispatch_local<H: ActorHandler, P: Providers, C: MessageCodec>(
     };
 
     reply.send(response);
+}
+
+/// Check the deactivation hint and deactivate the actor if needed.
+async fn maybe_deactivate<H: ActorHandler, P: Providers, C: MessageCodec>(
+    actors: &mut HashMap<String, H>,
+    identity: &str,
+    router: &Rc<ActorRouter<P, C>>,
+    directory: &Rc<dyn ActorDirectory>,
+    state_store: &Option<Rc<dyn ActorStateStore>>,
+    actor_type: ActorType,
+) {
+    let should_deactivate = actors
+        .get(identity)
+        .is_some_and(|a| a.deactivation_hint() == DeactivationHint::DeactivateOnIdle);
+
+    if !should_deactivate {
+        return;
+    }
+
+    let actor_id = ActorId::new(actor_type, identity.to_string());
+
+    // Call on_deactivate (best-effort)
+    if let Some(actor) = actors.get_mut(identity) {
+        let ctx = ActorContext {
+            id: actor_id.clone(),
+            router: router.clone(),
+            state_store: state_store.clone(),
+        };
+        let _ = actor.on_deactivate(&ctx).await;
+    }
+
+    // Remove from memory
+    actors.remove(identity);
+
+    // Unregister from directory (best-effort)
+    let _ = directory.unregister(&actor_id).await;
+}
+
+/// Deactivate all actors during shutdown.
+async fn deactivate_all<H: ActorHandler, P: Providers, C: MessageCodec>(
+    actors: &mut HashMap<String, H>,
+    router: &Rc<ActorRouter<P, C>>,
+    directory: &Rc<dyn ActorDirectory>,
+    state_store: &Option<Rc<dyn ActorStateStore>>,
+    actor_type: ActorType,
+) {
+    let identities: Vec<String> = actors.keys().cloned().collect();
+    for identity in identities {
+        let actor_id = ActorId::new(actor_type, identity.clone());
+        if let Some(actor) = actors.get_mut(&identity) {
+            let ctx = ActorContext {
+                id: actor_id.clone(),
+                router: router.clone(),
+                state_store: state_store.clone(),
+            };
+            let _ = actor.on_deactivate(&ctx).await;
+        }
+        actors.remove(&identity);
+        let _ = directory.unregister(&actor_id).await;
+    }
 }
 
 /// Forward a message to the correct node when the actor lives elsewhere.
@@ -370,18 +556,21 @@ async fn proxy_forwarded_response<C: MessageCodec>(
 
 /// Server-side runtime for virtual actors.
 ///
-/// Owns actor instances, spawns processing loops, and handles activation
-/// and method dispatch internally. Register actor types with `register()`,
-/// and the host spawns a processing task for each type.
+/// Owns actor instances, spawns processing loops, and handles activation,
+/// lifecycle, and method dispatch internally. Register actor types with
+/// `register()`, and the host spawns a processing task for each type.
+///
+/// # State Persistence
+///
+/// Optionally configure a state store with [`with_state_store`](Self::with_state_store).
+/// Actors can then access it via `ctx.state_store()` in their lifecycle hooks.
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// let host = ActorHost::new(transport.clone(), router.clone(), directory.clone());
-/// host.register::<BankAccountImpl>()?;
-///
-/// // Now BankAccountImpl actors are automatically activated and dispatched
-/// // when messages arrive at their type's token (index 0).
+/// let host = ActorHost::new(transport.clone(), router.clone(), directory.clone())
+///     .with_state_store(Rc::new(InMemoryStateStore::new()));
+/// host.register::<BankAccountImpl>();
 /// ```
 pub struct ActorHost<P: Providers, C: MessageCodec = JsonCodec> {
     /// The transport for registering endpoints.
@@ -390,6 +579,8 @@ pub struct ActorHost<P: Providers, C: MessageCodec = JsonCodec> {
     router: Rc<ActorRouter<P, C>>,
     /// Directory for registering activated actors.
     directory: Rc<dyn ActorDirectory>,
+    /// Optional state store for persistent actor state.
+    state_store: Option<Rc<dyn ActorStateStore>>,
     /// Providers bundle for spawning tasks.
     providers: P,
 }
@@ -412,8 +603,18 @@ impl<P: Providers, C: MessageCodec> ActorHost<P, C> {
             transport,
             router,
             directory,
+            state_store: None,
             providers,
         }
+    }
+
+    /// Configure a state store for persistent actor state.
+    ///
+    /// When set, actors can access the store via `ctx.state_store()`
+    /// in their `on_activate`, `dispatch`, and `on_deactivate` methods.
+    pub fn with_state_store(mut self, store: Rc<dyn ActorStateStore>) -> Self {
+        self.state_store = Some(store);
+        self
     }
 
     /// Register an actor type with the host.
@@ -432,6 +633,7 @@ impl<P: Providers, C: MessageCodec> ActorHost<P, C> {
             self.transport.clone(),
             self.router.clone(),
             self.directory.clone(),
+            self.state_store.clone(),
             self.providers.clone(),
         );
     }
