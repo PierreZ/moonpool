@@ -23,7 +23,7 @@ Before ANY work:
 
 ## Phase 1: Remove old tests, keep the build green
 
-**Status**: NOT STARTED
+**Status**: COMPLETE
 
 **Goal**: Delete all simulation/chaos test files. Keep all library code compiling. The old macros, builder API, StateRegistry, and InvariantCheck remain for now (transport src depends on them).
 
