@@ -43,6 +43,7 @@
 pub mod assertion_slots;
 pub mod context;
 pub mod coverage;
+pub mod each_buckets;
 pub mod energy;
 pub mod fork_loop;
 pub mod replay;
@@ -52,13 +53,14 @@ pub mod shared_stats;
 // Re-exports for the public API
 pub use assertion_slots::maybe_fork_on_assertion;
 pub use context::{explorer_is_child, set_rng_hooks};
+pub use each_buckets::{EachBucket, assertion_sometimes_each, each_bucket_read_all};
 pub use fork_loop::{AdaptiveConfig, exit_child};
 pub use replay::{ParseTimelineError, format_timeline, parse_timeline};
 pub use shared_stats::{ExplorationStats, get_bug_recipe, get_exploration_stats};
 
 use context::{
-    ASSERTION_TABLE, COVERAGE_BITMAP_PTR, ENERGY_BUDGET_PTR, SHARED_RECIPE, SHARED_STATS,
-    VIRGIN_MAP_PTR,
+    ASSERTION_TABLE, COVERAGE_BITMAP_PTR, EACH_BUCKET_PTR, ENERGY_BUDGET_PTR, SHARED_RECIPE,
+    SHARED_STATS, VIRGIN_MAP_PTR,
 };
 
 /// Configuration for exploration.
@@ -95,6 +97,7 @@ pub fn init(config: ExplorationConfig) -> Result<(), std::io::Error> {
     let virgin_ptr = shared_mem::alloc_shared(coverage::COVERAGE_MAP_SIZE)?;
     let bitmap_ptr = shared_mem::alloc_shared(coverage::COVERAGE_MAP_SIZE)?;
     let table_ptr = shared_mem::alloc_shared(ASSERTION_TABLE_SIZE)?;
+    let each_bucket_ptr = shared_mem::alloc_shared(each_buckets::each_bucket_region_size())?;
 
     // Allocate energy budget if adaptive mode is configured
     let energy_ptr = if let Some(ref adaptive) = config.adaptive {
@@ -109,6 +112,7 @@ pub fn init(config: ExplorationConfig) -> Result<(), std::io::Error> {
     VIRGIN_MAP_PTR.with(|c| c.set(virgin_ptr));
     COVERAGE_BITMAP_PTR.with(|c| c.set(bitmap_ptr));
     ASSERTION_TABLE.with(|c| c.set(table_ptr as *mut assertion_slots::AssertionSlot));
+    EACH_BUCKET_PTR.with(|c| c.set(each_bucket_ptr));
     ENERGY_BUDGET_PTR.with(|c| c.set(energy_ptr));
 
     // Activate exploration context
@@ -173,6 +177,12 @@ pub fn cleanup() {
         if !table_ptr.is_null() {
             shared_mem::free_shared(table_ptr as *mut u8, ASSERTION_TABLE_SIZE);
             ASSERTION_TABLE.with(|c| c.set(std::ptr::null_mut()));
+        }
+
+        let each_bucket_ptr = EACH_BUCKET_PTR.with(|c| c.get());
+        if !each_bucket_ptr.is_null() {
+            shared_mem::free_shared(each_bucket_ptr, each_buckets::each_bucket_region_size());
+            EACH_BUCKET_PTR.with(|c| c.set(std::ptr::null_mut()));
         }
 
         let energy_ptr = ENERGY_BUDGET_PTR.with(|c| c.get());

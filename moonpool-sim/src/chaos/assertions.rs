@@ -170,70 +170,74 @@ pub fn validate_assertion_contracts() -> Vec<String> {
     violations
 }
 
-/// Assert that a condition is always true, panicking on failure.
-///
-/// This macro is used for conditions that must always hold in a correct
-/// distributed system implementation. If the condition fails, the simulation
-/// will panic immediately with a descriptive error message including the current seed.
-///
-/// # Parameters
-///
-/// * `name` - An identifier for this assertion (for error reporting)
-/// * `condition` - The expression to evaluate (must be boolean)
-/// * `message` - A descriptive error message to show on failure
-///
-/// Assert that a condition must always be true. Panics immediately if false.
-#[macro_export]
-macro_rules! always_assert {
-    ($name:ident, $condition:expr, $message:expr) => {
-        let result = $condition;
-        if !result {
-            let current_seed = $crate::sim::get_current_sim_seed();
-            panic!(
-                "Always assertion '{}' failed (seed: {}): {}",
-                stringify!($name),
-                current_seed,
-                $message
-            );
-        }
-    };
-}
-
-/// Assert a condition that should sometimes be true, tracking the success rate.
-///
-/// This macro is used for probabilistic properties in distributed systems,
-/// such as "consensus should usually be reached quickly" or "the system should
-/// be available most of the time". The assertion result is tracked for statistical
-/// analysis without causing the simulation to fail.
-///
-/// The macro automatically registers the assertion at compile time and tracks
-/// module execution to enable unreachable code detection.
-///
-/// # Parameters
-///
-/// * `name` - An identifier for this assertion (for tracking purposes)
-/// * `condition` - The expression to evaluate (must be boolean)
-/// * `message` - A descriptive message about what this assertion tests
-///
-/// Assert that a condition should sometimes be true. Records statistics for analysis.
-#[macro_export]
-macro_rules! sometimes_assert {
-    ($name:ident, $condition:expr, $message:expr) => {
-        // Runtime execution - simplified to just record the result
-        let result = $condition;
-        $crate::chaos::assertions::record_assertion(stringify!($name), result);
-        if result {
-            $crate::chaos::assertions::on_sometimes_success(stringify!($name));
-        }
-    };
-}
-
-/// Notify the exploration framework that a `sometimes_assert!` succeeded.
+/// Notify the exploration framework that an `assert_sometimes!` succeeded.
 ///
 /// This may trigger a fork if this is a new assertion discovery and
 /// exploration is active.
 pub fn on_sometimes_success(name: &str) {
     moonpool_explorer::maybe_fork_on_assertion(name);
+}
+
+/// Backing function for `assert_sometimes_each!`.
+///
+/// Delegates to the explorer's per-bucket fork infrastructure.
+pub fn on_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&str, i64)]) {
+    moonpool_explorer::assertion_sometimes_each(msg, keys, quality);
+}
+
+/// Always-true assertion. Panics with seed info on failure.
+///
+/// Unlike the old `always_assert!`, this takes `(condition, message)` instead
+/// of `(name, condition, message)`.
+#[macro_export]
+macro_rules! assert_always {
+    ($condition:expr, $message:expr) => {
+        if !$condition {
+            let seed = $crate::sim::get_current_sim_seed();
+            panic!("[ALWAYS FAILED] seed={} — {}", seed, $message);
+        }
+    };
+}
+
+/// Sometimes-true assertion. Records stats and triggers exploration fork on success.
+///
+/// Unlike the old `sometimes_assert!`, this takes `(condition, message)` instead
+/// of `(name, condition, message)`. The message is used as the assertion name.
+#[macro_export]
+macro_rules! assert_sometimes {
+    ($condition:expr, $message:expr) => {
+        let result = $condition;
+        $crate::chaos::assertions::record_assertion($message, result);
+        if result {
+            $crate::chaos::assertions::on_sometimes_success($message);
+        }
+    };
+}
+
+/// Per-value bucketed sometimes assertion. Forks on first discovery of each unique
+/// key combination. Optional quality watermarks re-fork on improvement.
+///
+/// # Usage
+///
+/// ```ignore
+/// // Identity keys only (one bucket per unique combination):
+/// assert_sometimes_each!("msg", [("key1", val1), ("key2", val2)]);
+///
+/// // With quality watermarks (re-fork on improvement):
+/// assert_sometimes_each!("msg", [("key1", val1)], [("quality", score)]);
+/// ```
+#[macro_export]
+macro_rules! assert_sometimes_each {
+    ($msg:expr, [ $(($name:expr, $val:expr)),+ $(,)? ]) => {
+        $crate::chaos::assertions::on_sometimes_each($msg, &[ $(($name, $val as i64)),+ ], &[])
+    };
+    ($msg:expr, [ $(($name:expr, $val:expr)),+ $(,)? ], [ $(($qname:expr, $qval:expr)),+ $(,)? ]) => {
+        $crate::chaos::assertions::on_sometimes_each(
+            $msg,
+            &[ $(($name, $val as i64)),+ ],
+            &[ $(($qname, $qval as i64)),+ ],
+        )
+    };
 }
 
 #[cfg(test)]
@@ -313,51 +317,40 @@ mod tests {
     }
 
     #[test]
-    fn test_always_assert_success() {
+    fn test_assert_always_success() {
         reset_assertion_results();
 
         let value = 42;
-        always_assert!(value_is_42, value == 42, "Value should be 42");
+        assert_always!(value == 42, "Value should be 42");
 
-        // always_assert! no longer tracks successful assertions
-        // It only panics on failure, so successful calls leave no trace
+        // assert_always! does not track assertions - it only panics on failure
         let results = get_assertion_results();
         assert!(
             results.is_empty(),
-            "always_assert! should not be tracked when successful"
+            "assert_always! should not be tracked when successful"
         );
     }
 
     #[test]
-    #[should_panic(
-        expected = "Always assertion 'impossible' failed (seed: 0): This should never happen"
-    )]
-    fn test_always_assert_failure() {
+    #[should_panic(expected = "[ALWAYS FAILED]")]
+    fn test_assert_always_failure() {
         let value = 42;
-        always_assert!(impossible, value == 0, "This should never happen");
+        assert_always!(value == 0, "This should never happen");
     }
 
     #[test]
-    fn test_sometimes_assert() {
+    fn test_assert_sometimes() {
         reset_assertion_results();
 
         let fast_time = 50;
         let slow_time = 150;
         let threshold = 100;
 
-        sometimes_assert!(
-            fast_operation,
-            fast_time < threshold,
-            "Operation should be fast"
-        );
-        sometimes_assert!(
-            fast_operation,
-            slow_time < threshold,
-            "Operation should be fast"
-        );
+        assert_sometimes!(fast_time < threshold, "Operation should be fast");
+        assert_sometimes!(slow_time < threshold, "Operation should be fast");
 
         let results = get_assertion_results();
-        let stats = &results["fast_operation"];
+        let stats = &results["Operation should be fast"];
         assert_eq!(stats.total_checks, 2);
         assert_eq!(stats.successes, 1);
         assert_eq!(stats.success_rate(), 50.0);
@@ -376,16 +369,16 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_assertions_same_name() {
+    fn test_multiple_assertions_same_message() {
         reset_assertion_results();
 
-        sometimes_assert!(reliability, true, "System should be reliable");
-        sometimes_assert!(reliability, false, "System should be reliable");
-        sometimes_assert!(reliability, true, "System should be reliable");
-        sometimes_assert!(reliability, true, "System should be reliable");
+        assert_sometimes!(true, "System should be reliable");
+        assert_sometimes!(false, "System should be reliable");
+        assert_sometimes!(true, "System should be reliable");
+        assert_sometimes!(true, "System should be reliable");
 
         let results = get_assertion_results();
-        let stats = &results["reliability"];
+        let stats = &results["System should be reliable"];
         assert_eq!(stats.total_checks, 4);
         assert_eq!(stats.successes, 3);
         assert_eq!(stats.success_rate(), 75.0);
@@ -398,41 +391,39 @@ mod tests {
         let items = [1, 2, 3, 4, 5];
         let sum: i32 = items.iter().sum();
 
-        sometimes_assert!(
-            sum_in_range,
+        assert_sometimes!(
             (10..=20).contains(&sum),
             "Sum should be in reasonable range"
         );
 
-        always_assert!(
-            not_empty,
-            !items.is_empty(),
-            "Items list should not be empty"
-        );
+        assert_always!(!items.is_empty(), "Items list should not be empty");
 
         let results = get_assertion_results();
-        // Only sometimes_assert! is tracked now
-        assert_eq!(results.len(), 1, "Only sometimes_assert should be tracked");
-        assert_eq!(results["sum_in_range"].success_rate(), 100.0);
-        // always_assert! no longer appears in results when successful
+        // Only assert_sometimes! is tracked
+        assert_eq!(results.len(), 1, "Only assert_sometimes should be tracked");
+        assert_eq!(
+            results["Sum should be in reasonable range"].success_rate(),
+            100.0
+        );
+        // assert_always! does not appear in results when successful
         assert!(
-            !results.contains_key("not_empty"),
-            "always_assert should not be tracked"
+            !results.contains_key("Items list should not be empty"),
+            "assert_always should not be tracked"
         );
     }
 
     #[test]
-    fn test_sometimes_assert_macro() {
+    fn test_assert_sometimes_macro() {
         reset_assertion_results();
 
-        // Test the simplified macro functionality
-        sometimes_assert!(macro_test, true, "Test assertion");
-        sometimes_assert!(macro_test, false, "Test assertion");
+        // Test the new macro functionality
+        assert_sometimes!(true, "Test assertion");
+        assert_sometimes!(false, "Test assertion");
 
         let results = get_assertion_results();
-        assert!(results.contains_key("macro_test"));
-        assert_eq!(results["macro_test"].total_checks, 2);
-        assert_eq!(results["macro_test"].successes, 1);
+        assert!(results.contains_key("Test assertion"));
+        assert_eq!(results["Test assertion"].total_checks, 2);
+        assert_eq!(results["Test assertion"].successes, 1);
 
         // Should not have violations (50% success rate is valid)
         let violations = validate_assertion_contracts();

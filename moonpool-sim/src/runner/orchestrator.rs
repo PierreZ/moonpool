@@ -6,10 +6,14 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::{SimulationResult, chaos::AssertionStats};
+use crate::chaos::state_handle::StateHandle;
+use crate::chaos::{AssertionStats, Invariant};
+use crate::runner::context::{CancellationToken, SimContext};
+use crate::runner::fault_injector::{FaultInjector, PhaseConfig};
+use crate::runner::workload::Workload;
+use crate::{SimulationError, SimulationResult};
 
 use super::report::SimulationMetrics;
-use super::topology::{TopologyFactory, Workload};
 
 /// Deadlock detection utility to identify stuck simulations.
 #[derive(Debug, Default)]
@@ -36,7 +40,6 @@ impl DeadlockDetector {
         event_count: usize,
         initial_event_count: usize,
     ) -> bool {
-        // Check for deadlock: no events and no progress made
         if event_count == 0 && handles_count == initial_handle_count && initial_event_count == 0 {
             self.no_progress_count += 1;
             self.no_progress_count > self.threshold
@@ -56,57 +59,125 @@ impl DeadlockDetector {
 pub(crate) struct WorkloadOrchestrator;
 
 impl WorkloadOrchestrator {
-    /// Execute all workloads using spawn_local and coordinate their execution.
-    pub(crate) async fn orchestrate_workloads(
-        workloads: &[Workload],
+    /// Execute workloads using the new setup/run/check lifecycle.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn orchestrate(
+        workloads: &[Box<dyn Workload>],
+        invariants: &[Box<dyn Invariant>],
+        fault_injectors: &[Box<dyn FaultInjector>],
+        phase_config: Option<&PhaseConfig>,
+        workload_ips: &[String],
         seed: u64,
-        provider: crate::SimNetworkProvider,
         mut sim: crate::sim::SimWorld,
-        shutdown_signal: tokio_util::sync::CancellationToken,
+        shutdown: CancellationToken,
         iteration_count: usize,
-        invariants: &[crate::InvariantCheck],
     ) -> Result<(Vec<SimulationResult<SimulationMetrics>>, SimulationMetrics), (Vec<u64>, usize)>
     {
-        tracing::debug!("Spawning {} workload(s) with spawn_local", workloads.len());
+        tracing::debug!(
+            "Orchestrating {} workload(s), {} invariant(s), {} fault injector(s)",
+            workloads.len(),
+            invariants.len(),
+            fault_injectors.len(),
+        );
 
-        // Create shared state registry for invariant checking
-        let state_registry = crate::StateRegistry::new();
+        // 1. Create shared StateHandle
+        let state = StateHandle::new();
 
-        let mut handles = Vec::new();
-        for (idx, workload) in workloads.iter().enumerate() {
-            tracing::debug!("Spawning workload {}: {}", idx, workload.name);
+        // 2. Build peer lists and create SimContext per workload
+        let mut contexts: Vec<SimContext> = Vec::new();
+        for (i, _workload) in workloads.iter().enumerate() {
+            let my_ip = workload_ips[i].clone();
+            let peers: Vec<String> = workload_ips
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, ip)| ip.clone())
+                .collect();
 
-            let topology = TopologyFactory::create_topology(
-                &workload.ip_address,
-                workloads,
-                shutdown_signal.clone(),
-                state_registry.clone(),
+            let ctx = SimContext::new(
+                sim.network_provider(),
+                sim.time_provider(),
+                crate::SimRandomProvider::new(seed),
+                sim.storage_provider(),
+                my_ip,
+                peers,
+                shutdown.clone(),
+                state.clone(),
             );
+            contexts.push(ctx);
+        }
 
-            let time_provider = sim.time_provider();
-            let task_provider = sim.task_provider();
-            // Create random provider from seed
-            let random_provider = crate::SimRandomProvider::new(seed);
-            let handle = tokio::task::spawn_local((workload.workload)(
-                random_provider,
-                provider.clone(),
-                time_provider,
-                task_provider,
-                topology,
-            ));
+        // 3. Setup phase: call setup sequentially
+        for (i, workload) in workloads.iter().enumerate() {
+            tracing::debug!("Setup phase: {}", workload.name());
+            if let Err(e) = workload.setup(&contexts[i]).await {
+                tracing::error!("Setup failed for workload '{}': {}", workload.name(), e);
+                return Err((vec![seed], 1));
+            }
+        }
+
+        // 4. Run phase: spawn_local all workloads + fault injectors concurrently
+        let mut handles = Vec::new();
+
+        for (i, workload) in workloads.iter().enumerate() {
+            tracing::debug!("Spawning workload: {}", workload.name());
+            // Safety: ctx and workload outlive the spawned task because we
+            // join all handles before returning from this function.
+            let ctx_ptr = &contexts[i] as *const SimContext;
+            let workload_ptr = &**workload as *const dyn Workload;
+            let handle = tokio::task::spawn_local(async move {
+                let ctx = unsafe { &*ctx_ptr };
+                let w = unsafe { &*workload_ptr };
+                w.run(ctx).await
+            });
             handles.push(handle);
         }
 
-        // Process events while workloads run
-        let mut results = Vec::new();
+        // Spawn fault injectors
+        let mut fault_handles = Vec::new();
+        if !fault_injectors.is_empty() {
+            let fault_ctx = SimContext::new(
+                sim.network_provider(),
+                sim.time_provider(),
+                crate::SimRandomProvider::new(seed.wrapping_add(1000)),
+                sim.storage_provider(),
+                workload_ips[0].clone(),
+                workload_ips[1..].to_vec(),
+                shutdown.clone(),
+                state.clone(),
+            );
+            // Keep fault_ctx alive for the duration of the function
+            let fault_ctx_box = Box::new(fault_ctx);
+            let fault_ctx_ptr = &*fault_ctx_box as *const SimContext;
+
+            for fi in fault_injectors.iter() {
+                let fi_ptr = &**fi as *const dyn FaultInjector;
+                let handle = tokio::task::spawn_local(async move {
+                    let ctx = unsafe { &*fault_ctx_ptr };
+                    let fi = unsafe { &*fi_ptr };
+                    fi.inject(ctx).await
+                });
+                fault_handles.push(handle);
+            }
+
+            // Leak the box to keep it alive (will be cleaned up on process exit)
+            // This is acceptable since simulations are short-lived.
+            std::mem::forget(fault_ctx_box);
+        }
+
+        // 5. Event loop
+        let mut results: Vec<SimulationResult<SimulationMetrics>> = Vec::new();
         let mut loop_count = 0;
         let mut deadlock_detector = DeadlockDetector::new(3);
         let mut shutdown_triggered = false;
+
+        let phase_start = Instant::now();
+
         while !handles.is_empty() {
             loop_count += 1;
             if loop_count % 100 == 0 {
                 tracing::debug!(
-                    "Cooperative loop iteration {}, {} handles remaining, {} pending events",
+                    "Loop iteration {}, {} handles, {} events pending",
                     loop_count,
                     handles.len(),
                     sim.pending_event_count()
@@ -116,43 +187,52 @@ impl WorkloadOrchestrator {
             let initial_handle_count = handles.len();
             let initial_event_count = sim.pending_event_count();
 
-            // Process one simulation event to allow better interleaving
+            // Process one simulation event
             if sim.pending_event_count() > 0 {
-                tracing::trace!(
-                    "Processing one simulation event, {} events pending",
-                    sim.pending_event_count()
-                );
                 sim.step();
 
-                // Check invariants after processing event
+                // Check invariants after event
                 let current_time_ms = sim.current_time().as_millis() as u64;
-                Self::check_invariants(&state_registry, current_time_ms, invariants);
+                Self::check_invariants(&state, current_time_ms, invariants);
             }
 
-            // Check if any handles are ready
+            // Handle phase transitions
+            if let Some(pc) = phase_config {
+                let elapsed_ms = phase_start.elapsed().as_millis() as u64;
+                if elapsed_ms > pc.chaos_duration_ms && !fault_handles.is_empty() {
+                    tracing::debug!("Chaos phase complete, cancelling fault injectors");
+                    for fh in fault_handles.drain(..) {
+                        fh.abort();
+                    }
+                }
+                if elapsed_ms > pc.chaos_duration_ms + pc.liveness_duration_ms
+                    && !shutdown_triggered
+                {
+                    tracing::debug!("Liveness phase complete, triggering shutdown");
+                    Self::trigger_shutdown(&mut sim, &shutdown);
+                    shutdown_triggered = true;
+                }
+            }
+
+            // Check completed handles
             let mut i = 0;
             while i < handles.len() {
                 if handles[i].is_finished() {
-                    tracing::debug!("Workload handle {} finished", i);
                     let join_result = handles.remove(i).await;
-                    let result = match join_result {
-                        Ok(workload_result) => {
-                            tracing::debug!("Workload completed successfully");
-                            workload_result
+                    let result: SimulationResult<SimulationMetrics> = match join_result {
+                        Ok(Ok(())) => Ok(SimulationMetrics::default()),
+                        Ok(Err(e)) => {
+                            tracing::error!("Workload error: {}", e);
+                            Err(e)
                         }
                         Err(_) => {
                             tracing::error!("Workload task panicked");
-                            Err(crate::SimulationError::InvalidState(
-                                "Task panicked".to_string(),
-                            ))
+                            Err(SimulationError::InvalidState("Task panicked".to_string()))
                         }
                     };
 
-                    // Trigger shutdown on any completion (success or failure) so
-                    // server workloads don't spin forever when a client fails
-                    // under chaos injection.
-                    if !shutdown_triggered {
-                        Self::trigger_shutdown(&mut sim, &shutdown_signal);
+                    if !shutdown_triggered && phase_config.is_none() {
+                        Self::trigger_shutdown(&mut sim, &shutdown);
                         shutdown_triggered = true;
                     }
 
@@ -162,7 +242,7 @@ impl WorkloadOrchestrator {
                 }
             }
 
-            // Check for deadlock using dedicated detector
+            // Deadlock detection
             if deadlock_detector.check_deadlock(
                 handles.len(),
                 initial_handle_count,
@@ -170,42 +250,53 @@ impl WorkloadOrchestrator {
                 initial_event_count,
             ) {
                 tracing::error!(
-                    "🔒 DEADLOCK detected on iteration {} with seed {}: {} tasks remaining but no events to process after {} iterations",
+                    "DEADLOCK detected on iteration {} with seed {}: {} tasks remaining after {} iterations",
                     iteration_count,
                     seed,
                     handles.len(),
                     deadlock_detector.no_progress_count()
                 );
-                // Mark all remaining tasks as failed
                 for _ in 0..handles.len() {
-                    results.push(Err(crate::SimulationError::InvalidState(
-                        format!("Deadlock detected on iteration {} with seed {}: tasks stuck with no events", iteration_count, seed),
-                    )));
+                    results.push(Err(SimulationError::InvalidState(format!(
+                        "Deadlock detected on iteration {} with seed {}: tasks stuck with no events",
+                        iteration_count, seed
+                    ))));
                 }
-
-                // Return error state for early exit
                 return Err((vec![seed], 1));
             }
 
             // Yield to allow tasks to make progress
             if !handles.is_empty() {
-                tracing::trace!("Yielding to allow {} tasks to make progress", handles.len());
                 tokio::task::yield_now().await;
             }
         }
 
+        // Cancel remaining fault injectors
+        for fh in fault_handles {
+            fh.abort();
+        }
+
         tracing::debug!(
-            "All workloads completed after {} loop iterations, processing remaining events",
+            "All workloads completed after {} loops, processing remaining events",
             loop_count
         );
-        // Process any remaining events after all workloads complete
+
+        // Process remaining events
         sim.run_until_empty();
+
+        // 6. Check phase: call check sequentially
+        for (i, workload) in workloads.iter().enumerate() {
+            tracing::debug!("Check phase: {}", workload.name());
+            if let Err(e) = workload.check(&contexts[i]).await {
+                tracing::error!("Check failed for workload '{}': {}", workload.name(), e);
+                results.push(Err(e));
+            }
+        }
 
         // Extract final simulation metrics
         let sim_metrics = sim.extract_metrics();
 
-        // If this is a forked child, exit immediately to return control to parent.
-        // Exit code 42 signals a bug was found (any workload failed).
+        // 7. Explorer child exit
         if moonpool_explorer::explorer_is_child() {
             let code = if results.iter().all(|r| r.is_ok()) {
                 0
@@ -219,18 +310,11 @@ impl WorkloadOrchestrator {
     }
 
     /// Trigger shutdown signal and schedule wake events.
-    fn trigger_shutdown(
-        sim: &mut crate::sim::SimWorld,
-        shutdown_signal: &tokio_util::sync::CancellationToken,
-    ) {
-        tracing::debug!("First workload completed successfully, triggering shutdown signal");
-        shutdown_signal.cancel();
+    fn trigger_shutdown(sim: &mut crate::sim::SimWorld, shutdown: &CancellationToken) {
+        tracing::debug!("Triggering shutdown signal");
+        shutdown.cancel();
 
-        // Schedule a shutdown event to wake all tasks
-        tracing::debug!("Scheduling Shutdown event to wake all tasks");
         sim.schedule_event(crate::sim::Event::Shutdown, Duration::from_nanos(1));
-
-        // Schedule many periodic wake events to ensure tasks can check shutdown
         for i in 1..100 {
             sim.schedule_event(
                 crate::sim::Event::Timer {
@@ -241,22 +325,10 @@ impl WorkloadOrchestrator {
         }
     }
 
-    /// Check all registered invariants against current actor states.
-    ///
-    /// If any invariant check panics, the simulation will immediately terminate with that panic.
-    /// This implements the "crash early" philosophy inspired by FoundationDB.
-    fn check_invariants(
-        state_registry: &crate::StateRegistry,
-        sim_time_ms: u64,
-        invariants: &[crate::InvariantCheck],
-    ) {
-        if invariants.is_empty() {
-            return;
-        }
-
-        let all_states = state_registry.get_all_states();
+    /// Check all registered invariants against current state.
+    fn check_invariants(state: &StateHandle, sim_time_ms: u64, invariants: &[Box<dyn Invariant>]) {
         for invariant in invariants {
-            invariant(&all_states, sim_time_ms);
+            invariant.check(state, sim_time_ms);
         }
     }
 }
@@ -306,7 +378,6 @@ impl IterationManager {
         let seed = if self.iteration_count < self.seeds.len() {
             self.seeds[self.iteration_count]
         } else {
-            // Generate new seed using hash of base seed and iteration count
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
             let mut hasher = DefaultHasher::new();
@@ -319,15 +390,14 @@ impl IterationManager {
 
         self.iteration_count += 1;
 
-        // Log which seed is being used for this iteration
         tracing::info!(
-            "🌱 Starting iteration {} with seed {} (iteration {}/{})",
+            "Starting iteration {} with seed {} ({}/{})",
             self.iteration_count,
             seed,
             self.iteration_count,
             match &self.control {
                 super::builder::IterationControl::FixedCount(count) => *count,
-                super::builder::IterationControl::TimeLimit(_) => 0, // Unknown count for time-based
+                super::builder::IterationControl::TimeLimit(_) => 0,
                 super::builder::IterationControl::UntilAllSometimesReached(limit) => *limit,
             }
         );
@@ -345,18 +415,15 @@ impl IterationManager {
         &self.seeds[..self.iteration_count]
     }
 
-    /// Check if all sometimes_assert! assertions have been reached with at least one success.
-    /// This simplified version checks that we have some assertion results and they have successes.
+    /// Check if all sometimes assertions have been reached with at least one success.
     fn all_sometimes_assertions_reached() -> bool {
         let results = crate::chaos::get_assertion_results();
 
-        // Must have at least one assertion
         if results.is_empty() {
             tracing::debug!("No assertions found yet");
             return false;
         }
 
-        // Check if all executed assertions have at least one success
         for (name, stats) in &results {
             if stats.total_checks > 0 && stats.successes == 0 {
                 tracing::debug!(
@@ -366,12 +433,6 @@ impl IterationManager {
                 );
                 return false;
             }
-            tracing::debug!(
-                "Assertion '{}' succeeded {} times out of {}",
-                name,
-                stats.successes,
-                stats.total_checks
-            );
         }
 
         tracing::debug!("All assertions have at least one success!");
@@ -419,7 +480,6 @@ impl MetricsCollector {
     }
 
     /// Aggregate metrics from all workload results.
-    /// Returns (success, aggregated_metrics).
     fn aggregate_workload_results(
         results: &[SimulationResult<SimulationMetrics>],
     ) -> (bool, SimulationMetrics) {
@@ -448,12 +508,10 @@ impl MetricsCollector {
         sim_metrics: SimulationMetrics,
     ) {
         self.successful_runs += 1;
-        tracing::info!("✅ Iteration completed successfully with seed {}", seed);
+        tracing::info!("Iteration completed successfully with seed {}", seed);
 
-        // Merge workload and simulation metrics
         let combined = Self::merge_metrics(workload_metrics, sim_metrics);
 
-        // Aggregate across iterations
         self.aggregated_metrics.wall_time += wall_time;
         self.aggregated_metrics.simulated_time += combined.simulated_time;
         self.aggregated_metrics.events_processed += combined.events_processed;
@@ -463,11 +521,9 @@ impl MetricsCollector {
 
     /// Merge workload metrics with simulation metrics.
     fn merge_metrics(mut workload: SimulationMetrics, sim: SimulationMetrics) -> SimulationMetrics {
-        // Prefer larger simulated time (simulation world tracks actual time advancement)
         if sim.simulated_time > workload.simulated_time {
             workload.simulated_time = sim.simulated_time;
         }
-        // Use simulation events only if workloads reported none
         if workload.events_processed == 0 {
             workload.events_processed = sim.events_processed;
         }
@@ -477,16 +533,16 @@ impl MetricsCollector {
     /// Record a failed iteration.
     fn record_failure(&mut self, seed: u64) {
         self.failed_runs += 1;
-        tracing::error!("❌ Iteration FAILED with seed {}", seed);
+        tracing::error!("Iteration FAILED with seed {}", seed);
         self.individual_metrics
-            .push(Err(crate::SimulationError::InvalidState(format!(
+            .push(Err(SimulationError::InvalidState(format!(
                 "One or more workloads failed (seed {})",
                 seed
             ))));
         self.faulty_seeds.push(seed);
     }
 
-    /// Add faulty seeds from external sources (e.g., deadlock detection).
+    /// Add faulty seeds from external sources.
     pub(crate) fn add_faulty_seeds(&mut self, mut seeds: Vec<u64>) {
         self.faulty_seeds.append(&mut seeds);
     }

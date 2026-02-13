@@ -114,14 +114,15 @@ pub use sim::{
 
 // Runner module re-exports
 pub use runner::{
-    IterationControl, SimulationBuilder, SimulationMetrics, SimulationReport, TokioReport,
-    TokioRunner, WorkloadTopology,
+    CancellationToken, FaultInjector, IterationControl, PhaseConfig, SimContext, SimulationBuilder,
+    SimulationMetrics, SimulationReport, TokioReport, TokioRunner, Workload, WorkloadTopology,
+    workload_fn,
 };
 
 // Chaos module re-exports
 pub use chaos::{
-    AssertionStats, InvariantCheck, StateRegistry, buggify_init, buggify_reset,
-    get_assertion_results, panic_on_assertion_violations, reset_assertion_results,
+    AssertionStats, Invariant, StateHandle, buggify_init, buggify_reset, get_assertion_results,
+    invariant_fn, panic_on_assertion_violations, reset_assertion_results,
     validate_assertion_contracts,
 };
 

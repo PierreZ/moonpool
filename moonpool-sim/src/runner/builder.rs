@@ -4,16 +4,13 @@
 //! and executing simulation experiments.
 
 use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::time::{Duration, Instant};
 use tracing::instrument;
 
-use crate::{InvariantCheck, SimulationResult};
-
+use super::context::CancellationToken;
+use super::fault_injector::PhaseConfig;
 use super::orchestrator::{IterationManager, MetricsCollector, WorkloadOrchestrator};
 use super::report::{SimulationMetrics, SimulationReport};
-use super::topology::{Workload, WorkloadTopology};
 
 /// Configuration for how many iterations a simulation should run.
 ///
@@ -28,25 +25,29 @@ pub enum IterationControl {
     UntilAllSometimesReached(usize),
 }
 
-/// Type alias for workload function signature to reduce complexity.
-pub(crate) type WorkloadFn = Box<
-    dyn Fn(
-        crate::SimRandomProvider,
-        crate::SimNetworkProvider,
-        crate::SimTimeProvider,
-        crate::TokioTaskProvider,
-        WorkloadTopology,
-    ) -> Pin<Box<dyn Future<Output = SimulationResult<SimulationMetrics>>>>,
->;
-
 /// Builder pattern for configuring and running simulation experiments.
+///
+/// # Example
+///
+/// ```ignore
+/// SimulationBuilder::new()
+///     .workload_fn("client", |ctx| async move { Ok(()) })
+///     .workload_fn("server", |ctx| async move { Ok(()) })
+///     .invariant_fn("conservation", |state, _time| { /* check */ })
+///     .set_iterations(100)
+///     .random_network()
+///     .run()
+///     .await;
+/// ```
 pub struct SimulationBuilder {
     iteration_control: IterationControl,
-    workloads: Vec<Workload>,
+    workloads: Vec<Box<dyn super::workload::Workload>>,
+    invariants: Vec<Box<dyn crate::chaos::Invariant>>,
+    fault_injectors: Vec<Box<dyn super::fault_injector::FaultInjector>>,
+    phase_config: Option<PhaseConfig>,
     seeds: Vec<u64>,
-    next_ip: u32, // For auto-assigning IP addresses starting from 10.0.0.1
+    next_ip: u32,
     use_random_config: bool,
-    invariants: Vec<InvariantCheck>,
     exploration_config: Option<moonpool_explorer::ExplorationConfig>,
 }
 
@@ -62,54 +63,56 @@ impl SimulationBuilder {
         Self {
             iteration_control: IterationControl::FixedCount(1),
             workloads: Vec::new(),
-            seeds: Vec::new(),
-            next_ip: 1, // Start from 10.0.0.1
-            use_random_config: false,
             invariants: Vec::new(),
+            fault_injectors: Vec::new(),
+            phase_config: None,
+            seeds: Vec::new(),
+            next_ip: 1,
+            use_random_config: false,
             exploration_config: None,
         }
     }
 
-    /// Register a workload with the simulation builder.
-    ///
-    /// # Arguments
-    /// * `name` - Name for the workload (for reporting purposes)
-    /// * `workload` - Async function that takes a RandomProvider, NetworkProvider, TimeProvider, TaskProvider, and WorkloadTopology and returns simulation metrics
-    pub fn register_workload<S, F, Fut>(mut self, name: S, workload: F) -> Self
+    /// Add a workload implementing the `Workload` trait.
+    pub fn workload(mut self, w: impl super::workload::Workload + 'static) -> Self {
+        self.workloads.push(Box::new(w));
+        self
+    }
+
+    /// Add a workload from a name and async closure.
+    pub fn workload_fn<F, Fut>(self, name: &str, run_fn: F) -> Self
     where
-        S: Into<String>,
-        F: Fn(
-                crate::SimRandomProvider,
-                crate::SimNetworkProvider,
-                crate::SimTimeProvider,
-                crate::TokioTaskProvider,
-                WorkloadTopology,
-            ) -> Fut
-            + 'static,
-        Fut: Future<Output = SimulationResult<SimulationMetrics>> + 'static,
+        F: Fn(&super::context::SimContext) -> Fut + 'static,
+        Fut: std::future::Future<Output = Result<(), crate::SimulationError>> + 'static,
     {
-        // Auto-assign IP address starting from 10.0.0.1
-        let ip_address = format!("10.0.0.{}", self.next_ip);
-        self.next_ip += 1;
+        self.workload(super::workload::workload_fn(name, run_fn))
+    }
 
-        let boxed_workload = Box::new(
-            move |random_provider, provider, time_provider, task_provider, topology| {
-                let fut = workload(
-                    random_provider,
-                    provider,
-                    time_provider,
-                    task_provider,
-                    topology,
-                );
-                Box::pin(fut) as Pin<Box<dyn Future<Output = SimulationResult<SimulationMetrics>>>>
-            },
-        );
+    /// Add an invariant implementing the `Invariant` trait.
+    pub fn invariant(mut self, inv: impl crate::chaos::Invariant + 'static) -> Self {
+        self.invariants.push(Box::new(inv));
+        self
+    }
 
-        self.workloads.push(Workload {
-            name: name.into(),
-            ip_address,
-            workload: boxed_workload,
-        });
+    /// Add an invariant from a name and closure.
+    pub fn invariant_fn<F>(mut self, name: &str, check: F) -> Self
+    where
+        F: Fn(&crate::chaos::StateHandle, u64) + 'static,
+    {
+        self.invariants
+            .push(crate::chaos::invariant_fn(name, check));
+        self
+    }
+
+    /// Add a fault injector.
+    pub fn fault(mut self, fi: impl super::fault_injector::FaultInjector + 'static) -> Self {
+        self.fault_injectors.push(Box::new(fi));
+        self
+    }
+
+    /// Set phase configuration for chaos/liveness phases.
+    pub fn phases(mut self, config: PhaseConfig) -> Self {
+        self.phase_config = Some(config);
         self
     }
 
@@ -131,81 +134,32 @@ impl SimulationBuilder {
         self
     }
 
-    /// Run until all sometimes_assert! assertions have been reached.
-    pub fn run_until_all_sometimes_reached(mut self, safety_limit: usize) -> Self {
+    /// Run until all sometimes assertions have been reached.
+    pub fn until_all_sometimes_reached(mut self, safety_limit: usize) -> Self {
         self.iteration_control = IterationControl::UntilAllSometimesReached(safety_limit);
         self
     }
 
     /// Set specific seeds for deterministic debugging and regression testing.
-    ///
-    /// This method is specifically designed for debugging scenarios where you need
-    /// to reproduce specific problematic behavior. Unlike `set_seeds()`, the name
-    /// makes it clear this is for debugging/testing specific scenarios.
-    ///
-    /// **Key differences from `set_seeds()`:**
-    /// - **Intent**: Clearly indicates debugging/testing purpose
-    /// - **Usage**: Typically used with `FixedCount(1)` for reproducing exact scenarios
-    /// - **Documentation**: Self-documenting that these seeds are for specific test cases
-    ///
-    /// **Common use cases:**
-    /// - Reproducing TCP ordering bugs (e.g., seed 42 revealed the ordering issue)
-    /// - Regression testing for specific edge cases
-    /// - Deterministic testing in CI/CD pipelines
-    /// - Investigating assertion failures at specific seeds
-    ///
-    /// Example: `set_debug_seeds(vec![42])` with `FixedCount(1)` ensures the test
-    /// always runs with seed 42, making it reproducible for debugging the TCP ordering fix.
     pub fn set_debug_seeds(mut self, seeds: Vec<u64>) -> Self {
         self.seeds = seeds;
         self
     }
 
-    /// Enable randomized network configuration for chaos testing
-    pub fn use_random_config(mut self) -> Self {
+    /// Enable randomized network configuration for chaos testing.
+    pub fn random_network(mut self) -> Self {
         self.use_random_config = true;
         self
     }
 
-    /// Register invariant check functions to be executed after every simulation event.
-    ///
-    /// Invariants receive a snapshot of all actor states and the current simulation time,
-    /// and should panic if any global property is violated.
-    ///
-    /// # Arguments
-    /// * `invariants` - Vector of invariant check functions
-    ///
-    /// # Example
-    /// ```ignore
-    /// SimulationBuilder::new()
-    ///     .with_invariants(vec![
-    ///         Box::new(|states, _time| {
-    ///             let total_sent: u64 = states.values()
-    ///                 .filter_map(|v| v.get("messages_sent").and_then(|s| s.as_u64()))
-    ///                 .sum();
-    ///             let total_received: u64 = states.values()
-    ///                 .filter_map(|v| v.get("messages_received").and_then(|r| r.as_u64()))
-    ///                 .sum();
-    ///             assert!(total_received <= total_sent, "Message conservation violated");
-    ///         })
-    ///     ])
-    /// ```
-    pub fn with_invariants(mut self, invariants: Vec<InvariantCheck>) -> Self {
-        self.invariants = invariants;
-        self
-    }
-
     /// Enable fork-based multiverse exploration.
-    ///
-    /// When enabled, the simulation will fork child processes at assertion
-    /// discovery points to explore alternate timelines with different seeds.
     pub fn enable_exploration(mut self, config: moonpool_explorer::ExplorationConfig) -> Self {
         self.exploration_config = Some(config);
         self
     }
 
-    #[instrument(skip_all)]
     /// Run the simulation and generate a report.
+    #[instrument(skip_all)]
     pub async fn run(self) -> SimulationReport {
         if self.workloads.is_empty() {
             return SimulationReport {
@@ -247,7 +201,6 @@ impl SimulationBuilder {
             crate::sim::set_sim_seed(seed);
 
             // Initialize buggify system for this iteration
-            // Use moderate probabilities: 50% activation rate, 25% firing rate
             crate::chaos::buggify_init(0.5, 0.25);
 
             // Create fresh NetworkConfiguration for this iteration
@@ -257,35 +210,40 @@ impl SimulationBuilder {
                 crate::NetworkConfiguration::default()
             };
 
-            // Create shared SimWorld for this iteration using fresh network config
+            // Create shared SimWorld for this iteration
             let sim = crate::sim::SimWorld::new_with_network_config_and_seed(network_config, seed);
-            let provider = sim.network_provider();
 
             let start_time = Instant::now();
 
-            // Create shutdown signal for this iteration
-            let shutdown_signal = tokio_util::sync::CancellationToken::new();
+            // Create shutdown token for this iteration
+            let shutdown = CancellationToken::new();
 
-            // Execute workloads using orchestrator
-            let orchestration_result = WorkloadOrchestrator::orchestrate_workloads(
+            // Assign IPs to workloads
+            let mut workload_ips: Vec<String> = Vec::new();
+            for i in 0..self.workloads.len() {
+                workload_ips.push(format!("10.0.0.{}", self.next_ip as usize + i));
+            }
+
+            // Execute workloads using new orchestrator
+            let orchestration_result = WorkloadOrchestrator::orchestrate(
                 &self.workloads,
-                seed,
-                provider,
-                sim,
-                shutdown_signal,
-                iteration_count,
                 &self.invariants,
+                &self.fault_injectors,
+                self.phase_config.as_ref(),
+                &workload_ips,
+                seed,
+                sim,
+                shutdown,
+                iteration_count,
             )
             .await;
 
             let (all_results, sim_metrics) = match orchestration_result {
                 Ok((results, metrics)) => (results, metrics),
                 Err((faulty_seeds_from_deadlock, failed_count)) => {
-                    // Handle deadlock case - merge with existing state and return early
                     metrics_collector.add_faulty_seeds(faulty_seeds_from_deadlock);
                     metrics_collector.add_failed_runs(failed_count);
 
-                    // Create early exit report
                     let assertion_results = crate::chaos::get_assertion_results();
                     let assertion_violations = crate::chaos::validate_assertion_contracts();
                     crate::chaos::buggify_reset();
@@ -302,14 +260,9 @@ impl SimulationBuilder {
 
             let wall_time = start_time.elapsed();
 
-            // Record iteration results using metrics collector
             metrics_collector.record_iteration(seed, wall_time, all_results, sim_metrics);
-
-            // Reset buggify state after each iteration to ensure clean state
             crate::chaos::buggify_reset();
         }
-
-        // End of main iteration loop
 
         // Gather exploration stats before cleanup
         let exploration_report = if self.exploration_config.is_some() {
@@ -328,27 +281,24 @@ impl SimulationBuilder {
             None
         };
 
-        // Log summary of all seeds used
+        // Log summary
         let iteration_count = iteration_manager.current_iteration();
         let (successful_runs, failed_runs) = metrics_collector.current_stats();
         tracing::info!(
-            "📊 Simulation completed: {}/{} iterations successful",
+            "Simulation completed: {}/{} iterations successful",
             successful_runs,
             iteration_count
         );
-        tracing::info!("🌱 Seeds used: {:?}", iteration_manager.seeds_used());
+        tracing::info!("Seeds used: {:?}", iteration_manager.seeds_used());
         if failed_runs > 0 {
             tracing::warn!(
-                "⚠️ {} iterations failed - check logs above for failing seeds",
+                "{} iterations failed - check logs above for failing seeds",
                 failed_runs
             );
         }
 
-        // Collect assertion results and validate them
         let assertion_results = crate::chaos::get_assertion_results();
         let assertion_violations = crate::chaos::validate_assertion_contracts();
-
-        // Final buggify reset to ensure no impact on subsequent code
         crate::chaos::buggify_reset();
 
         metrics_collector.generate_report(

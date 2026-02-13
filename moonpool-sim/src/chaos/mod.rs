@@ -19,9 +19,11 @@
 //! | Component | Purpose |
 //! |-----------|---------|
 //! | [`buggify!`] | Probabilistic fault injection at code locations |
-//! | [`always_assert!`] | Invariants that must never fail |
-//! | [`sometimes_assert!`] | Behaviors that should occur under chaos |
-//! | [`InvariantCheck`] | Cross-actor properties validated after events |
+//! | [`assert_always!`] | Invariants that must never fail |
+//! | [`assert_sometimes!`] | Behaviors that should occur under chaos |
+//! | [`assert_sometimes_each!`] | Per-value bucketed sometimes assertions |
+//! | [`Invariant`] | Cross-workload properties validated after events |
+//! | [`StateHandle`] | Shared state for cross-workload communication |
 //!
 //! # The Buggify System
 //!
@@ -53,56 +55,32 @@
 //! | `activation_prob` | 25% | `Buggify.h:79-88` |
 //! | `firing_prob` | 25% | `P_GENERAL_BUGGIFIED_SECTION_FIRES` |
 //!
-//! # Fault Injection Mechanisms
-//!
-//! ## Network Faults
-//!
-//! | Mechanism | Default | What it tests |
-//! |-----------|---------|---------------|
-//! | Random connection close | 0.001% | Reconnection, message redelivery |
-//! | Bit flip corruption | 0.01% | CRC32C checksum validation |
-//! | Connect failure | 50% probabilistic | Timeout handling, retries |
-//! | Partial/short writes | 1000 bytes max | Message fragmentation |
-//! | Packet loss | disabled | At-least-once delivery |
-//! | Network partitions | disabled | Split-brain handling |
-//! | Half-open connections | manual | Peer crash detection |
-//!
-//! ## Timing Faults
-//!
-//! | Mechanism | Default | What it tests |
-//! |-----------|---------|---------------|
-//! | TCP operation latencies | 1-11ms connect | Async scheduling |
-//! | Clock drift | 100ms max | Leases, heartbeats, leader election |
-//! | Buggified delays | 25% probability | Race conditions |
-//! | Per-connection asymmetric delays | optional | Satellite links, geographic distance |
-//!
 //! # Assertions
 //!
-//! ## always_assert!
+//! ## assert_always!
 //!
 //! Guards invariants that must **never** fail:
 //!
 //! ```ignore
-//! always_assert!(
+//! assert_always!(
 //!     sent_count >= received_count,
-//!     "message_ordering",
-//!     "received more than sent: {} > {}", received_count, sent_count
+//!     "received more than sent"
 //! );
 //! ```
 //!
-//! ## sometimes_assert!
+//! ## assert_sometimes!
 //!
 //! Validates that error paths **do** execute under chaos:
 //!
 //! ```ignore
 //! if buggify!() {
-//!     sometimes_assert!("timeout_triggered");
+//!     assert_sometimes!(true, "timeout_triggered");
 //!     return Err(Timeout);
 //! }
 //! ```
 //!
 //! Multi-seed testing with `UntilAllSometimesReached(1000)` ensures all
-//! `sometimes_assert!` statements fire across the seed space.
+//! `assert_sometimes!` statements fire across the seed space.
 //!
 //! # Strategic Placement
 //!
@@ -112,32 +90,18 @@
 //! - Retry logic entry points
 //! - Resource limit checks
 //! - State transitions
-//!
-//! # Configuration
-//!
-//! ```ignore
-//! use moonpool_sim::{ChaosConfiguration, NetworkConfiguration};
-//!
-//! // Full chaos (default)
-//! let chaos = ChaosConfiguration::default();
-//!
-//! // No chaos (fast tests)
-//! let chaos = ChaosConfiguration::disabled();
-//!
-//! // Randomized per seed
-//! let chaos = ChaosConfiguration::random_for_seed();
-//! ```
 
 pub mod assertions;
 pub mod buggify;
-pub mod invariants;
-pub mod state_registry;
+pub mod invariant_trait;
+pub mod state_handle;
 
 // Re-export main types at module level
 pub use assertions::{
-    AssertionStats, get_assertion_results, on_sometimes_success, panic_on_assertion_violations,
-    record_assertion, reset_assertion_results, validate_assertion_contracts,
+    AssertionStats, get_assertion_results, on_sometimes_each, on_sometimes_success,
+    panic_on_assertion_violations, record_assertion, reset_assertion_results,
+    validate_assertion_contracts,
 };
 pub use buggify::{buggify_init, buggify_internal, buggify_reset};
-pub use invariants::InvariantCheck;
-pub use state_registry::StateRegistry;
+pub use invariant_trait::{Invariant, invariant_fn};
+pub use state_handle::StateHandle;

@@ -42,11 +42,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 
-use moonpool_sim::{
-    NetworkProvider, SimNetworkProvider, SimRandomProvider, SimTimeProvider, SimulationBuilder,
-    SimulationError, SimulationMetrics, SimulationResult, TaskProvider, TcpListenerTrait,
-    TokioTaskProvider, WorkloadTopology,
-};
+use moonpool_sim::{NetworkProvider, SimulationBuilder, SimulationError, TcpListenerTrait};
 
 // ============================================================================
 // HTTP Request Handler
@@ -80,122 +76,6 @@ async fn handle_request(
 }
 
 // ============================================================================
-// Server Workload
-// ============================================================================
-
-/// HTTP server workload: binds, accepts one connection, serves HTTP/1.1 requests.
-async fn server_workload(
-    _random: SimRandomProvider,
-    network: SimNetworkProvider,
-    _time: SimTimeProvider,
-    _task: TokioTaskProvider,
-    topology: WorkloadTopology,
-) -> SimulationResult<SimulationMetrics> {
-    let listener = network.bind(&topology.my_ip).await?;
-
-    // Accept one connection from the client
-    let (stream, _addr) = listener.accept().await?;
-    let io = TokioIo::new(stream);
-
-    // Serve HTTP/1.1 on this connection until the client closes it
-    hyper::server::conn::http1::Builder::new()
-        .serve_connection(io, service_fn(handle_request))
-        .await
-        .map_err(|e| SimulationError::InvalidState(format!("hyper server error: {e}")))?;
-
-    Ok(SimulationMetrics::default())
-}
-
-// ============================================================================
-// Client Workload
-// ============================================================================
-
-/// HTTP client workload: connects, sends requests, verifies responses.
-async fn client_workload(
-    _random: SimRandomProvider,
-    network: SimNetworkProvider,
-    _time: SimTimeProvider,
-    task: TokioTaskProvider,
-    topology: WorkloadTopology,
-) -> SimulationResult<SimulationMetrics> {
-    let server_ip = &topology.peer_ips[0];
-
-    let stream = network.connect(server_ip).await?;
-    let io = TokioIo::new(stream);
-
-    // HTTP/1.1 handshake — no executor or timer needed
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
-        .await
-        .map_err(|e| SimulationError::InvalidState(format!("hyper handshake error: {e}")))?;
-
-    // Drive the connection in the background
-    task.spawn_task("hyper-conn-driver", async move {
-        if let Err(e) = conn.await {
-            eprintln!("Connection driver error: {e}");
-        }
-    });
-
-    // --- Request 1: GET /hello ---
-    let req = Request::builder()
-        .uri("/hello")
-        .header("host", server_ip.as_str())
-        .body(Full::new(Bytes::new()))
-        .map_err(|e| SimulationError::InvalidState(format!("request build error: {e}")))?;
-
-    let res = sender
-        .send_request(req)
-        .await
-        .map_err(|e| SimulationError::InvalidState(format!("send_request error: {e}")))?;
-
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = res
-        .into_body()
-        .collect()
-        .await
-        .map_err(|e| SimulationError::InvalidState(format!("body collect error: {e}")))?
-        .to_bytes();
-    assert_eq!(&body[..], b"Hello from moonpool-sim!");
-
-    // --- Request 2: POST /echo ---
-    let req = Request::builder()
-        .method("POST")
-        .uri("/echo")
-        .header("host", server_ip.as_str())
-        .body(Full::new(Bytes::from("ping")))
-        .map_err(|e| SimulationError::InvalidState(format!("request build error: {e}")))?;
-
-    let res = sender
-        .send_request(req)
-        .await
-        .map_err(|e| SimulationError::InvalidState(format!("send_request error: {e}")))?;
-
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = res
-        .into_body()
-        .collect()
-        .await
-        .map_err(|e| SimulationError::InvalidState(format!("body collect error: {e}")))?
-        .to_bytes();
-    assert_eq!(&body[..], b"ping");
-
-    // --- Request 3: GET /nonexistent → 404 ---
-    let req = Request::builder()
-        .uri("/nonexistent")
-        .header("host", server_ip.as_str())
-        .body(Full::new(Bytes::new()))
-        .map_err(|e| SimulationError::InvalidState(format!("request build error: {e}")))?;
-
-    let res = sender
-        .send_request(req)
-        .await
-        .map_err(|e| SimulationError::InvalidState(format!("send_request error: {e}")))?;
-
-    assert_eq!(res.status(), StatusCode::NOT_FOUND);
-
-    Ok(SimulationMetrics::default())
-}
-
-// ============================================================================
 // Main
 // ============================================================================
 
@@ -207,8 +87,123 @@ fn main() {
 
     let report = runtime.block_on(async {
         SimulationBuilder::new()
-            .register_workload("server", server_workload)
-            .register_workload("client", client_workload)
+            .workload_fn("server", |ctx| {
+                let network = ctx.network().clone();
+                let my_ip = ctx.my_ip().to_string();
+                async move {
+                    let listener = network
+                        .bind(&my_ip)
+                        .await
+                        .map_err(|e| SimulationError::InvalidState(format!("bind: {e}")))?;
+
+                    // Accept one connection from the client
+                    let (stream, _addr) = listener
+                        .accept()
+                        .await
+                        .map_err(|e| SimulationError::InvalidState(format!("accept: {e}")))?;
+                    let io = TokioIo::new(stream);
+
+                    // Serve HTTP/1.1 on this connection until the client closes it
+                    hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, service_fn(handle_request))
+                        .await
+                        .map_err(|e| {
+                            SimulationError::InvalidState(format!("hyper server error: {e}"))
+                        })?;
+
+                    Ok(())
+                }
+            })
+            .workload_fn("client", |ctx| {
+                let network = ctx.network().clone();
+                let peer_ip = ctx.peer().to_string();
+                async move {
+                    let stream = network
+                        .connect(&peer_ip)
+                        .await
+                        .map_err(|e| SimulationError::InvalidState(format!("connect: {e}")))?;
+                    let io = TokioIo::new(stream);
+
+                    // HTTP/1.1 handshake
+                    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+                        .await
+                        .map_err(|e| {
+                            SimulationError::InvalidState(format!("hyper handshake: {e}"))
+                        })?;
+
+                    // Drive the connection in the background
+                    tokio::task::spawn_local(async move {
+                        if let Err(e) = conn.await {
+                            eprintln!("Connection driver error: {e}");
+                        }
+                    });
+
+                    // --- Request 1: GET /hello ---
+                    let req = Request::builder()
+                        .uri("/hello")
+                        .header("host", peer_ip.as_str())
+                        .body(Full::new(Bytes::new()))
+                        .map_err(|e| {
+                            SimulationError::InvalidState(format!("request build: {e}"))
+                        })?;
+
+                    let res = sender
+                        .send_request(req)
+                        .await
+                        .map_err(|e| SimulationError::InvalidState(format!("send_request: {e}")))?;
+
+                    assert_eq!(res.status(), StatusCode::OK);
+                    let body = res
+                        .into_body()
+                        .collect()
+                        .await
+                        .map_err(|e| SimulationError::InvalidState(format!("body collect: {e}")))?
+                        .to_bytes();
+                    assert_eq!(&body[..], b"Hello from moonpool-sim!");
+
+                    // --- Request 2: POST /echo ---
+                    let req = Request::builder()
+                        .method("POST")
+                        .uri("/echo")
+                        .header("host", peer_ip.as_str())
+                        .body(Full::new(Bytes::from("ping")))
+                        .map_err(|e| {
+                            SimulationError::InvalidState(format!("request build: {e}"))
+                        })?;
+
+                    let res = sender
+                        .send_request(req)
+                        .await
+                        .map_err(|e| SimulationError::InvalidState(format!("send_request: {e}")))?;
+
+                    assert_eq!(res.status(), StatusCode::OK);
+                    let body = res
+                        .into_body()
+                        .collect()
+                        .await
+                        .map_err(|e| SimulationError::InvalidState(format!("body collect: {e}")))?
+                        .to_bytes();
+                    assert_eq!(&body[..], b"ping");
+
+                    // --- Request 3: GET /nonexistent → 404 ---
+                    let req = Request::builder()
+                        .uri("/nonexistent")
+                        .header("host", peer_ip.as_str())
+                        .body(Full::new(Bytes::new()))
+                        .map_err(|e| {
+                            SimulationError::InvalidState(format!("request build: {e}"))
+                        })?;
+
+                    let res = sender
+                        .send_request(req)
+                        .await
+                        .map_err(|e| SimulationError::InvalidState(format!("send_request: {e}")))?;
+
+                    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+                    Ok(())
+                }
+            })
             .set_iterations(3)
             .run()
             .await

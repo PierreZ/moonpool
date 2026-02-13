@@ -40,6 +40,9 @@ thread_local! {
 
     /// Pointer to shared energy budget (null when adaptive forking is disabled).
     pub(crate) static ENERGY_BUDGET_PTR: Cell<*mut EnergyBudget> = const { Cell::new(std::ptr::null_mut()) };
+
+    /// Pointer to shared each-bucket region for SOMETIMES_EACH assertions.
+    pub(crate) static EACH_BUCKET_PTR: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
 }
 
 /// Exploration state for the current process.
