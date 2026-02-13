@@ -139,4 +139,7 @@ pub use storage::{
 // Provider exports
 pub use providers::{SimProviders, SimRandomProvider, SimTimeProvider};
 
+// Explorer re-exports
+pub use moonpool_explorer::{ExplorationConfig, format_timeline, parse_timeline};
+
 // Macros are automatically available at crate root when defined with #[macro_export]

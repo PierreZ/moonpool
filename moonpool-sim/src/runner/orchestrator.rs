@@ -204,6 +204,17 @@ impl WorkloadOrchestrator {
         // Extract final simulation metrics
         let sim_metrics = sim.extract_metrics();
 
+        // If this is a forked child, exit immediately to return control to parent.
+        // Exit code 42 signals a bug was found (any workload failed).
+        if moonpool_explorer::explorer_is_child() {
+            let code = if results.iter().all(|r| r.is_ok()) {
+                0
+            } else {
+                42
+            };
+            moonpool_explorer::exit_child(code);
+        }
+
         Ok((results, sim_metrics))
     }
 

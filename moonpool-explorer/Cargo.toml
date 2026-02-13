@@ -1,0 +1,11 @@
+[package]
+name = "moonpool-explorer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fork-based multiverse exploration for moonpool simulation testing"
+
+[dependencies]
+libc = "0.2"

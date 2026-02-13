@@ -222,7 +222,18 @@ macro_rules! sometimes_assert {
         // Runtime execution - simplified to just record the result
         let result = $condition;
         $crate::chaos::assertions::record_assertion(stringify!($name), result);
+        if result {
+            $crate::chaos::assertions::on_sometimes_success(stringify!($name));
+        }
     };
+}
+
+/// Notify the exploration framework that a `sometimes_assert!` succeeded.
+///
+/// This may trigger a fork if this is a new assertion discovery and
+/// exploration is active.
+pub fn on_sometimes_success(name: &str) {
+    moonpool_explorer::maybe_fork_on_assertion(name);
 }
 
 #[cfg(test)]

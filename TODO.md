@@ -96,7 +96,7 @@ Update `reset_sim_rng()` to also reset count and clear breakpoints.
 
 ---
 
-## PR 2: moonpool-explorer Crate + Fork Loop
+## PR 2: moonpool-explorer Crate + Fork Loop ✅ DONE
 
 **Goal**: New `moonpool-explorer` crate with MAP_SHARED infrastructure, assertion-triggered forking, and the core fork loop. Wire into moonpool-sim.
 

@@ -1,0 +1,179 @@
+//! Coverage tracking for exploration novelty detection.
+//!
+//! Tracks which assertion-triggered code paths have been explored across
+//! forked processes. The [`VirginMap`] lives in shared memory and accumulates
+//! coverage from all children. Each child gets a fresh [`CoverageBitmap`]
+//! that is merged into the virgin map after the child exits.
+
+/// Size of coverage bitmaps in bytes (8192 bit positions).
+pub const COVERAGE_MAP_SIZE: usize = 1024;
+
+/// Per-child coverage bitmap, cleared before each fork.
+///
+/// Tracks which assertion slots were hit during this child's execution.
+/// After the child exits, the parent merges this into the [`VirginMap`].
+pub struct CoverageBitmap {
+    ptr: *mut u8,
+}
+
+impl CoverageBitmap {
+    /// Wrap a shared-memory pointer as a coverage bitmap.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must point to at least [`COVERAGE_MAP_SIZE`] bytes of valid,
+    /// writable shared memory.
+    pub unsafe fn new(ptr: *mut u8) -> Self {
+        Self { ptr }
+    }
+
+    /// Set the bit at the given index (mod total bits).
+    pub fn set_bit(&self, index: usize) {
+        let bit_index = index % (COVERAGE_MAP_SIZE * 8);
+        let byte = bit_index / 8;
+        let bit = bit_index % 8;
+        // Safety: ptr points to COVERAGE_MAP_SIZE bytes, byte < COVERAGE_MAP_SIZE
+        unsafe {
+            *self.ptr.add(byte) |= 1 << bit;
+        }
+    }
+
+    /// Clear all bits to zero.
+    pub fn clear(&self) {
+        // Safety: ptr points to COVERAGE_MAP_SIZE bytes
+        unsafe {
+            std::ptr::write_bytes(self.ptr, 0, COVERAGE_MAP_SIZE);
+        }
+    }
+
+    /// Get a pointer to the underlying data.
+    pub fn as_ptr(&self) -> *const u8 {
+        self.ptr
+    }
+}
+
+/// Cross-process coverage map, OR'd by all children.
+///
+/// Lives in `MAP_SHARED` memory so all forked processes contribute.
+/// A bit set to 1 means "this assertion path has been explored."
+pub struct VirginMap {
+    ptr: *mut u8,
+}
+
+impl VirginMap {
+    /// Wrap a shared-memory pointer as a virgin map.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must point to at least [`COVERAGE_MAP_SIZE`] bytes of valid,
+    /// writable shared memory.
+    pub unsafe fn new(ptr: *mut u8) -> Self {
+        Self { ptr }
+    }
+
+    /// Merge a child's coverage bitmap into this virgin map (bitwise OR).
+    pub fn merge_from(&self, other: &CoverageBitmap) {
+        // Safety: both pointers are valid for COVERAGE_MAP_SIZE bytes
+        unsafe {
+            for i in 0..COVERAGE_MAP_SIZE {
+                *self.ptr.add(i) |= *other.as_ptr().add(i);
+            }
+        }
+    }
+
+    /// Check if a child's bitmap contains any bits not yet in the virgin map.
+    pub fn has_new_bits(&self, other: &CoverageBitmap) -> bool {
+        // Safety: both pointers are valid for COVERAGE_MAP_SIZE bytes
+        unsafe {
+            for i in 0..COVERAGE_MAP_SIZE {
+                let virgin = *self.ptr.add(i);
+                let child = *other.as_ptr().add(i);
+                // Child has bits that virgin doesn't
+                if (child & !virgin) != 0 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shared_mem;
+
+    #[test]
+    fn test_set_bit_and_check() {
+        let ptr = shared_mem::alloc_shared(COVERAGE_MAP_SIZE).expect("alloc failed");
+        let virgin_ptr = shared_mem::alloc_shared(COVERAGE_MAP_SIZE).expect("alloc failed");
+        let bm = unsafe { CoverageBitmap::new(ptr) };
+        let vm = unsafe { VirginMap::new(virgin_ptr) };
+
+        // Initially no new bits
+        assert!(!vm.has_new_bits(&bm));
+
+        // Set a bit in bitmap
+        bm.set_bit(42);
+        assert!(vm.has_new_bits(&bm));
+
+        // Merge into virgin
+        vm.merge_from(&bm);
+        // Now no new bits (already merged)
+        assert!(!vm.has_new_bits(&bm));
+
+        unsafe {
+            shared_mem::free_shared(ptr, COVERAGE_MAP_SIZE);
+            shared_mem::free_shared(virgin_ptr, COVERAGE_MAP_SIZE);
+        }
+    }
+
+    #[test]
+    fn test_clear() {
+        let ptr = shared_mem::alloc_shared(COVERAGE_MAP_SIZE).expect("alloc failed");
+        let bm = unsafe { CoverageBitmap::new(ptr) };
+
+        bm.set_bit(0);
+        bm.set_bit(100);
+        bm.set_bit(8000);
+
+        bm.clear();
+
+        // Verify all zeroed
+        unsafe {
+            for i in 0..COVERAGE_MAP_SIZE {
+                assert_eq!(*ptr.add(i), 0);
+            }
+            shared_mem::free_shared(ptr, COVERAGE_MAP_SIZE);
+        }
+    }
+
+    #[test]
+    fn test_merge_accumulates() {
+        let bm1_ptr = shared_mem::alloc_shared(COVERAGE_MAP_SIZE).expect("alloc failed");
+        let bm2_ptr = shared_mem::alloc_shared(COVERAGE_MAP_SIZE).expect("alloc failed");
+        let vm_ptr = shared_mem::alloc_shared(COVERAGE_MAP_SIZE).expect("alloc failed");
+
+        let bm1 = unsafe { CoverageBitmap::new(bm1_ptr) };
+        let bm2 = unsafe { CoverageBitmap::new(bm2_ptr) };
+        let vm = unsafe { VirginMap::new(vm_ptr) };
+
+        bm1.set_bit(10);
+        bm2.set_bit(20);
+
+        vm.merge_from(&bm1);
+        // bm2 has bit 20 which is new
+        assert!(vm.has_new_bits(&bm2));
+
+        vm.merge_from(&bm2);
+        // Now neither has new bits
+        assert!(!vm.has_new_bits(&bm1));
+        assert!(!vm.has_new_bits(&bm2));
+
+        unsafe {
+            shared_mem::free_shared(bm1_ptr, COVERAGE_MAP_SIZE);
+            shared_mem::free_shared(bm2_ptr, COVERAGE_MAP_SIZE);
+            shared_mem::free_shared(vm_ptr, COVERAGE_MAP_SIZE);
+        }
+    }
+}

@@ -47,6 +47,7 @@ pub struct SimulationBuilder {
     next_ip: u32, // For auto-assigning IP addresses starting from 10.0.0.1
     use_random_config: bool,
     invariants: Vec<InvariantCheck>,
+    exploration_config: Option<moonpool_explorer::ExplorationConfig>,
 }
 
 impl Default for SimulationBuilder {
@@ -65,6 +66,7 @@ impl SimulationBuilder {
             next_ip: 1, // Start from 10.0.0.1
             use_random_config: false,
             invariants: Vec::new(),
+            exploration_config: None,
         }
     }
 
@@ -193,6 +195,15 @@ impl SimulationBuilder {
         self
     }
 
+    /// Enable fork-based multiverse exploration.
+    ///
+    /// When enabled, the simulation will fork child processes at assertion
+    /// discovery points to explore alternate timelines with different seeds.
+    pub fn enable_exploration(mut self, config: moonpool_explorer::ExplorationConfig) -> Self {
+        self.exploration_config = Some(config);
+        self
+    }
+
     #[instrument(skip_all)]
     /// Run the simulation and generate a report.
     pub async fn run(self) -> SimulationReport {
@@ -214,6 +225,17 @@ impl SimulationBuilder {
         let mut iteration_manager =
             IterationManager::new(self.iteration_control.clone(), self.seeds.clone());
         let mut metrics_collector = MetricsCollector::new();
+
+        // Initialize exploration if configured
+        if let Some(ref config) = self.exploration_config {
+            moonpool_explorer::set_rng_hooks(crate::sim::get_rng_call_count, |seed| {
+                crate::sim::set_sim_seed(seed);
+                crate::sim::reset_rng_call_count();
+            });
+            if let Err(e) = moonpool_explorer::init(config.clone()) {
+                tracing::error!("Failed to initialize exploration: {}", e);
+            }
+        }
 
         while iteration_manager.should_continue() {
             let seed = iteration_manager.next_iteration();
@@ -286,6 +308,11 @@ impl SimulationBuilder {
         }
 
         // End of main iteration loop
+
+        // Clean up exploration if it was enabled
+        if self.exploration_config.is_some() {
+            moonpool_explorer::cleanup();
+        }
 
         // Log summary of all seeds used
         let iteration_count = iteration_manager.current_iteration();
