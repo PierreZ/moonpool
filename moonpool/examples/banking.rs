@@ -6,8 +6,9 @@
 //! # What It Shows
 //!
 //! - A static `PingPong` interface (existing pattern, proves coexistence)
-//! - A virtual `BankAccount` actor with `deposit`, `withdraw`, `get_balance`
+//! - A virtual `BankAccount` actor defined with `#[virtual_actor]` macro
 //! - `ActorHost` for automatic activation and dispatch (no manual select! loop)
+//! - Typed `BankAccountRef` for ergonomic actor calls
 //! - Single process, local delivery, single transport
 //!
 //! # Architecture
@@ -17,20 +18,16 @@
 //!   UID(0x5049_4E47, 1) → PingPong::ping RequestStream   (static, index 1)
 //!   UID(0xBA4E_4B00, 0) → BankAccount handler             (virtual, all methods)
 //! ```
-//!
-//! Both the static endpoint and virtual actor handler live on the same
-//! transport and `EndpointMap`. The ActorHost spawns the processing loop
-//! for virtual actors, while static endpoints still use a manual `select!`.
 
 use std::rc::Rc;
 
 use moonpool::actors::{
-    ActorContext, ActorDirectory, ActorError, ActorHandler, ActorHost, ActorId, ActorRouter,
-    ActorType, InMemoryDirectory, LocalPlacement, PlacementStrategy,
+    ActorContext, ActorDirectory, ActorError, ActorHandler, ActorHost, ActorRouter, ActorType,
+    InMemoryDirectory, LocalPlacement, PlacementStrategy,
 };
 use moonpool::{
     Endpoint, JsonCodec, MessageCodec, NetTransportBuilder, NetworkAddress, Providers, RpcError,
-    UID, interface,
+    UID, interface, virtual_actor,
 };
 use serde::{Deserialize, Serialize};
 
@@ -54,7 +51,7 @@ trait PingPong {
 }
 
 // ============================================================================
-// Virtual Actor: BankAccount (using ActorHost)
+// Virtual Actor: BankAccount (using #[virtual_actor] macro)
 // ============================================================================
 
 /// Deposit request.
@@ -79,66 +76,71 @@ struct BalanceResponse {
     balance: i64,
 }
 
-/// Actor type constant.
-const BANK_ACCOUNT_TYPE: ActorType = ActorType(0xBA4E_4B00);
-
-/// Method discriminants.
-mod bank_methods {
-    pub const DEPOSIT: u32 = 1;
-    pub const WITHDRAW: u32 = 2;
-    pub const GET_BALANCE: u32 = 3;
+/// Define the virtual actor interface — generates:
+/// - `BankAccountRef<P>` for typed actor calls
+/// - `bank_account_methods` module with DEPOSIT, WITHDRAW, GET_BALANCE constants
+/// - `dispatch_bank_account()` function for routing method calls
+#[virtual_actor(id = 0xBA4E_4B00)]
+trait BankAccount {
+    async fn deposit(&mut self, req: DepositRequest) -> Result<BalanceResponse, RpcError>;
+    async fn withdraw(&mut self, req: WithdrawRequest) -> Result<BalanceResponse, RpcError>;
+    async fn get_balance(&mut self, req: GetBalanceRequest) -> Result<BalanceResponse, RpcError>;
 }
 
 /// BankAccount actor implementation.
 #[derive(Default)]
-struct BankAccount {
+struct BankAccountImpl {
     balance: i64,
 }
 
 #[async_trait::async_trait(?Send)]
-impl ActorHandler for BankAccount {
+impl BankAccount for BankAccountImpl {
+    async fn deposit(&mut self, req: DepositRequest) -> Result<BalanceResponse, RpcError> {
+        self.balance += req.amount;
+        println!(
+            "  [server] DEPOSIT +{} → balance={}",
+            req.amount, self.balance
+        );
+        Ok(BalanceResponse {
+            balance: self.balance,
+        })
+    }
+
+    async fn withdraw(&mut self, req: WithdrawRequest) -> Result<BalanceResponse, RpcError> {
+        self.balance -= req.amount;
+        println!(
+            "  [server] WITHDRAW -{} → balance={}",
+            req.amount, self.balance
+        );
+        Ok(BalanceResponse {
+            balance: self.balance,
+        })
+    }
+
+    async fn get_balance(&mut self, req: GetBalanceRequest) -> Result<BalanceResponse, RpcError> {
+        let _ = req;
+        println!("  [server] GET_BALANCE → balance={}", self.balance);
+        Ok(BalanceResponse {
+            balance: self.balance,
+        })
+    }
+}
+
+/// Hand-written bridge: delegates to the generated dispatch function.
+/// (Could be macro-generated in a future iteration.)
+#[async_trait::async_trait(?Send)]
+impl ActorHandler for BankAccountImpl {
     fn actor_type() -> ActorType {
-        BANK_ACCOUNT_TYPE
+        BankAccountRef::<moonpool::TokioProviders>::ACTOR_TYPE
     }
 
     async fn dispatch<P: Providers, C: MessageCodec>(
         &mut self,
-        _ctx: &ActorContext<P, C>,
+        ctx: &ActorContext<P, C>,
         method: u32,
         body: &[u8],
     ) -> Result<Vec<u8>, ActorError> {
-        let codec = JsonCodec;
-        match method {
-            bank_methods::DEPOSIT => {
-                let req: DepositRequest = codec.decode(body)?;
-                self.balance += req.amount;
-                println!(
-                    "  [server] DEPOSIT +{} → balance={}",
-                    req.amount, self.balance
-                );
-                Ok(codec.encode(&BalanceResponse {
-                    balance: self.balance,
-                })?)
-            }
-            bank_methods::WITHDRAW => {
-                let req: WithdrawRequest = codec.decode(body)?;
-                self.balance -= req.amount;
-                println!(
-                    "  [server] WITHDRAW -{} → balance={}",
-                    req.amount, self.balance
-                );
-                Ok(codec.encode(&BalanceResponse {
-                    balance: self.balance,
-                })?)
-            }
-            bank_methods::GET_BALANCE => {
-                println!("  [server] GET_BALANCE → balance={}", self.balance);
-                Ok(codec.encode(&BalanceResponse {
-                    balance: self.balance,
-                })?)
-            }
-            _ => Err(ActorError::UnknownMethod(method)),
-        }
+        dispatch_bank_account(self, ctx, method, body).await
     }
 }
 
@@ -164,7 +166,7 @@ async fn run_ping_server<P: Providers>(
 }
 
 // ============================================================================
-// Client: uses ActorRouter for virtual actors, bound client for static
+// Client: uses BankAccountRef for virtual actors, bound client for static
 // ============================================================================
 
 async fn run_client<P: Providers>(
@@ -177,48 +179,26 @@ async fn run_client<P: Providers>(
 
     println!("\n--- Virtual Actor: BankAccount ---\n");
 
+    // Create typed actor references (no network call — just handles)
+    let alice = BankAccountRef::new("alice", &router);
+    let bob = BankAccountRef::new("bob", &router);
+
     // Deposit to alice
-    let alice_id = ActorId::new(BANK_ACCOUNT_TYPE, "alice");
-    let resp: BalanceResponse = router
-        .send_actor_request(
-            &alice_id,
-            bank_methods::DEPOSIT,
-            &DepositRequest { amount: 100 },
-        )
-        .await?;
+    let resp = alice.deposit(DepositRequest { amount: 100 }).await?;
     println!("  [client] Alice balance after deposit: {}", resp.balance);
     assert_eq!(resp.balance, 100);
 
     // Deposit to bob
-    let bob_id = ActorId::new(BANK_ACCOUNT_TYPE, "bob");
-    let resp: BalanceResponse = router
-        .send_actor_request(
-            &bob_id,
-            bank_methods::DEPOSIT,
-            &DepositRequest { amount: 50 },
-        )
-        .await?;
+    let resp = bob.deposit(DepositRequest { amount: 50 }).await?;
     println!("  [client] Bob balance after deposit: {}", resp.balance);
     assert_eq!(resp.balance, 50);
 
     // Transfer: withdraw from alice, deposit to bob
-    let resp: BalanceResponse = router
-        .send_actor_request(
-            &alice_id,
-            bank_methods::WITHDRAW,
-            &WithdrawRequest { amount: 30 },
-        )
-        .await?;
+    let resp = alice.withdraw(WithdrawRequest { amount: 30 }).await?;
     println!("  [client] Alice balance after withdraw: {}", resp.balance);
     assert_eq!(resp.balance, 70);
 
-    let resp: BalanceResponse = router
-        .send_actor_request(
-            &bob_id,
-            bank_methods::DEPOSIT,
-            &DepositRequest { amount: 30 },
-        )
-        .await?;
+    let resp = bob.deposit(DepositRequest { amount: 30 }).await?;
     println!(
         "  [client] Bob balance after transfer deposit: {}",
         resp.balance
@@ -226,17 +206,13 @@ async fn run_client<P: Providers>(
     assert_eq!(resp.balance, 80);
 
     // Check final balances
-    let alice: BalanceResponse = router
-        .send_actor_request(&alice_id, bank_methods::GET_BALANCE, &GetBalanceRequest {})
-        .await?;
-    assert_eq!(alice.balance, 70);
-    println!("  [client] Alice final balance: {}", alice.balance);
+    let alice_balance = alice.get_balance(GetBalanceRequest {}).await?;
+    assert_eq!(alice_balance.balance, 70);
+    println!("  [client] Alice final balance: {}", alice_balance.balance);
 
-    let bob: BalanceResponse = router
-        .send_actor_request(&bob_id, bank_methods::GET_BALANCE, &GetBalanceRequest {})
-        .await?;
-    assert_eq!(bob.balance, 80);
-    println!("  [client] Bob final balance: {}", bob.balance);
+    let bob_balance = bob.get_balance(GetBalanceRequest {}).await?;
+    assert_eq!(bob_balance.balance, 80);
+    println!("  [client] Bob final balance: {}", bob_balance.balance);
 
     println!("\n--- Static Interface: PingPong ---\n");
 
@@ -295,7 +271,10 @@ async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
     let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
 
     // Build router + host
-    let local_endpoint = Endpoint::new(local_addr.clone(), UID::new(BANK_ACCOUNT_TYPE.0, 0));
+    let local_endpoint = Endpoint::new(
+        local_addr.clone(),
+        UID::new(BankAccountRef::<moonpool::TokioProviders>::ACTOR_TYPE.0, 0),
+    );
     let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(local_endpoint));
     let router = Rc::new(ActorRouter::new(
         transport.clone(),
@@ -306,7 +285,7 @@ async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
     let host = ActorHost::new(transport.clone(), router.clone(), directory);
 
     // Register actor type — host spawns processing loop internally
-    host.register::<BankAccount>();
+    host.register::<BankAccountImpl>();
 
     // Spawn static PingPong server loop as a background task
     let server_transport = transport.clone();

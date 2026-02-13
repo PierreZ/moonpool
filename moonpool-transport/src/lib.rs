@@ -101,5 +101,6 @@ pub use rpc::{
     method_uid, send_request,
 };
 
-// Interface attribute macro
+// Attribute macros
 pub use moonpool_transport_derive::interface;
+pub use moonpool_transport_derive::virtual_actor;
