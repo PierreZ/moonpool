@@ -7,6 +7,8 @@
 use std::cell::{Cell, RefCell};
 
 use crate::assertion_slots::AssertionSlot;
+use crate::energy::EnergyBudget;
+use crate::fork_loop::AdaptiveConfig;
 use crate::shared_stats::{SharedRecipe, SharedStats};
 
 thread_local! {
@@ -35,6 +37,9 @@ thread_local! {
 
     /// Pointer to shared assertion slot table.
     pub(crate) static ASSERTION_TABLE: Cell<*mut AssertionSlot> = const { Cell::new(std::ptr::null_mut()) };
+
+    /// Pointer to shared energy budget (null when adaptive forking is disabled).
+    pub(crate) static ENERGY_BUDGET_PTR: Cell<*mut EnergyBudget> = const { Cell::new(std::ptr::null_mut()) };
 }
 
 /// Exploration state for the current process.
@@ -54,6 +59,8 @@ pub struct ExplorerCtx {
     pub recipe: Vec<(u64, u64)>,
     /// Number of children to fork at each discovery point.
     pub children_per_fork: u32,
+    /// Adaptive forking configuration (None = fixed-count mode).
+    pub adaptive: Option<AdaptiveConfig>,
 }
 
 impl ExplorerCtx {
@@ -67,6 +74,7 @@ impl ExplorerCtx {
             current_seed: 0,
             recipe: Vec::new(),
             children_per_fork: 0,
+            adaptive: None,
         }
     }
 }

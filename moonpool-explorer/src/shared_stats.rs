@@ -50,6 +50,8 @@ pub struct ExplorationStats {
     pub fork_points: u64,
     /// Number of bugs found.
     pub bug_found: u64,
+    /// Energy remaining in the reallocation pool (0 when adaptive is disabled).
+    pub realloc_pool_remaining: i64,
 }
 
 /// Allocate and initialize shared stats.
@@ -95,6 +97,18 @@ pub fn get_exploration_stats() -> Option<ExplorationStats> {
     if ptr.is_null() {
         return None;
     }
+
+    // Read realloc pool from energy budget if available
+    let realloc_pool = crate::context::ENERGY_BUDGET_PTR.with(|c| {
+        let energy_ptr = c.get();
+        if energy_ptr.is_null() {
+            0
+        } else {
+            // Safety: energy_ptr was set during init
+            unsafe { (*energy_ptr).realloc_pool.load(Ordering::Relaxed) }
+        }
+    });
+
     // Safety: ptr was set during init and points to valid shared stats
     unsafe {
         Some(ExplorationStats {
@@ -102,6 +116,7 @@ pub fn get_exploration_stats() -> Option<ExplorationStats> {
             total_timelines: (*ptr).total_timelines.load(Ordering::Relaxed),
             fork_points: (*ptr).fork_points.load(Ordering::Relaxed),
             bug_found: (*ptr).bug_found.load(Ordering::Relaxed),
+            realloc_pool_remaining: realloc_pool,
         })
     }
 }

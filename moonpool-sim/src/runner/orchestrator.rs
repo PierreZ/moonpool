@@ -503,6 +503,7 @@ impl MetricsCollector {
         seeds_used: Vec<u64>,
         assertion_results: HashMap<String, AssertionStats>,
         assertion_violations: Vec<String>,
+        exploration: Option<super::report::ExplorationReport>,
     ) -> super::report::SimulationReport {
         super::report::SimulationReport {
             iterations: iteration_count,
@@ -514,6 +515,7 @@ impl MetricsCollector {
             seeds_failing: self.faulty_seeds,
             assertion_results,
             assertion_violations,
+            exploration,
         }
     }
 

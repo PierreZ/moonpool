@@ -51,6 +51,7 @@ fn test_fork_basic() {
                 max_depth: 1,
                 children_per_fork: 2,
                 global_energy: 10,
+                adaptive: None,
             })
             .register_workload(
                 "client",
@@ -91,6 +92,7 @@ fn test_child_exit_code() {
                 max_depth: 1,
                 children_per_fork: 2,
                 global_energy: 10,
+                adaptive: None,
             })
             .register_workload(
                 "client",
@@ -136,6 +138,7 @@ fn test_depth_limit() {
                 max_depth: 1,
                 children_per_fork: 2,
                 global_energy: 100,
+                adaptive: None,
             })
             .register_workload(
                 "client",
@@ -178,6 +181,7 @@ fn test_energy_limit() {
                 max_depth: 3,
                 children_per_fork: 8,
                 global_energy: 2,
+                adaptive: None,
             })
             .register_workload(
                 "client",
@@ -235,6 +239,7 @@ fn test_planted_bug() {
                 max_depth: 3,
                 children_per_fork: 4,
                 global_energy: 50,
+                adaptive: None,
             })
             .register_workload(
                 "client",

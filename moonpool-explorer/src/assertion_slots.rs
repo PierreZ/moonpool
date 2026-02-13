@@ -78,7 +78,7 @@ pub fn maybe_fork_on_assertion(name: &str) {
                         let bm = crate::coverage::CoverageBitmap::new(bm_ptr);
                         bm.set_bit(hash as usize);
                     }
-                    crate::fork_loop::branch_on_discovery(name);
+                    crate::fork_loop::dispatch_branch(name, i);
                 }
                 return;
             }
@@ -101,7 +101,7 @@ pub fn maybe_fork_on_assertion(name: &str) {
                 let bm = crate::coverage::CoverageBitmap::new(bm_ptr);
                 bm.set_bit(hash as usize);
             }
-            crate::fork_loop::branch_on_discovery(name);
+            crate::fork_loop::dispatch_branch(name, idx);
         }
         // Table full — silently ignore (bounded resource)
     }

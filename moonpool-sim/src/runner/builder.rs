@@ -218,6 +218,7 @@ impl SimulationBuilder {
                 seeds_failing: Vec::new(),
                 assertion_results: HashMap::new(),
                 assertion_violations: Vec::new(),
+                exploration: None,
             };
         }
 
@@ -294,6 +295,7 @@ impl SimulationBuilder {
                         iteration_manager.seeds_used().to_vec(),
                         assertion_results,
                         assertion_violations,
+                        None,
                     );
                 }
             };
@@ -309,10 +311,22 @@ impl SimulationBuilder {
 
         // End of main iteration loop
 
-        // Clean up exploration if it was enabled
-        if self.exploration_config.is_some() {
+        // Gather exploration stats before cleanup
+        let exploration_report = if self.exploration_config.is_some() {
+            let stats = moonpool_explorer::get_exploration_stats();
+            let bug_recipe = moonpool_explorer::get_bug_recipe();
             moonpool_explorer::cleanup();
-        }
+            stats.map(|s| super::report::ExplorationReport {
+                total_timelines: s.total_timelines,
+                fork_points: s.fork_points,
+                bugs_found: s.bug_found,
+                bug_recipe,
+                energy_remaining: s.global_energy,
+                realloc_pool_remaining: s.realloc_pool_remaining,
+            })
+        } else {
+            None
+        };
 
         // Log summary of all seeds used
         let iteration_count = iteration_manager.current_iteration();
@@ -342,6 +356,7 @@ impl SimulationBuilder {
             iteration_manager.seeds_used().to_vec(),
             assertion_results,
             assertion_violations,
+            exploration_report,
         )
     }
 }
@@ -448,6 +463,7 @@ mod tests {
             seeds_failing: vec![42],
             assertion_results: HashMap::new(),
             assertion_violations: Vec::new(),
+            exploration: None,
         };
 
         let display = format!("{}", report);

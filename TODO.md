@@ -207,7 +207,7 @@ if moonpool_explorer::explorer_is_child() {
 
 ---
 
-## PR 3: Adaptive Forking + Energy Budgets + Reporting
+## PR 3: Adaptive Forking + Energy Budgets + Reporting ✅ DONE
 
 **Goal**: Replace fixed-count with yield-driven adaptive forking. Add 3-level energy budgets. Produce exploration report.
 

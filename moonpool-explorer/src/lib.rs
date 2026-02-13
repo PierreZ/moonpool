@@ -29,6 +29,7 @@
 //!     max_depth: 2,
 //!     children_per_fork: 4,
 //!     global_energy: 100,
+//!     adaptive: None,
 //! })?;
 //!
 //! // ... run simulation ...
@@ -42,6 +43,7 @@
 pub mod assertion_slots;
 pub mod context;
 pub mod coverage;
+pub mod energy;
 pub mod fork_loop;
 pub mod replay;
 pub mod shared_mem;
@@ -50,21 +52,28 @@ pub mod shared_stats;
 // Re-exports for the public API
 pub use assertion_slots::maybe_fork_on_assertion;
 pub use context::{explorer_is_child, set_rng_hooks};
-pub use fork_loop::exit_child;
+pub use fork_loop::{AdaptiveConfig, exit_child};
 pub use replay::{ParseTimelineError, format_timeline, parse_timeline};
 pub use shared_stats::{ExplorationStats, get_bug_recipe, get_exploration_stats};
 
-use context::{ASSERTION_TABLE, COVERAGE_BITMAP_PTR, SHARED_RECIPE, SHARED_STATS, VIRGIN_MAP_PTR};
+use context::{
+    ASSERTION_TABLE, COVERAGE_BITMAP_PTR, ENERGY_BUDGET_PTR, SHARED_RECIPE, SHARED_STATS,
+    VIRGIN_MAP_PTR,
+};
 
 /// Configuration for exploration.
 #[derive(Debug, Clone)]
 pub struct ExplorationConfig {
     /// Maximum fork depth (0 = no forking).
     pub max_depth: u32,
-    /// Number of children to fork at each discovery point.
+    /// Number of children to fork at each discovery point (fixed-count mode).
     pub children_per_fork: u32,
     /// Global energy budget (total number of fork operations allowed).
     pub global_energy: i64,
+    /// Optional adaptive forking configuration.
+    /// When `None`, uses fixed `children_per_fork` (backward compatible).
+    /// When `Some`, uses coverage-yield-driven batch forking with 3-level energy.
+    pub adaptive: Option<fork_loop::AdaptiveConfig>,
 }
 
 /// Total size of the assertion slot table in bytes.
@@ -87,12 +96,20 @@ pub fn init(config: ExplorationConfig) -> Result<(), std::io::Error> {
     let bitmap_ptr = shared_mem::alloc_shared(coverage::COVERAGE_MAP_SIZE)?;
     let table_ptr = shared_mem::alloc_shared(ASSERTION_TABLE_SIZE)?;
 
+    // Allocate energy budget if adaptive mode is configured
+    let energy_ptr = if let Some(ref adaptive) = config.adaptive {
+        energy::init_energy_budget(config.global_energy, adaptive.per_mark_energy)?
+    } else {
+        std::ptr::null_mut()
+    };
+
     // Store pointers in thread-local context
     SHARED_STATS.with(|c| c.set(stats_ptr));
     SHARED_RECIPE.with(|c| c.set(recipe_ptr));
     VIRGIN_MAP_PTR.with(|c| c.set(virgin_ptr));
     COVERAGE_BITMAP_PTR.with(|c| c.set(bitmap_ptr));
     ASSERTION_TABLE.with(|c| c.set(table_ptr as *mut assertion_slots::AssertionSlot));
+    ENERGY_BUDGET_PTR.with(|c| c.set(energy_ptr));
 
     // Activate exploration context
     context::with_ctx_mut(|ctx| {
@@ -103,6 +120,7 @@ pub fn init(config: ExplorationConfig) -> Result<(), std::io::Error> {
         ctx.current_seed = 0;
         ctx.recipe.clear();
         ctx.children_per_fork = config.children_per_fork;
+        ctx.adaptive = config.adaptive.clone();
     });
 
     Ok(())
@@ -156,6 +174,15 @@ pub fn cleanup() {
             shared_mem::free_shared(table_ptr as *mut u8, ASSERTION_TABLE_SIZE);
             ASSERTION_TABLE.with(|c| c.set(std::ptr::null_mut()));
         }
+
+        let energy_ptr = ENERGY_BUDGET_PTR.with(|c| c.get());
+        if !energy_ptr.is_null() {
+            shared_mem::free_shared(
+                energy_ptr as *mut u8,
+                std::mem::size_of::<energy::EnergyBudget>(),
+            );
+            ENERGY_BUDGET_PTR.with(|c| c.set(std::ptr::null_mut()));
+        }
     }
 }
 
@@ -169,6 +196,7 @@ mod tests {
             max_depth: 2,
             children_per_fork: 4,
             global_energy: 100,
+            adaptive: None,
         };
 
         init(config).expect("init failed");
@@ -197,5 +225,22 @@ mod tests {
     fn test_maybe_fork_noop_when_inactive() {
         // Should not panic when exploration is not active
         maybe_fork_on_assertion("test_assertion");
+    }
+
+    #[test]
+    fn test_backward_compat_no_adaptive() {
+        let config = ExplorationConfig {
+            max_depth: 2,
+            children_per_fork: 4,
+            global_energy: 100,
+            adaptive: None,
+        };
+        init(config).expect("init failed");
+
+        // Energy budget pointer should be null (old path)
+        let has_energy = context::ENERGY_BUDGET_PTR.with(|c| !c.get().is_null());
+        assert!(!has_energy);
+
+        cleanup();
     }
 }

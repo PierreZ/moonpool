@@ -20,7 +20,9 @@
 
 use std::sync::atomic::Ordering;
 
-use crate::context::{self, COVERAGE_BITMAP_PTR, SHARED_RECIPE, SHARED_STATS, VIRGIN_MAP_PTR};
+use crate::context::{
+    self, COVERAGE_BITMAP_PTR, ENERGY_BUDGET_PTR, SHARED_RECIPE, SHARED_STATS, VIRGIN_MAP_PTR,
+};
 use crate::coverage::{COVERAGE_MAP_SIZE, CoverageBitmap, VirginMap};
 use crate::shared_stats::MAX_RECIPE_ENTRIES;
 
@@ -38,6 +40,201 @@ fn compute_child_seed(parent_seed: u64, mark_name: &str, child_idx: u32) -> u64 
     hash ^= child_idx as u64;
     hash = hash.wrapping_mul(0x100000001b3);
     hash
+}
+
+/// Configuration for adaptive batch-based forking.
+///
+/// Instead of forking a fixed number of children, the adaptive loop forks
+/// in batches and checks coverage yield between batches. Productive marks
+/// (that find new coverage) get more forks; barren marks stop early and
+/// return their energy to the reallocation pool.
+#[derive(Debug, Clone)]
+pub struct AdaptiveConfig {
+    /// Number of children to fork per batch before checking coverage yield.
+    pub batch_size: u32,
+    /// Minimum total forks for a mark (even if barren after first batch).
+    pub min_timelines: u32,
+    /// Maximum total forks for a mark (hard cap).
+    pub max_timelines: u32,
+    /// Initial per-mark energy budget.
+    pub per_mark_energy: i64,
+}
+
+/// Dispatch to either adaptive or fixed-count forking based on config.
+///
+/// If an energy budget is configured (adaptive mode), uses coverage-yield-driven
+/// batching. Otherwise falls back to the fixed `children_per_fork` behavior.
+#[cfg(unix)]
+pub(crate) fn dispatch_branch(mark_name: &str, slot_idx: usize) {
+    let has_adaptive = ENERGY_BUDGET_PTR.with(|c| !c.get().is_null());
+    if has_adaptive {
+        adaptive_branch_on_discovery(mark_name, slot_idx);
+    } else {
+        branch_on_discovery(mark_name);
+    }
+}
+
+/// No-op on non-unix platforms.
+#[cfg(not(unix))]
+pub(crate) fn dispatch_branch(_mark_name: &str, _slot_idx: usize) {}
+
+/// Adaptive branch: fork in batches, check coverage yield, stop when barren.
+#[cfg(unix)]
+fn adaptive_branch_on_discovery(mark_name: &str, slot_idx: usize) {
+    // Read context for guard checks
+    let (active, depth, max_depth, current_seed) =
+        context::with_ctx(|ctx| (ctx.active, ctx.depth, ctx.max_depth, ctx.current_seed));
+
+    if !active || depth >= max_depth {
+        return;
+    }
+
+    let budget_ptr = ENERGY_BUDGET_PTR.with(|c| c.get());
+    if budget_ptr.is_null() {
+        return;
+    }
+
+    // Initialize per-mark budget on first use
+    // Safety: budget_ptr is valid shared memory
+    unsafe {
+        crate::energy::init_mark_budget(budget_ptr, slot_idx);
+    }
+
+    // Record the current RNG call count for the recipe
+    let fork_call_count = context::rng_get_count();
+
+    // Get shared memory pointers
+    let bm_ptr = COVERAGE_BITMAP_PTR.with(|c| c.get());
+    let vm_ptr = VIRGIN_MAP_PTR.with(|c| c.get());
+    let stats_ptr = SHARED_STATS.with(|c| c.get());
+
+    // Read adaptive config from context
+    let (batch_size, min_timelines, max_timelines) = context::with_ctx(|ctx| {
+        ctx.adaptive
+            .as_ref()
+            .map(|a| (a.batch_size, a.min_timelines, a.max_timelines))
+            .unwrap_or((4, 1, 16))
+    });
+
+    // Save parent bitmap
+    let mut parent_bitmap_backup = [0u8; COVERAGE_MAP_SIZE];
+    if !bm_ptr.is_null() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bm_ptr,
+                parent_bitmap_backup.as_mut_ptr(),
+                COVERAGE_MAP_SIZE,
+            );
+        }
+    }
+
+    let mut total_forked: u32 = 0;
+
+    // Batch loop
+    loop {
+        let mut batch_has_new = false;
+
+        for _ in 0..batch_size {
+            if total_forked >= max_timelines {
+                break;
+            }
+
+            // Check energy
+            // Safety: budget_ptr is valid
+            if !unsafe { crate::energy::decrement_mark_energy(budget_ptr, slot_idx) } {
+                break;
+            }
+
+            // Clear child bitmap before fork
+            if !bm_ptr.is_null() {
+                let bm = unsafe { CoverageBitmap::new(bm_ptr) };
+                bm.clear();
+            }
+
+            let child_seed = compute_child_seed(current_seed, mark_name, total_forked);
+            total_forked += 1;
+
+            // Safety: single-threaded, no real I/O. See branch_on_discovery.
+            let pid = unsafe { libc::fork() };
+
+            match pid {
+                -1 => break, // fork failed
+                0 => {
+                    // CHILD — reseed and return
+                    context::rng_reseed(child_seed);
+                    context::with_ctx_mut(|ctx| {
+                        ctx.is_child = true;
+                        ctx.depth += 1;
+                        ctx.current_seed = child_seed;
+                        ctx.recipe.push((fork_call_count, child_seed));
+                    });
+                    if !stats_ptr.is_null() {
+                        unsafe {
+                            (*stats_ptr).total_timelines.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    return;
+                }
+                child_pid => {
+                    // PARENT — wait for child
+                    let mut status: libc::c_int = 0;
+                    unsafe {
+                        libc::waitpid(child_pid, &mut status, 0);
+                    }
+
+                    // Check coverage yield BEFORE merging
+                    if !bm_ptr.is_null() && !vm_ptr.is_null() {
+                        let bm = unsafe { CoverageBitmap::new(bm_ptr) };
+                        let vm = unsafe { VirginMap::new(vm_ptr) };
+                        if vm.has_new_bits(&bm) {
+                            batch_has_new = true;
+                        }
+                        vm.merge_from(&bm);
+                    }
+
+                    // Check if child found a bug
+                    let exited_normally = libc::WIFEXITED(status);
+                    if exited_normally && libc::WEXITSTATUS(status) == 42 {
+                        if !stats_ptr.is_null() {
+                            unsafe {
+                                (*stats_ptr).bug_found.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        save_bug_recipe(fork_call_count, child_seed);
+                    }
+
+                    if !stats_ptr.is_null() {
+                        unsafe {
+                            (*stats_ptr).fork_points.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Batch complete — decide whether to continue
+        if total_forked >= max_timelines {
+            break;
+        }
+        if !batch_has_new && total_forked >= min_timelines {
+            // Barren — return remaining energy to pool
+            unsafe {
+                crate::energy::return_mark_energy_to_pool(budget_ptr, slot_idx);
+            }
+            break;
+        }
+        // Check if we ran out of energy mid-batch (total_forked didn't reach batch_size)
+        if !total_forked.is_multiple_of(batch_size) && total_forked < max_timelines {
+            break; // energy exhausted
+        }
+    }
+
+    // Restore parent bitmap
+    if !bm_ptr.is_null() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(parent_bitmap_backup.as_ptr(), bm_ptr, COVERAGE_MAP_SIZE);
+        }
+    }
 }
 
 /// Branch the simulation timeline at a discovery point.
