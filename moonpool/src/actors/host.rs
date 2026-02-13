@@ -17,8 +17,10 @@
 //! host.register::<BankAccountImpl>()?;
 //! ```
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
+use std::task::{Poll, Waker};
 
 use crate::{
     Endpoint, JsonCodec, MessageCodec, NetTransport, Providers, RequestStream, TaskProvider, UID,
@@ -32,6 +34,71 @@ use super::{ActorDirectory, ActorRouter};
 /// Maximum number of times a message can be forwarded before being rejected.
 /// Prevents infinite forwarding loops.
 const MAX_FORWARD_COUNT: u8 = 2;
+
+/// Local `!Send` message queue for routing messages to a per-identity actor task.
+///
+/// Uses `Rc<RefCell<VecDeque>>` + `Waker` following the same pattern as
+/// `NetNotifiedQueue`, but without serialization since messages are already
+/// deserialized by the transport layer.
+struct IdentityMailbox<C: MessageCodec> {
+    inner: RefCell<MailboxInner<C>>,
+}
+
+struct MailboxInner<C: MessageCodec> {
+    queue: VecDeque<(ActorMessage, crate::ReplyPromise<ActorResponse, C>)>,
+    waker: Option<Waker>,
+    closed: bool,
+}
+
+impl<C: MessageCodec> IdentityMailbox<C> {
+    fn new() -> Rc<Self> {
+        Rc::new(Self {
+            inner: RefCell::new(MailboxInner {
+                queue: VecDeque::new(),
+                waker: None,
+                closed: false,
+            }),
+        })
+    }
+
+    fn send(&self, msg: ActorMessage, reply: crate::ReplyPromise<ActorResponse, C>) {
+        let mut inner = self.inner.borrow_mut();
+        inner.queue.push_back((msg, reply));
+        if let Some(waker) = inner.waker.take() {
+            waker.wake();
+        }
+    }
+
+    /// Receive the next message, or `None` if the mailbox is closed.
+    ///
+    /// Returns a `'static` future by cloning the `Rc`, avoiding self-referential
+    /// borrow issues in async state machines.
+    fn recv(
+        mailbox: &Rc<Self>,
+    ) -> impl std::future::Future<Output = Option<(ActorMessage, crate::ReplyPromise<ActorResponse, C>)>>
+    {
+        let mb = Rc::clone(mailbox);
+        std::future::poll_fn(move |cx| {
+            let mut inner = mb.inner.borrow_mut();
+            if let Some(item) = inner.queue.pop_front() {
+                return Poll::Ready(Some(item));
+            }
+            if inner.closed {
+                return Poll::Ready(None);
+            }
+            inner.waker = Some(cx.waker().clone());
+            Poll::Pending
+        })
+    }
+
+    fn close(&self) {
+        let mut inner = self.inner.borrow_mut();
+        inner.closed = true;
+        if let Some(waker) = inner.waker.take() {
+            waker.wake();
+        }
+    }
+}
 
 /// Hint from an actor type about when it should be deactivated.
 ///
@@ -222,21 +289,16 @@ impl<H: ActorHandler, P: Providers, C: MessageCodec> ActorTypeDispatcher<P, C>
     }
 }
 
-/// Processing loop for a single actor type.
+/// Routing loop for a single actor type.
 ///
-/// Receives `ActorMessage`s from the transport, looks up or creates the
-/// target actor instance, calls `dispatch()`, and sends the response.
+/// Receives `ActorMessage`s from the transport and routes them to per-identity
+/// tasks via [`IdentityMailbox`] channels. Each identity gets its own spawned
+/// task that owns the actor instance and processes messages sequentially.
 ///
 /// # Turn-Based Concurrency
 ///
-/// One message at a time per actor instance. The loop processes messages
-/// sequentially — no concurrent access to the same actor.
-///
-/// # Lifecycle
-///
-/// When an actor is first activated: `Default::default()` → `on_activate()`.
-/// After each dispatch, if `deactivation_hint()` returns `DeactivateOnIdle`,
-/// the actor is deactivated: `on_deactivate()` → removed from memory.
+/// One message at a time per actor identity (Orleans guarantee). Different
+/// identities process concurrently via separate spawned tasks.
 ///
 /// # Forwarding
 ///
@@ -251,7 +313,7 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
     state_store: Option<Rc<dyn ActorStateStore>>,
     stream: RequestStream<ActorMessage, C>,
 ) {
-    let mut actors: HashMap<String, H> = HashMap::new();
+    let mut mailboxes: HashMap<String, Rc<IdentityMailbox<C>>> = HashMap::new();
     let actor_type = H::actor_type();
     let local_address = transport.local_address().clone();
     let codec = router.codec().clone();
@@ -261,42 +323,23 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
             .recv_with_transport::<_, ActorResponse>(&transport)
             .await
         else {
-            // Stream closed — shutdown. Deactivate all remaining actors.
-            deactivate_all::<H, P, C>(&mut actors, &router, &directory, &state_store, actor_type)
-                .await;
+            // Stream closed — shutdown. Close all mailboxes so per-identity
+            // tasks deactivate their actors and exit.
+            for mailbox in mailboxes.values() {
+                mailbox.close();
+            }
             break;
         };
 
         let identity = actor_msg.target.identity.clone();
 
-        // Check if we host this actor locally
-        if actors.contains_key(&identity) {
-            // Actor exists locally — dispatch directly
-            dispatch_local::<H, P, C>(
-                &mut actors,
-                &identity,
-                &actor_msg,
-                &router,
-                &state_store,
-                actor_type,
-                reply,
-            )
-            .await;
-
-            // Check deactivation hint
-            maybe_deactivate::<H, P, C>(
-                &mut actors,
-                &identity,
-                &router,
-                &directory,
-                &state_store,
-                actor_type,
-            )
-            .await;
+        // Route to existing per-identity mailbox if present
+        if let Some(mailbox) = mailboxes.get(&identity) {
+            mailbox.send(actor_msg, reply);
             continue;
         }
 
-        // Actor not local — check directory
+        // Not local — check directory for forwarding
         let actor_id = ActorId::new(actor_type, identity.clone());
         let dir_lookup = directory.lookup(&actor_id).await;
 
@@ -314,153 +357,135 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
                 );
             }
             _ => {
-                // Actor not registered, or registered on this node — activate locally
-                let mut actor = H::default();
-                let ctx = ActorContext {
-                    id: ActorId::new(actor_type, identity.clone()),
-                    router: router.clone(),
-                    state_store: state_store.clone(),
-                };
-
-                // Call on_activate — if it fails, send error response and skip
-                if let Err(e) = actor.on_activate(&ctx).await {
-                    reply.send(ActorResponse {
-                        body: Err(format!("activation failed: {e}")),
-                        cache_invalidation: None,
-                    });
-                    continue;
-                }
-
-                actors.insert(identity.clone(), actor);
-
-                // Register in directory (best-effort, ignore race conditions)
-                let endpoint = Endpoint::new(local_address.clone(), UID::new(actor_type.0, 0));
-                let _ = directory.register(&actor_id, endpoint).await;
-
-                dispatch_local::<H, P, C>(
-                    &mut actors,
-                    &identity,
-                    &actor_msg,
-                    &router,
-                    &state_store,
-                    actor_type,
-                    reply,
-                )
-                .await;
-
-                // Check deactivation hint
-                maybe_deactivate::<H, P, C>(
-                    &mut actors,
-                    &identity,
-                    &router,
-                    &directory,
-                    &state_store,
-                    actor_type,
-                )
-                .await;
+                // Actor not registered, or registered on this node — create mailbox + task
+                let mailbox = IdentityMailbox::new();
+                transport.providers().task().spawn_task(
+                    "actor_identity_loop",
+                    identity_processing_loop::<H, P, C>(
+                        mailbox.clone(),
+                        identity.clone(),
+                        router.clone(),
+                        directory.clone(),
+                        state_store.clone(),
+                        actor_type,
+                        local_address.clone(),
+                    ),
+                );
+                mailbox.send(actor_msg, reply);
+                mailboxes.insert(identity, mailbox);
             }
         }
     }
 }
 
-/// Dispatch a method call to a locally hosted actor.
-async fn dispatch_local<H: ActorHandler, P: Providers, C: MessageCodec>(
-    actors: &mut HashMap<String, H>,
-    identity: &str,
-    actor_msg: &ActorMessage,
-    router: &Rc<ActorRouter<P, C>>,
-    state_store: &Option<Rc<dyn ActorStateStore>>,
+/// Per-identity processing loop for a single actor instance.
+///
+/// Receives messages from the identity's mailbox, activates the actor on first
+/// message (or after deactivation), dispatches method calls, and handles
+/// deactivation. Runs as a spawned task, maintaining turn-based concurrency
+/// for this identity while allowing other identities to process concurrently.
+async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
+    mailbox: Rc<IdentityMailbox<C>>,
+    identity: String,
+    router: Rc<ActorRouter<P, C>>,
+    directory: Rc<dyn ActorDirectory>,
+    state_store: Option<Rc<dyn ActorStateStore>>,
     actor_type: ActorType,
-    reply: crate::ReplyPromise<ActorResponse, C>,
+    local_address: crate::NetworkAddress,
 ) {
-    let Some(actor) = actors.get_mut(identity) else {
-        reply.send(ActorResponse {
-            body: Err("actor not found after activation".to_string()),
-            cache_invalidation: None,
-        });
-        return;
-    };
+    let mut actor: Option<H> = None;
 
-    let ctx = ActorContext {
-        id: ActorId::new(actor_type, identity.to_string()),
-        router: router.clone(),
-        state_store: state_store.clone(),
-    };
-
-    let result = actor
-        .dispatch(&ctx, actor_msg.method, &actor_msg.body)
-        .await;
-
-    let response = match result {
-        Ok(body) => ActorResponse {
-            body: Ok(body),
-            cache_invalidation: None,
-        },
-        Err(e) => ActorResponse {
-            body: Err(e.to_string()),
-            cache_invalidation: None,
-        },
-    };
-
-    reply.send(response);
-}
-
-/// Check the deactivation hint and deactivate the actor if needed.
-async fn maybe_deactivate<H: ActorHandler, P: Providers, C: MessageCodec>(
-    actors: &mut HashMap<String, H>,
-    identity: &str,
-    router: &Rc<ActorRouter<P, C>>,
-    directory: &Rc<dyn ActorDirectory>,
-    state_store: &Option<Rc<dyn ActorStateStore>>,
-    actor_type: ActorType,
-) {
-    let should_deactivate = actors
-        .get(identity)
-        .is_some_and(|a| a.deactivation_hint() == DeactivationHint::DeactivateOnIdle);
-
-    if !should_deactivate {
-        return;
-    }
-
-    let actor_id = ActorId::new(actor_type, identity.to_string());
-
-    // Call on_deactivate (best-effort)
-    if let Some(actor) = actors.get_mut(identity) {
-        let ctx = ActorContext {
-            id: actor_id.clone(),
-            router: router.clone(),
-            state_store: state_store.clone(),
+    loop {
+        let Some((actor_msg, reply)) = IdentityMailbox::recv(&mailbox).await else {
+            // Mailbox closed — shutdown
+            break;
         };
-        let _ = actor.on_deactivate(&ctx).await;
-    }
 
-    // Remove from memory
-    actors.remove(identity);
-
-    // Unregister from directory (best-effort)
-    let _ = directory.unregister(&actor_id).await;
-}
-
-/// Deactivate all actors during shutdown.
-async fn deactivate_all<H: ActorHandler, P: Providers, C: MessageCodec>(
-    actors: &mut HashMap<String, H>,
-    router: &Rc<ActorRouter<P, C>>,
-    directory: &Rc<dyn ActorDirectory>,
-    state_store: &Option<Rc<dyn ActorStateStore>>,
-    actor_type: ActorType,
-) {
-    let identities: Vec<String> = actors.keys().cloned().collect();
-    for identity in identities {
-        let actor_id = ActorId::new(actor_type, identity.clone());
-        if let Some(actor) = actors.get_mut(&identity) {
+        // Activate if needed
+        if actor.is_none() {
+            let mut new_actor = H::default();
+            let actor_id = ActorId::new(actor_type, identity.clone());
             let ctx = ActorContext {
                 id: actor_id.clone(),
                 router: router.clone(),
                 state_store: state_store.clone(),
             };
-            let _ = actor.on_deactivate(&ctx).await;
+
+            if let Err(e) = new_actor.on_activate(&ctx).await {
+                reply.send(ActorResponse {
+                    body: Err(format!("activation failed: {e}")),
+                    cache_invalidation: None,
+                });
+                continue;
+            }
+
+            // Register in directory (best-effort)
+            let endpoint = Endpoint::new(local_address.clone(), UID::new(actor_type.0, 0));
+            let _ = directory.register(&actor_id, endpoint).await;
+
+            actor = Some(new_actor);
         }
-        actors.remove(&identity);
+
+        // Dispatch
+        let Some(actor_ref) = actor.as_mut() else {
+            reply.send(ActorResponse {
+                body: Err("internal: actor not activated".to_string()),
+                cache_invalidation: None,
+            });
+            continue;
+        };
+
+        let ctx = ActorContext {
+            id: ActorId::new(actor_type, identity.clone()),
+            router: router.clone(),
+            state_store: state_store.clone(),
+        };
+
+        let result = actor_ref
+            .dispatch(&ctx, actor_msg.method, &actor_msg.body)
+            .await;
+
+        let response = match result {
+            Ok(body) => ActorResponse {
+                body: Ok(body),
+                cache_invalidation: None,
+            },
+            Err(e) => ActorResponse {
+                body: Err(e.to_string()),
+                cache_invalidation: None,
+            },
+        };
+
+        reply.send(response);
+
+        // Check deactivation hint
+        if actor
+            .as_ref()
+            .is_some_and(|a| a.deactivation_hint() == DeactivationHint::DeactivateOnIdle)
+        {
+            let actor_id = ActorId::new(actor_type, identity.clone());
+            if let Some(a) = actor.as_mut() {
+                let ctx = ActorContext {
+                    id: actor_id.clone(),
+                    router: router.clone(),
+                    state_store: state_store.clone(),
+                };
+                let _ = a.on_deactivate(&ctx).await;
+            }
+            actor = None;
+            let _ = directory.unregister(&actor_id).await;
+        }
+    }
+
+    // Shutdown: deactivate if still active
+    if let Some(ref mut a) = actor {
+        let actor_id = ActorId::new(actor_type, identity.clone());
+        let ctx = ActorContext {
+            id: actor_id.clone(),
+            router: router.clone(),
+            state_store: state_store.clone(),
+        };
+        let _ = a.on_deactivate(&ctx).await;
         let _ = directory.unregister(&actor_id).await;
     }
 }
