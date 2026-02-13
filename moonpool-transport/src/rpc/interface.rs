@@ -41,12 +41,14 @@ use crate::{Endpoint, UID};
 ///
 /// Uses FDB's adjustment pattern via `Endpoint::adjusted()`.
 ///
+/// Note: Method indices start at 1 (index 0 is reserved for virtual actor dispatch).
+///
 /// # Example
 ///
 /// ```rust,ignore
 /// let base = Endpoint::new(addr, UID::new(0xCA1C, 0));
-/// let add_endpoint = method_endpoint(&base, 0);
-/// let sub_endpoint = method_endpoint(&base, 1);
+/// let add_endpoint = method_endpoint(&base, 1);  // first method
+/// let sub_endpoint = method_endpoint(&base, 2);  // second method
 /// ```
 pub fn method_endpoint(base: &Endpoint, method_index: u32) -> Endpoint {
     base.adjusted(method_index)
@@ -54,11 +56,13 @@ pub fn method_endpoint(base: &Endpoint, method_index: u32) -> Endpoint {
 
 /// Generate UID for a specific interface method.
 ///
+/// Note: Method indices start at 1 (index 0 is reserved for virtual actor dispatch).
+///
 /// # Example
 ///
 /// ```rust,ignore
-/// let add_uid = method_uid(0xCA1C_0000, 0);
-/// let sub_uid = method_uid(0xCA1C_0000, 1);
+/// let add_uid = method_uid(0xCA1C_0000, 1);  // first method
+/// let sub_uid = method_uid(0xCA1C_0000, 2);  // second method
 /// ```
 pub const fn method_uid(interface_id: u64, method_index: u32) -> UID {
     UID::new(interface_id, method_index as u64)

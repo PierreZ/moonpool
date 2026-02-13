@@ -41,7 +41,8 @@ use syn::{
 /// Each method must be async with signature:
 /// `async fn name(&self, req: ReqType) -> Result<RespType, RpcError>`
 ///
-/// Method indices are derived from method declaration order.
+/// Method indices are derived from method declaration order, starting at 1.
+/// Index 0 is reserved for virtual actor dispatch.
 #[proc_macro_attribute]
 pub fn interface(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr = parse_macro_input!(attr as InterfaceAttr);
@@ -77,8 +78,9 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
             // Extract request and response types from method signature
             let (req_type, resp_type) = extract_method_types(&method.sig)?;
 
+            // Method indices start at 1; index 0 is reserved for virtual actor dispatch.
             method_infos.push(MethodInfo {
-                index: index as u32,
+                index: (index + 1) as u32,
                 name: method_name.clone(),
                 req_type,
                 resp_type,
