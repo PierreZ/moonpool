@@ -37,7 +37,7 @@ moonpool_explorer::set_rng_hooks(
 
 ---
 
-## PR 1: RNG Call Counting + Breakpoints
+## PR 1: RNG Call Counting + Breakpoints ✅ DONE
 
 **Goal**: Make the RNG replay-capable. Foundation for fork recording and deterministic replay.
 

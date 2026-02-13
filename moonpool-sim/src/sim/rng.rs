@@ -11,7 +11,8 @@ use rand::{
     distr::{Distribution, StandardUniform, uniform::SampleUniform},
 };
 use rand_chacha::ChaCha8Rng;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 
 thread_local! {
     /// Thread-local random number generator for simulation.
@@ -25,6 +26,53 @@ thread_local! {
     /// This stores the last seed set via [`set_sim_seed`] to enable
     /// error reporting with seed information.
     static CURRENT_SEED: RefCell<u64> = const { RefCell::new(0) };
+
+    /// Thread-local counter tracking RNG calls since last reset.
+    ///
+    /// Used by the exploration framework to record fork points and
+    /// enable deterministic replay via breakpoints.
+    static RNG_CALL_COUNT: Cell<u64> = const { Cell::new(0) };
+
+    /// Thread-local queue of RNG breakpoints, sorted by target call count.
+    ///
+    /// Each entry is `(target_count, new_seed)`. When the call count exceeds
+    /// `target_count`, the RNG reseeds with `new_seed` and the count resets to 1.
+    static RNG_BREAKPOINTS: RefCell<VecDeque<(u64, u64)>> = const { RefCell::new(VecDeque::new()) };
+}
+
+/// Increment the RNG call counter and check for breakpoints.
+///
+/// Called before every RNG sample. If the current call count exceeds
+/// a breakpoint's target, reseeds the RNG and resets the counter.
+fn pre_sample() {
+    RNG_CALL_COUNT.with(|c| c.set(c.get() + 1));
+    check_rng_breakpoint();
+}
+
+/// Check and trigger any pending RNG breakpoints.
+///
+/// Pops breakpoints whose target count has been exceeded (using `>`),
+/// reseeding the RNG for each. The count resets to 1 because the
+/// current call is the first call of the new seed segment.
+fn check_rng_breakpoint() {
+    RNG_BREAKPOINTS.with(|bp| {
+        let mut breakpoints = bp.borrow_mut();
+        while let Some(&(target_count, new_seed)) = breakpoints.front() {
+            let count = RNG_CALL_COUNT.with(|c| c.get());
+            if count > target_count {
+                breakpoints.pop_front();
+                SIM_RNG.with(|rng| {
+                    *rng.borrow_mut() = ChaCha8Rng::seed_from_u64(new_seed);
+                });
+                CURRENT_SEED.with(|s| {
+                    *s.borrow_mut() = new_seed;
+                });
+                RNG_CALL_COUNT.with(|c| c.set(1));
+            } else {
+                break;
+            }
+        }
+    });
 }
 
 /// Generate a random value using the thread-local simulation RNG.
@@ -42,6 +90,7 @@ pub fn sim_random<T>() -> T
 where
     StandardUniform: Distribution<T>,
 {
+    pre_sample();
     SIM_RNG.with(|rng| rng.borrow_mut().sample(StandardUniform))
 }
 
@@ -63,6 +112,7 @@ pub fn sim_random_range<T>(range: std::ops::Range<T>) -> T
 where
     T: SampleUniform + PartialOrd,
 {
+    pre_sample();
     SIM_RNG.with(|rng| rng.borrow_mut().random_range(range))
 }
 
@@ -119,7 +169,8 @@ pub fn set_sim_seed(seed: u64) {
 ///
 /// A random f64 value in [0.0, 1.0).
 pub fn sim_random_f64() -> f64 {
-    sim_random::<f64>()
+    pre_sample();
+    SIM_RNG.with(|rng| rng.borrow_mut().sample(StandardUniform))
 }
 
 /// Get the current simulation seed.
@@ -150,6 +201,45 @@ pub fn reset_sim_rng() {
     CURRENT_SEED.with(|current| {
         *current.borrow_mut() = 0;
     });
+    RNG_CALL_COUNT.with(|c| c.set(0));
+    RNG_BREAKPOINTS.with(|bp| bp.borrow_mut().clear());
+}
+
+/// Get the current RNG call count.
+///
+/// Returns the number of RNG calls made since the last seed set or reset.
+/// Used by the exploration framework to record fork points.
+pub fn get_rng_call_count() -> u64 {
+    RNG_CALL_COUNT.with(|c| c.get())
+}
+
+/// Reset the RNG call count to zero.
+///
+/// Used when reseeding to start a new counting segment.
+pub fn reset_rng_call_count() {
+    RNG_CALL_COUNT.with(|c| c.set(0));
+}
+
+/// Set RNG breakpoints for deterministic replay.
+///
+/// Each breakpoint is a `(target_count, new_seed)` pair. When the RNG call
+/// count exceeds `target_count`, the RNG is reseeded with `new_seed` and
+/// the count resets to 1.
+///
+/// Breakpoints must be sorted by `target_count` in ascending order.
+///
+/// # Parameters
+///
+/// * `breakpoints` - Sorted list of (target_count, new_seed) pairs.
+pub fn set_rng_breakpoints(breakpoints: Vec<(u64, u64)>) {
+    RNG_BREAKPOINTS.with(|bp| {
+        *bp.borrow_mut() = VecDeque::from(breakpoints);
+    });
+}
+
+/// Clear all RNG breakpoints.
+pub fn clear_rng_breakpoints() {
+    RNG_BREAKPOINTS.with(|bp| bp.borrow_mut().clear());
 }
 
 #[cfg(test)]
@@ -275,5 +365,142 @@ mod tests {
         // Test that reset clears the seed
         reset_sim_rng();
         assert_eq!(get_current_sim_seed(), 0);
+    }
+
+    #[test]
+    fn test_call_counting() {
+        reset_sim_rng();
+        set_sim_seed(42);
+        assert_eq!(get_rng_call_count(), 0);
+
+        let _: f64 = sim_random();
+        assert_eq!(get_rng_call_count(), 1);
+
+        let _: u32 = sim_random();
+        assert_eq!(get_rng_call_count(), 2);
+
+        let _ = sim_random_range(0..100);
+        assert_eq!(get_rng_call_count(), 3);
+
+        let _ = sim_random_f64();
+        assert_eq!(get_rng_call_count(), 4);
+
+        // sim_random_range_or_default with valid range delegates to sim_random_range
+        let _ = sim_random_range_or_default(0..100);
+        assert_eq!(get_rng_call_count(), 5);
+
+        // sim_random_range_or_default with empty range does NOT consume RNG
+        let _ = sim_random_range_or_default(100..100);
+        assert_eq!(get_rng_call_count(), 5);
+    }
+
+    #[test]
+    fn test_breakpoint_reseed() {
+        reset_sim_rng();
+        set_sim_seed(100);
+
+        // Record first 5 values with seed 100
+        let mut old_values = Vec::new();
+        for _ in 0..5 {
+            old_values.push(sim_random::<f64>());
+        }
+
+        // Record first value with seed 200 from scratch
+        reset_sim_rng();
+        set_sim_seed(200);
+        let new_seed_first: f64 = sim_random();
+
+        // Replay: seed 100, breakpoint at count=5 to reseed to 200
+        reset_sim_rng();
+        set_sim_seed(100);
+        set_rng_breakpoints(vec![(5, 200)]);
+
+        // First 5 calls should match old seed
+        for (i, expected) in old_values.iter().enumerate() {
+            let actual: f64 = sim_random();
+            assert_eq!(*expected, actual, "Mismatch at call {}", i + 1);
+        }
+
+        // Call 6 triggers breakpoint (count 6 > 5), reseeds to 200
+        let after_breakpoint: f64 = sim_random();
+        assert_eq!(after_breakpoint, new_seed_first);
+        assert_eq!(get_rng_call_count(), 1);
+        assert_eq!(get_current_sim_seed(), 200);
+    }
+
+    #[test]
+    fn test_chained_breakpoints() {
+        reset_sim_rng();
+        set_sim_seed(10);
+        set_rng_breakpoints(vec![(3, 20), (2, 30)]);
+
+        // 3 calls with seed 10
+        let _: f64 = sim_random(); // count=1
+        let _: f64 = sim_random(); // count=2
+        let _: f64 = sim_random(); // count=3
+        assert_eq!(get_current_sim_seed(), 10);
+
+        // Call 4: count becomes 4 > 3, breakpoint fires: reseed to 20, count=1
+        let _: f64 = sim_random();
+        assert_eq!(get_current_sim_seed(), 20);
+        assert_eq!(get_rng_call_count(), 1);
+
+        // 1 more call with seed 20
+        let _: f64 = sim_random(); // count=2
+
+        // Call 3 of seed 20: count becomes 3 > 2, breakpoint fires: reseed to 30, count=1
+        let _: f64 = sim_random();
+        assert_eq!(get_current_sim_seed(), 30);
+        assert_eq!(get_rng_call_count(), 1);
+    }
+
+    #[test]
+    fn test_replay_determinism() {
+        // Run 1: record a "recipe" — seed 42, fork at call 3 to seed 99
+        reset_sim_rng();
+        set_sim_seed(42);
+        let _: f64 = sim_random();
+        let _: f64 = sim_random();
+        let _: f64 = sim_random();
+        let fork_count = get_rng_call_count();
+        set_sim_seed(99);
+        reset_rng_call_count();
+        let post_fork_1: f64 = sim_random();
+        let post_fork_2: f64 = sim_random();
+
+        // Run 2: replay using breakpoints
+        reset_sim_rng();
+        set_sim_seed(42);
+        set_rng_breakpoints(vec![(fork_count, 99)]);
+        let _: f64 = sim_random();
+        let _: f64 = sim_random();
+        let _: f64 = sim_random();
+        // Breakpoint triggers on next call (count 4 > 3)
+        let replay_1: f64 = sim_random();
+        let replay_2: f64 = sim_random();
+
+        assert_eq!(post_fork_1, replay_1);
+        assert_eq!(post_fork_2, replay_2);
+    }
+
+    #[test]
+    fn test_reset_clears_everything_including_breakpoints() {
+        set_sim_seed(42);
+        let _: f64 = sim_random();
+        let _: f64 = sim_random();
+        set_rng_breakpoints(vec![(10, 99)]);
+
+        assert_eq!(get_rng_call_count(), 2);
+
+        reset_sim_rng();
+
+        assert_eq!(get_rng_call_count(), 0);
+        assert_eq!(get_current_sim_seed(), 0);
+
+        // Verify breakpoints were cleared
+        set_sim_seed(42);
+        let _: f64 = sim_random();
+        assert_eq!(get_rng_call_count(), 1);
+        assert_eq!(get_current_sim_seed(), 42); // no breakpoint triggered
     }
 }

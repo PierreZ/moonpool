@@ -107,7 +107,8 @@ pub mod storage;
 // Sim module re-exports
 pub use sim::{
     ConnectionStateChange, Event, EventQueue, NetworkOperation, ScheduledEvent, SimWorld,
-    SleepFuture, StorageOperation, WeakSimWorld, get_current_sim_seed, reset_sim_rng, set_sim_seed,
+    SleepFuture, StorageOperation, WeakSimWorld, clear_rng_breakpoints, get_current_sim_seed,
+    get_rng_call_count, reset_rng_call_count, reset_sim_rng, set_rng_breakpoints, set_sim_seed,
     sim_random, sim_random_range, sim_random_range_or_default,
 };
 
