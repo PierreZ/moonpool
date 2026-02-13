@@ -12,7 +12,6 @@ use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use crate::{Endpoint, MessageCodec};
-use moonpool_sim::assert_sometimes;
 use serde::de::DeserializeOwned;
 
 use super::net_notified_queue::NetNotifiedQueue;
@@ -49,13 +48,13 @@ impl<T: DeserializeOwned, C: MessageCodec> Future for ReplyFuture<T, C> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // Try to receive from the queue (non-blocking)
         if let Some(result) = self.queue.try_recv() {
-            assert_sometimes!(true, "Reply received from server");
+            moonpool_sim::assert_sometimes_each!("rpc_resolution", [("type", 0i64)]); // immediate_success
             return Poll::Ready(result);
         }
 
         // Check if queue is closed (connection failed)
         if self.queue.is_closed() {
-            assert_sometimes!(true, "Reply queue closed before response");
+            moonpool_sim::assert_sometimes_each!("rpc_resolution", [("type", 1i64)]); // immediate_closed
             return Poll::Ready(Err(ReplyError::ConnectionFailed));
         }
 
@@ -64,11 +63,11 @@ impl<T: DeserializeOwned, C: MessageCodec> Future for ReplyFuture<T, C> {
         let mut recv_future = Box::pin(self.queue.recv());
         match recv_future.as_mut().poll(cx) {
             Poll::Ready(Some(result)) => {
-                assert_sometimes!(true, "Reply received from server");
+                moonpool_sim::assert_sometimes_each!("rpc_resolution", [("type", 2i64)]); // polled_success
                 Poll::Ready(result)
             }
             Poll::Ready(None) => {
-                assert_sometimes!(true, "Reply queue closed before response");
+                moonpool_sim::assert_sometimes_each!("rpc_resolution", [("type", 3i64)]); // polled_closed
                 Poll::Ready(Err(ReplyError::ConnectionFailed))
             }
             Poll::Pending => Poll::Pending,

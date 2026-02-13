@@ -37,7 +37,7 @@ If your error handling code exists but `sometimes_assert!` never fires, you have
 
 ## Multi-Seed Testing
 
-Different seeds explore different execution orderings. `UntilAllSometimesReached(N)` runs simulations with different seeds until all `sometimes_assert!` statements have triggered at least once, up to N iterations.
+Different seeds explore different execution orderings. Use `set_iterations(N)` to run N seeds, each exploring different paths through chaos. For deeper exploration, `enable_exploration(budget)` uses fork-based multiverse exploration to branch into alternate timelines at discovery points.
 
 This transforms testing from "check known behaviors" to "explore the unknown until confident."
 

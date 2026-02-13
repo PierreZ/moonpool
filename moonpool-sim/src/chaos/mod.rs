@@ -79,8 +79,8 @@
 //! }
 //! ```
 //!
-//! Multi-seed testing with `UntilAllSometimesReached(1000)` ensures all
-//! `assert_sometimes!` statements fire across the seed space.
+//! Multi-seed testing with `set_iterations(N)` and `enable_exploration(budget)`
+//! ensures `assert_sometimes!` statements fire across the seed space.
 //!
 //! # Strategic Placement
 //!

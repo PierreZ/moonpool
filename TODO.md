@@ -522,7 +522,7 @@ Commit: `feat(moonpool-sim): new DX — SimContext, Workload trait, assert_somet
 
 ## Phase 3: New FDB-style workloads
 
-**Status**: NOT STARTED
+**Status**: COMPLETE
 
 **Goal**: Replace deleted tests with FDB-style alphabet workloads using the new API. Add exploration fork points throughout the transport source code. Patterns from the blog post: operation alphabets (Normal/Adversarial/Nemesis), reference model invariants (BTreeMap), conservation laws.
 

@@ -3,7 +3,11 @@
 //! Provides shared utilities for testing EndpointMap, NetTransport,
 //! and NetNotifiedQueue under chaos conditions.
 
+pub mod alphabet;
 pub mod operations;
+pub mod reference_model;
+pub mod test_scenarios;
+pub mod workloads;
 
 use serde::{Deserialize, Serialize};
 

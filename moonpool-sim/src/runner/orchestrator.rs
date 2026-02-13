@@ -94,16 +94,8 @@ impl WorkloadOrchestrator {
                 .map(|(_, ip)| ip.clone())
                 .collect();
 
-            let ctx = SimContext::new(
-                sim.network_provider(),
-                sim.time_provider(),
-                crate::SimRandomProvider::new(seed),
-                sim.storage_provider(),
-                my_ip,
-                peers,
-                shutdown.clone(),
-                state.clone(),
-            );
+            let providers = crate::SimProviders::new(sim.downgrade(), seed);
+            let ctx = SimContext::new(providers, my_ip, peers, shutdown.clone(), state.clone());
             contexts.push(ctx);
         }
 
@@ -136,11 +128,10 @@ impl WorkloadOrchestrator {
         // Spawn fault injectors
         let mut fault_handles = Vec::new();
         if !fault_injectors.is_empty() {
+            let fault_providers =
+                crate::SimProviders::new(sim.downgrade(), seed.wrapping_add(1000));
             let fault_ctx = SimContext::new(
-                sim.network_provider(),
-                sim.time_provider(),
-                crate::SimRandomProvider::new(seed.wrapping_add(1000)),
-                sim.storage_provider(),
+                fault_providers,
                 workload_ips[0].clone(),
                 workload_ips[1..].to_vec(),
                 shutdown.clone(),
@@ -366,10 +357,6 @@ impl IterationManager {
             super::builder::IterationControl::TimeLimit(duration) => {
                 self.start_time.elapsed() < *duration
             }
-            super::builder::IterationControl::UntilAllSometimesReached(safety_limit) => {
-                self.iteration_count < *safety_limit
-                    && !(self.iteration_count > 0 && Self::all_sometimes_assertions_reached())
-            }
         }
     }
 
@@ -398,7 +385,6 @@ impl IterationManager {
             match &self.control {
                 super::builder::IterationControl::FixedCount(count) => *count,
                 super::builder::IterationControl::TimeLimit(_) => 0,
-                super::builder::IterationControl::UntilAllSometimesReached(limit) => *limit,
             }
         );
 
@@ -413,30 +399,6 @@ impl IterationManager {
     /// Get all seeds used so far.
     pub(crate) fn seeds_used(&self) -> &[u64] {
         &self.seeds[..self.iteration_count]
-    }
-
-    /// Check if all sometimes assertions have been reached with at least one success.
-    fn all_sometimes_assertions_reached() -> bool {
-        let results = crate::chaos::get_assertion_results();
-
-        if results.is_empty() {
-            tracing::debug!("No assertions found yet");
-            return false;
-        }
-
-        for (name, stats) in &results {
-            if stats.total_checks > 0 && stats.successes == 0 {
-                tracing::debug!(
-                    "Assertion '{}' executed {} times but never succeeded",
-                    name,
-                    stats.total_checks
-                );
-                return false;
-            }
-        }
-
-        tracing::debug!("All assertions have at least one success!");
-        true
     }
 }
 

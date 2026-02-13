@@ -11,8 +11,8 @@
 **Test timeouts**: Configured in `.config/nextest.toml` (1s default, 4m for tests with "slow_simulation" in name)
 
 **Debug testing**:
-- Default: `UntilAllSometimesReached(1000)` for comprehensive chaos testing
-- Debug faulty seeds: `FixedCount(1)` with specific seed and ERROR log level
+- Default: `set_iterations(N)` with `enable_exploration(budget)` for comprehensive chaos testing
+- Debug faulty seeds: `set_iterations(1)` with specific seed and ERROR log level
 
 ## Commit Messages
 Follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/):
@@ -45,8 +45,8 @@ moonpool-transport/ - Peer connections, wire format, FlowTransport, RPC
 **Goal**: 100% sometimes assertion coverage via chaos testing + comprehensive invariant validation
 **Target**: 100% success rate - no deadlocks/hangs acceptable
 
-**Multi-seed testing**: Default `UntilAllSometimesReached(1000)` runs until all sometimes_assert! statements have triggered
-**Failing seeds**: Debug with `SimulationBuilder::set_seed(failing_seed)` → fix root cause → verify → re-enable chaos
+**Multi-seed testing**: Use `set_iterations(N)` with `enable_exploration(budget)` for comprehensive coverage via fork-based exploration
+**Failing seeds**: Debug with `SimulationBuilder::set_debug_seeds(vec![failing_seed])` → fix root cause → verify → re-enable chaos
 **Infrastructure events**: Tests terminate early when only ConnectionRestore events remain
 **Invariant checking**: Cross-workload properties validated after every simulation event
 **Goal**: Find bugs, not regression testing

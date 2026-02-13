@@ -567,6 +567,16 @@ async fn connection_task<P: Providers>(
                 }
 
                 // Process send queues - drain reliable first, then unreliable (FDB pattern)
+                {
+                    let state = shared_state.borrow();
+                    moonpool_sim::assert_sometimes_each!(
+                        "queue_drain",
+                        [
+                            ("reliable_len", state.reliable_queue.len()),
+                            ("unreliable_len", state.unreliable_queue.len())
+                        ]
+                    );
+                }
                 tracing::debug!("connection_task: processing send queues");
                 while let Some(ref mut stream) = current_connection {
                     // Get next message - reliable queue has priority
@@ -595,6 +605,7 @@ async fn connection_task<P: Providers>(
 
                     // Buggify: Sometimes force write failures to test requeuing
                     if moonpool_sim::buggify_with_prob!(0.02) {
+                        assert_sometimes!(true, "buggified_write_failure");
                         tracing::debug!("Buggify forcing write failure for requeue testing");
                         handle_connection_failure(
                             &shared_state,
@@ -642,7 +653,8 @@ async fn connection_task<P: Providers>(
             } => {
                 match read_result {
                     Ok((_buffer, 0)) => {
-                        // Connection closed
+                        // Connection closed gracefully (EOF)
+                        assert_sometimes!(true, "graceful_close_on_read");
                         handle_connection_failure(
                             &shared_state,
                             &mut current_connection,
@@ -869,6 +881,9 @@ async fn establish_connection<P: Providers>(
         };
 
         // Apply backoff if needed (no RefCell borrow held)
+        if should_backoff {
+            assert_sometimes!(delay > Duration::ZERO, "backoff_applied");
+        }
         if should_backoff && time.sleep(delay).await.is_err() {
             return Err(PeerError::ConnectionFailed);
         }
@@ -910,6 +925,10 @@ async fn establish_connection<P: Providers>(
                 {
                     let mut state = shared_state.borrow_mut();
                     state.reconnect_state.failure_count += 1;
+                    moonpool_sim::assert_sometimes_each!(
+                        "connection_failure",
+                        [("failure_count", state.reconnect_state.failure_count)]
+                    );
                     let next_delay = std::cmp::min(
                         state.reconnect_state.current_delay * 2,
                         config.max_reconnect_delay,

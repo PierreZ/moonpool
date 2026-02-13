@@ -21,8 +21,6 @@ pub enum IterationControl {
     FixedCount(usize),
     /// Run for a specific duration of wall-clock time
     TimeLimit(Duration),
-    /// Run until all sometimes_assert! assertions have been reached (with a safety limit)
-    UntilAllSometimesReached(usize),
 }
 
 /// Builder pattern for configuring and running simulation experiments.
@@ -131,12 +129,6 @@ impl SimulationBuilder {
     /// Run for a specific wall-clock time duration.
     pub fn set_time_limit(mut self, duration: Duration) -> Self {
         self.iteration_control = IterationControl::TimeLimit(duration);
-        self
-    }
-
-    /// Run until all sometimes assertions have been reached.
-    pub fn until_all_sometimes_reached(mut self, safety_limit: usize) -> Self {
-        self.iteration_control = IterationControl::UntilAllSometimesReached(safety_limit);
         self
     }
 

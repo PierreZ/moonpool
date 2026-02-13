@@ -144,6 +144,7 @@ impl<T: Serialize, C: MessageCodec> ReplyPromise<T, C> {
             && let Some(sender) = inner.sender.take()
         {
             sender(&inner.reply_endpoint, &payload);
+            moonpool_sim::assert_sometimes!(true, "error_reply_sent");
         }
 
         inner.fulfilled = true;

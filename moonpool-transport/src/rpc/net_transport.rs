@@ -366,12 +366,12 @@ impl<P: Providers> NetTransport<P> {
     ) -> Result<(), MessagingError> {
         // Check for local delivery
         if self.is_local_address(&endpoint.address) {
-            assert_sometimes!(true, "Unreliable send uses local delivery path");
+            moonpool_sim::assert_sometimes_each!("send_path", [("path", 1i64)]); // local_unreliable
             return self.deliver_local(&endpoint.token, payload);
         }
 
         // Get or create peer for remote address
-        assert_sometimes!(true, "Unreliable send uses remote peer path");
+        moonpool_sim::assert_sometimes_each!("send_path", [("path", 3i64)]); // remote_unreliable
         let peer = self.get_or_open_peer(&endpoint.address);
         peer.borrow_mut()
             .send_unreliable(endpoint.token, payload)
@@ -395,10 +395,12 @@ impl<P: Providers> NetTransport<P> {
     pub fn send_reliable(&self, endpoint: &Endpoint, payload: &[u8]) -> Result<(), MessagingError> {
         // Check for local delivery
         if self.is_local_address(&endpoint.address) {
+            moonpool_sim::assert_sometimes_each!("send_path", [("path", 0i64)]); // local_reliable
             return self.deliver_local(&endpoint.token, payload);
         }
 
         // Get or create peer for remote address
+        moonpool_sim::assert_sometimes_each!("send_path", [("path", 2i64)]); // remote_reliable
         let peer = self.get_or_open_peer(&endpoint.address);
         peer.borrow_mut()
             .send_reliable(endpoint.token, payload)
@@ -938,6 +940,7 @@ fn connection_incoming<P: Providers>(
     let peer = {
         let data = transport.data.borrow();
         if data.incoming_peers.contains_key(&peer_addr) {
+            moonpool_sim::assert_sometimes!(true, "incoming_peer_replaced");
             tracing::debug!(
                 "connection_incoming: replacing stale incoming peer for {}",
                 peer_addr

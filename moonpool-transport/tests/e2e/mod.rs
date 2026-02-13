@@ -3,7 +3,9 @@
 //! Provides shared infrastructure for client/server workloads,
 //! message tracking, and invariant validation.
 
+pub mod invariants;
 pub mod operations;
+pub mod workloads;
 
 use moonpool_transport::UID;
 

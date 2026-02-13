@@ -54,7 +54,8 @@
 //!
 //! ```ignore
 //! SimulationBuilder::new()
-//!     .run_count(IterationControl::UntilAllSometimesReached(1000))
+//!     .set_iterations(100)
+//!     .random_network()
 //!     .run(workload);
 //! ```
 //!
@@ -62,8 +63,8 @@
 //!
 //! ```ignore
 //! SimulationBuilder::new()
-//!     .set_seed(failing_seed)
-//!     .run_count(IterationControl::FixedCount(1))
+//!     .set_debug_seeds(vec![failing_seed])
+//!     .set_iterations(1)
 //!     .run(workload);
 //! ```
 

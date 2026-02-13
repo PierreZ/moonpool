@@ -6,9 +6,11 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use moonpool_core::Providers;
+
 use crate::chaos::state_handle::StateHandle;
 use crate::network::SimNetworkProvider;
-use crate::providers::{SimRandomProvider, SimTimeProvider};
+use crate::providers::{SimProviders, SimRandomProvider, SimTimeProvider};
 use crate::storage::SimStorageProvider;
 
 /// Simple cancellation token using `Rc<Cell<bool>>`.
@@ -50,10 +52,7 @@ impl Default for CancellationToken {
 /// Bundles all providers, topology information, shared state, and shutdown
 /// signaling into a single handle.
 pub struct SimContext {
-    network: SimNetworkProvider,
-    time: SimTimeProvider,
-    random: SimRandomProvider,
-    storage: SimStorageProvider,
+    providers: SimProviders,
     my_ip: String,
     peers: Vec<String>,
     shutdown: CancellationToken,
@@ -62,22 +61,15 @@ pub struct SimContext {
 
 impl SimContext {
     /// Create a new simulation context.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        network: SimNetworkProvider,
-        time: SimTimeProvider,
-        random: SimRandomProvider,
-        storage: SimStorageProvider,
+        providers: SimProviders,
         my_ip: String,
         peers: Vec<String>,
         shutdown: CancellationToken,
         state: StateHandle,
     ) -> Self {
         Self {
-            network,
-            time,
-            random,
-            storage,
+            providers,
             my_ip,
             peers,
             shutdown,
@@ -85,24 +77,32 @@ impl SimContext {
         }
     }
 
+    /// Get the bundled simulation providers.
+    ///
+    /// Use this to pass providers to components that need a `P: Providers`
+    /// (e.g., `NetTransportBuilder::new(ctx.providers().clone())`).
+    pub fn providers(&self) -> &SimProviders {
+        &self.providers
+    }
+
     /// Get the network provider.
     pub fn network(&self) -> &SimNetworkProvider {
-        &self.network
+        self.providers.network()
     }
 
     /// Get the time provider.
     pub fn time(&self) -> &SimTimeProvider {
-        &self.time
+        self.providers.time()
     }
 
     /// Get the random provider.
     pub fn random(&self) -> &SimRandomProvider {
-        &self.random
+        self.providers.random()
     }
 
     /// Get the storage provider.
     pub fn storage(&self) -> &SimStorageProvider {
-        &self.storage
+        self.providers.storage()
     }
 
     /// Get this workload's address string (used for bind/connect).
