@@ -101,7 +101,7 @@ impl WorkloadOrchestrator {
         let mut results = Vec::new();
         let mut loop_count = 0;
         let mut deadlock_detector = DeadlockDetector::new(3);
-        let mut first_success_triggered = false;
+        let mut shutdown_triggered = false;
         while !handles.is_empty() {
             loop_count += 1;
             if loop_count % 100 == 0 {
@@ -148,10 +148,12 @@ impl WorkloadOrchestrator {
                         }
                     };
 
-                    // If this is the first successful workload, trigger shutdown signal
-                    if !first_success_triggered && result.is_ok() {
+                    // Trigger shutdown on any completion (success or failure) so
+                    // server workloads don't spin forever when a client fails
+                    // under chaos injection.
+                    if !shutdown_triggered {
                         Self::trigger_shutdown(&mut sim, &shutdown_signal);
-                        first_success_triggered = true;
+                        shutdown_triggered = true;
                     }
 
                     results.push(result);

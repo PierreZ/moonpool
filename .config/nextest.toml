@@ -18,6 +18,11 @@ slow-timeout = { period = "10m", terminate-after = 5 }
 filter = 'test(multi_node_rpc)'
 slow-timeout = { period = "30s", terminate-after = 3 }
 
+# Actor simulation tests need more time under CPU contention
+[[profile.default.overrides]]
+filter = 'test(stateful_actors) | test(multi_node_actors)'
+slow-timeout = { period = "30s", terminate-after = 3 }
+
 # Connect failure tests with mode 2 can hang forever (FDB pattern)
 [[profile.default.overrides]]
 filter = 'test(connect_failure_random)'

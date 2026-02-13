@@ -1,24 +1,23 @@
-//! Simulation tests for multi-node virtual actors.
+//! Simulation tests for actor state persistence and lifecycle.
 //!
-//! Tests ActorHost, ActorRouter, and forwarding under simulated multi-node
-//! topologies using the moonpool-sim framework.
+//! Tests the activate → mutate → persist → deactivate → reactivate → verify
+//! cycle using `DeactivateOnIdle` actors with `PersistentState<T>`.
 //!
 //! # What's Tested
 //!
-//! - Multiple simulated nodes, each with their own transport + ActorHost
-//! - Shared `InMemoryDirectory` (per design: no coordinator, all nodes
-//!   share the directory)
-//! - `RoundRobinPlacement` distributes actors across nodes
-//! - Cross-node actor calls: caller on node A, actor on node B
-//! - Multiple actors (alice, bob, charlie) living on different nodes
-//! - State persistence across calls
+//! - `on_activate` loads state from `InMemoryStateStore`
+//! - `dispatch` mutates state and writes it to the store
+//! - `DeactivateOnIdle` triggers deactivation after each dispatch
+//! - Re-activation loads persisted state from the store
+//! - State survives across deactivation/reactivation cycles
 
 use std::rc::Rc;
 use std::time::Duration;
 
 use moonpool::actors::{
     ActorContext, ActorDirectory, ActorError, ActorHandler, ActorHost, ActorId, ActorRouter,
-    ActorType, InMemoryDirectory, PlacementStrategy, RoundRobinPlacement,
+    ActorStateStore, ActorType, DeactivationHint, InMemoryDirectory, InMemoryStateStore,
+    PersistentState, PlacementStrategy, RoundRobinPlacement,
 };
 use moonpool::{
     Endpoint, JsonCodec, MessageCodec, NetTransportBuilder, NetworkAddress, NetworkProvider,
@@ -29,10 +28,9 @@ use moonpool_sim::{SimRandomProvider, SimulationBuilder, SimulationReport, Workl
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
-// WorkloadProviders (same pattern as transport simulation tests)
+// WorkloadProviders (same pattern as actor_simulation.rs)
 // ============================================================================
 
-/// Providers bundle for simulation workloads.
 #[derive(Clone)]
 struct WorkloadProviders<N, T, TP> {
     network: N,
@@ -89,12 +87,12 @@ where
 }
 
 // ============================================================================
-// Test Actor: Counter (simple state for verification)
+// Stateful Counter Actor: uses PersistentState + DeactivateOnIdle
 // ============================================================================
 
-const COUNTER_ACTOR_TYPE: ActorType = ActorType(0x7E57_AC70);
+const STATEFUL_COUNTER_TYPE: ActorType = ActorType(0x57A7_EC70);
 
-mod counter_methods {
+mod stateful_methods {
     pub const INCREMENT: u32 = 1;
     pub const GET_VALUE: u32 = 2;
 }
@@ -112,16 +110,51 @@ struct ValueResponse {
     value: i64,
 }
 
-/// Simple counter actor for testing multi-node dispatch.
-#[derive(Default)]
-struct CounterActor {
+/// Persistent state for the counter — survives deactivation.
+#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct CounterData {
     value: i64,
 }
 
+/// A counter actor that persists state and deactivates after each message.
+///
+/// On every message:
+/// 1. `on_activate` loads `PersistentState<CounterData>` from the store
+/// 2. `dispatch` mutates and writes the state
+/// 3. `deactivation_hint()` returns `DeactivateOnIdle`
+/// 4. Host calls `on_deactivate` and removes the actor
+///
+/// Next message: step 1 again, loading persisted state from the store.
+#[derive(Default)]
+struct StatefulCounter {
+    state: Option<PersistentState<CounterData>>,
+}
+
 #[async_trait::async_trait(?Send)]
-impl ActorHandler for CounterActor {
+impl ActorHandler for StatefulCounter {
     fn actor_type() -> ActorType {
-        COUNTER_ACTOR_TYPE
+        STATEFUL_COUNTER_TYPE
+    }
+
+    fn deactivation_hint(&self) -> DeactivationHint {
+        DeactivationHint::DeactivateOnIdle
+    }
+
+    async fn on_activate<P: Providers, C: MessageCodec>(
+        &mut self,
+        ctx: &ActorContext<P, C>,
+    ) -> Result<(), ActorError> {
+        if let Some(store) = ctx.state_store() {
+            let ps = PersistentState::<CounterData>::load(
+                store.clone(),
+                "StatefulCounter",
+                &ctx.id.identity,
+            )
+            .await
+            .map_err(|e| ActorError::HandlerError(format!("state load failed: {e}")))?;
+            self.state = Some(ps);
+        }
+        Ok(())
     }
 
     async fn dispatch<P: Providers, C: MessageCodec>(
@@ -131,13 +164,27 @@ impl ActorHandler for CounterActor {
         body: &[u8],
     ) -> Result<Vec<u8>, ActorError> {
         let codec = JsonCodec;
+
+        // Get state — if no store was configured, just use in-memory default
+        let current_value = self.state.as_ref().map(|s| s.state().value).unwrap_or(0);
+
         match method {
-            counter_methods::INCREMENT => {
+            stateful_methods::INCREMENT => {
                 let req: IncrementRequest = codec.decode(body)?;
-                self.value += req.amount;
-                Ok(codec.encode(&ValueResponse { value: self.value })?)
+                let new_value = current_value + req.amount;
+
+                if let Some(ps) = &mut self.state {
+                    ps.state_mut().value = new_value;
+                    ps.write_state().await.map_err(|e| {
+                        ActorError::HandlerError(format!("state write failed: {e}"))
+                    })?;
+                }
+
+                Ok(codec.encode(&ValueResponse { value: new_value })?)
             }
-            counter_methods::GET_VALUE => Ok(codec.encode(&ValueResponse { value: self.value })?),
+            stateful_methods::GET_VALUE => Ok(codec.encode(&ValueResponse {
+                value: current_value,
+            })?),
             _ => Err(ActorError::UnknownMethod(method)),
         }
     }
@@ -171,16 +218,9 @@ fn assert_simulation_success(report: &SimulationReport) {
 // Workloads
 // ============================================================================
 
-/// Actor host workload — runs on each simulated node.
-///
-/// Each node:
-/// 1. Creates a listening transport
-/// 2. Creates an ActorRouter and ActorHost
-/// 3. Registers CounterActor
-/// 4. Stays alive via time.sleep() loop until shutdown signal
-///
-/// Uses `time.sleep()` to generate simulation events and avoid deadlock.
-async fn actor_host_workload<N, T, TP>(
+/// Actor host workload with state store — runs on each simulated node.
+#[allow(clippy::too_many_arguments)]
+async fn stateful_host_workload<N, T, TP>(
     random: SimRandomProvider,
     network: N,
     time: T,
@@ -188,6 +228,7 @@ async fn actor_host_workload<N, T, TP>(
     topology: WorkloadTopology,
     directory: Rc<dyn ActorDirectory>,
     placement: Rc<dyn PlacementStrategy>,
+    state_store: Rc<dyn ActorStateStore>,
 ) -> SimulationResult<SimulationMetrics>
 where
     N: NetworkProvider + Clone + 'static,
@@ -215,11 +256,9 @@ where
         JsonCodec,
     ));
 
-    let host = ActorHost::new(transport, router, directory);
-    host.register::<CounterActor>();
+    let host = ActorHost::new(transport, router, directory).with_state_store(state_store);
+    host.register::<StatefulCounter>();
 
-    // Keep alive by sleeping in a loop, generating simulation events.
-    // The shutdown signal fires when the client workload returns Ok.
     loop {
         let _ = time.sleep(Duration::from_millis(100)).await;
         if topology.shutdown_signal.is_cancelled() {
@@ -237,17 +276,8 @@ where
     })
 }
 
-/// Client workload — drives actor calls across nodes.
-///
-/// The client:
-/// 1. Creates a listening transport (needed for responses in simulation —
-///    the server sends responses by opening a new outgoing connection to
-///    the client's address, because simulated `accept()` uses ephemeral
-///    addresses so the server can't reuse the incoming connection)
-/// 2. Builds a router pointing at the shared directory + placement
-/// 3. Sends actor requests that route to different nodes
-/// 4. Verifies state is maintained correctly per actor identity
-async fn actor_client_workload<N, T, TP>(
+/// Client workload — tests state persistence across deactivation/reactivation.
+async fn stateful_client_workload<N, T, TP>(
     random: SimRandomProvider,
     network: N,
     time: T,
@@ -277,76 +307,72 @@ where
 
     let router = Rc::new(ActorRouter::new(transport, directory, placement, JsonCodec));
 
-    // Small delay to let server hosts start and begin listening.
-    // time.sleep() generates a simulation event that advances simulated time.
+    // Small delay to let server hosts start
     let _ = time.sleep(Duration::from_millis(50)).await;
 
-    // --- Test 1: Basic cross-node deposit ---
-    let alice = ActorId::new(COUNTER_ACTOR_TYPE, "alice");
+    // --- Test 1: Increment alice ---
+    // Actor activates, loads empty state, increments, writes, deactivates.
+    let alice = ActorId::new(STATEFUL_COUNTER_TYPE, "alice");
     let resp: ValueResponse = router
         .send_actor_request(
             &alice,
-            counter_methods::INCREMENT,
+            stateful_methods::INCREMENT,
             &IncrementRequest { amount: 100 },
         )
         .await
-        .expect("alice deposit should succeed");
-    assert_eq!(resp.value, 100, "alice should have 100 after first deposit");
+        .expect("alice increment should succeed");
+    assert_eq!(
+        resp.value, 100,
+        "alice should have 100 after first increment"
+    );
 
-    // --- Test 2: Different actor on potentially different node ---
-    let bob = ActorId::new(COUNTER_ACTOR_TYPE, "bob");
+    // --- Test 2: Get alice value ---
+    // Actor re-activates from store, loads persisted state (100).
     let resp: ValueResponse = router
-        .send_actor_request(
-            &bob,
-            counter_methods::INCREMENT,
-            &IncrementRequest { amount: 50 },
-        )
+        .send_actor_request(&alice, stateful_methods::GET_VALUE, &GetValueRequest {})
         .await
-        .expect("bob deposit should succeed");
-    assert_eq!(resp.value, 50, "bob should have 50 after deposit");
+        .expect("alice get_value should succeed");
+    assert_eq!(
+        resp.value, 100,
+        "alice should still have 100 after reactivation"
+    );
 
-    // --- Test 3: State persistence - second call to alice ---
+    // --- Test 3: Increment alice again ---
+    // Another reactivation, state should be 100, increment to 130.
     let resp: ValueResponse = router
         .send_actor_request(
             &alice,
-            counter_methods::INCREMENT,
+            stateful_methods::INCREMENT,
             &IncrementRequest { amount: 30 },
         )
         .await
-        .expect("alice second deposit should succeed");
+        .expect("alice second increment should succeed");
     assert_eq!(
         resp.value, 130,
-        "alice should have 130 after second deposit"
+        "alice should have 130 after second increment"
     );
 
-    // --- Test 4: Get balance from alice ---
-    let resp: ValueResponse = router
-        .send_actor_request(&alice, counter_methods::GET_VALUE, &GetValueRequest {})
-        .await
-        .expect("alice get_value should succeed");
-    assert_eq!(resp.value, 130, "alice final balance should be 130");
-
-    // --- Test 5: Get balance from bob ---
-    let resp: ValueResponse = router
-        .send_actor_request(&bob, counter_methods::GET_VALUE, &GetValueRequest {})
-        .await
-        .expect("bob get_value should succeed");
-    assert_eq!(resp.value, 50, "bob final balance should be 50");
-
-    // --- Test 6: Third actor to exercise round-robin placement ---
-    let charlie = ActorId::new(COUNTER_ACTOR_TYPE, "charlie");
+    // --- Test 4: Independent actor bob ---
+    let bob = ActorId::new(STATEFUL_COUNTER_TYPE, "bob");
     let resp: ValueResponse = router
         .send_actor_request(
-            &charlie,
-            counter_methods::INCREMENT,
-            &IncrementRequest { amount: 77 },
+            &bob,
+            stateful_methods::INCREMENT,
+            &IncrementRequest { amount: 50 },
         )
         .await
-        .expect("charlie deposit should succeed");
-    assert_eq!(resp.value, 77, "charlie should have 77 after deposit");
+        .expect("bob increment should succeed");
+    assert_eq!(resp.value, 50, "bob should have 50");
+
+    // --- Test 5: Verify alice unchanged after bob's activity ---
+    let resp: ValueResponse = router
+        .send_actor_request(&alice, stateful_methods::GET_VALUE, &GetValueRequest {})
+        .await
+        .expect("alice final get should succeed");
+    assert_eq!(resp.value, 130, "alice should still have 130");
 
     Ok(SimulationMetrics {
-        events_processed: 6,
+        events_processed: 5,
         ..Default::default()
     })
 }
@@ -355,19 +381,17 @@ where
 // Simulation Tests
 // ============================================================================
 
-/// Test multi-node actor dispatch with 3 server nodes and 1 client.
+/// Test state persistence across deactivation/reactivation with 3 server nodes.
 ///
-/// Each server node runs ActorHost in its own simulated network.
-/// RoundRobinPlacement distributes actors across the 3 nodes.
-/// Shared InMemoryDirectory means all nodes see each other's registrations.
+/// Each server node has `DeactivateOnIdle` actors that persist state to a
+/// shared `InMemoryStateStore`. After each message, the actor is deactivated.
+/// The next message re-activates it and loads state from the store.
 #[test]
-fn test_multi_node_actors_3x1() {
+fn test_stateful_actors_3x1() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .try_init();
 
-    // Pre-build shared state — directory and placement shared across all
-    // workloads within the same iteration.
     let node_addrs = [
         NetworkAddress::parse("10.0.0.1:4500").expect("valid"),
         NetworkAddress::parse("10.0.0.2:4500").expect("valid"),
@@ -375,20 +399,21 @@ fn test_multi_node_actors_3x1() {
     ];
 
     let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
+    let state_store: Rc<dyn ActorStateStore> = Rc::new(InMemoryStateStore::new());
     let node_endpoints: Vec<Endpoint> = node_addrs
         .iter()
-        .map(|addr| Endpoint::new(addr.clone(), UID::new(COUNTER_ACTOR_TYPE.0, 0)))
+        .map(|addr| Endpoint::new(addr.clone(), UID::new(STATEFUL_COUNTER_TYPE.0, 0)))
         .collect();
     let placement: Rc<dyn PlacementStrategy> = Rc::new(RoundRobinPlacement::new(node_endpoints));
 
     let report = run_simulation(
         SimulationBuilder::new()
-            // Node 1 → 10.0.0.1
             .register_workload("node1", {
                 let dir = directory.clone();
                 let plc = placement.clone();
+                let store = state_store.clone();
                 move |random, network, time, task, topology| {
-                    actor_host_workload(
+                    stateful_host_workload(
                         random,
                         network,
                         time,
@@ -396,15 +421,16 @@ fn test_multi_node_actors_3x1() {
                         topology,
                         dir.clone(),
                         plc.clone(),
+                        store.clone(),
                     )
                 }
             })
-            // Node 2 → 10.0.0.2
             .register_workload("node2", {
                 let dir = directory.clone();
                 let plc = placement.clone();
+                let store = state_store.clone();
                 move |random, network, time, task, topology| {
-                    actor_host_workload(
+                    stateful_host_workload(
                         random,
                         network,
                         time,
@@ -412,15 +438,16 @@ fn test_multi_node_actors_3x1() {
                         topology,
                         dir.clone(),
                         plc.clone(),
+                        store.clone(),
                     )
                 }
             })
-            // Node 3 → 10.0.0.3
             .register_workload("node3", {
                 let dir = directory.clone();
                 let plc = placement.clone();
+                let store = state_store.clone();
                 move |random, network, time, task, topology| {
-                    actor_host_workload(
+                    stateful_host_workload(
                         random,
                         network,
                         time,
@@ -428,15 +455,15 @@ fn test_multi_node_actors_3x1() {
                         topology,
                         dir.clone(),
                         plc.clone(),
+                        store.clone(),
                     )
                 }
             })
-            // Client → 10.0.0.4
             .register_workload("client", {
                 let dir = directory.clone();
                 let plc = placement.clone();
                 move |random, network, time, task, topology| {
-                    actor_client_workload(
+                    stateful_client_workload(
                         random,
                         network,
                         time,
@@ -454,9 +481,9 @@ fn test_multi_node_actors_3x1() {
     assert_simulation_success(&report);
 }
 
-/// Test multi-node actors with 2 nodes (minimal multi-node setup).
+/// Test state persistence with 2 nodes (minimal multi-node setup).
 #[test]
-fn test_multi_node_actors_2x1() {
+fn test_stateful_actors_2x1() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .try_init();
@@ -467,9 +494,10 @@ fn test_multi_node_actors_2x1() {
     ];
 
     let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
+    let state_store: Rc<dyn ActorStateStore> = Rc::new(InMemoryStateStore::new());
     let node_endpoints: Vec<Endpoint> = node_addrs
         .iter()
-        .map(|addr| Endpoint::new(addr.clone(), UID::new(COUNTER_ACTOR_TYPE.0, 0)))
+        .map(|addr| Endpoint::new(addr.clone(), UID::new(STATEFUL_COUNTER_TYPE.0, 0)))
         .collect();
     let placement: Rc<dyn PlacementStrategy> = Rc::new(RoundRobinPlacement::new(node_endpoints));
 
@@ -478,8 +506,9 @@ fn test_multi_node_actors_2x1() {
             .register_workload("node1", {
                 let dir = directory.clone();
                 let plc = placement.clone();
+                let store = state_store.clone();
                 move |random, network, time, task, topology| {
-                    actor_host_workload(
+                    stateful_host_workload(
                         random,
                         network,
                         time,
@@ -487,14 +516,16 @@ fn test_multi_node_actors_2x1() {
                         topology,
                         dir.clone(),
                         plc.clone(),
+                        store.clone(),
                     )
                 }
             })
             .register_workload("node2", {
                 let dir = directory.clone();
                 let plc = placement.clone();
+                let store = state_store.clone();
                 move |random, network, time, task, topology| {
-                    actor_host_workload(
+                    stateful_host_workload(
                         random,
                         network,
                         time,
@@ -502,6 +533,7 @@ fn test_multi_node_actors_2x1() {
                         topology,
                         dir.clone(),
                         plc.clone(),
+                        store.clone(),
                     )
                 }
             })
@@ -509,7 +541,7 @@ fn test_multi_node_actors_2x1() {
                 let dir = directory.clone();
                 let plc = placement.clone();
                 move |random, network, time, task, topology| {
-                    actor_client_workload(
+                    stateful_client_workload(
                         random,
                         network,
                         time,

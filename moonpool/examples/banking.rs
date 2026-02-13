@@ -1,13 +1,15 @@
-//! Banking Example: Virtual actors + static endpoints coexisting.
+//! Banking Example: Virtual actors with state persistence.
 //!
 //! This example demonstrates the virtual actor networking layer running
-//! alongside static RPC interfaces on the same transport.
+//! alongside static RPC interfaces on the same transport, with
+//! `PersistentState<T>` for durable actor state.
 //!
 //! # What It Shows
 //!
 //! - A static `PingPong` interface (existing pattern, proves coexistence)
 //! - A virtual `BankAccount` actor defined with `#[virtual_actor]` macro
-//! - `ActorHost` for automatic activation and dispatch (no manual select! loop)
+//! - **State persistence**: `PersistentState<BankAccountData>` + `InMemoryStateStore`
+//! - **Lifecycle**: `on_activate` loads state, `DeactivateAfterIdle` removes actor after idle timeout
 //! - Typed `BankAccountRef` for ergonomic actor calls
 //! - Single process, local delivery, single transport
 //!
@@ -20,10 +22,12 @@
 //! ```
 
 use std::rc::Rc;
+use std::time::Duration;
 
 use moonpool::actors::{
-    ActorContext, ActorDirectory, ActorError, ActorHandler, ActorHost, ActorRouter, ActorType,
-    InMemoryDirectory, LocalPlacement, PlacementStrategy,
+    ActorContext, ActorDirectory, ActorError, ActorHandler, ActorHost, ActorRouter,
+    ActorStateStore, ActorType, DeactivationHint, InMemoryDirectory, InMemoryStateStore,
+    LocalPlacement, PersistentState, PlacementStrategy,
 };
 use moonpool::{
     Endpoint, JsonCodec, MessageCodec, NetTransportBuilder, NetworkAddress, Providers, RpcError,
@@ -87,42 +91,65 @@ trait BankAccount {
     async fn get_balance(&mut self, req: GetBalanceRequest) -> Result<BalanceResponse, RpcError>;
 }
 
-/// BankAccount actor implementation.
+/// Persistent state for the BankAccount — survives deactivation.
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+struct BankAccountData {
+    balance: i64,
+}
+
+/// BankAccount actor implementation with persistent state.
+///
+/// Uses `DeactivateAfterIdle(30s)` — the actor stays in memory for 30 seconds
+/// after the last message, then is deactivated. State is persisted to the store
+/// and reloaded on reactivation.
 #[derive(Default)]
 struct BankAccountImpl {
-    balance: i64,
+    state: Option<PersistentState<BankAccountData>>,
+}
+
+impl BankAccountImpl {
+    fn balance(&self) -> i64 {
+        self.state.as_ref().map(|s| s.state().balance).unwrap_or(0)
+    }
 }
 
 #[async_trait::async_trait(?Send)]
 impl BankAccount for BankAccountImpl {
     async fn deposit(&mut self, req: DepositRequest) -> Result<BalanceResponse, RpcError> {
-        self.balance += req.amount;
+        let new_balance = self.balance() + req.amount;
+        if let Some(s) = &mut self.state {
+            s.state_mut().balance = new_balance;
+            let _ = s.write_state().await;
+        }
         println!(
             "  [server] DEPOSIT +{} → balance={}",
-            req.amount, self.balance
+            req.amount, new_balance
         );
         Ok(BalanceResponse {
-            balance: self.balance,
+            balance: new_balance,
         })
     }
 
     async fn withdraw(&mut self, req: WithdrawRequest) -> Result<BalanceResponse, RpcError> {
-        self.balance -= req.amount;
+        let new_balance = self.balance() - req.amount;
+        if let Some(s) = &mut self.state {
+            s.state_mut().balance = new_balance;
+            let _ = s.write_state().await;
+        }
         println!(
             "  [server] WITHDRAW -{} → balance={}",
-            req.amount, self.balance
+            req.amount, new_balance
         );
         Ok(BalanceResponse {
-            balance: self.balance,
+            balance: new_balance,
         })
     }
 
     async fn get_balance(&mut self, req: GetBalanceRequest) -> Result<BalanceResponse, RpcError> {
         let _ = req;
-        println!("  [server] GET_BALANCE → balance={}", self.balance);
-        Ok(BalanceResponse {
-            balance: self.balance,
-        })
+        let balance = self.balance();
+        println!("  [server] GET_BALANCE → balance={}", balance);
+        Ok(BalanceResponse { balance })
     }
 }
 
@@ -132,6 +159,32 @@ impl BankAccount for BankAccountImpl {
 impl ActorHandler for BankAccountImpl {
     fn actor_type() -> ActorType {
         BankAccountRef::<moonpool::TokioProviders>::ACTOR_TYPE
+    }
+
+    fn deactivation_hint(&self) -> DeactivationHint {
+        DeactivationHint::DeactivateAfterIdle(Duration::from_secs(30))
+    }
+
+    async fn on_activate<P: Providers, C: MessageCodec>(
+        &mut self,
+        ctx: &ActorContext<P, C>,
+    ) -> Result<(), ActorError> {
+        if let Some(store) = ctx.state_store() {
+            let ps = PersistentState::<BankAccountData>::load(
+                store.clone(),
+                "BankAccount",
+                &ctx.id.identity,
+            )
+            .await
+            .map_err(|e| ActorError::HandlerError(format!("state load: {e}")))?;
+            println!(
+                "  [server] ACTIVATE {} (balance={})",
+                ctx.id.identity,
+                ps.state().balance
+            );
+            self.state = Some(ps);
+        }
+        Ok(())
     }
 
     async fn dispatch<P: Providers, C: MessageCodec>(
@@ -270,6 +323,9 @@ async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
     // Shared directory for actor location tracking
     let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
 
+    // State store for persistent actor state
+    let state_store: Rc<dyn ActorStateStore> = Rc::new(InMemoryStateStore::new());
+
     // Build router + host
     let local_endpoint = Endpoint::new(
         local_addr.clone(),
@@ -282,7 +338,8 @@ async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
         placement,
         JsonCodec,
     ));
-    let host = ActorHost::new(transport.clone(), router.clone(), directory);
+    let host =
+        ActorHost::new(transport.clone(), router.clone(), directory).with_state_store(state_store);
 
     // Register actor type — host spawns processing loop internally
     host.register::<BankAccountImpl>();

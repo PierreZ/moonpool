@@ -40,12 +40,16 @@
 
 mod directory;
 mod host;
+mod persistent_state;
 mod placement;
 mod router;
+mod state;
 mod types;
 
 pub use directory::{ActorDirectory, DirectoryError, InMemoryDirectory};
-pub use host::{ActorContext, ActorHandler, ActorHost};
+pub use host::{ActorContext, ActorHandler, ActorHost, DeactivationHint};
+pub use persistent_state::PersistentState;
 pub use placement::{LocalPlacement, PlacementError, PlacementStrategy, RoundRobinPlacement};
 pub use router::{ActorError, ActorRouter};
+pub use state::{ActorStateError, ActorStateStore, InMemoryStateStore, StoredState};
 pub use types::{ActorId, ActorMessage, ActorResponse, ActorType, CacheInvalidation};
