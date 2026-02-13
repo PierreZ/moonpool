@@ -454,14 +454,30 @@ impl<P: Providers> NetTransport<P> {
     /// When a new peer is created, a `connection_reader` task is spawned to
     /// handle incoming packets (FDB: connectionKeeper spawns connectionReader at line 843).
     ///
+    /// Also checks incoming peers (from accepted connections) as a fallback.
+    /// This enables response routing over existing connections — when a server
+    /// receives a request from a client, it can send the response back on the
+    /// same connection without requiring the client to listen for new connections.
+    ///
     /// # FDB Reference
     /// `Reference<struct Peer> getOrOpenPeer(NetworkAddress const& address);`
     fn get_or_open_peer(&self, address: &NetworkAddress) -> SharedPeer<P> {
         let addr_str = address.to_string();
 
-        // Check if peer already exists
+        // Check if outgoing peer already exists
         if let Some(peer) = self.data.borrow().peers.get(&addr_str) {
             sometimes_assert!(peer_reused, true, "Existing peer reused for address");
+            return Rc::clone(peer);
+        }
+
+        // Check incoming peers — reuse accepted connection for responses
+        // (FDB pattern: responses flow back on the same connection)
+        if let Some(peer) = self.data.borrow().incoming_peers.get(&addr_str) {
+            sometimes_assert!(
+                incoming_peer_reused,
+                true,
+                "Incoming peer reused for response"
+            );
             return Rc::clone(peer);
         }
 
