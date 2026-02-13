@@ -52,6 +52,18 @@ pub enum ActorError {
     /// Codec serialization/deserialization error.
     #[error("codec error: {0}")]
     Codec(#[from] crate::CodecError),
+
+    /// The method discriminant is not recognized by the actor handler.
+    #[error("unknown method: {0}")]
+    UnknownMethod(u32),
+
+    /// The remote actor handler returned an error.
+    #[error("handler error: {0}")]
+    HandlerError(String),
+
+    /// RPC-level error (wraps MessagingError or ReplyError).
+    #[error("rpc error: {0}")]
+    Rpc(#[from] crate::RpcError),
 }
 
 /// Caller-side actor request router.
@@ -100,6 +112,11 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
         }
     }
 
+    /// Get a reference to the codec used by this router.
+    pub fn codec(&self) -> &C {
+        &self.codec
+    }
+
     /// Send a request to a virtual actor.
     ///
     /// Resolves the actor's location (placing if needed), serializes the
@@ -143,10 +160,8 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
 
         // 5. Await and decode response
         let response: ActorResponse = future.await?;
-        let result = self
-            .codec
-            .decode(&response.body)
-            .map_err(ActorError::Codec)?;
+        let body = response.body.map_err(ActorError::HandlerError)?;
+        let result = self.codec.decode(&body).map_err(ActorError::Codec)?;
         Ok(result)
     }
 

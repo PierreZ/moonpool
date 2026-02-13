@@ -59,6 +59,16 @@ pub struct ActorId {
     pub identity: String,
 }
 
+impl ActorId {
+    /// Create a new actor ID.
+    pub fn new(actor_type: ActorType, identity: impl Into<String>) -> Self {
+        Self {
+            actor_type,
+            identity: identity.into(),
+        }
+    }
+}
+
 /// Message payload for virtual actor calls.
 ///
 /// Wrapped in `RequestEnvelope` by `send_request()` — the transport treats
@@ -89,12 +99,14 @@ pub struct ActorMessage {
 
 /// Response from a virtual actor.
 ///
-/// Wraps the serialized response body. The caller deserializes
-/// the body using the expected response type for the method called.
+/// Wraps the serialized response body or an error from the handler.
+/// The caller deserializes the body using the expected response type
+/// for the method called, or propagates the error.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ActorResponse {
-    /// Serialized method-specific response body.
-    pub body: Vec<u8>,
+    /// Serialized method-specific response body, or an error message
+    /// from the handler.
+    pub body: Result<Vec<u8>, String>,
 }
 
 #[cfg(test)]
@@ -199,13 +211,25 @@ mod tests {
     #[test]
     fn test_actor_response_serialization_roundtrip() {
         let resp = ActorResponse {
-            body: vec![10, 20, 30],
+            body: Ok(vec![10, 20, 30]),
         };
 
         let serialized = serde_json::to_vec(&resp).expect("serialize");
         let deserialized: ActorResponse = serde_json::from_slice(&serialized).expect("deserialize");
 
-        assert_eq!(deserialized.body, vec![10, 20, 30]);
+        assert_eq!(deserialized.body, Ok(vec![10, 20, 30]));
+    }
+
+    #[test]
+    fn test_actor_response_error_roundtrip() {
+        let resp = ActorResponse {
+            body: Err("unknown method: 99".to_string()),
+        };
+
+        let serialized = serde_json::to_vec(&resp).expect("serialize");
+        let deserialized: ActorResponse = serde_json::from_slice(&serialized).expect("deserialize");
+
+        assert_eq!(deserialized.body, Err("unknown method: 99".to_string()));
     }
 
     #[test]
