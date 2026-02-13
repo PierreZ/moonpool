@@ -46,6 +46,6 @@ mod types;
 
 pub use directory::{ActorDirectory, DirectoryError, InMemoryDirectory};
 pub use host::{ActorContext, ActorHandler, ActorHost};
-pub use placement::{LocalPlacement, PlacementError, PlacementStrategy};
+pub use placement::{LocalPlacement, PlacementError, PlacementStrategy, RoundRobinPlacement};
 pub use router::{ActorError, ActorRouter};
-pub use types::{ActorId, ActorMessage, ActorResponse, ActorType};
+pub use types::{ActorId, ActorMessage, ActorResponse, ActorType, CacheInvalidation};

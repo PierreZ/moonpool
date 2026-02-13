@@ -79,6 +79,59 @@ impl PlacementStrategy for LocalPlacement {
     }
 }
 
+/// Round-robin placement across a known set of nodes.
+///
+/// Distributes actors evenly across the provided node list. Each call
+/// to `place()` picks the next node in rotation. Suitable for multi-node
+/// systems with a static topology.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let nodes = vec![node_a_endpoint, node_b_endpoint, node_c_endpoint];
+/// let placement = RoundRobinPlacement::new(nodes);
+/// // First actor → node A, second → node B, third → node C, fourth → node A, ...
+/// ```
+#[derive(Debug)]
+pub struct RoundRobinPlacement {
+    /// Known node endpoints.
+    nodes: Vec<Endpoint>,
+    /// Next index to use (wraps around).
+    next: std::cell::Cell<usize>,
+}
+
+impl RoundRobinPlacement {
+    /// Create a new round-robin placement strategy.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `nodes` is empty.
+    pub fn new(nodes: Vec<Endpoint>) -> Self {
+        assert!(
+            !nodes.is_empty(),
+            "RoundRobinPlacement requires at least one node"
+        );
+        Self {
+            nodes,
+            next: std::cell::Cell::new(0),
+        }
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl PlacementStrategy for RoundRobinPlacement {
+    async fn place(
+        &self,
+        _id: &ActorId,
+        _candidates: &[Endpoint],
+    ) -> Result<Endpoint, PlacementError> {
+        let index = self.next.get();
+        let endpoint = self.nodes[index].clone();
+        self.next.set((index + 1) % self.nodes.len());
+        Ok(endpoint)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};

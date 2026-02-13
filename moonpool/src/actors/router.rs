@@ -160,6 +160,19 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
 
         // 5. Await and decode response
         let response: ActorResponse = future.await?;
+
+        // 6. Handle cache invalidation if present
+        if let Some(invalidation) = &response.cache_invalidation {
+            // Update our directory cache with the correct endpoint
+            let _ = self.directory.unregister(&invalidation.actor_id).await;
+            if let Some(valid) = &invalidation.valid_endpoint {
+                let _ = self
+                    .directory
+                    .register(&invalidation.actor_id, valid.clone())
+                    .await;
+            }
+        }
+
         let body = response.body.map_err(ActorError::HandlerError)?;
         let result = self.codec.decode(&body).map_err(ActorError::Codec)?;
         Ok(result)

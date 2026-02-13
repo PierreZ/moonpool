@@ -22,8 +22,13 @@ serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 
 [dev-dependencies]
+async-trait = "0.1"
+moonpool-sim = { path = "../moonpool-sim", version = "0.3.0" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
 
 [[example]]
 name = "banking"

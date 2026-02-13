@@ -20,11 +20,17 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::{JsonCodec, MessageCodec, NetTransport, Providers, RequestStream, TaskProvider, UID};
+use crate::{
+    Endpoint, JsonCodec, MessageCodec, NetTransport, Providers, RequestStream, TaskProvider, UID,
+};
 
 use super::router::ActorError;
-use super::types::{ActorId, ActorMessage, ActorResponse, ActorType};
+use super::types::{ActorId, ActorMessage, ActorResponse, ActorType, CacheInvalidation};
 use super::{ActorDirectory, ActorRouter};
+
+/// Maximum number of times a message can be forwarded before being rejected.
+/// Prevents infinite forwarding loops.
+const MAX_FORWARD_COUNT: u8 = 2;
 
 /// Context provided to actor methods during dispatch.
 ///
@@ -154,6 +160,13 @@ impl<H: ActorHandler, P: Providers, C: MessageCodec> ActorTypeDispatcher<P, C>
 ///
 /// One message at a time per actor instance. The loop processes messages
 /// sequentially — no concurrent access to the same actor.
+///
+/// # Forwarding
+///
+/// When a message arrives for an actor not hosted locally, and the directory
+/// indicates the actor lives on another node, the message is forwarded
+/// (up to `MAX_FORWARD_COUNT` hops). The response includes a
+/// `CacheInvalidation` hint so the caller can update its stale cache.
 async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
     transport: Rc<NetTransport<P>>,
     router: Rc<ActorRouter<P, C>>,
@@ -162,6 +175,8 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
 ) {
     let mut actors: HashMap<String, H> = HashMap::new();
     let actor_type = H::actor_type();
+    let local_address = transport.local_address().clone();
+    let codec = router.codec().clone();
 
     loop {
         let Some((actor_msg, reply)) = stream
@@ -172,43 +187,184 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
             break;
         };
 
-        // Look up or create the actor instance
         let identity = actor_msg.target.identity.clone();
-        if !actors.contains_key(&identity) {
-            // Activate new actor via Default::default()
-            actors.insert(identity.clone(), H::default());
 
-            // Register in directory (best-effort, ignore race conditions)
-            let actor_id = ActorId::new(actor_type, identity.clone());
-            let endpoint =
-                crate::Endpoint::new(transport.local_address().clone(), UID::new(actor_type.0, 0));
-            let _ = directory.register(&actor_id, endpoint).await;
+        // Check if we host this actor locally
+        if actors.contains_key(&identity) {
+            // Actor exists locally — dispatch directly
+            dispatch_local::<H, P, C>(
+                &mut actors,
+                &identity,
+                &actor_msg,
+                &router,
+                actor_type,
+                reply,
+            )
+            .await;
+            continue;
         }
 
-        let actor = actors
-            .get_mut(&identity)
-            .expect("actor was just inserted or already exists");
+        // Actor not local — check directory
+        let actor_id = ActorId::new(actor_type, identity.clone());
+        let dir_lookup = directory.lookup(&actor_id).await;
 
-        // Build context for this invocation
-        let ctx = ActorContext {
-            id: ActorId::new(actor_type, identity),
-            router: router.clone(),
-        };
+        match dir_lookup {
+            Ok(Some(registered_endpoint)) if registered_endpoint.address != local_address => {
+                // Actor is registered on another node — forward
+                forward_message::<P, C>(
+                    &transport,
+                    &actor_msg,
+                    &registered_endpoint,
+                    &local_address,
+                    actor_type,
+                    &codec,
+                    reply,
+                );
+            }
+            _ => {
+                // Actor not registered, or registered on this node — activate locally
+                actors.insert(identity.clone(), H::default());
 
-        // Dispatch the method call
-        let result = actor
-            .dispatch(&ctx, actor_msg.method, &actor_msg.body)
-            .await;
+                // Register in directory (best-effort, ignore race conditions)
+                let endpoint = Endpoint::new(local_address.clone(), UID::new(actor_type.0, 0));
+                let _ = directory.register(&actor_id, endpoint).await;
 
-        // Send response
-        let response = match result {
-            Ok(body) => ActorResponse { body: Ok(body) },
-            Err(e) => ActorResponse {
-                body: Err(e.to_string()),
-            },
-        };
+                dispatch_local::<H, P, C>(
+                    &mut actors,
+                    &identity,
+                    &actor_msg,
+                    &router,
+                    actor_type,
+                    reply,
+                )
+                .await;
+            }
+        }
+    }
+}
 
-        reply.send(response);
+/// Dispatch a method call to a locally hosted actor.
+async fn dispatch_local<H: ActorHandler, P: Providers, C: MessageCodec>(
+    actors: &mut HashMap<String, H>,
+    identity: &str,
+    actor_msg: &ActorMessage,
+    router: &Rc<ActorRouter<P, C>>,
+    actor_type: ActorType,
+    reply: crate::ReplyPromise<ActorResponse, C>,
+) {
+    let actor = actors
+        .get_mut(identity)
+        .expect("actor was just inserted or already exists");
+
+    let ctx = ActorContext {
+        id: ActorId::new(actor_type, identity.to_string()),
+        router: router.clone(),
+    };
+
+    let result = actor
+        .dispatch(&ctx, actor_msg.method, &actor_msg.body)
+        .await;
+
+    let response = match result {
+        Ok(body) => ActorResponse {
+            body: Ok(body),
+            cache_invalidation: None,
+        },
+        Err(e) => ActorResponse {
+            body: Err(e.to_string()),
+            cache_invalidation: None,
+        },
+    };
+
+    reply.send(response);
+}
+
+/// Forward a message to the correct node when the actor lives elsewhere.
+///
+/// Increments `forward_count` and sends the message to the registered endpoint.
+/// The response is proxied back to the original caller with a `CacheInvalidation`
+/// hint appended.
+fn forward_message<P: Providers, C: MessageCodec>(
+    transport: &Rc<NetTransport<P>>,
+    actor_msg: &ActorMessage,
+    registered_endpoint: &Endpoint,
+    local_address: &crate::NetworkAddress,
+    actor_type: ActorType,
+    codec: &C,
+    reply: crate::ReplyPromise<ActorResponse, C>,
+) {
+    // Check forward count limit
+    if actor_msg.forward_count >= MAX_FORWARD_COUNT {
+        reply.send(ActorResponse {
+            body: Err(format!(
+                "message forwarded too many times ({})",
+                actor_msg.forward_count
+            )),
+            cache_invalidation: None,
+        });
+        return;
+    }
+
+    // Build forwarded message with incremented forward_count
+    let forwarded_msg = ActorMessage {
+        target: actor_msg.target.clone(),
+        sender: actor_msg.sender.clone(),
+        method: actor_msg.method,
+        body: actor_msg.body.clone(),
+        forward_count: actor_msg.forward_count + 1,
+    };
+
+    // Destination endpoint on the correct node
+    let dest = Endpoint::new(
+        registered_endpoint.address.clone(),
+        UID::new(actor_type.0, 0),
+    );
+
+    // Build cache invalidation hint for the caller
+    let stale_endpoint = Endpoint::new(local_address.clone(), UID::new(actor_type.0, 0));
+    let cache_invalidation = CacheInvalidation {
+        actor_id: actor_msg.target.clone(),
+        invalid_endpoint: stale_endpoint,
+        valid_endpoint: Some(registered_endpoint.clone()),
+    };
+
+    // Send the forwarded request
+    match crate::send_request(transport, &dest, forwarded_msg, codec.clone()) {
+        Ok(future) => {
+            // Spawn a task to proxy the response back
+            transport.providers().task().spawn_task(
+                "actor_forward_proxy",
+                proxy_forwarded_response(future, reply, cache_invalidation),
+            );
+        }
+        Err(_e) => {
+            reply.send(ActorResponse {
+                body: Err("failed to forward message".to_string()),
+                cache_invalidation: Some(cache_invalidation),
+            });
+        }
+    }
+}
+
+/// Proxy the response from a forwarded message back to the original caller,
+/// attaching the cache invalidation hint.
+async fn proxy_forwarded_response<C: MessageCodec>(
+    future: crate::ReplyFuture<ActorResponse, C>,
+    reply: crate::ReplyPromise<ActorResponse, C>,
+    cache_invalidation: CacheInvalidation,
+) {
+    match future.await {
+        Ok(mut response) => {
+            // Attach cache invalidation hint so caller updates its directory
+            response.cache_invalidation = Some(cache_invalidation);
+            reply.send(response);
+        }
+        Err(_e) => {
+            reply.send(ActorResponse {
+                body: Err("forwarded request failed".to_string()),
+                cache_invalidation: Some(cache_invalidation),
+            });
+        }
     }
 }
 
