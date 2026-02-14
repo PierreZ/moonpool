@@ -51,8 +51,11 @@ pub mod shared_mem;
 pub mod shared_stats;
 
 // Re-exports for the public API
-pub use assertion_slots::maybe_fork_on_assertion;
-pub use context::{explorer_is_child, set_rng_hooks};
+pub use assertion_slots::{
+    ASSERTION_TABLE_MEM_SIZE, AssertCmp, AssertKind, AssertionSlot, AssertionSlotSnapshot,
+    assertion_bool, assertion_numeric, assertion_read_all, assertion_sometimes_all, msg_hash,
+};
+pub use context::{explorer_is_child, get_assertion_table_ptr, set_rng_hooks};
 pub use each_buckets::{EachBucket, assertion_sometimes_each, each_bucket_read_all};
 pub use fork_loop::{AdaptiveConfig, exit_child};
 pub use replay::{ParseTimelineError, format_timeline, parse_timeline};
@@ -78,9 +81,67 @@ pub struct ExplorationConfig {
     pub adaptive: Option<fork_loop::AdaptiveConfig>,
 }
 
-/// Total size of the assertion slot table in bytes.
-const ASSERTION_TABLE_SIZE: usize =
-    assertion_slots::MAX_ASSERTION_SLOTS * std::mem::size_of::<assertion_slots::AssertionSlot>();
+/// Initialize assertion table and each-bucket shared memory only.
+///
+/// This allocates the shared memory regions needed for assertion tracking
+/// without requiring a full exploration context. Idempotent (no-op if
+/// already initialized).
+///
+/// # Errors
+///
+/// Returns an error if shared memory allocation fails.
+pub fn init_assertions() -> Result<(), std::io::Error> {
+    let current = ASSERTION_TABLE.with(|c| c.get());
+    if !current.is_null() {
+        return Ok(()); // Already initialized
+    }
+
+    let table_ptr = shared_mem::alloc_shared(assertion_slots::ASSERTION_TABLE_MEM_SIZE)?;
+    let each_bucket_ptr = shared_mem::alloc_shared(each_buckets::EACH_BUCKET_MEM_SIZE)?;
+
+    ASSERTION_TABLE.with(|c| c.set(table_ptr));
+    EACH_BUCKET_PTR.with(|c| c.set(each_bucket_ptr));
+
+    Ok(())
+}
+
+/// Free assertion table and each-bucket shared memory.
+///
+/// Nulls the pointers after freeing. No-op if not initialized.
+pub fn cleanup_assertions() {
+    unsafe {
+        let table_ptr = ASSERTION_TABLE.with(|c| c.get());
+        if !table_ptr.is_null() {
+            shared_mem::free_shared(table_ptr, assertion_slots::ASSERTION_TABLE_MEM_SIZE);
+            ASSERTION_TABLE.with(|c| c.set(std::ptr::null_mut()));
+        }
+
+        let each_bucket_ptr = EACH_BUCKET_PTR.with(|c| c.get());
+        if !each_bucket_ptr.is_null() {
+            shared_mem::free_shared(each_bucket_ptr, each_buckets::EACH_BUCKET_MEM_SIZE);
+            EACH_BUCKET_PTR.with(|c| c.set(std::ptr::null_mut()));
+        }
+    }
+}
+
+/// Zero assertion table memory for between-run resets.
+///
+/// No-op if not initialized.
+pub fn reset_assertions() {
+    let table_ptr = ASSERTION_TABLE.with(|c| c.get());
+    if !table_ptr.is_null() {
+        unsafe {
+            std::ptr::write_bytes(table_ptr, 0, assertion_slots::ASSERTION_TABLE_MEM_SIZE);
+        }
+    }
+
+    let each_bucket_ptr = EACH_BUCKET_PTR.with(|c| c.get());
+    if !each_bucket_ptr.is_null() {
+        unsafe {
+            std::ptr::write_bytes(each_bucket_ptr, 0, each_buckets::EACH_BUCKET_MEM_SIZE);
+        }
+    }
+}
 
 /// Initialize the exploration framework.
 ///
@@ -91,13 +152,14 @@ const ASSERTION_TABLE_SIZE: usize =
 ///
 /// Returns an error if shared memory allocation fails.
 pub fn init(config: ExplorationConfig) -> Result<(), std::io::Error> {
-    // Allocate shared memory regions
+    // Initialize assertion table first (idempotent)
+    init_assertions()?;
+
+    // Allocate exploration-specific shared memory regions
     let stats_ptr = shared_stats::init_shared_stats(config.global_energy)?;
     let recipe_ptr = shared_stats::init_shared_recipe()?;
     let virgin_ptr = shared_mem::alloc_shared(coverage::COVERAGE_MAP_SIZE)?;
     let bitmap_ptr = shared_mem::alloc_shared(coverage::COVERAGE_MAP_SIZE)?;
-    let table_ptr = shared_mem::alloc_shared(ASSERTION_TABLE_SIZE)?;
-    let each_bucket_ptr = shared_mem::alloc_shared(each_buckets::EACH_BUCKET_MEM_SIZE)?;
 
     // Allocate energy budget if adaptive mode is configured
     let energy_ptr = if let Some(ref adaptive) = config.adaptive {
@@ -111,8 +173,6 @@ pub fn init(config: ExplorationConfig) -> Result<(), std::io::Error> {
     SHARED_RECIPE.with(|c| c.set(recipe_ptr));
     VIRGIN_MAP_PTR.with(|c| c.set(virgin_ptr));
     COVERAGE_BITMAP_PTR.with(|c| c.set(bitmap_ptr));
-    ASSERTION_TABLE.with(|c| c.set(table_ptr as *mut assertion_slots::AssertionSlot));
-    EACH_BUCKET_PTR.with(|c| c.set(each_bucket_ptr));
     ENERGY_BUDGET_PTR.with(|c| c.set(energy_ptr));
 
     // Activate exploration context
@@ -140,7 +200,7 @@ pub fn cleanup() {
         ctx.active = false;
     });
 
-    // Free shared memory regions
+    // Free exploration-specific shared memory regions
     // Safety: these pointers were allocated by init() via alloc_shared()
     unsafe {
         let stats_ptr = SHARED_STATS.with(|c| c.get());
@@ -173,12 +233,6 @@ pub fn cleanup() {
             COVERAGE_BITMAP_PTR.with(|c| c.set(std::ptr::null_mut()));
         }
 
-        let table_ptr = ASSERTION_TABLE.with(|c| c.get());
-        if !table_ptr.is_null() {
-            shared_mem::free_shared(table_ptr as *mut u8, ASSERTION_TABLE_SIZE);
-            ASSERTION_TABLE.with(|c| c.set(std::ptr::null_mut()));
-        }
-
         let energy_ptr = ENERGY_BUDGET_PTR.with(|c| c.get());
         if !energy_ptr.is_null() {
             shared_mem::free_shared(
@@ -187,13 +241,10 @@ pub fn cleanup() {
             );
             ENERGY_BUDGET_PTR.with(|c| c.set(std::ptr::null_mut()));
         }
-
-        let each_bucket_ptr = EACH_BUCKET_PTR.with(|c| c.get());
-        if !each_bucket_ptr.is_null() {
-            shared_mem::free_shared(each_bucket_ptr, each_buckets::EACH_BUCKET_MEM_SIZE);
-            EACH_BUCKET_PTR.with(|c| c.set(std::ptr::null_mut()));
-        }
     }
+
+    // Clean up assertion table and each-buckets (shared with init_assertions)
+    cleanup_assertions();
 }
 
 #[cfg(test)]
@@ -232,9 +283,27 @@ mod tests {
     }
 
     #[test]
-    fn test_maybe_fork_noop_when_inactive() {
-        // Should not panic when exploration is not active
-        maybe_fork_on_assertion("test_assertion");
+    fn test_assertion_bool_noop_when_inactive() {
+        // Should not panic when assertion table is not initialized
+        assertion_bool(AssertKind::Sometimes, true, true, "test_assertion");
+    }
+
+    #[test]
+    fn test_init_assertions_standalone() {
+        init_assertions().expect("init_assertions failed");
+
+        // Table pointer should be set
+        let ptr = context::get_assertion_table_ptr();
+        assert!(!ptr.is_null());
+
+        // Idempotent — second call should be no-op
+        init_assertions().expect("init_assertions second call failed");
+
+        cleanup_assertions();
+
+        // Should be null after cleanup
+        let ptr = context::get_assertion_table_ptr();
+        assert!(ptr.is_null());
     }
 
     #[test]

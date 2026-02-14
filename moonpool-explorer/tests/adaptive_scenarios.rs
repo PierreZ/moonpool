@@ -81,31 +81,66 @@ fn test_adaptive_maze_cascade() {
     .expect("init failed");
 
     // Entry gate — always triggers, guarantees the adaptive path fires
-    moonpool_explorer::maybe_fork_on_assertion("maze_entry");
+    moonpool_explorer::assertion_bool(
+        moonpool_explorer::AssertKind::Sometimes,
+        true,
+        true,
+        "maze_entry",
+    );
 
     // Lock 0: two gates at P≈0.3
     let g0a = random_below(10) < 3;
     if g0a {
-        moonpool_explorer::maybe_fork_on_assertion("maze_g0a");
+        moonpool_explorer::assertion_bool(
+            moonpool_explorer::AssertKind::Sometimes,
+            true,
+            true,
+            "maze_g0a",
+        );
         let g0b = random_below(10) < 3;
         if g0b {
-            moonpool_explorer::maybe_fork_on_assertion("maze_lock0");
+            moonpool_explorer::assertion_bool(
+                moonpool_explorer::AssertKind::Sometimes,
+                true,
+                true,
+                "maze_lock0",
+            );
 
             // Lock 1: requires lock 0, two gates at P≈0.3
             let g1a = random_below(10) < 3;
             if g1a {
-                moonpool_explorer::maybe_fork_on_assertion("maze_g1a");
+                moonpool_explorer::assertion_bool(
+                    moonpool_explorer::AssertKind::Sometimes,
+                    true,
+                    true,
+                    "maze_g1a",
+                );
                 let g1b = random_below(10) < 3;
                 if g1b {
-                    moonpool_explorer::maybe_fork_on_assertion("maze_lock1");
+                    moonpool_explorer::assertion_bool(
+                        moonpool_explorer::AssertKind::Sometimes,
+                        true,
+                        true,
+                        "maze_lock1",
+                    );
 
                     // Lock 2: requires lock 0 + lock 1, two gates at P≈0.3
                     let g2a = random_below(10) < 3;
                     if g2a {
-                        moonpool_explorer::maybe_fork_on_assertion("maze_g2a");
+                        moonpool_explorer::assertion_bool(
+                            moonpool_explorer::AssertKind::Sometimes,
+                            true,
+                            true,
+                            "maze_g2a",
+                        );
                         let g2b = random_below(10) < 3;
                         if g2b {
-                            moonpool_explorer::maybe_fork_on_assertion("maze_lock2");
+                            moonpool_explorer::assertion_bool(
+                                moonpool_explorer::AssertKind::Sometimes,
+                                true,
+                                true,
+                                "maze_lock2",
+                            );
 
                             // Bug: all 3 locks open!
                             if moonpool_explorer::explorer_is_child() {
@@ -173,7 +208,12 @@ fn test_adaptive_dungeon_floors() {
     .expect("init failed");
 
     // Entry — always triggers, starts the exploration
-    moonpool_explorer::maybe_fork_on_assertion("dungeon_entry");
+    moonpool_explorer::assertion_bool(
+        moonpool_explorer::AssertKind::Sometimes,
+        true,
+        true,
+        "dungeon_entry",
+    );
 
     let mut floors_cleared = 0u32;
 
@@ -193,7 +233,12 @@ fn test_adaptive_dungeon_floors() {
             4 => "dungeon_f4",
             _ => break,
         };
-        moonpool_explorer::maybe_fork_on_assertion(name);
+        moonpool_explorer::assertion_bool(
+            moonpool_explorer::AssertKind::Sometimes,
+            true,
+            true,
+            name,
+        );
         floors_cleared = floor + 1;
     }
 
@@ -249,9 +294,24 @@ fn test_adaptive_energy_budget() {
     .expect("init failed");
 
     // All gates always fire — maximizes energy consumption
-    moonpool_explorer::maybe_fork_on_assertion("energy_a");
-    moonpool_explorer::maybe_fork_on_assertion("energy_b");
-    moonpool_explorer::maybe_fork_on_assertion("energy_c");
+    moonpool_explorer::assertion_bool(
+        moonpool_explorer::AssertKind::Sometimes,
+        true,
+        true,
+        "energy_a",
+    );
+    moonpool_explorer::assertion_bool(
+        moonpool_explorer::AssertKind::Sometimes,
+        true,
+        true,
+        "energy_b",
+    );
+    moonpool_explorer::assertion_bool(
+        moonpool_explorer::AssertKind::Sometimes,
+        true,
+        true,
+        "energy_c",
+    );
 
     if moonpool_explorer::explorer_is_child() {
         moonpool_explorer::exit_child(0);

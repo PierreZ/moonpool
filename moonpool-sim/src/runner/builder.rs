@@ -176,6 +176,11 @@ impl SimulationBuilder {
             IterationManager::new(self.iteration_control.clone(), self.seeds.clone());
         let mut metrics_collector = MetricsCollector::new();
 
+        // Initialize assertion table (unconditional — works even without exploration)
+        if let Err(e) = moonpool_explorer::init_assertions() {
+            tracing::error!("Failed to initialize assertion table: {}", e);
+        }
+
         // Initialize exploration if configured
         if let Some(ref config) = self.exploration_config {
             moonpool_explorer::set_rng_hooks(crate::sim::get_rng_call_count, |seed| {
@@ -299,6 +304,11 @@ impl SimulationBuilder {
         // Collect assertion results and validate them
         let assertion_results = crate::chaos::get_assertion_results();
         let assertion_violations = crate::chaos::validate_assertion_contracts();
+
+        // Clean up assertion table if exploration didn't already do it
+        if self.exploration_config.is_none() {
+            moonpool_explorer::cleanup_assertions();
+        }
 
         // Final buggify reset to ensure no impact on subsequent code
         crate::chaos::buggify_reset();

@@ -141,7 +141,9 @@ pub use storage::{
 pub use providers::{SimProviders, SimRandomProvider, SimTimeProvider};
 
 // Explorer re-exports
-pub use moonpool_explorer::{AdaptiveConfig, ExplorationConfig, format_timeline, parse_timeline};
+pub use moonpool_explorer::{
+    AdaptiveConfig, AssertCmp, AssertKind, ExplorationConfig, format_timeline, parse_timeline,
+};
 pub use runner::report::ExplorationReport;
 
 // Macros are automatically available at crate root when defined with #[macro_export]

@@ -6,7 +6,6 @@
 
 use std::cell::{Cell, RefCell};
 
-use crate::assertion_slots::AssertionSlot;
 use crate::energy::EnergyBudget;
 use crate::fork_loop::AdaptiveConfig;
 use crate::shared_stats::{SharedRecipe, SharedStats};
@@ -35,8 +34,8 @@ thread_local! {
     /// Pointer to per-child coverage bitmap.
     pub(crate) static COVERAGE_BITMAP_PTR: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
 
-    /// Pointer to shared assertion slot table.
-    pub(crate) static ASSERTION_TABLE: Cell<*mut AssertionSlot> = const { Cell::new(std::ptr::null_mut()) };
+    /// Pointer to shared assertion slot table (raw bytes, counter-based layout).
+    pub(crate) static ASSERTION_TABLE: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
 
     /// Pointer to shared energy budget (null when adaptive forking is disabled).
     pub(crate) static ENERGY_BUDGET_PTR: Cell<*mut EnergyBudget> = const { Cell::new(std::ptr::null_mut()) };
@@ -121,6 +120,13 @@ pub fn explorer_is_active() -> bool {
 /// Check if this process is a forked child.
 pub fn explorer_is_child() -> bool {
     with_ctx(|ctx| ctx.is_child)
+}
+
+/// Get the raw pointer to the assertion table shared memory.
+///
+/// Returns null if the table is not initialized.
+pub fn get_assertion_table_ptr() -> *mut u8 {
+    ASSERTION_TABLE.with(|c| c.get())
 }
 
 #[cfg(test)]
