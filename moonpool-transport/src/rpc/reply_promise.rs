@@ -116,6 +116,7 @@ impl<T: Serialize, C: MessageCodec> ReplyPromise<T, C> {
             Err(e) => {
                 // Serialization failed - send error instead
                 tracing::error!(error = %e, "failed to serialize reply");
+                assert_sometimes!(true, "reply_serialization_failed");
                 let error_result: Result<T, ReplyError> = Err(ReplyError::Serialization {
                     message: e.to_string(),
                 });
@@ -139,6 +140,7 @@ impl<T: Serialize, C: MessageCodec> ReplyPromise<T, C> {
             return;
         }
 
+        assert_sometimes!(true, "error_reply_sent");
         let result: Result<T, ReplyError> = Err(error);
         if let Ok(payload) = inner.codec.encode(&result)
             && let Some(sender) = inner.sender.take()

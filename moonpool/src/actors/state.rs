@@ -23,6 +23,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt;
 
+use moonpool_sim::assert_sometimes;
+
 /// Errors from state store operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ActorStateError {
@@ -156,6 +158,7 @@ impl ActorStateStore for InMemoryStateStore {
         if let Some(expected) = expected_etag {
             match entries.get(&key) {
                 Some(existing) if existing.etag != expected => {
+                    assert_sometimes!(true, "etag_conflict");
                     return Err(ActorStateError::ETagMismatch {
                         expected: expected.to_string(),
                         actual: existing.etag.clone(),

@@ -17,7 +17,7 @@ use crate::{
     HEADER_SIZE, NetworkProvider, Providers, TaskProvider, TimeProvider, UID, WireError,
     serialize_packet, try_deserialize_packet,
 };
-use moonpool_sim::assert_sometimes;
+use moonpool_sim::{assert_sometimes, assert_sometimes_each};
 
 /// Type alias for the peer receiver channel.
 /// Used when taking ownership via `take_receiver()`.
@@ -596,6 +596,7 @@ async fn connection_task<P: Providers>(
                     // Buggify: Sometimes force write failures to test requeuing
                     if moonpool_sim::buggify_with_prob!(0.02) {
                         tracing::debug!("Buggify forcing write failure for requeue testing");
+                        assert_sometimes!(true, "buggified_write_failure");
                         handle_connection_failure(
                             &shared_state,
                             &mut current_connection,
@@ -643,6 +644,7 @@ async fn connection_task<P: Providers>(
                 match read_result {
                     Ok((_buffer, 0)) => {
                         // Connection closed
+                        assert_sometimes!(true, "graceful_close_on_read");
                         handle_connection_failure(
                             &shared_state,
                             &mut current_connection,
@@ -842,6 +844,7 @@ async fn establish_connection<P: Providers>(
             if let Some(max_failures) = config.max_connection_failures
                 && state.reconnect_state.failure_count >= max_failures
             {
+                assert_sometimes!(true, "max_failures_reached");
                 return Err(PeerError::ConnectionFailed);
             }
 
@@ -905,21 +908,37 @@ async fn establish_connection<P: Providers>(
                 }
                 return Ok(stream);
             }
-            Ok(Err(_)) | Err(_) => {
-                // Connection failed - update state and retry
-                {
-                    let mut state = shared_state.borrow_mut();
-                    state.reconnect_state.failure_count += 1;
-                    let next_delay = std::cmp::min(
-                        state.reconnect_state.current_delay * 2,
-                        config.max_reconnect_delay,
-                    );
-                    state.reconnect_state.current_delay = next_delay;
-                    let now = state.time.now();
-                    state.metrics.record_connection_failure_at(now, next_delay);
-                }
+            Ok(Err(_)) => {
+                // Connection refused/failed - update state and retry
+                record_connection_failure(shared_state, config);
+                // Continue loop to retry
+            }
+            Err(_) => {
+                // Connection attempt timed out
+                assert_sometimes!(true, "connection_timed_out");
+                record_connection_failure(shared_state, config);
                 // Continue loop to retry
             }
         }
     }
+}
+
+/// Record a connection failure: increment failure count, update backoff delay, record metrics.
+fn record_connection_failure<P: Providers>(
+    shared_state: &Rc<RefCell<PeerSharedState<P>>>,
+    config: &PeerConfig,
+) {
+    let mut state = shared_state.borrow_mut();
+    state.reconnect_state.failure_count += 1;
+    assert_sometimes_each!(
+        "backoff_depth",
+        [("attempt", state.reconnect_state.failure_count)]
+    );
+    let next_delay = std::cmp::min(
+        state.reconnect_state.current_delay * 2,
+        config.max_reconnect_delay,
+    );
+    state.reconnect_state.current_delay = next_delay;
+    let now = state.time.now();
+    state.metrics.record_connection_failure_at(now, next_delay);
 }

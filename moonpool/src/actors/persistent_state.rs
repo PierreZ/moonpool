@@ -30,6 +30,7 @@
 
 use std::rc::Rc;
 
+use moonpool_sim::assert_sometimes;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -63,6 +64,7 @@ impl<T: Serialize + DeserializeOwned + Default> PersistentState<T> {
 
         match stored {
             Some(entry) => {
+                assert_sometimes!(true, "persistent_state_loaded");
                 let value: T = serde_json::from_slice(&entry.data)
                     .map_err(|e| ActorStateError::SerializationError(e.to_string()))?;
                 Ok(Self {
@@ -127,6 +129,7 @@ impl<T: Serialize + DeserializeOwned + Default> PersistentState<T> {
 
         self.etag = Some(new_etag);
         self.record_exists = true;
+        assert_sometimes!(true, "persistent_state_written");
         Ok(())
     }
 

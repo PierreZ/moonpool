@@ -1,5 +1,3 @@
-// TODO CLAUDE AI: port to new Invariant trait API
-/*
 //! Message tracking and invariant validation for simulation tests.
 //!
 //! Tracks sent/received messages and validates correctness properties.
@@ -8,10 +6,10 @@
 
 use std::collections::HashSet;
 
-use moonpool_sim::{always_assert, sometimes_assert};
+use moonpool_sim::{Invariant, StateHandle, assert_always, assert_sometimes};
 
 /// Tracks messages sent and received for invariant validation.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct MessageInvariants {
     /// Reliable messages sent (by seq_id)
     pub reliable_sent: HashSet<u64>,
@@ -75,24 +73,21 @@ impl MessageInvariants {
     pub fn validate_always(&self) {
         // No phantom messages - received must be subset of sent
         for seq_id in &self.reliable_received {
-            always_assert!(
-                no_phantom_reliable,
+            assert_always!(
                 self.reliable_sent.contains(seq_id),
                 format!("Received reliable message {} that was never sent", seq_id)
             );
         }
 
         for seq_id in &self.unreliable_received {
-            always_assert!(
-                no_phantom_unreliable,
+            assert_always!(
                 self.unreliable_sent.contains(seq_id),
                 format!("Received unreliable message {} that was never sent", seq_id)
             );
         }
 
         // Unreliable can drop but never multiply (per-message)
-        always_assert!(
-            unreliable_conservation,
+        assert_always!(
             self.unreliable_received.len() <= self.unreliable_sent.len(),
             format!(
                 "More unique unreliable received ({}) than sent ({})",
@@ -105,15 +100,13 @@ impl MessageInvariants {
     /// Validate receiver-side invariants with coverage assertions.
     pub fn validate_receiver_always(&self) {
         // Track duplicate occurrence under chaos (expected with retransmission)
-        sometimes_assert!(
-            receiver_sees_duplicates,
+        assert_sometimes!(
             self.duplicate_count > 0,
             "Should sometimes see duplicates due to retransmission"
         );
 
         // Also track clean delivery path
-        sometimes_assert!(
-            receiver_no_duplicates,
+        assert_sometimes!(
             self.duplicate_count == 0,
             "Should sometimes see no duplicates (clean delivery)"
         );
@@ -129,8 +122,7 @@ impl MessageInvariants {
             .difference(&self.reliable_received)
             .collect();
 
-        always_assert!(
-            all_reliable_delivered,
+        assert_always!(
             missing.is_empty(),
             format!(
                 "Not all reliable messages delivered. Missing: {:?}",
@@ -139,14 +131,12 @@ impl MessageInvariants {
         );
 
         // Coverage assertions for unreliable behavior
-        sometimes_assert!(
-            some_unreliable_dropped,
+        assert_sometimes!(
             self.unreliable_received.len() < self.unreliable_sent.len(),
             "Some unreliable should sometimes be dropped under chaos"
         );
 
-        sometimes_assert!(
-            all_unreliable_delivered,
+        assert_sometimes!(
             self.unreliable_received.len() == self.unreliable_sent.len(),
             "All unreliable should sometimes be delivered (no chaos)"
         );
@@ -164,17 +154,11 @@ impl MessageInvariants {
 }
 
 // ============================================================================
-// RPC Invariants (Phase 12B)
+// RPC Invariants
 // ============================================================================
 
 /// Tracks RPC request-response pairs for invariant validation.
-///
-/// Validates FDB-style guarantees:
-/// - Request-Response Correlation: every response maps to a sent request
-/// - Promise Single-Fulfillment: at most one of send/error/drop per promise
-/// - Broken Promise Guarantee: dropped promises send BrokenPromise error
-/// - No Phantom Messages: can't receive response for unsent request
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct RpcInvariants {
     /// RPC requests sent (by request_id)
     pub requests_sent: HashSet<u64>,
@@ -223,13 +207,10 @@ impl RpcInvariants {
     }
 
     /// Validate invariants that should always hold.
-    ///
-    /// Called continuously during test execution.
     pub fn validate_always(&self) {
         // INV-1: No phantom responses - received must be subset of sent
         for request_id in &self.responses_received {
-            always_assert!(
-                no_phantom_rpc_response,
+            assert_always!(
                 self.requests_sent.contains(request_id),
                 format!(
                     "Received RPC response {} that was never requested",
@@ -240,8 +221,7 @@ impl RpcInvariants {
 
         // INV-2: No phantom broken promises
         for request_id in &self.broken_promises {
-            always_assert!(
-                no_phantom_broken_promise,
+            assert_always!(
                 self.requests_sent.contains(request_id),
                 format!(
                     "Received broken promise {} that was never requested",
@@ -252,8 +232,7 @@ impl RpcInvariants {
 
         // INV-3: At most one resolution per request (success XOR broken)
         for request_id in &self.responses_received {
-            always_assert!(
-                rpc_single_resolution,
+            assert_always!(
                 !self.broken_promises.contains(request_id),
                 format!(
                     "Request {} has both success response and broken promise",
@@ -266,25 +245,19 @@ impl RpcInvariants {
     /// Validate coverage assertions for error paths.
     pub fn validate_coverage(&self) {
         // Success path coverage
-        sometimes_assert!(
-            rpc_success_path,
+        assert_sometimes!(
             self.successful_responses > 0,
             "Should sometimes see successful RPC responses"
         );
 
         // Broken promise path coverage
-        sometimes_assert!(
-            rpc_broken_promise_path,
+        assert_sometimes!(
             !self.broken_promises.is_empty(),
             "Should sometimes see broken promises"
         );
 
         // Timeout path coverage
-        sometimes_assert!(
-            rpc_timeout_path,
-            self.timeouts > 0,
-            "Should sometimes see timeouts"
-        );
+        assert_sometimes!(self.timeouts > 0, "Should sometimes see timeouts");
     }
 
     /// Get summary for logging.
@@ -301,141 +274,36 @@ impl RpcInvariants {
 }
 
 // ============================================================================
-// Multi-Node RPC Invariants (Phase 12 Step 7d)
+// Invariant trait wrappers for use with SimulationBuilder
 // ============================================================================
 
-/// Cross-node invariant validator for multi-node RPC tests.
-///
-/// Validates properties that span multiple nodes:
-/// - Client-Server Consistency: server sees all requests client sent
-/// - Response Routing: responses route back to correct client
-/// - No Message Duplication: each request arrives at most once
-/// - Load Distribution: in multi-server scenarios, requests distribute
-pub struct MultiNodeRpcInvariants;
+/// Invariant wrapper that validates MessageInvariants from StateHandle.
+pub struct MessageInvariantChecker;
 
-impl MultiNodeRpcInvariants {
-    /// Validate cross-node invariants from state registry data.
-    ///
-    /// This examines the collected states from all clients and servers
-    /// and validates global properties.
-    ///
-    /// # Arguments
-    /// * `states` - Map of node_id -> state JSON from StateRegistry
-    pub fn validate_cross_node(states: &std::collections::HashMap<String, serde_json::Value>) {
-        // Collect client and server states
-        let mut client_requests_sent: u64 = 0;
-        let mut server_responses_sent: u64 = 0;
-        let mut client_count = 0;
-        let mut server_count = 0;
-
-        for (node_id, state) in states {
-            if node_id.starts_with("client:") {
-                client_count += 1;
-                // Parse client state - extract sent count
-                if let Some(summary) = state.as_str() {
-                    // Parse "RPC: sent=N, ..." format
-                    if let Some(start) = summary.find("sent=") {
-                        let rest = &summary[start + 5..];
-                        if let Some(end) = rest.find(',')
-                            && let Ok(n) = rest[..end].parse::<u64>()
-                        {
-                            client_requests_sent += n;
-                        }
-                    }
-                }
-            } else if node_id.starts_with("server:") {
-                server_count += 1;
-                // Parse server state - extract success count as "responses sent"
-                if let Some(summary) = state.as_str()
-                    && let Some(start) = summary.find("success=")
-                {
-                    let rest = &summary[start + 8..];
-                    if let Some(end) = rest.find(',')
-                        && let Ok(n) = rest[..end].parse::<u64>()
-                    {
-                        server_responses_sent += n;
-                    }
-                }
-            }
-        }
-
-        tracing::info!(
-            clients = client_count,
-            servers = server_count,
-            client_requests = client_requests_sent,
-            server_responses = server_responses_sent,
-            "Multi-node invariant check"
-        );
-
-        // Coverage assertions for multi-node scenarios
-        sometimes_assert!(
-            multi_node_has_clients,
-            client_count > 0,
-            "Should have active clients"
-        );
-
-        sometimes_assert!(
-            multi_node_has_servers,
-            server_count > 0,
-            "Should have active servers"
-        );
-
-        sometimes_assert!(
-            multi_node_requests_sent,
-            client_requests_sent > 0,
-            "Clients should send requests"
-        );
-
-        sometimes_assert!(
-            multi_node_responses_sent,
-            server_responses_sent > 0,
-            "Server should send responses"
-        );
+impl Invariant for MessageInvariantChecker {
+    fn name(&self) -> &str {
+        "message_invariants"
     }
 
-    /// Validate that request counts are reasonable.
-    ///
-    /// In multi-node scenarios with chaos, we expect:
-    /// - Some requests may be lost due to network failures
-    /// - Server shouldn't receive more requests than clients sent
-    pub fn validate_request_conservation(
-        total_client_requests: u64,
-        total_server_received: u64,
-        total_server_responses: u64,
-    ) {
-        // Server can't receive more requests than clients sent
-        always_assert!(
-            request_conservation,
-            total_server_received <= total_client_requests,
-            format!(
-                "Server received {} requests but clients only sent {}",
-                total_server_received, total_client_requests
-            )
-        );
+    fn check(&self, state: &StateHandle, _sim_time_ms: u64) {
+        if let Some(inv) = state.get::<MessageInvariants>("message_invariants") {
+            inv.validate_always();
+        }
+    }
+}
 
-        // Server can't send more responses than requests received
-        always_assert!(
-            response_conservation,
-            total_server_responses <= total_server_received,
-            format!(
-                "Server sent {} responses but only received {} requests",
-                total_server_responses, total_server_received
-            )
-        );
+/// Invariant wrapper that validates RpcInvariants from StateHandle.
+pub struct RpcInvariantChecker;
 
-        // Coverage: under chaos, some requests should be lost
-        sometimes_assert!(
-            some_requests_lost,
-            total_server_received < total_client_requests,
-            "Some requests should be lost under network chaos"
-        );
+impl Invariant for RpcInvariantChecker {
+    fn name(&self) -> &str {
+        "rpc_invariants"
+    }
 
-        // Coverage: in happy path, all requests should arrive
-        sometimes_assert!(
-            all_requests_delivered,
-            total_server_received == total_client_requests,
-            "All requests should sometimes be delivered (no chaos)"
-        );
+    fn check(&self, state: &StateHandle, _sim_time_ms: u64) {
+        if let Some(inv) = state.get::<RpcInvariants>("rpc_invariants") {
+            inv.validate_always();
+        }
     }
 }
 
@@ -572,4 +440,3 @@ mod tests {
         assert!(summary.contains("conn_fail=1"));
     }
 }
-*/

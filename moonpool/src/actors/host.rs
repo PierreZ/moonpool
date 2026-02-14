@@ -23,6 +23,8 @@ use std::rc::Rc;
 use std::task::{Poll, Waker};
 use std::time::Duration;
 
+use moonpool_sim::assert_sometimes;
+
 use crate::{
     Endpoint, JsonCodec, MessageCodec, NetTransport, Providers, RequestStream, TaskProvider,
     TimeProvider, UID,
@@ -433,6 +435,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
     pending_tasks: Rc<Cell<usize>>,
 ) {
     let mut actor: Option<H> = None;
+    let mut was_previously_active = false;
 
     loop {
         // Wait for next message, with optional idle timeout when actor is active.
@@ -453,6 +456,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                                 state_store: state_store.clone(),
                             };
                             let _ = a.on_deactivate(&ctx).await;
+                            assert_sometimes!(true, "deactivate_after_idle_timeout");
                         }
                         actor = None;
                         let _ = directory.unregister(&actor_id).await;
@@ -468,11 +472,16 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
 
         let Some((actor_msg, reply)) = msg_opt else {
             // Mailbox closed — shutdown
+            assert_sometimes!(true, "identity_mailbox_closed");
             break;
         };
 
         // Activate if needed
         if actor.is_none() {
+            if was_previously_active {
+                assert_sometimes!(true, "actor_reactivated");
+            }
+
             let mut new_actor = H::default();
             let actor_id = ActorId::new(actor_type, identity.clone());
             let ctx = ActorContext {
@@ -482,6 +491,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
             };
 
             if let Err(e) = new_actor.on_activate(&ctx).await {
+                assert_sometimes!(true, "on_activate_failed");
                 reply.send(ActorResponse {
                     body: Err(format!("activation failed: {e}")),
                     cache_invalidation: None,
@@ -494,6 +504,8 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
             let _ = directory.register(&actor_id, endpoint).await;
 
             actor = Some(new_actor);
+            assert_sometimes!(true, "actor_activated");
+            was_previously_active = true;
         }
 
         // Dispatch
@@ -541,6 +553,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                     state_store: state_store.clone(),
                 };
                 let _ = a.on_deactivate(&ctx).await;
+                assert_sometimes!(true, "deactivate_on_idle");
             }
             actor = None;
             let _ = directory.unregister(&actor_id).await;

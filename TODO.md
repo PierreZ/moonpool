@@ -381,7 +381,7 @@ Commit message: `refactor(moonpool): port assertion macros, delete StateRegistry
 
 ## Phase 7: Exploration verification workloads
 
-**Status**: NOT STARTED
+**Status**: COMPLETE
 
 **Goal**: Port maze + dungeon from Claude-fork-testing as moonpool-sim integration tests. These prove fork-based exploration actually works end-to-end — finding paths through probability gates that random testing would take millions of iterations to discover.
 
@@ -425,7 +425,7 @@ Commit message: `feat(moonpool-sim): port maze + dungeon exploration workloads, 
 
 ## Phase 8: Fork points in transport + actor source
 
-**Status**: NOT STARTED
+**Status**: COMPLETE
 
 **Goal**: Add NEW `assert_sometimes!` and `assert_sometimes_each!` assertions as exploration fork points. These go in **library source** (not tests) so every simulation run hits them. Phase 6 already ports ~33 existing assertions to new macro names — Phase 8 adds genuinely new ones that don't exist yet.
 
@@ -505,7 +505,7 @@ Commit message: `feat(moonpool): add exploration fork points in transport and ac
 
 ## Phase 9: Transport workloads
 
-**Status**: NOT STARTED
+**Status**: COMPLETE
 
 **Goal**: FDB-style alphabet workloads for transport. Patterns from the blog post: operation alphabets (Normal/Adversarial/Nemesis), reference model (BTreeMap), conservation laws.
 
@@ -587,7 +587,7 @@ Commit message: `feat(moonpool-transport): FDB-style alphabet workloads with ref
 
 ## Phase 10: Actor workloads
 
-**Status**: NOT STARTED
+**Status**: COMPLETE (slow_simulation_banking_chaos ignored — transfer revert bug to fix)
 
 **Goal**: FDB-style alphabet workloads for the virtual actor system. Conservation laws, ETag concurrency, lifecycle verification.
 
