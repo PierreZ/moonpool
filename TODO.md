@@ -92,7 +92,7 @@ Commit message (for user): `refactor(moonpool): comment out old simulation tests
 
 ## Phase 2: EachBucket infrastructure in moonpool-explorer
 
-**Status**: NOT STARTED
+**Status**: COMPLETE
 
 **Goal**: Add `assert_sometimes_each!` backing infrastructure to moonpool-explorer. Isolated crate, no moonpool-sim changes.
 
