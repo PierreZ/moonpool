@@ -427,56 +427,75 @@ Commit message: `feat(moonpool-sim): port maze + dungeon exploration workloads, 
 
 **Status**: NOT STARTED
 
-**Goal**: Add `assert_sometimes!` and `assert_sometimes_each!` throughout source code to create fork points for exploration. These go in **library source** (not tests) so every simulation run hits them.
+**Goal**: Add NEW `assert_sometimes!` and `assert_sometimes_each!` assertions as exploration fork points. These go in **library source** (not tests) so every simulation run hits them. Phase 6 already ports ~33 existing assertions to new macro names — Phase 8 adds genuinely new ones that don't exist yet.
 
 **Can run in parallel with Phase 7 after Phase 6 completes. Split into 8a (transport) and 8b (actors) for parallel teammates.**
 
+### Assertion placement principles
+
+1. **Depth tracking**: Use `assert_sometimes_each!` with a depth/count key when reaching deeper states requires "sequential luck" (multiple successive rare events). The explorer forks at each depth, letting children explore deeper levels independently. This gives an nth-root asymptotic speedup over naive random testing.
+
+2. **Chaos pairing**: Place `assert_sometimes!` inside or after `buggify!` blocks. These mark chaos-injected faults with low effective probability (~0.5%). Forking here explores the error recovery pipeline that follows the injection.
+
+3. **Rare event marking**: Use `assert_sometimes!` for events that require specific conditions (chaos injection, timing, multi-step sequences). Don't add for events that fire on every run — those are already covered by Phase 6's ported assertions and would waste fork budget.
+
+4. **Lifecycle stages**: For the actor system (zero existing assertions), mark lifecycle boundaries that are progressively harder to reach. Reactivation after deactivation is the hardest and most valuable fork point.
+
 ### 8a: Transport fork points (`moonpool-transport/src/`)
 
-#### `peer/core.rs` — Connection & Reliability
+All entries below are NEW assertions not present in the existing codebase.
 
-| Location | Type | What to assert |
-|----------|------|----------------|
-| Connection attempt fails | `assert_sometimes_each!` | `"connection_failure", [("failure_count", count as i64)]` |
-| Backoff applied | `assert_sometimes!` | `backoff_delay > Duration::ZERO, "backoff_applied"` |
-| Checksum mismatch | `assert_sometimes!` | `true, "checksum_corruption_detected"` |
-| Reliable message requeued | `assert_sometimes!` | `true, "reliable_requeue_on_failure"` |
-| Unreliable discarded | `assert_sometimes!` | `true, "unreliable_discarded"` |
-| Connection recovered | `assert_sometimes!` | `failure_count > 0, "connection_recovered_after_failure"` |
-| Buggified write failure | `assert_sometimes!` | `true, "buggified_write_failure"` |
-| Graceful close on read | `assert_sometimes!` | `true, "graceful_close_on_read"` |
+#### `peer/core.rs` — Connection Reliability Depth
 
-#### `rpc/net_transport.rs` — Routing & Dispatch
+| Location | Type | What to assert | Rationale |
+|----------|------|----------------|-----------|
+| `establish_connection()`, after `failure_count += 1` (line ~919) | `assert_sometimes_each!` | `"backoff_depth", [("attempt", failure_count as i64)]` | Each successive backoff doubles the delay. Getting to attempt 3+ requires sustained connection failure across multiple retry cycles. The explorer forks at attempt N and children explore deeper attempts with different seeds — the core depth-tracking pattern. Without it, reaching high backoff depths requires an exponentially unlikely sequence of consecutive failures. |
+| Inside `buggify_with_prob!(0.02)` block (line ~600) | `assert_sometimes!` | `true, "buggified_write_failure"` | Marks chaos-injected write failure (~0.5% effective probability = 25% activation × 2% firing). Fork explores the post-failure pipeline: reliable requeue, unreliable discard, connection teardown, backoff, reconnection, and message redelivery. Pairs with existing `peer_requeues_on_failure` and `peer_recovers_after_failures` to verify the full recovery sequence. |
+| When `read` returns 0 bytes (EOF) in `connection_task` (line ~646) | `assert_sometimes!` | `true, "graceful_close_on_read"` | TCP half-close (FIN delivery) path. Chaos-dependent — requires `random_close` buggify or explicit peer close. Fork explores post-FIN behavior: pending send buffer handling, connection teardown, peer state cleanup. Validates the half-close fix (graceful vs abort close semantics). |
+| `establish_connection()`, when `max_connection_failures` check triggers return (line ~849) | `assert_sometimes!` | `true, "max_failures_reached"` | Terminal failure — peer gives up reconnecting. Very rare: requires max consecutive failures without any intervening success. Tests that the system handles permanent peer loss gracefully (error propagation to callers, workload fallback). |
+| `establish_connection()`, inside timeout/failure branch `Ok(Err(_)) \| Err(_)` (line ~915) | `assert_sometimes!` | `true, "connection_timed_out"` | Connection attempt timed out (distinct from connection refused). Tests timeout handling and its interaction with backoff delay calculation. Chaos-dependent — requires simulated network delays to exceed `connection_timeout`. |
 
-| Location | Type | What to assert |
-|----------|------|----------------|
-| Send path selection | `assert_sometimes_each!` | `"send_path", [("path", path_id)]` |
-| Peer reused (outgoing) | `assert_sometimes!` | `true, "peer_reused_outgoing"` |
-| Peer reused (incoming) | `assert_sometimes!` | `true, "peer_reused_incoming"` |
-| New peer created | `assert_sometimes!` | `true, "new_peer_created"` |
-| Dispatch undelivered | `assert_sometimes!` | `true, "dispatch_undelivered"` |
-| Incoming accepted | `assert_sometimes!` | `true, "incoming_connection_accepted"` |
+#### `rpc/reply_promise.rs` — RPC Error Paths
 
-#### `rpc/reply_future.rs` + `rpc/reply_promise.rs`
-
-| Location | Type | What to assert |
-|----------|------|----------------|
-| Reply resolution type | `assert_sometimes_each!` | `"rpc_resolution", [("type", type_id)]` |
-| Broken promise | `assert_sometimes!` | `true, "broken_promise"` |
-| Error reply sent | `assert_sometimes!` | `true, "error_reply_sent"` |
+| Location | Type | What to assert | Rationale |
+|----------|------|----------------|-----------|
+| `send()` serialization failure path, inside `Err(e)` match arm (line ~117) | `assert_sometimes!` | `true, "reply_serialization_failed"` | Success response fails to serialize, server sends error reply instead. Very rare — requires a type that serializes on the request path but fails on the response path. Tests the error fallback path in reply handling. |
+| `send_error()` method body (line ~142) | `assert_sometimes!` | `true, "error_reply_sent"` | Server explicitly sends an error response (distinct from broken promise). Tests the application-level error path through the RPC system. Requires workload to exercise error cases. |
 
 ### 8b: Actor fork points (`moonpool/src/actors/`)
 
-| File | Location | Type | What to assert |
-|------|----------|------|----------------|
-| `host.rs` | Actor activated | `assert_sometimes!` | `true, "actor_activated"` |
-| `host.rs` | Actor deactivated | `assert_sometimes!` | `true, "actor_deactivated"` |
-| `host.rs` | DeactivateOnIdle | `assert_sometimes!` | `true, "deactivate_on_idle"` |
-| `host.rs` | Mailbox closed | `assert_sometimes!` | `true, "identity_mailbox_closed"` |
-| `router.rs` | Placement invoked | `assert_sometimes!` | `true, "placement_invoked"` |
-| `state.rs` | ETag mismatch | `assert_sometimes!` | `true, "etag_conflict"` |
-| `persistent_state.rs` | State loaded | `assert_sometimes!` | `true, "state_loaded"` |
-| `persistent_state.rs` | State written | `assert_sometimes!` | `true, "state_persisted"` |
+The actor system currently has **zero assertions**. All additions are new. Listed from easiest to hardest to reach — the hardest transitions are the most valuable fork points.
+
+#### `host.rs` — Actor Lifecycle
+
+| Location | Type | What to assert | Rationale |
+|----------|------|----------------|-----------|
+| After successful `on_activate()` (line ~496, after `actor = Some(new_actor)`) | `assert_sometimes!` | `true, "actor_activated"` | Coverage baseline. Verifies exploration reaches actor activation code. Fork cost is minimal (one fork per seed) and provides a baseline signal from the actor system. |
+| After `on_activate()` returns `Err` (line ~484) | `assert_sometimes!` | `true, "on_activate_failed"` | Activation failure. Only fires when the actor's `on_activate` returns an error (injected by test workload or chaos). Tests that the system sends error response, skips dispatch, and continues processing. |
+| After `on_deactivate()` in `DeactivateOnIdle` check (line ~543) | `assert_sometimes!` | `true, "deactivate_on_idle"` | Per-dispatch deactivation. Only fires for actors with `DeactivateOnIdle` hint. Tests the core Orleans grain lifecycle: activate → dispatch → deactivate → reactivate. |
+| After `on_deactivate()` in idle timeout path (line ~455) | `assert_sometimes!` | `true, "deactivate_after_idle_timeout"` | Idle timeout deactivation. Requires no messages for the configured duration. Harder to reach than per-dispatch deactivation because it needs a period of silence for a specific identity. |
+| When actor reactivates after prior deactivation (line ~475) | `assert_sometimes!` | `true, "actor_reactivated"` | **Hardest lifecycle state.** Requires: (1) actor activates, (2) deactivation triggers, (3) new message arrives for same identity. Each step is independently unlikely. Fork here ensures thorough testing of state restoration and lifecycle correctness. **Impl**: add `let mut was_previously_active = false;` local in `identity_processing_loop`, set `true` after first activation, assert on re-activation. |
+| When mailbox closed detected (loop exit at `None` match, line ~469) | `assert_sometimes!` | `true, "identity_mailbox_closed"` | Shutdown path. Fires when the routing loop closes the identity mailbox during host shutdown. Fork explores shutdown → deactivate → cleanup with various in-flight message states. |
+
+#### `router.rs` — Routing Decisions
+
+| Location | Type | What to assert | Rationale |
+|----------|------|----------------|-----------|
+| When `placement.place()` is called in `resolve()` (line ~189) | `assert_sometimes!` | `true, "placement_invoked"` | New actor placement. Fires when the directory has no entry for the target actor. Tests placement strategy → directory registration path. |
+| When `AlreadyRegistered` race is handled in `resolve()` (line ~195) | `assert_sometimes!` | `true, "directory_registration_race"` | **Rare**: requires two callers to place the same actor identity simultaneously. Tests race resolution correctness. Chaos-dependent (requires timing luck or concurrent workloads). |
+
+#### `state.rs` — State Store
+
+| Location | Type | What to assert | Rationale |
+|----------|------|----------------|-----------|
+| When `write_state` returns `ETagMismatch` (line ~159) | `assert_sometimes!` | `true, "etag_conflict"` | Optimistic concurrency conflict. Requires concurrent writes to the same actor state key with stale ETags. Central to persistent actor correctness under contention. |
+
+#### `persistent_state.rs` — Persistent State Lifecycle
+
+| Location | Type | What to assert | Rationale |
+|----------|------|----------------|-----------|
+| When `load()` finds existing state (line ~65, `Some(entry)` branch) | `assert_sometimes!` | `true, "persistent_state_loaded"` | Fires when state was previously persisted and is being loaded. Combined with `actor_reactivated`, verifies the full write → deactivate → reactivate → load lifecycle. |
+| After successful `write_state()` (line ~128) | `assert_sometimes!` | `true, "persistent_state_written"` | State durability marker. Paired with `persistent_state_loaded` to verify round-trip correctness. |
 
 ### 8.1 Verify
 
