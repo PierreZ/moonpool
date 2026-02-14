@@ -236,6 +236,82 @@ pub fn on_sometimes_success(name: &str) {
     moonpool_explorer::maybe_fork_on_assertion(name);
 }
 
+/// Notify the exploration framework of a per-value bucketed assertion.
+///
+/// This delegates to moonpool-explorer's EachBucket infrastructure for
+/// fork-based exploration with identity keys and quality watermarks.
+pub fn on_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&str, i64)]) {
+    moonpool_explorer::assertion_sometimes_each(msg, keys, quality);
+}
+
+/// Assert that a condition is always true, panicking on failure with seed info.
+///
+/// Unlike `always_assert!`, this macro uses the message string directly
+/// (no separate name identifier).
+///
+/// # Parameters
+///
+/// * `condition` - The expression to evaluate (must be boolean)
+/// * `message` - A descriptive error message to show on failure
+#[macro_export]
+macro_rules! assert_always {
+    ($condition:expr, $message:expr) => {
+        if !$condition {
+            let seed = $crate::sim::get_current_sim_seed();
+            panic!("[ALWAYS FAILED] seed={} — {}", seed, $message);
+        }
+    };
+}
+
+/// Assert a condition that should sometimes be true, tracking stats and triggering exploration.
+///
+/// Unlike `sometimes_assert!`, this macro uses the message string directly
+/// as the assertion name (no separate name identifier).
+///
+/// # Parameters
+///
+/// * `condition` - The expression to evaluate (must be boolean)
+/// * `message` - A descriptive message used as the assertion name
+#[macro_export]
+macro_rules! assert_sometimes {
+    ($condition:expr, $message:expr) => {
+        let result = $condition;
+        $crate::chaos::assertions::record_assertion($message, result);
+        if result {
+            $crate::chaos::assertions::on_sometimes_success($message);
+        }
+    };
+}
+
+/// Per-value bucketed sometimes assertion with optional quality watermarks.
+///
+/// Each unique combination of identity keys gets its own bucket. On first
+/// discovery of a new bucket, a fork is triggered for exploration. If quality
+/// keys are provided, re-forks when quality improves.
+///
+/// # Usage
+///
+/// ```ignore
+/// // Identity keys only
+/// assert_sometimes_each!("gate", [("lock", lock_id), ("depth", depth)]);
+///
+/// // With quality watermarks
+/// assert_sometimes_each!("descended", [("to_floor", floor)], [("health", hp)]);
+/// ```
+#[macro_export]
+macro_rules! assert_sometimes_each {
+    ($msg:expr, [ $(($name:expr, $val:expr)),+ $(,)? ]) => {
+        $crate::chaos::assertions::on_sometimes_each($msg, &[ $(($name, $val as i64)),+ ], &[])
+    };
+    ($msg:expr, [ $(($name:expr, $val:expr)),+ $(,)? ], [ $(($qname:expr, $qval:expr)),+ $(,)? ]) => {
+        $crate::chaos::assertions::on_sometimes_each(
+            $msg,
+            &[ $(($name, $val as i64)),+ ],
+            &[ $(($qname, $qval as i64)),+ ],
+        )
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

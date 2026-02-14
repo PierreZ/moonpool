@@ -131,7 +131,7 @@ Commit message: `feat(moonpool-explorer): add EachBucket infrastructure for asse
 
 ## Phase 3: New assertion macros
 
-**Status**: NOT STARTED
+**Status**: COMPLETE
 
 **Goal**: Add new assertion macros alongside old ones. Old ones still needed by transport src until Phase 6.
 

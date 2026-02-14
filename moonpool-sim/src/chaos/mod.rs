@@ -135,8 +135,9 @@ pub mod state_registry;
 
 // Re-export main types at module level
 pub use assertions::{
-    AssertionStats, get_assertion_results, on_sometimes_success, panic_on_assertion_violations,
-    record_assertion, reset_assertion_results, validate_assertion_contracts,
+    AssertionStats, get_assertion_results, on_sometimes_each, on_sometimes_success,
+    panic_on_assertion_violations, record_assertion, reset_assertion_results,
+    validate_assertion_contracts,
 };
 pub use buggify::{buggify_init, buggify_internal, buggify_reset};
 pub use invariants::InvariantCheck;
