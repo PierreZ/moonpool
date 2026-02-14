@@ -706,3 +706,73 @@ fn test_dungeon_slow_simulation() {
     assert!(exp.total_timelines > 0, "expected forked timelines, got 0");
     assert!(exp.bugs_found > 0, "exploration should have found the bug");
 }
+
+/// Test that a dungeon bug found by exploration can be replayed deterministically.
+///
+/// Same workflow as the maze replay test but for the more complex dungeon:
+/// 1. Exploration finds a path through all 7 key gates to reach the treasure
+/// 2. The recipe is captured and formatted as a timeline string
+/// 3. Replaying with the same seed + RNG breakpoints reproduces the treasure find
+#[test]
+fn test_dungeon_bug_replay_slow_simulation() {
+    // Phase 1: Run exploration to find the bug and capture the recipe.
+    let report = run_simulation(
+        SimulationBuilder::new()
+            .set_iterations(1)
+            .set_debug_seeds(vec![54321])
+            .enable_exploration(ExplorationConfig {
+                max_depth: 120,
+                children_per_fork: 4,
+                global_energy: 2_000_000,
+                adaptive: Some(moonpool_sim::AdaptiveConfig {
+                    batch_size: 30,
+                    min_timelines: 800,
+                    max_timelines: 2_000,
+                    per_mark_energy: 20_000,
+                }),
+            })
+            .workload_fn("dungeon", |_ctx| async move {
+                let mut dungeon = Dungeon::new(DEFAULT_MAX_STEPS, DEFAULT_TARGET_LEVEL);
+                let result = dungeon.run();
+
+                if result == StepResult::BugFound {
+                    return Err(moonpool_sim::SimulationError::InvalidState(
+                        "dungeon bug: treasure found on floor 8".to_string(),
+                    ));
+                }
+
+                Ok(())
+            }),
+    );
+
+    assert_eq!(report.successful_runs, 1);
+
+    let exp = report.exploration.expect("exploration report missing");
+    assert!(exp.bugs_found > 0, "exploration should have found the bug");
+    let recipe = exp.bug_recipe.expect("bug recipe should be captured");
+    let initial_seed = report.seeds_used[0];
+
+    // Phase 2: Format and parse the recipe (simulates developer copy-pasting from logs).
+    let timeline_str = moonpool_sim::format_timeline(&recipe);
+    eprintln!(
+        "Replaying dungeon bug: seed={}, recipe={}",
+        initial_seed, timeline_str
+    );
+    let parsed_recipe =
+        moonpool_sim::parse_timeline(&timeline_str).expect("recipe should round-trip");
+    assert_eq!(recipe, parsed_recipe);
+
+    // Phase 3: Replay — same seed, breakpoints from recipe, no exploration.
+    moonpool_sim::reset_sim_rng();
+    moonpool_sim::set_sim_seed(initial_seed);
+    moonpool_sim::set_rng_breakpoints(parsed_recipe);
+
+    let mut dungeon = Dungeon::new(DEFAULT_MAX_STEPS, DEFAULT_TARGET_LEVEL);
+    let result = dungeon.run();
+
+    assert_eq!(
+        result,
+        StepResult::BugFound,
+        "replaying the recipe should reproduce the dungeon bug"
+    );
+}
