@@ -17,7 +17,7 @@ use crate::{
     HEADER_SIZE, NetworkProvider, Providers, TaskProvider, TimeProvider, UID, WireError,
     serialize_packet, try_deserialize_packet,
 };
-use moonpool_sim::sometimes_assert;
+use moonpool_sim::assert_sometimes;
 
 /// Type alias for the peer receiver channel.
 /// Used when taking ownership via `take_receiver()`.
@@ -298,8 +298,7 @@ impl<P: Providers> Peer<P> {
             let mut state = self.shared_state.borrow_mut();
 
             // Check queue capacity before adding
-            sometimes_assert!(
-                peer_queue_near_capacity,
+            assert_sometimes!(
                 state.reliable_queue.len() >= (self.config.max_queue_size as f64 * 0.8) as usize,
                 "Message queue should sometimes approach capacity limit"
             );
@@ -321,8 +320,7 @@ impl<P: Providers> Peer<P> {
             );
 
             // Check if queue is growing with multiple messages
-            sometimes_assert!(
-                peer_queue_grows,
+            assert_sometimes!(
                 state.reliable_queue.len() > 1,
                 "Message queue should sometimes contain multiple messages"
             );
@@ -707,8 +705,7 @@ fn handle_connection_failure<P: Providers>(
     // Handle the failed send if provided
     if let Some((data, is_reliable)) = failed_send {
         if is_reliable {
-            sometimes_assert!(
-                peer_requeues_on_failure,
+            assert_sometimes!(
                 true,
                 "Peer should sometimes re-queue reliable messages after send failure"
             );
@@ -782,8 +779,7 @@ fn process_read_buffer<P: Providers>(
                             expected,
                             actual
                         );
-                        sometimes_assert!(
-                            checksum_caught_corruption,
+                        assert_sometimes!(
                             true,
                             "Checksum validation should sometimes catch corrupted packets"
                         );
@@ -796,8 +792,7 @@ fn process_read_buffer<P: Providers>(
                     }
                 }
 
-                sometimes_assert!(
-                    connection_teardown_on_wire_error,
+                assert_sometimes!(
                     true,
                     "Connection should sometimes be torn down on wire format errors"
                 );
@@ -816,8 +811,7 @@ fn process_read_buffer<P: Providers>(
                             "connection_task: discarding {} unreliable packets after wire error (FDB pattern)",
                             unreliable_count
                         );
-                        sometimes_assert!(
-                            unreliable_discarded_on_error,
+                        assert_sometimes!(
                             true,
                             "Unreliable packets should sometimes be discarded on connection errors"
                         );
@@ -897,8 +891,7 @@ async fn establish_connection<P: Providers>(
                     let mut state = shared_state.borrow_mut();
 
                     if state.reconnect_state.failure_count > 0 {
-                        sometimes_assert!(
-                            peer_recovers_after_failures,
+                        assert_sometimes!(
                             true,
                             "Peer should sometimes successfully connect after previous failures"
                         );

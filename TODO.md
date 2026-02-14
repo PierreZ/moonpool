@@ -351,7 +351,7 @@ Commit message: `feat(moonpool-sim): rewrite builder + orchestrator with Workloa
 
 ## Phase 6: Port transport macros + clean up old code
 
-**Status**: NOT STARTED
+**Status**: COMPLETE
 
 **Goal**: Replace old macro calls in transport src, delete old types. Everything compiles.
 

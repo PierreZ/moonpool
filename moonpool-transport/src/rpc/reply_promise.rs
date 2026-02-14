@@ -29,7 +29,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::{Endpoint, MessageCodec};
-use moonpool_sim::sometimes_assert;
+use moonpool_sim::assert_sometimes;
 use serde::Serialize;
 
 use super::reply_error::ReplyError;
@@ -110,7 +110,7 @@ impl<T: Serialize, C: MessageCodec> ReplyPromise<T, C> {
             Ok(payload) => {
                 if let Some(sender) = inner.sender.take() {
                     sender(&inner.reply_endpoint, &payload);
-                    sometimes_assert!(reply_sent, true, "Reply successfully sent");
+                    assert_sometimes!(true, "Reply successfully sent");
                 }
             }
             Err(e) => {
@@ -164,11 +164,7 @@ impl<T: Serialize, C: MessageCodec> Drop for ReplyPromise<T, C> {
     fn drop(&mut self) {
         let mut inner = self.inner.borrow_mut();
         if !inner.fulfilled {
-            sometimes_assert!(
-                broken_promise_detected,
-                true,
-                "Promise dropped without reply"
-            );
+            assert_sometimes!(true, "Promise dropped without reply");
 
             // Send BrokenPromise error to client
             let result: Result<T, ReplyError> = Err(ReplyError::BrokenPromise);

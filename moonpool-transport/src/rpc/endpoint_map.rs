@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::{UID, WELL_KNOWN_RESERVED_COUNT, WellKnownToken};
-use moonpool_sim::sometimes_assert;
+use moonpool_sim::assert_sometimes;
 
 use crate::error::MessagingError;
 
@@ -105,11 +105,7 @@ impl EndpointMap {
         }
         self.well_known[index] = Some(receiver);
         self.registration_count += 1;
-        sometimes_assert!(
-            well_known_registered,
-            true,
-            "Well-known endpoint registered successfully"
-        );
+        assert_sometimes!(true, "Well-known endpoint registered successfully");
         Ok(())
     }
 
@@ -148,11 +144,7 @@ impl EndpointMap {
 
         // Fall back to dynamic lookup
         let result = self.dynamic.get(token).cloned();
-        sometimes_assert!(
-            dynamic_lookup_found,
-            result.is_some(),
-            "Dynamic endpoint lookup succeeds"
-        );
+        assert_sometimes!(result.is_some(), "Dynamic endpoint lookup succeeds");
         result
     }
 
@@ -166,22 +158,14 @@ impl EndpointMap {
     pub fn remove(&mut self, token: &UID) -> Option<Rc<dyn MessageReceiver>> {
         if token.is_well_known() {
             // Well-known endpoints cannot be removed
-            sometimes_assert!(
-                well_known_removal_rejected,
-                true,
-                "Well-known endpoint removal correctly rejected"
-            );
+            assert_sometimes!(true, "Well-known endpoint removal correctly rejected");
             return None;
         }
 
         let result = self.dynamic.remove(token);
         if result.is_some() {
             self.deregistration_count += 1;
-            sometimes_assert!(
-                endpoint_deregistered,
-                true,
-                "Dynamic endpoint deregistered successfully"
-            );
+            assert_sometimes!(true, "Dynamic endpoint deregistered successfully");
         }
         result
     }
