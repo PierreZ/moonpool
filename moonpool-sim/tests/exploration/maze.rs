@@ -289,3 +289,76 @@ fn test_maze_slow_simulation() {
     assert!(exp.total_timelines > 0, "expected forked timelines, got 0");
     assert!(exp.bugs_found > 0, "exploration should have found the bug");
 }
+
+/// Test that a bug found by exploration can be replayed deterministically.
+///
+/// This demonstrates the full bug-reproduction workflow:
+/// 1. Exploration finds the bug and captures a recipe (sequence of RNG fork points)
+/// 2. The recipe is formatted as a human-readable timeline string (for logs/issue reports)
+/// 3. A developer parses the recipe string and replays it using RNG breakpoints
+/// 4. The exact same bug reproduces without any exploration or forking
+#[test]
+fn test_maze_bug_replay_slow_simulation() {
+    // Phase 1: Run exploration to find the bug and capture the recipe.
+    let report = run_simulation(
+        SimulationBuilder::new()
+            .set_iterations(1)
+            .set_debug_seeds(vec![12345])
+            .enable_exploration(ExplorationConfig {
+                max_depth: 30,
+                children_per_fork: 4,
+                global_energy: 50_000,
+                adaptive: Some(moonpool_sim::AdaptiveConfig {
+                    batch_size: 20,
+                    min_timelines: 100,
+                    max_timelines: 200,
+                    per_mark_energy: 1_000,
+                }),
+            })
+            .workload_fn("maze", |_ctx| async move {
+                let mut maze = Maze::new(DEFAULT_MAX_STEPS);
+                let result = maze.run();
+
+                if result == StepResult::BugFound {
+                    return Err(moonpool_sim::SimulationError::InvalidState(
+                        "maze bug: all 4 locks opened".to_string(),
+                    ));
+                }
+
+                Ok(())
+            }),
+    );
+
+    assert_eq!(report.successful_runs, 1);
+
+    let exp = report.exploration.expect("exploration report missing");
+    assert!(exp.bugs_found > 0, "exploration should have found the bug");
+    let recipe = exp.bug_recipe.expect("bug recipe should be captured");
+    let initial_seed = report.seeds_used[0];
+
+    // Phase 2: Simulate what a developer does — format and parse the recipe.
+    // In practice the recipe is printed to logs; the developer copies it to replay.
+    let timeline_str = moonpool_sim::format_timeline(&recipe);
+    eprintln!(
+        "Replaying bug: seed={}, recipe={}",
+        initial_seed, timeline_str
+    );
+    let parsed_recipe =
+        moonpool_sim::parse_timeline(&timeline_str).expect("recipe should round-trip");
+    assert_eq!(recipe, parsed_recipe);
+
+    // Phase 3: Replay — same seed, breakpoints from recipe, no exploration.
+    // The RNG follows the exact same path the bug-finding child took.
+    moonpool_sim::reset_sim_rng();
+    moonpool_sim::set_sim_seed(initial_seed);
+    moonpool_sim::set_rng_breakpoints(parsed_recipe);
+
+    let mut maze = Maze::new(DEFAULT_MAX_STEPS);
+    let result = maze.run();
+
+    assert_eq!(
+        result,
+        StepResult::BugFound,
+        "replaying the recipe should reproduce the bug"
+    );
+}
