@@ -182,7 +182,6 @@ impl TokioRunner {
                 peer_ips,
                 peer_names,
                 shutdown_signal: shutdown_signal.clone(),
-                state_registry: crate::StateRegistry::new(),
             };
 
             let provider = TokioNetworkProvider::new();
@@ -220,7 +219,6 @@ impl TokioRunner {
                     peer_ips,
                     peer_names,
                     shutdown_signal: shutdown_signal.clone(),
-                    state_registry: crate::StateRegistry::new(),
                 };
 
                 let provider = TokioNetworkProvider::new();

@@ -307,7 +307,7 @@ Commit message: `feat(moonpool-sim): add SimContext, Workload, FaultInjector, St
 
 ## Phase 5: Rewrite builder + orchestrator
 
-**Status**: NOT STARTED
+**Status**: COMPLETE
 
 **Goal**: Replace builder and orchestrator internals with new lifecycle. All old-API callers are already commented out (Phase 1), so this is safe.
 
