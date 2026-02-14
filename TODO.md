@@ -193,7 +193,7 @@ Commit message: `feat(moonpool-sim): add assert_always!, assert_sometimes!, asse
 
 ## Phase 4: New simulation types
 
-**Status**: NOT STARTED
+**Status**: COMPLETE
 
 **Goal**: Add all new types. Everything additive — nothing breaks, no callers yet.
 

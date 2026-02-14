@@ -130,7 +130,9 @@
 
 pub mod assertions;
 pub mod buggify;
+pub mod invariant_trait;
 pub mod invariants;
+pub mod state_handle;
 pub mod state_registry;
 
 // Re-export main types at module level
@@ -140,5 +142,7 @@ pub use assertions::{
     validate_assertion_contracts,
 };
 pub use buggify::{buggify_init, buggify_internal, buggify_reset};
+pub use invariant_trait::{Invariant, invariant_fn};
 pub use invariants::InvariantCheck;
+pub use state_handle::StateHandle;
 pub use state_registry::StateRegistry;
