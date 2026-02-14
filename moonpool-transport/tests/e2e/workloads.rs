@@ -1,3 +1,5 @@
+// TODO CLAUDE AI: port to new Workload trait API
+/*
 //! Workload implementations for E2E Peer testing.
 //!
 //! Provides client and server workloads that can be used with SimulationBuilder
@@ -720,3 +722,4 @@ pub async fn wire_server_workload_with_config(
         ..Default::default()
     })
 }
+*/

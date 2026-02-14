@@ -21,6 +21,7 @@ Before ANY work:
 1. Read `CLAUDE.md` for project constraints (no unwrap, no tokio direct calls, async_trait(?Send), etc.)
 2. Read this `TODO.md` for full context
 3. **After any context compaction**, re-read both `CLAUDE.md` and `TODO.md` to restore context
+4. **Track progress here**: Update each phase's `Status` field as work progresses (`NOT STARTED` → `IN PROGRESS` → `COMPLETE`). This file is the source of truth for resuming after context resets.
 
 ### Context documents
 
@@ -51,7 +52,7 @@ The fork-based exploration was prototyped in a separate project. Read these file
 
 ## Phase 1: Comment out old tests, keep the build green
 
-**Status**: NOT STARTED
+**Status**: COMPLETE
 
 **Goal**: Comment out all simulation/chaos test files. Keep all library code compiling. The old macros, builder API, StateRegistry, and InvariantCheck remain for now (transport src depends on them).
 

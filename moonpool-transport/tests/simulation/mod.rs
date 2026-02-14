@@ -3,6 +3,8 @@
 //! Provides shared utilities for testing EndpointMap, NetTransport,
 //! and NetNotifiedQueue under chaos conditions.
 
+#![allow(dead_code)]
+
 pub mod invariants;
 pub mod operations;
 #[cfg(test)]
