@@ -450,6 +450,19 @@ use dungeon_game::{Action, StepOutcome, Tile};
 const DEFAULT_MAX_STEPS: u64 = 10000;
 const DEFAULT_TARGET_LEVEL: u32 = 8;
 
+/// Level-dependent assertion messages for key discovery events.
+const KEY_FOUND_MSGS: [&str; 9] = [
+    "key found L0",
+    "key found L1",
+    "key found L2",
+    "key found L3",
+    "key found L4",
+    "key found L5",
+    "key found L6",
+    "key found L7",
+    "key found L8",
+];
+
 /// Probability of finding the hidden key when on the key tile.
 const KEY_FIND_P: f64 = 0.03;
 
@@ -500,6 +513,7 @@ impl Dungeon {
         self.last_action_index = Some(action_index);
         let action = Action::from_index(action_index);
         let level = self.game.status().level as u8;
+        let has_key = self.game.has_key() as u8;
         let hp = self.game.hp();
         let hp_bucket: u8 = match hp {
             ..=1 => 0,
@@ -512,6 +526,15 @@ impl Dungeon {
         let mut rng = SimRngAdapter;
         let outcome = self.game.act(action, &mut rng);
 
+        // Recompute HP bucket after action (may have changed from damage/healing).
+        let hp_after = self.game.hp();
+        let hp_bucket_after: u8 = match hp_after {
+            ..=1 => 0,
+            2 => 1,
+            3..=4 => 2,
+            _ => 3,
+        };
+
         // --- Key probability gate ---
         if self.game.on_key_tile() && !self.game.has_key() {
             moonpool_sim::assert_sometimes_each!(
@@ -521,6 +544,10 @@ impl Dungeon {
             );
             if Self::random_bool(KEY_FIND_P) {
                 self.game.grant_key();
+                let lvl = level as usize;
+                if lvl < KEY_FOUND_MSGS.len() {
+                    moonpool_sim::assert_sometimes!(true, KEY_FOUND_MSGS[lvl]);
+                }
             }
         }
 
@@ -570,19 +597,33 @@ impl Dungeon {
                     moonpool_sim::assert_sometimes_each!(
                         "room explored",
                         [("floor", level as i64), ("room", room_idx as i64)],
-                        [("health", hp_bucket as i64)]
+                        [
+                            ("has_key", has_key as i64),
+                            ("health", hp_bucket_after as i64)
+                        ]
                     );
                     if room_idx == self.game.num_rooms() - 1 {
                         moonpool_sim::assert_sometimes_each!(
                             "goal room",
                             [("floor", level as i64)],
-                            [("health", hp_bucket as i64)]
+                            [
+                                ("has_key", has_key as i64),
+                                ("health", hp_bucket_after as i64)
+                            ]
                         );
                     }
                 }
             }
             StepOutcome::Dead | StepOutcome::Alive => {}
         }
+
+        // Track level and HP watermarks for guidance.
+        moonpool_sim::assert_sometimes_greater_than!(
+            self.game.status().level as i64,
+            0,
+            "dungeon level reached"
+        );
+        moonpool_sim::assert_sometimes_greater_than!(hp_after as i64, 0, "health remaining");
 
         match outcome {
             StepOutcome::Won => StepResult::BugFound,
@@ -656,12 +697,6 @@ fn test_dungeon_slow_simulation() {
     // Parent run should succeed
     assert_eq!(report.successful_runs, 1);
 
-    // Verify exploration happened
-    let stats = moonpool_explorer::get_exploration_stats();
-    if let Some(stats) = stats {
-        assert!(
-            stats.total_timelines > 0,
-            "expected forked timelines, got 0"
-        );
-    }
+    let exp = report.exploration.expect("exploration report missing");
+    assert!(exp.total_timelines > 0, "expected forked timelines, got 0");
 }

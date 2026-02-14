@@ -285,6 +285,20 @@ impl SimulationBuilder {
             None
         };
 
+        // Print exploration summary (always visible, no tracing subscriber needed)
+        if let Some(ref exp) = exploration_report {
+            eprintln!(
+                "\n--- Exploration ---\n  timelines: {}  |  fork points: {}  |  bugs: {}  |  energy left: {}",
+                exp.total_timelines, exp.fork_points, exp.bugs_found, exp.energy_remaining
+            );
+            if let Some(ref recipe) = exp.bug_recipe {
+                eprintln!(
+                    "  bug recipe: {}",
+                    moonpool_explorer::format_timeline(recipe)
+                );
+            }
+        }
+
         // Log summary of all seeds used
         let iteration_count = iteration_manager.current_iteration();
         let (successful_runs, failed_runs) = metrics_collector.current_stats();

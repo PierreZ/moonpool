@@ -29,7 +29,10 @@ fn test_exploration_disabled_default() {
 
     assert_eq!(report.successful_runs, 1);
     assert!(!moonpool_explorer::explorer_is_child());
-    assert!(moonpool_explorer::get_exploration_stats().is_none());
+    assert!(
+        report.exploration.is_none(),
+        "exploration report should be None when disabled"
+    );
 }
 
 /// Test basic fork exploration — verify children are forked and stats update.
@@ -53,21 +56,17 @@ fn test_fork_basic() {
 
     assert_eq!(report.successful_runs, 1);
 
-    // After exploration, stats should show timelines were explored
-    let stats = moonpool_explorer::get_exploration_stats();
-    if let Some(stats) = stats {
-        assert!(
-            stats.total_timelines > 0,
-            "expected forked children, got total_timelines={}",
-            stats.total_timelines
-        );
-        assert!(
-            stats.fork_points > 0,
-            "expected fork points, got fork_points={}",
-            stats.fork_points
-        );
-    }
-    // Note: stats may be None if cleanup already ran, which is fine
+    let exp = report.exploration.expect("exploration report missing");
+    assert!(
+        exp.total_timelines > 0,
+        "expected forked children, got total_timelines={}",
+        exp.total_timelines
+    );
+    assert!(
+        exp.fork_points > 0,
+        "expected fork points, got fork_points={}",
+        exp.fork_points
+    );
 }
 
 /// Test that forked children that fail report exit code 42 (bug found).
@@ -102,15 +101,12 @@ fn test_child_exit_code() {
     // Parent should succeed
     assert_eq!(report.successful_runs, 1);
 
-    // Check if bug was found via shared stats
-    let stats = moonpool_explorer::get_exploration_stats();
-    if let Some(stats) = stats {
-        assert!(
-            stats.bug_found > 0,
-            "expected bug_found > 0, got {}",
-            stats.bug_found
-        );
-    }
+    let exp = report.exploration.expect("exploration report missing");
+    assert!(
+        exp.bugs_found > 0,
+        "expected bugs_found > 0, got {}",
+        exp.bugs_found
+    );
 }
 
 /// Test that max_depth=1 prevents grandchildren (no recursive forking).
@@ -143,14 +139,12 @@ fn test_depth_limit() {
     // - Root forks 2 children at gate_1 (depth 0->1)
     // - Gate_2 in children: depth=1 == max_depth, no fork
     // So total_timelines should be exactly 2
-    let stats = moonpool_explorer::get_exploration_stats();
-    if let Some(stats) = stats {
-        assert!(
-            stats.total_timelines <= 4,
-            "depth limit exceeded: total_timelines={} (expected <= 4)",
-            stats.total_timelines
-        );
-    }
+    let exp = report.exploration.expect("exploration report missing");
+    assert!(
+        exp.total_timelines <= 4,
+        "depth limit exceeded: total_timelines={} (expected <= 4)",
+        exp.total_timelines
+    );
 }
 
 /// Test that global energy budget limits the number of forks.
@@ -178,14 +172,12 @@ fn test_energy_limit() {
     assert_eq!(report.successful_runs, 1);
 
     // With energy=2 and children_per_fork=8, we can only fork 2 children total
-    let stats = moonpool_explorer::get_exploration_stats();
-    if let Some(stats) = stats {
-        assert!(
-            stats.total_timelines <= 2,
-            "energy limit exceeded: total_timelines={} (expected <= 2)",
-            stats.total_timelines
-        );
-    }
+    let exp = report.exploration.expect("exploration report missing");
+    assert!(
+        exp.total_timelines <= 2,
+        "energy limit exceeded: total_timelines={} (expected <= 2)",
+        exp.total_timelines
+    );
 }
 
 /// Test that a recipe captured from a bug-finding fork can be replayed
@@ -221,26 +213,23 @@ fn test_planted_bug() {
                 adaptive: None,
             })
             .workload_fn("client", |_ctx| async move {
-                // Gate 1: ~10% chance
-                let gate1 = moonpool_sim::sim_random_range(0u32..10) == 0;
-                moonpool_sim::assert_sometimes!(gate1, "gate 1");
+                // Gate 1: always passes — triggers the first fork
+                moonpool_sim::assert_sometimes!(true, "gate 1");
 
-                if gate1 {
-                    // Gate 2: ~10% chance (conditional on gate 1)
-                    let gate2 = moonpool_sim::sim_random_range(0u32..10) == 0;
-                    moonpool_sim::assert_sometimes!(gate2, "gate 2");
+                // Gate 2: ~10% chance (children explore with reseeded RNG)
+                let gate2 = moonpool_sim::sim_random_range(0u32..10) == 0;
+                moonpool_sim::assert_sometimes!(gate2, "gate 2");
 
-                    if gate2 {
-                        // Gate 3: ~10% chance (conditional on gate 1 and 2)
-                        let gate3 = moonpool_sim::sim_random_range(0u32..10) == 0;
-                        moonpool_sim::assert_sometimes!(gate3, "gate 3");
+                if gate2 {
+                    // Gate 3: ~10% chance
+                    let gate3 = moonpool_sim::sim_random_range(0u32..10) == 0;
+                    moonpool_sim::assert_sometimes!(gate3, "gate 3");
 
-                        if gate3 {
-                            // Bug! All 3 gates passed
-                            return Err(moonpool_sim::SimulationError::InvalidState(
-                                "planted bug found: all 3 gates passed".to_string(),
-                            ));
-                        }
+                    if gate3 {
+                        // Bug! Both gates passed
+                        return Err(moonpool_sim::SimulationError::InvalidState(
+                            "planted bug found: all gates passed".to_string(),
+                        ));
                     }
                 }
 
@@ -248,20 +237,13 @@ fn test_planted_bug() {
             }),
     );
 
-    // The parent should succeed (only children hit the bug)
+    // Parent should succeed (bugs only found in forked children)
     assert_eq!(report.successful_runs, 1);
-
-    // With exploration enabled, we should find the planted bug much more
-    // efficiently than brute force (P = 0.001 without exploration).
-    // The test mainly verifies the exploration machinery works end-to-end
-    // without crashing or hanging.
-    let stats = moonpool_explorer::get_exploration_stats();
-    if let Some(stats) = stats {
-        assert!(
-            stats.total_timelines > 0,
-            "expected some exploration, got total_timelines=0"
-        );
-    }
+    let exp = report.exploration.expect("exploration report missing");
+    assert!(
+        exp.total_timelines > 0,
+        "expected some exploration, got total_timelines=0"
+    );
 }
 
 /// Test that assert_sometimes_each! triggers fork-based exploration.
@@ -294,13 +276,10 @@ fn test_sometimes_each_triggers_fork() {
 
     assert_eq!(report.successful_runs, 1);
 
-    // Verify exploration happened
-    let stats = moonpool_explorer::get_exploration_stats();
-    if let Some(stats) = stats {
-        assert!(
-            stats.total_timelines > 0,
-            "expected forked children from assert_sometimes_each!, got total_timelines={}",
-            stats.total_timelines
-        );
-    }
+    let exp = report.exploration.expect("exploration report missing");
+    assert!(
+        exp.total_timelines > 0,
+        "expected forked children from assert_sometimes_each!, got total_timelines={}",
+        exp.total_timelines
+    );
 }

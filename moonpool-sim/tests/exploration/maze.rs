@@ -280,12 +280,6 @@ fn test_maze_slow_simulation() {
     // Parent run should succeed (bugs only found in forked children)
     assert_eq!(report.successful_runs, 1);
 
-    // Verify exploration happened
-    let stats = moonpool_explorer::get_exploration_stats();
-    if let Some(stats) = stats {
-        assert!(
-            stats.total_timelines > 0,
-            "expected forked timelines, got 0"
-        );
-    }
+    let exp = report.exploration.expect("exploration report missing");
+    assert!(exp.total_timelines > 0, "expected forked timelines, got 0");
 }
