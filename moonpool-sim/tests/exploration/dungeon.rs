@@ -675,10 +675,15 @@ fn test_dungeon_slow_simulation() {
         SimulationBuilder::new()
             .set_iterations(1)
             .enable_exploration(ExplorationConfig {
-                max_depth: 10,
+                max_depth: 120,
                 children_per_fork: 4,
-                global_energy: 300,
-                adaptive: None,
+                global_energy: 2_000_000,
+                adaptive: Some(moonpool_sim::AdaptiveConfig {
+                    batch_size: 30,
+                    min_timelines: 800,
+                    max_timelines: 2_000,
+                    per_mark_energy: 20_000,
+                }),
             })
             .workload_fn("dungeon", |_ctx| async move {
                 let mut dungeon = Dungeon::new(DEFAULT_MAX_STEPS, DEFAULT_TARGET_LEVEL);
@@ -699,4 +704,5 @@ fn test_dungeon_slow_simulation() {
 
     let exp = report.exploration.expect("exploration report missing");
     assert!(exp.total_timelines > 0, "expected forked timelines, got 0");
+    assert!(exp.bugs_found > 0, "exploration should have found the bug");
 }

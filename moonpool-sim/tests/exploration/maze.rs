@@ -258,10 +258,15 @@ fn test_maze_slow_simulation() {
         SimulationBuilder::new()
             .set_iterations(1)
             .enable_exploration(ExplorationConfig {
-                max_depth: 8,
+                max_depth: 30,
                 children_per_fork: 4,
-                global_energy: 200,
-                adaptive: None,
+                global_energy: 50_000,
+                adaptive: Some(moonpool_sim::AdaptiveConfig {
+                    batch_size: 20,
+                    min_timelines: 100,
+                    max_timelines: 200,
+                    per_mark_energy: 1_000,
+                }),
             })
             .workload_fn("maze", |_ctx| async move {
                 let mut maze = Maze::new(DEFAULT_MAX_STEPS);
@@ -282,4 +287,5 @@ fn test_maze_slow_simulation() {
 
     let exp = report.exploration.expect("exploration report missing");
     assert!(exp.total_timelines > 0, "expected forked timelines, got 0");
+    assert!(exp.bugs_found > 0, "exploration should have found the bug");
 }

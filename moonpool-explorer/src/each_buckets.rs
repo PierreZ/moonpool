@@ -201,6 +201,15 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
         }
     }
 
+    // Mark coverage bitmap for adaptive yield detection.
+    // Different identity key combinations produce different bucket_hash values,
+    // so the bitmap distinguishes e.g. floor-1 from floor-2 assertions.
+    let bm_ptr = crate::context::COVERAGE_BITMAP_PTR.with(|c| c.get());
+    if !bm_ptr.is_null() {
+        let bm = unsafe { crate::coverage::CoverageBitmap::new(bm_ptr) };
+        bm.set_bit(bucket_hash as usize);
+    }
+
     let has_quality = quality.len().min(4) as u8;
     let score = if has_quality > 0 {
         pack_quality(quality)
