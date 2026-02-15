@@ -1,0 +1,32 @@
+[package]
+name = "moonpool-paxos"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Vertical Paxos II consensus for the moonpool framework"
+documentation = "https://docs.rs/moonpool-paxos"
+readme = "README.md"
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "tokio_unstable"]
+rustc-args = ["--cfg", "tokio_unstable"]
+
+[dependencies]
+moonpool-core = { path = "../moonpool-core", version = "0.3.0" }
+moonpool-transport = { path = "../moonpool-transport", version = "0.3.0" }
+moonpool-transport-derive = { path = "../moonpool-transport-derive", version = "0.3.0" }
+
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1", features = ["full", "tracing"] }
+tracing = "0.1"
+
+[dev-dependencies]
+moonpool-sim = { path = "../moonpool-sim", version = "0.3.0" }
+moonpool-explorer = { path = "../moonpool-explorer", version = "0.3.0" }
+tokio = { version = "1", features = ["full", "tracing"] }
+tracing-subscriber = "0.3"

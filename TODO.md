@@ -19,31 +19,10 @@ INSTRUCTIONS FOR CLAUDE CODE (re-read this block every session start and after e
 ## Current Focus
 
 > **Task**: _none_
-> **Status**: not started
-> **Modified files**: _none_
+> **Status**: T-001 through T-013 complete
+> **Modified files**: moonpool-paxos/src/{lib,types,storage,master,acceptor,leader}.rs, moonpool-paxos/Cargo.toml, Cargo.toml
 
 ## Up Next
-
-**Foundation**
-- [ ] `T-001` 🔴 **Scaffold moonpool-paxos crate** — Cargo.toml (deps: moonpool-transport, moonpool-core, serde, async-trait; dev-deps: moonpool-sim, moonpool-explorer, tokio), lib.rs with crate-level doc explaining VP II vs Raft, add to workspace members
-- [ ] `T-002` 🔴 **Define core types** — `BallotNumber(u64)`, `LogSlot(u64)`, `Configuration { ballot, leader: NetworkAddress, acceptors: Vec<NetworkAddress> }`, `PaxosError` enum (StaleBallot, NotLeader, QuorumNotReached, Timeout, Network, Storage)
-- [ ] `T-003` 🔴 **Define Command + PaxosStorage traits** — `trait Command: Serialize + DeserializeOwned`, `trait PaxosStorage` (load/store vote, maxBallot, log entries), `InMemoryPaxosStorage` impl
-- [ ] `T-004` 🔴 **Define ConfigurationMaster trait** — `trait ConfigurationMaster` (new_ballot, report_complete, wait_activated, current_config), `InMemoryConfigMaster` impl with strict VP II flow
-
-**Acceptor (Paper Section 4.1-4.2, Figure 3)**
-- [ ] `T-005` 🟡 **Define AcceptorService** — `#[service]` trait with `prepare(Phase1aRequest) -> Phase1bResponse` and `accept(Phase2aRequest) -> Phase2bResponse`, AcceptorState struct
-- [ ] `T-006` 🟡 **Implement Phase1a handler** — On 1a: if msg.bal >= maxBallot, set maxBallot, reply with vote[prevBal]. Else ignore. Explain: "like Raft's RequestVote but for a specific log slot"
-- [ ] `T-007` 🟡 **Implement Phase2a handler** — On 2a: if msg.bal >= maxBallot, set vote[bal]=val, reply 2b. Explain: "like Raft's AppendEntries accept, but the value was already chosen by Phase 1"
-
-**Leader / Primary (Paper Section 4.3, Figure 4)**
-- [ ] `T-008` 🟡 **Define LeaderService** — `#[service]` trait with `submit(CommandRequest) -> CommandResponse`, LeaderState struct (ballot, prevBal, safeVal, log)
-- [ ] `T-009` 🟡 **Implement Phase 1 (VFindSafe)** — Send 1a to prev config acceptors, collect 1b. If any voted value found → safeVal. If read quorum all None → AllSafe. Explain: "like Raft's leader reading uncommitted entries after election, but formalized"
-- [ ] `T-010` 🟡 **Implement Phase 2** — Send 2a(bal, val) to ALL acceptors (write quorum = all). Wait for ALL 2b responses. Value is now chosen. Explain: "like Raft replication but requiring ALL followers, not just majority"
-- [ ] `T-011` 🟡 **Implement client request path** — Sequential: one slot at a time. Client sends command → leader assigns next slot → Phase 2 → respond. If safeVal != AllSafe, must use that value first.
-
-**Configuration Master (Paper Section 4.3, Figure 5)**
-- [ ] `T-012` 🟡 **Implement InMemoryConfigMaster** — Track curBallot, nextBallot. Send newBallot(bal, prevBal=curBallot). On complete(bal, prevBal): if prevBal==curBallot, activate and send activated(bal).
-- [ ] `T-013` 🟡 **Implement strict VP II activation** — New config starts inactive. Leader does Phase1 + Phase2 (if needed) → sends complete → master activates → leader receives activated → begins serving. Inactive ballots have no effect.
 
 **Reconfiguration**
 - [ ] `T-014` 🟡 **Implement failure detector** — Primary sends periodic heartbeats to master via RPC. Master tracks last_heartbeat per node. On timeout: trigger reconfiguration. Use TimeProvider for sim-friendly clocks.
@@ -69,3 +48,16 @@ _none_
 ## Completed
 
 <!-- Format: - [x] `T-XXX` **Title** — Completed YYYY-MM-DD, commit: abc1234 -->
+- [x] `T-001` **Scaffold moonpool-paxos crate** — Completed 2026-02-15
+- [x] `T-002` **Define core types** — Completed 2026-02-15
+- [x] `T-003` **Define Command + PaxosStorage traits** — Completed 2026-02-15
+- [x] `T-004` **Define ConfigurationMaster trait** — Completed 2026-02-15
+- [x] `T-005` **Define AcceptorService** — Completed 2026-02-15
+- [x] `T-006` **Implement Phase1a handler** — Completed 2026-02-15
+- [x] `T-007` **Implement Phase2a handler** — Completed 2026-02-15
+- [x] `T-008` **Define LeaderService** — Completed 2026-02-15
+- [x] `T-009` **Implement Phase 1 (VFindSafe)** — Completed 2026-02-15
+- [x] `T-010` **Implement Phase 2** — Completed 2026-02-15
+- [x] `T-011` **Implement client request path** — Completed 2026-02-15
+- [x] `T-012` **Implement InMemoryConfigMaster** — Completed 2026-02-15
+- [x] `T-013` **Implement strict VP II activation** — Completed 2026-02-15
