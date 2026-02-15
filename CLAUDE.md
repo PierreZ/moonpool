@@ -35,10 +35,12 @@ Types: `fix` (bugfix), `feat` (new feature), `build`, `chore`, `ci`, `docs`, `st
 
 ## Crate Architecture
 ```
-moonpool/           - Facade crate, re-exports everything
-moonpool-core/      - Provider traits (Time, Task, Network, Random) and core types
-moonpool-sim/       - Simulation runtime, chaos testing, buggify
-moonpool-transport/ - Peer connections, wire format, FlowTransport, RPC
+moonpool/                    - Facade crate + virtual actors, re-exports everything
+moonpool-core/               - Provider traits (Time, Task, Network, Random, Storage) and core types
+moonpool-sim/                - Simulation runtime, chaos testing, buggify, assertions
+moonpool-transport/          - Peer connections, wire format, FlowTransport, RPC
+moonpool-transport-derive/   - Proc-macro: #[service] and #[actor_impl]
+moonpool-explorer/           - Fork-based multiverse exploration, coverage, energy budgets
 ```
 
 ## Testing Philosophy

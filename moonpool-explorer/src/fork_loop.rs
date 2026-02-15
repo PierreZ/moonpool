@@ -239,8 +239,8 @@ fn adaptive_branch_on_discovery(mark_name: &str, slot_idx: usize) {
 
 /// Branch the simulation timeline at a discovery point.
 ///
-/// Called when [`crate::assertion_slots::maybe_fork_on_assertion`] detects a
-/// new assertion success. Forks `children_per_fork` child processes, each with
+/// Called when an assertion detects a new success (e.g. via `assertion_bool`
+/// or `assertion_numeric`). Forks `children_per_fork` child processes, each with
 /// a different seed derived from the current seed and the assertion name.
 ///
 /// **In the child**: sets `is_child = true`, increments depth, reseeds the RNG,

@@ -18,7 +18,9 @@
 //!
 //! - [`SimWorld`]: The simulation runtime managing events and time
 //! - [`SimulationBuilder`]: Configure and run simulations
-//! - [`chaos`]: Fault injection (buggify, assertions, invariants)
+//! - [`chaos`]: Fault injection (buggify, 14 assertion macros, invariants)
+//! - [`storage`]: Storage simulation with fault injection
+//! - Multiverse exploration via `moonpool-explorer` (re-exported as [`ExplorationConfig`], [`AdaptiveConfig`])
 //!
 //! ## Quick Start
 //!
@@ -47,6 +49,9 @@
 //! | Partial writes | 1000 bytes max | Message fragmentation |
 //! | Packet loss | disabled | At-least-once delivery |
 //! | Network partitions | disabled | Split-brain handling |
+//! | Storage corruption | configurable | Checksum validation, recovery |
+//! | Torn writes | configurable | Write atomicity, journaling |
+//! | Sync failures | configurable | Durability guarantees |
 //!
 //! ## Multi-Seed Testing
 //!
