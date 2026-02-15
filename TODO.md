@@ -18,17 +18,13 @@ INSTRUCTIONS FOR CLAUDE CODE (re-read this block every session start and after e
 
 ## Current Focus
 
-> **Task**: T-019 through T-022
-> **Status**: T-001 through T-018 complete
-> **Modified files**: moonpool-paxos/src/{lib,types,storage,master,acceptor,leader,heartbeat,reconfig,catchup,lease,client}.rs, moonpool-paxos/Cargo.toml, Cargo.toml
+> **Task**: _none_
+> **Status**: T-001 through T-022 complete
+> **Modified files**: moonpool-paxos/src/{lib,types,storage,master,acceptor,leader,heartbeat,reconfig,catchup,lease,client}.rs, moonpool-paxos/tests/simulation/{mod,workloads,invariants,test_scenarios}.rs, moonpool-paxos/Cargo.toml, Cargo.toml
 
 ## Up Next
 
-**Simulation Tests**
-- [ ] `T-019` 🔴 **Scaffold sim test** — 5-node topology (3 acceptors + 1 master + 1 client). SimulationBuilder with enable_exploration. Basic workload: client submits N commands, verify all committed.
-- [ ] `T-020` 🔴 **Safety assertions** — `assert_always!`: no two different values chosen for same slot, no split-brain (at most one active primary per ballot), acceptor never votes in ballot < maxBallot, write quorum = all ACK before chosen
-- [ ] `T-021` 🔴 **Liveness assertions** — `assert_sometimes!`: consensus reached for at least one slot, reconfiguration completes after primary failure, lease expires and new primary elected, catch-up completes for lagging backup
-- [ ] `T-022` 🟡 **Exploration assertions** — `assert_sometimes_each!`: reconfig depth (successive failovers), log slot depth (commands committed). `assert_sometimes_all!`: all backups caught up simultaneously, full write quorum healthy + consensus in progress. Adaptive config (batch=20, min=100, max=200, per_mark=1K)
+_All planned tasks complete._
 
 ## Blocked / Waiting
 
@@ -55,3 +51,7 @@ _none_
 - [x] `T-016` **Implement CatchUp RPC** — Completed 2026-02-15
 - [x] `T-017` **Implement conservative leases** — Completed 2026-02-15
 - [x] `T-018` **Implement PaxosClient** — Completed 2026-02-15
+- [x] `T-019` **Scaffold sim test** — Completed 2026-02-15
+- [x] `T-020` **Safety assertions** — Completed 2026-02-15
+- [x] `T-021` **Liveness assertions** — Completed 2026-02-15
+- [x] `T-022` **Exploration assertions** — Completed 2026-02-15
