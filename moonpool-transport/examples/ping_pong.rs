@@ -1,7 +1,7 @@
-//! Ping-Pong Example: Real TCP RPC using Moonpool's `#[interface]` macro.
+//! Ping-Pong Example: Real TCP RPC using Moonpool's `#[service]` macro.
 //!
 //! This example demonstrates moonpool's RPC over **real TCP sockets**
-//! using the ergonomic `#[interface]` macro and bound client pattern.
+//! using the ergonomic `#[service]` macro and bound client pattern.
 //!
 //! Run as two separate processes:
 //!
@@ -16,7 +16,7 @@
 //! # Architecture
 //!
 //! The example shows:
-//! - `#[interface]` macro for generating Server, Client, and BoundClient types
+//! - `#[service]` macro for generating Server, Client, and BoundClient types
 //! - `NetTransportBuilder` for clean transport setup
 //! - `.bind()` pattern for Orleans-style ergonomic client calls
 //! - Server: listening, receiving typed requests, sending responses
@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use moonpool_transport::{
     JsonCodec, NetTransportBuilder, NetworkAddress, Providers, RpcError, TimeProvider,
-    TokioProviders, interface,
+    TokioProviders, service,
 };
 use serde::{Deserialize, Serialize};
 
@@ -66,11 +66,11 @@ struct PingResponse {
 
 /// PingPong interface definition.
 ///
-/// The `#[interface]` macro generates:
+/// The `#[service]` macro generates:
 /// - `PingPongServer<C>` with `RequestStream` field (ping)
 /// - `PingPongClient` with `bind()` method
 /// - `BoundPingPongClient<N, T, TP, C>` implementing the `PingPong` trait
-#[interface(id = 0x5049_4E47)]
+#[service(id = 0x5049_4E47)]
 trait PingPong {
     async fn ping(&self, req: PingRequest) -> Result<PingResponse, RpcError>;
 }
@@ -260,7 +260,7 @@ fn main() {
         }
         _ => {
             println!("Ping-Pong Example: Real TCP RPC with Moonpool\n");
-            println!("This example demonstrates the #[interface] macro:\n");
+            println!("This example demonstrates the #[service] macro:\n");
             println!("  - PingPongServer<C> with RequestStream field");
             println!("  - PingPongClient with .bind() for creating BoundPingPongClient");
             println!("  - BoundPingPongClient implements PingPong trait for ergonomic calls");

@@ -1,14 +1,14 @@
-//! Proc-macro for FDB-style Interface pattern.
+//! Proc-macros for moonpool RPC interfaces and virtual actors.
 //!
-//! This crate provides the `#[interface]` attribute macro that generates
-//! server and client types from a trait definition.
+//! This crate provides the `#[service]` attribute macro (unified entry point)
+//! and `#[actor_impl]` for auto-generating `ActorHandler` boilerplate.
 //!
-//! # Example
+//! # RPC Example (`&self` methods)
 //!
 //! ```rust,ignore
-//! use moonpool_transport::{interface, RpcError};
+//! use moonpool_transport::{service, RpcError};
 //!
-//! #[interface(id = 0xCA1C_0000)]
+//! #[service(id = 0xCA1C_0000)]
 //! trait Calculator {
 //!     async fn add(&self, req: AddRequest) -> Result<AddResponse, RpcError>;
 //!     async fn sub(&self, req: SubRequest) -> Result<SubResponse, RpcError>;
@@ -16,41 +16,107 @@
 //! ```
 //!
 //! This generates:
-//! - `CalculatorServer<C>` with `RequestStream` fields and `init()` method
+//! - `CalculatorServer<C>` with `RequestStream` fields, `init()`, and `serve()`
 //! - `CalculatorClient` with endpoint accessors and `bind()` method
 //! - `BoundCalculatorClient<P, C>` implementing the `Calculator` trait
 //! - The trait itself with `#[async_trait(?Send)]`
+//!
+//! # Actor Example (`&mut self` methods)
+//!
+//! ```rust,ignore
+//! use moonpool_transport::{service, RpcError};
+//!
+//! #[service(id = 0xBA4E_4B00)]
+//! trait BankAccount {
+//!     async fn deposit(&mut self, req: DepositRequest) -> Result<BalanceResponse, RpcError>;
+//! }
+//! ```
+//!
+//! This generates:
+//! - `BankAccountRef<P>` for typed actor calls
+//! - `dispatch_bank_account()` function for routing method calls
+//! - `bank_account_methods` module with `ACTOR_TYPE` and method constants
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    Expr, ExprLit, FnArg, GenericArgument, Ident, ItemTrait, Lit, PathArguments, ReturnType,
-    TraitItem, Type, parse_macro_input,
+    Expr, ExprLit, FnArg, GenericArgument, Ident, ImplItem, ItemImpl, ItemTrait, Lit,
+    PathArguments, ReturnType, TraitItem, Type, parse_macro_input,
 };
 
-/// Attribute macro for FDB-style Interface pattern.
+/// Unified attribute macro for defining RPC interfaces and virtual actors.
 ///
-/// Generates server, client, and bound client types from the trait definition.
+/// Generates all boilerplate from a trait definition. The mode is auto-detected
+/// from the method receivers:
+///
+/// - **`&self` methods** → RPC mode: generates `{Name}Server`, `{Name}Client`,
+///   `Bound{Name}Client`, and a `serve()` method for automatic request dispatch.
+/// - **`&mut self` methods** → Actor mode: generates `{Name}Ref`, `dispatch_{name}()`,
+///   and a `{name}_methods` module with `ACTOR_TYPE` and method constants.
+///
+/// All methods must use the same receiver type (mixing `&self` and `&mut self` is
+/// a compile error).
 ///
 /// # Attributes
 ///
-/// - `#[interface(id = 0x...)]` - Required. Sets the interface ID (u64).
+/// - `#[service(id = 0x...)]` - Required. Sets the interface / actor type ID (u64).
 ///
-/// # Methods
+/// # RPC Example
 ///
-/// Each method must be async with signature:
-/// `async fn name(&self, req: ReqType) -> Result<RespType, RpcError>`
+/// ```rust,ignore
+/// #[service(id = 0x5049_4E47)]
+/// trait PingPong {
+///     async fn ping(&self, req: PingRequest) -> Result<PingResponse, RpcError>;
+/// }
+/// ```
 ///
-/// Method indices are derived from method declaration order, starting at 1.
-/// Index 0 is reserved for virtual actor dispatch.
+/// # Actor Example
+///
+/// ```rust,ignore
+/// #[service(id = 0xBA4E_4B00)]
+/// trait BankAccount {
+///     async fn deposit(&mut self, req: DepositRequest) -> Result<BalanceResponse, RpcError>;
+/// }
+/// ```
 #[proc_macro_attribute]
-pub fn interface(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr = parse_macro_input!(attr as InterfaceAttr);
     let item = parse_macro_input!(item as ItemTrait);
 
-    match interface_impl(attr, item) {
+    match service_impl(attr, item) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// Auto-detect mode from method receivers and delegate.
+fn service_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
+    let mut has_ref = false;
+    let mut has_mut_ref = false;
+
+    for trait_item in &item.items {
+        if let TraitItem::Fn(method) = trait_item
+            && let Some(FnArg::Receiver(recv)) = method.sig.inputs.first()
+        {
+            if recv.mutability.is_some() {
+                has_mut_ref = true;
+            } else {
+                has_ref = true;
+            }
+        }
+    }
+
+    if has_ref && has_mut_ref {
+        return Err(syn::Error::new_spanned(
+            &item.ident,
+            "all methods must use either `&self` (RPC mode) or `&mut self` (actor mode), not both",
+        ));
+    }
+
+    if has_mut_ref {
+        virtual_actor_impl(attr, item)
+    } else {
+        interface_impl(attr, item)
     }
 }
 
@@ -167,6 +233,46 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
     // Generate the trait with async_trait attribute
     let trait_vis = &item.vis;
     let trait_items = &item.items;
+    let trait_name_snake = to_snake_case(&name.to_string());
+
+    // Generate serve() method blocks — one close handle + one spawned task per method
+    let serve_close_handles: Vec<_> = method_infos
+        .iter()
+        .map(|m| {
+            let method_name = &m.name;
+            quote! {
+                let queue = self.#method_name.queue();
+                close_fns.push(Box::new(move || queue.close()));
+            }
+        })
+        .collect();
+
+    let serve_spawn_tasks: Vec<_> = method_infos
+        .iter()
+        .map(|m| {
+            let method_name = &m.name;
+            let resp_type = &m.resp_type;
+            let task_name = format!("{}_{}", trait_name_snake, m.name);
+            quote! {
+                {
+                    let stream = self.#method_name;
+                    let t = transport.clone();
+                    let h = handler.clone();
+                    providers.task().spawn_task(#task_name, async move {
+                        while let Some((req, reply)) = stream
+                            .recv_with_transport::<_, #resp_type>(&t)
+                            .await
+                        {
+                            match h.#method_name(req).await {
+                                Ok(resp) => reply.send(resp),
+                                Err(_) => {}
+                            }
+                        }
+                    });
+                }
+            }
+        })
+        .collect();
 
     let expanded = quote! {
         // Emit the original trait with async_trait(?Send)
@@ -177,7 +283,7 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
 
         /// Server-side interface with RequestStreams.
         ///
-        /// Generated by `#[interface]`.
+        /// Generated by `#[service]`.
         pub struct #server_name<C: moonpool_transport::MessageCodec> {
             #(#server_fields,)*
         }
@@ -190,6 +296,9 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
             pub const METHOD_COUNT: u32 = #method_count;
 
             /// Initialize the server interface, registering all handlers.
+            ///
+            /// Returns the server with individual `RequestStream` fields for
+            /// manual control. For a simpler pattern, use [`serve()`](Self::serve).
             pub fn init<P>(transport: &std::rc::Rc<moonpool_transport::NetTransport<P>>, codec: C) -> Self
             where
                 P: moonpool_transport::Providers,
@@ -197,11 +306,41 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
                 #(#server_inits)*
                 Self { #(#server_field_names,)* }
             }
+
+            /// Consume this server and spawn handler tasks for all methods.
+            ///
+            /// Each method gets its own task that loops on `recv_with_transport`
+            /// and dispatches to the handler. Returns a [`ServerHandle`](moonpool_transport::ServerHandle)
+            /// that stops all tasks when dropped.
+            ///
+            /// # Example
+            ///
+            /// ```rust,ignore
+            /// let server = MyServer::init(&transport, JsonCodec);
+            /// let handle = server.serve(transport.clone(), Rc::new(handler), &providers);
+            /// // Tasks run until handle is dropped or stop() is called
+            /// ```
+            pub fn serve<P, H>(
+                self,
+                transport: std::rc::Rc<moonpool_transport::NetTransport<P>>,
+                handler: std::rc::Rc<H>,
+                providers: &P,
+            ) -> moonpool_transport::ServerHandle
+            where
+                P: moonpool_transport::Providers,
+                H: #name + 'static,
+            {
+                use moonpool_transport::TaskProvider as _;
+                let mut close_fns: Vec<Box<dyn Fn()>> = Vec::new();
+                #(#serve_close_handles)*
+                #(#serve_spawn_tasks)*
+                moonpool_transport::ServerHandle::new(close_fns)
+            }
         }
 
         /// Client-side interface with Endpoints.
         ///
-        /// Generated by `#[interface]`.
+        /// Generated by `#[service]`.
         /// Only the base endpoint is serialized; method endpoints are derived.
         ///
         /// Use `bind()` to create a bound client that implements the trait.
@@ -280,7 +419,7 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
 
         /// Bound client that implements the interface trait.
         ///
-        /// Generated by `#[interface]`.
+        /// Generated by `#[service]`.
         /// Created by calling `bind()` on the client.
         pub struct #bound_client_name<P, C>
         where
@@ -383,48 +522,8 @@ fn extract_result_ok_type(ty: &Type) -> syn::Result<Type> {
 }
 
 // ============================================================================
-// #[virtual_actor] Attribute Macro
+// Virtual Actor Implementation (internal, called by #[service])
 // ============================================================================
-
-/// Attribute macro for defining virtual actor interfaces.
-///
-/// Generates all boilerplate from a trait definition:
-/// - The trait itself with `#[async_trait(?Send)]`
-/// - Actor type constant and method discriminant constants
-/// - Typed `ActorRef` (caller-side handle)
-/// - `dispatch_*` function for routing method calls
-///
-/// # Attributes
-///
-/// - `#[virtual_actor(id = 0x...)]` - Required. Sets the actor type ID (u64).
-///
-/// # Methods
-///
-/// Each method must be async with signature:
-/// `async fn name(&mut self, req: ReqType) -> Result<RespType, RpcError>`
-///
-/// Method indices are derived from method declaration order, starting at 1.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// #[virtual_actor(id = 0xBA4E_4B00)]
-/// trait BankAccount {
-///     async fn deposit(&mut self, req: DepositRequest) -> Result<BalanceResponse, RpcError>;
-///     async fn withdraw(&mut self, req: WithdrawRequest) -> Result<BalanceResponse, RpcError>;
-///     async fn get_balance(&mut self, req: GetBalanceRequest) -> Result<BalanceResponse, RpcError>;
-/// }
-/// ```
-#[proc_macro_attribute]
-pub fn virtual_actor(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let attr = parse_macro_input!(attr as InterfaceAttr);
-    let item = parse_macro_input!(item as ItemTrait);
-
-    match virtual_actor_impl(attr, item) {
-        Ok(tokens) => tokens.into(),
-        Err(err) => err.to_compile_error().into(),
-    }
-}
 
 /// Virtual actor method info.
 struct VirtualActorMethodInfo {
@@ -526,8 +625,10 @@ fn virtual_actor_impl(
             #(#trait_items)*
         }
 
-        /// Method discriminant constants for this virtual actor.
+        /// Actor type and method discriminant constants for this virtual actor.
         #trait_vis mod #methods_mod_name {
+            /// The actor type ID for this virtual actor.
+            pub const ACTOR_TYPE: moonpool::actors::ActorType = moonpool::actors::ActorType(#actor_type_id);
             #(#method_constants)*
         }
 
@@ -694,4 +795,142 @@ impl syn::parse::Parse for InterfaceAttr {
 
         Ok(InterfaceAttr { id })
     }
+}
+
+// ============================================================================
+// #[actor_impl] Attribute Macro
+// ============================================================================
+
+/// Attribute macro for auto-generating `ActorHandler` boilerplate.
+///
+/// Applied on `impl ActorHandler for MyStruct` blocks. Takes the actor trait
+/// name as argument and auto-generates `actor_type()` and `dispatch()`.
+/// User-provided methods (`deactivation_hint`, `on_activate`, `on_deactivate`)
+/// are preserved; missing lifecycle methods get defaults.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[actor_impl(BankAccount)]
+/// impl ActorHandler for BankAccountImpl {
+///     fn deactivation_hint(&self) -> DeactivationHint {
+///         DeactivationHint::DeactivateAfterIdle(Duration::from_secs(30))
+///     }
+///
+///     async fn on_activate<P: Providers, C: MessageCodec>(
+///         &mut self, ctx: &ActorContext<P, C>,
+///     ) -> Result<(), ActorError> {
+///         // load persistent state...
+///         Ok(())
+///     }
+/// }
+/// ```
+///
+/// For the simplest case (all defaults):
+///
+/// ```rust,ignore
+/// #[actor_impl(BankAccount)]
+/// impl ActorHandler for BankAccountImpl {}
+/// ```
+#[proc_macro_attribute]
+pub fn actor_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let trait_name = parse_macro_input!(attr as Ident);
+    let item = parse_macro_input!(item as ItemImpl);
+
+    match actor_impl_impl(trait_name, item) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+fn actor_impl_impl(trait_name: Ident, mut item: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
+    let snake = to_snake_case(&trait_name.to_string());
+    let methods_mod = format_ident!("{}_methods", snake);
+    let dispatch_fn = format_ident!("dispatch_{}", snake);
+
+    // Collect names of user-provided methods
+    let user_methods: Vec<String> = item
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let ImplItem::Fn(method) = item {
+                Some(method.sig.ident.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let has_actor_type = user_methods.iter().any(|m| m == "actor_type");
+    let has_dispatch = user_methods.iter().any(|m| m == "dispatch");
+    let has_deactivation_hint = user_methods.iter().any(|m| m == "deactivation_hint");
+    let has_on_activate = user_methods.iter().any(|m| m == "on_activate");
+    let has_on_deactivate = user_methods.iter().any(|m| m == "on_deactivate");
+
+    // Always inject actor_type()
+    if !has_actor_type {
+        let method: ImplItem = syn::parse_quote! {
+            fn actor_type() -> moonpool::actors::ActorType {
+                #methods_mod::ACTOR_TYPE
+            }
+        };
+        item.items.insert(0, method);
+    }
+
+    // Always inject dispatch()
+    if !has_dispatch {
+        let method: ImplItem = syn::parse_quote! {
+            async fn dispatch<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
+                &mut self,
+                ctx: &moonpool::actors::ActorContext<P, C>,
+                method: u32,
+                body: &[u8],
+            ) -> Result<Vec<u8>, moonpool::actors::ActorError> {
+                #dispatch_fn(self, ctx, method, body).await
+            }
+        };
+        item.items.push(method);
+    }
+
+    // Inject default deactivation_hint() if not provided
+    if !has_deactivation_hint {
+        let method: ImplItem = syn::parse_quote! {
+            fn deactivation_hint(&self) -> moonpool::actors::DeactivationHint {
+                moonpool::actors::DeactivationHint::KeepAlive
+            }
+        };
+        item.items.push(method);
+    }
+
+    // Inject default on_activate() if not provided
+    if !has_on_activate {
+        let method: ImplItem = syn::parse_quote! {
+            async fn on_activate<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
+                &mut self,
+                _ctx: &moonpool::actors::ActorContext<P, C>,
+            ) -> Result<(), moonpool::actors::ActorError> {
+                Ok(())
+            }
+        };
+        item.items.push(method);
+    }
+
+    // Inject default on_deactivate() if not provided
+    if !has_on_deactivate {
+        let method: ImplItem = syn::parse_quote! {
+            async fn on_deactivate<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
+                &mut self,
+                _ctx: &moonpool::actors::ActorContext<P, C>,
+            ) -> Result<(), moonpool::actors::ActorError> {
+                Ok(())
+            }
+        };
+        item.items.push(method);
+    }
+
+    // Emit with #[async_trait(?Send)]
+    Ok(quote! {
+        #[async_trait::async_trait(?Send)]
+        #item
+    })
 }

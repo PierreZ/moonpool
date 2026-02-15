@@ -12,12 +12,12 @@ use serde::{Deserialize, Serialize};
 
 use moonpool::actors::{
     ActorContext, ActorDirectory, ActorError, ActorHandler, ActorHost, ActorRouter,
-    ActorStateStore, ActorType, DeactivationHint, InMemoryDirectory, InMemoryStateStore,
-    LocalPlacement, PersistentState, PlacementStrategy,
+    ActorStateStore, DeactivationHint, InMemoryDirectory, InMemoryStateStore, LocalPlacement,
+    PersistentState, PlacementStrategy,
 };
 use moonpool::{
     Endpoint, JsonCodec, MessageCodec, NetTransportBuilder, NetworkAddress, Providers,
-    RandomProvider, RpcError, TimeProvider, UID, virtual_actor,
+    RandomProvider, RpcError, TimeProvider, UID, actor_impl, service,
 };
 use moonpool_sim::providers::SimProviders;
 use moonpool_sim::{SimContext, SimulationResult, Workload, assert_sometimes};
@@ -52,7 +52,7 @@ pub struct BalanceResponse {
 }
 
 /// Define the virtual actor interface.
-#[virtual_actor(id = 0xBA4E_4B00)]
+#[service(id = 0xBA4E_4B00)]
 trait BankAccount {
     async fn deposit(&mut self, req: DepositRequest) -> Result<BalanceResponse, RpcError>;
     async fn withdraw(&mut self, req: WithdrawRequest) -> Result<BalanceResponse, RpcError>;
@@ -111,12 +111,8 @@ impl BankAccount for BankAccountImpl {
     }
 }
 
-#[async_trait(?Send)]
+#[actor_impl(BankAccount)]
 impl ActorHandler for BankAccountImpl {
-    fn actor_type() -> ActorType {
-        BankAccountRef::<SimProviders>::ACTOR_TYPE
-    }
-
     fn deactivation_hint(&self) -> DeactivationHint {
         DeactivationHint::DeactivateOnIdle
     }
@@ -136,15 +132,6 @@ impl ActorHandler for BankAccountImpl {
             self.state = Some(ps);
         }
         Ok(())
-    }
-
-    async fn dispatch<P: Providers, C: MessageCodec>(
-        &mut self,
-        ctx: &ActorContext<P, C>,
-        method: u32,
-        body: &[u8],
-    ) -> Result<Vec<u8>, ActorError> {
-        dispatch_bank_account(self, ctx, method, body).await
     }
 }
 

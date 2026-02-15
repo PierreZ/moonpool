@@ -22,6 +22,7 @@ mod reply_promise;
 mod request;
 mod request_stream;
 mod rpc_error;
+mod server_handle;
 
 pub use endpoint_map::{EndpointMap, MessageReceiver};
 pub use interface::{method_endpoint, method_uid};
@@ -33,3 +34,4 @@ pub use reply_promise::ReplyPromise;
 pub use request::send_request;
 pub use request_stream::{RequestEnvelope, RequestStream};
 pub use rpc_error::RpcError;
+pub use server_handle::ServerHandle;

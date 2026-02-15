@@ -1,11 +1,11 @@
 //! Calculator Example: Multi-method RPC interface using Moonpool.
 //!
-//! This example demonstrates the `#[interface]` attribute macro that generates
+//! This example demonstrates the `#[service]` attribute macro that generates
 //! server and client interface structs from a trait definition.
 //!
 //! # Key Features
 //!
-//! - `#[interface(id = ...)]` generates `CalculatorServer`, `CalculatorClient`, and `BoundCalculatorClient`
+//! - `#[service(id = ...)]` generates `CalculatorServer`, `CalculatorClient`, and `BoundCalculatorClient`
 //! - Trait-based interface definition (idiomatic Rust)
 //! - Orleans-style ergonomic client calls via `.bind()`
 //! - Only base endpoint is serialized (FDB pattern)
@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use moonpool_transport::{
     JsonCodec, NetTransportBuilder, NetworkAddress, Providers, RpcError, TimeProvider,
-    TokioProviders, interface,
+    TokioProviders, service,
 };
 use serde::{Deserialize, Serialize};
 
@@ -90,11 +90,11 @@ struct DivResponse {
 
 /// Calculator interface definition.
 ///
-/// The `#[interface]` macro generates:
+/// The `#[service]` macro generates:
 /// - `CalculatorServer<C>` with `RequestStream` fields (add, sub, mul, div)
 /// - `CalculatorClient` with `bind()` method for creating bound clients
 /// - `BoundCalculatorClient<N, T, TP, C>` implementing the `Calculator` trait
-#[interface(id = 0xCA1C_0000)]
+#[service(id = 0xCA1C_0000)]
 trait Calculator {
     async fn add(&self, req: AddRequest) -> Result<AddResponse, RpcError>;
     async fn sub(&self, req: SubRequest) -> Result<SubResponse, RpcError>;
@@ -348,7 +348,7 @@ fn main() {
         }
         _ => {
             println!("Calculator Example: FDB-style Interface Pattern\n");
-            println!("This example demonstrates the #[interface] macro:\n");
+            println!("This example demonstrates the #[service] macro:\n");
             println!(
                 "  - Single interface definition generates Server, Client, and BoundClient types"
             );

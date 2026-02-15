@@ -7,7 +7,7 @@
 //! # What It Shows
 //!
 //! - A static `PingPong` interface (existing pattern, proves coexistence)
-//! - A virtual `BankAccount` actor defined with `#[virtual_actor]` macro
+//! - A virtual `BankAccount` actor defined with `#[service]` macro
 //! - **State persistence**: `PersistentState<BankAccountData>` + `InMemoryStateStore`
 //! - **Lifecycle**: `on_activate` loads state, `DeactivateAfterIdle` removes actor after idle timeout
 //! - Typed `BankAccountRef` for ergonomic actor calls
@@ -26,12 +26,12 @@ use std::time::Duration;
 
 use moonpool::actors::{
     ActorContext, ActorDirectory, ActorError, ActorHandler, ActorHost, ActorRouter,
-    ActorStateStore, ActorType, DeactivationHint, InMemoryDirectory, InMemoryStateStore,
-    LocalPlacement, PersistentState, PlacementStrategy,
+    ActorStateStore, DeactivationHint, InMemoryDirectory, InMemoryStateStore, LocalPlacement,
+    PersistentState, PlacementStrategy,
 };
 use moonpool::{
     Endpoint, JsonCodec, MessageCodec, NetTransportBuilder, NetworkAddress, Providers, RpcError,
-    UID, interface, virtual_actor,
+    UID, actor_impl, service,
 };
 use serde::{Deserialize, Serialize};
 
@@ -49,13 +49,13 @@ struct PingResponse {
     seq: u32,
 }
 
-#[interface(id = 0x5049_4E47)]
+#[service(id = 0x5049_4E47)]
 trait PingPong {
     async fn ping(&self, req: PingRequest) -> Result<PingResponse, RpcError>;
 }
 
 // ============================================================================
-// Virtual Actor: BankAccount (using #[virtual_actor] macro)
+// Virtual Actor: BankAccount (using #[service] macro)
 // ============================================================================
 
 /// Deposit request.
@@ -84,7 +84,7 @@ struct BalanceResponse {
 /// - `BankAccountRef<P>` for typed actor calls
 /// - `bank_account_methods` module with DEPOSIT, WITHDRAW, GET_BALANCE constants
 /// - `dispatch_bank_account()` function for routing method calls
-#[virtual_actor(id = 0xBA4E_4B00)]
+#[service(id = 0xBA4E_4B00)]
 trait BankAccount {
     async fn deposit(&mut self, req: DepositRequest) -> Result<BalanceResponse, RpcError>;
     async fn withdraw(&mut self, req: WithdrawRequest) -> Result<BalanceResponse, RpcError>;
@@ -153,14 +153,10 @@ impl BankAccount for BankAccountImpl {
     }
 }
 
-/// Hand-written bridge: delegates to the generated dispatch function.
-/// (Could be macro-generated in a future iteration.)
-#[async_trait::async_trait(?Send)]
+/// Actor handler bridge — `actor_type()` and `dispatch()` are auto-generated
+/// by `#[actor_impl]`. Only lifecycle overrides are hand-written.
+#[actor_impl(BankAccount)]
 impl ActorHandler for BankAccountImpl {
-    fn actor_type() -> ActorType {
-        BankAccountRef::<moonpool::TokioProviders>::ACTOR_TYPE
-    }
-
     fn deactivation_hint(&self) -> DeactivationHint {
         DeactivationHint::DeactivateAfterIdle(Duration::from_secs(30))
     }
@@ -185,15 +181,6 @@ impl ActorHandler for BankAccountImpl {
             self.state = Some(ps);
         }
         Ok(())
-    }
-
-    async fn dispatch<P: Providers, C: MessageCodec>(
-        &mut self,
-        ctx: &ActorContext<P, C>,
-        method: u32,
-        body: &[u8],
-    ) -> Result<Vec<u8>, ActorError> {
-        dispatch_bank_account(self, ctx, method, body).await
     }
 }
 
