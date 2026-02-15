@@ -41,6 +41,7 @@ moonpool-sim/                - Simulation runtime, chaos testing, buggify, asser
 moonpool-transport/          - Peer connections, wire format, FlowTransport, RPC
 moonpool-transport-derive/   - Proc-macro: #[service] and #[actor_impl]
 moonpool-explorer/           - Fork-based multiverse exploration, coverage, energy budgets
+moonpool-paxos/              - Vertical Paxos II consensus, primary-backup replication
 ```
 
 ## Testing Philosophy
@@ -129,3 +130,16 @@ Strategic placement: error handling, timeouts, retries, resource limits
 **When to use assertions**: Per-actor validation (`always_assert!` in actor code)
 **Performance**: Invariants run after every simulation event - design accordingly
 **Architecture**: Actors expose state via JSON → StateRegistry → InvariantCheck functions → panic on violation
+
+## Task Management
+
+TODO.md is the single source of truth for all tasks.
+
+1. **Re-read TODO.md from disk** at session start and after every compaction. Never trust summaries.
+2. **Re-read `docs/references/vertical-paxos.pdf`** after compaction or when in doubt about Vertical Paxos protocol details.
+3. **Update TODO.md immediately** when completing, starting, or pausing a task.
+4. **Only mark tasks complete** after `cargo install cargo-nextest --locked` (if needed) and `nix develop --command cargo fmt && nix develop --command cargo clippy && nix develop --command cargo nextest run` all pass.
+5. After compaction: re-read TODO.md, re-read any files listed in "Modified files", run tests to verify state.
+6. Work one task at a time. Commit after each. Prefer /clear between unrelated tasks.
+7. When compacting, preserve: current task ID + progress, modified file paths, failing test names, key decisions.
+8. When writing code, add extensive Paxos explanations in rustdoc and comments. Assume reviewer has Raft background but zero Paxos knowledge. Map Paxos concepts to Raft equivalents where helpful (e.g., "ballot ≈ term", "acceptor ≈ voter/follower", "leader ≈ leader").
