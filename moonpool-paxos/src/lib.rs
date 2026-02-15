@@ -81,17 +81,30 @@
 //! | [`master`] | `ConfigurationMaster` trait and `InMemoryConfigMaster` |
 //! | [`acceptor`] | Acceptor service: Phase 1a/2a handlers |
 //! | [`leader`] | Leader service: Phase 1/2, client request path |
+//! | [`heartbeat`] | Failure detection via periodic heartbeats |
+//! | [`reconfig`] | Master-driven reconfiguration on primary failure |
+//! | [`catchup`] | Catch-up protocol for lagging backups |
+//! | [`lease`] | Conservative leases for linearizable reads |
+//! | [`client`] | Client for discovering primary and submitting commands |
 
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 
 pub mod acceptor;
+pub mod catchup;
+pub mod client;
+pub mod heartbeat;
 pub mod leader;
+pub mod lease;
 pub mod master;
+pub mod reconfig;
 pub mod storage;
 pub mod types;
 
 // Re-export key types at crate root for convenience
+pub use client::PaxosClient;
+pub use heartbeat::{HeartbeatConfig, HeartbeatTracker};
+pub use lease::{LeaseConfig, LeaseState};
 pub use master::{ConfigurationMaster, InMemoryConfigMaster};
 pub use storage::{InMemoryPaxosStorage, PaxosStorage};
 pub use types::{BallotNumber, Configuration, LogEntry, LogSlot, PaxosError};

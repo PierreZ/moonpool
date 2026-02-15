@@ -18,22 +18,11 @@ INSTRUCTIONS FOR CLAUDE CODE (re-read this block every session start and after e
 
 ## Current Focus
 
-> **Task**: _none_
-> **Status**: T-001 through T-013 complete
-> **Modified files**: moonpool-paxos/src/{lib,types,storage,master,acceptor,leader}.rs, moonpool-paxos/Cargo.toml, Cargo.toml
+> **Task**: T-019 through T-022
+> **Status**: T-001 through T-018 complete
+> **Modified files**: moonpool-paxos/src/{lib,types,storage,master,acceptor,leader,heartbeat,reconfig,catchup,lease,client}.rs, moonpool-paxos/Cargo.toml, Cargo.toml
 
 ## Up Next
-
-**Reconfiguration**
-- [ ] `T-014` 🟡 **Implement failure detector** — Primary sends periodic heartbeats to master via RPC. Master tracks last_heartbeat per node. On timeout: trigger reconfiguration. Use TimeProvider for sim-friendly clocks.
-- [ ] `T-015` 🔴 **Implement reconfiguration flow** — Master picks new leader from surviving acceptors (read quorum = 1, so new leader already has prev state). New leader: Phase1 from prev config → catch up → complete → activated → serve. Explain: "the key VP II insight: new leader IS a read quorum, so state transfer is local"
-
-**Catch-up & Leases**
-- [ ] `T-016` 🟡 **Implement CatchUp RPC** — Separate `catch_up(from_slot, to_slot) -> Vec<LogEntry>` endpoint. Lagging backup requests missing entries from primary. Not part of Paxos protocol proper, but needed for practical recovery.
-- [ ] `T-017` 🟡 **Implement conservative leases** — Primary holds time-bounded lease. Reads served locally during lease. Master waits lease_duration + max_clock_drift before electing new primary. Lease refreshed via heartbeat ACK.
-
-**Client**
-- [ ] `T-018` 🟡 **Implement PaxosClient** — Discovers primary from master. Submits commands. On NotLeader error: re-discover primary and retry. Explain: "like Raft client redirection but discovery goes through the master, not the cluster"
 
 **Simulation Tests**
 - [ ] `T-019` 🔴 **Scaffold sim test** — 5-node topology (3 acceptors + 1 master + 1 client). SimulationBuilder with enable_exploration. Basic workload: client submits N commands, verify all committed.
@@ -61,3 +50,8 @@ _none_
 - [x] `T-011` **Implement client request path** — Completed 2026-02-15
 - [x] `T-012` **Implement InMemoryConfigMaster** — Completed 2026-02-15
 - [x] `T-013` **Implement strict VP II activation** — Completed 2026-02-15
+- [x] `T-014` **Implement failure detector** — Completed 2026-02-15
+- [x] `T-015` **Implement reconfiguration flow** — Completed 2026-02-15
+- [x] `T-016` **Implement CatchUp RPC** — Completed 2026-02-15
+- [x] `T-017` **Implement conservative leases** — Completed 2026-02-15
+- [x] `T-018` **Implement PaxosClient** — Completed 2026-02-15
