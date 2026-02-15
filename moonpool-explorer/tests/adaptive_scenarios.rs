@@ -1,7 +1,7 @@
 //! Integration tests for adaptive fork-based exploration.
 //!
-//! These tests exercise the adaptive code path (`dispatch_branch →
-//! `adaptive_branch_on_discovery`) with coverage-yield-driven batching
+//! These tests exercise the adaptive code path (`dispatch_split →
+//! `adaptive_split_on_discovery`) with coverage-yield-driven batching
 //! and 3-level energy budgets.
 //!
 //! Each test provides a minimal xorshift64 RNG via thread-local storage,
@@ -69,7 +69,7 @@ fn test_adaptive_maze_cascade() {
 
     moonpool_explorer::init(ExplorationConfig {
         max_depth: 8,
-        children_per_fork: 4,
+        timelines_per_split: 4,
         global_energy: 150,
         adaptive: Some(AdaptiveConfig {
             batch_size: 4,
@@ -196,7 +196,7 @@ fn test_adaptive_dungeon_floors() {
 
     moonpool_explorer::init(ExplorationConfig {
         max_depth: 7,
-        children_per_fork: 4,
+        timelines_per_split: 4,
         global_energy: 200,
         adaptive: Some(AdaptiveConfig {
             batch_size: 4,
@@ -282,7 +282,7 @@ fn test_adaptive_energy_budget() {
 
     moonpool_explorer::init(ExplorationConfig {
         max_depth: 3,
-        children_per_fork: 4,
+        timelines_per_split: 4,
         global_energy: 8,
         adaptive: Some(AdaptiveConfig {
             batch_size: 2,

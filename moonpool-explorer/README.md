@@ -41,7 +41,7 @@ This crate has zero knowledge of moonpool internals. Communication with the simu
 ## Key Concepts
 
 - **Coverage bitmap** — 8192-bit vector tracking which code paths have been exercised
-- **Virgin map** — Tracks frontier of new coverage across all timelines
+- **Explored map** — Tracks frontier of new coverage across all timelines
 - **Assertion slots** — 128 shared-memory slots for Antithesis-style assertion tracking (boolean, numeric, compound)
 - **Energy budgets** — Three-level system (global, per-mark, realloc pool) prevents runaway forking
 - **Adaptive forking** — Batch-based: fork N children, check coverage yield, return energy from barren marks
@@ -52,7 +52,7 @@ This crate has zero knowledge of moonpool internals. Communication with the simu
 ```rust
 ExplorationConfig {
     max_depth: 30,           // Maximum fork depth
-    children_per_fork: 4,    // Children per discovery (fixed-count mode)
+    timelines_per_split: 4,    // Timelines per split point (fixed-count mode)
     global_energy: 50_000,   // Total fork budget
     adaptive: Some(AdaptiveConfig {
         batch_size: 20,       // Children per adaptive batch
