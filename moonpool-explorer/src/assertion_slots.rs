@@ -90,7 +90,7 @@ pub struct AssertionSlot {
     /// Whether to maximize (1) or minimize (0) the watermark value.
     pub maximize: u8,
     /// Whether a fork has been triggered for this assertion (0 = no, 1 = yes).
-    pub fork_triggered: u8,
+    pub split_triggered: u8,
     /// Total number of times this assertion passed.
     pub pass_count: u64,
     /// Total number of times this assertion failed.
@@ -98,7 +98,7 @@ pub struct AssertionSlot {
     /// Numeric watermark: best value observed (for guidance assertions).
     pub watermark: i64,
     /// Watermark value at last fork (for detecting improvement).
-    pub fork_watermark: i64,
+    pub split_watermark: i64,
     /// Frontier: number of simultaneously true bools (for BooleanSometimesAll).
     pub frontier: u8,
     /// Padding for alignment.
@@ -177,11 +177,11 @@ unsafe fn find_or_alloc_slot(
                 kind: kind as u8,
                 must_hit,
                 maximize,
-                fork_triggered: 0,
+                split_triggered: 0,
                 pass_count: 0,
                 fail_count: 0,
                 watermark: if maximize == 1 { i64::MIN } else { i64::MAX },
-                fork_watermark: if maximize == 1 { i64::MIN } else { i64::MAX },
+                split_watermark: if maximize == 1 { i64::MIN } else { i64::MAX },
                 frontier: 0,
                 _pad: [0; 7],
                 msg: msg_buf,
@@ -193,9 +193,9 @@ unsafe fn find_or_alloc_slot(
 
 /// Trigger forking for a slot that discovered something new.
 ///
-/// Writes to coverage bitmap and virgin map (if pointers are non-null),
-/// then calls `dispatch_branch()` if exploration is active.
-fn assertion_branch(slot_idx: usize, hash: u32) {
+/// Writes to coverage bitmap and explored map (if pointers are non-null),
+/// then calls `dispatch_split()` if exploration is active.
+fn assertion_split(slot_idx: usize, hash: u32) {
     // Mark coverage bitmap
     let bm_ptr = crate::context::COVERAGE_BITMAP_PTR.with(|c| c.get());
     if !bm_ptr.is_null() {
@@ -203,10 +203,10 @@ fn assertion_branch(slot_idx: usize, hash: u32) {
         bm.set_bit(hash as usize);
     }
 
-    // Mark virgin map
-    let vm_ptr = crate::context::VIRGIN_MAP_PTR.with(|c| c.get());
+    // Mark explored map
+    let vm_ptr = crate::context::EXPLORED_MAP_PTR.with(|c| c.get());
     if !vm_ptr.is_null() {
-        let vm = unsafe { crate::coverage::VirginMap::new(vm_ptr) };
+        let vm = unsafe { crate::coverage::ExploredMap::new(vm_ptr) };
         let bm_ptr2 = crate::context::COVERAGE_BITMAP_PTR.with(|c| c.get());
         if !bm_ptr2.is_null() {
             let bm = unsafe { crate::coverage::CoverageBitmap::new(bm_ptr2) };
@@ -216,7 +216,7 @@ fn assertion_branch(slot_idx: usize, hash: u32) {
 
     // Dispatch to fork loop if explorer is active
     if crate::context::explorer_is_active() {
-        crate::fork_loop::dispatch_branch("", slot_idx % MAX_ASSERTION_SLOTS);
+        crate::split_loop::dispatch_split("", slot_idx % MAX_ASSERTION_SLOTS);
     }
 }
 
@@ -263,13 +263,13 @@ pub fn assertion_bool(kind: AssertKind, must_hit: bool, condition: bool, msg: &s
                     let pc = &*((&(*slot).pass_count) as *const u64 as *const AtomicI64);
                     pc.fetch_add(1, Ordering::Relaxed);
 
-                    // CAS fork_triggered from 0 → 1 on first success
-                    let ft = &*((&(*slot).fork_triggered) as *const u8 as *const AtomicU8);
+                    // CAS split_triggered from 0 → 1 on first success
+                    let ft = &*((&(*slot).split_triggered) as *const u8 as *const AtomicU8);
                     if ft
                         .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
                         .is_ok()
                     {
-                        assertion_branch(slot_idx, hash);
+                        assertion_split(slot_idx, hash);
                     }
                 } else {
                     let fc = &*((&(*slot).fail_count) as *const u64 as *const AtomicI64);
@@ -365,9 +365,9 @@ pub fn assertion_numeric(
             }
         }
 
-        // For NumericSometimes: fork when watermark improves past fork_watermark
+        // For NumericSometimes: fork when watermark improves past split_watermark
         if kind == AssertKind::NumericSometimes {
-            let fw = &*((&(*slot).fork_watermark) as *const i64 as *const AtomicI64);
+            let fw = &*((&(*slot).split_watermark) as *const i64 as *const AtomicI64);
             let mut fork_current = fw.load(Ordering::Relaxed);
             loop {
                 let is_better = if maximize {
@@ -385,7 +385,7 @@ pub fn assertion_numeric(
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => {
-                        assertion_branch(slot_idx, hash);
+                        assertion_split(slot_idx, hash);
                         break;
                     }
                     Err(actual) => fork_current = actual,
@@ -439,7 +439,7 @@ pub fn assertion_sometimes_all(msg: &str, named_bools: &[(&str, bool)]) {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    assertion_branch(slot_idx, hash);
+                    assertion_split(slot_idx, hash);
                     break;
                 }
                 Err(actual) => current = actual,
@@ -527,8 +527,8 @@ mod tests {
     #[test]
     fn test_slot_size_stable() {
         // Verify AssertionSlot size for shared memory layout stability.
-        // msg_hash(4) + kind(1) + must_hit(1) + maximize(1) + fork_triggered(1) +
-        // pass_count(8) + fail_count(8) + watermark(8) + fork_watermark(8) +
+        // msg_hash(4) + kind(1) + must_hit(1) + maximize(1) + split_triggered(1) +
+        // pass_count(8) + fail_count(8) + watermark(8) + split_watermark(8) +
         // frontier(1) + _pad(7) + msg(64) = 112
         assert_eq!(std::mem::size_of::<AssertionSlot>(), 112);
     }

@@ -7,8 +7,8 @@
 use std::cell::{Cell, RefCell};
 
 use crate::energy::EnergyBudget;
-use crate::fork_loop::AdaptiveConfig;
 use crate::shared_stats::{SharedRecipe, SharedStats};
+use crate::split_loop::AdaptiveConfig;
 
 thread_local! {
     /// Per-process exploration state.
@@ -20,7 +20,7 @@ thread_local! {
     /// Function pointer to reseed the RNG in moonpool-sim.
     static RNG_RESEED: Cell<fn(u64)> = const { Cell::new(|_| {}) };
 
-    // Shared-memory pointers (set during init, used by fork_loop and assertion_slots)
+    // Shared-memory pointers (set during init, used by split_loop and assertion_slots)
 
     /// Pointer to cross-process statistics.
     pub(crate) static SHARED_STATS: Cell<*mut SharedStats> = const { Cell::new(std::ptr::null_mut()) };
@@ -28,8 +28,8 @@ thread_local! {
     /// Pointer to shared recipe storage for bug-finding timelines.
     pub(crate) static SHARED_RECIPE: Cell<*mut SharedRecipe> = const { Cell::new(std::ptr::null_mut()) };
 
-    /// Pointer to cross-process virgin coverage map.
-    pub(crate) static VIRGIN_MAP_PTR: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
+    /// Pointer to cross-process explored coverage map.
+    pub(crate) static EXPLORED_MAP_PTR: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
 
     /// Pointer to per-child coverage bitmap.
     pub(crate) static COVERAGE_BITMAP_PTR: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
@@ -60,7 +60,7 @@ pub struct ExplorerCtx {
     /// the fork points that led to this timeline.
     pub recipe: Vec<(u64, u64)>,
     /// Number of children to fork at each discovery point.
-    pub children_per_fork: u32,
+    pub timelines_per_split: u32,
     /// Adaptive forking configuration (None = fixed-count mode).
     pub adaptive: Option<AdaptiveConfig>,
 }
@@ -75,7 +75,7 @@ impl ExplorerCtx {
             max_depth: 0,
             current_seed: 0,
             recipe: Vec::new(),
-            children_per_fork: 0,
+            timelines_per_split: 0,
             adaptive: None,
         }
     }

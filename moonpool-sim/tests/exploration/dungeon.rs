@@ -676,7 +676,7 @@ fn test_dungeon_slow_simulation() {
             .set_iterations(1)
             .enable_exploration(ExplorationConfig {
                 max_depth: 120,
-                children_per_fork: 4,
+                timelines_per_split: 4,
                 global_energy: 2_000_000,
                 adaptive: Some(moonpool_sim::AdaptiveConfig {
                     batch_size: 30,
@@ -722,7 +722,7 @@ fn test_dungeon_bug_replay_slow_simulation() {
             .set_debug_seeds(vec![54321])
             .enable_exploration(ExplorationConfig {
                 max_depth: 120,
-                children_per_fork: 4,
+                timelines_per_split: 4,
                 global_energy: 2_000_000,
                 adaptive: Some(moonpool_sim::AdaptiveConfig {
                     batch_size: 30,

@@ -39,7 +39,7 @@ pub struct EachBucket {
     /// Hash of (site_hash + identity key values) — uniquely identifies this bucket.
     pub bucket_hash: u32,
     /// CAS guard: 0 = no fork yet, 1 = first fork triggered.
-    pub fork_triggered: u8,
+    pub split_triggered: u8,
     /// Number of identity keys stored in `key_values`.
     pub num_keys: u8,
     /// Number of quality keys (0-4). 0 means no quality tracking.
@@ -130,7 +130,7 @@ unsafe fn find_or_alloc_each_bucket(
             EachBucket {
                 site_hash,
                 bucket_hash,
-                fork_triggered: 0,
+                split_triggered: 0,
                 num_keys: num_keys as u8,
                 has_quality,
                 _pad: 0,
@@ -232,8 +232,8 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
         let count_atomic = &*((&(*bucket).pass_count) as *const u32 as *const AtomicU32);
         count_atomic.fetch_add(1, Ordering::Relaxed);
 
-        // Fork on first discovery: CAS fork_triggered from 0 → 1.
-        let ft = &*((&(*bucket).fork_triggered) as *const u8 as *const AtomicU8);
+        // Fork on first discovery: CAS split_triggered from 0 → 1.
+        let ft = &*((&(*bucket).split_triggered) as *const u8 as *const AtomicU8);
         let first_discovery = ft
             .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok();
@@ -246,7 +246,7 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
             }
 
             let bucket_index = compute_each_bucket_index(ptr, bucket);
-            crate::fork_loop::dispatch_branch(
+            crate::split_loop::dispatch_split(
                 msg,
                 bucket_index % crate::assertion_slots::MAX_ASSERTION_SLOTS,
             );
@@ -267,7 +267,7 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
                 ) {
                     Ok(_) => {
                         let bucket_index = compute_each_bucket_index(ptr, bucket);
-                        crate::fork_loop::dispatch_branch(
+                        crate::split_loop::dispatch_split(
                             msg,
                             bucket_index % crate::assertion_slots::MAX_ASSERTION_SLOTS,
                         );

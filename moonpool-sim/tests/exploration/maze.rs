@@ -259,7 +259,7 @@ fn test_maze_slow_simulation() {
             .set_iterations(1)
             .enable_exploration(ExplorationConfig {
                 max_depth: 30,
-                children_per_fork: 4,
+                timelines_per_split: 4,
                 global_energy: 50_000,
                 adaptive: Some(moonpool_sim::AdaptiveConfig {
                     batch_size: 20,
@@ -306,7 +306,7 @@ fn test_maze_bug_replay_slow_simulation() {
             .set_debug_seeds(vec![12345])
             .enable_exploration(ExplorationConfig {
                 max_depth: 30,
-                children_per_fork: 4,
+                timelines_per_split: 4,
                 global_energy: 50_000,
                 adaptive: Some(moonpool_sim::AdaptiveConfig {
                     batch_size: 20,

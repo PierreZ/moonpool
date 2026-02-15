@@ -43,7 +43,7 @@ fn test_fork_basic() {
             .set_iterations(1)
             .enable_exploration(ExplorationConfig {
                 max_depth: 1,
-                children_per_fork: 2,
+                timelines_per_split: 2,
                 global_energy: 10,
                 adaptive: None,
             })
@@ -77,7 +77,7 @@ fn test_child_exit_code() {
             .set_iterations(1)
             .enable_exploration(ExplorationConfig {
                 max_depth: 1,
-                children_per_fork: 2,
+                timelines_per_split: 2,
                 global_energy: 10,
                 adaptive: None,
             })
@@ -117,7 +117,7 @@ fn test_depth_limit() {
             .set_iterations(1)
             .enable_exploration(ExplorationConfig {
                 max_depth: 1,
-                children_per_fork: 2,
+                timelines_per_split: 2,
                 global_energy: 100,
                 adaptive: None,
             })
@@ -135,7 +135,7 @@ fn test_depth_limit() {
 
     assert_eq!(report.successful_runs, 1);
 
-    // With max_depth=1 and children_per_fork=2:
+    // With max_depth=1 and timelines_per_split=2:
     // - Root forks 2 children at gate_1 (depth 0->1)
     // - Gate_2 in children: depth=1 == max_depth, no fork
     // So total_timelines should be exactly 2
@@ -155,7 +155,7 @@ fn test_energy_limit() {
             .set_iterations(1)
             .enable_exploration(ExplorationConfig {
                 max_depth: 3,
-                children_per_fork: 8,
+                timelines_per_split: 8,
                 global_energy: 2,
                 adaptive: None,
             })
@@ -171,7 +171,7 @@ fn test_energy_limit() {
 
     assert_eq!(report.successful_runs, 1);
 
-    // With energy=2 and children_per_fork=8, we can only fork 2 children total
+    // With energy=2 and timelines_per_split=8, we can only fork 2 children total
     let exp = report.exploration.expect("exploration report missing");
     assert!(
         exp.total_timelines <= 2,
@@ -208,7 +208,7 @@ fn test_planted_bug() {
             .set_iterations(1)
             .enable_exploration(ExplorationConfig {
                 max_depth: 3,
-                children_per_fork: 4,
+                timelines_per_split: 4,
                 global_energy: 50,
                 adaptive: None,
             })
@@ -254,7 +254,7 @@ fn test_sometimes_each_triggers_fork() {
             .set_iterations(1)
             .enable_exploration(ExplorationConfig {
                 max_depth: 2,
-                children_per_fork: 2,
+                timelines_per_split: 2,
                 global_energy: 20,
                 adaptive: None,
             })
