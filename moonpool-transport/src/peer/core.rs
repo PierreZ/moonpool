@@ -17,7 +17,7 @@ use crate::{
     HEADER_SIZE, NetworkProvider, Providers, TaskProvider, TimeProvider, UID, WireError,
     serialize_packet, try_deserialize_packet,
 };
-use moonpool_sim::sometimes_assert;
+use moonpool_sim::{assert_sometimes, assert_sometimes_each};
 
 /// Type alias for the peer receiver channel.
 /// Used when taking ownership via `take_receiver()`.
@@ -298,8 +298,7 @@ impl<P: Providers> Peer<P> {
             let mut state = self.shared_state.borrow_mut();
 
             // Check queue capacity before adding
-            sometimes_assert!(
-                peer_queue_near_capacity,
+            assert_sometimes!(
                 state.reliable_queue.len() >= (self.config.max_queue_size as f64 * 0.8) as usize,
                 "Message queue should sometimes approach capacity limit"
             );
@@ -321,8 +320,7 @@ impl<P: Providers> Peer<P> {
             );
 
             // Check if queue is growing with multiple messages
-            sometimes_assert!(
-                peer_queue_grows,
+            assert_sometimes!(
                 state.reliable_queue.len() > 1,
                 "Message queue should sometimes contain multiple messages"
             );
@@ -598,6 +596,7 @@ async fn connection_task<P: Providers>(
                     // Buggify: Sometimes force write failures to test requeuing
                     if moonpool_sim::buggify_with_prob!(0.02) {
                         tracing::debug!("Buggify forcing write failure for requeue testing");
+                        assert_sometimes!(true, "buggified_write_failure");
                         handle_connection_failure(
                             &shared_state,
                             &mut current_connection,
@@ -645,6 +644,7 @@ async fn connection_task<P: Providers>(
                 match read_result {
                     Ok((_buffer, 0)) => {
                         // Connection closed
+                        assert_sometimes!(true, "graceful_close_on_read");
                         handle_connection_failure(
                             &shared_state,
                             &mut current_connection,
@@ -707,8 +707,7 @@ fn handle_connection_failure<P: Providers>(
     // Handle the failed send if provided
     if let Some((data, is_reliable)) = failed_send {
         if is_reliable {
-            sometimes_assert!(
-                peer_requeues_on_failure,
+            assert_sometimes!(
                 true,
                 "Peer should sometimes re-queue reliable messages after send failure"
             );
@@ -782,8 +781,7 @@ fn process_read_buffer<P: Providers>(
                             expected,
                             actual
                         );
-                        sometimes_assert!(
-                            checksum_caught_corruption,
+                        assert_sometimes!(
                             true,
                             "Checksum validation should sometimes catch corrupted packets"
                         );
@@ -796,8 +794,7 @@ fn process_read_buffer<P: Providers>(
                     }
                 }
 
-                sometimes_assert!(
-                    connection_teardown_on_wire_error,
+                assert_sometimes!(
                     true,
                     "Connection should sometimes be torn down on wire format errors"
                 );
@@ -816,8 +813,7 @@ fn process_read_buffer<P: Providers>(
                             "connection_task: discarding {} unreliable packets after wire error (FDB pattern)",
                             unreliable_count
                         );
-                        sometimes_assert!(
-                            unreliable_discarded_on_error,
+                        assert_sometimes!(
                             true,
                             "Unreliable packets should sometimes be discarded on connection errors"
                         );
@@ -848,6 +844,7 @@ async fn establish_connection<P: Providers>(
             if let Some(max_failures) = config.max_connection_failures
                 && state.reconnect_state.failure_count >= max_failures
             {
+                assert_sometimes!(true, "max_failures_reached");
                 return Err(PeerError::ConnectionFailed);
             }
 
@@ -897,8 +894,7 @@ async fn establish_connection<P: Providers>(
                     let mut state = shared_state.borrow_mut();
 
                     if state.reconnect_state.failure_count > 0 {
-                        sometimes_assert!(
-                            peer_recovers_after_failures,
+                        assert_sometimes!(
                             true,
                             "Peer should sometimes successfully connect after previous failures"
                         );
@@ -912,21 +908,37 @@ async fn establish_connection<P: Providers>(
                 }
                 return Ok(stream);
             }
-            Ok(Err(_)) | Err(_) => {
-                // Connection failed - update state and retry
-                {
-                    let mut state = shared_state.borrow_mut();
-                    state.reconnect_state.failure_count += 1;
-                    let next_delay = std::cmp::min(
-                        state.reconnect_state.current_delay * 2,
-                        config.max_reconnect_delay,
-                    );
-                    state.reconnect_state.current_delay = next_delay;
-                    let now = state.time.now();
-                    state.metrics.record_connection_failure_at(now, next_delay);
-                }
+            Ok(Err(_)) => {
+                // Connection refused/failed - update state and retry
+                record_connection_failure(shared_state, config);
+                // Continue loop to retry
+            }
+            Err(_) => {
+                // Connection attempt timed out
+                assert_sometimes!(true, "connection_timed_out");
+                record_connection_failure(shared_state, config);
                 // Continue loop to retry
             }
         }
     }
+}
+
+/// Record a connection failure: increment failure count, update backoff delay, record metrics.
+fn record_connection_failure<P: Providers>(
+    shared_state: &Rc<RefCell<PeerSharedState<P>>>,
+    config: &PeerConfig,
+) {
+    let mut state = shared_state.borrow_mut();
+    state.reconnect_state.failure_count += 1;
+    assert_sometimes_each!(
+        "backoff_depth",
+        [("attempt", state.reconnect_state.failure_count)]
+    );
+    let next_delay = std::cmp::min(
+        state.reconnect_state.current_delay * 2,
+        config.max_reconnect_delay,
+    );
+    state.reconnect_state.current_delay = next_delay;
+    let now = state.time.now();
+    state.metrics.record_connection_failure_at(now, next_delay);
 }

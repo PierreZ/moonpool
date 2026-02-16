@@ -8,13 +8,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use moonpool_sim::{always_assert, sometimes_assert};
+use moonpool_sim::{assert_always, assert_sometimes};
 
 /// Tracks sent and received messages for invariant validation.
-///
-/// Maintains separate tracking for reliable and unreliable messages
-/// to verify their different delivery guarantees.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct MessageInvariants {
     /// Sequence IDs of messages sent reliably (should all be delivered).
     pub reliable_sent: HashSet<u64>,
@@ -57,9 +54,7 @@ impl MessageInvariants {
         }
     }
 
-    /// Record a message being received.
-    ///
-    /// Returns true if this is a duplicate receive.
+    /// Record a message being received. Returns true if duplicate.
     pub fn record_received(&mut self, sequence_id: u64, sent_reliably: bool) -> bool {
         let is_duplicate = if sent_reliably {
             let is_dup = self.reliable_received.contains(&sequence_id);
@@ -80,15 +75,10 @@ impl MessageInvariants {
         is_duplicate
     }
 
-    /// Validate invariants that must always hold (during execution).
-    ///
-    /// These are checked continuously during the test.
-    /// NOTE: This requires the tracker to have recorded both sends AND receives.
-    /// For server-side (receive-only) validation, use `validate_receiver_always()` instead.
+    /// Validate invariants that must always hold.
     pub fn validate_always(&self) {
         // No duplicates allowed
-        always_assert!(
-            no_duplicate_messages,
+        assert_always!(
             self.duplicate_count == 0,
             format!(
                 "Message duplication detected: {} duplicates",
@@ -98,24 +88,21 @@ impl MessageInvariants {
 
         // All received must be subset of sent (no phantom messages)
         for seq_id in &self.reliable_received {
-            always_assert!(
-                reliable_received_was_sent,
+            assert_always!(
                 self.reliable_sent.contains(seq_id),
                 format!("Received reliable message {} that was never sent", seq_id)
             );
         }
 
         for seq_id in &self.unreliable_received {
-            always_assert!(
-                unreliable_received_was_sent,
+            assert_always!(
                 self.unreliable_sent.contains(seq_id),
                 format!("Received unreliable message {} that was never sent", seq_id)
             );
         }
 
         // Unreliable received <= unreliable sent
-        always_assert!(
-            unreliable_conservation,
+        assert_always!(
             self.unreliable_received.len() <= self.unreliable_sent.len(),
             format!(
                 "Unreliable received ({}) > sent ({})",
@@ -125,50 +112,27 @@ impl MessageInvariants {
         );
     }
 
-    /// Validate invariants for a receiver (server) that only sees receives.
-    ///
-    /// This is a subset of `validate_always()` that only checks properties
-    /// that can be validated without knowing what was sent.
-    ///
-    /// Note: We do NOT check for duplicates here because under chaos conditions,
-    /// reliable messages may be retransmitted when connections fail and reconnect.
-    /// Duplicate detection would require application-level deduplication logic.
+    /// Validate invariants for a receiver that only sees receives.
     pub fn validate_receiver_always(&self) {
-        // Note: We CANNOT validate "received ⊆ sent" here because
-        // the server doesn't know what was sent. That requires
-        // cross-workload validation via StateRegistry.
-
-        // Note: We CANNOT check for duplicates here because Peer retransmits
-        // reliable messages on reconnection. Without application-level
-        // deduplication (tracking seen sequence IDs), duplicates are expected.
-
-        // Track that duplicates DO occur under chaos (expected behavior)
-        sometimes_assert!(
-            receiver_sees_duplicates,
+        assert_sometimes!(
             self.duplicate_count > 0,
             "Receiver should sometimes see duplicate messages due to retransmission"
         );
 
-        // Also track the happy path - sometimes no duplicates
-        sometimes_assert!(
-            receiver_no_duplicates,
+        assert_sometimes!(
             self.duplicate_count == 0,
             "Receiver should sometimes see no duplicates (clean delivery)"
         );
     }
 
     /// Validate invariants at quiescence (after drain phase).
-    ///
-    /// At quiescence, all reliable messages should have been delivered.
     pub fn validate_at_quiescence(&self) {
-        // All reliable messages delivered
         let missing: Vec<_> = self
             .reliable_sent
             .difference(&self.reliable_received)
             .collect();
 
-        always_assert!(
-            all_reliable_delivered,
+        assert_always!(
             missing.is_empty(),
             format!(
                 "Not all reliable messages delivered at quiescence. Missing {} of {}: {:?}",
@@ -182,25 +146,19 @@ impl MessageInvariants {
             )
         );
 
-        // Record coverage assertions
-        sometimes_assert!(
-            some_unreliable_dropped,
+        assert_sometimes!(
             self.unreliable_received.len() < self.unreliable_sent.len(),
             "Some unreliable messages should sometimes be dropped"
         );
 
-        sometimes_assert!(
-            all_unreliable_delivered,
+        assert_sometimes!(
             self.unreliable_received.len() == self.unreliable_sent.len(),
             "All unreliable messages should sometimes be delivered (no chaos)"
         );
     }
 
     /// Check if ordering is preserved for reliable messages.
-    ///
-    /// Messages should be received in the same order they were sent.
     pub fn validate_ordering(&self) {
-        // Build expected order: filter sent_order to only include received messages
         let expected_order: Vec<u64> = self
             .reliable_sent_order
             .iter()
@@ -208,17 +166,14 @@ impl MessageInvariants {
             .copied()
             .collect();
 
-        // Check that received_order matches expected_order
         if expected_order != self.reliable_received_order {
-            // Find first mismatch
             for (i, (expected, actual)) in expected_order
                 .iter()
                 .zip(self.reliable_received_order.iter())
                 .enumerate()
             {
                 if expected != actual {
-                    always_assert!(
-                        reliable_ordering_preserved,
+                    assert_always!(
                         false,
                         format!(
                             "Ordering violation at position {}: expected {}, got {}",
@@ -229,9 +184,7 @@ impl MessageInvariants {
                 }
             }
 
-            // Length mismatch
-            always_assert!(
-                reliable_ordering_preserved,
+            assert_always!(
                 false,
                 format!(
                     "Ordering length mismatch: expected {}, got {}",
@@ -257,10 +210,15 @@ impl MessageInvariants {
 /// Summary statistics from invariant tracking.
 #[derive(Debug, Clone)]
 pub struct InvariantSummary {
+    /// Number of reliable messages sent.
     pub reliable_sent: usize,
+    /// Number of reliable messages received.
     pub reliable_received: usize,
+    /// Number of unreliable messages sent.
     pub unreliable_sent: usize,
+    /// Number of unreliable messages received.
     pub unreliable_received: usize,
+    /// Number of duplicate messages received.
     pub duplicates: u64,
 }
 
@@ -279,8 +237,6 @@ impl std::fmt::Display for InvariantSummary {
 }
 
 /// Per-peer invariant tracking for multi-peer scenarios.
-///
-/// Tracks messages per source peer to detect routing bugs.
 #[derive(Debug, Default)]
 pub struct MultiPeerInvariants {
     /// Invariants per peer (keyed by sender_id).

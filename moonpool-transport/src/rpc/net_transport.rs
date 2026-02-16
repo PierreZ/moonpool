@@ -34,7 +34,7 @@ use crate::{
     Endpoint, NetworkAddress, NetworkProvider, Peer, PeerConfig, Providers, TaskProvider,
     TcpListenerTrait, UID, WellKnownToken,
 };
-use moonpool_sim::sometimes_assert;
+use moonpool_sim::assert_sometimes;
 use tokio::sync::watch;
 
 use super::endpoint_map::{EndpointMap, MessageReceiver};
@@ -366,20 +366,12 @@ impl<P: Providers> NetTransport<P> {
     ) -> Result<(), MessagingError> {
         // Check for local delivery
         if self.is_local_address(&endpoint.address) {
-            sometimes_assert!(
-                local_delivery_path,
-                true,
-                "Unreliable send uses local delivery path"
-            );
+            assert_sometimes!(true, "Unreliable send uses local delivery path");
             return self.deliver_local(&endpoint.token, payload);
         }
 
         // Get or create peer for remote address
-        sometimes_assert!(
-            remote_peer_path,
-            true,
-            "Unreliable send uses remote peer path"
-        );
+        assert_sometimes!(true, "Unreliable send uses remote peer path");
         let peer = self.get_or_open_peer(&endpoint.address);
         peer.borrow_mut()
             .send_unreliable(endpoint.token, payload)
@@ -430,20 +422,12 @@ impl<P: Providers> NetTransport<P> {
             receiver.receive(payload);
             drop(data); // Release borrow before mutating stats
             self.data.borrow_mut().stats.packets_dispatched += 1;
-            sometimes_assert!(
-                endpoint_found_local,
-                true,
-                "Local delivery found registered endpoint"
-            );
+            assert_sometimes!(true, "Local delivery found registered endpoint");
             Ok(())
         } else {
             drop(data); // Release borrow before mutating stats
             self.data.borrow_mut().stats.packets_undelivered += 1;
-            sometimes_assert!(
-                endpoint_not_found_local,
-                true,
-                "Local delivery to unregistered endpoint"
-            );
+            assert_sometimes!(true, "Local delivery to unregistered endpoint");
             Err(MessagingError::EndpointNotFound { token: *token })
         }
     }
@@ -466,18 +450,14 @@ impl<P: Providers> NetTransport<P> {
 
         // Check if outgoing peer already exists
         if let Some(peer) = self.data.borrow().peers.get(&addr_str) {
-            sometimes_assert!(peer_reused, true, "Existing peer reused for address");
+            assert_sometimes!(true, "Existing peer reused for address");
             return Rc::clone(peer);
         }
 
         // Check incoming peers — reuse accepted connection for responses
         // (FDB pattern: responses flow back on the same connection)
         if let Some(peer) = self.data.borrow().incoming_peers.get(&addr_str) {
-            sometimes_assert!(
-                incoming_peer_reused,
-                true,
-                "Incoming peer reused for response"
-            );
+            assert_sometimes!(true, "Incoming peer reused for response");
             return Rc::clone(peer);
         }
 
@@ -500,7 +480,7 @@ impl<P: Providers> NetTransport<P> {
         // This handles responses for outgoing requests
         self.spawn_connection_reader(Rc::clone(&peer), addr_str);
 
-        sometimes_assert!(peer_created, true, "New peer created for address");
+        assert_sometimes!(true, "New peer created for address");
         peer
     }
 
@@ -517,16 +497,12 @@ impl<P: Providers> NetTransport<P> {
             receiver.receive(payload);
             drop(data); // Release borrow before mutating stats
             self.data.borrow_mut().stats.packets_dispatched += 1;
-            sometimes_assert!(dispatch_success, true, "Message dispatched to endpoint");
+            assert_sometimes!(true, "Message dispatched to endpoint");
             Ok(())
         } else {
             drop(data); // Release borrow before mutating stats
             self.data.borrow_mut().stats.packets_undelivered += 1;
-            sometimes_assert!(
-                dispatch_undelivered,
-                true,
-                "Dispatch to unregistered endpoint"
-            );
+            assert_sometimes!(true, "Dispatch to unregistered endpoint");
             Err(MessagingError::EndpointNotFound { token: *token })
         }
     }
@@ -836,11 +812,7 @@ async fn connection_reader<P: Providers>(
                     );
                 }
 
-                sometimes_assert!(
-                    connection_reader_dispatch,
-                    true,
-                    "connectionReader dispatched incoming message"
-                );
+                assert_sometimes!(true, "connectionReader dispatched incoming message");
             }
             None => {
                 // Channel closed - peer disconnected or shutdown
@@ -918,11 +890,7 @@ async fn listen_task<P: Providers>(
                             &transport_rc,
                         );
 
-                        sometimes_assert!(
-                            connection_incoming_accepted,
-                            true,
-                            "listen() accepted incoming connection"
-                        );
+                        assert_sometimes!(true, "listen() accepted incoming connection");
                     }
                     Err(e) => {
                         tracing::warn!("listen_task: accept error on {}: {:?}", listen_addr, e);

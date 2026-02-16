@@ -18,6 +18,7 @@ Application code depends on traits, not concrete implementations:
 | `NetworkProvider` | Connect, listen, accept | Real TCP | Simulated TCP |
 | `TaskProvider` | Spawn async tasks | Tokio spawn | Event-driven |
 | `RandomProvider` | Random numbers | System RNG | Seeded RNG |
+| `StorageProvider` | File I/O | Real filesystem | Fault-injected I/O |
 
 ## The Golden Rule
 

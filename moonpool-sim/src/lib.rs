@@ -18,7 +18,9 @@
 //!
 //! - [`SimWorld`]: The simulation runtime managing events and time
 //! - [`SimulationBuilder`]: Configure and run simulations
-//! - [`chaos`]: Fault injection (buggify, assertions, invariants)
+//! - [`chaos`]: Fault injection (buggify, 14 assertion macros, invariants)
+//! - [`storage`]: Storage simulation with fault injection
+//! - Multiverse exploration via `moonpool-explorer` (re-exported as [`ExplorationConfig`], [`AdaptiveConfig`])
 //!
 //! ## Quick Start
 //!
@@ -47,6 +49,9 @@
 //! | Partial writes | 1000 bytes max | Message fragmentation |
 //! | Packet loss | disabled | At-least-once delivery |
 //! | Network partitions | disabled | Split-brain handling |
+//! | Storage corruption | configurable | Checksum validation, recovery |
+//! | Torn writes | configurable | Write atomicity, journaling |
+//! | Sync failures | configurable | Durability guarantees |
 //!
 //! ## Multi-Seed Testing
 //!
@@ -107,20 +112,22 @@ pub mod storage;
 // Sim module re-exports
 pub use sim::{
     ConnectionStateChange, Event, EventQueue, NetworkOperation, ScheduledEvent, SimWorld,
-    SleepFuture, StorageOperation, WeakSimWorld, get_current_sim_seed, reset_sim_rng, set_sim_seed,
+    SleepFuture, StorageOperation, WeakSimWorld, clear_rng_breakpoints, get_current_sim_seed,
+    get_rng_call_count, reset_rng_call_count, reset_sim_rng, set_rng_breakpoints, set_sim_seed,
     sim_random, sim_random_range, sim_random_range_or_default,
 };
 
 // Runner module re-exports
 pub use runner::{
-    IterationControl, SimulationBuilder, SimulationMetrics, SimulationReport, TokioReport,
-    TokioRunner, WorkloadTopology,
+    FaultContext, FaultInjector, IterationControl, PhaseConfig, SimContext, SimulationBuilder,
+    SimulationMetrics, SimulationReport, TokioReport, TokioRunner, Workload, WorkloadTopology,
+    workload_fn,
 };
 
 // Chaos module re-exports
 pub use chaos::{
-    AssertionStats, InvariantCheck, StateRegistry, buggify_init, buggify_reset,
-    get_assertion_results, panic_on_assertion_violations, reset_assertion_results,
+    AssertionStats, Invariant, StateHandle, buggify_init, buggify_reset, get_assertion_results,
+    invariant_fn, panic_on_assertion_violations, reset_assertion_results,
     validate_assertion_contracts,
 };
 
@@ -137,5 +144,11 @@ pub use storage::{
 
 // Provider exports
 pub use providers::{SimProviders, SimRandomProvider, SimTimeProvider};
+
+// Explorer re-exports
+pub use moonpool_explorer::{
+    AdaptiveConfig, AssertCmp, AssertKind, ExplorationConfig, format_timeline, parse_timeline,
+};
+pub use runner::report::ExplorationReport;
 
 // Macros are automatically available at crate root when defined with #[macro_export]

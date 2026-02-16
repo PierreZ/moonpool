@@ -12,13 +12,19 @@
 //! - `tokio` - TokioRunner for real-world execution
 
 pub mod builder;
+pub mod context;
+pub mod fault_injector;
 pub(crate) mod orchestrator;
 pub mod report;
 pub mod tokio;
 pub mod topology;
+pub mod workload;
 
 // Re-export main types at module level
 pub use builder::{IterationControl, SimulationBuilder};
+pub use context::SimContext;
+pub use fault_injector::{FaultContext, FaultInjector, PhaseConfig};
 pub use report::{SimulationMetrics, SimulationReport};
 pub use tokio::{TokioReport, TokioRunner};
 pub use topology::WorkloadTopology;
+pub use workload::{Workload, workload_fn};

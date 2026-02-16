@@ -20,6 +20,7 @@
 
 use std::rc::Rc;
 
+use moonpool_sim::assert_sometimes;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -186,6 +187,7 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
         }
 
         // Not found — place the actor
+        assert_sometimes!(true, "placement_invoked");
         let endpoint = self.placement.place(target, &[]).await?;
 
         // Register in directory (ignore AlreadyRegistered race — another caller
@@ -193,6 +195,7 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
         match self.directory.register(target, endpoint.clone()).await {
             Ok(()) => {}
             Err(DirectoryError::AlreadyRegistered { .. }) => {
+                assert_sometimes!(true, "directory_registration_race");
                 // Another caller placed it first — use their placement
                 if let Some(ep) = self.directory.lookup(target).await? {
                     return Ok(ep);

@@ -16,7 +16,7 @@ Bugs hide in rare combinations of events. An API with just six variables creates
 
 **Time compression.** A single-threaded event loop advances simulated time when all actors block. Years of uptime can be simulated in seconds. A simulated day passes instantly when nothing is scheduled.
 
-**Chaos injection.** The simulator deliberately biases execution toward rare code paths. Network delays, disconnects, partitions, bit flips—failures that might take months to occur in production happen continuously in simulation.
+**Chaos injection.** The simulator deliberately biases execution toward rare code paths. Network delays, disconnects, partitions, bit flips, storage corruption—failures that might take months to occur in production happen continuously in simulation.
 
 ## Controlled Failure Injection: BUGGIFY
 
@@ -24,14 +24,22 @@ Rather than hoping rare bugs surface, moonpool deliberately triggers them. `bugg
 
 Strategic placement at error-prone points ensures deep bugs—those needing rare combinations of events—actually get tested.
 
-## The Assertion System
+## The Assertion Suite
 
-**`always_assert!`**: Invariants that must never fail. These guard correctness properties that should hold regardless of chaos.
+Moonpool provides 14 Antithesis-style assertion macros for comprehensive property testing:
 
-**`sometimes_assert!`**: Verify that edge cases actually occur. This is the key insight:
+**Boolean assertions** — guard correctness properties:
+- `assert_always!` / `assert_always_or_unreachable!` — invariants that must never fail
+- `assert_sometimes!` — verify that edge cases actually occur
+- `assert_reachable!` / `assert_unreachable!` — code path reachability
 
-- Prevention testing tells you *"this line was reached"*
-- Sometimes assertions verify *"this interesting scenario actually happened"*
+**Numeric assertions** — track watermarks and thresholds:
+- `assert_always_greater_than!`, `assert_always_less_than!` (and `_or_equal_to` variants) — numeric invariants
+- `assert_sometimes_greater_than!`, `assert_sometimes_less_than!` (and `_or_equal_to` variants) — watermark tracking with fork-on-improvement
+
+**Compound assertions** — multi-condition discovery:
+- `assert_sometimes_all!` — frontier tracking across multiple named conditions
+- `assert_sometimes_each!` — per-value bucketed assertions with quality watermarks
 
 If your error handling code exists but `sometimes_assert!` never fires, you haven't actually tested it. The goal is 100% sometimes coverage—proof that every error path was exercised.
 
@@ -40,6 +48,12 @@ If your error handling code exists but `sometimes_assert!` never fires, you have
 Different seeds explore different execution orderings. `UntilAllSometimesReached(N)` runs simulations with different seeds until all `sometimes_assert!` statements have triggered at least once, up to N iterations.
 
 This transforms testing from "check known behaviors" to "explore the unknown until confident."
+
+## Multiverse Exploration
+
+Beyond multi-seed testing, moonpool-sim integrates with `moonpool-explorer` for fork-based exploration. When an assertion discovers new behavior, the explorer forks child processes with different RNG seeds to explore alternate timelines from that discovery point.
+
+Adaptive energy budgets and coverage bitmaps guide exploration toward productive branches, while energy limits prevent runaway forking.
 
 ## Documentation
 

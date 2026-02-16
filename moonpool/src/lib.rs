@@ -11,20 +11,22 @@
 //! ## Crate Architecture
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────┐
-//! │           moonpool (this crate)                 │
-//! │         Re-exports all functionality            │
-//! ├─────────────────────────────────────────────────┤
-//! │  moonpool-transport    │    moonpool-sim        │
-//! │  • Peer connections    │    • SimWorld runtime  │
-//! │  • Wire format         │    • Chaos testing     │
-//! │  • NetTransport        │    • Buggify macros    │
-//! │  • RPC primitives      │    • Assertions        │
-//! ├─────────────────────────────────────────────────┤
-//! │              moonpool-core                      │
-//! │  Provider traits: Time, Task, Network, Random   │
-//! │  Core types: UID, Endpoint, NetworkAddress      │
-//! └─────────────────────────────────────────────────┘
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │              moonpool (this crate)                          │
+//! │   Re-exports all functionality + virtual actors module      │
+//! ├──────────────────────────┬──────────────────────────────────┤
+//! │  moonpool-transport      │       moonpool-sim               │
+//! │  • Peer connections      │       • SimWorld runtime         │
+//! │  • Wire format           │       • Chaos testing            │
+//! │  • NetTransport + RPC    │       • Buggify macros           │
+//! │  • #[service] macro      │       • 14 assertion macros      │
+//! │    (via transport-derive)│       • Multiverse exploration   │
+//! │                          │         (via moonpool-explorer)  │
+//! ├──────────────────────────┴──────────────────────────────────┤
+//! │                     moonpool-core                           │
+//! │  Provider traits: Time, Task, Network, Random, Storage      │
+//! │  Core types: UID, Endpoint, NetworkAddress                  │
+//! └─────────────────────────────────────────────────────────────┘
 //! ```
 //!
 //! ## Quick Start
@@ -47,12 +49,15 @@
 //! | Provider traits only | `moonpool-core` |
 //! | Simulation without transport | `moonpool-sim` |
 //! | Transport without simulation | `moonpool-transport` |
+//! | Fork-based exploration internals | `moonpool-explorer` |
+//! | Proc-macro internals | `moonpool-transport-derive` |
 //!
 //! ## Documentation
 //!
 //! - [`moonpool_core`] - Provider traits and core types
 //! - [`moonpool_sim`] - Simulation runtime and chaos testing
 //! - [`moonpool_transport`] - Network transport layer
+//! - [`actors`] - Virtual actor system (Orleans-style)
 
 #![deny(missing_docs)]
 

@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use crate::{Endpoint, MessageCodec};
-use moonpool_sim::sometimes_assert;
+use moonpool_sim::assert_sometimes;
 use serde::de::DeserializeOwned;
 
 use super::net_notified_queue::NetNotifiedQueue;
@@ -49,17 +49,13 @@ impl<T: DeserializeOwned, C: MessageCodec> Future for ReplyFuture<T, C> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // Try to receive from the queue (non-blocking)
         if let Some(result) = self.queue.try_recv() {
-            sometimes_assert!(reply_received, true, "Reply received from server");
+            assert_sometimes!(true, "Reply received from server");
             return Poll::Ready(result);
         }
 
         // Check if queue is closed (connection failed)
         if self.queue.is_closed() {
-            sometimes_assert!(
-                reply_queue_closed,
-                true,
-                "Reply queue closed before response"
-            );
+            assert_sometimes!(true, "Reply queue closed before response");
             return Poll::Ready(Err(ReplyError::ConnectionFailed));
         }
 
@@ -68,15 +64,11 @@ impl<T: DeserializeOwned, C: MessageCodec> Future for ReplyFuture<T, C> {
         let mut recv_future = Box::pin(self.queue.recv());
         match recv_future.as_mut().poll(cx) {
             Poll::Ready(Some(result)) => {
-                sometimes_assert!(reply_received, true, "Reply received from server");
+                assert_sometimes!(true, "Reply received from server");
                 Poll::Ready(result)
             }
             Poll::Ready(None) => {
-                sometimes_assert!(
-                    reply_queue_closed,
-                    true,
-                    "Reply queue closed before response"
-                );
+                assert_sometimes!(true, "Reply queue closed before response");
                 Poll::Ready(Err(ReplyError::ConnectionFailed))
             }
             Poll::Pending => Poll::Pending,

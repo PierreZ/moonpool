@@ -38,6 +38,7 @@
 //! | [`TaskProvider`] | Event-driven | Tokio spawn | Task spawning |
 //! | [`RandomProvider`] | Seeded RNG | System RNG | Deterministic randomness |
 //! | [`NetworkProvider`] | Simulated TCP | Real TCP | Connect, listen, accept |
+//! | [`StorageProvider`] | Fault-injected I/O | Real filesystem | File open, read, write, sync |
 //!
 //! **Important**: Never call tokio directly in application code.
 //! - ❌ `tokio::time::sleep()`

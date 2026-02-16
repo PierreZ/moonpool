@@ -19,9 +19,9 @@
 //! | Component | Purpose |
 //! |-----------|---------|
 //! | [`buggify!`] | Probabilistic fault injection at code locations |
-//! | [`always_assert!`] | Invariants that must never fail |
-//! | [`sometimes_assert!`] | Behaviors that should occur under chaos |
-//! | [`InvariantCheck`] | Cross-actor properties validated after events |
+//! | [`assert_always!`] | Invariants that must never fail |
+//! | [`assert_sometimes!`] | Behaviors that should occur under chaos |
+//! | [`Invariant`] | Cross-workload properties validated after events |
 //!
 //! # The Buggify System
 //!
@@ -78,31 +78,30 @@
 //!
 //! # Assertions
 //!
-//! ## always_assert!
+//! ## assert_always!
 //!
 //! Guards invariants that must **never** fail:
 //!
 //! ```ignore
-//! always_assert!(
+//! assert_always!(
 //!     sent_count >= received_count,
-//!     "message_ordering",
-//!     "received more than sent: {} > {}", received_count, sent_count
+//!     "received more than sent"
 //! );
 //! ```
 //!
-//! ## sometimes_assert!
+//! ## assert_sometimes!
 //!
 //! Validates that error paths **do** execute under chaos:
 //!
 //! ```ignore
 //! if buggify!() {
-//!     sometimes_assert!("timeout_triggered");
+//!     assert_sometimes!(true, "timeout_triggered");
 //!     return Err(Timeout);
 //! }
 //! ```
 //!
 //! Multi-seed testing with `UntilAllSometimesReached(1000)` ensures all
-//! `sometimes_assert!` statements fire across the seed space.
+//! `assert_sometimes!` statements fire across the seed space.
 //!
 //! # Strategic Placement
 //!
@@ -130,14 +129,15 @@
 
 pub mod assertions;
 pub mod buggify;
-pub mod invariants;
-pub mod state_registry;
+pub mod invariant_trait;
+pub mod state_handle;
 
 // Re-export main types at module level
 pub use assertions::{
-    AssertionStats, get_assertion_results, panic_on_assertion_violations, record_assertion,
+    AssertionStats, get_assertion_results, on_assertion_bool, on_assertion_numeric,
+    on_assertion_sometimes_all, on_sometimes_each, panic_on_assertion_violations,
     reset_assertion_results, validate_assertion_contracts,
 };
 pub use buggify::{buggify_init, buggify_internal, buggify_reset};
-pub use invariants::InvariantCheck;
-pub use state_registry::StateRegistry;
+pub use invariant_trait::{Invariant, invariant_fn};
+pub use state_handle::StateHandle;

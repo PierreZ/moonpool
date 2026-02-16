@@ -54,6 +54,20 @@ Build your transport once with provider traits. In production, inject tokio-base
 └─────────────────────────────────────────────────┘
 ```
 
+## The `#[service]` Macro
+
+The `moonpool-transport-derive` crate (re-exported here) provides a unified macro that auto-generates all boilerplate from a trait definition:
+
+- **`&self` methods** (RPC mode) — generates `Server`, `Client`, `BoundClient`, and `serve()` for automatic request dispatch
+- **`&mut self` methods** (Actor mode) — generates `Ref` for typed actor calls, `dispatch_*()` for routing, and a methods module
+
+```rust,ignore
+#[service(id = 0xCA1C_0000)]
+trait Calculator {
+    async fn add(&self, req: AddRequest) -> Result<AddResponse, RpcError>;
+}
+```
+
 ## Documentation
 
 - [API Documentation](https://docs.rs/moonpool-transport)

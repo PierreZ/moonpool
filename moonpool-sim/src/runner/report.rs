@@ -30,6 +30,23 @@ impl Default for SimulationMetrics {
     }
 }
 
+/// Report from fork-based exploration.
+#[derive(Debug, Clone)]
+pub struct ExplorationReport {
+    /// Total timelines explored across all forks.
+    pub total_timelines: u64,
+    /// Total fork points triggered.
+    pub fork_points: u64,
+    /// Number of bugs found (children exiting with code 42).
+    pub bugs_found: u64,
+    /// Bug recipe if one was captured (for replay).
+    pub bug_recipe: Option<Vec<(u64, u64)>>,
+    /// Remaining global energy after exploration.
+    pub energy_remaining: i64,
+    /// Energy in the reallocation pool.
+    pub realloc_pool_remaining: i64,
+}
+
 /// Comprehensive report of a simulation run with statistical analysis.
 #[derive(Debug, Clone)]
 pub struct SimulationReport {
@@ -51,6 +68,8 @@ pub struct SimulationReport {
     pub assertion_results: HashMap<String, AssertionStats>,
     /// Assertion validation violations (if any)
     pub assertion_violations: Vec<String>,
+    /// Exploration report (present when fork-based exploration was enabled).
+    pub exploration: Option<ExplorationReport>,
 }
 
 impl SimulationReport {
@@ -114,6 +133,23 @@ impl fmt::Display for SimulationReport {
         if !self.seeds_failing.is_empty() {
             writeln!(f)?;
             writeln!(f, "Faulty seeds: {:?}", self.seeds_failing)?;
+        }
+
+        if let Some(ref exp) = self.exploration {
+            writeln!(f)?;
+            writeln!(f, "=== Exploration Report ===")?;
+            writeln!(f, "Timelines explored: {}", exp.total_timelines)?;
+            writeln!(f, "Fork points: {}", exp.fork_points)?;
+            writeln!(f, "Bugs found: {}", exp.bugs_found)?;
+            if let Some(ref recipe) = exp.bug_recipe {
+                writeln!(
+                    f,
+                    "Bug recipe: {}",
+                    moonpool_explorer::format_timeline(recipe)
+                )?;
+            }
+            writeln!(f, "Energy remaining: {}", exp.energy_remaining)?;
+            writeln!(f, "Realloc pool remaining: {}", exp.realloc_pool_remaining)?;
         }
 
         writeln!(f)?;
