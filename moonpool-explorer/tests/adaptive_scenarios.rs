@@ -63,7 +63,7 @@ fn random_below(divisor: u32) -> u32 {
 /// Brute-force probability: (0.3²)³ ≈ 7×10⁻⁴.
 /// With adaptive forking the cascade amplifies through 7 fork points.
 #[test]
-fn test_adaptive_maze_cascade() {
+fn slow_simulation_adaptive_maze_cascade() {
     moonpool_explorer::set_rng_hooks(get_count, reseed);
     reseed(42);
 
@@ -190,7 +190,7 @@ fn test_adaptive_maze_cascade() {
 /// Brute-force probability: 0.2⁵ ≈ 3.2×10⁻⁴.
 /// Fork cascade amplifies at each floor.
 #[test]
-fn test_adaptive_dungeon_floors() {
+fn slow_simulation_adaptive_dungeon_floors() {
     moonpool_explorer::set_rng_hooks(get_count, reseed);
     reseed(7777);
 
@@ -276,7 +276,7 @@ fn test_adaptive_dungeon_floors() {
 /// 3 always-true gates maximize energy consumption. The global energy cap
 /// of 8 limits total forks regardless of per-mark budgets.
 #[test]
-fn test_adaptive_energy_budget() {
+fn slow_simulation_adaptive_energy_budget() {
     moonpool_explorer::set_rng_hooks(get_count, reseed);
     reseed(99);
 

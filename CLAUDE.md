@@ -8,7 +8,12 @@
 - `nix develop --command cargo clippy`
 - `nix develop --command cargo nextest run`
 
-**Test timeouts**: Configured in `.config/nextest.toml` (1s default, 4m for tests with "slow_simulation" in name)
+**Test profiles**: Configured in `.config/nextest.toml`
+- `cargo nextest run` — all tests
+- `cargo nextest run --profile fast` — fast tests only (unit + SimWorld)
+- `cargo nextest run --profile sim` — slow simulation tests only (chaos + exploration)
+
+**Naming convention**: Slow tests use `slow_simulation_` prefix (e.g. `slow_simulation_maze`). Fast tests use `test_` prefix.
 
 **Debug testing**:
 - Default: `UntilAllSometimesReached(1000)` for comprehensive chaos testing

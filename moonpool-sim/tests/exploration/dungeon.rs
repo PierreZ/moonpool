@@ -670,7 +670,7 @@ fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
 /// floor 8 is ~ (0.03)^7 ~ 2.2e-11. Fork amplification at each floor
 /// makes this reachable.
 #[test]
-fn test_dungeon_slow_simulation() {
+fn slow_simulation_dungeon() {
     let report = run_simulation(
         SimulationBuilder::new()
             .set_iterations(1)
@@ -714,7 +714,7 @@ fn test_dungeon_slow_simulation() {
 /// 2. The recipe is captured and formatted as a timeline string
 /// 3. Replaying with the same seed + RNG breakpoints reproduces the treasure find
 #[test]
-fn test_dungeon_bug_replay_slow_simulation() {
+fn slow_simulation_dungeon_bug_replay() {
     // Phase 1: Run exploration to find the bug and capture the recipe.
     let report = run_simulation(
         SimulationBuilder::new()

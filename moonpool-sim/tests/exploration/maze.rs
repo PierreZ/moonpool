@@ -253,7 +253,7 @@ fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
 /// With 4 locks * 5 gates at P=0.05, brute force is essentially impossible.
 /// Fork-based exploration should find all paths efficiently.
 #[test]
-fn test_maze_slow_simulation() {
+fn slow_simulation_maze() {
     let report = run_simulation(
         SimulationBuilder::new()
             .set_iterations(1)
@@ -298,7 +298,7 @@ fn test_maze_slow_simulation() {
 /// 3. A developer parses the recipe string and replays it using RNG breakpoints
 /// 4. The exact same bug reproduces without any exploration or forking
 #[test]
-fn test_maze_bug_replay_slow_simulation() {
+fn slow_simulation_maze_bug_replay() {
     // Phase 1: Run exploration to find the bug and capture the recipe.
     let report = run_simulation(
         SimulationBuilder::new()
