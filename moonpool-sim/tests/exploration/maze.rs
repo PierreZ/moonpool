@@ -240,7 +240,7 @@ impl Maze {
     }
 }
 
-/// Workload that runs the maze and reports bugs via error return.
+/// Workload that runs the maze and reports bugs via assertion.
 struct MazeWorkload {
     max_steps: u64,
 }
@@ -255,11 +255,10 @@ impl Workload for MazeWorkload {
         let mut maze = Maze::new(self.max_steps);
         let result = maze.run();
 
-        if result == StepResult::BugFound {
-            return Err(moonpool_sim::SimulationError::InvalidState(
-                "maze bug: all 4 locks opened".to_string(),
-            ));
-        }
+        moonpool_sim::assert_always!(
+            result != StepResult::BugFound,
+            "maze bug: all 4 locks opened"
+        );
 
         Ok(())
     }

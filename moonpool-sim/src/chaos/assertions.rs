@@ -4,19 +4,25 @@
 //! properties. Assertions are tracked in shared memory via moonpool-explorer,
 //! enabling cross-process tracking across forked exploration timelines.
 //!
+//! Following the Antithesis principle: **assertions never crash your program**.
+//! Always-type assertions log violations at ERROR level and record them via a
+//! thread-local flag, allowing the simulation to continue running and discover
+//! cascading failures. The simulation runner checks `has_always_violations()`
+//! after each iteration to report failures through the normal result pipeline.
+//!
 //! # Assertion Kinds
 //!
 //! | Macro | Tracks | Panics | Forks |
 //! |-------|--------|--------|-------|
-//! | `assert_always!` | yes | on failure | no |
-//! | `assert_always_or_unreachable!` | yes | on failure | no |
+//! | `assert_always!` | yes | no | no |
+//! | `assert_always_or_unreachable!` | yes | no | no |
 //! | `assert_sometimes!` | yes | no | on first success |
 //! | `assert_reachable!` | yes | no | on first reach |
-//! | `assert_unreachable!` | yes | on reach | no |
-//! | `assert_always_greater_than!` | yes | on failure | no |
-//! | `assert_always_greater_than_or_equal_to!` | yes | on failure | no |
-//! | `assert_always_less_than!` | yes | on failure | no |
-//! | `assert_always_less_than_or_equal_to!` | yes | on failure | no |
+//! | `assert_unreachable!` | yes | no | no |
+//! | `assert_always_greater_than!` | yes | no | no |
+//! | `assert_always_greater_than_or_equal_to!` | yes | no | no |
+//! | `assert_always_less_than!` | yes | no | no |
+//! | `assert_always_less_than_or_equal_to!` | yes | no | no |
 //! | `assert_sometimes_greater_than!` | yes | no | on watermark improvement |
 //! | `assert_sometimes_greater_than_or_equal_to!` | yes | no | on watermark improvement |
 //! | `assert_sometimes_less_than!` | yes | no | on watermark improvement |
@@ -24,7 +30,34 @@
 //! | `assert_sometimes_all!` | yes | no | on frontier advance |
 //! | `assert_sometimes_each!` | yes | no | on discovery/quality |
 
+use std::cell::Cell;
 use std::collections::HashMap;
+
+// =============================================================================
+// Thread-local violation tracking (Antithesis-style: never panic)
+// =============================================================================
+
+thread_local! {
+    static ALWAYS_VIOLATION_COUNT: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Record that an always-type assertion was violated during this iteration.
+///
+/// Called by always-type macros instead of panicking. The simulation runner
+/// checks `has_always_violations()` after each iteration to report failures.
+pub fn record_always_violation() {
+    ALWAYS_VIOLATION_COUNT.with(|c| c.set(c.get() + 1));
+}
+
+/// Reset the violation counter. Must be called at the start of each iteration.
+pub fn reset_always_violations() {
+    ALWAYS_VIOLATION_COUNT.with(|c| c.set(0));
+}
+
+/// Check whether any always-type assertion was violated during this iteration.
+pub fn has_always_violations() -> bool {
+    ALWAYS_VIOLATION_COUNT.with(|c| c.get() > 0)
+}
 
 /// Statistics for a tracked assertion.
 ///
@@ -277,9 +310,12 @@ pub fn validate_assertion_contracts() -> Vec<String> {
 // Assertion Macros
 // =============================================================================
 
-/// Assert that a condition is always true, panicking on failure with seed info.
+/// Assert that a condition is always true.
 ///
 /// Tracks pass/fail in shared memory for cross-process visibility.
+/// Does **not** panic — records the violation via `record_always_violation()`
+/// and logs at ERROR level with the seed, following the Antithesis principle
+/// that assertions never crash the program.
 #[macro_export]
 macro_rules! assert_always {
     ($condition:expr, $message:expr) => {
@@ -293,13 +329,16 @@ macro_rules! assert_always {
         );
         if !cond {
             let seed = $crate::sim::get_current_sim_seed();
-            panic!("[ALWAYS FAILED] seed={} — {}", seed, __msg);
+            tracing::error!("[ALWAYS FAILED] seed={} — {}", seed, __msg);
+            $crate::chaos::assertions::record_always_violation();
         }
     };
 }
 
 /// Assert that a condition is always true when reached, but the code path
 /// need not be reached. Does not panic if never evaluated.
+///
+/// Does **not** panic on failure — records the violation and logs at ERROR level.
 #[macro_export]
 macro_rules! assert_always_or_unreachable {
     ($condition:expr, $message:expr) => {
@@ -313,7 +352,8 @@ macro_rules! assert_always_or_unreachable {
         );
         if !cond {
             let seed = $crate::sim::get_current_sim_seed();
-            panic!("[ALWAYS_OR_UNREACHABLE FAILED] seed={} — {}", seed, __msg);
+            tracing::error!("[ALWAYS_OR_UNREACHABLE FAILED] seed={} — {}", seed, __msg);
+            $crate::chaos::assertions::record_always_violation();
         }
     };
 }
@@ -350,7 +390,8 @@ macro_rules! assert_reachable {
 
 /// Assert that a code path should never be reached.
 ///
-/// Panics if reached. Tracks in shared memory for reporting.
+/// Does **not** panic — records the violation and logs at ERROR level.
+/// Tracks in shared memory for reporting.
 #[macro_export]
 macro_rules! assert_unreachable {
     ($message:expr) => {
@@ -362,11 +403,14 @@ macro_rules! assert_unreachable {
             false,
         );
         let seed = $crate::sim::get_current_sim_seed();
-        panic!("[UNREACHABLE REACHED] seed={} — {}", seed, __msg);
+        tracing::error!("[UNREACHABLE REACHED] seed={} — {}", seed, __msg);
+        $crate::chaos::assertions::record_always_violation();
     };
 }
 
 /// Assert that `val > threshold` always holds.
+///
+/// Does **not** panic on failure — records the violation and logs at ERROR level.
 #[macro_export]
 macro_rules! assert_always_greater_than {
     ($val:expr, $thresh:expr, $message:expr) => {
@@ -383,15 +427,21 @@ macro_rules! assert_always_greater_than {
         );
         if !(__v > __t) {
             let seed = $crate::sim::get_current_sim_seed();
-            panic!(
+            tracing::error!(
                 "[NUMERIC ALWAYS FAILED] seed={} — {} (val={}, thresh={})",
-                seed, __msg, __v, __t
+                seed,
+                __msg,
+                __v,
+                __t
             );
+            $crate::chaos::assertions::record_always_violation();
         }
     };
 }
 
 /// Assert that `val >= threshold` always holds.
+///
+/// Does **not** panic on failure — records the violation and logs at ERROR level.
 #[macro_export]
 macro_rules! assert_always_greater_than_or_equal_to {
     ($val:expr, $thresh:expr, $message:expr) => {
@@ -408,15 +458,21 @@ macro_rules! assert_always_greater_than_or_equal_to {
         );
         if !(__v >= __t) {
             let seed = $crate::sim::get_current_sim_seed();
-            panic!(
+            tracing::error!(
                 "[NUMERIC ALWAYS FAILED] seed={} — {} (val={}, thresh={})",
-                seed, __msg, __v, __t
+                seed,
+                __msg,
+                __v,
+                __t
             );
+            $crate::chaos::assertions::record_always_violation();
         }
     };
 }
 
 /// Assert that `val < threshold` always holds.
+///
+/// Does **not** panic on failure — records the violation and logs at ERROR level.
 #[macro_export]
 macro_rules! assert_always_less_than {
     ($val:expr, $thresh:expr, $message:expr) => {
@@ -433,15 +489,21 @@ macro_rules! assert_always_less_than {
         );
         if !(__v < __t) {
             let seed = $crate::sim::get_current_sim_seed();
-            panic!(
+            tracing::error!(
                 "[NUMERIC ALWAYS FAILED] seed={} — {} (val={}, thresh={})",
-                seed, __msg, __v, __t
+                seed,
+                __msg,
+                __v,
+                __t
             );
+            $crate::chaos::assertions::record_always_violation();
         }
     };
 }
 
 /// Assert that `val <= threshold` always holds.
+///
+/// Does **not** panic on failure — records the violation and logs at ERROR level.
 #[macro_export]
 macro_rules! assert_always_less_than_or_equal_to {
     ($val:expr, $thresh:expr, $message:expr) => {
@@ -458,10 +520,14 @@ macro_rules! assert_always_less_than_or_equal_to {
         );
         if !(__v <= __t) {
             let seed = $crate::sim::get_current_sim_seed();
-            panic!(
+            tracing::error!(
                 "[NUMERIC ALWAYS FAILED] seed={} — {} (val={}, thresh={})",
-                seed, __msg, __v, __t
+                seed,
+                __msg,
+                __v,
+                __t
             );
+            $crate::chaos::assertions::record_always_violation();
         }
     };
 }

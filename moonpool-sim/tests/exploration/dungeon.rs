@@ -672,11 +672,10 @@ impl Workload for DungeonWorkload {
         let mut dungeon = Dungeon::new(self.max_steps, self.target_level);
         let result = dungeon.run();
 
-        if result == StepResult::BugFound {
-            return Err(moonpool_sim::SimulationError::InvalidState(
-                "dungeon bug: treasure found on floor 8".to_string(),
-            ));
-        }
+        moonpool_sim::assert_always!(
+            result != StepResult::BugFound,
+            "dungeon bug: treasure found on floor 8"
+        );
 
         Ok(())
     }

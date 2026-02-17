@@ -347,13 +347,18 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "never sent")]
     fn test_phantom_message_detected() {
+        moonpool_sim::reset_always_violations();
         let mut inv = MessageInvariants::new();
 
-        // Receive without sending - should panic
+        // Receive without sending - should trigger always-violation
         inv.record_received(999, true);
         inv.validate_always();
+
+        assert!(
+            moonpool_sim::has_always_violations(),
+            "expected always-violation for phantom message"
+        );
     }
 
     // ========================================================================
@@ -393,35 +398,50 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "never requested")]
     fn test_rpc_phantom_response_detected() {
+        moonpool_sim::reset_always_violations();
         let mut inv = RpcInvariants::new();
 
-        // Receive response without sending request - should panic
+        // Receive response without sending request - should trigger violation
         inv.record_response_received(999);
         inv.validate_always();
+
+        assert!(
+            moonpool_sim::has_always_violations(),
+            "expected always-violation for phantom response"
+        );
     }
 
     #[test]
-    #[should_panic(expected = "never requested")]
     fn test_rpc_phantom_broken_promise_detected() {
+        moonpool_sim::reset_always_violations();
         let mut inv = RpcInvariants::new();
 
-        // Broken promise for never-sent request - should panic
+        // Broken promise for never-sent request - should trigger violation
         inv.record_broken_promise(999);
         inv.validate_always();
+
+        assert!(
+            moonpool_sim::has_always_violations(),
+            "expected always-violation for phantom broken promise"
+        );
     }
 
     #[test]
-    #[should_panic(expected = "both success response and broken promise")]
     fn test_rpc_double_resolution_detected() {
+        moonpool_sim::reset_always_violations();
         let mut inv = RpcInvariants::new();
 
         inv.record_request_sent(1);
         inv.record_response_received(1);
-        inv.record_broken_promise(1); // Should panic - already resolved
+        inv.record_broken_promise(1); // Already resolved
 
         inv.validate_always();
+
+        assert!(
+            moonpool_sim::has_always_violations(),
+            "expected always-violation for double resolution"
+        );
     }
 
     #[test]
