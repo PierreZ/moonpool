@@ -9,12 +9,9 @@
 //!
 //! # Usage
 //!
-//! Implement the trait directly or use [`workload_fn`] for simple cases:
-//!
 //! ```ignore
-//! use moonpool_sim::{Workload, SimContext, SimulationResult, workload_fn};
+//! use moonpool_sim::{Workload, SimContext, SimulationResult};
 //!
-//! // Trait implementation
 //! struct MyServer;
 //!
 //! #[async_trait(?Send)]
@@ -25,15 +22,7 @@
 //!         Ok(())
 //!     }
 //! }
-//!
-//! // Closure shorthand
-//! let w = workload_fn("client", |ctx| async move {
-//!     Ok(())
-//! });
 //! ```
-
-use std::future::Future;
-use std::pin::Pin;
 
 use async_trait::async_trait;
 
@@ -70,54 +59,4 @@ pub trait Workload: 'static {
     async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
         Ok(())
     }
-}
-
-/// Type-erased async closure for workload run function.
-type BoxedRunFn =
-    Box<dyn FnOnce(&SimContext) -> Pin<Box<dyn Future<Output = SimulationResult<()>>>>>;
-
-/// Closure-based workload adapter.
-struct FnWorkload {
-    name: String,
-    run_fn: Option<BoxedRunFn>,
-}
-
-#[async_trait(?Send)]
-impl Workload for FnWorkload {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        match self.run_fn.take() {
-            Some(f) => f(ctx).await,
-            None => Ok(()),
-        }
-    }
-}
-
-/// Create a workload from an async closure.
-///
-/// The closure receives a `&SimContext` and returns a `SimulationResult<()>`.
-/// Only `run()` is implemented; `setup()` and `check()` are no-ops.
-///
-/// # Example
-///
-/// ```ignore
-/// let w = workload_fn("ping", |ctx| async move {
-///     let peer = ctx.peer("server").expect("server");
-///     ctx.time().sleep(Duration::from_millis(100)).await?;
-///     Ok(())
-/// });
-/// ```
-pub fn workload_fn<F, Fut>(name: impl Into<String>, f: F) -> Box<dyn Workload>
-where
-    F: FnOnce(&SimContext) -> Fut + 'static,
-    Fut: Future<Output = SimulationResult<()>> + 'static,
-{
-    let name = name.into();
-    Box::new(FnWorkload {
-        name,
-        run_fn: Some(Box::new(move |ctx| Box::pin(f(ctx)))),
-    })
 }

@@ -9,7 +9,10 @@
 //! - Workload: `/home/pierrez/workspace/rust/Claude-fork-testing/maze-explorer/src/dungeon.rs`
 //! - Engine: `/home/pierrez/workspace/rust/Claude-fork-testing/dungeon/src/lib.rs`
 
-use moonpool_sim::{ExplorationConfig, SimulationBuilder, SimulationReport};
+use async_trait::async_trait;
+use moonpool_sim::{
+    ExplorationConfig, SimContext, SimulationBuilder, SimulationReport, SimulationResult, Workload,
+};
 
 // ============================================================================
 // Inlined dungeon game engine
@@ -653,6 +656,32 @@ impl Dungeon {
     }
 }
 
+/// Workload that runs the dungeon and reports bugs via error return.
+struct DungeonWorkload {
+    max_steps: u64,
+    target_level: u32,
+}
+
+#[async_trait(?Send)]
+impl Workload for DungeonWorkload {
+    fn name(&self) -> &str {
+        "dungeon"
+    }
+
+    async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+        let mut dungeon = Dungeon::new(self.max_steps, self.target_level);
+        let result = dungeon.run();
+
+        if result == StepResult::BugFound {
+            return Err(moonpool_sim::SimulationError::InvalidState(
+                "dungeon bug: treasure found on floor 8".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
 /// Helper to run a simulation and return the report.
 fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
@@ -685,17 +714,9 @@ fn slow_simulation_dungeon() {
                     per_mark_energy: 20_000,
                 }),
             })
-            .workload_fn("dungeon", |_ctx| async move {
-                let mut dungeon = Dungeon::new(DEFAULT_MAX_STEPS, DEFAULT_TARGET_LEVEL);
-                let result = dungeon.run();
-
-                if result == StepResult::BugFound {
-                    return Err(moonpool_sim::SimulationError::InvalidState(
-                        "dungeon bug: treasure found on floor 8".to_string(),
-                    ));
-                }
-
-                Ok(())
+            .workload(DungeonWorkload {
+                max_steps: DEFAULT_MAX_STEPS,
+                target_level: DEFAULT_TARGET_LEVEL,
             }),
     );
 
@@ -731,17 +752,9 @@ fn slow_simulation_dungeon_bug_replay() {
                     per_mark_energy: 20_000,
                 }),
             })
-            .workload_fn("dungeon", |_ctx| async move {
-                let mut dungeon = Dungeon::new(DEFAULT_MAX_STEPS, DEFAULT_TARGET_LEVEL);
-                let result = dungeon.run();
-
-                if result == StepResult::BugFound {
-                    return Err(moonpool_sim::SimulationError::InvalidState(
-                        "dungeon bug: treasure found on floor 8".to_string(),
-                    ));
-                }
-
-                Ok(())
+            .workload(DungeonWorkload {
+                max_steps: DEFAULT_MAX_STEPS,
+                target_level: DEFAULT_TARGET_LEVEL,
             }),
     );
 

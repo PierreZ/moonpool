@@ -6,7 +6,10 @@
 //!
 //! Ported from `/home/pierrez/workspace/rust/Claude-fork-testing/maze-explorer/src/maze.rs`.
 
-use moonpool_sim::{ExplorationConfig, SimulationBuilder, SimulationReport};
+use async_trait::async_trait;
+use moonpool_sim::{
+    ExplorationConfig, SimContext, SimulationBuilder, SimulationReport, SimulationResult, Workload,
+};
 
 // Gate probability — each nested `if` has this chance of passing.
 const GATE_P: f64 = 0.05;
@@ -237,6 +240,31 @@ impl Maze {
     }
 }
 
+/// Workload that runs the maze and reports bugs via error return.
+struct MazeWorkload {
+    max_steps: u64,
+}
+
+#[async_trait(?Send)]
+impl Workload for MazeWorkload {
+    fn name(&self) -> &str {
+        "maze"
+    }
+
+    async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+        let mut maze = Maze::new(self.max_steps);
+        let result = maze.run();
+
+        if result == StepResult::BugFound {
+            return Err(moonpool_sim::SimulationError::InvalidState(
+                "maze bug: all 4 locks opened".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
 /// Helper to run a simulation and return the report.
 fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
@@ -268,17 +296,8 @@ fn slow_simulation_maze() {
                     per_mark_energy: 1_000,
                 }),
             })
-            .workload_fn("maze", |_ctx| async move {
-                let mut maze = Maze::new(DEFAULT_MAX_STEPS);
-                let result = maze.run();
-
-                if result == StepResult::BugFound {
-                    return Err(moonpool_sim::SimulationError::InvalidState(
-                        "maze bug: all 4 locks opened".to_string(),
-                    ));
-                }
-
-                Ok(())
+            .workload(MazeWorkload {
+                max_steps: DEFAULT_MAX_STEPS,
             }),
     );
 
@@ -315,17 +334,8 @@ fn slow_simulation_maze_bug_replay() {
                     per_mark_energy: 1_000,
                 }),
             })
-            .workload_fn("maze", |_ctx| async move {
-                let mut maze = Maze::new(DEFAULT_MAX_STEPS);
-                let result = maze.run();
-
-                if result == StepResult::BugFound {
-                    return Err(moonpool_sim::SimulationError::InvalidState(
-                        "maze bug: all 4 locks opened".to_string(),
-                    ));
-                }
-
-                Ok(())
+            .workload(MazeWorkload {
+                max_steps: DEFAULT_MAX_STEPS,
             }),
     );
 

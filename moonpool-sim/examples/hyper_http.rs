@@ -1,5 +1,3 @@
-// TODO CLAUDE AI: port to new Workload trait API (currently uses old register_workload API)
-/*
 //! Hyper HTTP Example: Testing HTTP/1.1 services in deterministic simulation.
 //!
 //! This example demonstrates that **unmodified hyper** can run over moonpool-sim's
@@ -37,6 +35,7 @@
 //! nix develop --command cargo run --example hyper_http -p moonpool-sim
 //! ```
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
@@ -45,9 +44,8 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 
 use moonpool_sim::{
-    NetworkProvider, SimNetworkProvider, SimRandomProvider, SimTimeProvider, SimulationBuilder,
-    SimulationError, SimulationMetrics, SimulationResult, TaskProvider, TcpListenerTrait,
-    TokioTaskProvider, WorkloadTopology,
+    NetworkProvider, SimContext, SimulationBuilder, SimulationError, SimulationResult,
+    TaskProvider, TcpListenerTrait, Workload,
 };
 
 // ============================================================================
@@ -80,109 +78,119 @@ async fn handle_request(
 // Server Workload
 // ============================================================================
 
-async fn server_workload(
-    _random: SimRandomProvider,
-    network: SimNetworkProvider,
-    _time: SimTimeProvider,
-    _task: TokioTaskProvider,
-    topology: WorkloadTopology,
-) -> SimulationResult<SimulationMetrics> {
-    let listener = network.bind(&topology.my_ip).await?;
-    let (stream, _addr) = listener.accept().await?;
-    let io = TokioIo::new(stream);
+/// HTTP/1.1 server workload using unmodified hyper over simulated TCP.
+struct HyperServer;
 
-    hyper::server::conn::http1::Builder::new()
-        .serve_connection(io, service_fn(handle_request))
-        .await
-        .map_err(|e| SimulationError::InvalidState(format!("hyper server error: {e}")))?;
+#[async_trait(?Send)]
+impl Workload for HyperServer {
+    fn name(&self) -> &str {
+        "server"
+    }
 
-    Ok(SimulationMetrics::default())
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let listener = ctx.network().bind(ctx.my_ip()).await?;
+        let (stream, _addr) = listener.accept().await?;
+        let io = TokioIo::new(stream);
+
+        hyper::server::conn::http1::Builder::new()
+            .serve_connection(io, service_fn(handle_request))
+            .await
+            .map_err(|e| SimulationError::InvalidState(format!("hyper server error: {e}")))?;
+
+        Ok(())
+    }
 }
 
 // ============================================================================
 // Client Workload
 // ============================================================================
 
-async fn client_workload(
-    _random: SimRandomProvider,
-    network: SimNetworkProvider,
-    _time: SimTimeProvider,
-    task: TokioTaskProvider,
-    topology: WorkloadTopology,
-) -> SimulationResult<SimulationMetrics> {
-    let server_ip = &topology.peer_ips[0];
+/// HTTP/1.1 client workload using unmodified hyper over simulated TCP.
+struct HyperClient;
 
-    let stream = network.connect(server_ip).await?;
-    let io = TokioIo::new(stream);
+#[async_trait(?Send)]
+impl Workload for HyperClient {
+    fn name(&self) -> &str {
+        "client"
+    }
 
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
-        .await
-        .map_err(|e| SimulationError::InvalidState(format!("hyper handshake error: {e}")))?;
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let server_ip = ctx
+            .peer("server")
+            .ok_or_else(|| SimulationError::InvalidState("server not found in peers".into()))?;
 
-    task.spawn_task("hyper-conn-driver", async move {
-        if let Err(e) = conn.await {
-            eprintln!("Connection driver error: {e}");
-        }
-    });
+        let stream = ctx.network().connect(&server_ip).await?;
+        let io = TokioIo::new(stream);
 
-    // GET /hello
-    let req = Request::builder()
-        .uri("/hello")
-        .header("host", server_ip.as_str())
-        .body(Full::new(Bytes::new()))
-        .map_err(|e| SimulationError::InvalidState(format!("request build error: {e}")))?;
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+            .await
+            .map_err(|e| SimulationError::InvalidState(format!("hyper handshake error: {e}")))?;
 
-    let res = sender
-        .send_request(req)
-        .await
-        .map_err(|e| SimulationError::InvalidState(format!("send_request error: {e}")))?;
+        ctx.task().spawn_task("hyper-conn-driver", async move {
+            if let Err(e) = conn.await {
+                eprintln!("Connection driver error: {e}");
+            }
+        });
 
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = res
-        .into_body()
-        .collect()
-        .await
-        .map_err(|e| SimulationError::InvalidState(format!("body collect error: {e}")))?
-        .to_bytes();
-    assert_eq!(&body[..], b"Hello from moonpool-sim!");
+        // GET /hello
+        let req = Request::builder()
+            .uri("/hello")
+            .header("host", server_ip.as_str())
+            .body(Full::new(Bytes::new()))
+            .map_err(|e| SimulationError::InvalidState(format!("request build error: {e}")))?;
 
-    // POST /echo
-    let req = Request::builder()
-        .method("POST")
-        .uri("/echo")
-        .header("host", server_ip.as_str())
-        .body(Full::new(Bytes::from("ping")))
-        .map_err(|e| SimulationError::InvalidState(format!("request build error: {e}")))?;
+        let res = sender
+            .send_request(req)
+            .await
+            .map_err(|e| SimulationError::InvalidState(format!("send_request error: {e}")))?;
 
-    let res = sender
-        .send_request(req)
-        .await
-        .map_err(|e| SimulationError::InvalidState(format!("send_request error: {e}")))?;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res
+            .into_body()
+            .collect()
+            .await
+            .map_err(|e| SimulationError::InvalidState(format!("body collect error: {e}")))?
+            .to_bytes();
+        assert_eq!(&body[..], b"Hello from moonpool-sim!");
 
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = res
-        .into_body()
-        .collect()
-        .await
-        .map_err(|e| SimulationError::InvalidState(format!("body collect error: {e}")))?
-        .to_bytes();
-    assert_eq!(&body[..], b"ping");
+        // POST /echo
+        let req = Request::builder()
+            .method("POST")
+            .uri("/echo")
+            .header("host", server_ip.as_str())
+            .body(Full::new(Bytes::from("ping")))
+            .map_err(|e| SimulationError::InvalidState(format!("request build error: {e}")))?;
 
-    // GET /nonexistent → 404
-    let req = Request::builder()
-        .uri("/nonexistent")
-        .header("host", server_ip.as_str())
-        .body(Full::new(Bytes::new()))
-        .map_err(|e| SimulationError::InvalidState(format!("request build error: {e}")))?;
+        let res = sender
+            .send_request(req)
+            .await
+            .map_err(|e| SimulationError::InvalidState(format!("send_request error: {e}")))?;
 
-    let res = sender
-        .send_request(req)
-        .await
-        .map_err(|e| SimulationError::InvalidState(format!("send_request error: {e}")))?;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res
+            .into_body()
+            .collect()
+            .await
+            .map_err(|e| SimulationError::InvalidState(format!("body collect error: {e}")))?
+            .to_bytes();
+        assert_eq!(&body[..], b"ping");
 
-    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        // GET /nonexistent → 404
+        let req = Request::builder()
+            .uri("/nonexistent")
+            .header("host", server_ip.as_str())
+            .body(Full::new(Bytes::new()))
+            .map_err(|e| SimulationError::InvalidState(format!("request build error: {e}")))?;
 
-    Ok(SimulationMetrics::default())
+        let res = sender
+            .send_request(req)
+            .await
+            .map_err(|e| SimulationError::InvalidState(format!("send_request error: {e}")))?;
+
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -190,6 +198,10 @@ async fn client_workload(
 // ============================================================================
 
 fn main() {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::ERROR)
+        .init();
+
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build_local(Default::default())
@@ -197,8 +209,8 @@ fn main() {
 
     let report = runtime.block_on(async {
         SimulationBuilder::new()
-            .register_workload("server", server_workload)
-            .register_workload("client", client_workload)
+            .workload(HyperServer)
+            .workload(HyperClient)
             .set_iterations(3)
             .run()
             .await
@@ -219,9 +231,4 @@ fn main() {
     }
 
     println!("\nAll iterations passed!");
-}
-*/
-
-fn main() {
-    println!("Example commented out — pending port to new Workload trait API");
 }
