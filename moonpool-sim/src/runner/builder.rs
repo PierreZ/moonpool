@@ -301,6 +301,7 @@ impl SimulationBuilder {
             // Prepare clean state for this iteration
             crate::sim::reset_sim_rng();
             crate::sim::set_sim_seed(seed);
+            crate::chaos::reset_always_violations();
 
             // Initialize buggify system for this iteration
             // Use moderate probabilities: 50% activation rate, 25% firing rate
@@ -352,7 +353,28 @@ impl SimulationBuilder {
                     self.fault_injectors = returned_injectors;
 
                     let wall_time = start_time.elapsed();
-                    metrics_collector.record_iteration(seed, wall_time, &all_results, sim_metrics);
+
+                    // If always-assertion violations occurred (from invariants or workloads),
+                    // inject a synthetic error so the iteration is recorded as failed
+                    if crate::chaos::has_always_violations() {
+                        let mut results_with_violation = all_results;
+                        results_with_violation.push(Err(crate::SimulationError::InvalidState(
+                            "always-assertion violated".to_string(),
+                        )));
+                        metrics_collector.record_iteration(
+                            seed,
+                            wall_time,
+                            &results_with_violation,
+                            sim_metrics,
+                        );
+                    } else {
+                        metrics_collector.record_iteration(
+                            seed,
+                            wall_time,
+                            &all_results,
+                            sim_metrics,
+                        );
+                    }
                 }
                 Err((faulty_seeds_from_deadlock, failed_count)) => {
                     // Handle deadlock case - merge with existing state and return early

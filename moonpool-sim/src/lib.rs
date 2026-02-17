@@ -127,8 +127,8 @@ pub use runner::{
 // Chaos module re-exports
 pub use chaos::{
     AssertionStats, Invariant, StateHandle, buggify_init, buggify_reset, get_assertion_results,
-    invariant_fn, panic_on_assertion_violations, reset_assertion_results,
-    validate_assertion_contracts,
+    has_always_violations, invariant_fn, panic_on_assertion_violations, reset_always_violations,
+    reset_assertion_results, validate_assertion_contracts,
 };
 
 // Network exports

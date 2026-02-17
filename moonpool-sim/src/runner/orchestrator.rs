@@ -181,11 +181,12 @@ impl WorkloadOrchestrator {
 
         // If this is a forked child, exit immediately to return control to parent.
         if moonpool_explorer::explorer_is_child() {
-            let code = if results.iter().all(|r| r.is_ok()) {
-                0
-            } else {
-                42
-            };
+            let code =
+                if results.iter().all(|r| r.is_ok()) && !crate::chaos::has_always_violations() {
+                    0
+                } else {
+                    42
+                };
             moonpool_explorer::exit_child(code);
         }
 
