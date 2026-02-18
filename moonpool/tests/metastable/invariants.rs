@@ -52,12 +52,7 @@ impl Invariant for RecoveryInvariant {
                 let healthy_for = sim_time_ms.saturating_sub(since);
                 if healthy_for > RECOVERY_DEADLINE_MS {
                     let goodput = state.get::<f64>("goodput").unwrap_or(1.0);
-                    assert_always!(
-                        goodput >= RECOVERY_THRESHOLD,
-                        format!(
-                            "recovery: DNS healthy for more than {RECOVERY_THRESHOLD} but goodput is low"
-                        )
-                    );
+                    assert_always!(goodput >= RECOVERY_THRESHOLD, "recovery_after_dns_heals");
                 }
             }
         } else {

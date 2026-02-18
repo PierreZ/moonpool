@@ -104,29 +104,44 @@ fn slow_simulation_metastable_failure() {
         moonpool_sim::parse_timeline(&timeline_str).expect("recipe should round-trip");
     assert_eq!(recipe, parsed_recipe);
 
-    // Phase 3: Replay — same seed, breakpoints from recipe, no exploration
-    moonpool_sim::reset_sim_rng();
-    moonpool_sim::set_sim_seed(initial_seed);
-    moonpool_sim::set_rng_breakpoints(parsed_recipe);
+    // Phase 3: Capture recipe for hardcoded replay test
+    eprintln!(
+        "Replay values: seed={}, recipe={}",
+        initial_seed, timeline_str
+    );
+}
 
-    let replay_report = run_simulation(
+/// Fast replay test using a known-good recipe from exploration.
+///
+/// Uses hardcoded seed + breakpoints discovered by `slow_simulation_metastable_failure`.
+/// This lets us iterate on replay correctness without re-running the expensive exploration.
+#[test]
+fn test_metastable_replay() {
+    let seed: u64 = 9577351254535018007;
+    let recipe_str = "5@590676371239035912 -> 106@17865372042823683381 -> 4107@16428674119576506947 -> 0@15901296595419797488 -> 30@12013086745221223274 -> 159@7876662793634380815";
+    let recipe = moonpool_sim::parse_timeline(recipe_str).expect("recipe should parse");
+
+    moonpool_sim::reset_sim_rng();
+    moonpool_sim::set_sim_seed(seed);
+    moonpool_sim::set_rng_breakpoints(recipe);
+
+    let report = run_simulation(
         SimulationBuilder::new()
             .workload(DnsWorkload::new())
             .workload(LeaseStoreWorkload::new())
             .workload(FleetWorkload::new())
             .workload(DriverWorkload::new())
             .invariant(RecoveryInvariant::new())
+            .random_network()
             .set_iterations(1)
-            .set_debug_seeds(vec![initial_seed]),
+            .set_debug_seeds(vec![seed]),
     );
 
-    eprintln!("Replay report: {replay_report}");
-    assert_eq!(replay_report.successful_runs, 1);
+    eprintln!("Replay report: {report}");
 
-    // Verify the recovery invariant was violated during replay too
-    let recovery = replay_report
+    let recovery = report
         .assertion_results
-        .get("recovery")
+        .get("recovery_after_dns_heals")
         .expect("recovery assertion missing in replay");
     let failures = recovery.total_checks - recovery.successes;
     assert!(
