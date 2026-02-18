@@ -8,6 +8,3 @@ mod maze;
 
 #[path = "exploration/dungeon.rs"]
 mod dungeon;
-
-#[path = "exploration/control_plane/mod.rs"]
-mod control_plane;
