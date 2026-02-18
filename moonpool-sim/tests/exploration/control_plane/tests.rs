@@ -68,6 +68,8 @@ fn slow_simulation_control_plane() {
             }),
     );
 
+    eprintln!("{report}");
+
     // All parent runs should succeed
     assert_eq!(report.successful_runs, 2);
 
@@ -107,6 +109,8 @@ fn slow_simulation_control_plane_replay() {
                 parallelism: Some(moonpool_sim::Parallelism::HalfCores),
             }),
     );
+
+    eprintln!("{report}");
 
     assert_eq!(report.successful_runs, 1);
     let exp = report.exploration.expect("exploration report missing");

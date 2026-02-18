@@ -271,6 +271,8 @@ impl SimulationBuilder {
                 assertion_violations: Vec::new(),
                 coverage_violations: Vec::new(),
                 exploration: None,
+                assertion_details: Vec::new(),
+                bucket_summaries: Vec::new(),
             };
         }
 
@@ -398,6 +400,8 @@ impl SimulationBuilder {
                         assertion_violations,
                         coverage_violations,
                         None,
+                        Vec::new(),
+                        Vec::new(),
                     );
                 }
             }
@@ -419,13 +423,17 @@ impl SimulationBuilder {
         }
 
         // End of main iteration loop
+        //
+        // Data collection: read ALL shared memory BEFORE any cleanup.
+        // cleanup() calls cleanup_assertions() which frees the assertion
+        // table and each-bucket table.
 
-        // Build exploration report from accumulated stats across all seeds.
-        // Energy/realloc values reflect the last seed's final state.
+        // 1. Read exploration-specific data (freed by cleanup)
         let exploration_report = if self.exploration_config.is_some() {
             let final_stats = moonpool_explorer::get_exploration_stats();
             let bug_recipe = first_bug_recipe.or_else(moonpool_explorer::get_bug_recipe);
-            moonpool_explorer::cleanup();
+            let coverage_bits = moonpool_explorer::explored_map_bits_set().unwrap_or(0);
+
             Some(super::report::ExplorationReport {
                 total_timelines: total_exploration_timelines,
                 fork_points: total_exploration_fork_points,
@@ -436,16 +444,48 @@ impl SimulationBuilder {
                     .as_ref()
                     .map(|s| s.realloc_pool_remaining)
                     .unwrap_or(0),
+                coverage_bits,
+                coverage_total: (moonpool_explorer::coverage::COVERAGE_MAP_SIZE * 8) as u32,
             })
         } else {
             None
         };
 
+        // 2. Read assertion + bucket data (freed by cleanup/cleanup_assertions)
+        let assertion_results = crate::chaos::get_assertion_results();
+        let (assertion_violations, coverage_violations) =
+            crate::chaos::validate_assertion_contracts();
+        let raw_assertion_slots = moonpool_explorer::assertion_read_all();
+        let raw_each_buckets = moonpool_explorer::each_bucket_read_all();
+
+        // 3. Now safe to free all shared memory
+        if self.exploration_config.is_some() {
+            moonpool_explorer::cleanup();
+        } else {
+            moonpool_explorer::cleanup_assertions();
+        }
+
+        // 4. Build rich assertion details from raw slot snapshots
+        let assertion_details = build_assertion_details(&raw_assertion_slots);
+
+        // 5. Build bucket summaries by grouping EachBuckets by site
+        let bucket_summaries = build_bucket_summaries(&raw_each_buckets);
+
         // Print exploration summary (always visible, no tracing subscriber needed)
         if let Some(ref exp) = exploration_report {
             eprintln!(
-                "\n--- Exploration ---\n  timelines: {}  |  fork points: {}  |  bugs: {}  |  energy left: {}",
-                exp.total_timelines, exp.fork_points, exp.bugs_found, exp.energy_remaining
+                "\n--- Exploration ---\n  timelines: {}  |  fork points: {}  |  bugs: {}  |  energy left: {}  |  coverage: {}/{} ({:.1}%)",
+                exp.total_timelines,
+                exp.fork_points,
+                exp.bugs_found,
+                exp.energy_remaining,
+                exp.coverage_bits,
+                exp.coverage_total,
+                if exp.coverage_total > 0 {
+                    (exp.coverage_bits as f64 / exp.coverage_total as f64) * 100.0
+                } else {
+                    0.0
+                }
             );
             if let Some(ref recipe) = exp.bug_recipe {
                 eprintln!(
@@ -471,16 +511,6 @@ impl SimulationBuilder {
             );
         }
 
-        // Collect assertion results and validate them
-        let assertion_results = crate::chaos::get_assertion_results();
-        let (assertion_violations, coverage_violations) =
-            crate::chaos::validate_assertion_contracts();
-
-        // Clean up assertion table if exploration didn't already do it
-        if self.exploration_config.is_none() {
-            moonpool_explorer::cleanup_assertions();
-        }
-
         // Final buggify reset to ensure no impact on subsequent code
         crate::chaos::buggify_reset();
 
@@ -491,8 +521,108 @@ impl SimulationBuilder {
             assertion_violations,
             coverage_violations,
             exploration_report,
+            assertion_details,
+            bucket_summaries,
         )
     }
+}
+
+/// Build [`AssertionDetail`] vec from raw assertion slot snapshots.
+fn build_assertion_details(
+    slots: &[moonpool_explorer::AssertionSlotSnapshot],
+) -> Vec<super::report::AssertionDetail> {
+    use super::report::{AssertionDetail, AssertionStatus};
+    use moonpool_explorer::AssertKind;
+
+    slots
+        .iter()
+        .filter_map(|slot| {
+            let kind = AssertKind::from_u8(slot.kind)?;
+            let total = slot.pass_count.saturating_add(slot.fail_count);
+
+            // Skip unvisited assertions
+            if total == 0 && slot.frontier == 0 {
+                return None;
+            }
+
+            let status = match kind {
+                AssertKind::Always
+                | AssertKind::AlwaysOrUnreachable
+                | AssertKind::NumericAlways => {
+                    if slot.fail_count > 0 {
+                        AssertionStatus::Fail
+                    } else {
+                        AssertionStatus::Pass
+                    }
+                }
+                AssertKind::Sometimes | AssertKind::NumericSometimes => {
+                    if slot.pass_count > 0 {
+                        AssertionStatus::Pass
+                    } else {
+                        AssertionStatus::Miss
+                    }
+                }
+                AssertKind::Reachable => {
+                    if slot.pass_count > 0 {
+                        AssertionStatus::Pass
+                    } else {
+                        AssertionStatus::Miss
+                    }
+                }
+                AssertKind::Unreachable => {
+                    if slot.pass_count > 0 {
+                        AssertionStatus::Fail
+                    } else {
+                        AssertionStatus::Pass
+                    }
+                }
+                AssertKind::BooleanSometimesAll => {
+                    if slot.frontier > 0 {
+                        AssertionStatus::Pass
+                    } else {
+                        AssertionStatus::Miss
+                    }
+                }
+            };
+
+            Some(AssertionDetail {
+                msg: slot.msg.clone(),
+                kind,
+                pass_count: slot.pass_count,
+                fail_count: slot.fail_count,
+                watermark: slot.watermark,
+                frontier: slot.frontier,
+                status,
+            })
+        })
+        .collect()
+}
+
+/// Build [`BucketSiteSummary`] vec by grouping [`EachBucket`]s by site message.
+fn build_bucket_summaries(
+    buckets: &[moonpool_explorer::EachBucket],
+) -> Vec<super::report::BucketSiteSummary> {
+    use super::report::BucketSiteSummary;
+    use std::collections::HashMap;
+
+    let mut sites: HashMap<u32, BucketSiteSummary> = HashMap::new();
+
+    for bucket in buckets {
+        let entry = sites
+            .entry(bucket.site_hash)
+            .or_insert_with(|| BucketSiteSummary {
+                msg: bucket.msg_str().to_string(),
+                buckets_discovered: 0,
+                total_hits: 0,
+            });
+
+        entry.buckets_discovered += 1;
+        entry.total_hits += bucket.pass_count as u64;
+    }
+
+    let mut summaries: Vec<_> = sites.into_values().collect();
+    summaries.sort_by(|a, b| b.total_hits.cmp(&a.total_hits));
+    summaries
 }
 
 #[cfg(test)]

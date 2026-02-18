@@ -721,6 +721,8 @@ fn slow_simulation_dungeon() {
             }),
     );
 
+    eprintln!("{report}");
+
     // All parent runs should succeed
     assert_eq!(report.successful_runs, 3);
 
@@ -760,6 +762,8 @@ fn slow_simulation_dungeon_bug_replay() {
                 target_level: DEFAULT_TARGET_LEVEL,
             }),
     );
+
+    eprintln!("{report}");
 
     assert_eq!(report.successful_runs, 3);
 

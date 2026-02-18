@@ -745,7 +745,9 @@ impl MetricsCollector {
         self.aggregated_metrics.simulated_time += sim_metrics.simulated_time;
         self.aggregated_metrics.events_processed += sim_metrics.events_processed;
 
-        self.individual_metrics.push(Ok(sim_metrics));
+        let mut individual = sim_metrics;
+        individual.wall_time = wall_time;
+        self.individual_metrics.push(Ok(individual));
     }
 
     /// Record a failed iteration.
@@ -771,6 +773,7 @@ impl MetricsCollector {
     }
 
     /// Generate the final simulation report.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn generate_report(
         self,
         iteration_count: usize,
@@ -779,6 +782,8 @@ impl MetricsCollector {
         assertion_violations: Vec<String>,
         coverage_violations: Vec<String>,
         exploration: Option<super::report::ExplorationReport>,
+        assertion_details: Vec<super::report::AssertionDetail>,
+        bucket_summaries: Vec<super::report::BucketSiteSummary>,
     ) -> super::report::SimulationReport {
         super::report::SimulationReport {
             iterations: iteration_count,
@@ -792,6 +797,8 @@ impl MetricsCollector {
             assertion_violations,
             coverage_violations,
             exploration,
+            assertion_details,
+            bucket_summaries,
         }
     }
 

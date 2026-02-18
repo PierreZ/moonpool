@@ -574,7 +574,9 @@ pub use assertion_slots::{
     assertion_bool, assertion_numeric, assertion_read_all, assertion_sometimes_all, msg_hash,
 };
 pub use context::{explorer_is_child, get_assertion_table_ptr, set_rng_hooks};
-pub use each_buckets::{EachBucket, assertion_sometimes_each, each_bucket_read_all};
+pub use each_buckets::{
+    EachBucket, assertion_sometimes_each, each_bucket_read_all, unpack_quality,
+};
 pub use replay::{ParseTimelineError, format_timeline, parse_timeline};
 pub use shared_stats::{ExplorationStats, get_bug_recipe, get_exploration_stats};
 pub use split_loop::{AdaptiveConfig, Parallelism, exit_child};
@@ -756,6 +758,23 @@ pub fn prepare_next_seed(per_seed_energy: i64) {
         ctx.recipe.clear();
         ctx.warm_start = true;
     });
+}
+
+/// Count the number of bits set in the explored coverage map.
+///
+/// Returns `None` if the explored map is not initialized (exploration not active).
+/// The result represents how many unique assertion paths have been explored
+/// across all timelines.
+///
+/// Must be called before [`cleanup`] which frees the explored map memory.
+pub fn explored_map_bits_set() -> Option<u32> {
+    let ptr = EXPLORED_MAP_PTR.with(|c| c.get());
+    if ptr.is_null() {
+        return None;
+    }
+    // Safety: ptr was allocated during init() with COVERAGE_MAP_SIZE bytes.
+    let vm = unsafe { coverage::ExploredMap::new(ptr) };
+    Some(vm.count_bits_set())
 }
 
 /// Initialize the exploration framework.
