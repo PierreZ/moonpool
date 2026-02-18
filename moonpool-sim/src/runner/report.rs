@@ -32,6 +32,15 @@ impl Default for SimulationMetrics {
     }
 }
 
+/// A captured bug recipe with its root seed for deterministic replay.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BugRecipe {
+    /// The root seed that was active when this bug was discovered.
+    pub seed: u64,
+    /// Fork path: `(rng_call_count, child_seed)` pairs.
+    pub recipe: Vec<(u64, u64)>,
+}
+
 /// Report from fork-based exploration.
 #[derive(Debug, Clone)]
 pub struct ExplorationReport {
@@ -41,8 +50,8 @@ pub struct ExplorationReport {
     pub fork_points: u64,
     /// Number of bugs found (children exiting with code 42).
     pub bugs_found: u64,
-    /// Bug recipe if one was captured (for replay).
-    pub bug_recipe: Option<Vec<(u64, u64)>>,
+    /// Bug recipes captured during exploration (one per seed that found bugs).
+    pub bug_recipes: Vec<BugRecipe>,
     /// Remaining global energy after exploration.
     pub energy_remaining: i64,
     /// Energy in the reallocation pool.
@@ -291,11 +300,12 @@ impl fmt::Display for SimulationReport {
                 "  Energy left:  {:<18}Realloc pool:   {}",
                 exp.energy_remaining, exp.realloc_pool_remaining
             )?;
-            if let Some(ref recipe) = exp.bug_recipe {
+            for br in &exp.bug_recipes {
                 writeln!(
                     f,
-                    "  Bug recipe: {}",
-                    moonpool_explorer::format_timeline(recipe)
+                    "  Bug recipe (seed={}): {}",
+                    br.seed,
+                    moonpool_explorer::format_timeline(&br.recipe)
                 )?;
             }
         }

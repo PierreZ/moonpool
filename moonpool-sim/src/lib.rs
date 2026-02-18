@@ -209,6 +209,6 @@ pub use moonpool_explorer::{
     AdaptiveConfig, AssertCmp, AssertKind, ExplorationConfig, Parallelism, format_timeline,
     parse_timeline,
 };
-pub use runner::report::ExplorationReport;
+pub use runner::report::{BugRecipe, ExplorationReport};
 
 // Macros are automatically available at crate root when defined with #[macro_export]

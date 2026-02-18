@@ -81,6 +81,7 @@ pub struct SimulationBuilder {
     fault_injectors: Vec<Box<dyn FaultInjector>>,
     phase_config: Option<PhaseConfig>,
     exploration_config: Option<moonpool_explorer::ExplorationConfig>,
+    replay_recipe: Option<super::report::BugRecipe>,
 }
 
 impl Default for SimulationBuilder {
@@ -101,6 +102,7 @@ impl SimulationBuilder {
             fault_injectors: Vec::new(),
             phase_config: None,
             exploration_config: None,
+            replay_recipe: None,
         }
     }
 
@@ -210,6 +212,15 @@ impl SimulationBuilder {
         self
     }
 
+    /// Set a bug recipe for deterministic replay.
+    ///
+    /// The builder applies the recipe's RNG breakpoints after its own
+    /// initialization, ensuring they survive internal resets.
+    pub fn replay_recipe(mut self, recipe: super::report::BugRecipe) -> Self {
+        self.replay_recipe = Some(recipe);
+        self
+    }
+
     /// Resolve all entries into a flat workload list for one iteration.
     ///
     /// Returns `(workloads, return_map)` where `return_map[i] = Some(entry_idx)`
@@ -285,7 +296,7 @@ impl SimulationBuilder {
         let mut total_exploration_timelines: u64 = 0;
         let mut total_exploration_fork_points: u64 = 0;
         let mut total_exploration_bugs: u64 = 0;
-        let mut first_bug_recipe: Option<Vec<(u64, u64)>> = None;
+        let mut bug_recipes: Vec<super::report::BugRecipe> = Vec::new();
 
         // Initialize assertion table (unconditional — works even without exploration)
         if let Err(e) = moonpool_explorer::init_assertions() {
@@ -346,6 +357,11 @@ impl SimulationBuilder {
 
             // Create shared SimWorld for this iteration using fresh network config
             let sim = crate::sim::SimWorld::new_with_network_config_and_seed(network_config, seed);
+
+            // Apply replay breakpoints after SimWorld creation (which resets RNG state)
+            if let Some(ref br) = self.replay_recipe {
+                crate::sim::set_rng_breakpoints(br.recipe.clone());
+            }
 
             let start_time = Instant::now();
 
@@ -413,8 +429,8 @@ impl SimulationBuilder {
                     total_exploration_fork_points += stats.fork_points;
                     total_exploration_bugs += stats.bug_found;
                 }
-                if first_bug_recipe.is_none() {
-                    first_bug_recipe = moonpool_explorer::get_bug_recipe();
+                if let Some(recipe) = moonpool_explorer::get_bug_recipe() {
+                    bug_recipes.push(super::report::BugRecipe { seed, recipe });
                 }
             }
 
@@ -431,14 +447,15 @@ impl SimulationBuilder {
         // 1. Read exploration-specific data (freed by cleanup)
         let exploration_report = if self.exploration_config.is_some() {
             let final_stats = moonpool_explorer::get_exploration_stats();
-            let bug_recipe = first_bug_recipe.or_else(moonpool_explorer::get_bug_recipe);
+            // The per-iteration capture above should have caught all recipes.
+            // No fallback needed since we capture after every iteration.
             let coverage_bits = moonpool_explorer::explored_map_bits_set().unwrap_or(0);
 
             Some(super::report::ExplorationReport {
                 total_timelines: total_exploration_timelines,
                 fork_points: total_exploration_fork_points,
                 bugs_found: total_exploration_bugs,
-                bug_recipe,
+                bug_recipes,
                 energy_remaining: final_stats.as_ref().map(|s| s.global_energy).unwrap_or(0),
                 realloc_pool_remaining: final_stats
                     .as_ref()
@@ -487,10 +504,10 @@ impl SimulationBuilder {
                     0.0
                 }
             );
-            if let Some(ref recipe) = exp.bug_recipe {
+            for br in &exp.bug_recipes {
                 eprintln!(
                     "  bug recipe: {}",
-                    moonpool_explorer::format_timeline(recipe)
+                    moonpool_explorer::format_timeline(&br.recipe)
                 );
             }
         }

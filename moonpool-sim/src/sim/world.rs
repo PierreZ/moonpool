@@ -5,7 +5,7 @@
 
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     net::IpAddr,
     rc::{Rc, Weak},
     task::Waker,
@@ -772,7 +772,7 @@ impl SimWorld {
     }
 
     /// Wake all tasks associated with a connection
-    fn wake_all(wakers: &mut HashMap<ConnectionId, Vec<Waker>>, connection_id: ConnectionId) {
+    fn wake_all(wakers: &mut BTreeMap<ConnectionId, Vec<Waker>>, connection_id: ConnectionId) {
         if let Some(waker_list) = wakers.remove(&connection_id) {
             for waker in waker_list {
                 waker.wake();
@@ -1288,12 +1288,12 @@ impl SimWorld {
     fn handle_shutdown_event(inner: &mut SimInner) {
         tracing::debug!("Processing Shutdown event - waking all pending tasks");
 
-        for (task_id, waker) in inner.wakers.task_wakers.drain() {
+        for (task_id, waker) in std::mem::take(&mut inner.wakers.task_wakers) {
             tracing::trace!("Waking task {}", task_id);
             waker.wake();
         }
 
-        for (_conn_id, waker) in inner.wakers.read_wakers.drain() {
+        for (_conn_id, waker) in std::mem::take(&mut inner.wakers.read_wakers) {
             waker.wake();
         }
 

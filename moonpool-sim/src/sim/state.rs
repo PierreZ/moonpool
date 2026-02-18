@@ -4,7 +4,7 @@
 //! listeners, partitions, and clogs in the simulation environment.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     net::IpAddr,
     time::Duration,
 };
@@ -199,24 +199,24 @@ pub struct NetworkState {
     /// Network configuration for this simulation.
     pub config: NetworkConfiguration,
     /// Active connections indexed by their ID.
-    pub connections: HashMap<ConnectionId, ConnectionState>,
+    pub connections: BTreeMap<ConnectionId, ConnectionState>,
     /// Active listeners indexed by their ID.
-    pub listeners: HashMap<ListenerId, ListenerState>,
+    pub listeners: BTreeMap<ListenerId, ListenerState>,
     /// Connections pending acceptance, indexed by address.
-    pub pending_connections: HashMap<String, ConnectionId>,
+    pub pending_connections: BTreeMap<String, ConnectionId>,
 
     /// Write clog state (temporary write blocking).
-    pub connection_clogs: HashMap<ConnectionId, ClogState>,
+    pub connection_clogs: BTreeMap<ConnectionId, ClogState>,
 
     /// Read clog state (temporary read blocking, symmetric with write clogging).
-    pub read_clogs: HashMap<ConnectionId, ClogState>,
+    pub read_clogs: BTreeMap<ConnectionId, ClogState>,
 
     /// Partitions between specific IP pairs (from, to) -> partition state
-    pub ip_partitions: HashMap<(IpAddr, IpAddr), PartitionState>,
+    pub ip_partitions: BTreeMap<(IpAddr, IpAddr), PartitionState>,
     /// Send partitions - IP cannot send to anyone
-    pub send_partitions: HashMap<IpAddr, Duration>,
+    pub send_partitions: BTreeMap<IpAddr, Duration>,
     /// Receive partitions - IP cannot receive from anyone
-    pub recv_partitions: HashMap<IpAddr, Duration>,
+    pub recv_partitions: BTreeMap<IpAddr, Duration>,
 
     /// Last time a random close was triggered (global cooldown tracking)
     /// FDB: g_simulator->lastConnectionFailure - see sim2.actor.cpp:583
@@ -225,7 +225,7 @@ pub struct NetworkState {
     /// Per-IP-pair base latencies for consistent connection behavior.
     /// Once set on first connection, all subsequent connections between the same
     /// IP pair will use this base latency (with optional jitter on top).
-    pub pair_latencies: HashMap<(IpAddr, IpAddr), Duration>,
+    pub pair_latencies: BTreeMap<(IpAddr, IpAddr), Duration>,
 }
 
 impl NetworkState {
@@ -235,16 +235,16 @@ impl NetworkState {
             next_connection_id: 0,
             next_listener_id: 0,
             config,
-            connections: HashMap::new(),
-            listeners: HashMap::new(),
-            pending_connections: HashMap::new(),
-            connection_clogs: HashMap::new(),
-            read_clogs: HashMap::new(),
-            ip_partitions: HashMap::new(),
-            send_partitions: HashMap::new(),
-            recv_partitions: HashMap::new(),
+            connections: BTreeMap::new(),
+            listeners: BTreeMap::new(),
+            pending_connections: BTreeMap::new(),
+            connection_clogs: BTreeMap::new(),
+            read_clogs: BTreeMap::new(),
+            ip_partitions: BTreeMap::new(),
+            send_partitions: BTreeMap::new(),
+            recv_partitions: BTreeMap::new(),
             last_random_close_time: Duration::ZERO,
-            pair_latencies: HashMap::new(),
+            pair_latencies: BTreeMap::new(),
         }
     }
 
@@ -312,7 +312,7 @@ impl NetworkState {
 // =============================================================================
 
 /// Unique identifier for a simulated file within the simulation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileId(pub u64);
 
 /// Type of pending storage operation.
@@ -359,7 +359,7 @@ pub struct StorageFileState {
     /// Whether the file has been closed
     pub is_closed: bool,
     /// Pending operations keyed by sequence number
-    pub pending_ops: HashMap<u64, PendingStorageOp>,
+    pub pending_ops: BTreeMap<u64, PendingStorageOp>,
     /// Next sequence number for operations on this file
     pub next_op_seq: u64,
 }
@@ -374,7 +374,7 @@ impl StorageFileState {
             options,
             storage,
             is_closed: false,
-            pending_ops: HashMap::new(),
+            pending_ops: BTreeMap::new(),
             next_op_seq: 0,
         }
     }
@@ -388,9 +388,9 @@ pub struct StorageState {
     /// Storage configuration for latencies and fault injection
     pub config: StorageConfiguration,
     /// Active files indexed by their ID
-    pub files: HashMap<FileId, StorageFileState>,
+    pub files: BTreeMap<FileId, StorageFileState>,
     /// Mapping from path to file ID for quick lookup
-    pub path_to_file: HashMap<String, FileId>,
+    pub path_to_file: BTreeMap<String, FileId>,
     /// Set of paths that have been deleted (for create_new semantics)
     pub deleted_paths: HashSet<String>,
     /// Set of (file_id, op_seq) pairs for sync operations that failed
@@ -403,8 +403,8 @@ impl StorageState {
         Self {
             next_file_id: 0,
             config,
-            files: HashMap::new(),
-            path_to_file: HashMap::new(),
+            files: BTreeMap::new(),
+            path_to_file: BTreeMap::new(),
             deleted_paths: HashSet::new(),
             sync_failures: HashSet::new(),
         }

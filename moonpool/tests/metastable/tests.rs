@@ -13,6 +13,7 @@ fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
+        .rng_seed(tokio::runtime::RngSeed::from_bytes(b"deterministic"))
         .build_local(Default::default())
         .expect("Failed to build local runtime");
 
@@ -91,24 +92,13 @@ fn slow_simulation_metastable_failure() {
         "exploration should have found the metastable failure"
     );
 
-    // Phase 2: Capture bug recipe and round-trip through timeline format
-    let recipe = exp.bug_recipe.expect("bug recipe should be captured");
-    let initial_seed = report.seeds_used[0];
-
-    let timeline_str = moonpool_sim::format_timeline(&recipe);
-    eprintln!(
-        "Replaying metastable bug: seed={}, recipe={}",
-        initial_seed, timeline_str
-    );
-    let parsed_recipe =
-        moonpool_sim::parse_timeline(&timeline_str).expect("recipe should round-trip");
-    assert_eq!(recipe, parsed_recipe);
-
-    // Phase 3: Capture recipe for hardcoded replay test
-    eprintln!(
-        "Replay values: seed={}, recipe={}",
-        initial_seed, timeline_str
-    );
+    // Phase 2: Capture bug recipe — now includes the root seed
+    let bug = exp
+        .bug_recipes
+        .first()
+        .expect("bug recipe should be captured");
+    let timeline_str = moonpool_sim::format_timeline(&bug.recipe);
+    eprintln!("Replay values: seed={}, recipe={}", bug.seed, timeline_str);
 }
 
 /// Fast replay test using a known-good recipe from exploration.
@@ -117,13 +107,13 @@ fn slow_simulation_metastable_failure() {
 /// This lets us iterate on replay correctness without re-running the expensive exploration.
 #[test]
 fn test_metastable_replay() {
-    let seed: u64 = 9577351254535018007;
-    let recipe_str = "5@590676371239035912 -> 106@17865372042823683381 -> 4107@16428674119576506947 -> 0@15901296595419797488 -> 30@12013086745221223274 -> 159@7876662793634380815";
-    let recipe = moonpool_sim::parse_timeline(recipe_str).expect("recipe should parse");
-
-    moonpool_sim::reset_sim_rng();
-    moonpool_sim::set_sim_seed(seed);
-    moonpool_sim::set_rng_breakpoints(recipe);
+    let bug = moonpool_sim::BugRecipe {
+        seed: 54321,
+        recipe: moonpool_sim::parse_timeline(
+            "5@590681868797176967 -> 8@865448932235176101 -> 81@4779941305685547315 -> 0@18260205261052660768 -> 4@14388353850498491855 -> 1156@10435589435718015354 -> 0@8966787143959973739 -> 524@15111294430527635224 -> 1654@1314653516675584659 -> 151@8075856974641946789",
+        )
+        .expect("recipe should parse"),
+    };
 
     let report = run_simulation(
         SimulationBuilder::new()
@@ -133,8 +123,9 @@ fn test_metastable_replay() {
             .workload(DriverWorkload::new())
             .invariant(RecoveryInvariant::new())
             .random_network()
+            .replay_recipe(bug)
             .set_iterations(1)
-            .set_debug_seeds(vec![seed]),
+            .set_debug_seeds(vec![54321]),
     );
 
     eprintln!("Replay report: {report}");

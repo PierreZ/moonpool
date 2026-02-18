@@ -27,7 +27,7 @@
 //! eliminating the most common footgun in NetTransport usage.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::rc::{Rc, Weak};
 
 use crate::{
@@ -65,11 +65,11 @@ struct TransportData<P: Providers> {
 
     /// Peer connections keyed by destination address (outgoing).
     /// FDB: std::unordered_map<NetworkAddress, Reference<struct Peer>> peers;
-    peers: HashMap<String, SharedPeer<P>>,
+    peers: BTreeMap<String, SharedPeer<P>>,
 
     /// Incoming peer connections (from accepted connections).
     /// Separate from outgoing peers to avoid conflicts.
-    incoming_peers: HashMap<String, SharedPeer<P>>,
+    incoming_peers: BTreeMap<String, SharedPeer<P>>,
 
     /// Statistics.
     stats: TransportStats,
@@ -79,8 +79,8 @@ impl<P: Providers> Default for TransportData<P> {
     fn default() -> Self {
         Self {
             endpoints: EndpointMap::new(),
-            peers: HashMap::new(),
-            incoming_peers: HashMap::new(),
+            peers: BTreeMap::new(),
+            incoming_peers: BTreeMap::new(),
             stats: TransportStats::default(),
         }
     }

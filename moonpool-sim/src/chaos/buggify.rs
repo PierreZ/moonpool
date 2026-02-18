@@ -5,7 +5,7 @@
 
 use crate::sim::rng::sim_random;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
@@ -14,7 +14,7 @@ thread_local! {
 #[derive(Default)]
 struct State {
     enabled: bool,
-    active_locations: HashMap<String, bool>,
+    active_locations: BTreeMap<String, bool>,
     activation_prob: f64,
 }
 

@@ -769,19 +769,21 @@ fn slow_simulation_dungeon_bug_replay() {
 
     let exp = report.exploration.expect("exploration report missing");
     assert!(exp.bugs_found > 0, "exploration should have found the bug");
-    let recipe = exp.bug_recipe.expect("bug recipe should be captured");
-    // Bug recipe comes from the first seed that found it (debug seed 54321)
-    let initial_seed = report.seeds_used[0];
+    let bug = exp
+        .bug_recipes
+        .first()
+        .expect("bug recipe should be captured");
+    let initial_seed = bug.seed;
 
     // Phase 2: Format and parse the recipe (simulates developer copy-pasting from logs).
-    let timeline_str = moonpool_sim::format_timeline(&recipe);
+    let timeline_str = moonpool_sim::format_timeline(&bug.recipe);
     eprintln!(
         "Replaying dungeon bug: seed={}, recipe={}",
         initial_seed, timeline_str
     );
     let parsed_recipe =
         moonpool_sim::parse_timeline(&timeline_str).expect("recipe should round-trip");
-    assert_eq!(recipe, parsed_recipe);
+    assert_eq!(bug.recipe, parsed_recipe);
 
     // Phase 3: Replay — same seed, breakpoints from recipe, no exploration.
     moonpool_sim::reset_sim_rng();
