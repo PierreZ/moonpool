@@ -712,7 +712,7 @@ fn slow_simulation_dungeon() {
                     max_timelines: 2_000,
                     per_mark_energy: 20_000,
                 }),
-                parallelism: Some(moonpool_sim::Parallelism::MaxCores),
+                parallelism: Some(moonpool_sim::Parallelism::HalfCores),
             })
             .workload(DungeonWorkload {
                 max_steps: DEFAULT_MAX_STEPS,
@@ -751,7 +751,7 @@ fn slow_simulation_dungeon_bug_replay() {
                     max_timelines: 2_000,
                     per_mark_energy: 20_000,
                 }),
-                parallelism: Some(moonpool_sim::Parallelism::MaxCores),
+                parallelism: Some(moonpool_sim::Parallelism::HalfCores),
             })
             .workload(DungeonWorkload {
                 max_steps: DEFAULT_MAX_STEPS,
