@@ -42,4 +42,13 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Run cargo nextest
-        run: nix develop --command cargo nextest run
+        run: nix develop --command cargo nextest run --profile fast
+
+  sim:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Run simulation tests
+        run: nix develop --command cargo nextest run --profile sim
