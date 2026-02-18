@@ -36,7 +36,3 @@ hyper = { version = "1", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 tempfile = "3"
 tracing-subscriber = "0.3"
-
-[[example]]
-name = "hyper_http"
-path = "examples/hyper_http.rs"

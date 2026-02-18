@@ -54,6 +54,11 @@ impl DeadlockDetector {
     pub(crate) fn no_progress_count(&self) -> usize {
         self.no_progress_count
     }
+
+    /// Reset the no-progress counter (e.g. after triggering shutdown to give tasks a chance).
+    pub(crate) fn reset(&mut self) {
+        self.no_progress_count = 0;
+    }
 }
 
 /// Orchestrates workload execution and event processing.
@@ -286,21 +291,34 @@ impl WorkloadOrchestrator {
 
             let current_active = handles.iter().filter(|h| h.is_some()).count();
 
-            // Deadlock detection
+            // Deadlock detection: trigger shutdown first to give tasks a chance to exit,
+            // only fail on the second detection (genuine deadlock).
             if deadlock_detector.check_deadlock(
                 current_active,
                 initial_handle_count,
                 sim.pending_event_count(),
                 initial_event_count,
             ) {
-                tracing::error!(
-                    "DEADLOCK detected on iteration {} with seed {}: {} tasks remaining after {} no-progress iterations",
-                    iteration_count,
-                    seed,
-                    current_active,
-                    deadlock_detector.no_progress_count()
-                );
-                return Err((vec![seed], 1));
+                if !shutdown_triggered {
+                    tracing::warn!(
+                        "No progress detected on iteration {} with seed {}: {} tasks remaining. Triggering shutdown to unblock workloads.",
+                        iteration_count,
+                        seed,
+                        current_active,
+                    );
+                    Self::trigger_shutdown(sim, shutdown_signal);
+                    shutdown_triggered = true;
+                    deadlock_detector.reset();
+                } else {
+                    tracing::error!(
+                        "DEADLOCK detected on iteration {} with seed {}: {} tasks remaining after {} no-progress iterations",
+                        iteration_count,
+                        seed,
+                        current_active,
+                        deadlock_detector.no_progress_count()
+                    );
+                    return Err((vec![seed], 1));
+                }
             }
 
             // Yield to allow tasks to make progress
@@ -404,6 +422,7 @@ impl WorkloadOrchestrator {
         let mut chaos_ended = false;
         let mut recovery_ended = false;
         let mut deadlock_detector = DeadlockDetector::new(3);
+        let mut shutdown_triggered = false;
 
         let mut workload_collected: Vec<Option<WorkloadResult>> =
             (0..total_workloads).map(|_| None).collect();
@@ -433,6 +452,7 @@ impl WorkloadOrchestrator {
                 tracing::debug!("Recovery phase ended, triggering shutdown");
                 Self::trigger_shutdown(sim, shutdown_signal);
                 recovery_ended = true;
+                shutdown_triggered = true;
             }
 
             // Process one simulation event
@@ -479,20 +499,33 @@ impl WorkloadOrchestrator {
 
             let current_active = workload_handles.iter().filter(|h| h.is_some()).count();
 
-            // Deadlock detection
+            // Deadlock detection: trigger shutdown first to give tasks a chance to exit,
+            // only fail on the second detection (genuine deadlock).
             if deadlock_detector.check_deadlock(
                 current_active,
                 initial_handle_count,
                 sim.pending_event_count(),
                 initial_event_count,
             ) {
-                tracing::error!(
-                    "DEADLOCK detected on iteration {} with seed {}: {} tasks remaining",
-                    iteration_count,
-                    seed,
-                    current_active
-                );
-                return Err((vec![seed], 1));
+                if !shutdown_triggered {
+                    tracing::warn!(
+                        "No progress detected on iteration {} with seed {}: {} tasks remaining. Triggering shutdown to unblock workloads.",
+                        iteration_count,
+                        seed,
+                        current_active,
+                    );
+                    Self::trigger_shutdown(sim, shutdown_signal);
+                    shutdown_triggered = true;
+                    deadlock_detector.reset();
+                } else {
+                    tracing::error!(
+                        "DEADLOCK detected on iteration {} with seed {}: {} tasks remaining",
+                        iteration_count,
+                        seed,
+                        current_active
+                    );
+                    return Err((vec![seed], 1));
+                }
             }
 
             // Yield to allow tasks to make progress
