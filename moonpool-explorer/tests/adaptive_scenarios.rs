@@ -77,6 +77,7 @@ fn slow_simulation_adaptive_maze_cascade() {
             max_timelines: 20,
             per_mark_energy: 15,
         }),
+        parallelism: None,
     })
     .expect("init failed");
 
@@ -204,6 +205,7 @@ fn slow_simulation_adaptive_dungeon_floors() {
             max_timelines: 25,
             per_mark_energy: 20,
         }),
+        parallelism: None,
     })
     .expect("init failed");
 
@@ -290,6 +292,7 @@ fn slow_simulation_adaptive_energy_budget() {
             max_timelines: 6,
             per_mark_energy: 3,
         }),
+        parallelism: None,
     })
     .expect("init failed");
 

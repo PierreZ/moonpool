@@ -147,7 +147,8 @@ pub use providers::{SimProviders, SimRandomProvider, SimTimeProvider};
 
 // Explorer re-exports
 pub use moonpool_explorer::{
-    AdaptiveConfig, AssertCmp, AssertKind, ExplorationConfig, format_timeline, parse_timeline,
+    AdaptiveConfig, AssertCmp, AssertKind, ExplorationConfig, Parallelism, format_timeline,
+    parse_timeline,
 };
 pub use runner::report::ExplorationReport;
 

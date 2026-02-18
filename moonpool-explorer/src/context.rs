@@ -8,7 +8,7 @@ use std::cell::{Cell, RefCell};
 
 use crate::energy::EnergyBudget;
 use crate::shared_stats::{SharedRecipe, SharedStats};
-use crate::split_loop::AdaptiveConfig;
+use crate::split_loop::{AdaptiveConfig, Parallelism};
 
 thread_local! {
     /// Per-process exploration state.
@@ -42,6 +42,12 @@ thread_local! {
 
     /// Pointer to shared EachBucket memory (null when not initialized).
     pub(crate) static EACH_BUCKET_PTR: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
+
+    /// Base pointer for per-process bitmap pool (null until first parallel split).
+    pub(crate) static BITMAP_POOL: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
+
+    /// Number of slots in the bitmap pool.
+    pub(crate) static BITMAP_POOL_SLOTS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Exploration state for the current process.
@@ -63,6 +69,8 @@ pub struct ExplorerCtx {
     pub timelines_per_split: u32,
     /// Adaptive forking configuration (None = fixed-count mode).
     pub adaptive: Option<AdaptiveConfig>,
+    /// Parallelism configuration (None = sequential).
+    pub parallelism: Option<Parallelism>,
 }
 
 impl ExplorerCtx {
@@ -77,6 +85,7 @@ impl ExplorerCtx {
             recipe: Vec::new(),
             timelines_per_split: 0,
             adaptive: None,
+            parallelism: None,
         }
     }
 }

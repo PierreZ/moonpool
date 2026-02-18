@@ -294,6 +294,7 @@ fn slow_simulation_maze() {
                     max_timelines: 200,
                     per_mark_energy: 1_000,
                 }),
+                parallelism: Some(moonpool_sim::Parallelism::MaxCores),
             })
             .workload(MazeWorkload {
                 max_steps: DEFAULT_MAX_STEPS,
@@ -332,6 +333,7 @@ fn slow_simulation_maze_bug_replay() {
                     max_timelines: 200,
                     per_mark_energy: 1_000,
                 }),
+                parallelism: Some(moonpool_sim::Parallelism::MaxCores),
             })
             .workload(MazeWorkload {
                 max_steps: DEFAULT_MAX_STEPS,

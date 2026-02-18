@@ -154,10 +154,16 @@
 //!  │       calls exit_child(0) or exit_child(42) if bug              │
 //!  │                                                                  │
 //!  │   PARENT (pid>0):                                               │
-//!  │     - waitpid() — blocks until child finishes                   │
-//!  │     - Merge child's coverage bitmap into explored map           │
-//!  │     - If child exited with code 42 → record bug recipe          │
-//!  │     - Loop to next child                                        │
+//!  │     Sequential mode:                                            │
+//!  │       - waitpid(pid) — blocks until THIS child finishes         │
+//!  │       - Merge child's coverage bitmap into explored map         │
+//!  │       - If child exited with code 42 → record bug recipe        │
+//!  │       - Loop to next child                                      │
+//!  │     Parallel mode:                                              │
+//!  │       - Track child in active set                               │
+//!  │       - When slots are full → reap_one() via waitpid(-1)        │
+//!  │       - Continue forking until all children spawned             │
+//!  │       - Drain remaining active children at the end              │
 //!  └──────────────────────────────────────────────────────────────────┘
 //!
 //!  Step 8: Restore parent's coverage bitmap
@@ -234,7 +240,8 @@
 //!     max_depth: 2,
 //!     timelines_per_split: 3,
 //!     global_energy: 50,
-//!     adaptive: None,   // ← fixed-count mode
+//!     adaptive: None,      // ← fixed-count mode
+//!     parallelism: None,   // ← sequential (or Some(Parallelism::MaxCores))
 //! }
 //! ```
 //!
@@ -315,6 +322,7 @@
 //!         max_timelines: 20,    // hard cap per mark
 //!         per_mark_energy: 15,  // initial budget per mark
 //!     }),
+//!     parallelism: Some(Parallelism::MaxCores),  // use all CPU cores
 //! }
 //! ```
 //!
@@ -400,7 +408,8 @@
 //! ├──────────────────────────────────────────────────┤
 //! │  MAP_SHARED memory:                              │  ← truly shared
 //! │    - Assertion table (128 slots)                 │
-//! │    - Coverage bitmap + explored map              │
+//! │    - Coverage bitmap pool (1 slot per core)      │
+//! │    - Explored map (union of all coverage)        │
 //! │    - Energy budget                               │
 //! │    - Fork stats + bug recipe                     │
 //! └──────────────────────────────────────────────────┘
@@ -409,7 +418,7 @@
 //!                      │
 //!            ┌─────────┴─────────┐
 //!            ▼                   ▼
-//!     Parent (waits)      Child (continues)
+//!     Parent (reaps)      Child (continues)
 //!     - waitpid()         - rng_reseed(new_seed)
 //!     - merge coverage    - run simulation
 //!     - check exit code   - exit_child(0 or 42)
@@ -418,6 +427,78 @@
 //! `MAP_SHARED` memory is the only communication channel between parent
 //! and child. Assertion counters, coverage bits, energy budgets, and bug
 //! recipes all live there. This is why the crate only depends on `libc`.
+//!
+//! # Parallel exploration (multi-core)
+//!
+//! By default, the fork loop is sequential: fork one child, wait for it,
+//! merge coverage, repeat. This uses only one CPU core.
+//!
+//! With `parallelism: Some(Parallelism::MaxCores)`, the explorer runs
+//! multiple children concurrently using a **sliding window** capped at
+//! the number of available CPU cores:
+//!
+//! ```text
+//! Sequential (parallelism: None):
+//!
+//!   fork child 0 --- waitpid --- fork child 1 --- waitpid --- ...
+//!   core 0 busy     core 0 idle  core 0 busy     core 0 idle
+//!
+//! Parallel (parallelism: Some(Parallelism::MaxCores)):
+//!
+//!   fork child 0 ──────────────────────── reap
+//!   fork child 1 ─────────────────── reap
+//!   fork child 2 ────────────── reap
+//!   fork child 3 ─────── reap
+//!   all cores busy until drained
+//! ```
+//!
+//! The parent uses `waitpid(-1)` to reap whichever child finishes first,
+//! then recycles that slot for the next child.
+//!
+//! ## How the bitmap pool works
+//!
+//! In sequential mode, children share one coverage bitmap (cleared between
+//! each child). In parallel mode, concurrent children would clobber each
+//! other's bitmap, so each child gets its own **bitmap pool slot**:
+//!
+//! ```text
+//! Bitmap pool (MAP_SHARED, allocated lazily on first parallel split):
+//! ┌─────────────┬─────────────┬─────────────┬─────────────┐
+//! │  Slot 0     │  Slot 1     │  Slot 2     │  Slot 3     │
+//! │  1024 bytes │  1024 bytes │  1024 bytes │  1024 bytes │
+//! │  child A    │  child B    │  child C    │  (free)     │
+//! └─────────────┴─────────────┴─────────────┴─────────────┘
+//! ```
+//!
+//! When a child finishes (`waitpid(-1)` returns its PID), the parent:
+//! 1. Looks up which slot that child used
+//! 2. Merges the slot's bitmap into the explored map
+//! 3. Recycles the slot for the next child
+//!
+//! Children that themselves become parents (nested splits) allocate their
+//! own fresh pool -- the pool pointer is reset to null in each child at
+//! fork time.
+//!
+//! ## Parallelism variants
+//!
+//! ```text
+//! Variant              Slot count
+//! ───────────────────  ─────────────────────────────────────
+//! MaxCores             All available CPU cores
+//! HalfCores            Half of available cores (rounded up, min 1)
+//! Cores(n)             Exactly n cores
+//! MaxCoresMinus(n)     All cores minus n (min 1)
+//! ```
+//!
+//! ## Concurrency safety
+//!
+//! All `MAP_SHARED` state uses atomic operations that are safe across
+//! `fork()` boundaries:
+//! - **Assertion slots**: CAS for first-time discovery, `fetch_add` for counters
+//! - **Energy budget**: `fetch_sub`/`fetch_add` with rollback on failure
+//! - **Bug recipe**: CAS first-bug-wins -- only the first bug is recorded
+//! - **Stats counters**: `fetch_add` -- concurrent increments are safe
+//! - **Explored map merge**: Done by the parent AFTER `waitpid`, never concurrent
 //!
 //! # Architecture
 //!
@@ -440,12 +521,13 @@
 //!
 //! ```text
 //! lib.rs             ── ExplorationConfig, init/cleanup, this documentation
-//! split_loop.rs      ── The fork loop: split_on_discovery, adaptive batching
+//! split_loop.rs      ── The fork loop: sequential + parallel sliding window,
+//!                       adaptive batching, Parallelism enum
 //! assertion_slots.rs ── Shared-memory assertion table (128 slots)
 //! each_buckets.rs    ── Per-value bucketed assertions (256 buckets)
 //! coverage.rs        ── CoverageBitmap + ExploredMap (8192-bit bitmaps)
 //! energy.rs          ── 3-level energy budget (global + per-mark + realloc pool)
-//! context.rs         ── Thread-local state, RNG hooks
+//! context.rs         ── Thread-local state, RNG hooks, bitmap pool pointers
 //! shared_stats.rs    ── Cross-process counters (timelines, fork_points, bugs)
 //! shared_mem.rs      ── mmap(MAP_SHARED|MAP_ANONYMOUS) allocation
 //! replay.rs          ── Recipe formatting and parsing ("151@seed -> 80@seed")
@@ -465,6 +547,7 @@
 //!     timelines_per_split: 4,
 //!     global_energy: 100,
 //!     adaptive: None,
+//!     parallelism: Some(Parallelism::MaxCores),
 //! })?;
 //!
 //! // ... run simulation ...
@@ -494,7 +577,7 @@ pub use context::{explorer_is_child, get_assertion_table_ptr, set_rng_hooks};
 pub use each_buckets::{EachBucket, assertion_sometimes_each, each_bucket_read_all};
 pub use replay::{ParseTimelineError, format_timeline, parse_timeline};
 pub use shared_stats::{ExplorationStats, get_bug_recipe, get_exploration_stats};
-pub use split_loop::{AdaptiveConfig, exit_child};
+pub use split_loop::{AdaptiveConfig, Parallelism, exit_child};
 
 use context::{
     ASSERTION_TABLE, COVERAGE_BITMAP_PTR, EACH_BUCKET_PTR, ENERGY_BUDGET_PTR, EXPLORED_MAP_PTR,
@@ -514,6 +597,10 @@ pub struct ExplorationConfig {
     /// When `None`, uses fixed `timelines_per_split` (backward compatible).
     /// When `Some`, uses coverage-yield-driven batch forking with 3-level energy.
     pub adaptive: Option<split_loop::AdaptiveConfig>,
+    /// Optional parallelism for multi-core exploration.
+    /// When `None`, children are forked and reaped sequentially (one core).
+    /// When `Some`, a sliding window of concurrent children uses multiple cores.
+    pub parallelism: Option<split_loop::Parallelism>,
 }
 
 /// Initialize assertion table and each-bucket shared memory only.
@@ -620,6 +707,7 @@ pub fn init(config: ExplorationConfig) -> Result<(), std::io::Error> {
         ctx.recipe.clear();
         ctx.timelines_per_split = config.timelines_per_split;
         ctx.adaptive = config.adaptive.clone();
+        ctx.parallelism = config.parallelism.clone();
     });
 
     Ok(())
@@ -693,6 +781,7 @@ mod tests {
             timelines_per_split: 4,
             global_energy: 100,
             adaptive: None,
+            parallelism: None,
         };
 
         init(config).expect("init failed");
@@ -748,6 +837,7 @@ mod tests {
             timelines_per_split: 4,
             global_energy: 100,
             adaptive: None,
+            parallelism: None,
         };
         init(config).expect("init failed");
 

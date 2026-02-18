@@ -192,6 +192,7 @@ fn test_fork_basic() {
                 timelines_per_split: 2,
                 global_energy: 10,
                 adaptive: None,
+                parallelism: None,
             })
             .workload(AssertOnceWorkload {
                 message: "triggers fork",
@@ -224,6 +225,7 @@ fn test_child_exit_code() {
                 timelines_per_split: 2,
                 global_energy: 10,
                 adaptive: None,
+                parallelism: None,
             })
             .workload(ChildBugWorkload),
     );
@@ -250,6 +252,7 @@ fn test_depth_limit() {
                 timelines_per_split: 2,
                 global_energy: 100,
                 adaptive: None,
+                parallelism: None,
             })
             .workload(TwoGateWorkload),
     );
@@ -279,6 +282,7 @@ fn test_energy_limit() {
                 timelines_per_split: 8,
                 global_energy: 2,
                 adaptive: None,
+                parallelism: None,
             })
             .workload(ThreeGateWorkload),
     );
@@ -325,6 +329,7 @@ fn test_planted_bug() {
                 timelines_per_split: 4,
                 global_energy: 50,
                 adaptive: None,
+                parallelism: None,
             })
             .workload(PlantedBugWorkload),
     );
@@ -349,6 +354,7 @@ fn test_sometimes_each_triggers_fork() {
                 timelines_per_split: 2,
                 global_energy: 20,
                 adaptive: None,
+                parallelism: None,
             })
             .workload(EachBucketWorkload),
     );
