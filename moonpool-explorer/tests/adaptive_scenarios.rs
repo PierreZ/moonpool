@@ -76,6 +76,7 @@ fn slow_simulation_adaptive_maze_cascade() {
             min_timelines: 4,
             max_timelines: 20,
             per_mark_energy: 15,
+            warm_min_timelines: None,
         }),
         parallelism: None,
     })
@@ -204,6 +205,7 @@ fn slow_simulation_adaptive_dungeon_floors() {
             min_timelines: 4,
             max_timelines: 25,
             per_mark_energy: 20,
+            warm_min_timelines: None,
         }),
         parallelism: None,
     })
@@ -291,6 +293,7 @@ fn slow_simulation_adaptive_energy_budget() {
             min_timelines: 2,
             max_timelines: 6,
             per_mark_energy: 3,
+            warm_min_timelines: None,
         }),
         parallelism: None,
     })

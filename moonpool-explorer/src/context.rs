@@ -71,6 +71,8 @@ pub struct ExplorerCtx {
     pub adaptive: Option<AdaptiveConfig>,
     /// Parallelism configuration (None = sequential).
     pub parallelism: Option<Parallelism>,
+    /// Whether this seed is a warm start (explored map has prior coverage).
+    pub warm_start: bool,
 }
 
 impl ExplorerCtx {
@@ -86,6 +88,7 @@ impl ExplorerCtx {
             timelines_per_split: 0,
             adaptive: None,
             parallelism: None,
+            warm_start: false,
         }
     }
 }

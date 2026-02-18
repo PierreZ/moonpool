@@ -39,6 +39,11 @@ use std::collections::HashMap;
 
 thread_local! {
     static ALWAYS_VIOLATION_COUNT: Cell<u64> = const { Cell::new(0) };
+    /// When set, the next call to [`reset_assertion_results`] is skipped.
+    /// Used by multi-seed exploration to prevent `SimWorld::create` from
+    /// zeroing assertion state that [`moonpool_explorer::prepare_next_seed`]
+    /// already selectively reset.
+    static SKIP_NEXT_ASSERTION_RESET: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Record that an always-type assertion was violated during this iteration.
@@ -185,12 +190,29 @@ pub fn get_assertion_results() -> HashMap<String, AssertionStats> {
     results
 }
 
+/// Request that the next call to [`reset_assertion_results`] be skipped.
+///
+/// Used by multi-seed exploration: [`moonpool_explorer::prepare_next_seed`]
+/// does a selective reset (preserving explored map and watermarks), so the
+/// full zero in `SimWorld::create` must be suppressed.
+pub fn skip_next_assertion_reset() {
+    SKIP_NEXT_ASSERTION_RESET.with(|c| c.set(true));
+}
+
 /// Reset all assertion statistics.
 ///
-/// Zeros the shared memory assertion table. Should be called before each
-/// simulation run to ensure clean state between consecutive simulations.
+/// Zeros the shared memory assertion table unless a skip was requested via
+/// [`skip_next_assertion_reset`]. Should be called before each simulation
+/// run to ensure clean state between consecutive simulations.
 pub fn reset_assertion_results() {
-    moonpool_explorer::reset_assertions();
+    let skip = SKIP_NEXT_ASSERTION_RESET.with(|c| {
+        let v = c.get();
+        c.set(false); // always consume the flag
+        v
+    });
+    if !skip {
+        moonpool_explorer::reset_assertions();
+    }
 }
 
 /// Check assertion validation and panic if violations are found.

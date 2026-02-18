@@ -665,6 +665,99 @@ pub fn reset_assertions() {
     }
 }
 
+/// Prepare the exploration framework for the next seed in multi-seed exploration.
+///
+/// Preserves the explored map (cumulative coverage) and assertion watermarks/frontiers
+/// so subsequent seeds benefit from prior discovery context. Resets per-seed transient
+/// state: energy budgets, statistics, split triggers, pass/fail counters, coverage
+/// bitmap, and bug recipe.
+///
+/// Call this between seeds instead of [`reset_assertions`] when you want
+/// coverage-preserving multi-seed exploration.
+pub fn prepare_next_seed(per_seed_energy: i64) {
+    // 1. PRESERVE explored map — do nothing
+
+    // 2. Selectively reset assertion table slots:
+    //    PRESERVE: watermark, split_watermark, frontier (quality context)
+    //    RESET: split_triggered, pass_count, fail_count (per-seed transient)
+    let table_ptr = ASSERTION_TABLE.with(|c| c.get());
+    if !table_ptr.is_null() {
+        unsafe {
+            let count_ptr = table_ptr as *const std::sync::atomic::AtomicU32;
+            let count = (*count_ptr)
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .min(assertion_slots::MAX_ASSERTION_SLOTS as u32) as usize;
+            let base = table_ptr.add(8) as *mut assertion_slots::AssertionSlot;
+            for i in 0..count {
+                let slot = &mut *base.add(i);
+                slot.split_triggered = 0;
+                slot.pass_count = 0;
+                slot.fail_count = 0;
+            }
+        }
+    }
+
+    // 3. Selectively reset each-bucket slots:
+    //    PRESERVE: best_score (quality watermark), key_values, msg
+    //    RESET: split_triggered, pass_count (per-seed transient)
+    let each_ptr = EACH_BUCKET_PTR.with(|c| c.get());
+    if !each_ptr.is_null() {
+        unsafe {
+            let count_ptr = each_ptr as *const std::sync::atomic::AtomicU32;
+            let count = (*count_ptr)
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .min(each_buckets::MAX_EACH_BUCKETS as u32) as usize;
+            let base = each_ptr.add(8) as *mut each_buckets::EachBucket;
+            for i in 0..count {
+                let bucket = &mut *base.add(i);
+                bucket.split_triggered = 0;
+                bucket.pass_count = 0;
+            }
+        }
+    }
+
+    // 4. Zero coverage bitmap (per-timeline, NOT the explored map)
+    let bm_ptr = COVERAGE_BITMAP_PTR.with(|c| c.get());
+    if !bm_ptr.is_null() {
+        unsafe {
+            std::ptr::write_bytes(bm_ptr, 0, coverage::COVERAGE_MAP_SIZE);
+        }
+    }
+
+    // 5. Reset energy budget with fresh per-seed energy
+    let energy_ptr = ENERGY_BUDGET_PTR.with(|c| c.get());
+    if !energy_ptr.is_null() {
+        unsafe {
+            energy::reset_energy_budget(energy_ptr, per_seed_energy);
+        }
+    }
+
+    // 6. Reset shared stats
+    let stats_ptr = SHARED_STATS.with(|c| c.get());
+    if !stats_ptr.is_null() {
+        unsafe {
+            shared_stats::reset_shared_stats(stats_ptr, per_seed_energy);
+        }
+    }
+
+    // 7. Reset bug recipe
+    let recipe_ptr = SHARED_RECIPE.with(|c| c.get());
+    if !recipe_ptr.is_null() {
+        unsafe {
+            shared_stats::reset_shared_recipe(recipe_ptr);
+        }
+    }
+
+    // 8. Reset context for new seed, mark as warm start
+    context::with_ctx_mut(|ctx| {
+        ctx.is_child = false;
+        ctx.depth = 0;
+        ctx.current_seed = 0;
+        ctx.recipe.clear();
+        ctx.warm_start = true;
+    });
+}
+
 /// Initialize the exploration framework.
 ///
 /// Allocates shared memory for cross-process state and activates exploration.
@@ -708,6 +801,7 @@ pub fn init(config: ExplorationConfig) -> Result<(), std::io::Error> {
         ctx.timelines_per_split = config.timelines_per_split;
         ctx.adaptive = config.adaptive.clone();
         ctx.parallelism = config.parallelism.clone();
+        ctx.warm_start = false;
     });
 
     Ok(())

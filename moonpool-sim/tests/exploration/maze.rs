@@ -283,16 +283,17 @@ fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
 fn slow_simulation_maze() {
     let report = run_simulation(
         SimulationBuilder::new()
-            .set_iterations(1)
+            .set_iterations(2)
             .enable_exploration(ExplorationConfig {
                 max_depth: 30,
                 timelines_per_split: 4,
-                global_energy: 50_000,
+                global_energy: 20_000,
                 adaptive: Some(moonpool_sim::AdaptiveConfig {
                     batch_size: 20,
-                    min_timelines: 100,
-                    max_timelines: 200,
-                    per_mark_energy: 1_000,
+                    min_timelines: 60,
+                    max_timelines: 150,
+                    per_mark_energy: 600,
+                    warm_min_timelines: Some(20),
                 }),
                 parallelism: Some(moonpool_sim::Parallelism::MaxCores),
             })
@@ -301,8 +302,8 @@ fn slow_simulation_maze() {
             }),
     );
 
-    // Parent run should succeed (bugs only found in forked children)
-    assert_eq!(report.successful_runs, 1);
+    // All parent runs should succeed (bugs only found in forked children)
+    assert_eq!(report.successful_runs, 2);
 
     let exp = report.exploration.expect("exploration report missing");
     assert!(exp.total_timelines > 0, "expected forked timelines, got 0");
@@ -321,17 +322,18 @@ fn slow_simulation_maze_bug_replay() {
     // Phase 1: Run exploration to find the bug and capture the recipe.
     let report = run_simulation(
         SimulationBuilder::new()
-            .set_iterations(1)
+            .set_iterations(2)
             .set_debug_seeds(vec![12345])
             .enable_exploration(ExplorationConfig {
                 max_depth: 30,
                 timelines_per_split: 4,
-                global_energy: 50_000,
+                global_energy: 20_000,
                 adaptive: Some(moonpool_sim::AdaptiveConfig {
                     batch_size: 20,
-                    min_timelines: 100,
-                    max_timelines: 200,
-                    per_mark_energy: 1_000,
+                    min_timelines: 60,
+                    max_timelines: 150,
+                    per_mark_energy: 600,
+                    warm_min_timelines: Some(20),
                 }),
                 parallelism: Some(moonpool_sim::Parallelism::MaxCores),
             })
@@ -340,11 +342,12 @@ fn slow_simulation_maze_bug_replay() {
             }),
     );
 
-    assert_eq!(report.successful_runs, 1);
+    assert_eq!(report.successful_runs, 2);
 
     let exp = report.exploration.expect("exploration report missing");
     assert!(exp.bugs_found > 0, "exploration should have found the bug");
     let recipe = exp.bug_recipe.expect("bug recipe should be captured");
+    // Bug recipe comes from the first seed that found it (debug seed 12345)
     let initial_seed = report.seeds_used[0];
 
     // Phase 2: Simulate what a developer does — format and parse the recipe.

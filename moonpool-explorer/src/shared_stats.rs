@@ -89,6 +89,33 @@ pub unsafe fn decrement_energy(stats: *mut SharedStats) -> bool {
     unsafe { (*stats).global_energy.fetch_sub(1, Ordering::Relaxed) > 0 }
 }
 
+/// Reset shared stats for a new seed in multi-seed exploration.
+///
+/// Zeros counters and sets the display energy value.
+///
+/// # Safety
+///
+/// `stats` must point to valid shared memory allocated by [`init_shared_stats`].
+pub unsafe fn reset_shared_stats(stats: *mut SharedStats, new_energy: i64) {
+    let s = unsafe { &*stats };
+    s.global_energy.store(new_energy, Ordering::Relaxed);
+    s.total_timelines.store(0, Ordering::Relaxed);
+    s.fork_points.store(0, Ordering::Relaxed);
+    s.bug_found.store(0, Ordering::Relaxed);
+}
+
+/// Reset shared recipe for a new seed in multi-seed exploration.
+///
+/// Clears the claimed flag so the next seed can capture a new bug recipe.
+///
+/// # Safety
+///
+/// `recipe` must point to valid shared memory allocated by [`init_shared_recipe`].
+pub unsafe fn reset_shared_recipe(recipe: *mut SharedRecipe) {
+    let r = unsafe { &*recipe };
+    r.claimed.store(0, Ordering::Relaxed);
+}
+
 /// Get a snapshot of the current exploration statistics.
 ///
 /// Returns `None` if the stats pointer is null (exploration not initialized).

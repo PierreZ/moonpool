@@ -278,6 +278,12 @@ impl SimulationBuilder {
             IterationManager::new(self.iteration_control.clone(), self.seeds.clone());
         let mut metrics_collector = MetricsCollector::new();
 
+        // Accumulators for multi-seed exploration stats
+        let mut total_exploration_timelines: u64 = 0;
+        let mut total_exploration_fork_points: u64 = 0;
+        let mut total_exploration_bugs: u64 = 0;
+        let mut first_bug_recipe: Option<Vec<(u64, u64)>> = None;
+
         // Initialize assertion table (unconditional — works even without exploration)
         if let Err(e) = moonpool_explorer::init_assertions() {
             tracing::error!("Failed to initialize assertion table: {}", e);
@@ -297,6 +303,20 @@ impl SimulationBuilder {
         while iteration_manager.should_continue() {
             let seed = iteration_manager.next_iteration();
             let iteration_count = iteration_manager.current_iteration();
+
+            // Multi-seed exploration: preserve explored map between seeds.
+            // prepare_next_seed() does a selective reset (keeps coverage + watermarks),
+            // then skip_next_assertion_reset() prevents SimWorld::create from zeroing
+            // the assertion table that we just selectively reset.
+            if self.exploration_config.is_some() && iteration_count > 1 {
+                let energy = self
+                    .exploration_config
+                    .as_ref()
+                    .map(|c| c.global_energy)
+                    .unwrap_or(0);
+                moonpool_explorer::prepare_next_seed(energy);
+                crate::chaos::assertions::skip_next_assertion_reset();
+            }
 
             // Prepare clean state for this iteration
             crate::sim::reset_sim_rng();
@@ -396,24 +416,40 @@ impl SimulationBuilder {
                 }
             }
 
+            // Accumulate exploration stats across seeds (before reset)
+            if self.exploration_config.is_some() {
+                if let Some(stats) = moonpool_explorer::get_exploration_stats() {
+                    total_exploration_timelines += stats.total_timelines;
+                    total_exploration_fork_points += stats.fork_points;
+                    total_exploration_bugs += stats.bug_found;
+                }
+                if first_bug_recipe.is_none() {
+                    first_bug_recipe = moonpool_explorer::get_bug_recipe();
+                }
+            }
+
             // Reset buggify state after each iteration to ensure clean state
             crate::chaos::buggify_reset();
         }
 
         // End of main iteration loop
 
-        // Gather exploration stats before cleanup
+        // Build exploration report from accumulated stats across all seeds.
+        // Energy/realloc values reflect the last seed's final state.
         let exploration_report = if self.exploration_config.is_some() {
-            let stats = moonpool_explorer::get_exploration_stats();
-            let bug_recipe = moonpool_explorer::get_bug_recipe();
+            let final_stats = moonpool_explorer::get_exploration_stats();
+            let bug_recipe = first_bug_recipe.or_else(moonpool_explorer::get_bug_recipe);
             moonpool_explorer::cleanup();
-            stats.map(|s| super::report::ExplorationReport {
-                total_timelines: s.total_timelines,
-                fork_points: s.fork_points,
-                bugs_found: s.bug_found,
+            Some(super::report::ExplorationReport {
+                total_timelines: total_exploration_timelines,
+                fork_points: total_exploration_fork_points,
+                bugs_found: total_exploration_bugs,
                 bug_recipe,
-                energy_remaining: s.global_energy,
-                realloc_pool_remaining: s.realloc_pool_remaining,
+                energy_remaining: final_stats.as_ref().map(|s| s.global_energy).unwrap_or(0),
+                realloc_pool_remaining: final_stats
+                    .as_ref()
+                    .map(|s| s.realloc_pool_remaining)
+                    .unwrap_or(0),
             })
         } else {
             None

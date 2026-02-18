@@ -220,6 +220,9 @@ pub struct AdaptiveConfig {
     pub max_timelines: u32,
     /// Initial per-mark energy budget.
     pub per_mark_energy: i64,
+    /// Minimum timelines for marks during warm starts (explored map has prior
+    /// coverage from previous seeds). Defaults to `batch_size` if `None`.
+    pub warm_min_timelines: Option<u32>,
 }
 
 /// Dispatch to either adaptive or fixed-count splitting based on config.
@@ -277,6 +280,21 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
             .map(|a| (a.batch_size, a.min_timelines, a.max_timelines))
             .unwrap_or((4, 1, 16))
     });
+
+    // Warm start: when explored map has prior coverage from previous seeds,
+    // barren marks stop after fewer timelines since they're re-treading
+    // already-discovered paths.
+    let effective_min_timelines = {
+        let (is_warm, warm_min) = context::with_ctx(|ctx| {
+            let wm = ctx
+                .adaptive
+                .as_ref()
+                .and_then(|a| a.warm_min_timelines)
+                .unwrap_or(batch_size);
+            (ctx.warm_start, wm)
+        });
+        if is_warm { warm_min } else { min_timelines }
+    };
 
     // Check parallelism
     let parallelism = context::with_ctx(|ctx| ctx.parallelism.clone());
@@ -444,7 +462,7 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
         if timelines_spawned >= max_timelines {
             break;
         }
-        if !batch_has_new && timelines_spawned >= min_timelines {
+        if !batch_has_new && timelines_spawned >= effective_min_timelines {
             // Barren — return remaining energy to pool
             // Safety: budget_ptr is valid
             unsafe {
