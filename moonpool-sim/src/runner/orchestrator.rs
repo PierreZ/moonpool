@@ -715,14 +715,19 @@ impl MetricsCollector {
     }
 
     /// Record the results of an iteration.
+    ///
+    /// An iteration is considered failed if any workload returned an error
+    /// OR if assertion violations were detected during the iteration.
     pub(crate) fn record_iteration(
         &mut self,
         seed: u64,
         wall_time: Duration,
         all_results: &[SimulationResult<()>],
+        has_assertion_violations: bool,
         sim_metrics: SimulationMetrics,
     ) {
-        let all_ok = all_results.iter().all(|r| r.is_ok());
+        let workloads_ok = all_results.iter().all(|r| r.is_ok());
+        let all_ok = workloads_ok && !has_assertion_violations;
 
         if all_ok {
             self.record_success(seed, wall_time, sim_metrics);
@@ -772,6 +777,7 @@ impl MetricsCollector {
         seeds_used: Vec<u64>,
         assertion_results: HashMap<String, AssertionStats>,
         assertion_violations: Vec<String>,
+        coverage_violations: Vec<String>,
         exploration: Option<super::report::ExplorationReport>,
     ) -> super::report::SimulationReport {
         super::report::SimulationReport {
@@ -784,6 +790,7 @@ impl MetricsCollector {
             seeds_failing: self.faulty_seeds,
             assertion_results,
             assertion_violations,
+            coverage_violations,
             exploration,
         }
     }

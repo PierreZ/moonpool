@@ -215,43 +215,36 @@ pub fn reset_assertion_results() {
     }
 }
 
-/// Check assertion validation and panic if violations are found.
+/// Panic if the report contains assertion violations.
 ///
-/// Checks all assertion kinds for their specific violation conditions.
+/// Uses the pre-collected `assertion_violations` from the report rather than
+/// re-reading shared memory (which may already be freed by the time this is
+/// called).
 ///
 /// # Panics
 ///
-/// Panics if there are assertion violations.
-pub fn panic_on_assertion_violations(_report: &crate::runner::SimulationReport) {
-    let violations = validate_assertion_contracts();
-
-    if !violations.is_empty() {
-        println!("Assertion violations found:");
-        for violation in &violations {
-            println!("  - {}", violation);
+/// Panics if `report.assertion_violations` is non-empty.
+pub fn panic_on_assertion_violations(report: &crate::runner::SimulationReport) {
+    if !report.assertion_violations.is_empty() {
+        eprintln!("Assertion violations found:");
+        for violation in &report.assertion_violations {
+            eprintln!("  - {}", violation);
         }
         panic!("Unexpected assertion violations detected!");
-    } else {
-        println!("All assertions passed validation!");
     }
 }
 
 /// Validate all assertion contracts based on their kind.
 ///
-/// Per-kind validation:
-/// - Always: violation if fail_count > 0, or if never reached (must_hit + total == 0)
-/// - AlwaysOrUnreachable: violation if fail_count > 0
-/// - Sometimes: violation if pass_count == 0 when total > 0
-/// - Reachable: violation if never reached (pass_count == 0)
-/// - Unreachable: violation if ever reached (pass_count > 0)
-/// - NumericAlways: violation if fail_count > 0
-/// - NumericSometimes: violation if pass_count == 0 when total > 0
-///
-/// # Returns
-///
-/// A vector of violation messages, or empty if all assertions are valid.
-pub fn validate_assertion_contracts() -> Vec<String> {
-    let mut violations = Vec::new();
+/// Returns two vectors:
+/// - **always_violations**: Definite bugs — always-type assertions that failed,
+///   or unreachable code that was reached.  Safe to check with any iteration count.
+/// - **coverage_violations**: Statistical — sometimes-type assertions that were
+///   never satisfied, or reachable code that was never reached.  Only meaningful
+///   with enough iterations for statistical coverage.
+pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
+    let mut always_violations = Vec::new();
+    let mut coverage_violations = Vec::new();
     let slots = moonpool_explorer::assertion_read_all();
 
     for slot in &slots {
@@ -261,18 +254,19 @@ pub fn validate_assertion_contracts() -> Vec<String> {
         match kind {
             Some(moonpool_explorer::AssertKind::Always) => {
                 if slot.fail_count > 0 {
-                    violations.push(format!(
+                    always_violations.push(format!(
                         "assert_always!('{}') failed {} times out of {}",
                         slot.msg, slot.fail_count, total
                     ));
                 }
                 if slot.must_hit != 0 && total == 0 {
-                    violations.push(format!("assert_always!('{}') was never reached", slot.msg));
+                    always_violations
+                        .push(format!("assert_always!('{}') was never reached", slot.msg));
                 }
             }
             Some(moonpool_explorer::AssertKind::AlwaysOrUnreachable) => {
                 if slot.fail_count > 0 {
-                    violations.push(format!(
+                    always_violations.push(format!(
                         "assert_always_or_unreachable!('{}') failed {} times out of {}",
                         slot.msg, slot.fail_count, total
                     ));
@@ -280,7 +274,7 @@ pub fn validate_assertion_contracts() -> Vec<String> {
             }
             Some(moonpool_explorer::AssertKind::Sometimes) => {
                 if total > 0 && slot.pass_count == 0 {
-                    violations.push(format!(
+                    coverage_violations.push(format!(
                         "assert_sometimes!('{}') has 0% success rate ({} checks)",
                         slot.msg, total
                     ));
@@ -288,7 +282,7 @@ pub fn validate_assertion_contracts() -> Vec<String> {
             }
             Some(moonpool_explorer::AssertKind::Reachable) => {
                 if slot.pass_count == 0 {
-                    violations.push(format!(
+                    coverage_violations.push(format!(
                         "assert_reachable!('{}') was never reached",
                         slot.msg
                     ));
@@ -296,7 +290,7 @@ pub fn validate_assertion_contracts() -> Vec<String> {
             }
             Some(moonpool_explorer::AssertKind::Unreachable) => {
                 if slot.pass_count > 0 {
-                    violations.push(format!(
+                    always_violations.push(format!(
                         "assert_unreachable!('{}') was reached {} times",
                         slot.msg, slot.pass_count
                     ));
@@ -304,7 +298,7 @@ pub fn validate_assertion_contracts() -> Vec<String> {
             }
             Some(moonpool_explorer::AssertKind::NumericAlways) => {
                 if slot.fail_count > 0 {
-                    violations.push(format!(
+                    always_violations.push(format!(
                         "numeric assert_always ('{}') failed {} times out of {}",
                         slot.msg, slot.fail_count, total
                     ));
@@ -312,7 +306,7 @@ pub fn validate_assertion_contracts() -> Vec<String> {
             }
             Some(moonpool_explorer::AssertKind::NumericSometimes) => {
                 if total > 0 && slot.pass_count == 0 {
-                    violations.push(format!(
+                    coverage_violations.push(format!(
                         "numeric assert_sometimes ('{}') has 0% success rate ({} checks)",
                         slot.msg, total
                     ));
@@ -325,7 +319,7 @@ pub fn validate_assertion_contracts() -> Vec<String> {
         }
     }
 
-    violations
+    (always_violations, coverage_violations)
 }
 
 // =============================================================================

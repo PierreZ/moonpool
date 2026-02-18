@@ -66,8 +66,10 @@ pub struct SimulationReport {
     pub seeds_failing: Vec<u64>,
     /// Aggregated assertion results across all iterations
     pub assertion_results: HashMap<String, AssertionStats>,
-    /// Assertion validation violations (if any)
+    /// Always-type assertion violations (definite bugs).
     pub assertion_violations: Vec<String>,
+    /// Coverage assertion violations (sometimes/reachable not satisfied).
+    pub coverage_violations: Vec<String>,
     /// Exploration report (present when fork-based exploration was enabled).
     pub exploration: Option<ExplorationReport>,
 }
@@ -150,6 +152,27 @@ impl fmt::Display for SimulationReport {
             }
             writeln!(f, "Energy remaining: {}", exp.energy_remaining)?;
             writeln!(f, "Realloc pool remaining: {}", exp.realloc_pool_remaining)?;
+        }
+
+        if !self.assertion_violations.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "=== Assertion Violations ===")?;
+            for v in &self.assertion_violations {
+                writeln!(f, "  - {}", v)?;
+            }
+        }
+
+        if !self.coverage_violations.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "=== Coverage Gaps ===")?;
+            for v in &self.coverage_violations {
+                writeln!(f, "  - {}", v)?;
+            }
+        }
+
+        if !self.assertion_results.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "Assertions tracked: {}", self.assertion_results.len())?;
         }
 
         writeln!(f)?;

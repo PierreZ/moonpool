@@ -269,6 +269,7 @@ impl SimulationBuilder {
                 seeds_failing: Vec::new(),
                 assertion_results: HashMap::new(),
                 assertion_violations: Vec::new(),
+                coverage_violations: Vec::new(),
                 exploration: None,
             };
         }
@@ -304,17 +305,13 @@ impl SimulationBuilder {
             let seed = iteration_manager.next_iteration();
             let iteration_count = iteration_manager.current_iteration();
 
-            // Multi-seed exploration: preserve explored map between seeds.
-            // prepare_next_seed() does a selective reset (keeps coverage + watermarks),
-            // then skip_next_assertion_reset() prevents SimWorld::create from zeroing
-            // the assertion table that we just selectively reset.
-            if self.exploration_config.is_some() && iteration_count > 1 {
-                let energy = self
-                    .exploration_config
-                    .as_ref()
-                    .map(|c| c.global_energy)
-                    .unwrap_or(0);
-                moonpool_explorer::prepare_next_seed(energy);
+            // Preserve assertion data across iterations so the final report
+            // reflects all seeds, not just the last one.  For exploration runs,
+            // prepare_next_seed() also does a selective reset of coverage state.
+            if iteration_count > 1 {
+                if let Some(ref config) = self.exploration_config {
+                    moonpool_explorer::prepare_next_seed(config.global_energy);
+                }
                 crate::chaos::assertions::skip_next_assertion_reset();
             }
 
@@ -373,28 +370,15 @@ impl SimulationBuilder {
                     self.fault_injectors = returned_injectors;
 
                     let wall_time = start_time.elapsed();
+                    let has_violations = crate::chaos::has_always_violations();
 
-                    // If always-assertion violations occurred (from invariants or workloads),
-                    // inject a synthetic error so the iteration is recorded as failed
-                    if crate::chaos::has_always_violations() {
-                        let mut results_with_violation = all_results;
-                        results_with_violation.push(Err(crate::SimulationError::InvalidState(
-                            "always-assertion violated".to_string(),
-                        )));
-                        metrics_collector.record_iteration(
-                            seed,
-                            wall_time,
-                            &results_with_violation,
-                            sim_metrics,
-                        );
-                    } else {
-                        metrics_collector.record_iteration(
-                            seed,
-                            wall_time,
-                            &all_results,
-                            sim_metrics,
-                        );
-                    }
+                    metrics_collector.record_iteration(
+                        seed,
+                        wall_time,
+                        &all_results,
+                        has_violations,
+                        sim_metrics,
+                    );
                 }
                 Err((faulty_seeds_from_deadlock, failed_count)) => {
                     // Handle deadlock case - merge with existing state and return early
@@ -403,7 +387,8 @@ impl SimulationBuilder {
 
                     // Create early exit report
                     let assertion_results = crate::chaos::get_assertion_results();
-                    let assertion_violations = crate::chaos::validate_assertion_contracts();
+                    let (assertion_violations, coverage_violations) =
+                        crate::chaos::validate_assertion_contracts();
                     crate::chaos::buggify_reset();
 
                     return metrics_collector.generate_report(
@@ -411,6 +396,7 @@ impl SimulationBuilder {
                         iteration_manager.seeds_used().to_vec(),
                         assertion_results,
                         assertion_violations,
+                        coverage_violations,
                         None,
                     );
                 }
@@ -487,7 +473,8 @@ impl SimulationBuilder {
 
         // Collect assertion results and validate them
         let assertion_results = crate::chaos::get_assertion_results();
-        let assertion_violations = crate::chaos::validate_assertion_contracts();
+        let (assertion_violations, coverage_violations) =
+            crate::chaos::validate_assertion_contracts();
 
         // Clean up assertion table if exploration didn't already do it
         if self.exploration_config.is_none() {
@@ -502,6 +489,7 @@ impl SimulationBuilder {
             iteration_manager.seeds_used().to_vec(),
             assertion_results,
             assertion_violations,
+            coverage_violations,
             exploration_report,
         )
     }
