@@ -55,7 +55,7 @@ moonpool-explorer/           - Fork-based multiverse exploration, coverage, ener
 **Goal**: 100% sometimes assertion coverage via chaos testing + comprehensive invariant validation
 **Target**: 100% success rate - no deadlocks/hangs acceptable
 
-**Multi-seed testing**: Default `UntilAllSometimesReached(1000)` runs until all sometimes_assert! statements have triggered
+**Multi-seed testing**: Default `UntilAllSometimesReached(1000)` runs until all assert_sometimes! statements have triggered
 **Failing seeds**: Debug with `SimulationBuilder::set_seed(failing_seed)` → fix root cause → verify → re-enable chaos
 **Infrastructure events**: Tests terminate early when only ConnectionRestore events remain
 **Invariant checking**: Cross-workload properties validated after every simulation event
@@ -134,6 +134,6 @@ Strategic placement: error handling, timeouts, retries, resource limits
 
 ## Invariant System
 **When to use invariants**: Cross-actor properties, global system constraints, deterministic bug detection
-**When to use assertions**: Per-actor validation (`always_assert!` in actor code)
+**When to use assertions**: Per-actor validation (`assert_always!` in actor code)
 **Performance**: Invariants run after every simulation event - design accordingly
 **Architecture**: Actors expose state via JSON → StateRegistry → InvariantCheck functions → panic on violation

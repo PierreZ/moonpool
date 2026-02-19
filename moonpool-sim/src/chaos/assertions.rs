@@ -1,6 +1,6 @@
 //! Antithesis-style assertion macros and result tracking for simulation testing.
 //!
-//! This module provides 14+ assertion macros for testing distributed system
+//! This module provides 15 assertion macros for testing distributed system
 //! properties. Assertions are tracked in shared memory via moonpool-explorer,
 //! enabling cross-process tracking across forked exploration timelines.
 //!
