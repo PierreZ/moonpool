@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-02-19
+
+### 🚀 Features
+
+- **moonpool-transport-derive**: Unified #[service] macro, #[actor_impl], and serve()
+- **moonpool**: Complete Phases 7-10 — exploration tests, fork points, transport + actor workloads
+- **moonpool**: Add multi-node virtual actors with forwarding and simulation tests
+- **moonpool-transport-derive**: Add #[virtual_actor] macro: generates ActorRef, dispatcher, and method constants
+- **transport-derive**: Reserve token index 0 for virtual actor dispatch
+- **core**: Add StorageProvider and StorageFile traits
+
+### 🐛 Bug Fixes
+
+- **moonpool**: Fix metastable replay determinism with seeded tokio runtime
+- **moonpool-sim**: Decouple assertion violations from workload errors
+
+### 📚 Documentation
+
+- Align documentation with current codebase state
+- Update all READMEs, CLAUDE.md, and rustdoc for 6-crate architecture
+
+### 🚜 Refactor
+
+- **moonpool-sim**: Make always-assertions non-panicking (Antithesis style)
+- **moonpool**: Port assertion macros, delete StateRegistry/InvariantCheck
+- **moonpool**: Comment out old simulation tests for DX redesign
+- **core**: Replace SimulationResult with TimeError in TimeProvider
+
+
 ## [0.3.0] - 2026-01-25
 
 ### 🚀 Features
