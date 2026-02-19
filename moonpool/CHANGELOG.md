@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.4.0] - 2026-02-19
+
+### 🚀 Features
+
+- **moonpool**: Replace control-plane test with AWS DynamoDB metastable failure simulation
+- **moonpool-transport-derive**: Unified #[service] macro, #[actor_impl], and serve()
+- **moonpool**: Complete Phases 7-10 — exploration tests, fork points, transport + actor workloads
+- **moonpool-sim**: Add RNG call counting and breakpoints
+- **moonpool**: Add graceful stop for ActorHost
+- **moonpool**: Add DeactivateAfterIdle idle timeout for actors
+- **moonpool**: Add per-identity concurrent actor processing
+- **moonpool**: Add Orleans-style actor lifecycle and state persistence
+- **moonpool**: Add multi-node virtual actors with forwarding and simulation tests
+- **moonpool-transport-derive**: Add #[virtual_actor] macro: generates ActorRef, dispatcher, and method constants
+- **moonpool**: Add ActorHost: server-side runtime with automatic actor activation and dispatch
+- **moonpool**: Add banking example with virtual actors and static endpoints
+- **moonpool**: Add ActorRouter for caller-side actor request resolution
+- **moonpool**: Add PlacementStrategy trait and LocalPlacement
+- **moonpool**: Add ActorDirectory trait and InMemoryDirectory implementation
+- **moonpool**: Add core virtual actor types (ActorId, ActorMessage, ActorResponse)
+
+### 🐛 Bug Fixes
+
+- **moonpool**: Fix metastable replay determinism with seeded tokio runtime
+- **moonpool**: Fix metastable replay test assertion key and add fast replay test
+
+### 📚 Documentation
+
+- Align documentation with current codebase state
+- Update all READMEs, CLAUDE.md, and rustdoc for 6-crate architecture
+
+### 🎨 Styling
+
+- **moonpool**: Apply cargo fmt formatting
+
+
 ## [0.2.2] - 2025-12-18
 
 ### 🐛 Bug Fixes
