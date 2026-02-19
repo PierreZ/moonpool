@@ -100,6 +100,24 @@ pub unsafe fn decrement_mark_energy(budget: *mut EnergyBudget, slot_idx: usize) 
     false
 }
 
+/// Reset the energy budget for a new seed in multi-seed exploration.
+///
+/// Sets fresh global energy, zeros all per-mark budgets and the realloc pool.
+/// Keeps `per_mark_initial` unchanged (set during [`init_energy_budget`]).
+///
+/// # Safety
+///
+/// `budget` must point to a valid `EnergyBudget` in shared memory.
+pub unsafe fn reset_energy_budget(budget: *mut EnergyBudget, new_global_energy: i64) {
+    let b = unsafe { &*budget };
+    b.global_remaining
+        .store(new_global_energy, Ordering::Relaxed);
+    b.realloc_pool.store(0, Ordering::Relaxed);
+    for slot in &b.per_mark {
+        slot.store(0, Ordering::Relaxed);
+    }
+}
+
 /// Return a mark's remaining per-mark energy to the reallocation pool.
 ///
 /// Called when a mark is determined to be barren (no new coverage found).

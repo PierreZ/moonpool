@@ -3,7 +3,10 @@
 //! These tests exercise the moonpool-explorer crate wired into moonpool-sim.
 //! Since they use `fork()`, each test must run in its own process (nextest default).
 
-use moonpool_sim::{ExplorationConfig, SimulationBuilder, SimulationReport};
+use async_trait::async_trait;
+use moonpool_sim::{
+    ExplorationConfig, SimContext, SimulationBuilder, SimulationReport, SimulationResult, Workload,
+};
 
 /// Helper to run a simulation and return the report.
 fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
@@ -16,14 +19,157 @@ fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
     local_runtime.block_on(async move { builder.run().await })
 }
 
+// ---------------------------------------------------------------------------
+// Workload structs
+// ---------------------------------------------------------------------------
+
+/// Simple workload that fires a single sometimes assertion.
+struct AssertOnceWorkload {
+    message: &'static str,
+}
+
+#[async_trait(?Send)]
+impl Workload for AssertOnceWorkload {
+    fn name(&self) -> &str {
+        "client"
+    }
+
+    async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+        moonpool_sim::assert_sometimes!(true, self.message);
+        Ok(())
+    }
+}
+
+/// Workload that triggers a fork, then fails in child processes (simulates a bug).
+struct ChildBugWorkload;
+
+#[async_trait(?Send)]
+impl Workload for ChildBugWorkload {
+    fn name(&self) -> &str {
+        "client"
+    }
+
+    async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+        moonpool_sim::assert_sometimes!(true, "triggers fork");
+
+        if moonpool_explorer::explorer_is_child() {
+            return Err(moonpool_sim::SimulationError::InvalidState(
+                "simulated bug in child".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+/// Workload with two consecutive assertion gates (tests depth limiting).
+struct TwoGateWorkload;
+
+#[async_trait(?Send)]
+impl Workload for TwoGateWorkload {
+    fn name(&self) -> &str {
+        "client"
+    }
+
+    async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+        // First assertion — will fork in parent (depth 0 -> 1)
+        moonpool_sim::assert_sometimes!(true, "first gate");
+
+        // Second assertion — children are at depth 1 == max_depth,
+        // so they should NOT fork further
+        moonpool_sim::assert_sometimes!(true, "second gate");
+
+        Ok(())
+    }
+}
+
+/// Workload with three assertion gates (tests energy limiting).
+struct ThreeGateWorkload;
+
+#[async_trait(?Send)]
+impl Workload for ThreeGateWorkload {
+    fn name(&self) -> &str {
+        "client"
+    }
+
+    async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+        moonpool_sim::assert_sometimes!(true, "gate 1");
+        moonpool_sim::assert_sometimes!(true, "gate 2");
+        moonpool_sim::assert_sometimes!(true, "gate 3");
+
+        Ok(())
+    }
+}
+
+/// Workload with cascaded probabilistic gates (planted bug scenario).
+struct PlantedBugWorkload;
+
+#[async_trait(?Send)]
+impl Workload for PlantedBugWorkload {
+    fn name(&self) -> &str {
+        "client"
+    }
+
+    async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+        // Gate 1: always passes — triggers the first fork
+        moonpool_sim::assert_sometimes!(true, "gate 1");
+
+        // Gate 2: ~10% chance (children explore with reseeded RNG)
+        let gate2 = moonpool_sim::sim_random_range(0u32..10) == 0;
+        moonpool_sim::assert_sometimes!(gate2, "gate 2");
+
+        if gate2 {
+            // Gate 3: ~10% chance
+            let gate3 = moonpool_sim::sim_random_range(0u32..10) == 0;
+            moonpool_sim::assert_sometimes!(gate3, "gate 3");
+
+            if gate3 {
+                // Bug! Both gates passed
+                return Err(moonpool_sim::SimulationError::InvalidState(
+                    "planted bug found: all gates passed".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Workload that exercises assert_sometimes_each! with identity keys.
+struct EachBucketWorkload;
+
+#[async_trait(?Send)]
+impl Workload for EachBucketWorkload {
+    fn name(&self) -> &str {
+        "client"
+    }
+
+    async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+        // Use assert_sometimes_each! with identity keys to trigger forking.
+        // Each unique (lock, depth) combination creates a separate bucket.
+        for lock in 0..2 {
+            for depth in 1..3 {
+                moonpool_sim::assert_sometimes_each!(
+                    "each_gate",
+                    [("lock", lock as i64), ("depth", depth as i64)]
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 /// Test that exploration is disabled by default and old behavior is unchanged.
 #[test]
 fn test_exploration_disabled_default() {
-    let report = run_simulation(SimulationBuilder::new().set_iterations(1).workload_fn(
-        "client",
-        |_ctx| async move {
-            moonpool_sim::assert_sometimes!(true, "always passes");
-            Ok(())
+    let report = run_simulation(SimulationBuilder::new().set_iterations(1).workload(
+        AssertOnceWorkload {
+            message: "always passes",
         },
     ));
 
@@ -46,11 +192,10 @@ fn test_fork_basic() {
                 timelines_per_split: 2,
                 global_energy: 10,
                 adaptive: None,
+                parallelism: None,
             })
-            .workload_fn("client", |_ctx| async move {
-                // This sometimes assertion success will trigger forking
-                moonpool_sim::assert_sometimes!(true, "triggers fork");
-                Ok(())
+            .workload(AssertOnceWorkload {
+                message: "triggers fork",
             }),
     );
 
@@ -80,22 +225,9 @@ fn test_child_exit_code() {
                 timelines_per_split: 2,
                 global_energy: 10,
                 adaptive: None,
+                parallelism: None,
             })
-            .workload_fn("client", |_ctx| async move {
-                // This assertion triggers forking on success
-                moonpool_sim::assert_sometimes!(true, "triggers fork");
-
-                // In the child, the reseeded RNG may cause different behavior.
-                // We use a failure to simulate a bug.
-                // But we only fail in children (parent must succeed to report).
-                if moonpool_explorer::explorer_is_child() {
-                    return Err(moonpool_sim::SimulationError::InvalidState(
-                        "simulated bug in child".to_string(),
-                    ));
-                }
-
-                Ok(())
-            }),
+            .workload(ChildBugWorkload),
     );
 
     // Parent should succeed
@@ -120,17 +252,9 @@ fn test_depth_limit() {
                 timelines_per_split: 2,
                 global_energy: 100,
                 adaptive: None,
+                parallelism: None,
             })
-            .workload_fn("client", |_ctx| async move {
-                // First assertion — will fork in parent (depth 0 -> 1)
-                moonpool_sim::assert_sometimes!(true, "first gate");
-
-                // Second assertion — children are at depth 1 == max_depth,
-                // so they should NOT fork further
-                moonpool_sim::assert_sometimes!(true, "second gate");
-
-                Ok(())
-            }),
+            .workload(TwoGateWorkload),
     );
 
     assert_eq!(report.successful_runs, 1);
@@ -158,15 +282,9 @@ fn test_energy_limit() {
                 timelines_per_split: 8,
                 global_energy: 2,
                 adaptive: None,
+                parallelism: None,
             })
-            .workload_fn("client", |_ctx| async move {
-                // Many assertions, but energy=2 should limit total forks
-                moonpool_sim::assert_sometimes!(true, "gate 1");
-                moonpool_sim::assert_sometimes!(true, "gate 2");
-                moonpool_sim::assert_sometimes!(true, "gate 3");
-
-                Ok(())
-            }),
+            .workload(ThreeGateWorkload),
     );
 
     assert_eq!(report.successful_runs, 1);
@@ -211,30 +329,9 @@ fn test_planted_bug() {
                 timelines_per_split: 4,
                 global_energy: 50,
                 adaptive: None,
+                parallelism: None,
             })
-            .workload_fn("client", |_ctx| async move {
-                // Gate 1: always passes — triggers the first fork
-                moonpool_sim::assert_sometimes!(true, "gate 1");
-
-                // Gate 2: ~10% chance (children explore with reseeded RNG)
-                let gate2 = moonpool_sim::sim_random_range(0u32..10) == 0;
-                moonpool_sim::assert_sometimes!(gate2, "gate 2");
-
-                if gate2 {
-                    // Gate 3: ~10% chance
-                    let gate3 = moonpool_sim::sim_random_range(0u32..10) == 0;
-                    moonpool_sim::assert_sometimes!(gate3, "gate 3");
-
-                    if gate3 {
-                        // Bug! Both gates passed
-                        return Err(moonpool_sim::SimulationError::InvalidState(
-                            "planted bug found: all gates passed".to_string(),
-                        ));
-                    }
-                }
-
-                Ok(())
-            }),
+            .workload(PlantedBugWorkload),
     );
 
     // Parent should succeed (bugs only found in forked children)
@@ -257,21 +354,9 @@ fn test_sometimes_each_triggers_fork() {
                 timelines_per_split: 2,
                 global_energy: 20,
                 adaptive: None,
+                parallelism: None,
             })
-            .workload_fn("client", |_ctx| async move {
-                // Use assert_sometimes_each! with identity keys to trigger forking.
-                // Each unique (lock, depth) combination creates a separate bucket.
-                for lock in 0..2 {
-                    for depth in 1..3 {
-                        moonpool_sim::assert_sometimes_each!(
-                            "each_gate",
-                            [("lock", lock as i64), ("depth", depth as i64)]
-                        );
-                    }
-                }
-
-                Ok(())
-            }),
+            .workload(EachBucketWorkload),
     );
 
     assert_eq!(report.successful_runs, 1);

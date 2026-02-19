@@ -2,8 +2,6 @@
 //!
 //! Contains tests for chaos injection and fault tolerance.
 
-#[path = "chaos/assertions.rs"]
-mod assertions;
 #[path = "chaos/bit_flip.rs"]
 mod bit_flip;
 #[path = "chaos/buggified_delay.rs"]

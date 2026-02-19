@@ -34,6 +34,17 @@ fn assert_simulation_success(report: &SimulationReport) {
             report.seeds_failing
         );
     }
+    if !report.assertion_violations.is_empty() {
+        panic!(
+            "Assertion violations:\n{}",
+            report
+                .assertion_violations
+                .iter()
+                .map(|v| format!("  - {}", v))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
 }
 
 // ============================================================================

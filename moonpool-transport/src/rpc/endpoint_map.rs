@@ -1,12 +1,12 @@
 //! EndpointMap: Token → receiver routing (FDB pattern).
 //!
 //! Routes incoming packets by token to registered receivers.
-//! Uses hybrid lookup: O(1) array for well-known tokens, HashMap for dynamic.
+//! Uses hybrid lookup: O(1) array for well-known tokens, BTreeMap for dynamic.
 //!
 //! # FDB Reference
 //! From FlowTransport.actor.cpp:80-220
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::{UID, WELL_KNOWN_RESERVED_COUNT, WellKnownToken};
@@ -39,7 +39,7 @@ pub trait MessageReceiver {
 /// # Design
 ///
 /// - **Well-known endpoints**: O(1) array access via token index (0-63)
-/// - **Dynamic endpoints**: HashMap lookup by full UID
+/// - **Dynamic endpoints**: BTreeMap lookup by full UID
 ///
 /// Well-known endpoints are checked first for hot-path performance.
 ///
@@ -52,7 +52,7 @@ pub struct EndpointMap {
 
     /// Dynamic receivers keyed by full UID.
     /// Used for endpoints allocated at runtime.
-    dynamic: HashMap<UID, Rc<dyn MessageReceiver>>,
+    dynamic: BTreeMap<UID, Rc<dyn MessageReceiver>>,
 
     /// Counter for metrics and debugging.
     registration_count: u64,
@@ -70,7 +70,7 @@ impl EndpointMap {
     pub fn new() -> Self {
         Self {
             well_known: std::array::from_fn(|_| None),
-            dynamic: HashMap::new(),
+            dynamic: BTreeMap::new(),
             registration_count: 0,
             deregistration_count: 0,
         }
@@ -111,7 +111,7 @@ impl EndpointMap {
 
     /// Register a dynamic endpoint with the given UID.
     ///
-    /// Dynamic endpoints use HashMap lookup. Call this when you need
+    /// Dynamic endpoints use BTreeMap lookup. Call this when you need
     /// a specific UID (e.g., for request-response correlation).
     ///
     /// # Arguments

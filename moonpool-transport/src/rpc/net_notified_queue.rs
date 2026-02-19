@@ -10,7 +10,7 @@
 //!
 //! ```rust,ignore
 //! use moonpool::{NetNotifiedQueue, Endpoint};
-//! use moonpool_traits::{JsonCodec, MessageCodec};
+//! use moonpool::{JsonCodec, MessageCodec};
 //!
 //! // Default JsonCodec
 //! let queue: NetNotifiedQueue<MyMessage> = NetNotifiedQueue::new(endpoint);

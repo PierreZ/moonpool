@@ -10,7 +10,7 @@ This is inspired by [Antithesis](https://antithesis.com/)'s approach: use covera
 
 ## How: Fork at Discovery
 
-When a `sometimes_assert!` succeeds for the first time, the explorer:
+When an `assert_sometimes!` succeeds for the first time, the explorer:
 
 1. **Forks** child processes with different RNG seeds
 2. Each child **continues** the simulation from the discovery point
@@ -51,15 +51,17 @@ This crate has zero knowledge of moonpool internals. Communication with the simu
 
 ```rust
 ExplorationConfig {
-    max_depth: 30,           // Maximum fork depth
-    timelines_per_split: 4,    // Timelines per split point (fixed-count mode)
-    global_energy: 50_000,   // Total fork budget
+    max_depth: 30,              // Maximum fork depth
+    timelines_per_split: 4,     // Timelines per split point (fixed-count mode)
+    global_energy: 50_000,      // Total fork budget
     adaptive: Some(AdaptiveConfig {
-        batch_size: 20,       // Children per adaptive batch
-        min_timelines: 100,   // Minimum timelines per mark
-        max_timelines: 200,   // Maximum timelines per mark
-        per_mark_energy: 1000,// Energy budget per fork point
+        batch_size: 20,          // Children per adaptive batch
+        min_timelines: 100,      // Minimum timelines per mark
+        max_timelines: 200,      // Maximum timelines per mark
+        per_mark_energy: 1000,   // Energy budget per fork point
+        warm_min_timelines: None, // Override min_timelines for warm seeds
     }),
+    parallelism: None,          // Optional multi-core sliding window
 }
 ```
 

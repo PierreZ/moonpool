@@ -20,9 +20,14 @@
 
 use std::sync::atomic::Ordering;
 
+#[cfg(unix)]
+use std::collections::HashMap;
+
 use crate::context::{
     self, COVERAGE_BITMAP_PTR, ENERGY_BUDGET_PTR, EXPLORED_MAP_PTR, SHARED_RECIPE, SHARED_STATS,
 };
+#[cfg(unix)]
+use crate::context::{BITMAP_POOL, BITMAP_POOL_SLOTS};
 use crate::coverage::{COVERAGE_MAP_SIZE, CoverageBitmap, ExploredMap};
 use crate::shared_stats::MAX_RECIPE_ENTRIES;
 
@@ -42,6 +47,163 @@ fn compute_child_seed(parent_seed: u64, mark_name: &str, child_idx: u32) -> u64 
     hash
 }
 
+/// Controls how many children can run in parallel during splitting.
+///
+/// When set on [`crate::ExplorationConfig::parallelism`], the fork loop
+/// uses a sliding window of this many concurrent children instead of the
+/// default sequential fork→wait→fork→wait cycle.
+#[derive(Debug, Clone)]
+pub enum Parallelism {
+    /// Use all available CPU cores (`sysconf(_SC_NPROCESSORS_ONLN)`).
+    MaxCores,
+    /// Use half the available CPU cores.
+    HalfCores,
+    /// Use exactly this many concurrent children.
+    Cores(usize),
+    /// Use all available cores minus `n` (e.g., leave 1 for the OS).
+    MaxCoresMinus(usize),
+}
+
+/// Resolve a [`Parallelism`] value to a concrete slot count (≥ 1).
+#[cfg(unix)]
+fn resolve_parallelism(p: &Parallelism) -> usize {
+    let ncpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+    let ncpus = if ncpus > 0 { ncpus as usize } else { 1 };
+    let n = match p {
+        Parallelism::MaxCores => ncpus,
+        Parallelism::HalfCores => ncpus / 2,
+        Parallelism::Cores(c) => *c,
+        Parallelism::MaxCoresMinus(minus) => ncpus.saturating_sub(*minus),
+    };
+    n.max(1) // always at least 1
+}
+
+/// Get or initialize the per-process bitmap pool in shared memory.
+///
+/// Returns the pool base pointer, or null if allocation fails.
+/// Each forked child resets this to null so it allocates its own pool
+/// if it becomes a parent (avoids sharing pool slots with siblings).
+#[cfg(unix)]
+fn get_or_init_pool(slot_count: usize) -> *mut u8 {
+    let existing = BITMAP_POOL.with(|c| c.get());
+    let existing_slots = BITMAP_POOL_SLOTS.with(|c| c.get());
+
+    if !existing.is_null() && existing_slots >= slot_count {
+        return existing;
+    }
+
+    // Free old pool if it exists but is too small
+    if !existing.is_null() {
+        // Safety: ptr was returned by alloc_shared with existing_slots * COVERAGE_MAP_SIZE
+        unsafe {
+            crate::shared_mem::free_shared(existing, existing_slots * COVERAGE_MAP_SIZE);
+        }
+        BITMAP_POOL.with(|c| c.set(std::ptr::null_mut()));
+        BITMAP_POOL_SLOTS.with(|c| c.set(0));
+    }
+
+    match crate::shared_mem::alloc_shared(slot_count * COVERAGE_MAP_SIZE) {
+        Ok(ptr) => {
+            BITMAP_POOL.with(|c| c.set(ptr));
+            BITMAP_POOL_SLOTS.with(|c| c.set(slot_count));
+            ptr
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Return the pointer to slot `idx` within a bitmap pool.
+#[cfg(unix)]
+fn pool_slot(pool_base: *mut u8, idx: usize) -> *mut u8 {
+    // Safety: caller ensures idx < slot_count and pool_base is valid
+    unsafe { pool_base.add(idx * COVERAGE_MAP_SIZE) }
+}
+
+/// Common child-process setup after fork: reseed RNG, update context, bump counter.
+///
+/// Also resets the bitmap pool pointer so nested splits allocate a fresh pool.
+#[cfg(unix)]
+fn setup_child(
+    child_seed: u64,
+    split_call_count: u64,
+    stats_ptr: *mut crate::shared_stats::SharedStats,
+) {
+    context::rng_reseed(child_seed);
+    context::with_ctx_mut(|ctx| {
+        ctx.is_child = true;
+        ctx.depth += 1;
+        ctx.current_seed = child_seed;
+        ctx.recipe.push((split_call_count, child_seed));
+    });
+    if !stats_ptr.is_null() {
+        // Safety: stats_ptr points to valid shared memory
+        unsafe {
+            (*stats_ptr).total_timelines.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    // Reset bitmap pool so nested splits allocate a fresh pool
+    BITMAP_POOL.with(|c| c.set(std::ptr::null_mut()));
+    BITMAP_POOL_SLOTS.with(|c| c.set(0));
+}
+
+/// Reap one finished child via `waitpid(-1)`, merge its coverage, check for bugs.
+///
+/// Removes the reaped PID from `active`, pushes its slot back to `free_slots`,
+/// and sets `batch_has_new` if the child contributed new coverage bits.
+#[cfg(unix)]
+fn reap_one(
+    active: &mut HashMap<libc::pid_t, (u64, usize)>,
+    free_slots: &mut Vec<usize>,
+    pool_base: *mut u8,
+    vm_ptr: *mut u8,
+    stats_ptr: *mut crate::shared_stats::SharedStats,
+    split_call_count: u64,
+    batch_has_new: &mut bool,
+) {
+    let mut status: libc::c_int = 0;
+    // Safety: waitpid(-1) waits for any child of this process
+    let finished_pid = unsafe { libc::waitpid(-1, &mut status, 0) };
+    if finished_pid <= 0 {
+        return;
+    }
+
+    let Some((child_seed, slot)) = active.remove(&finished_pid) else {
+        return;
+    };
+
+    // Merge child's coverage bitmap into explored map
+    if !vm_ptr.is_null() {
+        // Safety: pool_base + slot offset is valid shared memory
+        let child_bm = unsafe { CoverageBitmap::new(pool_slot(pool_base, slot)) };
+        let vm = unsafe { ExploredMap::new(vm_ptr) };
+        if vm.has_new_bits(&child_bm) {
+            *batch_has_new = true;
+        }
+        vm.merge_from(&child_bm);
+    }
+
+    // Check if child found a bug (exit code 42)
+    let exited_normally = libc::WIFEXITED(status);
+    if exited_normally && libc::WEXITSTATUS(status) == 42 {
+        if !stats_ptr.is_null() {
+            // Safety: stats_ptr is valid shared memory
+            unsafe {
+                (*stats_ptr).bug_found.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        save_bug_recipe(split_call_count, child_seed);
+    }
+
+    if !stats_ptr.is_null() {
+        // Safety: stats_ptr is valid shared memory
+        unsafe {
+            (*stats_ptr).fork_points.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    free_slots.push(slot);
+}
+
 /// Configuration for adaptive batch-based timeline splitting.
 ///
 /// Instead of spawning a fixed number of timelines, the adaptive loop
@@ -58,6 +220,9 @@ pub struct AdaptiveConfig {
     pub max_timelines: u32,
     /// Initial per-mark energy budget.
     pub per_mark_energy: i64,
+    /// Minimum timelines for marks during warm starts (explored map has prior
+    /// coverage from previous seeds). Defaults to `batch_size` if `None`.
+    pub warm_min_timelines: Option<u32>,
 }
 
 /// Dispatch to either adaptive or fixed-count splitting based on config.
@@ -79,13 +244,16 @@ pub(crate) fn dispatch_split(mark_name: &str, slot_idx: usize) {
 pub(crate) fn dispatch_split(_mark_name: &str, _slot_idx: usize) {}
 
 /// Adaptive split: spawn timelines in batches, check coverage yield, stop when barren.
+///
+/// When parallelism is configured, uses a sliding window of concurrent children
+/// capped at the resolved slot count. Otherwise falls back to sequential forking.
 #[cfg(unix)]
 fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
     // Read context for guard checks
-    let (active, depth, max_depth, current_seed) =
+    let (ctx_active, depth, max_depth, current_seed) =
         context::with_ctx(|ctx| (ctx.active, ctx.depth, ctx.max_depth, ctx.current_seed));
 
-    if !active || depth >= max_depth {
+    if !ctx_active || depth >= max_depth {
         return;
     }
 
@@ -100,15 +268,12 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
         crate::energy::init_mark_budget(budget_ptr, slot_idx);
     }
 
-    // Record the current RNG call count for the recipe
     let split_call_count = context::rng_get_count();
 
-    // Get shared memory pointers
     let bm_ptr = COVERAGE_BITMAP_PTR.with(|c| c.get());
     let vm_ptr = EXPLORED_MAP_PTR.with(|c| c.get());
     let stats_ptr = SHARED_STATS.with(|c| c.get());
 
-    // Read adaptive config from context
     let (batch_size, min_timelines, max_timelines) = context::with_ctx(|ctx| {
         ctx.adaptive
             .as_ref()
@@ -116,9 +281,40 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
             .unwrap_or((4, 1, 16))
     });
 
-    // Save parent bitmap
+    // Warm start: when explored map has prior coverage from previous seeds,
+    // barren marks stop after fewer timelines since they're re-treading
+    // already-discovered paths.
+    let effective_min_timelines = {
+        let (is_warm, warm_min) = context::with_ctx(|ctx| {
+            let wm = ctx
+                .adaptive
+                .as_ref()
+                .and_then(|a| a.warm_min_timelines)
+                .unwrap_or(batch_size);
+            (ctx.warm_start, wm)
+        });
+        if is_warm { warm_min } else { min_timelines }
+    };
+
+    // Check parallelism
+    let parallelism = context::with_ctx(|ctx| ctx.parallelism.clone());
+    let (slot_count, pool_base) = if let Some(ref p) = parallelism {
+        let sc = resolve_parallelism(p);
+        let pb = get_or_init_pool(sc);
+        if pb.is_null() {
+            (0, std::ptr::null_mut())
+        } else {
+            (sc, pb)
+        }
+    } else {
+        (0, std::ptr::null_mut())
+    };
+    let parallel = slot_count > 0;
+
+    // Save parent bitmap (sequential only — parallel children use pool slots)
     let mut parent_bitmap_backup = [0u8; COVERAGE_MAP_SIZE];
-    if !bm_ptr.is_null() {
+    if !parallel && !bm_ptr.is_null() {
+        // Safety: bm_ptr points to COVERAGE_MAP_SIZE bytes
         unsafe {
             std::ptr::copy_nonoverlapping(
                 bm_ptr,
@@ -130,109 +326,170 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
 
     let mut timelines_spawned: u32 = 0;
 
+    // Parallel state (only used when parallel == true)
+    let mut active: HashMap<libc::pid_t, (u64, usize)> = HashMap::new();
+    let mut free_slots: Vec<usize> = if parallel {
+        (0..slot_count).collect()
+    } else {
+        Vec::new()
+    };
+
     // Batch loop
     loop {
         let mut batch_has_new = false;
+        let batch_start = timelines_spawned;
 
-        for _ in 0..batch_size {
+        while timelines_spawned - batch_start < batch_size {
             if timelines_spawned >= max_timelines {
                 break;
             }
 
-            // Check energy
             // Safety: budget_ptr is valid
             if !unsafe { crate::energy::decrement_mark_energy(budget_ptr, slot_idx) } {
                 break;
             }
 
-            // Clear child bitmap before fork
-            if !bm_ptr.is_null() {
-                let bm = unsafe { CoverageBitmap::new(bm_ptr) };
-                bm.clear();
-            }
-
             let child_seed = compute_child_seed(current_seed, mark_name, timelines_spawned);
             timelines_spawned += 1;
 
-            // Safety: single-threaded, no real I/O. See split_on_discovery.
-            let pid = unsafe { libc::fork() };
-
-            match pid {
-                -1 => break, // fork failed
-                0 => {
-                    // CHILD — reseed and return
-                    context::rng_reseed(child_seed);
-                    context::with_ctx_mut(|ctx| {
-                        ctx.is_child = true;
-                        ctx.depth += 1;
-                        ctx.current_seed = child_seed;
-                        ctx.recipe.push((split_call_count, child_seed));
-                    });
-                    if !stats_ptr.is_null() {
-                        unsafe {
-                            (*stats_ptr).total_timelines.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-                    return;
+            if parallel {
+                // Back-pressure: reap a finished child if all slots are busy
+                while free_slots.is_empty() {
+                    reap_one(
+                        &mut active,
+                        &mut free_slots,
+                        pool_base,
+                        vm_ptr,
+                        stats_ptr,
+                        split_call_count,
+                        &mut batch_has_new,
+                    );
                 }
-                child_pid => {
-                    // PARENT — wait for child
-                    let mut status: libc::c_int = 0;
-                    unsafe {
-                        libc::waitpid(child_pid, &mut status, 0);
-                    }
+                let slot = match free_slots.pop() {
+                    Some(s) => s,
+                    None => break,
+                };
 
-                    // Check coverage yield BEFORE merging
-                    if !bm_ptr.is_null() && !vm_ptr.is_null() {
-                        let bm = unsafe { CoverageBitmap::new(bm_ptr) };
-                        let vm = unsafe { ExploredMap::new(vm_ptr) };
-                        if vm.has_new_bits(&bm) {
-                            batch_has_new = true;
-                        }
-                        vm.merge_from(&bm);
-                    }
+                // Clear child bitmap slot
+                // Safety: pool_base + slot offset is valid shared memory
+                unsafe {
+                    std::ptr::write_bytes(pool_slot(pool_base, slot), 0, COVERAGE_MAP_SIZE);
+                    COVERAGE_BITMAP_PTR.with(|c| c.set(pool_slot(pool_base, slot)));
+                }
 
-                    // Check if child found a bug
-                    let exited_normally = libc::WIFEXITED(status);
-                    if exited_normally && libc::WEXITSTATUS(status) == 42 {
-                        if !stats_ptr.is_null() {
-                            unsafe {
-                                (*stats_ptr).bug_found.fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                        save_bug_recipe(split_call_count, child_seed);
+                // Safety: single-threaded, no real I/O
+                let pid = unsafe { libc::fork() };
+                match pid {
+                    -1 => {
+                        free_slots.push(slot);
+                        break;
                     }
+                    0 => {
+                        setup_child(child_seed, split_call_count, stats_ptr);
+                        return;
+                    }
+                    child_pid => {
+                        active.insert(child_pid, (child_seed, slot));
+                    }
+                }
+            } else {
+                // Sequential path
+                if !bm_ptr.is_null() {
+                    let bm = unsafe { CoverageBitmap::new(bm_ptr) };
+                    bm.clear();
+                }
 
-                    if !stats_ptr.is_null() {
+                // Safety: single-threaded, no real I/O
+                let pid = unsafe { libc::fork() };
+                match pid {
+                    -1 => break,
+                    0 => {
+                        setup_child(child_seed, split_call_count, stats_ptr);
+                        return;
+                    }
+                    child_pid => {
+                        let mut status: libc::c_int = 0;
+                        // Safety: child_pid is valid
                         unsafe {
-                            (*stats_ptr).fork_points.fetch_add(1, Ordering::Relaxed);
+                            libc::waitpid(child_pid, &mut status, 0);
+                        }
+
+                        if !bm_ptr.is_null() && !vm_ptr.is_null() {
+                            let bm = unsafe { CoverageBitmap::new(bm_ptr) };
+                            let vm = unsafe { ExploredMap::new(vm_ptr) };
+                            if vm.has_new_bits(&bm) {
+                                batch_has_new = true;
+                            }
+                            vm.merge_from(&bm);
+                        }
+
+                        let exited_normally = libc::WIFEXITED(status);
+                        if exited_normally && libc::WEXITSTATUS(status) == 42 {
+                            if !stats_ptr.is_null() {
+                                // Safety: stats_ptr is valid
+                                unsafe {
+                                    (*stats_ptr).bug_found.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            save_bug_recipe(split_call_count, child_seed);
+                        }
+
+                        if !stats_ptr.is_null() {
+                            // Safety: stats_ptr is valid
+                            unsafe {
+                                (*stats_ptr).fork_points.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
                 }
             }
+        }
+
+        // Drain remaining active children before checking batch yield
+        while !active.is_empty() {
+            reap_one(
+                &mut active,
+                &mut free_slots,
+                pool_base,
+                vm_ptr,
+                stats_ptr,
+                split_call_count,
+                &mut batch_has_new,
+            );
         }
 
         // Batch complete — decide whether to continue
         if timelines_spawned >= max_timelines {
             break;
         }
-        if !batch_has_new && timelines_spawned >= min_timelines {
+        if !batch_has_new && timelines_spawned >= effective_min_timelines {
             // Barren — return remaining energy to pool
+            // Safety: budget_ptr is valid
             unsafe {
                 crate::energy::return_mark_energy_to_pool(budget_ptr, slot_idx);
             }
             break;
         }
-        // Check if we ran out of energy mid-batch (timelines_spawned didn't reach batch_size)
-        if !timelines_spawned.is_multiple_of(batch_size) && timelines_spawned < max_timelines {
-            break; // energy exhausted
+        // Check if we ran out of energy mid-batch
+        if timelines_spawned - batch_start < batch_size && timelines_spawned < max_timelines {
+            break;
         }
     }
 
-    // Restore parent bitmap
-    if !bm_ptr.is_null() {
-        unsafe {
-            std::ptr::copy_nonoverlapping(parent_bitmap_backup.as_ptr(), bm_ptr, COVERAGE_MAP_SIZE);
+    if parallel {
+        // Restore parent's bitmap pointer
+        COVERAGE_BITMAP_PTR.with(|c| c.set(bm_ptr));
+    } else {
+        // Restore parent bitmap content
+        if !bm_ptr.is_null() {
+            // Safety: bm_ptr points to COVERAGE_MAP_SIZE bytes
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    parent_bitmap_backup.as_ptr(),
+                    bm_ptr,
+                    COVERAGE_MAP_SIZE,
+                );
+            }
         }
     }
 }
@@ -243,29 +500,25 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
 /// or `assertion_numeric`). Spawns `timelines_per_split` child timelines,
 /// each with a different seed derived from the current seed and the mark name.
 ///
-/// **In the child**: sets `is_child = true`, increments depth, reseeds the RNG,
-/// and returns (the simulation continues with new randomness).
-///
-/// **In the parent**: calls `waitpid()` for each child, merges coverage, checks
-/// exit codes, and continues after all children are done.
+/// When parallelism is configured, uses a sliding window of concurrent children.
+/// Otherwise falls back to sequential fork→wait→fork→wait.
 #[cfg(unix)]
 pub fn split_on_discovery(mark_name: &str) {
-    // Read context for guard checks
-    let (active, depth, max_depth, timelines_per_split, current_seed) = context::with_ctx(|ctx| {
-        (
-            ctx.active,
-            ctx.depth,
-            ctx.max_depth,
-            ctx.timelines_per_split,
-            ctx.current_seed,
-        )
-    });
+    let (ctx_active, depth, max_depth, timelines_per_split, current_seed) =
+        context::with_ctx(|ctx| {
+            (
+                ctx.active,
+                ctx.depth,
+                ctx.max_depth,
+                ctx.timelines_per_split,
+                ctx.current_seed,
+            )
+        });
 
-    if !active || depth >= max_depth {
+    if !ctx_active || depth >= max_depth {
         return;
     }
 
-    // Check energy budget
     let stats_ptr = SHARED_STATS.with(|c| c.get());
     if stats_ptr.is_null() {
         return;
@@ -275,16 +528,28 @@ pub fn split_on_discovery(mark_name: &str) {
         return;
     }
 
-    // Record the current RNG call count for the recipe
     let split_call_count = context::rng_get_count();
-
-    // Get shared memory pointers
     let bm_ptr = COVERAGE_BITMAP_PTR.with(|c| c.get());
     let vm_ptr = EXPLORED_MAP_PTR.with(|c| c.get());
 
-    // Save parent bitmap (copy to stack)
+    // Check parallelism
+    let parallelism = context::with_ctx(|ctx| ctx.parallelism.clone());
+    let (slot_count, pool_base) = if let Some(ref p) = parallelism {
+        let sc = resolve_parallelism(p);
+        let pb = get_or_init_pool(sc);
+        if pb.is_null() {
+            (0, std::ptr::null_mut())
+        } else {
+            (sc, pb)
+        }
+    } else {
+        (0, std::ptr::null_mut())
+    };
+    let parallel = slot_count > 0;
+
+    // Save parent bitmap (sequential only)
     let mut parent_bitmap_backup = [0u8; COVERAGE_MAP_SIZE];
-    if !bm_ptr.is_null() {
+    if !parallel && !bm_ptr.is_null() {
         // Safety: bm_ptr points to COVERAGE_MAP_SIZE bytes
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -295,9 +560,16 @@ pub fn split_on_discovery(mark_name: &str) {
         }
     }
 
-    // Fork children
+    // Parallel state
+    let mut active: HashMap<libc::pid_t, (u64, usize)> = HashMap::new();
+    let mut free_slots: Vec<usize> = if parallel {
+        (0..slot_count).collect()
+    } else {
+        Vec::new()
+    };
+    let mut batch_has_new = false;
+
     for child_idx in 0..timelines_per_split {
-        // Additional children beyond the first each consume energy
         if child_idx > 0 {
             // Safety: stats_ptr is valid
             if !unsafe { crate::shared_stats::decrement_energy(stats_ptr) } {
@@ -305,90 +577,109 @@ pub fn split_on_discovery(mark_name: &str) {
             }
         }
 
-        // Clear child bitmap before fork
-        if !bm_ptr.is_null() {
-            // Safety: bm_ptr is valid
-            let bm = unsafe { CoverageBitmap::new(bm_ptr) };
-            bm.clear();
-        }
-
         let child_seed = compute_child_seed(current_seed, mark_name, child_idx);
 
-        // Safety: moonpool-sim is single-threaded, no real I/O, no file descriptors,
-        // no mutexes. After fork, child has COW copy of address space.
-        // MAP_SHARED memory is the only cross-process communication.
-        let pid = unsafe { libc::fork() };
-
-        match pid {
-            -1 => {
-                // Fork failed — continue without forking
-                break;
+        if parallel {
+            // Back-pressure: reap if all slots busy
+            while free_slots.is_empty() {
+                reap_one(
+                    &mut active,
+                    &mut free_slots,
+                    pool_base,
+                    vm_ptr,
+                    stats_ptr,
+                    split_call_count,
+                    &mut batch_has_new,
+                );
             }
-            0 => {
-                // CHILD PROCESS
-                // Reseed RNG via the hook (also resets call count)
-                context::rng_reseed(child_seed);
+            let slot = match free_slots.pop() {
+                Some(s) => s,
+                None => break,
+            };
 
-                // Update context
-                context::with_ctx_mut(|ctx| {
-                    ctx.is_child = true;
-                    ctx.depth += 1;
-                    ctx.current_seed = child_seed;
-                    ctx.recipe.push((split_call_count, child_seed));
-                });
-
-                // Increment total timelines counter
-                // Safety: stats_ptr is valid shared memory
-                unsafe {
-                    (*stats_ptr).total_timelines.fetch_add(1, Ordering::Relaxed);
-                }
-
-                // Return — child continues the simulation with new randomness.
-                // It will eventually reach the end of orchestrate_workloads
-                // where moonpool-sim calls exit_child().
-                return;
+            // Safety: pool slot is valid shared memory
+            unsafe {
+                std::ptr::write_bytes(pool_slot(pool_base, slot), 0, COVERAGE_MAP_SIZE);
+                COVERAGE_BITMAP_PTR.with(|c| c.set(pool_slot(pool_base, slot)));
             }
-            child_pid => {
-                // PARENT PROCESS — wait for child
-                let mut status: libc::c_int = 0;
-                // Safety: child_pid is a valid PID returned by fork()
-                unsafe {
-                    libc::waitpid(child_pid, &mut status, 0);
-                }
 
-                // Merge child coverage into explored map
-                if !bm_ptr.is_null() && !vm_ptr.is_null() {
-                    // Safety: both pointers are valid shared memory
-                    let bm = unsafe { CoverageBitmap::new(bm_ptr) };
-                    let vm = unsafe { ExploredMap::new(vm_ptr) };
-                    vm.merge_from(&bm);
+            // Safety: single-threaded, no real I/O
+            let pid = unsafe { libc::fork() };
+            match pid {
+                -1 => {
+                    free_slots.push(slot);
+                    break;
                 }
+                0 => {
+                    setup_child(child_seed, split_call_count, stats_ptr);
+                    return;
+                }
+                child_pid => {
+                    active.insert(child_pid, (child_seed, slot));
+                }
+            }
+        } else {
+            // Sequential path
+            if !bm_ptr.is_null() {
+                let bm = unsafe { CoverageBitmap::new(bm_ptr) };
+                bm.clear();
+            }
 
-                // Check if child found a bug (exit code 42)
-                let exited_normally = libc::WIFEXITED(status);
-                if exited_normally {
-                    let exit_code = libc::WEXITSTATUS(status);
-                    if exit_code == 42 {
+            // Safety: single-threaded, no real I/O
+            let pid = unsafe { libc::fork() };
+            match pid {
+                -1 => break,
+                0 => {
+                    setup_child(child_seed, split_call_count, stats_ptr);
+                    return;
+                }
+                child_pid => {
+                    let mut status: libc::c_int = 0;
+                    // Safety: child_pid is valid
+                    unsafe {
+                        libc::waitpid(child_pid, &mut status, 0);
+                    }
+
+                    if !bm_ptr.is_null() && !vm_ptr.is_null() {
+                        let bm = unsafe { CoverageBitmap::new(bm_ptr) };
+                        let vm = unsafe { ExploredMap::new(vm_ptr) };
+                        vm.merge_from(&bm);
+                    }
+
+                    let exited_normally = libc::WIFEXITED(status);
+                    if exited_normally && libc::WEXITSTATUS(status) == 42 {
                         // Safety: stats_ptr is valid
                         unsafe {
                             (*stats_ptr).bug_found.fetch_add(1, Ordering::Relaxed);
                         }
-                        // Save the bug recipe
                         save_bug_recipe(split_call_count, child_seed);
                     }
-                }
 
-                // Increment fork points counter
-                // Safety: stats_ptr is valid
-                unsafe {
-                    (*stats_ptr).fork_points.fetch_add(1, Ordering::Relaxed);
+                    // Safety: stats_ptr is valid
+                    unsafe {
+                        (*stats_ptr).fork_points.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         }
     }
 
-    // Restore parent bitmap
-    if !bm_ptr.is_null() {
+    // Drain remaining active children
+    while !active.is_empty() {
+        reap_one(
+            &mut active,
+            &mut free_slots,
+            pool_base,
+            vm_ptr,
+            stats_ptr,
+            split_call_count,
+            &mut batch_has_new,
+        );
+    }
+
+    if parallel {
+        COVERAGE_BITMAP_PTR.with(|c| c.set(bm_ptr));
+    } else if !bm_ptr.is_null() {
         // Safety: bm_ptr points to COVERAGE_MAP_SIZE bytes
         unsafe {
             std::ptr::copy_nonoverlapping(parent_bitmap_backup.as_ptr(), bm_ptr, COVERAGE_MAP_SIZE);

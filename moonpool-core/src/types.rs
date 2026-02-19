@@ -29,7 +29,9 @@ use crate::well_known::WellKnownToken;
 /// let uid = UID::new(0x123, 0x456);
 /// assert!(!uid.is_well_known());
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 pub struct UID {
     /// First 64 bits. For well-known UIDs, this is `u64::MAX`.
     pub first: u64,

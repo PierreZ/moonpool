@@ -9,7 +9,10 @@
 //! - Workload: `/home/pierrez/workspace/rust/Claude-fork-testing/maze-explorer/src/dungeon.rs`
 //! - Engine: `/home/pierrez/workspace/rust/Claude-fork-testing/dungeon/src/lib.rs`
 
-use moonpool_sim::{ExplorationConfig, SimulationBuilder, SimulationReport};
+use async_trait::async_trait;
+use moonpool_sim::{
+    ExplorationConfig, SimContext, SimulationBuilder, SimulationReport, SimulationResult, Workload,
+};
 
 // ============================================================================
 // Inlined dungeon game engine
@@ -653,6 +656,31 @@ impl Dungeon {
     }
 }
 
+/// Workload that runs the dungeon and reports bugs via error return.
+struct DungeonWorkload {
+    max_steps: u64,
+    target_level: u32,
+}
+
+#[async_trait(?Send)]
+impl Workload for DungeonWorkload {
+    fn name(&self) -> &str {
+        "dungeon"
+    }
+
+    async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+        let mut dungeon = Dungeon::new(self.max_steps, self.target_level);
+        let result = dungeon.run();
+
+        moonpool_sim::assert_always!(
+            result != StepResult::BugFound,
+            "dungeon bug: treasure found on floor 8"
+        );
+
+        Ok(())
+    }
+}
+
 /// Helper to run a simulation and return the report.
 fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
@@ -673,34 +701,30 @@ fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
 fn slow_simulation_dungeon() {
     let report = run_simulation(
         SimulationBuilder::new()
-            .set_iterations(1)
+            .set_iterations(3)
             .enable_exploration(ExplorationConfig {
                 max_depth: 120,
                 timelines_per_split: 4,
-                global_energy: 2_000_000,
+                global_energy: 400_000,
                 adaptive: Some(moonpool_sim::AdaptiveConfig {
                     batch_size: 30,
-                    min_timelines: 800,
-                    max_timelines: 2_000,
-                    per_mark_energy: 20_000,
+                    min_timelines: 400,
+                    max_timelines: 1_000,
+                    per_mark_energy: 10_000,
+                    warm_min_timelines: Some(30),
                 }),
+                parallelism: Some(moonpool_sim::Parallelism::HalfCores),
             })
-            .workload_fn("dungeon", |_ctx| async move {
-                let mut dungeon = Dungeon::new(DEFAULT_MAX_STEPS, DEFAULT_TARGET_LEVEL);
-                let result = dungeon.run();
-
-                if result == StepResult::BugFound {
-                    return Err(moonpool_sim::SimulationError::InvalidState(
-                        "dungeon bug: treasure found on floor 8".to_string(),
-                    ));
-                }
-
-                Ok(())
+            .workload(DungeonWorkload {
+                max_steps: DEFAULT_MAX_STEPS,
+                target_level: DEFAULT_TARGET_LEVEL,
             }),
     );
 
-    // Parent run should succeed
-    assert_eq!(report.successful_runs, 1);
+    eprintln!("{report}");
+
+    // All parent runs should succeed
+    assert_eq!(report.successful_runs, 3);
 
     let exp = report.exploration.expect("exploration report missing");
     assert!(exp.total_timelines > 0, "expected forked timelines, got 0");
@@ -718,49 +742,48 @@ fn slow_simulation_dungeon_bug_replay() {
     // Phase 1: Run exploration to find the bug and capture the recipe.
     let report = run_simulation(
         SimulationBuilder::new()
-            .set_iterations(1)
+            .set_iterations(3)
             .set_debug_seeds(vec![54321])
             .enable_exploration(ExplorationConfig {
                 max_depth: 120,
                 timelines_per_split: 4,
-                global_energy: 2_000_000,
+                global_energy: 400_000,
                 adaptive: Some(moonpool_sim::AdaptiveConfig {
                     batch_size: 30,
-                    min_timelines: 800,
-                    max_timelines: 2_000,
-                    per_mark_energy: 20_000,
+                    min_timelines: 400,
+                    max_timelines: 1_000,
+                    per_mark_energy: 10_000,
+                    warm_min_timelines: Some(30),
                 }),
+                parallelism: Some(moonpool_sim::Parallelism::HalfCores),
             })
-            .workload_fn("dungeon", |_ctx| async move {
-                let mut dungeon = Dungeon::new(DEFAULT_MAX_STEPS, DEFAULT_TARGET_LEVEL);
-                let result = dungeon.run();
-
-                if result == StepResult::BugFound {
-                    return Err(moonpool_sim::SimulationError::InvalidState(
-                        "dungeon bug: treasure found on floor 8".to_string(),
-                    ));
-                }
-
-                Ok(())
+            .workload(DungeonWorkload {
+                max_steps: DEFAULT_MAX_STEPS,
+                target_level: DEFAULT_TARGET_LEVEL,
             }),
     );
 
-    assert_eq!(report.successful_runs, 1);
+    eprintln!("{report}");
+
+    assert_eq!(report.successful_runs, 3);
 
     let exp = report.exploration.expect("exploration report missing");
     assert!(exp.bugs_found > 0, "exploration should have found the bug");
-    let recipe = exp.bug_recipe.expect("bug recipe should be captured");
-    let initial_seed = report.seeds_used[0];
+    let bug = exp
+        .bug_recipes
+        .first()
+        .expect("bug recipe should be captured");
+    let initial_seed = bug.seed;
 
     // Phase 2: Format and parse the recipe (simulates developer copy-pasting from logs).
-    let timeline_str = moonpool_sim::format_timeline(&recipe);
+    let timeline_str = moonpool_sim::format_timeline(&bug.recipe);
     eprintln!(
         "Replaying dungeon bug: seed={}, recipe={}",
         initial_seed, timeline_str
     );
     let parsed_recipe =
         moonpool_sim::parse_timeline(&timeline_str).expect("recipe should round-trip");
-    assert_eq!(recipe, parsed_recipe);
+    assert_eq!(bug.recipe, parsed_recipe);
 
     // Phase 3: Replay — same seed, breakpoints from recipe, no exploration.
     moonpool_sim::reset_sim_rng();

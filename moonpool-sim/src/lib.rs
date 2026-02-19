@@ -71,6 +71,65 @@
 //!     .run_count(IterationControl::FixedCount(1))
 //!     .run(workload);
 //! ```
+//!
+//! ## Coverage-Preserving Multi-Seed Exploration
+//!
+//! When exploration is enabled, multiple seeds share coverage context. The
+//! explored map (coverage bitmap union) and assertion watermarks are preserved
+//! between seeds so each subsequent seed focuses energy on genuinely new
+//! branches rather than re-treading already-discovered paths.
+//!
+//! A **warm start** mechanism reduces wasted forks: on seeds after the first,
+//! marks whose first probe batch finds zero new coverage bits stop after
+//! `warm_min_timelines` forks instead of the full `min_timelines`.
+//!
+//! ```text
+//!  Seed 1 (cold start)           Seed 2 (warm start)          Seed 3 (warm start)
+//!  energy: 400K                  energy: 400K                 energy: 400K
+//!
+//!  root ─┬─ mark A ──> 400       root ─┬─ mark A ──> 30      root ─┬─ mark A ──> 30
+//!        │  (new bits!) forks           │  (barren!) skip           │  (barren!) skip
+//!        │                              │                           │
+//!        ├─ mark B ──> 400              ├─ mark B ──> 30            ├─ mark B ──> 30
+//!        │  (new bits!) forks           │  (barren!) skip           │  (barren!) skip
+//!        │                              │                           │
+//!        └─ mark C ──> 400              ├─ mark C ──> 30            ├─ mark C ──> 30
+//!           (new bits!) forks           │  (barren!) skip           │  (barren!) skip
+//!                                       │                           │
+//!                                       └─ mark D ──> 400          └─ mark E ──> 400
+//!                                          (NEW bits!) forks           (NEW bits!) forks
+//!                        │                               │                            │
+//!       ┌────────────────┘              ┌────────────────┘           ┌────────────────┘
+//!       v                               v                            v
+//!  ┌──────────┐  ──preserved──>  ┌──────────┐  ──preserved──>  ┌──────────┐
+//!  │ explored │  coverage map    │ explored │  coverage map    │ explored │
+//!  │ map:     │  + watermarks    │ map:     │  + watermarks    │ map:     │
+//!  │ A,B,C    │                  │ A,B,C,D  │                  │ A,B,C,D,E│
+//!  └──────────┘                  └──────────┘                  └──────────┘
+//!
+//!  Total: each seed spends most energy on NEW discoveries.
+//!  Warm marks (A,B,C on seed 2) exit after warm_min_timelines (30)
+//!  instead of min_timelines (400), saving ~95% energy per barren mark.
+//! ```
+//!
+//! ```ignore
+//! SimulationBuilder::new()
+//!     .set_iterations(3)  // 3 root seeds with coverage forwarding
+//!     .enable_exploration(ExplorationConfig {
+//!         max_depth: 120,
+//!         timelines_per_split: 4,
+//!         global_energy: 400_000,  // per-seed energy budget
+//!         adaptive: Some(AdaptiveConfig {
+//!             batch_size: 30,
+//!             min_timelines: 400,
+//!             max_timelines: 1_000,
+//!             per_mark_energy: 10_000,
+//!             warm_min_timelines: Some(30),  // quick skip for barren warm marks
+//!         }),
+//!         parallelism: Some(Parallelism::HalfCores),
+//!     })
+//!     .workload(my_workload);
+//! ```
 
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
@@ -120,15 +179,15 @@ pub use sim::{
 // Runner module re-exports
 pub use runner::{
     FaultContext, FaultInjector, IterationControl, PhaseConfig, SimContext, SimulationBuilder,
-    SimulationMetrics, SimulationReport, TokioReport, TokioRunner, Workload, WorkloadTopology,
-    workload_fn,
+    SimulationMetrics, SimulationReport, TokioReport, TokioRunner, Workload, WorkloadCount,
+    WorkloadTopology,
 };
 
 // Chaos module re-exports
 pub use chaos::{
     AssertionStats, Invariant, StateHandle, buggify_init, buggify_reset, get_assertion_results,
-    invariant_fn, panic_on_assertion_violations, reset_assertion_results,
-    validate_assertion_contracts,
+    has_always_violations, invariant_fn, panic_on_assertion_violations, reset_always_violations,
+    reset_assertion_results, validate_assertion_contracts,
 };
 
 // Network exports
@@ -147,8 +206,9 @@ pub use providers::{SimProviders, SimRandomProvider, SimTimeProvider};
 
 // Explorer re-exports
 pub use moonpool_explorer::{
-    AdaptiveConfig, AssertCmp, AssertKind, ExplorationConfig, format_timeline, parse_timeline,
+    AdaptiveConfig, AssertCmp, AssertKind, ExplorationConfig, Parallelism, format_timeline,
+    parse_timeline,
 };
-pub use runner::report::ExplorationReport;
+pub use runner::report::{BugRecipe, ExplorationReport};
 
 // Macros are automatically available at crate root when defined with #[macro_export]

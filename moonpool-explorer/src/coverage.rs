@@ -81,6 +81,21 @@ impl ExploredMap {
         }
     }
 
+    /// Count the number of set bits in the explored map (population count).
+    ///
+    /// Returns the total number of unique assertion paths explored across
+    /// all timelines.
+    pub fn count_bits_set(&self) -> u32 {
+        let mut count: u32 = 0;
+        // Safety: ptr points to COVERAGE_MAP_SIZE bytes
+        unsafe {
+            for i in 0..COVERAGE_MAP_SIZE {
+                count += (*self.ptr.add(i)).count_ones();
+            }
+        }
+        count
+    }
+
     /// Check if a timeline's bitmap contains any bits not yet in the explored map.
     pub fn has_new_bits(&self, other: &CoverageBitmap) -> bool {
         // Safety: both pointers are valid for COVERAGE_MAP_SIZE bytes
@@ -174,6 +189,28 @@ mod tests {
             shared_mem::free_shared(bm1_ptr, COVERAGE_MAP_SIZE);
             shared_mem::free_shared(bm2_ptr, COVERAGE_MAP_SIZE);
             shared_mem::free_shared(vm_ptr, COVERAGE_MAP_SIZE);
+        }
+    }
+
+    #[test]
+    fn test_count_bits_set() {
+        let vm_ptr = shared_mem::alloc_shared(COVERAGE_MAP_SIZE).expect("alloc failed");
+        let bm_ptr = shared_mem::alloc_shared(COVERAGE_MAP_SIZE).expect("alloc failed");
+        let vm = unsafe { ExploredMap::new(vm_ptr) };
+        let bm = unsafe { CoverageBitmap::new(bm_ptr) };
+
+        assert_eq!(vm.count_bits_set(), 0);
+
+        bm.set_bit(0);
+        bm.set_bit(42);
+        bm.set_bit(8000);
+        vm.merge_from(&bm);
+
+        assert_eq!(vm.count_bits_set(), 3);
+
+        unsafe {
+            shared_mem::free_shared(vm_ptr, COVERAGE_MAP_SIZE);
+            shared_mem::free_shared(bm_ptr, COVERAGE_MAP_SIZE);
         }
     }
 }

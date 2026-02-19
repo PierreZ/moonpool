@@ -54,6 +54,11 @@ impl DeadlockDetector {
     pub(crate) fn no_progress_count(&self) -> usize {
         self.no_progress_count
     }
+
+    /// Reset the no-progress counter (e.g. after triggering shutdown to give tasks a chance).
+    pub(crate) fn reset(&mut self) {
+        self.no_progress_count = 0;
+    }
 }
 
 /// Orchestrates workload execution and event processing.
@@ -181,11 +186,12 @@ impl WorkloadOrchestrator {
 
         // If this is a forked child, exit immediately to return control to parent.
         if moonpool_explorer::explorer_is_child() {
-            let code = if results.iter().all(|r| r.is_ok()) {
-                0
-            } else {
-                42
-            };
+            let code =
+                if results.iter().all(|r| r.is_ok()) && !crate::chaos::has_always_violations() {
+                    0
+                } else {
+                    42
+                };
             moonpool_explorer::exit_child(code);
         }
 
@@ -285,21 +291,34 @@ impl WorkloadOrchestrator {
 
             let current_active = handles.iter().filter(|h| h.is_some()).count();
 
-            // Deadlock detection
+            // Deadlock detection: trigger shutdown first to give tasks a chance to exit,
+            // only fail on the second detection (genuine deadlock).
             if deadlock_detector.check_deadlock(
                 current_active,
                 initial_handle_count,
                 sim.pending_event_count(),
                 initial_event_count,
             ) {
-                tracing::error!(
-                    "DEADLOCK detected on iteration {} with seed {}: {} tasks remaining after {} no-progress iterations",
-                    iteration_count,
-                    seed,
-                    current_active,
-                    deadlock_detector.no_progress_count()
-                );
-                return Err((vec![seed], 1));
+                if !shutdown_triggered {
+                    tracing::warn!(
+                        "No progress detected on iteration {} with seed {}: {} tasks remaining. Triggering shutdown to unblock workloads.",
+                        iteration_count,
+                        seed,
+                        current_active,
+                    );
+                    Self::trigger_shutdown(sim, shutdown_signal);
+                    shutdown_triggered = true;
+                    deadlock_detector.reset();
+                } else {
+                    tracing::error!(
+                        "DEADLOCK detected on iteration {} with seed {}: {} tasks remaining after {} no-progress iterations",
+                        iteration_count,
+                        seed,
+                        current_active,
+                        deadlock_detector.no_progress_count()
+                    );
+                    return Err((vec![seed], 1));
+                }
             }
 
             // Yield to allow tasks to make progress
@@ -403,6 +422,7 @@ impl WorkloadOrchestrator {
         let mut chaos_ended = false;
         let mut recovery_ended = false;
         let mut deadlock_detector = DeadlockDetector::new(3);
+        let mut shutdown_triggered = false;
 
         let mut workload_collected: Vec<Option<WorkloadResult>> =
             (0..total_workloads).map(|_| None).collect();
@@ -432,6 +452,7 @@ impl WorkloadOrchestrator {
                 tracing::debug!("Recovery phase ended, triggering shutdown");
                 Self::trigger_shutdown(sim, shutdown_signal);
                 recovery_ended = true;
+                shutdown_triggered = true;
             }
 
             // Process one simulation event
@@ -478,20 +499,33 @@ impl WorkloadOrchestrator {
 
             let current_active = workload_handles.iter().filter(|h| h.is_some()).count();
 
-            // Deadlock detection
+            // Deadlock detection: trigger shutdown first to give tasks a chance to exit,
+            // only fail on the second detection (genuine deadlock).
             if deadlock_detector.check_deadlock(
                 current_active,
                 initial_handle_count,
                 sim.pending_event_count(),
                 initial_event_count,
             ) {
-                tracing::error!(
-                    "DEADLOCK detected on iteration {} with seed {}: {} tasks remaining",
-                    iteration_count,
-                    seed,
-                    current_active
-                );
-                return Err((vec![seed], 1));
+                if !shutdown_triggered {
+                    tracing::warn!(
+                        "No progress detected on iteration {} with seed {}: {} tasks remaining. Triggering shutdown to unblock workloads.",
+                        iteration_count,
+                        seed,
+                        current_active,
+                    );
+                    Self::trigger_shutdown(sim, shutdown_signal);
+                    shutdown_triggered = true;
+                    deadlock_detector.reset();
+                } else {
+                    tracing::error!(
+                        "DEADLOCK detected on iteration {} with seed {}: {} tasks remaining",
+                        iteration_count,
+                        seed,
+                        current_active
+                    );
+                    return Err((vec![seed], 1));
+                }
             }
 
             // Yield to allow tasks to make progress
@@ -681,14 +715,19 @@ impl MetricsCollector {
     }
 
     /// Record the results of an iteration.
+    ///
+    /// An iteration is considered failed if any workload returned an error
+    /// OR if assertion violations were detected during the iteration.
     pub(crate) fn record_iteration(
         &mut self,
         seed: u64,
         wall_time: Duration,
         all_results: &[SimulationResult<()>],
+        has_assertion_violations: bool,
         sim_metrics: SimulationMetrics,
     ) {
-        let all_ok = all_results.iter().all(|r| r.is_ok());
+        let workloads_ok = all_results.iter().all(|r| r.is_ok());
+        let all_ok = workloads_ok && !has_assertion_violations;
 
         if all_ok {
             self.record_success(seed, wall_time, sim_metrics);
@@ -706,7 +745,9 @@ impl MetricsCollector {
         self.aggregated_metrics.simulated_time += sim_metrics.simulated_time;
         self.aggregated_metrics.events_processed += sim_metrics.events_processed;
 
-        self.individual_metrics.push(Ok(sim_metrics));
+        let mut individual = sim_metrics;
+        individual.wall_time = wall_time;
+        self.individual_metrics.push(Ok(individual));
     }
 
     /// Record a failed iteration.
@@ -732,13 +773,17 @@ impl MetricsCollector {
     }
 
     /// Generate the final simulation report.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn generate_report(
         self,
         iteration_count: usize,
         seeds_used: Vec<u64>,
         assertion_results: HashMap<String, AssertionStats>,
         assertion_violations: Vec<String>,
+        coverage_violations: Vec<String>,
         exploration: Option<super::report::ExplorationReport>,
+        assertion_details: Vec<super::report::AssertionDetail>,
+        bucket_summaries: Vec<super::report::BucketSiteSummary>,
     ) -> super::report::SimulationReport {
         super::report::SimulationReport {
             iterations: iteration_count,
@@ -750,7 +795,10 @@ impl MetricsCollector {
             seeds_failing: self.faulty_seeds,
             assertion_results,
             assertion_violations,
+            coverage_violations,
             exploration,
+            assertion_details,
+            bucket_summaries,
         }
     }
 

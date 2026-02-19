@@ -154,10 +154,16 @@
 //!  │       calls exit_child(0) or exit_child(42) if bug              │
 //!  │                                                                  │
 //!  │   PARENT (pid>0):                                               │
-//!  │     - waitpid() — blocks until child finishes                   │
-//!  │     - Merge child's coverage bitmap into explored map           │
-//!  │     - If child exited with code 42 → record bug recipe          │
-//!  │     - Loop to next child                                        │
+//!  │     Sequential mode:                                            │
+//!  │       - waitpid(pid) — blocks until THIS child finishes         │
+//!  │       - Merge child's coverage bitmap into explored map         │
+//!  │       - If child exited with code 42 → record bug recipe        │
+//!  │       - Loop to next child                                      │
+//!  │     Parallel mode:                                              │
+//!  │       - Track child in active set                               │
+//!  │       - When slots are full → reap_one() via waitpid(-1)        │
+//!  │       - Continue forking until all children spawned             │
+//!  │       - Drain remaining active children at the end              │
 //!  └──────────────────────────────────────────────────────────────────┘
 //!
 //!  Step 8: Restore parent's coverage bitmap
@@ -234,7 +240,8 @@
 //!     max_depth: 2,
 //!     timelines_per_split: 3,
 //!     global_energy: 50,
-//!     adaptive: None,   // ← fixed-count mode
+//!     adaptive: None,      // ← fixed-count mode
+//!     parallelism: None,   // ← sequential (or Some(Parallelism::MaxCores))
 //! }
 //! ```
 //!
@@ -315,6 +322,7 @@
 //!         max_timelines: 20,    // hard cap per mark
 //!         per_mark_energy: 15,  // initial budget per mark
 //!     }),
+//!     parallelism: Some(Parallelism::MaxCores),  // use all CPU cores
 //! }
 //! ```
 //!
@@ -400,7 +408,8 @@
 //! ├──────────────────────────────────────────────────┤
 //! │  MAP_SHARED memory:                              │  ← truly shared
 //! │    - Assertion table (128 slots)                 │
-//! │    - Coverage bitmap + explored map              │
+//! │    - Coverage bitmap pool (1 slot per core)      │
+//! │    - Explored map (union of all coverage)        │
 //! │    - Energy budget                               │
 //! │    - Fork stats + bug recipe                     │
 //! └──────────────────────────────────────────────────┘
@@ -409,7 +418,7 @@
 //!                      │
 //!            ┌─────────┴─────────┐
 //!            ▼                   ▼
-//!     Parent (waits)      Child (continues)
+//!     Parent (reaps)      Child (continues)
 //!     - waitpid()         - rng_reseed(new_seed)
 //!     - merge coverage    - run simulation
 //!     - check exit code   - exit_child(0 or 42)
@@ -418,6 +427,78 @@
 //! `MAP_SHARED` memory is the only communication channel between parent
 //! and child. Assertion counters, coverage bits, energy budgets, and bug
 //! recipes all live there. This is why the crate only depends on `libc`.
+//!
+//! # Parallel exploration (multi-core)
+//!
+//! By default, the fork loop is sequential: fork one child, wait for it,
+//! merge coverage, repeat. This uses only one CPU core.
+//!
+//! With `parallelism: Some(Parallelism::MaxCores)`, the explorer runs
+//! multiple children concurrently using a **sliding window** capped at
+//! the number of available CPU cores:
+//!
+//! ```text
+//! Sequential (parallelism: None):
+//!
+//!   fork child 0 --- waitpid --- fork child 1 --- waitpid --- ...
+//!   core 0 busy     core 0 idle  core 0 busy     core 0 idle
+//!
+//! Parallel (parallelism: Some(Parallelism::MaxCores)):
+//!
+//!   fork child 0 ──────────────────────── reap
+//!   fork child 1 ─────────────────── reap
+//!   fork child 2 ────────────── reap
+//!   fork child 3 ─────── reap
+//!   all cores busy until drained
+//! ```
+//!
+//! The parent uses `waitpid(-1)` to reap whichever child finishes first,
+//! then recycles that slot for the next child.
+//!
+//! ## How the bitmap pool works
+//!
+//! In sequential mode, children share one coverage bitmap (cleared between
+//! each child). In parallel mode, concurrent children would clobber each
+//! other's bitmap, so each child gets its own **bitmap pool slot**:
+//!
+//! ```text
+//! Bitmap pool (MAP_SHARED, allocated lazily on first parallel split):
+//! ┌─────────────┬─────────────┬─────────────┬─────────────┐
+//! │  Slot 0     │  Slot 1     │  Slot 2     │  Slot 3     │
+//! │  1024 bytes │  1024 bytes │  1024 bytes │  1024 bytes │
+//! │  child A    │  child B    │  child C    │  (free)     │
+//! └─────────────┴─────────────┴─────────────┴─────────────┘
+//! ```
+//!
+//! When a child finishes (`waitpid(-1)` returns its PID), the parent:
+//! 1. Looks up which slot that child used
+//! 2. Merges the slot's bitmap into the explored map
+//! 3. Recycles the slot for the next child
+//!
+//! Children that themselves become parents (nested splits) allocate their
+//! own fresh pool -- the pool pointer is reset to null in each child at
+//! fork time.
+//!
+//! ## Parallelism variants
+//!
+//! ```text
+//! Variant              Slot count
+//! ───────────────────  ─────────────────────────────────────
+//! MaxCores             All available CPU cores
+//! HalfCores            Half of available cores (rounded up, min 1)
+//! Cores(n)             Exactly n cores
+//! MaxCoresMinus(n)     All cores minus n (min 1)
+//! ```
+//!
+//! ## Concurrency safety
+//!
+//! All `MAP_SHARED` state uses atomic operations that are safe across
+//! `fork()` boundaries:
+//! - **Assertion slots**: CAS for first-time discovery, `fetch_add` for counters
+//! - **Energy budget**: `fetch_sub`/`fetch_add` with rollback on failure
+//! - **Bug recipe**: CAS first-bug-wins -- only the first bug is recorded
+//! - **Stats counters**: `fetch_add` -- concurrent increments are safe
+//! - **Explored map merge**: Done by the parent AFTER `waitpid`, never concurrent
 //!
 //! # Architecture
 //!
@@ -440,12 +521,13 @@
 //!
 //! ```text
 //! lib.rs             ── ExplorationConfig, init/cleanup, this documentation
-//! split_loop.rs      ── The fork loop: split_on_discovery, adaptive batching
+//! split_loop.rs      ── The fork loop: sequential + parallel sliding window,
+//!                       adaptive batching, Parallelism enum
 //! assertion_slots.rs ── Shared-memory assertion table (128 slots)
 //! each_buckets.rs    ── Per-value bucketed assertions (256 buckets)
 //! coverage.rs        ── CoverageBitmap + ExploredMap (8192-bit bitmaps)
 //! energy.rs          ── 3-level energy budget (global + per-mark + realloc pool)
-//! context.rs         ── Thread-local state, RNG hooks
+//! context.rs         ── Thread-local state, RNG hooks, bitmap pool pointers
 //! shared_stats.rs    ── Cross-process counters (timelines, fork_points, bugs)
 //! shared_mem.rs      ── mmap(MAP_SHARED|MAP_ANONYMOUS) allocation
 //! replay.rs          ── Recipe formatting and parsing ("151@seed -> 80@seed")
@@ -465,6 +547,7 @@
 //!     timelines_per_split: 4,
 //!     global_energy: 100,
 //!     adaptive: None,
+//!     parallelism: Some(Parallelism::MaxCores),
 //! })?;
 //!
 //! // ... run simulation ...
@@ -491,10 +574,12 @@ pub use assertion_slots::{
     assertion_bool, assertion_numeric, assertion_read_all, assertion_sometimes_all, msg_hash,
 };
 pub use context::{explorer_is_child, get_assertion_table_ptr, set_rng_hooks};
-pub use each_buckets::{EachBucket, assertion_sometimes_each, each_bucket_read_all};
+pub use each_buckets::{
+    EachBucket, assertion_sometimes_each, each_bucket_read_all, unpack_quality,
+};
 pub use replay::{ParseTimelineError, format_timeline, parse_timeline};
 pub use shared_stats::{ExplorationStats, get_bug_recipe, get_exploration_stats};
-pub use split_loop::{AdaptiveConfig, exit_child};
+pub use split_loop::{AdaptiveConfig, Parallelism, exit_child};
 
 use context::{
     ASSERTION_TABLE, COVERAGE_BITMAP_PTR, EACH_BUCKET_PTR, ENERGY_BUDGET_PTR, EXPLORED_MAP_PTR,
@@ -514,6 +599,10 @@ pub struct ExplorationConfig {
     /// When `None`, uses fixed `timelines_per_split` (backward compatible).
     /// When `Some`, uses coverage-yield-driven batch forking with 3-level energy.
     pub adaptive: Option<split_loop::AdaptiveConfig>,
+    /// Optional parallelism for multi-core exploration.
+    /// When `None`, children are forked and reaped sequentially (one core).
+    /// When `Some`, a sliding window of concurrent children uses multiple cores.
+    pub parallelism: Option<split_loop::Parallelism>,
 }
 
 /// Initialize assertion table and each-bucket shared memory only.
@@ -578,6 +667,116 @@ pub fn reset_assertions() {
     }
 }
 
+/// Prepare the exploration framework for the next seed in multi-seed exploration.
+///
+/// Preserves the explored map (cumulative coverage) and assertion watermarks/frontiers
+/// so subsequent seeds benefit from prior discovery context. Resets per-seed transient
+/// state: energy budgets, statistics, split triggers, pass/fail counters, coverage
+/// bitmap, and bug recipe.
+///
+/// Call this between seeds instead of [`reset_assertions`] when you want
+/// coverage-preserving multi-seed exploration.
+pub fn prepare_next_seed(per_seed_energy: i64) {
+    // 1. PRESERVE explored map — do nothing
+
+    // 2. Selectively reset assertion table slots:
+    //    PRESERVE: watermark, split_watermark, frontier (quality context)
+    //    RESET: split_triggered, pass_count, fail_count (per-seed transient)
+    let table_ptr = ASSERTION_TABLE.with(|c| c.get());
+    if !table_ptr.is_null() {
+        unsafe {
+            let count_ptr = table_ptr as *const std::sync::atomic::AtomicU32;
+            let count = (*count_ptr)
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .min(assertion_slots::MAX_ASSERTION_SLOTS as u32) as usize;
+            let base = table_ptr.add(8) as *mut assertion_slots::AssertionSlot;
+            for i in 0..count {
+                let slot = &mut *base.add(i);
+                slot.split_triggered = 0;
+                slot.pass_count = 0;
+                slot.fail_count = 0;
+            }
+        }
+    }
+
+    // 3. Selectively reset each-bucket slots:
+    //    PRESERVE: best_score (quality watermark), key_values, msg
+    //    RESET: split_triggered, pass_count (per-seed transient)
+    let each_ptr = EACH_BUCKET_PTR.with(|c| c.get());
+    if !each_ptr.is_null() {
+        unsafe {
+            let count_ptr = each_ptr as *const std::sync::atomic::AtomicU32;
+            let count = (*count_ptr)
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .min(each_buckets::MAX_EACH_BUCKETS as u32) as usize;
+            let base = each_ptr.add(8) as *mut each_buckets::EachBucket;
+            for i in 0..count {
+                let bucket = &mut *base.add(i);
+                bucket.split_triggered = 0;
+                bucket.pass_count = 0;
+            }
+        }
+    }
+
+    // 4. Zero coverage bitmap (per-timeline, NOT the explored map)
+    let bm_ptr = COVERAGE_BITMAP_PTR.with(|c| c.get());
+    if !bm_ptr.is_null() {
+        unsafe {
+            std::ptr::write_bytes(bm_ptr, 0, coverage::COVERAGE_MAP_SIZE);
+        }
+    }
+
+    // 5. Reset energy budget with fresh per-seed energy
+    let energy_ptr = ENERGY_BUDGET_PTR.with(|c| c.get());
+    if !energy_ptr.is_null() {
+        unsafe {
+            energy::reset_energy_budget(energy_ptr, per_seed_energy);
+        }
+    }
+
+    // 6. Reset shared stats
+    let stats_ptr = SHARED_STATS.with(|c| c.get());
+    if !stats_ptr.is_null() {
+        unsafe {
+            shared_stats::reset_shared_stats(stats_ptr, per_seed_energy);
+        }
+    }
+
+    // 7. Reset bug recipe
+    let recipe_ptr = SHARED_RECIPE.with(|c| c.get());
+    if !recipe_ptr.is_null() {
+        unsafe {
+            shared_stats::reset_shared_recipe(recipe_ptr);
+        }
+    }
+
+    // 8. Reset context for new seed, mark as warm start
+    context::with_ctx_mut(|ctx| {
+        ctx.is_child = false;
+        ctx.depth = 0;
+        ctx.current_seed = 0;
+        ctx.recipe.clear();
+        ctx.warm_start = true;
+    });
+}
+
+/// Count the number of bits set in the explored coverage map.
+///
+/// Returns `None` if the explored map is not initialized (exploration not active).
+/// The result represents how many unique assertion paths have been explored
+/// across all timelines.
+///
+/// Must be called before [`cleanup`] which frees the explored map memory.
+pub fn explored_map_bits_set() -> Option<u32> {
+    let ptr = EXPLORED_MAP_PTR.with(|c| c.get());
+    if ptr.is_null() {
+        return None;
+    }
+    // Safety: ptr was allocated during init() with COVERAGE_MAP_SIZE bytes.
+    let vm = unsafe { coverage::ExploredMap::new(ptr) };
+    Some(vm.count_bits_set())
+}
+
 /// Initialize the exploration framework.
 ///
 /// Allocates shared memory for cross-process state and activates exploration.
@@ -620,6 +819,8 @@ pub fn init(config: ExplorationConfig) -> Result<(), std::io::Error> {
         ctx.recipe.clear();
         ctx.timelines_per_split = config.timelines_per_split;
         ctx.adaptive = config.adaptive.clone();
+        ctx.parallelism = config.parallelism.clone();
+        ctx.warm_start = false;
     });
 
     Ok(())
@@ -693,6 +894,7 @@ mod tests {
             timelines_per_split: 4,
             global_energy: 100,
             adaptive: None,
+            parallelism: None,
         };
 
         init(config).expect("init failed");
@@ -748,6 +950,7 @@ mod tests {
             timelines_per_split: 4,
             global_energy: 100,
             adaptive: None,
+            parallelism: None,
         };
         init(config).expect("init failed");
 

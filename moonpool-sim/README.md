@@ -41,11 +41,11 @@ Moonpool provides 14 Antithesis-style assertion macros for comprehensive propert
 - `assert_sometimes_all!` — frontier tracking across multiple named conditions
 - `assert_sometimes_each!` — per-value bucketed assertions with quality watermarks
 
-If your error handling code exists but `sometimes_assert!` never fires, you haven't actually tested it. The goal is 100% sometimes coverage—proof that every error path was exercised.
+If your error handling code exists but `assert_sometimes!` never fires, you haven't actually tested it. The goal is 100% sometimes coverage—proof that every error path was exercised.
 
 ## Multi-Seed Testing
 
-Different seeds explore different execution orderings. `UntilAllSometimesReached(N)` runs simulations with different seeds until all `sometimes_assert!` statements have triggered at least once, up to N iterations.
+Different seeds explore different execution orderings. `UntilAllSometimesReached(N)` runs simulations with different seeds until all `assert_sometimes!` statements have triggered at least once, up to N iterations.
 
 This transforms testing from "check known behaviors" to "explore the unknown until confident."
 

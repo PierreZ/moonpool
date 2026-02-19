@@ -6,7 +6,10 @@
 //!
 //! Ported from `/home/pierrez/workspace/rust/Claude-fork-testing/maze-explorer/src/maze.rs`.
 
-use moonpool_sim::{ExplorationConfig, SimulationBuilder, SimulationReport};
+use async_trait::async_trait;
+use moonpool_sim::{
+    ExplorationConfig, SimContext, SimulationBuilder, SimulationReport, SimulationResult, Workload,
+};
 
 // Gate probability — each nested `if` has this chance of passing.
 const GATE_P: f64 = 0.05;
@@ -237,6 +240,30 @@ impl Maze {
     }
 }
 
+/// Workload that runs the maze and reports bugs via assertion.
+struct MazeWorkload {
+    max_steps: u64,
+}
+
+#[async_trait(?Send)]
+impl Workload for MazeWorkload {
+    fn name(&self) -> &str {
+        "maze"
+    }
+
+    async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+        let mut maze = Maze::new(self.max_steps);
+        let result = maze.run();
+
+        moonpool_sim::assert_always!(
+            result != StepResult::BugFound,
+            "maze bug: all 4 locks opened"
+        );
+
+        Ok(())
+    }
+}
+
 /// Helper to run a simulation and return the report.
 fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
@@ -256,34 +283,27 @@ fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
 fn slow_simulation_maze() {
     let report = run_simulation(
         SimulationBuilder::new()
-            .set_iterations(1)
+            .set_iterations(2)
             .enable_exploration(ExplorationConfig {
                 max_depth: 30,
                 timelines_per_split: 4,
-                global_energy: 50_000,
+                global_energy: 20_000,
                 adaptive: Some(moonpool_sim::AdaptiveConfig {
                     batch_size: 20,
-                    min_timelines: 100,
-                    max_timelines: 200,
-                    per_mark_energy: 1_000,
+                    min_timelines: 60,
+                    max_timelines: 150,
+                    per_mark_energy: 600,
+                    warm_min_timelines: Some(20),
                 }),
+                parallelism: Some(moonpool_sim::Parallelism::MaxCores),
             })
-            .workload_fn("maze", |_ctx| async move {
-                let mut maze = Maze::new(DEFAULT_MAX_STEPS);
-                let result = maze.run();
-
-                if result == StepResult::BugFound {
-                    return Err(moonpool_sim::SimulationError::InvalidState(
-                        "maze bug: all 4 locks opened".to_string(),
-                    ));
-                }
-
-                Ok(())
+            .workload(MazeWorkload {
+                max_steps: DEFAULT_MAX_STEPS,
             }),
     );
 
-    // Parent run should succeed (bugs only found in forked children)
-    assert_eq!(report.successful_runs, 1);
+    // All parent runs should succeed (bugs only found in forked children)
+    assert_eq!(report.successful_runs, 2);
 
     let exp = report.exploration.expect("exploration report missing");
     assert!(exp.total_timelines > 0, "expected forked timelines, got 0");
@@ -302,50 +322,46 @@ fn slow_simulation_maze_bug_replay() {
     // Phase 1: Run exploration to find the bug and capture the recipe.
     let report = run_simulation(
         SimulationBuilder::new()
-            .set_iterations(1)
+            .set_iterations(2)
             .set_debug_seeds(vec![12345])
             .enable_exploration(ExplorationConfig {
                 max_depth: 30,
                 timelines_per_split: 4,
-                global_energy: 50_000,
+                global_energy: 20_000,
                 adaptive: Some(moonpool_sim::AdaptiveConfig {
                     batch_size: 20,
-                    min_timelines: 100,
-                    max_timelines: 200,
-                    per_mark_energy: 1_000,
+                    min_timelines: 60,
+                    max_timelines: 150,
+                    per_mark_energy: 600,
+                    warm_min_timelines: Some(20),
                 }),
+                parallelism: Some(moonpool_sim::Parallelism::MaxCores),
             })
-            .workload_fn("maze", |_ctx| async move {
-                let mut maze = Maze::new(DEFAULT_MAX_STEPS);
-                let result = maze.run();
-
-                if result == StepResult::BugFound {
-                    return Err(moonpool_sim::SimulationError::InvalidState(
-                        "maze bug: all 4 locks opened".to_string(),
-                    ));
-                }
-
-                Ok(())
+            .workload(MazeWorkload {
+                max_steps: DEFAULT_MAX_STEPS,
             }),
     );
 
-    assert_eq!(report.successful_runs, 1);
+    assert_eq!(report.successful_runs, 2);
 
     let exp = report.exploration.expect("exploration report missing");
     assert!(exp.bugs_found > 0, "exploration should have found the bug");
-    let recipe = exp.bug_recipe.expect("bug recipe should be captured");
-    let initial_seed = report.seeds_used[0];
+    let bug = exp
+        .bug_recipes
+        .first()
+        .expect("bug recipe should be captured");
+    let initial_seed = bug.seed;
 
     // Phase 2: Simulate what a developer does — format and parse the recipe.
     // In practice the recipe is printed to logs; the developer copies it to replay.
-    let timeline_str = moonpool_sim::format_timeline(&recipe);
+    let timeline_str = moonpool_sim::format_timeline(&bug.recipe);
     eprintln!(
         "Replaying bug: seed={}, recipe={}",
         initial_seed, timeline_str
     );
     let parsed_recipe =
         moonpool_sim::parse_timeline(&timeline_str).expect("recipe should round-trip");
-    assert_eq!(recipe, parsed_recipe);
+    assert_eq!(bug.recipe, parsed_recipe);
 
     // Phase 3: Replay — same seed, breakpoints from recipe, no exploration.
     // The RNG follows the exact same path the bug-finding child took.
