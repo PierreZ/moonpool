@@ -80,6 +80,22 @@ impl SimContext {
         &self.topology.my_ip
     }
 
+    /// Get this workload's client ID.
+    ///
+    /// Assigned by the builder's [`ClientId`](crate::ClientId) strategy.
+    /// Defaults to sequential IDs starting from 0 (FDB-style).
+    pub fn client_id(&self) -> usize {
+        self.topology.client_id
+    }
+
+    /// Get the total number of workload instances sharing this entry.
+    ///
+    /// For single `.workload()` entries this is 1.
+    /// For `.workloads(count, factory)` entries this is the resolved count.
+    pub fn client_count(&self) -> usize {
+        self.topology.client_count
+    }
+
     /// Find a peer's IP address by workload name.
     pub fn peer(&self, name: &str) -> Option<String> {
         self.topology.get_peer_by_name(name)

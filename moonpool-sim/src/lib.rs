@@ -178,9 +178,9 @@ pub use sim::{
 
 // Runner module re-exports
 pub use runner::{
-    FaultContext, FaultInjector, IterationControl, PhaseConfig, SimContext, SimulationBuilder,
-    SimulationMetrics, SimulationReport, TokioReport, TokioRunner, Workload, WorkloadCount,
-    WorkloadTopology,
+    ClientId, FaultContext, FaultInjector, IterationControl, PhaseConfig, SimContext,
+    SimulationBuilder, SimulationMetrics, SimulationReport, TokioReport, TokioRunner, Workload,
+    WorkloadCount, WorkloadTopology,
 };
 
 // Chaos module re-exports

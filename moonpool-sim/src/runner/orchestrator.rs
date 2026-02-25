@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::chaos::invariant_trait::Invariant;
 use crate::chaos::state_handle::StateHandle;
+use crate::runner::builder::WorkloadClientInfo;
 use crate::runner::context::SimContext;
 use crate::runner::fault_injector::{FaultContext, FaultInjector, PhaseConfig};
 use crate::runner::topology::TopologyFactory;
@@ -80,6 +81,7 @@ impl WorkloadOrchestrator {
         fault_injectors: Vec<Box<dyn FaultInjector>>,
         invariants: &[Box<dyn Invariant>],
         workload_info: &[(String, String)],
+        client_info: &[WorkloadClientInfo],
         seed: u64,
         mut sim: crate::sim::SimWorld,
         phase_config: Option<&PhaseConfig>,
@@ -110,9 +112,18 @@ impl WorkloadOrchestrator {
 
         // === SETUP PHASE ===
         let mut contexts = Vec::with_capacity(workloads.len());
-        for (_, ip) in workload_info.iter() {
-            let topology =
-                TopologyFactory::create_topology(ip, workload_info, shutdown_signal.clone());
+        for (i, (_, ip)) in workload_info.iter().enumerate() {
+            let WorkloadClientInfo {
+                client_id,
+                client_count,
+            } = client_info[i];
+            let topology = TopologyFactory::create_topology(
+                ip,
+                client_id,
+                client_count,
+                workload_info,
+                shutdown_signal.clone(),
+            );
             let ctx = SimContext::new(providers.clone(), topology, state.clone());
             contexts.push(ctx);
         }
@@ -166,9 +177,18 @@ impl WorkloadOrchestrator {
 
         // === CHECK PHASE ===
         let mut check_contexts = Vec::with_capacity(workload_info.len());
-        for (_, ip) in workload_info.iter() {
-            let topology =
-                TopologyFactory::create_topology(ip, workload_info, shutdown_signal.clone());
+        for (i, (_, ip)) in workload_info.iter().enumerate() {
+            let WorkloadClientInfo {
+                client_id,
+                client_count,
+            } = client_info[i];
+            let topology = TopologyFactory::create_topology(
+                ip,
+                client_id,
+                client_count,
+                workload_info,
+                shutdown_signal.clone(),
+            );
             let ctx = SimContext::new(providers.clone(), topology, state.clone());
             check_contexts.push(ctx);
         }

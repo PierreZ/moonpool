@@ -179,6 +179,8 @@ impl TokioRunner {
                 .collect();
             let topology = WorkloadTopology {
                 my_ip,
+                client_id: 0,
+                client_count: 1,
                 peer_ips,
                 peer_names,
                 shutdown_signal: shutdown_signal.clone(),
@@ -216,6 +218,8 @@ impl TokioRunner {
                     .collect();
                 let topology = WorkloadTopology {
                     my_ip,
+                    client_id: 0,
+                    client_count: 1,
                     peer_ips,
                     peer_names,
                     shutdown_signal: shutdown_signal.clone(),

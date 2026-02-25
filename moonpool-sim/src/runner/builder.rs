@@ -13,6 +13,25 @@ use crate::runner::fault_injector::{FaultInjector, PhaseConfig};
 use crate::runner::workload::Workload;
 
 use super::orchestrator::{IterationManager, MetricsCollector, WorkloadOrchestrator};
+
+/// Client identity information for a single workload instance.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WorkloadClientInfo {
+    /// The resolved client ID for this instance.
+    pub(crate) client_id: usize,
+    /// Total number of workload instances sharing this builder entry.
+    pub(crate) client_count: usize,
+}
+
+/// Resolved workload entries for a single iteration.
+struct ResolvedEntries {
+    workloads: Vec<Box<dyn Workload>>,
+    /// `return_map[i] = Some(entry_idx)` means `workloads[i]` should be
+    /// returned to `entries[entry_idx]` after the iteration.
+    return_map: Vec<Option<usize>>,
+    /// Client identity info parallel to `workloads`.
+    client_info: Vec<WorkloadClientInfo>,
+}
 use super::report::{SimulationMetrics, SimulationReport};
 
 /// Configuration for how many iterations a simulation should run.
@@ -60,13 +79,59 @@ impl WorkloadCount {
     }
 }
 
+/// Strategy for assigning client IDs to workload instances.
+///
+/// Inspired by FoundationDB's `WorkloadContext.clientId`, but more
+/// programmable. The resolved client ID is available via
+/// [`SimContext::client_id()`](super::context::SimContext::client_id).
+///
+/// # Examples
+///
+/// ```ignore
+/// // FDB-style sequential: IDs 0, 1, 2
+/// ClientId::Fixed(0)
+///
+/// // Sequential starting from 10: IDs 10, 11, 12
+/// ClientId::Fixed(10)
+///
+/// // Random IDs in [100..200) per instance
+/// ClientId::RandomRange(100..200)
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClientId {
+    /// Sequential IDs starting from `base`: instance 0 gets `base`,
+    /// instance 1 gets `base + 1`, and so on.
+    Fixed(usize),
+    /// Random ID drawn from `[start..end)` per instance,
+    /// using the simulation RNG (deterministic per seed).
+    /// IDs are not guaranteed unique across instances.
+    RandomRange(Range<usize>),
+}
+
+impl Default for ClientId {
+    fn default() -> Self {
+        Self::Fixed(0)
+    }
+}
+
+impl ClientId {
+    /// Resolve a client ID for the given instance index.
+    fn resolve(&self, index: usize) -> usize {
+        match self {
+            ClientId::Fixed(base) => base + index,
+            ClientId::RandomRange(range) => crate::sim::sim_random_range(range.clone()),
+        }
+    }
+}
+
 /// Internal storage for workload entries in the builder.
 enum WorkloadEntry {
     /// Single instance, reused across iterations (from `.workload()`).
-    Instance(Option<Box<dyn Workload>>),
+    Instance(Option<Box<dyn Workload>>, ClientId),
     /// Factory-based, fresh instances per iteration (from `.workloads()`).
     Factory {
         count: WorkloadCount,
+        client_id: ClientId,
         factory: Box<dyn Fn(usize) -> Box<dyn Workload>>,
     },
 }
@@ -109,10 +174,22 @@ impl SimulationBuilder {
     /// Add a single workload instance to the simulation.
     ///
     /// The instance is reused across iterations (the `run()` method is called
-    /// each iteration on the same struct).
+    /// each iteration on the same struct). Gets `client_id = 0`, `client_count = 1`.
     pub fn workload(mut self, w: impl Workload) -> Self {
+        self.entries.push(WorkloadEntry::Instance(
+            Some(Box::new(w)),
+            ClientId::default(),
+        ));
+        self
+    }
+
+    /// Add a single workload instance with a custom client ID strategy.
+    ///
+    /// Like [`workload()`](Self::workload), but the resolved client ID is
+    /// available via [`SimContext::client_id()`](super::context::SimContext::client_id).
+    pub fn workload_with_client_id(mut self, client_id: ClientId, w: impl Workload) -> Self {
         self.entries
-            .push(WorkloadEntry::Instance(Some(Box::new(w))));
+            .push(WorkloadEntry::Instance(Some(Box::new(w)), client_id));
         self
     }
 
@@ -120,6 +197,7 @@ impl SimulationBuilder {
     ///
     /// The factory receives an instance index (0-based) and must return a fresh
     /// workload. Instances are created each iteration and dropped afterward.
+    /// Client IDs default to sequential starting from 0 (FDB-style).
     ///
     /// The workload is responsible for its own `name()` — use the index to
     /// produce unique names when count > 1 (e.g., `format!("client-{i}")`).
@@ -140,6 +218,36 @@ impl SimulationBuilder {
     ) -> Self {
         self.entries.push(WorkloadEntry::Factory {
             count,
+            client_id: ClientId::default(),
+            factory: Box::new(factory),
+        });
+        self
+    }
+
+    /// Add multiple workload instances with a custom client ID strategy.
+    ///
+    /// Like [`workloads()`](Self::workloads), but client IDs are assigned
+    /// according to the given [`ClientId`] strategy instead of sequential.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // 3 clients with random IDs in [100..200)
+    /// builder.workloads_with_client_id(
+    ///     WorkloadCount::Fixed(3),
+    ///     ClientId::RandomRange(100..200),
+    ///     |i| Box::new(ClientWorkload::new(i)),
+    /// )
+    /// ```
+    pub fn workloads_with_client_id(
+        mut self,
+        count: WorkloadCount,
+        client_id: ClientId,
+        factory: impl Fn(usize) -> Box<dyn Workload> + 'static,
+    ) -> Self {
+        self.entries.push(WorkloadEntry::Factory {
+            count,
+            client_id,
             factory: Box::new(factory),
         });
         self
@@ -222,32 +330,46 @@ impl SimulationBuilder {
     }
 
     /// Resolve all entries into a flat workload list for one iteration.
-    ///
-    /// Returns `(workloads, return_map)` where `return_map[i] = Some(entry_idx)`
-    /// means `workloads[i]` should be returned to `entries[entry_idx]` after the iteration.
-    fn resolve_entries(&mut self) -> (Vec<Box<dyn Workload>>, Vec<Option<usize>>) {
+    fn resolve_entries(&mut self) -> ResolvedEntries {
         let mut workloads = Vec::new();
         let mut return_map = Vec::new();
+        let mut client_info = Vec::new();
 
         for (entry_idx, entry) in self.entries.iter_mut().enumerate() {
             match entry {
-                WorkloadEntry::Instance(opt) => {
+                WorkloadEntry::Instance(opt, cid) => {
                     if let Some(w) = opt.take() {
                         return_map.push(Some(entry_idx));
+                        client_info.push(WorkloadClientInfo {
+                            client_id: cid.resolve(0),
+                            client_count: 1,
+                        });
                         workloads.push(w);
                     }
                 }
-                WorkloadEntry::Factory { count, factory } => {
+                WorkloadEntry::Factory {
+                    count,
+                    client_id,
+                    factory,
+                } => {
                     let n = count.resolve();
                     for i in 0..n {
                         return_map.push(None);
+                        client_info.push(WorkloadClientInfo {
+                            client_id: client_id.resolve(i),
+                            client_count: n,
+                        });
                         workloads.push(factory(i));
                     }
                 }
             }
         }
 
-        (workloads, return_map)
+        ResolvedEntries {
+            workloads,
+            return_map,
+            client_info,
+        }
     }
 
     /// Return instance-based workloads to their entry slots after an iteration.
@@ -258,7 +380,7 @@ impl SimulationBuilder {
     ) {
         for (w, slot) in workloads.into_iter().zip(return_map) {
             if let Some(entry_idx) = slot
-                && let WorkloadEntry::Instance(opt) = &mut self.entries[entry_idx]
+                && let WorkloadEntry::Instance(opt, _) = &mut self.entries[entry_idx]
             {
                 *opt = Some(w);
             }
@@ -338,8 +460,12 @@ impl SimulationBuilder {
             crate::chaos::buggify_init(0.5, 0.25);
 
             // Resolve workload entries into concrete instances for this iteration
-            // (WorkloadCount::Random uses the sim RNG, already seeded above)
-            let (workloads, return_map) = self.resolve_entries();
+            // (WorkloadCount::Random and ClientId::RandomRange use the sim RNG, already seeded above)
+            let ResolvedEntries {
+                workloads,
+                return_map,
+                client_info,
+            } = self.resolve_entries();
 
             // Compute workload name/IP pairs from resolved workloads
             let workload_info: Vec<(String, String)> = workloads
@@ -374,6 +500,7 @@ impl SimulationBuilder {
                 fault_injectors,
                 &self.invariants,
                 &workload_info,
+                &client_info,
                 seed,
                 sim,
                 self.phase_config.as_ref(),
