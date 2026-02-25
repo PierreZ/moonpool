@@ -21,7 +21,7 @@ pub mod topology;
 pub mod workload;
 
 // Re-export main types at module level
-pub use builder::WorkloadCount;
+pub use builder::{ClientId, WorkloadCount};
 pub use builder::{IterationControl, SimulationBuilder};
 pub use context::SimContext;
 pub use fault_injector::{FaultContext, FaultInjector, PhaseConfig};

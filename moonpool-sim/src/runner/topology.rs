@@ -8,6 +8,10 @@
 pub struct WorkloadTopology {
     /// The IP address assigned to this workload
     pub my_ip: String,
+    /// This workload's client ID (assigned by the builder's [`ClientId`] strategy)
+    pub client_id: usize,
+    /// Total number of workload instances sharing this entry (factory count or 1)
+    pub client_count: usize,
     /// The IP addresses of all other peers in the simulation
     pub peer_ips: Vec<String>,
     /// The names of all other peers in the simulation (parallel to peer_ips)
@@ -45,6 +49,8 @@ impl TopologyFactory {
     /// `all_workloads` is a list of `(name, ip)` pairs for all workloads.
     pub(crate) fn create_topology(
         workload_ip: &str,
+        client_id: usize,
+        client_count: usize,
         all_workloads: &[(String, String)],
         shutdown_signal: tokio_util::sync::CancellationToken,
     ) -> WorkloadTopology {
@@ -62,6 +68,8 @@ impl TopologyFactory {
 
         WorkloadTopology {
             my_ip: workload_ip.to_string(),
+            client_id,
+            client_count,
             peer_ips,
             peer_names,
             shutdown_signal,
