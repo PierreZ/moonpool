@@ -590,6 +590,14 @@ impl SimulationBuilder {
                     .unwrap_or(0),
                 coverage_bits,
                 coverage_total: (moonpool_explorer::coverage::COVERAGE_MAP_SIZE * 8) as u32,
+                sancov_edges_total: final_stats
+                    .as_ref()
+                    .map(|s| s.sancov_edges_total)
+                    .unwrap_or(0),
+                sancov_edges_covered: final_stats
+                    .as_ref()
+                    .map(|s| s.sancov_edges_covered)
+                    .unwrap_or(0),
             })
         } else {
             None
@@ -631,6 +639,14 @@ impl SimulationBuilder {
                     0.0
                 }
             );
+            if exp.sancov_edges_total > 0 {
+                eprintln!(
+                    "  sancov: {} / {} edges ({:.1}%)",
+                    exp.sancov_edges_covered,
+                    exp.sancov_edges_total,
+                    (exp.sancov_edges_covered as f64 / exp.sancov_edges_total as f64) * 100.0
+                );
+            }
             for br in &exp.bug_recipes {
                 eprintln!(
                     "  bug recipe: {}",

@@ -60,6 +60,10 @@ pub struct ExplorationReport {
     pub coverage_bits: u32,
     /// Total number of bits in the coverage map (8192).
     pub coverage_total: u32,
+    /// Total instrumented code edges (from LLVM sancov). 0 when sancov unavailable.
+    pub sancov_edges_total: usize,
+    /// Code edges covered across all timelines. 0 when sancov unavailable.
+    pub sancov_edges_covered: usize,
 }
 
 /// Pass/fail/miss status for an assertion in the report.
@@ -295,6 +299,15 @@ impl fmt::Display for SimulationReport {
                     0.0
                 }
             )?;
+            if exp.sancov_edges_total > 0 {
+                writeln!(
+                    f,
+                    "  Sancov:       {} / {} edges ({:.1}%)",
+                    fmt_num(exp.sancov_edges_covered as u64),
+                    fmt_num(exp.sancov_edges_total as u64),
+                    (exp.sancov_edges_covered as f64 / exp.sancov_edges_total as f64) * 100.0
+                )?;
+            }
             writeln!(
                 f,
                 "  Energy left:  {:<18}Realloc pool:   {}",

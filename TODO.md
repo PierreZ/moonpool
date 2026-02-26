@@ -95,7 +95,7 @@ pub use sancov::{sancov_edge_count, sancov_edges_covered, sancov_is_available};
 
 ---
 
-## Commit 2: Build infrastructure — SANCOV_CRATES
+## ~~Commit 2: Build infrastructure — SANCOV_CRATES~~ ✅ DONE
 
 Build infrastructure comes before fork loop integration so that commit 3 can be
 end-to-end tested with actual sancov instrumentation.
@@ -129,7 +129,7 @@ cargo run --bin maze_explore
 
 ---
 
-## Commit 3: Fork loop integration
+## ~~Commit 3: Fork loop integration~~ ✅ DONE
 
 Wire sancov into `split_loop.rs` so it contributes to fork decisions.
 
@@ -176,7 +176,7 @@ crate::sancov::SANCOV_POOL_SLOTS.with(|c| c.set(0));
 
 ---
 
-## Commit 4: Stats & reporting
+## ~~Commit 4: Stats & reporting~~ ✅ DONE
 
 ### Files
 - **Modify** `moonpool-explorer/src/shared_stats.rs` — add to `ExplorationStats`:
@@ -198,24 +198,84 @@ crate::sancov::SANCOV_POOL_SLOTS.with(|c| c.set(0));
 
 ---
 
-## Commit 5: Example crate
+## Commit 5: Move simulation tests to binary targets
+
+Sancov only works in binary targets (`main()` runs on the main thread where TLS from static init is visible). `cargo test` uses worker threads where `__sanitizer_cov_8bit_counters_init` TLS is invisible. Moving all `slow_simulation_*` tests to binary targets enables sancov-guided exploration and eliminates the test-vs-binary duplication problem.
+
+### Source tests to move (7 files, 4 crates)
+
+| Source file | Tests |
+|---|---|
+| `moonpool-sim/tests/exploration/maze.rs` | `slow_simulation_maze`, `slow_simulation_maze_bug_replay` |
+| `moonpool-sim/tests/exploration/dungeon.rs` | `slow_simulation_dungeon`, `slow_simulation_dungeon_bug_replay` |
+| `moonpool/tests/metastable/tests.rs` | `slow_simulation_metastable_failure` |
+| `moonpool/tests/simulation/test_scenarios.rs` | `slow_simulation_banking_chaos` (ignored) |
+| `moonpool-transport/tests/e2e/tests.rs` | `slow_simulation_reliable_delivery`, `slow_simulation_unreliable_drops`, `slow_simulation_mixed_queues`, `slow_simulation_reconnection` |
+| `moonpool-transport/tests/simulation/test_scenarios.rs` | `slow_simulation_local_delivery`, ... |
+| `moonpool-explorer/tests/adaptive_scenarios.rs` | `slow_simulation_adaptive_maze_cascade` |
 
 ### Files
-- **Create** `moonpool-explorer-examples/Cargo.toml` — deps: `rand`, `moonpool-sim`, `async-trait`, `tokio`, `tracing`
-- **Create** `moonpool-explorer-examples/src/lib.rs` — exports `maze`, `dungeon`
-- **Create** `moonpool-explorer-examples/src/maze.rs` — 4 locks, 5 nested P=0.05 gates, `Maze::step()`/`run()`
-- **Create** `moonpool-explorer-examples/src/dungeon.rs` — 8-level roguelike, `Game::act()`, `generate_level()`
-- **Create** `moonpool-explorer-examples/src/bin/maze_explore.rs` — `SimRngAdapter`, `MazeWorkload`, adaptive config
-- **Create** `moonpool-explorer-examples/src/bin/dungeon_explore.rs` — `DungeonWorkload`, 3 iterations warm-start
-- **Modify** root `Cargo.toml` — add `moonpool-explorer-examples` to workspace members
 
-Binary doc comments:
+**Create `moonpool-simulations/Cargo.toml`** — deps: `moonpool`, `moonpool-sim`, `moonpool-explorer`, `moonpool-transport`, `async-trait`, `tokio`, `tracing`, `tracing-subscriber`, `serde`, `serde_json`
+
+**Create `moonpool-simulations/src/lib.rs`** — shared `run_simulation()` harness + report validation:
 ```rust
-//! With sancov (example crate only — logic is self-contained):
-//!   SANCOV_CRATES=moonpool_explorer_examples cargo run --bin maze_explore
-//!
-//! For real apps, also instrument framework libraries:
-//!   SANCOV_CRATES=my_app,moonpool,moonpool_transport cargo run --bin my_app
+pub fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build_local(Default::default())
+        .expect("Failed to build local runtime");
+    rt.block_on(async { builder.run().await })
+}
+```
+
+**Create workload modules** (moved from test files):
+- `moonpool-simulations/src/maze.rs` — `Maze` struct + `MazeWorkload` (from `moonpool-sim/tests/exploration/maze.rs`)
+- `moonpool-simulations/src/dungeon.rs` — `Dungeon` + `DungeonWorkload` (from `moonpool-sim/tests/exploration/dungeon.rs`)
+- `moonpool-simulations/src/metastable.rs` — metastable workloads (from `moonpool/tests/metastable/`)
+- `moonpool-simulations/src/banking.rs` — banking workloads (from `moonpool/tests/simulation/`)
+- `moonpool-simulations/src/transport.rs` — transport workloads (from `moonpool-transport/tests/e2e/` + `simulation/`)
+- `moonpool-simulations/src/adaptive.rs` — adaptive maze (from `moonpool-explorer/tests/adaptive_scenarios.rs`)
+
+**Create binary targets** — one per simulation scenario:
+- `moonpool-simulations/src/bin/maze_explore.rs`
+- `moonpool-simulations/src/bin/dungeon_explore.rs`
+- `moonpool-simulations/src/bin/metastable_explore.rs`
+- `moonpool-simulations/src/bin/banking_chaos.rs`
+- `moonpool-simulations/src/bin/transport_e2e.rs`
+- `moonpool-simulations/src/bin/adaptive_maze.rs`
+
+Each binary: configure `SimulationBuilder`, call `run_simulation()`, print report, `process::exit(1)` on assertion violations.
+
+Bug replay tests (`slow_simulation_*_bug_replay`) become `#[test]` in the simulations crate — they're fast (no exploration) and don't need sancov.
+
+**Delete original test files** from source crates:
+- `moonpool-sim/tests/exploration/{maze,dungeon}.rs` + `mod.rs`
+- `moonpool/tests/metastable/tests.rs` (keep non-slow tests if any)
+- `moonpool/tests/simulation/test_scenarios.rs` (keep non-slow tests if any)
+- `moonpool-transport/tests/e2e/tests.rs` (keep non-slow tests if any)
+- `moonpool-transport/tests/simulation/test_scenarios.rs` (keep non-slow tests if any)
+- `moonpool-explorer/tests/adaptive_scenarios.rs`
+
+**Modify root `Cargo.toml`** — add `moonpool-simulations` to workspace members
+
+**Update `.config/nextest.toml`** — adjust profiles now that `slow_simulation_*` tests no longer exist as cargo test targets
+
+### Usage
+
+```bash
+# Run a specific simulation:
+cargo run --bin maze_explore
+
+# With sancov:
+SANCOV_CRATES=moonpool_simulations,moonpool,moonpool_transport cargo run --bin maze_explore
+
+# Run all simulations:
+cargo run --bin maze_explore && cargo run --bin dungeon_explore && ...
+
+# Fast unit tests (unchanged):
+cargo test-fast
 ```
 
 ---
@@ -234,7 +294,7 @@ End-to-end (after commit 5):
 nix develop
 
 # With sancov:
-SANCOV_CRATES=moonpool_explorer_examples cargo run --bin maze_explore
+SANCOV_CRATES=moonpool_simulations cargo run --bin maze_explore
 # → sancov edges: N/M (available: true)
 
 # Without sancov (RUSTC_WRAPPER passes through when SANCOV_CRATES unset):
