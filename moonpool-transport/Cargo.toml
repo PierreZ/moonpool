@@ -40,9 +40,9 @@ name = "calculator"
 path = "examples/calculator.rs"
 
 [[bin]]
-name = "transport_e2e"
+name = "sim-transport-e2e"
 path = "src/bin/sim/transport_e2e.rs"
 
 [[bin]]
-name = "transport_messaging"
+name = "sim-transport-messaging"
 path = "src/bin/sim/transport_messaging.rs"

@@ -12,7 +12,9 @@ use moonpool::simulations::metastable::{
 use moonpool_sim::{ExplorationConfig, SimulationBuilder};
 
 fn main() {
-    tracing_subscriber::fmt::init();
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .try_init();
 
     let report = run_simulation(
         SimulationBuilder::new()

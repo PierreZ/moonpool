@@ -291,15 +291,8 @@ nix develop --command cargo nextest run --profile fast
 
 End-to-end (after commit 5):
 ```bash
-nix develop
-
-# With sancov:
-SANCOV_CRATES=moonpool_simulations cargo run --bin maze_explore
-# → sancov edges: N/M (available: true)
-
-# Without sancov (RUSTC_WRAPPER passes through when SANCOV_CRATES unset):
-cargo run --bin maze_explore
-# → sancov edges: 0/0 (available: false)
+nix develop --command cargo xtask sim maze   # sancov always on via xtask
+# → Sancov: N / M edges (X.Y%)
 ```
 
 ---
@@ -321,3 +314,37 @@ Changes from the original plan:
 6. **Changed COUNTERS_PTR/COUNTERS_LEN to `static Atomic*`**: The LLVM callback `__sanitizer_cov_8bit_counters_init` runs during static constructors (before `main()`). Thread-local `Cell` requires Rust's `thread_local!` machinery; `static AtomicPtr`/`AtomicUsize` are zero-initialized at compile time and universally safe for pre-main use. MAP_SHARED buffer pointers (`SANCOV_TRANSFER`, `SANCOV_HISTORY`, `SANCOV_POOL`, `SANCOV_POOL_SLOTS`) remain `Cell` since they're set during `init()` from `main()`.
 
 7. **Documented range merging algorithm**: `min(start)/max(stop)` across multiple `__sanitizer_cov_8bit_counters_init` callbacks. With `-Ccodegen-units=1`, one callback per instrumented crate. Gaps between BSS sections contain zeros, skipped by novelty detector.
+
+---
+
+## Future: Extract `moonpool-sim-examples` crate for better sancov coverage
+
+### Problem
+
+Maze and dungeon game logic currently lives inside `moonpool_sim::simulations::*`. When sancov instruments `moonpool_sim`, it instruments **all** 21K+ edges — the simulation runtime, chaos engine, orchestrator, event loop, assertions, RNG, etc. — but the dungeon only exercises ~1,450 of those edges (6.9%). The vast majority are unreachable dead code for these workloads (networking, RPC, actors, storage).
+
+This contradicts the sancov design principle: instrument the **code under test**, not the testing infrastructure. `moonpool_sim` is the testing infrastructure.
+
+### Solution
+
+Create `moonpool-sim-examples/` crate containing only the game logic:
+- `moonpool-sim-examples/src/maze.rs` — Maze struct, MazeWorkload
+- `moonpool-sim-examples/src/dungeon.rs` — Dungeon game engine, DungeonWorkload, SimRngAdapter
+
+The crate depends on `moonpool-sim` (for Workload trait, SimContext, assertions, sim_random) but contains only application-level code.
+
+### Impact on sancov
+
+- **Before**: `SANCOV_CRATES=moonpool_sim` → 21K edges, ~7% coverage (noisy)
+- **After**: `SANCOV_CRATES=moonpool_sim_examples` → ~2-3K edges, ~60%+ coverage (focused)
+
+Novel code paths in the game logic produce novel sancov edges directly, without being drowned out by the 19K irrelevant runtime edges. Fork decisions become more precise — sancov novelty correlates with actual exploration progress.
+
+### Changes needed
+
+- Create `moonpool-sim-examples/` with `Cargo.toml`, `src/lib.rs`, `src/maze.rs`, `src/dungeon.rs`
+- Move `moonpool-sim/src/simulations/{maze,dungeon}.rs` → `moonpool-sim-examples/src/`
+- Update `moonpool-sim/src/bin/sim/` binaries to import from `moonpool_sim_examples`
+- Update `xtask/src/main.rs` sancov mapping: `sim-maze-explore` → `moonpool_sim_examples`
+- Update `moonpool-sim/Cargo.toml` to add `moonpool-sim-examples` as a dev-dep (for replay tests)
+- Keep `moonpool-sim/src/simulations/mod.rs` with `run_simulation()` helper (shared by all crates)

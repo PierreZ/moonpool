@@ -11,7 +11,9 @@ use moonpool::simulations::banking::{
 use moonpool_sim::SimulationBuilder;
 
 fn main() {
-    tracing_subscriber::fmt::init();
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .try_init();
 
     eprintln!("WARNING: Banking chaos simulation has a known transfer revert bug.");
     eprintln!("Running anyway for coverage data...");

@@ -49,7 +49,7 @@ fn check_report(name: &str, report: &SimulationReport) -> Result<(), String> {
 
 fn main() {
     let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(tracing::Level::WARN)
         .try_init();
 
     // --- Local delivery ---

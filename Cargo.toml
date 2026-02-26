@@ -1,6 +1,6 @@
 [workspace]
 
-members = ["moonpool", "moonpool-core", "moonpool-explorer", "moonpool-sim", "moonpool-transport", "moonpool-transport-derive"]
+members = ["moonpool", "moonpool-core", "moonpool-explorer", "moonpool-sim", "moonpool-transport", "moonpool-transport-derive", "xtask"]
 resolver = "2"
 
 [workspace.package]
