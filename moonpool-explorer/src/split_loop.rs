@@ -144,6 +144,12 @@ fn setup_child(
     // Reset bitmap pool so nested splits allocate a fresh pool
     BITMAP_POOL.with(|c| c.set(std::ptr::null_mut()));
     BITMAP_POOL_SLOTS.with(|c| c.set(0));
+
+    // Zero BSS counters so child captures only its OWN sancov edges
+    crate::sancov::reset_bss_counters();
+    // Reset sancov pool so nested splits allocate a fresh pool
+    crate::sancov::SANCOV_POOL.with(|c| c.set(std::ptr::null_mut()));
+    crate::sancov::SANCOV_POOL_SLOTS.with(|c| c.set(0));
 }
 
 /// Reap one finished child via `waitpid(-1)`, merge its coverage, check for bugs.
@@ -151,10 +157,12 @@ fn setup_child(
 /// Removes the reaped PID from `active`, pushes its slot back to `free_slots`,
 /// and sets `batch_has_new` if the child contributed new coverage bits.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn reap_one(
     active: &mut HashMap<libc::pid_t, (u64, usize)>,
     free_slots: &mut Vec<usize>,
     pool_base: *mut u8,
+    sancov_pool_base: *mut u8,
     vm_ptr: *mut u8,
     stats_ptr: *mut crate::shared_stats::SharedStats,
     split_call_count: u64,
@@ -180,6 +188,14 @@ fn reap_one(
             *batch_has_new = true;
         }
         vm.merge_from(&child_bm);
+    }
+
+    // Check child's sancov coverage from its pool slot
+    if !sancov_pool_base.is_null() {
+        let sancov_slot = unsafe { crate::sancov::sancov_pool_slot(sancov_pool_base, slot) };
+        if crate::sancov::has_new_sancov_coverage_from(sancov_slot) {
+            *batch_has_new = true;
+        }
     }
 
     // Check if child found a bug (exit code 42)
@@ -311,6 +327,18 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
     };
     let parallel = slot_count > 0;
 
+    // Sancov parallel pool (one slot per concurrent child for sancov counters)
+    let sancov_pool_base = if parallel {
+        crate::sancov::get_or_init_sancov_pool(slot_count)
+    } else {
+        std::ptr::null_mut()
+    };
+    let parent_sancov_transfer = if parallel && !sancov_pool_base.is_null() {
+        crate::sancov::SANCOV_TRANSFER.with(|c| c.get())
+    } else {
+        std::ptr::null_mut()
+    };
+
     // Save parent bitmap (sequential only — parallel children use pool slots)
     let mut parent_bitmap_backup = [0u8; COVERAGE_MAP_SIZE];
     if !parallel && !bm_ptr.is_null() {
@@ -359,6 +387,7 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
                         &mut active,
                         &mut free_slots,
                         pool_base,
+                        sancov_pool_base,
                         vm_ptr,
                         stats_ptr,
                         split_call_count,
@@ -375,6 +404,16 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
                 unsafe {
                     std::ptr::write_bytes(pool_slot(pool_base, slot), 0, COVERAGE_MAP_SIZE);
                     COVERAGE_BITMAP_PTR.with(|c| c.set(pool_slot(pool_base, slot)));
+                }
+
+                // Clear child sancov slot and redirect transfer pointer
+                if !sancov_pool_base.is_null() {
+                    let sancov_len = crate::sancov::sancov_edge_count();
+                    unsafe {
+                        let sancov_slot = crate::sancov::sancov_pool_slot(sancov_pool_base, slot);
+                        std::ptr::write_bytes(sancov_slot, 0, sancov_len);
+                        crate::sancov::SANCOV_TRANSFER.with(|c| c.set(sancov_slot));
+                    }
                 }
 
                 // Safety: single-threaded, no real I/O
@@ -398,6 +437,7 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
                     let bm = unsafe { CoverageBitmap::new(bm_ptr) };
                     bm.clear();
                 }
+                crate::sancov::clear_transfer_buffer();
 
                 // Safety: single-threaded, no real I/O
                 let pid = unsafe { libc::fork() };
@@ -422,6 +462,7 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
                             }
                             vm.merge_from(&bm);
                         }
+                        batch_has_new |= crate::sancov::has_new_sancov_coverage();
 
                         let exited_normally = libc::WIFEXITED(status);
                         if exited_normally && libc::WEXITSTATUS(status) == 42 {
@@ -451,6 +492,7 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
                 &mut active,
                 &mut free_slots,
                 pool_base,
+                sancov_pool_base,
                 vm_ptr,
                 stats_ptr,
                 split_call_count,
@@ -479,6 +521,10 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
     if parallel {
         // Restore parent's bitmap pointer
         COVERAGE_BITMAP_PTR.with(|c| c.set(bm_ptr));
+        // Restore parent's sancov transfer pointer
+        if !sancov_pool_base.is_null() {
+            crate::sancov::SANCOV_TRANSFER.with(|c| c.set(parent_sancov_transfer));
+        }
     } else {
         // Restore parent bitmap content
         if !bm_ptr.is_null() {
@@ -547,6 +593,18 @@ pub fn split_on_discovery(mark_name: &str) {
     };
     let parallel = slot_count > 0;
 
+    // Sancov parallel pool (one slot per concurrent child for sancov counters)
+    let sancov_pool_base = if parallel {
+        crate::sancov::get_or_init_sancov_pool(slot_count)
+    } else {
+        std::ptr::null_mut()
+    };
+    let parent_sancov_transfer = if parallel && !sancov_pool_base.is_null() {
+        crate::sancov::SANCOV_TRANSFER.with(|c| c.get())
+    } else {
+        std::ptr::null_mut()
+    };
+
     // Save parent bitmap (sequential only)
     let mut parent_bitmap_backup = [0u8; COVERAGE_MAP_SIZE];
     if !parallel && !bm_ptr.is_null() {
@@ -586,6 +644,7 @@ pub fn split_on_discovery(mark_name: &str) {
                     &mut active,
                     &mut free_slots,
                     pool_base,
+                    sancov_pool_base,
                     vm_ptr,
                     stats_ptr,
                     split_call_count,
@@ -601,6 +660,16 @@ pub fn split_on_discovery(mark_name: &str) {
             unsafe {
                 std::ptr::write_bytes(pool_slot(pool_base, slot), 0, COVERAGE_MAP_SIZE);
                 COVERAGE_BITMAP_PTR.with(|c| c.set(pool_slot(pool_base, slot)));
+            }
+
+            // Clear child sancov slot and redirect transfer pointer
+            if !sancov_pool_base.is_null() {
+                let sancov_len = crate::sancov::sancov_edge_count();
+                unsafe {
+                    let sancov_slot = crate::sancov::sancov_pool_slot(sancov_pool_base, slot);
+                    std::ptr::write_bytes(sancov_slot, 0, sancov_len);
+                    crate::sancov::SANCOV_TRANSFER.with(|c| c.set(sancov_slot));
+                }
             }
 
             // Safety: single-threaded, no real I/O
@@ -624,6 +693,7 @@ pub fn split_on_discovery(mark_name: &str) {
                 let bm = unsafe { CoverageBitmap::new(bm_ptr) };
                 bm.clear();
             }
+            crate::sancov::clear_transfer_buffer();
 
             // Safety: single-threaded, no real I/O
             let pid = unsafe { libc::fork() };
@@ -645,6 +715,7 @@ pub fn split_on_discovery(mark_name: &str) {
                         let vm = unsafe { ExploredMap::new(vm_ptr) };
                         vm.merge_from(&bm);
                     }
+                    batch_has_new |= crate::sancov::has_new_sancov_coverage();
 
                     let exited_normally = libc::WIFEXITED(status);
                     if exited_normally && libc::WEXITSTATUS(status) == 42 {
@@ -670,6 +741,7 @@ pub fn split_on_discovery(mark_name: &str) {
             &mut active,
             &mut free_slots,
             pool_base,
+            sancov_pool_base,
             vm_ptr,
             stats_ptr,
             split_call_count,
@@ -679,6 +751,10 @@ pub fn split_on_discovery(mark_name: &str) {
 
     if parallel {
         COVERAGE_BITMAP_PTR.with(|c| c.set(bm_ptr));
+        // Restore parent's sancov transfer pointer
+        if !sancov_pool_base.is_null() {
+            crate::sancov::SANCOV_TRANSFER.with(|c| c.set(parent_sancov_transfer));
+        }
     } else if !bm_ptr.is_null() {
         // Safety: bm_ptr points to COVERAGE_MAP_SIZE bytes
         unsafe {
@@ -738,6 +814,7 @@ fn save_bug_recipe(split_call_count: u64, child_seed: u64) {
 /// forked child process.
 #[cfg(unix)]
 pub fn exit_child(code: i32) -> ! {
+    crate::sancov::copy_counters_to_shared();
     // Safety: _exit is always safe to call; it terminates the process.
     unsafe { libc::_exit(code) }
 }

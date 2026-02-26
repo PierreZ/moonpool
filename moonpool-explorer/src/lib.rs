@@ -728,6 +728,11 @@ pub fn prepare_next_seed(per_seed_energy: i64) {
         }
     }
 
+    // 4b. Clear sancov transfer buffer and reset BSS counters.
+    //     History map is preserved (cumulative, like the explored map).
+    sancov::clear_transfer_buffer();
+    sancov::reset_bss_counters();
+
     // 5. Reset energy budget with fresh per-seed energy
     let energy_ptr = ENERGY_BUDGET_PTR.with(|c| c.get());
     if !energy_ptr.is_null() {
@@ -790,6 +795,9 @@ pub fn explored_map_bits_set() -> Option<u32> {
 pub fn init(config: ExplorationConfig) -> Result<(), std::io::Error> {
     // Initialize assertion table first (idempotent)
     init_assertions()?;
+
+    // Initialize sancov shared memory (no-op if sancov unavailable)
+    sancov::init_sancov_shared()?;
 
     // Allocate exploration-specific shared memory regions
     let stats_ptr = shared_stats::init_shared_stats(config.global_energy)?;
@@ -880,6 +888,9 @@ pub fn cleanup() {
             ENERGY_BUDGET_PTR.with(|c| c.set(std::ptr::null_mut()));
         }
     }
+
+    // Clean up sancov shared memory
+    sancov::cleanup_sancov_shared();
 
     // Clean up assertion table and each-buckets (shared with init_assertions)
     cleanup_assertions();

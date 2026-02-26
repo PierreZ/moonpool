@@ -37,16 +37,22 @@ static COUNTERS_LEN: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
     /// MAP_SHARED buffer for child→parent counter transfer.
-    static SANCOV_TRANSFER: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
+    ///
+    /// Public so `split_loop.rs` can redirect per-child in parallel mode.
+    pub static SANCOV_TRANSFER: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
 
     /// MAP_SHARED global max map (history of highest bucketed values).
     static SANCOV_HISTORY: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
 
     /// MAP_SHARED pool base for parallel mode (one slot per concurrent child).
-    static SANCOV_POOL: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
+    ///
+    /// Public so `setup_child()` can reset for nested splits.
+    pub static SANCOV_POOL: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
 
     /// Number of slots in the sancov pool.
-    static SANCOV_POOL_SLOTS: Cell<usize> = const { Cell::new(0) };
+    ///
+    /// Public so `setup_child()` can reset for nested splits.
+    pub static SANCOV_POOL_SLOTS: Cell<usize> = const { Cell::new(0) };
 }
 
 // ---------------------------------------------------------------------------
