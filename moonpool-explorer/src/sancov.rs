@@ -92,8 +92,7 @@ pub unsafe extern "C" fn __sanitizer_cov_8bit_counters_init(start: *mut u8, stop
 ///
 /// Only called by LLVM instrumentation infrastructure.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __sanitizer_cov_pcs_init(_pcs_beg: *const usize, _pcs_end: *const usize) {
-}
+pub unsafe extern "C" fn __sanitizer_cov_pcs_init(_pcs_beg: *const usize, _pcs_end: *const usize) {}
 
 // ---------------------------------------------------------------------------
 // AFL bucketing
