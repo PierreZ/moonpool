@@ -567,6 +567,7 @@ pub mod replay;
 pub mod sancov;
 pub mod shared_mem;
 pub mod shared_stats;
+pub mod simulations;
 pub mod split_loop;
 
 // Re-exports for the public API

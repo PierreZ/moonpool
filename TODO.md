@@ -198,7 +198,7 @@ crate::sancov::SANCOV_POOL_SLOTS.with(|c| c.set(0));
 
 ---
 
-## Commit 5: Move simulation tests to binary targets
+## ~~Commit 5: Move simulation tests to binary targets~~ ✅ DONE
 
 Sancov only works in binary targets (`main()` runs on the main thread where TLS from static init is visible). `cargo test` uses worker threads where `__sanitizer_cov_8bit_counters_init` TLS is invisible. Moving all `slow_simulation_*` tests to binary targets enables sancov-guided exploration and eliminates the test-vs-binary duplication problem.
 

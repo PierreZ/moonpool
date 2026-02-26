@@ -21,16 +21,20 @@ async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-
-[dev-dependencies]
-async-trait = "0.1"
-moonpool-sim = { path = "../moonpool-sim", version = "0.4.0" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
+[dev-dependencies]
+
 [[example]]
 name = "banking"
 path = "examples/banking.rs"
+
+[[bin]]
+name = "sim-metastable-explore"
+path = "src/bin/sim/metastable_explore.rs"
+
+[[bin]]
+name = "sim-banking-chaos"
+path = "src/bin/sim/banking_chaos.rs"

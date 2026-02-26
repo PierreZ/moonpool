@@ -101,6 +101,9 @@ pub use rpc::{
     method_endpoint, method_uid, send_request,
 };
 
+/// Simulation workloads for chaos testing transport layer.
+pub mod simulations;
+
 // Attribute macros
 pub use moonpool_transport_derive::actor_impl;
 pub use moonpool_transport_derive::service;
