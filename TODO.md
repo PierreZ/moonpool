@@ -317,6 +317,38 @@ Changes from the original plan:
 
 ---
 
+## ~~Extract `moonpool-sim-examples` crate for better sancov coverage~~ ✅ DONE
+
+Extracted maze/dungeon game logic to `moonpool-sim-examples/` crate. Sancov now targets ~139 edges at 59.7% coverage instead of 21K+ edges at 6.9%.
+
+---
+
+## Future: Move all simulation binaries to exploration/forking
+
+### Problem
+
+Transport and banking simulation binaries (`sim-transport-e2e`, `sim-transport-messaging`, `sim-banking-chaos`) run chaos-only tests with `IterationControl` — no fork-based exploration. They don't benefit from sancov coverage signals or adaptive forking, leaving bugs that hide behind rare event combinations undiscovered.
+
+### Binaries to convert
+
+| Binary | Current mode | Sancov crates |
+|---|---|---|
+| `sim-transport-e2e` | Chaos only (5 scenarios) | `moonpool_transport` |
+| `sim-transport-messaging` | Chaos only (5 scenarios) | `moonpool_transport` |
+| `sim-banking-chaos` | Chaos only (100 iterations) | `moonpool,moonpool_transport` |
+
+`sim-metastable-explore` and `sim-adaptive-explore` already use exploration.
+
+### Changes needed
+
+- Add `enable_exploration(ExplorationConfig { ... })` with appropriate energy budgets to each binary
+- Tune `AdaptiveConfig` per workload (batch size, min/max timelines, per-mark energy)
+- Add `assert_sometimes_each!` / `assert_sometimes!` fork points in transport and banking workloads where interesting state transitions happen
+- Verify sancov edge counts and coverage percentages are reasonable
+- Update `xtask/src/main.rs` sancov_crates if needed
+
+---
+
 ## Future: Extract `moonpool-sim-examples` crate for better sancov coverage
 
 ### Problem

@@ -4,9 +4,6 @@
 //! tests and in standalone binary targets (where sancov instrumentation is
 //! visible).
 
-pub mod dungeon;
-pub mod maze;
-
 use crate::SimulationReport;
 
 /// Run a SimulationBuilder inside a local tokio runtime and return the report.

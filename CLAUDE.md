@@ -12,14 +12,11 @@
 
 **Test profiles**: Configured in `.config/nextest.toml`, aliases in `.cargo/config.toml`
 - `cargo test-fast` — fast tests only (unit + SimWorld) — **use this by default**
-- `cargo test-sim` — slow simulation tests only (chaos + exploration) — CPU intensive, runs 1 at a time
 - `cargo nextest run --profile fast` — same as `cargo test-fast`
-- `cargo nextest run --profile sim` — same as `cargo test-sim`
 
 **Simulation binaries**: Slow simulation tests run as binary targets (sancov requires `main()` thread). Managed via xtask:
-- `cargo xtask sim` — run all simulation binaries
+- `cargo xtask sim` — run all simulation binaries (sancov always enabled)
 - `cargo xtask sim maze` — filter by name substring
-- `cargo xtask sim --sancov` — enable per-binary sancov instrumentation
 
 **Naming convention**: Slow tests use `slow_simulation_` prefix (e.g. `slow_simulation_maze`). Fast tests use `test_` prefix.
 

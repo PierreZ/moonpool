@@ -1,6 +1,6 @@
-//! Binary target for maze exploration simulation.
+//! Binary target for dungeon exploration simulation.
 //!
-//! Runs the maze workload with fork-based exploration, producing coverage
+//! Runs the dungeon workload with fork-based exploration, producing coverage
 //! data visible to sancov instrumentation.
 
 use std::process;
@@ -12,21 +12,21 @@ fn main() {
 
     let report = moonpool_sim::simulations::run_simulation(
         moonpool_sim::SimulationBuilder::new()
-            .workload(moonpool_sim::simulations::maze::MazeWorkload::default())
+            .workload(moonpool_sim_examples::dungeon::DungeonWorkload::default())
             .enable_exploration(moonpool_sim::ExplorationConfig {
-                max_depth: 30,
+                max_depth: 120,
                 timelines_per_split: 4,
-                global_energy: 20_000,
+                global_energy: 400_000,
                 adaptive: Some(moonpool_sim::AdaptiveConfig {
-                    batch_size: 20,
-                    min_timelines: 60,
-                    max_timelines: 150,
-                    per_mark_energy: 600,
-                    warm_min_timelines: Some(20),
+                    batch_size: 30,
+                    min_timelines: 400,
+                    max_timelines: 1000,
+                    per_mark_energy: 10_000,
+                    warm_min_timelines: Some(30),
                 }),
-                parallelism: None,
+                parallelism: Some(moonpool_sim::Parallelism::HalfCores),
             })
-            .set_iterations(2),
+            .set_iterations(3),
     );
 
     eprintln!("{report}");

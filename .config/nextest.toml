@@ -17,12 +17,6 @@ slow-timeout = { period = "10m", terminate-after = 5 }
 [profile.fast]
 default-filter = "not test(slow_simulation)"
 
-# Run only slow simulation tests (1 at a time — each saturates all cores)
-[profile.sim]
-default-filter = "test(slow_simulation)"
-slow-timeout = { period = "10m", terminate-after = 5 }
-test-threads = 1
-
 [profile.default.junit]
 # Store test results
 path = "target/nextest/default/junit.xml"

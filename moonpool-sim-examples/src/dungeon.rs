@@ -9,8 +9,8 @@
 //! - Workload: `/home/pierrez/workspace/rust/Claude-fork-testing/maze-explorer/src/dungeon.rs`
 //! - Engine: `/home/pierrez/workspace/rust/Claude-fork-testing/dungeon/src/lib.rs`
 
-use crate::{SimContext, SimulationResult, Workload};
 use async_trait::async_trait;
+use moonpool_sim::{SimContext, SimulationResult, Workload};
 
 // ============================================================================
 // Inlined dungeon game engine
@@ -425,16 +425,16 @@ impl rand::TryRng for SimRngAdapter {
     type Error = core::convert::Infallible;
 
     fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-        Ok(crate::sim_random::<u32>())
+        Ok(moonpool_sim::sim_random::<u32>())
     }
 
     fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-        Ok(crate::sim_random::<u64>())
+        Ok(moonpool_sim::sim_random::<u64>())
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
         for chunk in dest.chunks_mut(8) {
-            let val = crate::sim_random::<u64>().to_le_bytes();
+            let val = moonpool_sim::sim_random::<u64>().to_le_bytes();
             let len = chunk.len();
             chunk.copy_from_slice(&val[..len]);
         }
@@ -504,7 +504,7 @@ impl Dungeon {
     }
 
     fn random_bool(p: f64) -> bool {
-        crate::sim_random::<f64>() < p
+        moonpool_sim::sim_random::<f64>() < p
     }
 
     /// Execute one step of the dungeon.
@@ -513,7 +513,7 @@ impl Dungeon {
 
         // Pick action with structured rollout (correlated sequences).
         // Always consume both RNG values for consistent call count per step.
-        let fresh_action_index = (crate::sim_random::<u64>() % 10) as u8;
+        let fresh_action_index = (moonpool_sim::sim_random::<u64>() % 10) as u8;
         let repeat = Self::random_bool(REPEAT_ACTION_P);
         let action_index = match (repeat, self.last_action_index) {
             (true, Some(last)) => last,
@@ -546,7 +546,7 @@ impl Dungeon {
 
         // --- Key probability gate ---
         if self.game.on_key_tile() && !self.game.has_key() {
-            crate::assert_sometimes_each!(
+            moonpool_sim::assert_sometimes_each!(
                 "on key tile",
                 [("floor", level as i64)],
                 [("health", hp_bucket as i64)]
@@ -555,14 +555,14 @@ impl Dungeon {
                 self.game.grant_key();
                 let lvl = level as usize;
                 if lvl < KEY_FOUND_MSGS.len() {
-                    crate::assert_sometimes!(true, KEY_FOUND_MSGS[lvl]);
+                    moonpool_sim::assert_sometimes!(true, KEY_FOUND_MSGS[lvl]);
                 }
             }
         }
 
         // Fork point when on stairs with key -- descent amplification.
         if self.game.player_tile() == Tile::StairsDown && self.game.has_key() {
-            crate::assert_sometimes_each!(
+            moonpool_sim::assert_sometimes_each!(
                 "stairs with key",
                 [("floor", level as i64)],
                 [("health", hp_bucket as i64)]
@@ -571,7 +571,7 @@ impl Dungeon {
 
         // Fork point near treasure.
         if self.game.player_tile() == Tile::Treasure {
-            crate::assert_sometimes!(true, "near treasure");
+            moonpool_sim::assert_sometimes!(true, "near treasure");
         }
 
         match outcome {
@@ -583,27 +583,27 @@ impl Dungeon {
                     3..=4 => 2,
                     _ => 3,
                 };
-                crate::assert_sometimes_each!(
+                moonpool_sim::assert_sometimes_each!(
                     "descended",
                     [("to_floor", new_level as i64)],
                     [("health", hp_bucket_desc as i64)]
                 );
             }
             StepOutcome::Won => {
-                crate::assert_sometimes!(true, "treasure found");
+                moonpool_sim::assert_sometimes!(true, "treasure found");
             }
             StepOutcome::MissingKey => {
-                crate::assert_sometimes!(true, "stairs without key");
+                moonpool_sim::assert_sometimes!(true, "stairs without key");
             }
             StepOutcome::Damaged => {
-                crate::assert_sometimes!(true, "survived monster hit");
+                moonpool_sim::assert_sometimes!(true, "survived monster hit");
             }
             StepOutcome::Healed => {
-                crate::assert_sometimes!(true, "picked up potion");
+                moonpool_sim::assert_sometimes!(true, "picked up potion");
             }
             StepOutcome::EnteredRoom => {
                 if let Some(room_idx) = self.game.player_room() {
-                    crate::assert_sometimes_each!(
+                    moonpool_sim::assert_sometimes_each!(
                         "room explored",
                         [("floor", level as i64), ("room", room_idx as i64)],
                         [
@@ -612,7 +612,7 @@ impl Dungeon {
                         ]
                     );
                     if room_idx == self.game.num_rooms() - 1 {
-                        crate::assert_sometimes_each!(
+                        moonpool_sim::assert_sometimes_each!(
                             "goal room",
                             [("floor", level as i64)],
                             [
@@ -627,12 +627,12 @@ impl Dungeon {
         }
 
         // Track level and HP watermarks for guidance.
-        crate::assert_sometimes_greater_than!(
+        moonpool_sim::assert_sometimes_greater_than!(
             self.game.status().level as i64,
             0,
             "dungeon level reached"
         );
-        crate::assert_sometimes_greater_than!(hp_after as i64, 0, "health remaining");
+        moonpool_sim::assert_sometimes_greater_than!(hp_after as i64, 0, "health remaining");
 
         match outcome {
             StepOutcome::Won => StepResult::BugFound,
@@ -690,7 +690,7 @@ impl Workload for DungeonWorkload {
         let mut dungeon = Dungeon::new(self.max_steps, self.target_level);
         let result = dungeon.run();
 
-        crate::assert_always!(
+        moonpool_sim::assert_always!(
             result != StepResult::BugFound,
             "dungeon bug: treasure found on floor 8"
         );
@@ -702,7 +702,7 @@ impl Workload for DungeonWorkload {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExplorationConfig, SimulationBuilder};
+    use moonpool_sim::{AdaptiveConfig, ExplorationConfig, Parallelism, SimulationBuilder};
 
     /// Test that a dungeon bug found by exploration can be replayed deterministically.
     ///
@@ -713,7 +713,7 @@ mod tests {
     #[test]
     fn slow_simulation_dungeon_bug_replay() {
         // Phase 1: Run exploration to find the bug and capture the recipe.
-        let report = super::super::run_simulation(
+        let report = moonpool_sim::simulations::run_simulation(
             SimulationBuilder::new()
                 .set_iterations(3)
                 .set_debug_seeds(vec![54321])
@@ -721,14 +721,14 @@ mod tests {
                     max_depth: 120,
                     timelines_per_split: 4,
                     global_energy: 400_000,
-                    adaptive: Some(crate::AdaptiveConfig {
+                    adaptive: Some(AdaptiveConfig {
                         batch_size: 30,
                         min_timelines: 400,
                         max_timelines: 1_000,
                         per_mark_energy: 10_000,
                         warm_min_timelines: Some(30),
                     }),
-                    parallelism: Some(crate::Parallelism::HalfCores),
+                    parallelism: Some(Parallelism::HalfCores),
                 })
                 .workload(DungeonWorkload {
                     max_steps: DEFAULT_MAX_STEPS,
@@ -749,18 +749,19 @@ mod tests {
         let initial_seed = bug.seed;
 
         // Phase 2: Format and parse the recipe (simulates developer copy-pasting from logs).
-        let timeline_str = crate::format_timeline(&bug.recipe);
+        let timeline_str = moonpool_sim::format_timeline(&bug.recipe);
         eprintln!(
             "Replaying dungeon bug: seed={}, recipe={}",
             initial_seed, timeline_str
         );
-        let parsed_recipe = crate::parse_timeline(&timeline_str).expect("recipe should round-trip");
+        let parsed_recipe =
+            moonpool_sim::parse_timeline(&timeline_str).expect("recipe should round-trip");
         assert_eq!(bug.recipe, parsed_recipe);
 
         // Phase 3: Replay -- same seed, breakpoints from recipe, no exploration.
-        crate::reset_sim_rng();
-        crate::set_sim_seed(initial_seed);
-        crate::set_rng_breakpoints(parsed_recipe);
+        moonpool_sim::reset_sim_rng();
+        moonpool_sim::set_sim_seed(initial_seed);
+        moonpool_sim::set_rng_breakpoints(parsed_recipe);
 
         let mut dungeon = Dungeon::new(DEFAULT_MAX_STEPS, DEFAULT_TARGET_LEVEL);
         let result = dungeon.run();

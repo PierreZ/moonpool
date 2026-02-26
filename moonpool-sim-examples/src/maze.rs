@@ -6,8 +6,8 @@
 //!
 //! Ported from `/home/pierrez/workspace/rust/Claude-fork-testing/maze-explorer/src/maze.rs`.
 
-use crate::{SimContext, SimulationResult, Workload};
 use async_trait::async_trait;
+use moonpool_sim::{SimContext, SimulationResult, Workload};
 
 /// Gate probability -- each nested `if` has this chance of passing.
 pub const GATE_P: f64 = 0.05;
@@ -51,7 +51,7 @@ impl Maze {
     }
 
     fn random_bool(p: f64) -> bool {
-        crate::sim_random::<f64>() < p
+        moonpool_sim::sim_random::<f64>() < p
     }
 
     /// Execute one step of the maze.
@@ -59,39 +59,39 @@ impl Maze {
         self.step_count += 1;
 
         // Consume one random value per step for state mixing.
-        let _: u64 = crate::sim_random();
+        let _: u64 = moonpool_sim::sim_random();
 
         let locks_open = self.locks.count_ones() as i64;
 
         // --- Lock 0: 5 nested gates (independent) ---
         if self.locks & 1 == 0 {
-            crate::assert_sometimes_each!(
+            moonpool_sim::assert_sometimes_each!(
                 "gate",
                 [("lock", 0i64), ("depth", 1i64), ("locks", locks_open)]
             );
             if Self::random_bool(GATE_P) {
-                crate::assert_sometimes_each!(
+                moonpool_sim::assert_sometimes_each!(
                     "gate",
                     [("lock", 0i64), ("depth", 2i64), ("locks", locks_open)]
                 );
                 if Self::random_bool(GATE_P) {
-                    crate::assert_sometimes_each!(
+                    moonpool_sim::assert_sometimes_each!(
                         "gate",
                         [("lock", 0i64), ("depth", 3i64), ("locks", locks_open)]
                     );
                     if Self::random_bool(GATE_P) {
-                        crate::assert_sometimes_each!(
+                        moonpool_sim::assert_sometimes_each!(
                             "gate",
                             [("lock", 0i64), ("depth", 4i64), ("locks", locks_open)]
                         );
                         if Self::random_bool(GATE_P) {
-                            crate::assert_sometimes_each!(
+                            moonpool_sim::assert_sometimes_each!(
                                 "gate",
                                 [("lock", 0i64), ("depth", 5i64), ("locks", locks_open)]
                             );
                             if Self::random_bool(GATE_P) {
                                 self.locks |= 1;
-                                crate::assert_sometimes_each!(
+                                moonpool_sim::assert_sometimes_each!(
                                     "lock opens",
                                     [("lock", 0i64), ("locks", locks_open)]
                                 );
@@ -105,33 +105,33 @@ impl Maze {
         // --- Lock 1: 5 nested gates (requires lock 0) ---
         let locks_open = self.locks.count_ones() as i64;
         if self.locks & 1 != 0 && self.locks & 2 == 0 {
-            crate::assert_sometimes_each!(
+            moonpool_sim::assert_sometimes_each!(
                 "gate",
                 [("lock", 1i64), ("depth", 1i64), ("locks", locks_open)]
             );
             if Self::random_bool(GATE_P) {
-                crate::assert_sometimes_each!(
+                moonpool_sim::assert_sometimes_each!(
                     "gate",
                     [("lock", 1i64), ("depth", 2i64), ("locks", locks_open)]
                 );
                 if Self::random_bool(GATE_P) {
-                    crate::assert_sometimes_each!(
+                    moonpool_sim::assert_sometimes_each!(
                         "gate",
                         [("lock", 1i64), ("depth", 3i64), ("locks", locks_open)]
                     );
                     if Self::random_bool(GATE_P) {
-                        crate::assert_sometimes_each!(
+                        moonpool_sim::assert_sometimes_each!(
                             "gate",
                             [("lock", 1i64), ("depth", 4i64), ("locks", locks_open)]
                         );
                         if Self::random_bool(GATE_P) {
-                            crate::assert_sometimes_each!(
+                            moonpool_sim::assert_sometimes_each!(
                                 "gate",
                                 [("lock", 1i64), ("depth", 5i64), ("locks", locks_open)]
                             );
                             if Self::random_bool(GATE_P) {
                                 self.locks |= 2;
-                                crate::assert_sometimes_each!(
+                                moonpool_sim::assert_sometimes_each!(
                                     "lock opens",
                                     [("lock", 1i64), ("locks", locks_open)]
                                 );
@@ -145,33 +145,33 @@ impl Maze {
         // --- Lock 2: 5 nested gates (independent) ---
         let locks_open = self.locks.count_ones() as i64;
         if self.locks & 4 == 0 {
-            crate::assert_sometimes_each!(
+            moonpool_sim::assert_sometimes_each!(
                 "gate",
                 [("lock", 2i64), ("depth", 1i64), ("locks", locks_open)]
             );
             if Self::random_bool(GATE_P) {
-                crate::assert_sometimes_each!(
+                moonpool_sim::assert_sometimes_each!(
                     "gate",
                     [("lock", 2i64), ("depth", 2i64), ("locks", locks_open)]
                 );
                 if Self::random_bool(GATE_P) {
-                    crate::assert_sometimes_each!(
+                    moonpool_sim::assert_sometimes_each!(
                         "gate",
                         [("lock", 2i64), ("depth", 3i64), ("locks", locks_open)]
                     );
                     if Self::random_bool(GATE_P) {
-                        crate::assert_sometimes_each!(
+                        moonpool_sim::assert_sometimes_each!(
                             "gate",
                             [("lock", 2i64), ("depth", 4i64), ("locks", locks_open)]
                         );
                         if Self::random_bool(GATE_P) {
-                            crate::assert_sometimes_each!(
+                            moonpool_sim::assert_sometimes_each!(
                                 "gate",
                                 [("lock", 2i64), ("depth", 5i64), ("locks", locks_open)]
                             );
                             if Self::random_bool(GATE_P) {
                                 self.locks |= 4;
-                                crate::assert_sometimes_each!(
+                                moonpool_sim::assert_sometimes_each!(
                                     "lock opens",
                                     [("lock", 2i64), ("locks", locks_open)]
                                 );
@@ -185,33 +185,33 @@ impl Maze {
         // --- Lock 3: 5 nested gates (requires lock 0 AND lock 2) ---
         let locks_open = self.locks.count_ones() as i64;
         if self.locks & 1 != 0 && self.locks & 4 != 0 && self.locks & 8 == 0 {
-            crate::assert_sometimes_each!(
+            moonpool_sim::assert_sometimes_each!(
                 "gate",
                 [("lock", 3i64), ("depth", 1i64), ("locks", locks_open)]
             );
             if Self::random_bool(GATE_P) {
-                crate::assert_sometimes_each!(
+                moonpool_sim::assert_sometimes_each!(
                     "gate",
                     [("lock", 3i64), ("depth", 2i64), ("locks", locks_open)]
                 );
                 if Self::random_bool(GATE_P) {
-                    crate::assert_sometimes_each!(
+                    moonpool_sim::assert_sometimes_each!(
                         "gate",
                         [("lock", 3i64), ("depth", 3i64), ("locks", locks_open)]
                     );
                     if Self::random_bool(GATE_P) {
-                        crate::assert_sometimes_each!(
+                        moonpool_sim::assert_sometimes_each!(
                             "gate",
                             [("lock", 3i64), ("depth", 4i64), ("locks", locks_open)]
                         );
                         if Self::random_bool(GATE_P) {
-                            crate::assert_sometimes_each!(
+                            moonpool_sim::assert_sometimes_each!(
                                 "gate",
                                 [("lock", 3i64), ("depth", 5i64), ("locks", locks_open)]
                             );
                             if Self::random_bool(GATE_P) {
                                 self.locks |= 8;
-                                crate::assert_sometimes_each!(
+                                moonpool_sim::assert_sometimes_each!(
                                     "lock opens",
                                     [("lock", 3i64), ("locks", locks_open)]
                                 );
@@ -224,7 +224,7 @@ impl Maze {
 
         // --- Check for the bug ---
         if self.all_locks_open() {
-            crate::assert_sometimes!(true, "all locks open");
+            moonpool_sim::assert_sometimes!(true, "all locks open");
             return StepResult::BugFound;
         }
 
@@ -270,7 +270,7 @@ impl Workload for MazeWorkload {
         let mut maze = Maze::new(self.max_steps);
         let result = maze.run();
 
-        crate::assert_always!(
+        moonpool_sim::assert_always!(
             result != StepResult::BugFound,
             "maze bug: all 4 locks opened"
         );
@@ -282,7 +282,7 @@ impl Workload for MazeWorkload {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExplorationConfig, SimulationBuilder};
+    use moonpool_sim::{AdaptiveConfig, ExplorationConfig, Parallelism, SimulationBuilder};
 
     /// Test that a bug found by exploration can be replayed deterministically.
     ///
@@ -294,7 +294,7 @@ mod tests {
     #[test]
     fn slow_simulation_maze_bug_replay() {
         // Phase 1: Run exploration to find the bug and capture the recipe.
-        let report = super::super::run_simulation(
+        let report = moonpool_sim::simulations::run_simulation(
             SimulationBuilder::new()
                 .set_iterations(2)
                 .set_debug_seeds(vec![12345])
@@ -302,14 +302,14 @@ mod tests {
                     max_depth: 30,
                     timelines_per_split: 4,
                     global_energy: 20_000,
-                    adaptive: Some(crate::AdaptiveConfig {
+                    adaptive: Some(AdaptiveConfig {
                         batch_size: 20,
                         min_timelines: 60,
                         max_timelines: 150,
                         per_mark_energy: 600,
                         warm_min_timelines: Some(20),
                     }),
-                    parallelism: Some(crate::Parallelism::MaxCores),
+                    parallelism: Some(Parallelism::MaxCores),
                 })
                 .workload(MazeWorkload {
                     max_steps: DEFAULT_MAX_STEPS,
@@ -328,19 +328,20 @@ mod tests {
 
         // Phase 2: Simulate what a developer does -- format and parse the recipe.
         // In practice the recipe is printed to logs; the developer copies it to replay.
-        let timeline_str = crate::format_timeline(&bug.recipe);
+        let timeline_str = moonpool_sim::format_timeline(&bug.recipe);
         eprintln!(
             "Replaying bug: seed={}, recipe={}",
             initial_seed, timeline_str
         );
-        let parsed_recipe = crate::parse_timeline(&timeline_str).expect("recipe should round-trip");
+        let parsed_recipe =
+            moonpool_sim::parse_timeline(&timeline_str).expect("recipe should round-trip");
         assert_eq!(bug.recipe, parsed_recipe);
 
         // Phase 3: Replay -- same seed, breakpoints from recipe, no exploration.
         // The RNG follows the exact same path the bug-finding child took.
-        crate::reset_sim_rng();
-        crate::set_sim_seed(initial_seed);
-        crate::set_rng_breakpoints(parsed_recipe);
+        moonpool_sim::reset_sim_rng();
+        moonpool_sim::set_sim_seed(initial_seed);
+        moonpool_sim::set_rng_breakpoints(parsed_recipe);
 
         let mut maze = Maze::new(DEFAULT_MAX_STEPS);
         let result = maze.run();

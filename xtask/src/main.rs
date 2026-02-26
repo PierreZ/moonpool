@@ -9,11 +9,11 @@ struct SimBinary {
 const SIM_BINARIES: &[SimBinary] = &[
     SimBinary {
         name: "sim-maze-explore",
-        sancov_crates: "moonpool_sim",
+        sancov_crates: "moonpool_sim_examples",
     },
     SimBinary {
         name: "sim-dungeon-explore",
-        sancov_crates: "moonpool_sim",
+        sancov_crates: "moonpool_sim_examples",
     },
     SimBinary {
         name: "sim-adaptive-explore",
