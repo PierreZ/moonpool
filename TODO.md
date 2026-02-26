@@ -12,7 +12,7 @@ moonpool-explorer uses fork()-based multiverse exploration with an assertion-lev
 
 ---
 
-## Commit 1: `sancov.rs` core module
+## ~~Commit 1: `sancov.rs` core module~~ ✅ DONE
 
 Add the sancov module to moonpool-explorer with no fork loop integration yet.
 

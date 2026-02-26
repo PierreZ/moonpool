@@ -564,6 +564,7 @@ pub mod coverage;
 pub mod each_buckets;
 pub mod energy;
 pub mod replay;
+pub mod sancov;
 pub mod shared_mem;
 pub mod shared_stats;
 pub mod split_loop;
@@ -578,6 +579,7 @@ pub use each_buckets::{
     EachBucket, assertion_sometimes_each, each_bucket_read_all, unpack_quality,
 };
 pub use replay::{ParseTimelineError, format_timeline, parse_timeline};
+pub use sancov::{sancov_edge_count, sancov_edges_covered, sancov_is_available};
 pub use shared_stats::{ExplorationStats, get_bug_recipe, get_exploration_stats};
 pub use split_loop::{AdaptiveConfig, Parallelism, exit_child};
 
