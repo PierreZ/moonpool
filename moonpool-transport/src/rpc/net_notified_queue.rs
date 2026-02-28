@@ -32,7 +32,7 @@ use std::task::{Context, Poll, Waker};
 use serde::de::DeserializeOwned;
 
 use crate::{Endpoint, MessageCodec, NetworkAddress, UID};
-use moonpool_sim::assert_sometimes;
+use moonpool_sim::{assert_always, assert_reachable};
 
 use super::endpoint_map::MessageReceiver;
 
@@ -190,7 +190,7 @@ impl<T: DeserializeOwned + 'static, C: MessageCodec> MessageReceiver for NetNoti
         // Deserialize the message using the codec
         match self.codec.decode::<T>(payload) {
             Ok(message) => {
-                assert_sometimes!(true, "Message deserialized successfully");
+                assert_reachable!("message_deserialized_ok");
                 let mut inner = self.inner.borrow_mut();
                 inner.queue.push_back(message);
                 inner.messages_received += 1;
@@ -201,11 +201,11 @@ impl<T: DeserializeOwned + 'static, C: MessageCodec> MessageReceiver for NetNoti
                     waker.wake();
                 }
                 if had_waiters {
-                    assert_sometimes!(true, "Wakers notified on new message");
+                    assert_reachable!("wakers_notified");
                 }
             }
             Err(e) => {
-                assert_sometimes!(true, "Message deserialization failed");
+                assert_reachable!("message_deserialization_failed");
                 // Log error and drop the message
                 tracing::warn!(
                     endpoint = %self.endpoint.token,
@@ -231,18 +231,19 @@ impl<T, C: MessageCodec> Future for RecvFuture<'_, T, C> {
 
         // Try to get a message
         if let Some(message) = inner.queue.pop_front() {
-            assert_sometimes!(true, "Message available immediately");
+            assert_reachable!("recv_immediate");
             return Poll::Ready(Some(message));
         }
 
         // If closed and empty, return None
         if inner.closed {
-            assert_sometimes!(true, "Queue closed and empty");
+            assert_always!(inner.queue.is_empty(), "closed_queue_is_empty");
+            assert_reachable!("recv_closed_empty");
             return Poll::Ready(None);
         }
 
         // Register waker and wait
-        assert_sometimes!(true, "Recv waiting for message");
+        assert_reachable!("recv_pending");
         inner.wakers.push(cx.waker().clone());
         Poll::Pending
     }

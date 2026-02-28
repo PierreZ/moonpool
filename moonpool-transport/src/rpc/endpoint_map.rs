@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::{UID, WELL_KNOWN_RESERVED_COUNT, WellKnownToken};
-use moonpool_sim::assert_sometimes;
+use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
 
 use crate::error::MessagingError;
 
@@ -103,9 +103,14 @@ impl EndpointMap {
                 max: WELL_KNOWN_RESERVED_COUNT,
             });
         }
+        // Invariant: well-known slot must not already be occupied (FDB ASSERT: data[index].receiver == nullptr)
+        assert_always!(
+            self.well_known[index].is_none(),
+            "well_known_slot_not_double_registered"
+        );
         self.well_known[index] = Some(receiver);
         self.registration_count += 1;
-        assert_sometimes!(true, "Well-known endpoint registered successfully");
+        assert_reachable!("well_known_endpoint_registered");
         Ok(())
     }
 
@@ -144,7 +149,7 @@ impl EndpointMap {
 
         // Fall back to dynamic lookup
         let result = self.dynamic.get(token).cloned();
-        assert_sometimes!(result.is_some(), "Dynamic endpoint lookup succeeds");
+        assert_sometimes!(result.is_some(), "dynamic_endpoint_lookup_hit");
         result
     }
 
@@ -157,15 +162,15 @@ impl EndpointMap {
     /// The removed receiver if it existed.
     pub fn remove(&mut self, token: &UID) -> Option<Rc<dyn MessageReceiver>> {
         if token.is_well_known() {
-            // Well-known endpoints cannot be removed
-            assert_sometimes!(true, "Well-known endpoint removal correctly rejected");
+            // Well-known endpoints cannot be removed (FDB invariant)
+            assert_reachable!("well_known_removal_rejected");
             return None;
         }
 
         let result = self.dynamic.remove(token);
         if result.is_some() {
             self.deregistration_count += 1;
-            assert_sometimes!(true, "Dynamic endpoint deregistered successfully");
+            assert_reachable!("dynamic_endpoint_deregistered");
         }
         result
     }
