@@ -14,8 +14,8 @@ use super::config::PeerConfig;
 use super::error::{PeerError, PeerResult};
 use super::metrics::PeerMetrics;
 use crate::{
-    HEADER_SIZE, NetworkProvider, Providers, TaskProvider, TimeProvider, UID, WireError,
-    serialize_packet, try_deserialize_packet,
+    HEADER_SIZE, NetworkProvider, Providers, TaskProvider, TimeProvider, UID, WellKnownToken,
+    WireError, serialize_packet, try_deserialize_packet,
 };
 use moonpool_sim::{assert_sometimes, assert_sometimes_each};
 
@@ -79,8 +79,11 @@ pub struct Peer<P: Providers> {
     /// Can be taken via `take_receiver()` for external ownership.
     receive_rx: Option<mpsc::UnboundedReceiver<(UID, Vec<u8>)>>,
 
-    /// Shutdown signaling
+    /// Shutdown signaling for connection_task
     shutdown_tx: mpsc::UnboundedSender<()>,
+
+    /// Shutdown signaling for connection_monitor
+    monitor_shutdown_tx: Option<mpsc::UnboundedSender<()>>,
 
     /// Configuration (owned by Peer)
     config: PeerConfig,
@@ -117,6 +120,15 @@ struct PeerSharedState<P: Providers> {
 
     /// Metrics collection
     metrics: PeerMetrics,
+
+    /// Notify signaled when a pong arrives.
+    ///
+    /// Replaced before each ping cycle to avoid spurious notifications.
+    /// FDB Reference: connectionMonitor uses choose{} to race pong vs timeout.
+    pong_notify: Rc<Notify>,
+
+    /// Time when the last ping was sent (for RTT calculation).
+    last_ping_sent_at: Option<Duration>,
 }
 
 impl<P: Providers> PeerSharedState<P> {
@@ -142,12 +154,15 @@ impl<P: Providers> Peer<P> {
             unreliable_queue: VecDeque::new(),
             reconnect_state,
             metrics: PeerMetrics::new_at(now),
+            pong_notify: Rc::new(Notify::new()),
+            last_ping_sent_at: None,
         }));
 
         // Create coordination primitives
         let data_to_send = Rc::new(Notify::new());
         let (receive_tx, receive_rx) = mpsc::unbounded_channel();
         let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
+        let ping_timeout_notify = Rc::new(Notify::new());
 
         // Spawn background connection task
         let writer_handle = providers.task().spawn_task(
@@ -160,8 +175,27 @@ impl<P: Providers> Peer<P> {
                 shutdown_rx,
                 None, // No initial stream - will establish connection
                 ConnectionLossBehavior::Reconnect,
+                ping_timeout_notify.clone(),
             ),
         );
+
+        // Spawn connection monitor if ping is enabled
+        let monitor_shutdown_tx = if config.ping_interval > Duration::ZERO {
+            let (monitor_tx, monitor_rx) = mpsc::unbounded_channel();
+            providers.task().spawn_task(
+                "connection_monitor",
+                connection_monitor(
+                    shared_state.clone(),
+                    data_to_send.clone(),
+                    config.clone(),
+                    ping_timeout_notify,
+                    monitor_rx,
+                ),
+            );
+            Some(monitor_tx)
+        } else {
+            None
+        };
 
         Self {
             shared_state,
@@ -169,6 +203,7 @@ impl<P: Providers> Peer<P> {
             writer_handle: Some(writer_handle),
             receive_rx: Some(receive_rx),
             shutdown_tx,
+            monitor_shutdown_tx,
             config,
             providers,
         }
@@ -205,6 +240,8 @@ impl<P: Providers> Peer<P> {
             unreliable_queue: VecDeque::new(),
             reconnect_state,
             metrics: PeerMetrics::new_at(now),
+            pong_notify: Rc::new(Notify::new()),
+            last_ping_sent_at: None,
         }));
 
         // Mark metrics as connected
@@ -218,6 +255,7 @@ impl<P: Providers> Peer<P> {
         let data_to_send = Rc::new(Notify::new());
         let (receive_tx, receive_rx) = mpsc::unbounded_channel();
         let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
+        let ping_timeout_notify = Rc::new(Notify::new());
 
         // Spawn background connection task with the existing stream
         let writer_handle = providers.task().spawn_task(
@@ -230,8 +268,27 @@ impl<P: Providers> Peer<P> {
                 shutdown_rx,
                 Some(stream),
                 ConnectionLossBehavior::Exit,
+                ping_timeout_notify.clone(),
             ),
         );
+
+        // Spawn connection monitor if ping is enabled
+        let monitor_shutdown_tx = if config.ping_interval > Duration::ZERO {
+            let (monitor_tx, monitor_rx) = mpsc::unbounded_channel();
+            providers.task().spawn_task(
+                "connection_monitor",
+                connection_monitor(
+                    shared_state.clone(),
+                    data_to_send.clone(),
+                    config.clone(),
+                    ping_timeout_notify,
+                    monitor_rx,
+                ),
+            );
+            Some(monitor_tx)
+        } else {
+            None
+        };
 
         Self {
             shared_state,
@@ -239,6 +296,7 @@ impl<P: Providers> Peer<P> {
             writer_handle: Some(writer_handle),
             receive_rx: Some(receive_rx),
             shutdown_tx,
+            monitor_shutdown_tx,
             config,
             providers,
         }
@@ -467,6 +525,11 @@ impl<P: Providers> Peer<P> {
         // Signal shutdown to connection task
         let _ = self.shutdown_tx.send(());
 
+        // Signal shutdown to connection monitor
+        if let Some(ref tx) = self.monitor_shutdown_tx {
+            let _ = tx.send(());
+        }
+
         // Wait for connection task to complete
         if let Some(handle) = self.writer_handle.take() {
             let _ = handle.await;
@@ -500,6 +563,7 @@ enum ConnectionLossBehavior {
 /// - Owns the connection exclusively to avoid RefCell conflicts
 /// - Handles both reading and writing operations
 /// - Parses wire format packets from the read stream
+#[allow(clippy::too_many_arguments)]
 async fn connection_task<P: Providers>(
     shared_state: Rc<RefCell<PeerSharedState<P>>>,
     data_to_send: Rc<Notify>,
@@ -508,17 +572,34 @@ async fn connection_task<P: Providers>(
     mut shutdown_rx: mpsc::UnboundedReceiver<()>,
     initial_stream: Option<<P::Network as moonpool_core::NetworkProvider>::TcpStream>,
     on_connection_loss: ConnectionLossBehavior,
+    ping_timeout_notify: Rc<Notify>,
 ) {
     let mut current_connection: Option<<P::Network as moonpool_core::NetworkProvider>::TcpStream> =
         initial_stream;
     // Buffer for accumulating partial packet reads
     let mut read_buffer: Vec<u8> = Vec::with_capacity(4096);
+    let ping_enabled = config.ping_interval > Duration::ZERO;
 
     loop {
         tokio::select! {
             // Check for shutdown
             _ = shutdown_rx.recv() => {
                 break;
+            }
+
+            // Check for ping timeout from connection_monitor
+            _ = ping_timeout_notify.notified(), if ping_enabled && current_connection.is_some() => {
+                tracing::warn!("connection_task: ping timeout detected by connection_monitor");
+                assert_sometimes!(true, "Ping timeout triggers connection failure");
+                handle_connection_failure(
+                    &shared_state,
+                    &mut current_connection,
+                    &mut read_buffer,
+                    None,
+                );
+                if on_connection_loss == ConnectionLossBehavior::Exit {
+                    break;
+                }
             }
 
             // Wait for data to send (FoundationDB pattern)
@@ -667,6 +748,7 @@ async fn connection_task<P: Providers>(
                             &mut read_buffer,
                             &receive_tx,
                             on_connection_loss,
+                            &data_to_send,
                         );
                         if should_exit {
                             break;
@@ -739,7 +821,10 @@ fn process_read_buffer<P: Providers>(
     read_buffer: &mut Vec<u8>,
     receive_tx: &mpsc::UnboundedSender<(UID, Vec<u8>)>,
     on_connection_loss: ConnectionLossBehavior,
+    data_to_send: &Rc<Notify>,
 ) -> bool {
+    let ping_token = WellKnownToken::Ping.uid();
+
     loop {
         if read_buffer.len() < HEADER_SIZE {
             return false; // Need more data for header
@@ -761,6 +846,12 @@ fn process_read_buffer<P: Providers>(
 
                 // Remove consumed bytes from buffer
                 read_buffer.drain(..consumed);
+
+                // Intercept ping/pong packets (FDB: PingReceiver pattern)
+                if token == ping_token && !payload.is_empty() {
+                    handle_ping_pong_packet(shared_state, &payload, data_to_send);
+                    continue; // Don't forward to receive_tx
+                }
 
                 // Send to receiver
                 if receive_tx.send((token, payload)).is_err() {
@@ -941,4 +1032,200 @@ fn record_connection_failure<P: Providers>(
     state.reconnect_state.current_delay = next_delay;
     let now = state.time.now();
     state.metrics.record_connection_failure_at(now, next_delay);
+}
+
+// =============================================================================
+// Ping/Pong Protocol
+// =============================================================================
+//
+// FDB Reference: connectionMonitor (FlowTransport.actor.cpp:616-699)
+//                PingReceiver (FlowTransport.actor.cpp:248-261)
+//
+// Wire format (uses WellKnownToken::Ping):
+//   Ping: [0u8][timestamp_nanos: u64 LE]  = 9 bytes
+//   Pong: [1u8][echoed_timestamp_nanos: u64 LE] = 9 bytes
+//
+// The timestamp is the sender's simulation time when the ping was sent,
+// echoed back in the pong for RTT calculation.
+
+/// Ping type marker byte.
+const PING_TYPE_REQUEST: u8 = 0;
+/// Pong type marker byte.
+const PONG_TYPE_RESPONSE: u8 = 1;
+/// Expected size of a ping/pong payload.
+const PING_PONG_PAYLOAD_SIZE: usize = 9;
+
+/// Create a ping payload with the given timestamp.
+fn create_ping_payload(now: Duration) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(PING_PONG_PAYLOAD_SIZE);
+    payload.push(PING_TYPE_REQUEST);
+    let timestamp_nanos = now.as_nanos() as u64;
+    payload.extend_from_slice(&timestamp_nanos.to_le_bytes());
+    payload
+}
+
+/// Create a pong payload echoing the timestamp from a ping.
+fn create_pong_payload(ping_payload: &[u8]) -> Option<Vec<u8>> {
+    if ping_payload.len() < PING_PONG_PAYLOAD_SIZE {
+        return None;
+    }
+    let mut payload = Vec::with_capacity(PING_PONG_PAYLOAD_SIZE);
+    payload.push(PONG_TYPE_RESPONSE);
+    // Echo the timestamp bytes from the ping
+    payload.extend_from_slice(&ping_payload[1..PING_PONG_PAYLOAD_SIZE]);
+    Some(payload)
+}
+
+/// Parse the timestamp from a pong payload.
+fn parse_pong_timestamp(payload: &[u8]) -> Option<Duration> {
+    if payload.len() < PING_PONG_PAYLOAD_SIZE || payload[0] != PONG_TYPE_RESPONSE {
+        return None;
+    }
+    let nanos = u64::from_le_bytes(payload[1..PING_PONG_PAYLOAD_SIZE].try_into().ok()?);
+    Some(Duration::from_nanos(nanos))
+}
+
+/// Handle an intercepted ping or pong packet.
+///
+/// - Ping (type 0): Queue a pong response in the unreliable queue.
+/// - Pong (type 1): Calculate RTT, update metrics, signal pong_notify.
+///
+/// FDB Reference: PingReceiver::receive() (FlowTransport.actor.cpp:253-256)
+fn handle_ping_pong_packet<P: Providers>(
+    shared_state: &Rc<RefCell<PeerSharedState<P>>>,
+    payload: &[u8],
+    data_to_send: &Rc<Notify>,
+) {
+    let ping_token = WellKnownToken::Ping.uid();
+
+    match payload[0] {
+        PING_TYPE_REQUEST => {
+            // Received a ping - respond with pong (FDB: req.reply.send(Void()))
+            tracing::debug!("handle_ping_pong: received ping, sending pong");
+            if let Some(pong_payload) = create_pong_payload(payload)
+                && let Ok(packet) = serialize_packet(ping_token, &pong_payload)
+            {
+                let mut state = shared_state.borrow_mut();
+                let was_empty = state.are_queues_empty();
+                state.unreliable_queue.push_back(packet);
+                drop(state);
+                if was_empty {
+                    data_to_send.notify_one();
+                }
+            }
+        }
+        PONG_TYPE_RESPONSE => {
+            // Received a pong - calculate RTT and signal monitor
+            tracing::debug!("handle_ping_pong: received pong");
+            if let Some(sent_at) = parse_pong_timestamp(payload) {
+                let mut state = shared_state.borrow_mut();
+                let now = state.time.now();
+                let rtt = now.saturating_sub(sent_at);
+                state.metrics.record_pong_received(now, rtt);
+                state.last_ping_sent_at = None;
+                let notify = state.pong_notify.clone();
+                drop(state);
+                notify.notify_one();
+                assert_sometimes!(true, "Pong received and RTT recorded");
+            }
+        }
+        _ => {
+            tracing::warn!("handle_ping_pong: unknown ping/pong type: {}", payload[0]);
+        }
+    }
+}
+
+/// Background connection health monitor.
+///
+/// Periodically sends ping packets and waits for pong responses.
+/// If no pong arrives within `ping_timeout`, signals the connection_task
+/// to drop the connection and reconnect.
+///
+/// FDB Reference: connectionMonitor (FlowTransport.actor.cpp:616-699)
+///
+/// # Design
+///
+/// - Sends pings via the unreliable queue (like FDB's sendUnreliable)
+/// - Uses a fresh Notify per ping cycle to avoid spurious wakeups
+/// - The timeout notification is picked up by connection_task's select! loop
+/// - Only pings when the connection is established
+async fn connection_monitor<P: Providers>(
+    shared_state: Rc<RefCell<PeerSharedState<P>>>,
+    data_to_send: Rc<Notify>,
+    config: PeerConfig,
+    ping_timeout_notify: Rc<Notify>,
+    mut shutdown_rx: mpsc::UnboundedReceiver<()>,
+) {
+    let ping_token = WellKnownToken::Ping.uid();
+
+    loop {
+        // Sleep for ping interval before sending
+        {
+            let time = shared_state.borrow().time.clone();
+            let result = time.timeout(config.ping_interval, shutdown_rx.recv());
+            match result.await {
+                Ok(_) => {
+                    // Shutdown signal received
+                    tracing::debug!("connection_monitor: shutdown during ping interval");
+                    return;
+                }
+                Err(_) => {
+                    // Timeout elapsed - time to ping
+                }
+            }
+        }
+
+        // Create a fresh Notify for this ping cycle to avoid spurious wakeups
+        let pong_notify = Rc::new(Notify::new());
+        let now = {
+            let mut state = shared_state.borrow_mut();
+            state.pong_notify = pong_notify.clone();
+            state.time.now()
+        };
+
+        // Create and queue ping packet.
+        // Always notify data_to_send so connection_task will establish a
+        // connection (if needed) and flush the queued ping.
+        let ping_payload = create_ping_payload(now);
+        if let Ok(packet) = serialize_packet(ping_token, &ping_payload) {
+            {
+                let mut state = shared_state.borrow_mut();
+                state.last_ping_sent_at = Some(now);
+                state.metrics.record_ping_sent();
+                state.unreliable_queue.push_back(packet);
+            }
+            data_to_send.notify_one();
+        }
+
+        // Wait for pong or timeout
+        // FDB: choose { when(delay(TIMEOUT)) {...} when(reply.getFuture()) {...} }
+        let time = shared_state.borrow().time.clone();
+        match time
+            .timeout(config.ping_timeout, pong_notify.notified())
+            .await
+        {
+            Ok(()) => {
+                // Pong received within timeout - connection healthy
+                tracing::debug!("connection_monitor: pong received, connection healthy");
+            }
+            Err(_) => {
+                // Timeout - no pong received
+                // FDB: throw connection_failed() (FlowTransport.actor.cpp:672-678)
+
+                // Double-check: connection might have been dropped by another path
+                let is_connected = shared_state.borrow().connection.is_some();
+                if is_connected {
+                    tracing::warn!(
+                        "connection_monitor: ping timeout - signaling connection failure"
+                    );
+                    shared_state.borrow_mut().metrics.record_ping_timeout();
+                    ping_timeout_notify.notify_one();
+                } else {
+                    tracing::debug!(
+                        "connection_monitor: ping timeout but connection already dropped"
+                    );
+                }
+            }
+        }
+    }
 }

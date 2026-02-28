@@ -37,7 +37,7 @@ use crate::{
 use moonpool_sim::assert_sometimes;
 use tokio::sync::watch;
 
-use super::endpoint_map::{EndpointMap, MessageReceiver};
+use super::endpoint_map::{EndpointMap, MessageReceiver, PingPongReceiver};
 use super::request_stream::RequestStream;
 use crate::MessageCodec;
 use crate::error::MessagingError;
@@ -160,8 +160,23 @@ impl<P: Providers> NetTransport<P> {
     /// ```
     pub fn new(local_address: NetworkAddress, providers: P) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
+
+        // Register PingPongReceiver for connection health checks
+        // FDB Reference: PingReceiver (FlowTransport.actor.cpp:248-261)
+        let mut endpoints = EndpointMap::new();
+        let ping_receiver = Rc::new(PingPongReceiver::new());
+        // Safety: WellKnownToken::Ping (1) is always within WELL_KNOWN_RESERVED_COUNT (64)
+        endpoints
+            .insert_well_known(WellKnownToken::Ping, ping_receiver)
+            .expect("WellKnownToken::Ping is a valid well-known index");
+
         Self {
-            data: RefCell::new(TransportData::default()),
+            data: RefCell::new(TransportData {
+                endpoints,
+                peers: BTreeMap::new(),
+                incoming_peers: BTreeMap::new(),
+                stats: TransportStats::default(),
+            }),
             local_address,
             providers,
             peer_config: PeerConfig::default(),
@@ -1120,7 +1135,8 @@ mod tests {
         let transport = create_test_transport();
 
         assert_eq!(transport.peer_count(), 0);
-        assert_eq!(transport.endpoint_count(), 0);
+        // PingPongReceiver is registered at construction for WellKnownToken::Ping
+        assert_eq!(transport.endpoint_count(), 1);
         assert_eq!(transport.packets_sent(), 0);
     }
 
@@ -1128,16 +1144,20 @@ mod tests {
     fn test_register_well_known() {
         let transport = create_test_transport();
 
+        // PingPongReceiver already registered at Ping token
+        assert_eq!(transport.endpoint_count(), 1);
+
+        // Register a different well-known token
         let queue: Rc<NetNotifiedQueue<String, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
             Endpoint::new(test_address(), UID::new(1, 1)),
             JsonCodec,
         ));
 
         transport
-            .register_well_known(WellKnownToken::Ping, queue)
+            .register_well_known(WellKnownToken::EndpointNotFound, queue)
             .expect("register should succeed");
 
-        assert_eq!(transport.endpoint_count(), 1);
+        assert_eq!(transport.endpoint_count(), 2);
     }
 
     #[test]
@@ -1153,7 +1173,8 @@ mod tests {
         let endpoint = transport.register(token, queue);
 
         assert_eq!(endpoint.token, token);
-        assert_eq!(transport.endpoint_count(), 1);
+        // 1 from PingPongReceiver + 1 dynamic
+        assert_eq!(transport.endpoint_count(), 2);
     }
 
     #[test]
@@ -1204,11 +1225,13 @@ mod tests {
         ));
 
         transport.register(token, queue as Rc<dyn MessageReceiver>);
-        assert_eq!(transport.endpoint_count(), 1);
+        // 1 PingPongReceiver + 1 dynamic
+        assert_eq!(transport.endpoint_count(), 2);
 
         let removed = transport.unregister(&token);
         assert!(removed.is_some());
-        assert_eq!(transport.endpoint_count(), 0);
+        // PingPongReceiver remains (well-known endpoints can't be removed)
+        assert_eq!(transport.endpoint_count(), 1);
     }
 
     #[test]
@@ -1243,9 +1266,9 @@ mod tests {
             .build()
             .expect("build should succeed");
 
-        // Should be properly initialized
+        // Should be properly initialized with PingPongReceiver
         assert_eq!(transport.peer_count(), 0);
-        assert_eq!(transport.endpoint_count(), 0);
+        assert_eq!(transport.endpoint_count(), 1); // PingPongReceiver
         assert_eq!(transport.packets_sent(), 0);
         assert_eq!(*transport.local_address(), test_address());
     }
@@ -1325,8 +1348,8 @@ mod tests {
         let token = UID::new(0xDEAD, 0xBEEF);
         let stream = transport.register_handler::<TestRequest, _>(token, JsonCodec);
 
-        // Handler should be registered
-        assert_eq!(transport.endpoint_count(), 1);
+        // Handler should be registered (1 PingPongReceiver + 1 dynamic)
+        assert_eq!(transport.endpoint_count(), 2);
 
         // Endpoint should match
         assert_eq!(stream.endpoint().token, token);
@@ -1364,8 +1387,8 @@ mod tests {
         let (sub_stream, sub_token) =
             transport.register_handler_at::<SubRequest, _>(CALC_INTERFACE, METHOD_SUB, JsonCodec);
 
-        // Both handlers should be registered
-        assert_eq!(transport.endpoint_count(), 2);
+        // Both handlers should be registered (1 PingPongReceiver + 2 dynamic)
+        assert_eq!(transport.endpoint_count(), 3);
 
         // Tokens should be deterministic
         assert_eq!(add_token, UID::new(CALC_INTERFACE, METHOD_ADD));

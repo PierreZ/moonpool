@@ -52,6 +52,25 @@ pub struct PeerMetrics {
 
     /// Whether the peer is currently connected
     pub is_connected: bool,
+
+    /// RTT of the most recent successful ping/pong round-trip.
+    ///
+    /// FDB Reference: `pingLatencies` (FlowTransport.h:186)
+    pub last_ping_rtt: Option<Duration>,
+
+    /// Time when the most recent pong was received.
+    pub last_pong_received_at: Option<Duration>,
+
+    /// Total number of ping timeouts (no pong within deadline).
+    ///
+    /// FDB Reference: `timeoutCount` (FlowTransport.h:187)
+    pub ping_timeouts: u64,
+
+    /// Total number of ping packets sent.
+    pub pings_sent: u64,
+
+    /// Total number of pong packets received.
+    pub pongs_received: u64,
 }
 
 impl Default for PeerMetrics {
@@ -85,6 +104,11 @@ impl PeerMetrics {
             consecutive_failures: 0,
             current_reconnect_delay: Duration::from_millis(100),
             is_connected: false,
+            last_ping_rtt: None,
+            last_pong_received_at: None,
+            ping_timeouts: 0,
+            pings_sent: 0,
+            pongs_received: 0,
         }
     }
 
@@ -138,6 +162,23 @@ impl PeerMetrics {
         if self.current_queue_size > 0 {
             self.current_queue_size -= 1;
         }
+    }
+
+    /// Record a ping sent.
+    pub fn record_ping_sent(&mut self) {
+        self.pings_sent += 1;
+    }
+
+    /// Record a pong received, with RTT calculation.
+    pub fn record_pong_received(&mut self, now: Duration, rtt: Duration) {
+        self.pongs_received += 1;
+        self.last_pong_received_at = Some(now);
+        self.last_ping_rtt = Some(rtt);
+    }
+
+    /// Record a ping timeout.
+    pub fn record_ping_timeout(&mut self) {
+        self.ping_timeouts += 1;
     }
 
     /// Calculate connection success rate as a percentage.

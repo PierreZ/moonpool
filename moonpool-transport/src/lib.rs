@@ -96,9 +96,9 @@ pub use wire::{
 
 // RPC exports
 pub use rpc::{
-    EndpointMap, MessageReceiver, NetNotifiedQueue, NetTransport, NetTransportBuilder, ReplyError,
-    ReplyFuture, ReplyPromise, RequestEnvelope, RequestStream, RpcError, ServerHandle,
-    method_endpoint, method_uid, send_request,
+    EndpointMap, MessageReceiver, NetNotifiedQueue, NetTransport, NetTransportBuilder,
+    PingPongReceiver, ReplyError, ReplyFuture, ReplyPromise, RequestEnvelope, RequestStream,
+    RpcError, ServerHandle, method_endpoint, method_uid, send_request,
 };
 
 // Attribute macros

@@ -24,7 +24,7 @@ mod request_stream;
 mod rpc_error;
 mod server_handle;
 
-pub use endpoint_map::{EndpointMap, MessageReceiver};
+pub use endpoint_map::{EndpointMap, MessageReceiver, PingPongReceiver};
 pub use interface::{method_endpoint, method_uid};
 pub use net_notified_queue::{NetNotifiedQueue, RecvFuture, SharedNetNotifiedQueue};
 pub use net_transport::{NetTransport, NetTransportBuilder};

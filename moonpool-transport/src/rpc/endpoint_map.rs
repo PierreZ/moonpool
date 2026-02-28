@@ -9,6 +9,8 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+use std::cell::Cell;
+
 use crate::{UID, WELL_KNOWN_RESERVED_COUNT, WellKnownToken};
 use moonpool_sim::assert_sometimes;
 
@@ -188,6 +190,68 @@ impl EndpointMap {
     /// Get total deregistration count (for metrics).
     pub fn deregistration_count(&self) -> u64 {
         self.deregistration_count
+    }
+}
+
+/// Ping/pong receiver registered in EndpointMap for connection health checks.
+///
+/// FDB Reference: PingReceiver (FlowTransport.actor.cpp:248-261)
+///
+/// This receiver is registered at [`WellKnownToken::Ping`] in the EndpointMap.
+/// In normal operation, ping/pong packets are intercepted at the Peer level
+/// (in `process_read_buffer`) for efficiency. This handler provides a fallback
+/// for packets that reach the EndpointMap dispatch layer, and exposes metrics.
+pub struct PingPongReceiver {
+    /// Count of ping packets received at EndpointMap level.
+    pings_received: Cell<u64>,
+    /// Count of pong packets received at EndpointMap level.
+    pongs_received: Cell<u64>,
+}
+
+impl Default for PingPongReceiver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PingPongReceiver {
+    /// Create a new PingPongReceiver.
+    pub fn new() -> Self {
+        Self {
+            pings_received: Cell::new(0),
+            pongs_received: Cell::new(0),
+        }
+    }
+
+    /// Get the number of ping packets received at EndpointMap level.
+    pub fn pings_received(&self) -> u64 {
+        self.pings_received.get()
+    }
+
+    /// Get the number of pong packets received at EndpointMap level.
+    pub fn pongs_received(&self) -> u64 {
+        self.pongs_received.get()
+    }
+}
+
+impl MessageReceiver for PingPongReceiver {
+    fn receive(&self, payload: &[u8]) {
+        if payload.is_empty() {
+            return;
+        }
+        match payload[0] {
+            0 => {
+                self.pings_received.set(self.pings_received.get() + 1);
+                tracing::debug!("PingPongReceiver: received ping at EndpointMap level");
+            }
+            1 => {
+                self.pongs_received.set(self.pongs_received.get() + 1);
+                tracing::debug!("PingPongReceiver: received pong at EndpointMap level");
+            }
+            _ => {
+                tracing::warn!("PingPongReceiver: unknown ping/pong type: {}", payload[0]);
+            }
+        }
     }
 }
 
