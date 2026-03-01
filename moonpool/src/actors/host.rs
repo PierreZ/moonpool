@@ -153,6 +153,18 @@ impl<P: Providers, C: MessageCodec> ActorContext<P, C> {
     pub fn state_store(&self) -> Option<&Rc<dyn ActorStateStore>> {
         self.state_store.as_ref()
     }
+
+    /// Get a typed actor reference for calling other actors.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let other: BankAccountRef<_, _> = ctx.actor_ref("other-account");
+    /// other.deposit(req).await?;
+    /// ```
+    pub fn actor_ref<R: super::ActorRef<P, C>>(&self, identity: impl Into<String>) -> R {
+        R::from_router(identity, &self.router)
+    }
 }
 
 /// Trait implemented by each actor type for method dispatch and lifecycle.

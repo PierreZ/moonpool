@@ -97,6 +97,10 @@ handle.await.unwrap().unwrap();
 
 Strategic placement: error handling, timeouts, retries, resource limits
 
+## Compatibility
+- Library is not in external use — prefer replacing code over maintaining backward compatibility
+- No deprecation needed — delete old APIs when replacing them
+
 ## API Design Principles
 **Keep APIs familiar**: APIs should match what developers expect from tokio objects
 - Maintain async patterns where developers expect them

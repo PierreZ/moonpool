@@ -32,9 +32,5 @@ name = "banking"
 path = "examples/banking.rs"
 
 [[bin]]
-name = "sim-metastable-explore"
-path = "src/bin/sim/metastable_explore.rs"
-
-[[bin]]
 name = "sim-banking-chaos"
 path = "src/bin/sim/banking_chaos.rs"

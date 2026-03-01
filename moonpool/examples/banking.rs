@@ -1,23 +1,20 @@
 //! Banking Example: Virtual actors with state persistence.
 //!
-//! This example demonstrates the virtual actor networking layer running
-//! alongside static RPC interfaces on the same transport, with
+//! This example demonstrates the virtual actor networking layer with
 //! `PersistentState<T>` for durable actor state.
 //!
 //! # What It Shows
 //!
-//! - A static `PingPong` interface (existing pattern, proves coexistence)
 //! - A virtual `BankAccount` actor defined with `#[service]` macro
 //! - **State persistence**: `PersistentState<BankAccountData>` + `InMemoryStateStore`
 //! - **Lifecycle**: `on_activate` loads state, `DeactivateAfterIdle` removes actor after idle timeout
-//! - Typed `BankAccountRef` for ergonomic actor calls
+//! - Typed `BankAccountRef` via `node.actor_ref("alice")`
 //! - Single process, local delivery, single transport
 //!
 //! # Architecture
 //!
 //! ```text
 //! EndpointMap:
-//!   UID(0x5049_4E47, 1) → PingPong::ping RequestStream   (static, index 1)
 //!   UID(0xBA4E_4B00, 0) → BankAccount handler             (virtual, all methods)
 //! ```
 
@@ -25,33 +22,11 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use moonpool::actors::{
-    ActorContext, ActorError, ActorHandler, ActorRouter, ActorStateStore, ClusterConfig,
-    DeactivationHint, InMemoryStateStore, MoonpoolNode, PersistentState,
+    ActorContext, ActorError, ActorHandler, ActorStateStore, ClusterConfig, DeactivationHint,
+    InMemoryStateStore, MoonpoolNode, NodeConfig, PersistentState,
 };
-use moonpool::{
-    Endpoint, JsonCodec, MessageCodec, NetworkAddress, Providers, RpcError, UID, actor_impl,
-    service,
-};
+use moonpool::{MessageCodec, NetworkAddress, Providers, RpcError, actor_impl, service};
 use serde::{Deserialize, Serialize};
-
-// ============================================================================
-// Static Interface: PingPong (proves coexistence)
-// ============================================================================
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct PingRequest {
-    seq: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct PingResponse {
-    seq: u32,
-}
-
-#[service(id = 0x5049_4E47)]
-trait PingPong {
-    async fn ping(&self, req: PingRequest) -> Result<PingResponse, RpcError>;
-}
 
 // ============================================================================
 // Virtual Actor: BankAccount (using #[service] macro)
@@ -114,7 +89,11 @@ impl BankAccountImpl {
 
 #[async_trait::async_trait(?Send)]
 impl BankAccount for BankAccountImpl {
-    async fn deposit(&mut self, req: DepositRequest) -> Result<BalanceResponse, RpcError> {
+    async fn deposit<P: Providers, C: MessageCodec>(
+        &mut self,
+        _ctx: &ActorContext<P, C>,
+        req: DepositRequest,
+    ) -> Result<BalanceResponse, RpcError> {
         let new_balance = self.balance() + req.amount;
         if let Some(s) = &mut self.state {
             s.state_mut().balance = new_balance;
@@ -129,7 +108,11 @@ impl BankAccount for BankAccountImpl {
         })
     }
 
-    async fn withdraw(&mut self, req: WithdrawRequest) -> Result<BalanceResponse, RpcError> {
+    async fn withdraw<P: Providers, C: MessageCodec>(
+        &mut self,
+        _ctx: &ActorContext<P, C>,
+        req: WithdrawRequest,
+    ) -> Result<BalanceResponse, RpcError> {
         let new_balance = self.balance() - req.amount;
         if let Some(s) = &mut self.state {
             s.state_mut().balance = new_balance;
@@ -144,7 +127,11 @@ impl BankAccount for BankAccountImpl {
         })
     }
 
-    async fn get_balance(&mut self, req: GetBalanceRequest) -> Result<BalanceResponse, RpcError> {
+    async fn get_balance<P: Providers, C: MessageCodec>(
+        &mut self,
+        _ctx: &ActorContext<P, C>,
+        req: GetBalanceRequest,
+    ) -> Result<BalanceResponse, RpcError> {
         let _ = req;
         let balance = self.balance();
         println!("  [server] GET_BALANCE → balance={}", balance);
@@ -184,43 +171,48 @@ impl ActorHandler for BankAccountImpl {
 }
 
 // ============================================================================
-// Static PingPong server loop (runs alongside ActorHost)
+// Main
 // ============================================================================
 
-async fn run_ping_server<P: Providers>(
-    transport: Rc<moonpool::NetTransport<P>>,
-    ping_server: PingPongServer<JsonCodec>,
-) {
-    // Process 2 ping messages
-    for _ in 0..2 {
-        if let Some((req, reply)) = ping_server
-            .ping
-            .recv_with_transport::<_, PingResponse>(&transport)
-            .await
-        {
-            println!("  [server] PING seq={}", req.seq);
-            reply.send(PingResponse { seq: req.seq });
+fn main() {
+    println!("=== Banking Example: Virtual Actors ===\n");
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build_local(Default::default())
+        .expect("Failed to create Tokio LocalRuntime");
+
+    runtime.block_on(async {
+        if let Err(e) = run_example().await {
+            eprintln!("Example error: {}", e);
+            std::process::exit(1);
         }
-    }
+    });
 }
 
-// ============================================================================
-// Client: uses BankAccountRef for virtual actors, bound client for static
-// ============================================================================
+async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
+    let local_addr = NetworkAddress::parse("127.0.0.1:4700")?;
 
-async fn run_client<P: Providers>(
-    router: Rc<ActorRouter<P>>,
-    transport: Rc<moonpool::NetTransport<P>>,
-    local_addr: NetworkAddress,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Set up static PingPong client
-    let ping_client = PingPongClient::new(local_addr).bind(transport, JsonCodec);
+    let state_store: Rc<dyn ActorStateStore> = Rc::new(InMemoryStateStore::new());
+
+    let cluster = ClusterConfig::builder()
+        .name("banking")
+        .topology(vec![local_addr.clone()])
+        .build()?;
+
+    let config = NodeConfig::builder().state_store(state_store).build();
+
+    let mut node = MoonpoolNode::new(cluster, config)
+        .with_providers(moonpool::TokioProviders::new())
+        .register::<BankAccountImpl>()
+        .start()
+        .await?;
+
+    // Create typed actor references via node.actor_ref()
+    let alice: BankAccountRef<_> = node.actor_ref("alice");
+    let bob: BankAccountRef<_> = node.actor_ref("bob");
 
     println!("\n--- Virtual Actor: BankAccount ---\n");
-
-    // Create typed actor references (no network call — just handles)
-    let alice = BankAccountRef::new("alice", &router);
-    let bob = BankAccountRef::new("bob", &router);
 
     // Deposit to alice
     let resp = alice.deposit(DepositRequest { amount: 100 }).await?;
@@ -253,80 +245,8 @@ async fn run_client<P: Providers>(
     assert_eq!(bob_balance.balance, 80);
     println!("  [client] Bob final balance: {}", bob_balance.balance);
 
-    println!("\n--- Static Interface: PingPong ---\n");
-
-    // Also call static endpoint to prove coexistence
-    let pong = ping_client.ping(PingRequest { seq: 42 }).await?;
-    assert_eq!(pong.seq, 42);
-    println!("  [client] Static ping seq=42 → pong seq={}", pong.seq);
-
-    // One more ping
-    let pong = ping_client.ping(PingRequest { seq: 99 }).await?;
-    assert_eq!(pong.seq, 99);
-    println!("  [client] Static ping seq=99 → pong seq={}", pong.seq);
-
     println!("\n--- Results ---\n");
     println!("  Virtual actors (BankAccount): alice=70, bob=80");
-    println!("  Static endpoint (PingPong): 2 successful pings");
-    println!("  Both coexist on the same transport!");
-
-    Ok(())
-}
-
-// ============================================================================
-// Main
-// ============================================================================
-
-fn main() {
-    println!("=== Banking Example: Virtual Actors + Static Endpoints ===\n");
-
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build_local(Default::default())
-        .expect("Failed to create Tokio LocalRuntime");
-
-    runtime.block_on(async {
-        if let Err(e) = run_example().await {
-            eprintln!("Example error: {}", e);
-            std::process::exit(1);
-        }
-    });
-}
-
-async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
-    // Shared local address for single-process local delivery
-    let local_addr = NetworkAddress::parse("127.0.0.1:4700")?;
-
-    // State store for persistent actor state
-    let state_store: Rc<dyn ActorStateStore> = Rc::new(InMemoryStateStore::new());
-
-    // Build and start a MoonpoolNode with banking actors
-    let local_endpoint = Endpoint::new(
-        local_addr.clone(),
-        UID::new(BankAccountRef::<moonpool::TokioProviders>::ACTOR_TYPE.0, 0),
-    );
-    let placement = Rc::new(moonpool::actors::LocalPlacement::new(local_endpoint));
-
-    let mut node = MoonpoolNode::join(ClusterConfig::single_node(local_addr.clone()))
-        .with_providers(moonpool::TokioProviders::new())
-        .with_address(local_addr.clone())
-        .with_placement(placement)
-        .with_state_store(state_store)
-        .register::<BankAccountImpl>()
-        .start()
-        .await?;
-
-    // Register static PingPong handler on the same transport
-    let ping_server = PingPongServer::init(node.transport(), JsonCodec);
-
-    // Spawn static PingPong server loop as a background task
-    let server_transport = node.transport().clone();
-    tokio::task::spawn_local(async move {
-        run_ping_server(server_transport, ping_server).await;
-    });
-
-    // Run client (sends requests that are delivered locally)
-    run_client(node.router().clone(), node.transport().clone(), local_addr).await?;
 
     node.shutdown().await?;
 

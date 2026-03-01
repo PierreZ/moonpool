@@ -7,20 +7,19 @@
 //! # Builder API
 //!
 //! ```rust,ignore
-//! let node = MoonpoolNode::join(cluster)
+//! let cluster = ClusterConfig::builder()
+//!     .name("banking")
+//!     .topology(vec![addr.clone()])
+//!     .build()?;
+//!
+//! let node = MoonpoolNode::new(cluster, NodeConfig::default())
 //!     .with_providers(providers)
-//!     .with_address(addr)
-//!     .with_placement(placement)
 //!     .register::<CounterActor>()
 //!     .start()
 //!     .await?;
 //!
-//! // Use actors via the node
-//! let resp: ValueResponse = node.router().send_actor_request(
-//!     &ActorId::new(COUNTER_TYPE, "my-counter"),
-//!     1,
-//!     &IncrementRequest { amount: 1 },
-//! ).await?;
+//! let counter: CounterRef<_> = node.actor_ref("my-counter");
+//! let resp = counter.increment(IncrementRequest { amount: 1 }).await?;
 //!
 //! node.shutdown().await?;
 //! ```
@@ -39,11 +38,12 @@ use crate::{
     Providers, TaskProvider, UID,
 };
 
+use super::ActorDirectory;
 use super::cluster::ClusterConfig;
 use super::host::{ActorHandler, ActorTypeDispatcher, TypedDispatcher};
+use super::node_config::NodeConfig;
 use super::router::{ActorError, ActorRouter};
 use super::state::ActorStateStore;
-use super::{ActorDirectory, PlacementStrategy};
 
 /// Type alias for a collection of close handles (one per registered actor type).
 type CloseHandles = Vec<Box<dyn Fn()>>;
@@ -83,6 +83,18 @@ pub struct MoonpoolNode<P: Providers, C: MessageCodec = JsonCodec> {
 }
 
 impl<P: Providers, C: MessageCodec> MoonpoolNode<P, C> {
+    /// Get a typed actor reference by identity.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let alice: BankAccountRef<_> = node.actor_ref("alice");
+    /// alice.deposit(req).await?;
+    /// ```
+    pub fn actor_ref<R: super::ActorRef<P, C>>(&self, identity: impl Into<String>) -> R {
+        R::from_router(identity, &self.router)
+    }
+
     /// Get a reference to the actor router.
     ///
     /// Use this to send requests to virtual actors via
@@ -150,21 +162,17 @@ impl<P: Providers, C: MessageCodec> Drop for MoonpoolNode<P, C> {
 /// # Example
 ///
 /// ```rust,ignore
-/// let node = MoonpoolNode::join(cluster)
+/// let node = MoonpoolNode::new(cluster, NodeConfig::default())
 ///     .with_providers(providers)
-///     .with_address(addr)
-///     .with_placement(placement)
 ///     .register::<MyActor>()
 ///     .start()
 ///     .await?;
 /// ```
 pub struct MoonpoolNodeBuilder<P: Providers, C: MessageCodec = JsonCodec> {
     cluster: ClusterConfig,
+    config: NodeConfig,
     providers: Option<P>,
-    address: Option<NetworkAddress>,
-    placement: Option<Rc<dyn PlacementStrategy>>,
     codec: C,
-    state_store: Option<Rc<dyn ActorStateStore>>,
     registrations: Vec<RegistrationFn<P, C>>,
 }
 
@@ -180,18 +188,22 @@ struct NodeParts<P: Providers, C: MessageCodec> {
 }
 
 impl<P: Providers> MoonpoolNode<P> {
-    /// Start building a node that joins the given cluster.
+    /// Create a builder for a node in the given cluster.
     ///
     /// Uses [`JsonCodec`] by default. Call [`MoonpoolNodeBuilder::with_codec`]
     /// to override.
-    pub fn join(cluster: ClusterConfig) -> MoonpoolNodeBuilder<P> {
+    ///
+    /// # Arguments
+    ///
+    /// * `cluster` - Shared cluster configuration (directory, membership)
+    /// * `config` - Per-node settings (address, placement, state store)
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new(cluster: ClusterConfig, config: NodeConfig) -> MoonpoolNodeBuilder<P> {
         MoonpoolNodeBuilder {
             cluster,
+            config,
             providers: None,
-            address: None,
-            placement: None,
             codec: JsonCodec,
-            state_store: None,
             registrations: Vec::new(),
         }
     }
@@ -204,37 +216,15 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
         self
     }
 
-    /// Set the node's network address (required).
-    pub fn with_address(mut self, address: NetworkAddress) -> Self {
-        self.address = Some(address);
-        self
-    }
-
-    /// Set the placement strategy.
-    ///
-    /// If not set, a [`LocalPlacement`](super::LocalPlacement) is used.
-    pub fn with_placement(mut self, placement: Rc<dyn PlacementStrategy>) -> Self {
-        self.placement = Some(placement);
-        self
-    }
-
     /// Set a custom message codec.
     pub fn with_codec<C2: MessageCodec>(self, codec: C2) -> MoonpoolNodeBuilder<P, C2> {
         MoonpoolNodeBuilder {
             cluster: self.cluster,
+            config: self.config,
             providers: self.providers,
-            address: self.address,
-            placement: self.placement,
             codec,
-            state_store: self.state_store,
             registrations: Vec::new(), // type changed, must re-register
         }
-    }
-
-    /// Set an actor state store for persistent actor state.
-    pub fn with_state_store(mut self, store: Rc<dyn ActorStateStore>) -> Self {
-        self.state_store = Some(store);
-        self
     }
 
     /// Register an actor handler type.
@@ -262,12 +252,30 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
     /// Creates the transport, router, and executes all actor registrations.
     /// The node is ready to process messages after this returns.
     ///
+    /// If no address was set in [`NodeConfig`], it is inferred from a
+    /// single-member topology. Multi-member topologies require an explicit address.
+    ///
     /// # Errors
     ///
     /// Returns an error if required fields are missing or transport creation fails.
     pub async fn start(self) -> Result<MoonpoolNode<P, C>, NodeError> {
         let providers = self.providers.ok_or(NodeError::MissingProviders)?;
-        let address = self.address.ok_or(NodeError::MissingAddress)?;
+
+        // Resolve address: explicit or inferred from single-member topology
+        let address = match self.config.address() {
+            Some(addr) => addr.clone(),
+            None => {
+                let members = self.cluster.membership().members().await;
+                if members.len() == 1 {
+                    members
+                        .into_iter()
+                        .next()
+                        .ok_or(NodeError::MissingAddress)?
+                } else {
+                    return Err(NodeError::MissingAddress);
+                }
+            }
+        };
 
         // Create transport
         let transport = NetTransportBuilder::new(providers.clone())
@@ -276,7 +284,7 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
             .map_err(|e| NodeError::Transport(e.to_string()))?;
 
         // Determine placement strategy
-        let placement = self.placement.unwrap_or_else(|| {
+        let placement = self.config.placement().cloned().unwrap_or_else(|| {
             let local_endpoint = Endpoint::new(address.clone(), UID::new(0, 0));
             Rc::new(super::LocalPlacement::new(local_endpoint))
         });
@@ -298,7 +306,7 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
             transport: transport.clone(),
             router: router.clone(),
             directory,
-            state_store: self.state_store,
+            state_store: self.config.state_store().cloned(),
             providers: providers.clone(),
             pending_tasks: pending_tasks.clone(),
             close_handles: close_handles.clone(),
@@ -331,8 +339,10 @@ pub enum NodeError {
     #[error("node requires providers (call with_providers())")]
     MissingProviders,
 
-    /// Network address was not set on the builder.
-    #[error("node requires an address (call with_address())")]
+    /// Network address could not be determined.
+    ///
+    /// Set it via [`NodeConfig::for_address`] or use a single-member topology.
+    #[error("node requires an address (set in NodeConfig or use single-member topology)")]
     MissingAddress,
 
     /// Transport creation failed.
@@ -347,7 +357,7 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     use crate::actors::types::{ActorId, ActorType};
-    use crate::actors::{InMemoryDirectory, LocalPlacement};
+    use crate::actors::{LocalPlacement, PlacementStrategy};
     use crate::{Endpoint, TokioProviders, UID};
 
     use super::super::host::{ActorContext, ActorHandler};
@@ -419,9 +429,11 @@ mod tests {
     #[test]
     fn test_node_builder_missing_providers() {
         run_local_test(async {
-            let cluster = ClusterConfig::single_node(addr(4700));
-            let result = MoonpoolNode::<TokioProviders>::join(cluster)
-                .with_address(addr(4700))
+            let cluster = ClusterConfig::builder()
+                .topology(vec![addr(4700)])
+                .build()
+                .expect("build cluster");
+            let result = MoonpoolNode::<TokioProviders>::new(cluster, NodeConfig::default())
                 .start()
                 .await;
             assert!(matches!(result, Err(NodeError::MissingProviders)));
@@ -429,10 +441,35 @@ mod tests {
     }
 
     #[test]
-    fn test_node_builder_missing_address() {
+    fn test_node_address_inferred_from_topology() {
         run_local_test(async {
-            let cluster = ClusterConfig::single_node(addr(4700));
-            let result = MoonpoolNode::join(cluster)
+            let local_addr = addr(4700);
+            let cluster = ClusterConfig::builder()
+                .topology(vec![local_addr.clone()])
+                .build()
+                .expect("build cluster");
+
+            // No address in NodeConfig — should be inferred from single-member topology
+            let node = MoonpoolNode::new(cluster, NodeConfig::default())
+                .with_providers(TokioProviders::new())
+                .start()
+                .await
+                .expect("start node");
+
+            assert_eq!(node.address(), &local_addr);
+        });
+    }
+
+    #[test]
+    fn test_node_missing_address_multi_member() {
+        run_local_test(async {
+            let cluster = ClusterConfig::builder()
+                .topology(vec![addr(4700), addr(4701)])
+                .build()
+                .expect("build cluster");
+
+            // No address in NodeConfig + multi-member topology → error
+            let result = MoonpoolNode::new(cluster, NodeConfig::default())
                 .with_providers(TokioProviders::new())
                 .start()
                 .await;
@@ -444,22 +481,18 @@ mod tests {
     fn test_node_start_and_send() {
         run_local_test(async {
             let local_addr = addr(4700);
-            let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
             let local_endpoint = Endpoint::new(local_addr.clone(), UID::new(TEST_ACTOR_TYPE.0, 0));
             let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(local_endpoint));
 
             let cluster = ClusterConfig::builder()
-                .directory(directory)
-                .membership(Rc::new(super::super::membership::SharedMembership::new(
-                    vec![local_addr.clone()],
-                )))
+                .topology(vec![local_addr.clone()])
                 .build()
                 .expect("build cluster");
 
-            let mut node = MoonpoolNode::join(cluster)
+            let config = NodeConfig::builder().placement(placement).build();
+
+            let mut node = MoonpoolNode::new(cluster, config)
                 .with_providers(TokioProviders::new())
-                .with_address(local_addr)
-                .with_placement(placement)
                 .register::<CounterActor>()
                 .start()
                 .await
@@ -488,12 +521,17 @@ mod tests {
     }
 
     #[test]
-    fn test_node_single_node_convenience() {
+    fn test_node_topology_convenience() {
         run_local_test(async {
             let local_addr = addr(4701);
-            let mut node = MoonpoolNode::join(ClusterConfig::single_node(local_addr.clone()))
+
+            let cluster = ClusterConfig::builder()
+                .topology(vec![local_addr.clone()])
+                .build()
+                .expect("build cluster");
+
+            let mut node = MoonpoolNode::new(cluster, NodeConfig::default())
                 .with_providers(TokioProviders::new())
-                .with_address(local_addr.clone())
                 .register::<CounterActor>()
                 .start()
                 .await
@@ -518,9 +556,14 @@ mod tests {
     fn test_node_address_accessor() {
         run_local_test(async {
             let local_addr = addr(4702);
-            let node = MoonpoolNode::join(ClusterConfig::single_node(local_addr.clone()))
+
+            let cluster = ClusterConfig::builder()
+                .topology(vec![local_addr.clone()])
+                .build()
+                .expect("build cluster");
+
+            let node = MoonpoolNode::new(cluster, NodeConfig::default())
                 .with_providers(TokioProviders::new())
-                .with_address(local_addr.clone())
                 .start()
                 .await
                 .expect("start node");

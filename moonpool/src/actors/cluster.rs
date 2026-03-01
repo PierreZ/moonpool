@@ -7,12 +7,9 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! let directory = Rc::new(InMemoryDirectory::new());
-//! let membership = Rc::new(SharedMembership::new(vec![addr_a, addr_b]));
-//!
 //! let cluster = ClusterConfig::builder()
-//!     .directory(directory)
-//!     .membership(membership)
+//!     .name("banking")
+//!     .topology(vec![addr_a, addr_b])
 //!     .build()?;
 //! ```
 
@@ -29,6 +26,7 @@ use crate::NetworkAddress;
 /// giving them a single shared directory and membership view.
 #[derive(Debug, Clone)]
 pub struct ClusterConfig {
+    name: Option<String>,
     directory: Rc<dyn ActorDirectory>,
     membership: Rc<dyn MembershipProvider>,
 }
@@ -37,20 +35,15 @@ impl ClusterConfig {
     /// Start building a cluster configuration.
     pub fn builder() -> ClusterConfigBuilder {
         ClusterConfigBuilder {
+            name: None,
             directory: None,
             membership: None,
         }
     }
 
-    /// Create a single-node cluster configuration.
-    ///
-    /// Uses an in-memory directory and a membership list containing
-    /// only the given address.
-    pub fn single_node(address: NetworkAddress) -> Self {
-        Self {
-            directory: Rc::new(InMemoryDirectory::new()),
-            membership: Rc::new(SharedMembership::new(vec![address])),
-        }
+    /// Optional cluster name (for logging/debugging).
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 
     /// The shared actor directory.
@@ -66,12 +59,21 @@ impl ClusterConfig {
 
 /// Builder for [`ClusterConfig`].
 pub struct ClusterConfigBuilder {
+    name: Option<String>,
     directory: Option<Rc<dyn ActorDirectory>>,
     membership: Option<Rc<dyn MembershipProvider>>,
 }
 
 impl ClusterConfigBuilder {
+    /// Set the cluster name (for logging/debugging).
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
     /// Set the actor directory.
+    ///
+    /// If not set, defaults to [`InMemoryDirectory`].
     pub fn directory(mut self, directory: Rc<dyn ActorDirectory>) -> Self {
         self.directory = Some(directory);
         self
@@ -83,18 +85,30 @@ impl ClusterConfigBuilder {
         self
     }
 
+    /// Convenience: set the cluster topology from a list of addresses.
+    ///
+    /// Creates a [`SharedMembership`] internally. Use [`membership()`](Self::membership)
+    /// for custom membership providers.
+    pub fn topology(self, addresses: Vec<NetworkAddress>) -> Self {
+        self.membership(Rc::new(SharedMembership::new(addresses)))
+    }
+
     /// Build the cluster configuration.
     ///
     /// # Errors
     ///
-    /// Returns an error if directory or membership is not set.
+    /// Returns an error if membership is not set (via [`topology()`](Self::topology)
+    /// or [`membership()`](Self::membership)).
     pub fn build(self) -> Result<ClusterConfig, ClusterConfigError> {
-        let directory = self.directory.ok_or(ClusterConfigError::MissingDirectory)?;
         let membership = self
             .membership
             .ok_or(ClusterConfigError::MissingMembership)?;
+        let directory = self
+            .directory
+            .unwrap_or_else(|| Rc::new(InMemoryDirectory::new()));
 
         Ok(ClusterConfig {
+            name: self.name,
             directory,
             membership,
         })
@@ -104,11 +118,8 @@ impl ClusterConfigBuilder {
 /// Errors from building a [`ClusterConfig`].
 #[derive(Debug, thiserror::Error)]
 pub enum ClusterConfigError {
-    /// No directory was provided to the builder.
-    #[error("cluster config requires a directory")]
-    MissingDirectory,
     /// No membership provider was provided to the builder.
-    #[error("cluster config requires a membership provider")]
+    #[error("cluster config requires a membership provider (call topology() or membership())")]
     MissingMembership,
 }
 
@@ -123,17 +134,30 @@ mod tests {
     }
 
     #[test]
-    fn test_single_node() {
-        let cluster = ClusterConfig::single_node(addr(4500));
-        // Verify Debug is implemented
-        let debug_str = format!("{:?}", cluster);
-        assert!(!debug_str.is_empty());
+    fn test_builder_with_topology() {
+        let cluster = ClusterConfig::builder()
+            .name("test")
+            .topology(vec![addr(4500)])
+            .build()
+            .expect("build should succeed");
+
+        assert_eq!(cluster.name(), Some("test"));
         let _ = cluster.directory();
         let _ = cluster.membership();
     }
 
     #[test]
-    fn test_builder() {
+    fn test_builder_without_name() {
+        let cluster = ClusterConfig::builder()
+            .topology(vec![addr(4500)])
+            .build()
+            .expect("build should succeed");
+
+        assert_eq!(cluster.name(), None);
+    }
+
+    #[test]
+    fn test_builder_with_explicit_directory() {
         let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
         let membership: Rc<dyn MembershipProvider> =
             Rc::new(SharedMembership::new(vec![addr(4500)]));
@@ -149,25 +173,30 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_missing_directory() {
-        let membership: Rc<dyn MembershipProvider> =
-            Rc::new(SharedMembership::new(vec![addr(4500)]));
+    fn test_builder_defaults_directory() {
+        let cluster = ClusterConfig::builder()
+            .topology(vec![addr(4500)])
+            .build()
+            .expect("build should succeed");
 
-        let result = ClusterConfig::builder().membership(membership).build();
-        assert!(matches!(result, Err(ClusterConfigError::MissingDirectory)));
+        // Directory should be defaulted (InMemoryDirectory)
+        let debug_str = format!("{:?}", cluster);
+        assert!(!debug_str.is_empty());
     }
 
     #[test]
     fn test_builder_missing_membership() {
-        let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
-
-        let result = ClusterConfig::builder().directory(directory).build();
+        let result = ClusterConfig::builder().build();
         assert!(matches!(result, Err(ClusterConfigError::MissingMembership)));
     }
 
     #[tokio::test]
-    async fn test_single_node_membership() {
-        let cluster = ClusterConfig::single_node(addr(4500));
+    async fn test_topology_membership() {
+        let cluster = ClusterConfig::builder()
+            .topology(vec![addr(4500)])
+            .build()
+            .expect("build should succeed");
+
         let members = cluster.membership().members().await;
         assert_eq!(members.len(), 1);
         assert_eq!(members[0], addr(4500));
