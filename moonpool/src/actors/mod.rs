@@ -65,4 +65,6 @@ pub use persistent_state::PersistentState;
 pub use placement::{LocalPlacement, PlacementError, PlacementStrategy, RoundRobinPlacement};
 pub use router::{ActorError, ActorRouter};
 pub use state::{ActorStateError, ActorStateStore, InMemoryStateStore, StoredState};
-pub use types::{ActorId, ActorMessage, ActorResponse, ActorType, CacheInvalidation};
+pub use types::{
+    ActivationId, ActorAddress, ActorId, ActorMessage, ActorResponse, ActorType, CacheInvalidation,
+};

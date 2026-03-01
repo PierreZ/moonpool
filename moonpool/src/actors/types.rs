@@ -131,8 +131,74 @@ pub struct CacheInvalidation {
     pub valid_endpoint: Option<crate::Endpoint>,
 }
 
+/// Unique identifier for a specific actor activation.
+///
+/// When an actor is activated on a node, it gets a unique `ActivationId`.
+/// If the actor is deactivated and later re-activated (possibly on a
+/// different node), it gets a new `ActivationId`. This distinguishes
+/// stale directory entries from current ones.
+///
+/// # Orleans Reference
+///
+/// Corresponds to Orleans' `ActivationId` — a unique tag generated
+/// per activation, used for conflict resolution in the directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ActivationId(pub u64);
+
+impl ActivationId {
+    /// Create a new activation ID from a raw value.
+    pub fn new(id: u64) -> Self {
+        Self(id)
+    }
+}
+
+impl std::fmt::Display for ActivationId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "act-{:016x}", self.0)
+    }
+}
+
+/// Full address of an actor activation: identity + location + activation.
+///
+/// This is the value stored in the directory. It tells you not just
+/// *which* actor and *where* it is, but *which specific activation*
+/// is registered. This allows safe re-registration after deactivation.
+///
+/// # Orleans Reference
+///
+/// Corresponds to Orleans' `GrainAddress` which contains:
+/// - `GrainId` (our `ActorId`)
+/// - `SiloAddress` (our `NetworkAddress` in the `Endpoint`)
+/// - `ActivationId` (our `ActivationId`)
+///
+/// The key insight from Orleans: `Register()` returns the existing
+/// `GrainAddress` on conflict. The caller can compare activation IDs
+/// to detect stale registrations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActorAddress {
+    /// The actor's identity (type + key).
+    pub actor_id: ActorId,
+    /// The endpoint where this activation is hosted.
+    pub endpoint: crate::Endpoint,
+    /// Unique identifier for this specific activation.
+    pub activation_id: ActivationId,
+}
+
+impl ActorAddress {
+    /// Create a new actor address.
+    pub fn new(actor_id: ActorId, endpoint: crate::Endpoint, activation_id: ActivationId) -> Self {
+        Self {
+            actor_id,
+            endpoint,
+            activation_id,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
     use super::*;
 
     #[test]
@@ -287,5 +353,52 @@ mod tests {
 
         assert_eq!(map.get(&alice), Some(&100));
         assert_eq!(map.get(&bob), Some(&50));
+    }
+
+    #[test]
+    fn test_activation_id_display() {
+        let id = ActivationId::new(42);
+        assert_eq!(format!("{id}"), "act-000000000000002a");
+    }
+
+    #[test]
+    fn test_actor_address_equality() {
+        let endpoint = crate::Endpoint::new(
+            crate::NetworkAddress::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4500),
+            crate::UID::new(0xBA4E_4B00, 0),
+        );
+        let actor_id = ActorId::new(ActorType(0xBA4E_4B00), "alice");
+
+        let addr1 = ActorAddress::new(actor_id.clone(), endpoint.clone(), ActivationId::new(1));
+        let addr2 = ActorAddress::new(actor_id.clone(), endpoint.clone(), ActivationId::new(1));
+        assert_eq!(addr1, addr2);
+    }
+
+    #[test]
+    fn test_actor_address_different_activation_not_equal() {
+        let endpoint = crate::Endpoint::new(
+            crate::NetworkAddress::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4500),
+            crate::UID::new(0xBA4E_4B00, 0),
+        );
+        let actor_id = ActorId::new(ActorType(0xBA4E_4B00), "alice");
+
+        let addr1 = ActorAddress::new(actor_id.clone(), endpoint.clone(), ActivationId::new(1));
+        let addr2 = ActorAddress::new(actor_id, endpoint, ActivationId::new(2));
+        assert_ne!(addr1, addr2);
+    }
+
+    #[test]
+    fn test_actor_address_serialization_roundtrip() {
+        let endpoint = crate::Endpoint::new(
+            crate::NetworkAddress::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4500),
+            crate::UID::new(0xBA4E_4B00, 0),
+        );
+        let actor_id = ActorId::new(ActorType(0xBA4E_4B00), "alice");
+        let addr = ActorAddress::new(actor_id, endpoint, ActivationId::new(99));
+
+        let serialized = serde_json::to_vec(&addr).expect("serialize");
+        let deserialized: ActorAddress = serde_json::from_slice(&serialized).expect("deserialize");
+
+        assert_eq!(addr, deserialized);
     }
 }
