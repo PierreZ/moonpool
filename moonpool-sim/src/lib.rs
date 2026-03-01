@@ -164,6 +164,9 @@ pub mod network;
 /// Storage simulation and configuration.
 pub mod storage;
 
+/// Simulation workloads and binary targets.
+pub mod simulations;
+
 // =============================================================================
 // Public API Re-exports
 // =============================================================================

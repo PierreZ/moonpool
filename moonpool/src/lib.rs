@@ -61,9 +61,16 @@
 
 #![deny(missing_docs)]
 
+// Allow the proc macros (#[service], #[actor_impl]) to reference `moonpool::actors::*`
+// when used inside this crate. Without this, the generated code fails to resolve
+// because Rust doesn't implicitly allow a crate to reference itself by name.
+extern crate self as moonpool;
+
 // Re-export all public items from sub-crates
 pub use moonpool_core::*;
 pub use moonpool_sim::*;
 pub use moonpool_transport::*;
 
 pub mod actors;
+#[allow(missing_docs)]
+pub mod simulations;

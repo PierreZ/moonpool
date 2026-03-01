@@ -27,10 +27,9 @@ thiserror = "2.0"
 tokio = { version = "1", features = ["full", "tracing"] }
 tokio-util = "0.7"
 tracing = "0.1"
+tracing-subscriber = "0.3"
 
 [dev-dependencies]
-moonpool-sim = { path = "../moonpool-sim", version = "0.4.0" }
-tracing-subscriber = "0.3"
 
 [[example]]
 name = "ping_pong"
@@ -39,3 +38,11 @@ path = "examples/ping_pong.rs"
 [[example]]
 name = "calculator"
 path = "examples/calculator.rs"
+
+[[bin]]
+name = "sim-transport-e2e"
+path = "src/bin/sim/transport_e2e.rs"
+
+[[bin]]
+name = "sim-transport-messaging"
+path = "src/bin/sim/transport_messaging.rs"

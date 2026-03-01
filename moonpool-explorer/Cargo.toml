@@ -7,5 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "Fork-based multiverse exploration for moonpool simulation testing"
 
+[[bin]]
+name = "sim-adaptive-explore"
+path = "src/bin/sim/adaptive_explore.rs"
+
 [dependencies]
 libc = "0.2"

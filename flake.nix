@@ -49,10 +49,11 @@
             echo "🌙 Moonpool development environment loaded"
             echo "Rust version: $(rustc --version)"
             echo "Cargo version: $(cargo --version)"
-            
+
             # Set environment variables
             export RUST_BACKTRACE=1
             export RUST_LOG=debug
+            export RUSTC_WRAPPER="$PWD/scripts/sancov-rustc.sh"
             
             # Inform about available tools
             echo "Available tools:"

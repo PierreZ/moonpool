@@ -821,9 +821,4 @@ impl MetricsCollector {
             bucket_summaries,
         }
     }
-
-    /// Get current statistics for logging.
-    pub(crate) fn current_stats(&self) -> (usize, usize) {
-        (self.successful_runs, self.failed_runs)
-    }
 }

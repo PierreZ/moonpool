@@ -564,8 +564,10 @@ pub mod coverage;
 pub mod each_buckets;
 pub mod energy;
 pub mod replay;
+pub mod sancov;
 pub mod shared_mem;
 pub mod shared_stats;
+pub mod simulations;
 pub mod split_loop;
 
 // Re-exports for the public API
@@ -578,6 +580,7 @@ pub use each_buckets::{
     EachBucket, assertion_sometimes_each, each_bucket_read_all, unpack_quality,
 };
 pub use replay::{ParseTimelineError, format_timeline, parse_timeline};
+pub use sancov::{sancov_edge_count, sancov_edges_covered, sancov_is_available};
 pub use shared_stats::{ExplorationStats, get_bug_recipe, get_exploration_stats};
 pub use split_loop::{AdaptiveConfig, Parallelism, exit_child};
 
@@ -726,6 +729,11 @@ pub fn prepare_next_seed(per_seed_energy: i64) {
         }
     }
 
+    // 4b. Clear sancov transfer buffer and reset BSS counters.
+    //     History map is preserved (cumulative, like the explored map).
+    sancov::clear_transfer_buffer();
+    sancov::reset_bss_counters();
+
     // 5. Reset energy budget with fresh per-seed energy
     let energy_ptr = ENERGY_BUDGET_PTR.with(|c| c.get());
     if !energy_ptr.is_null() {
@@ -788,6 +796,9 @@ pub fn explored_map_bits_set() -> Option<u32> {
 pub fn init(config: ExplorationConfig) -> Result<(), std::io::Error> {
     // Initialize assertion table first (idempotent)
     init_assertions()?;
+
+    // Initialize sancov shared memory (no-op if sancov unavailable)
+    sancov::init_sancov_shared()?;
 
     // Allocate exploration-specific shared memory regions
     let stats_ptr = shared_stats::init_shared_stats(config.global_energy)?;
@@ -878,6 +889,9 @@ pub fn cleanup() {
             ENERGY_BUDGET_PTR.with(|c| c.set(std::ptr::null_mut()));
         }
     }
+
+    // Clean up sancov shared memory
+    sancov::cleanup_sancov_shared();
 
     // Clean up assertion table and each-buckets (shared with init_assertions)
     cleanup_assertions();

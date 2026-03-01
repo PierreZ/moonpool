@@ -1,0 +1,25 @@
+[package]
+name = "moonpool-sim-examples"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Example simulation workloads for moonpool"
+documentation = "https://docs.rs/moonpool-sim-examples"
+
+[dependencies]
+moonpool-sim = { path = "../moonpool-sim", version = "0.4.0" }
+
+async-trait = "0.1"
+rand = "0.10"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[[bin]]
+name = "sim-maze-explore"
+path = "src/bin/sim/maze_explore.rs"
+
+[[bin]]
+name = "sim-dungeon-explore"
+path = "src/bin/sim/dungeon_explore.rs"

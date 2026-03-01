@@ -52,6 +52,10 @@ pub struct ExplorationStats {
     pub bug_found: u64,
     /// Energy remaining in the reallocation pool (0 when adaptive is disabled).
     pub realloc_pool_remaining: i64,
+    /// Total instrumented code edges (from LLVM sancov). 0 when sancov unavailable.
+    pub sancov_edges_total: usize,
+    /// Code edges covered across all timelines. 0 when sancov unavailable.
+    pub sancov_edges_covered: usize,
 }
 
 /// Allocate and initialize shared stats.
@@ -144,6 +148,8 @@ pub fn get_exploration_stats() -> Option<ExplorationStats> {
             fork_points: (*ptr).fork_points.load(Ordering::Relaxed),
             bug_found: (*ptr).bug_found.load(Ordering::Relaxed),
             realloc_pool_remaining: realloc_pool,
+            sancov_edges_total: crate::sancov::sancov_edge_count(),
+            sancov_edges_covered: crate::sancov::sancov_edges_covered(),
         })
     }
 }

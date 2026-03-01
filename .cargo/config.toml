@@ -2,5 +2,4 @@
 rustflags = ["--cfg", "tokio_unstable"]
 
 [alias]
-test-fast = "nextest run --profile fast"
-test-sim = "nextest run --profile sim"
+xtask = "run --package xtask --"

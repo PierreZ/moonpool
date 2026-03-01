@@ -60,6 +60,10 @@ pub struct ExplorationReport {
     pub coverage_bits: u32,
     /// Total number of bits in the coverage map (8192).
     pub coverage_total: u32,
+    /// Total instrumented code edges (from LLVM sancov). 0 when sancov unavailable.
+    pub sancov_edges_total: usize,
+    /// Code edges covered across all timelines. 0 when sancov unavailable.
+    pub sancov_edges_covered: usize,
 }
 
 /// Pass/fail/miss status for an assertion in the report.
@@ -170,6 +174,14 @@ impl SimulationReport {
             self.metrics.events_processed as f64 / self.successful_runs as f64
         }
     }
+
+    /// Print the report to stderr with colors when the terminal supports it.
+    ///
+    /// Falls back to the plain `Display` output when stderr is not a TTY
+    /// or `NO_COLOR` is set.
+    pub fn eprint(&self) {
+        super::display::eprint_report(self);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +199,15 @@ fn fmt_num(n: u64) -> String {
         result.push(c);
     }
     result.chars().rev().collect()
+}
+
+/// Format an `i64` with comma separators (handles negatives).
+fn fmt_i64(n: i64) -> String {
+    if n < 0 {
+        format!("-{}", fmt_num(n.unsigned_abs()))
+    } else {
+        fmt_num(n as u64)
+    }
 }
 
 /// Format a duration as a human-readable string.
@@ -295,10 +316,20 @@ impl fmt::Display for SimulationReport {
                     0.0
                 }
             )?;
+            if exp.sancov_edges_total > 0 {
+                writeln!(
+                    f,
+                    "  Sancov:       {} / {} edges ({:.1}%)",
+                    fmt_num(exp.sancov_edges_covered as u64),
+                    fmt_num(exp.sancov_edges_total as u64),
+                    (exp.sancov_edges_covered as f64 / exp.sancov_edges_total as f64) * 100.0
+                )?;
+            }
             writeln!(
                 f,
                 "  Energy left:  {:<18}Realloc pool:   {}",
-                exp.energy_remaining, exp.realloc_pool_remaining
+                fmt_i64(exp.energy_remaining),
+                fmt_i64(exp.realloc_pool_remaining)
             )?;
             for br in &exp.bug_recipes {
                 writeln!(
