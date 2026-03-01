@@ -623,53 +623,7 @@ impl SimulationBuilder {
         // 5. Build bucket summaries by grouping EachBuckets by site
         let bucket_summaries = build_bucket_summaries(&raw_each_buckets);
 
-        // Print exploration summary (always visible, no tracing subscriber needed)
-        if let Some(ref exp) = exploration_report {
-            eprintln!(
-                "\n--- Exploration ---\n  timelines: {}  |  fork points: {}  |  bugs: {}  |  energy left: {}  |  coverage: {}/{} ({:.1}%)",
-                exp.total_timelines,
-                exp.fork_points,
-                exp.bugs_found,
-                exp.energy_remaining,
-                exp.coverage_bits,
-                exp.coverage_total,
-                if exp.coverage_total > 0 {
-                    (exp.coverage_bits as f64 / exp.coverage_total as f64) * 100.0
-                } else {
-                    0.0
-                }
-            );
-            if exp.sancov_edges_total > 0 {
-                eprintln!(
-                    "  sancov: {} / {} edges ({:.1}%)",
-                    exp.sancov_edges_covered,
-                    exp.sancov_edges_total,
-                    (exp.sancov_edges_covered as f64 / exp.sancov_edges_total as f64) * 100.0
-                );
-            }
-            for br in &exp.bug_recipes {
-                eprintln!(
-                    "  bug recipe: {}",
-                    moonpool_explorer::format_timeline(&br.recipe)
-                );
-            }
-        }
-
-        // Log summary of all seeds used
         let iteration_count = iteration_manager.current_iteration();
-        let (successful_runs, failed_runs) = metrics_collector.current_stats();
-        tracing::info!(
-            "Simulation completed: {}/{} iterations successful",
-            successful_runs,
-            iteration_count
-        );
-        tracing::info!("Seeds used: {:?}", iteration_manager.seeds_used());
-        if failed_runs > 0 {
-            tracing::warn!(
-                "{} iterations failed - check logs above for failing seeds",
-                failed_runs
-            );
-        }
 
         // Final buggify reset to ensure no impact on subsequent code
         crate::chaos::buggify_reset();

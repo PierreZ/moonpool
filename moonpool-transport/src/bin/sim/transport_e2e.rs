@@ -65,7 +65,7 @@ fn main() {
             }))
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
-    eprintln!("{}", report);
+    report.eprint();
     if let Err(e) = check_report("reliable_delivery", &report) {
         eprintln!("FAILED: {e}");
         process::exit(1);
@@ -86,7 +86,7 @@ fn main() {
             }))
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
-    eprintln!("{}", report);
+    report.eprint();
     if let Err(e) = check_report("unreliable_drops", &report) {
         eprintln!("FAILED: {e}");
         process::exit(1);
@@ -107,7 +107,7 @@ fn main() {
             }))
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
-    eprintln!("{}", report);
+    report.eprint();
     if let Err(e) = check_report("mixed_queues", &report) {
         eprintln!("FAILED: {e}");
         process::exit(1);
@@ -128,7 +128,7 @@ fn main() {
             }))
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
-    eprintln!("{}", report);
+    report.eprint();
     if let Err(e) = check_report("reconnection", &report) {
         eprintln!("FAILED: {e}");
         process::exit(1);
@@ -161,7 +161,7 @@ fn main() {
             }))
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
-    eprintln!("{}", report);
+    report.eprint();
     if let Err(e) = check_report("multi_client", &report) {
         eprintln!("FAILED: {e}");
         process::exit(1);

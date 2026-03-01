@@ -174,6 +174,14 @@ impl SimulationReport {
             self.metrics.events_processed as f64 / self.successful_runs as f64
         }
     }
+
+    /// Print the report to stderr with colors when the terminal supports it.
+    ///
+    /// Falls back to the plain `Display` output when stderr is not a TTY
+    /// or `NO_COLOR` is set.
+    pub fn eprint(&self) {
+        super::display::eprint_report(self);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +199,15 @@ fn fmt_num(n: u64) -> String {
         result.push(c);
     }
     result.chars().rev().collect()
+}
+
+/// Format an `i64` with comma separators (handles negatives).
+fn fmt_i64(n: i64) -> String {
+    if n < 0 {
+        format!("-{}", fmt_num(n.unsigned_abs()))
+    } else {
+        fmt_num(n as u64)
+    }
 }
 
 /// Format a duration as a human-readable string.
@@ -311,7 +328,8 @@ impl fmt::Display for SimulationReport {
             writeln!(
                 f,
                 "  Energy left:  {:<18}Realloc pool:   {}",
-                exp.energy_remaining, exp.realloc_pool_remaining
+                fmt_i64(exp.energy_remaining),
+                fmt_i64(exp.realloc_pool_remaining)
             )?;
             for br in &exp.bug_recipes {
                 writeln!(

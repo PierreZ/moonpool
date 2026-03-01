@@ -13,6 +13,7 @@
 
 pub mod builder;
 pub mod context;
+pub mod display;
 pub mod fault_injector;
 pub(crate) mod orchestrator;
 pub mod report;

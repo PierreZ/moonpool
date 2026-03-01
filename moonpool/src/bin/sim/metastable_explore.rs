@@ -41,27 +41,7 @@ fn main() {
             }),
     );
 
-    eprintln!("{report}");
-
-    let exp = report.exploration.as_ref();
-    match exp {
-        Some(exp) if exp.bugs_found > 0 => {
-            eprintln!("Exploration found {} bugs", exp.bugs_found);
-            if let Some(bug) = exp.bug_recipes.first() {
-                let timeline_str = moonpool_sim::format_timeline(&bug.recipe);
-                eprintln!("Replay: seed={}, recipe={}", bug.seed, timeline_str);
-            }
-        }
-        Some(exp) => {
-            eprintln!(
-                "Exploration completed ({} timelines) but found no bugs",
-                exp.total_timelines
-            );
-        }
-        None => {
-            eprintln!("No exploration report");
-        }
-    }
+    report.eprint();
 
     let metastable = report.assertion_results.get("metastable_failure_detected");
     if let Some(m) = metastable

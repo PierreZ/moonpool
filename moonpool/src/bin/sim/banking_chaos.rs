@@ -2,8 +2,6 @@
 //!
 //! Note: This simulation has a known transfer revert bug (see TODO).
 
-use std::process;
-
 use moonpool::simulations::banking::{
     invariants::{ConservationLaw, NonNegativeBalances},
     workloads::BankingWorkload,
@@ -37,8 +35,5 @@ fn main() {
             .await
     });
 
-    eprintln!("{report}");
-
-    // Exit 0 since the bug is known
-    process::exit(0);
+    report.eprint();
 }

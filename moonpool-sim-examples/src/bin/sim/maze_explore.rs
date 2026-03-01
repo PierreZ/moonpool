@@ -29,16 +29,14 @@ fn main() {
             .set_iterations(2),
     );
 
-    eprintln!("{report}");
+    report.eprint();
 
-    if let Some(ref exploration) = report.exploration {
-        if exploration.total_timelines == 0 {
-            eprintln!("ERROR: no timelines explored");
-            process::exit(1);
-        }
-        eprintln!(
-            "Exploration: {} timelines, {} bugs found",
-            exploration.total_timelines, exploration.bugs_found
-        );
+    if report
+        .exploration
+        .as_ref()
+        .is_some_and(|e| e.total_timelines == 0)
+    {
+        eprintln!("ERROR: no timelines explored");
+        process::exit(1);
     }
 }
