@@ -7,6 +7,13 @@ struct SimBinary {
     sancov_crates: &'static str,
 }
 
+impl SimBinary {
+    /// Display name without the `sim-` prefix.
+    fn display_name(&self) -> &str {
+        self.name.strip_prefix("sim-").unwrap_or(self.name)
+    }
+}
+
 const SIM_BINARIES: &[SimBinary] = &[
     SimBinary {
         name: "sim-maze-explore",
@@ -125,7 +132,7 @@ fn sim_list(args: &[String]) {
     }
 
     for bin in &binaries {
-        println!("{}", bin.name);
+        println!("{}", bin.display_name());
     }
 }
 
@@ -167,7 +174,7 @@ fn run_binaries(binaries: &[&SimBinary]) {
     let mut failed = Vec::new();
 
     for bin in binaries {
-        eprintln!("--- {} ---", bin.name);
+        eprintln!("--- {} ---", bin.display_name());
         let bin_start = Instant::now();
 
         let mut cmd = Command::new("cargo");
@@ -182,23 +189,23 @@ fn run_binaries(binaries: &[&SimBinary]) {
             Ok(status) if status.success() => {
                 eprintln!(
                     "--- {} --- ({})\n",
-                    bin.name,
+                    bin.display_name(),
                     fmt_duration(bin_start.elapsed())
                 );
-                passed.push(bin.name);
+                passed.push(bin.display_name());
             }
             Ok(status) => {
                 let code = status.code().unwrap_or(-1);
                 eprintln!(
                     "{}: exited with code {code} ({})\n",
-                    bin.name,
+                    bin.display_name(),
                     fmt_duration(bin_start.elapsed())
                 );
-                failed.push(bin.name);
+                failed.push(bin.display_name());
             }
             Err(e) => {
-                eprintln!("{}: failed to launch: {e}\n", bin.name);
-                failed.push(bin.name);
+                eprintln!("{}: failed to launch: {e}\n", bin.display_name());
+                failed.push(bin.display_name());
             }
         }
     }
