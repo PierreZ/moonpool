@@ -344,8 +344,6 @@ macro_rules! assert_always {
             true,
         );
         if !cond {
-            let seed = $crate::sim::get_current_sim_seed();
-            tracing::error!("[ALWAYS FAILED] seed={} — {}", seed, __msg);
             $crate::chaos::assertions::record_always_violation();
         }
     };
@@ -367,8 +365,6 @@ macro_rules! assert_always_or_unreachable {
             false,
         );
         if !cond {
-            let seed = $crate::sim::get_current_sim_seed();
-            tracing::error!("[ALWAYS_OR_UNREACHABLE FAILED] seed={} — {}", seed, __msg);
             $crate::chaos::assertions::record_always_violation();
         }
     };
@@ -418,8 +414,6 @@ macro_rules! assert_unreachable {
             $crate::chaos::assertions::_re_export::AssertKind::Unreachable,
             false,
         );
-        let seed = $crate::sim::get_current_sim_seed();
-        tracing::error!("[UNREACHABLE REACHED] seed={} — {}", seed, __msg);
         $crate::chaos::assertions::record_always_violation();
     };
 }
@@ -442,14 +436,6 @@ macro_rules! assert_always_greater_than {
             false,
         );
         if !(__v > __t) {
-            let seed = $crate::sim::get_current_sim_seed();
-            tracing::error!(
-                "[NUMERIC ALWAYS FAILED] seed={} — {} (val={}, thresh={})",
-                seed,
-                __msg,
-                __v,
-                __t
-            );
             $crate::chaos::assertions::record_always_violation();
         }
     };
@@ -473,14 +459,6 @@ macro_rules! assert_always_greater_than_or_equal_to {
             false,
         );
         if !(__v >= __t) {
-            let seed = $crate::sim::get_current_sim_seed();
-            tracing::error!(
-                "[NUMERIC ALWAYS FAILED] seed={} — {} (val={}, thresh={})",
-                seed,
-                __msg,
-                __v,
-                __t
-            );
             $crate::chaos::assertions::record_always_violation();
         }
     };
@@ -504,14 +482,6 @@ macro_rules! assert_always_less_than {
             true,
         );
         if !(__v < __t) {
-            let seed = $crate::sim::get_current_sim_seed();
-            tracing::error!(
-                "[NUMERIC ALWAYS FAILED] seed={} — {} (val={}, thresh={})",
-                seed,
-                __msg,
-                __v,
-                __t
-            );
             $crate::chaos::assertions::record_always_violation();
         }
     };
@@ -535,14 +505,6 @@ macro_rules! assert_always_less_than_or_equal_to {
             true,
         );
         if !(__v <= __t) {
-            let seed = $crate::sim::get_current_sim_seed();
-            tracing::error!(
-                "[NUMERIC ALWAYS FAILED] seed={} — {} (val={}, thresh={})",
-                seed,
-                __msg,
-                __v,
-                __t
-            );
             $crate::chaos::assertions::record_always_violation();
         }
     };
