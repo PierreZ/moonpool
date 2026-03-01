@@ -90,7 +90,7 @@ impl ClusterConfigBuilder {
     /// Creates a [`SharedMembership`] internally. Use [`membership()`](Self::membership)
     /// for custom membership providers.
     pub fn topology(self, addresses: Vec<NetworkAddress>) -> Self {
-        self.membership(Rc::new(SharedMembership::new(addresses)))
+        self.membership(Rc::new(SharedMembership::with_members(addresses)))
     }
 
     /// Build the cluster configuration.
@@ -160,7 +160,7 @@ mod tests {
     fn test_builder_with_explicit_directory() {
         let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
         let membership: Rc<dyn MembershipProvider> =
-            Rc::new(SharedMembership::new(vec![addr(4500)]));
+            Rc::new(SharedMembership::with_members(vec![addr(4500)]));
 
         let cluster = ClusterConfig::builder()
             .directory(directory)
