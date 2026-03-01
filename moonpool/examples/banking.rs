@@ -25,13 +25,12 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use moonpool::actors::{
-    ActorContext, ActorDirectory, ActorError, ActorHandler, ActorHost, ActorRouter,
-    ActorStateStore, DeactivationHint, InMemoryDirectory, InMemoryStateStore, LocalPlacement,
-    PersistentState, PlacementStrategy,
+    ActorContext, ActorError, ActorHandler, ActorRouter, ActorStateStore, ClusterConfig,
+    DeactivationHint, InMemoryStateStore, MoonpoolNode, PersistentState,
 };
 use moonpool::{
-    Endpoint, JsonCodec, MessageCodec, NetTransportBuilder, NetworkAddress, Providers, RpcError,
-    UID, actor_impl, service,
+    Endpoint, JsonCodec, MessageCodec, NetworkAddress, Providers, RpcError, UID, actor_impl,
+    service,
 };
 use serde::{Deserialize, Serialize};
 
@@ -298,47 +297,38 @@ async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
     // Shared local address for single-process local delivery
     let local_addr = NetworkAddress::parse("127.0.0.1:4700")?;
 
-    // Build transport (no listening needed — all delivery is local)
-    let providers = moonpool::TokioProviders::new();
-    let transport = NetTransportBuilder::new(providers)
-        .local_address(local_addr.clone())
-        .build()?;
-
-    // Register static PingPong handler
-    let ping_server = PingPongServer::init(&transport, JsonCodec);
-
-    // Shared directory for actor location tracking
-    let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
-
     // State store for persistent actor state
     let state_store: Rc<dyn ActorStateStore> = Rc::new(InMemoryStateStore::new());
 
-    // Build router + host
+    // Build and start a MoonpoolNode with banking actors
     let local_endpoint = Endpoint::new(
         local_addr.clone(),
         UID::new(BankAccountRef::<moonpool::TokioProviders>::ACTOR_TYPE.0, 0),
     );
-    let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(local_endpoint));
-    let router = Rc::new(ActorRouter::new(
-        transport.clone(),
-        directory.clone(),
-        placement,
-        JsonCodec,
-    ));
-    let host =
-        ActorHost::new(transport.clone(), router.clone(), directory).with_state_store(state_store);
+    let placement = Rc::new(moonpool::actors::LocalPlacement::new(local_endpoint));
 
-    // Register actor type — host spawns processing loop internally
-    host.register::<BankAccountImpl>();
+    let mut node = MoonpoolNode::join(ClusterConfig::single_node(local_addr.clone()))
+        .with_providers(moonpool::TokioProviders::new())
+        .with_address(local_addr.clone())
+        .with_placement(placement)
+        .with_state_store(state_store)
+        .register::<BankAccountImpl>()
+        .start()
+        .await?;
+
+    // Register static PingPong handler on the same transport
+    let ping_server = PingPongServer::init(node.transport(), JsonCodec);
 
     // Spawn static PingPong server loop as a background task
-    let server_transport = transport.clone();
+    let server_transport = node.transport().clone();
     tokio::task::spawn_local(async move {
         run_ping_server(server_transport, ping_server).await;
     });
 
     // Run client (sends requests that are delivered locally)
-    run_client(router, transport, local_addr).await?;
+    run_client(node.router().clone(), node.transport().clone(), local_addr).await?;
+
+    node.shutdown().await?;
 
     println!("\nExample completed successfully!");
     Ok(())

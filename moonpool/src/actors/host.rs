@@ -253,7 +253,7 @@ pub trait ActorHandler: Default + 'static {
 ///
 /// Each registered actor type gets a `TypedDispatcher<H>` that implements
 /// this trait. The host stores these as `Box<dyn ActorTypeDispatcher<P, C>>`.
-trait ActorTypeDispatcher<P: Providers, C: MessageCodec> {
+pub(super) trait ActorTypeDispatcher<P: Providers, C: MessageCodec> {
     /// Start the processing loop for this actor type.
     ///
     /// Spawns a task that receives `ActorMessage`s from the transport,
@@ -273,12 +273,12 @@ trait ActorTypeDispatcher<P: Providers, C: MessageCodec> {
 }
 
 /// Type-erased dispatcher for a specific actor handler type.
-struct TypedDispatcher<H: ActorHandler> {
+pub(super) struct TypedDispatcher<H: ActorHandler> {
     _marker: std::marker::PhantomData<H>,
 }
 
 impl<H: ActorHandler> TypedDispatcher<H> {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             _marker: std::marker::PhantomData,
         }

@@ -11,13 +11,12 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::actors::{
-    ActorContext, ActorDirectory, ActorError, ActorHandler, ActorHost, ActorRouter,
-    ActorStateStore, DeactivationHint, InMemoryDirectory, InMemoryStateStore, LocalPlacement,
-    PersistentState, PlacementStrategy,
+    ActorContext, ActorError, ActorHandler, ActorStateStore, ClusterConfig, DeactivationHint,
+    InMemoryStateStore, MoonpoolNode, PersistentState,
 };
 use crate::{
-    Endpoint, JsonCodec, MessageCodec, NetTransportBuilder, NetworkAddress, Providers,
-    RandomProvider, RpcError, TimeProvider, UID, actor_impl, service,
+    Endpoint, MessageCodec, NetworkAddress, Providers, RandomProvider, RpcError, TimeProvider, UID,
+    actor_impl, service,
 };
 use moonpool_sim::providers::SimProviders;
 use moonpool_sim::{SimContext, SimulationResult, Workload, assert_sometimes};
@@ -156,9 +155,8 @@ pub struct BankingWorkload {
     num_ops: usize,
     /// Account names to use.
     accounts: Vec<String>,
-    /// Actor infrastructure (populated in setup).
-    host: Option<ActorHost<SimProviders>>,
-    router: Option<Rc<ActorRouter<SimProviders>>>,
+    /// Actor runtime (populated in setup).
+    node: Option<MoonpoolNode<SimProviders>>,
     /// Reference model for tracking expected state.
     model: BankingModel,
 }
@@ -169,8 +167,7 @@ impl BankingWorkload {
         Self {
             num_ops,
             accounts,
-            host: None,
-            router: None,
+            node: None,
             model: BankingModel::default(),
         }
     }
@@ -188,33 +185,24 @@ impl Workload for BankingWorkload {
             moonpool_sim::SimulationError::InvalidState(format!("invalid address: {e}"))
         })?;
 
-        let transport = NetTransportBuilder::new(ctx.providers().clone())
-            .local_address(local_addr.clone())
-            .build()
-            .map_err(|e| {
-                moonpool_sim::SimulationError::InvalidState(format!("transport build: {e}"))
-            })?;
-
-        let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
         let state_store: Rc<dyn ActorStateStore> = Rc::new(InMemoryStateStore::new());
         let local_endpoint = Endpoint::new(
-            local_addr,
+            local_addr.clone(),
             UID::new(BankAccountRef::<SimProviders>::ACTOR_TYPE.0, 0),
         );
-        let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(local_endpoint));
-        let router = Rc::new(ActorRouter::new(
-            transport.clone(),
-            directory.clone(),
-            placement,
-            JsonCodec,
-        ));
-        let host =
-            ActorHost::new(transport, router.clone(), directory).with_state_store(state_store);
+        let placement = Rc::new(crate::actors::LocalPlacement::new(local_endpoint));
 
-        host.register::<BankAccountImpl>();
+        let node = MoonpoolNode::join(ClusterConfig::single_node(local_addr.clone()))
+            .with_providers(ctx.providers().clone())
+            .with_address(local_addr)
+            .with_placement(placement)
+            .with_state_store(state_store)
+            .register::<BankAccountImpl>()
+            .start()
+            .await
+            .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("node start: {e}")))?;
 
-        self.host = Some(host);
-        self.router = Some(router);
+        self.node = Some(node);
         self.model = BankingModel::default();
 
         Ok(())
@@ -222,12 +210,12 @@ impl Workload for BankingWorkload {
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let router = self
-            .router
+            .node
             .as_ref()
+            .map(|n| n.router().clone())
             .ok_or_else(|| {
-                moonpool_sim::SimulationError::InvalidState("router not initialized".to_string())
-            })?
-            .clone();
+                moonpool_sim::SimulationError::InvalidState("node not initialized".to_string())
+            })?;
 
         // Seed initial deposits so accounts have funds
         for account in &self.accounts {
@@ -374,8 +362,8 @@ impl Workload for BankingWorkload {
             ctx.state().publish(BANKING_MODEL_KEY, self.model.clone());
         }
 
-        // Shutdown: drop host to trigger deactivation
-        drop(self.host.take());
+        // Shutdown: drop node to trigger deactivation
+        drop(self.node.take());
 
         Ok(())
     }

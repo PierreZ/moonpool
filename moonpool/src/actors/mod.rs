@@ -38,16 +38,22 @@
 //! The processing loop dequeues a message, finds/activates the actor,
 //! calls the method, sends the response, then processes the next message.
 
+mod cluster;
 mod directory;
 mod host;
+mod membership;
+mod node;
 mod persistent_state;
 mod placement;
 mod router;
 mod state;
 mod types;
 
+pub use cluster::{ClusterConfig, ClusterConfigBuilder, ClusterConfigError};
 pub use directory::{ActorDirectory, DirectoryError, InMemoryDirectory};
 pub use host::{ActorContext, ActorHandler, ActorHost, DeactivationHint};
+pub use membership::{MembershipProvider, SharedMembership};
+pub use node::{MoonpoolNode, MoonpoolNodeBuilder, NodeError, NodeStatus};
 pub use persistent_state::PersistentState;
 pub use placement::{LocalPlacement, PlacementError, PlacementStrategy, RoundRobinPlacement};
 pub use router::{ActorError, ActorRouter};
