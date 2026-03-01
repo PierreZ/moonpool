@@ -26,6 +26,8 @@ use serde::de::DeserializeOwned;
 
 use crate::{Endpoint, JsonCodec, MessageCodec, NetTransport, Providers, UID, send_request};
 
+use super::membership::MembershipProvider;
+use super::types::{ActivationId, ActorAddress};
 use super::{
     ActorDirectory, ActorId, ActorMessage, ActorResponse, DirectoryError, PlacementError,
     PlacementStrategy,
@@ -87,6 +89,7 @@ pub struct ActorRouter<P: Providers, C: MessageCodec = JsonCodec> {
     transport: Rc<NetTransport<P>>,
     directory: Rc<dyn ActorDirectory>,
     placement: Rc<dyn PlacementStrategy>,
+    membership: Rc<dyn MembershipProvider>,
     codec: C,
 }
 
@@ -98,17 +101,20 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
     /// * `transport` - The transport for sending messages
     /// * `directory` - Directory for resolving actor locations
     /// * `placement` - Strategy for placing new actors
+    /// * `membership` - Membership provider for active member list
     /// * `codec` - Codec for serializing request/response bodies
     pub fn new(
         transport: Rc<NetTransport<P>>,
         directory: Rc<dyn ActorDirectory>,
         placement: Rc<dyn PlacementStrategy>,
+        membership: Rc<dyn MembershipProvider>,
         codec: C,
     ) -> Self {
         Self {
             transport,
             directory,
             placement,
+            membership,
             codec,
         }
     }
@@ -164,13 +170,20 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
 
         // 6. Handle cache invalidation if present
         if let Some(invalidation) = &response.cache_invalidation {
-            // Update our directory cache with the correct endpoint
-            let _ = self.directory.unregister(&invalidation.actor_id).await;
+            // Unregister the stale entry (use activation_id 0 as a wildcard —
+            // if the activation doesn't match, the directory ignores it)
+            let stale_address = ActorAddress::new(
+                invalidation.actor_id.clone(),
+                invalidation.invalid_endpoint.clone(),
+                ActivationId::new(0),
+            );
+            let _ = self.directory.unregister(&stale_address).await;
+
             if let Some(valid) = &invalidation.valid_endpoint {
-                let _ = self
-                    .directory
-                    .register(&invalidation.actor_id, valid.clone())
-                    .await;
+                let new_activation = ActivationId::new(valid.token.first ^ valid.token.second);
+                let new_address =
+                    ActorAddress::new(invalidation.actor_id.clone(), valid.clone(), new_activation);
+                let _ = self.directory.register(new_address).await;
             }
         }
 
@@ -182,29 +195,24 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
     /// Resolve an actor's endpoint, placing it if not found in the directory.
     async fn resolve(&self, target: &ActorId) -> Result<Endpoint, ActorError> {
         // Check directory first
-        if let Some(endpoint) = self.directory.lookup(target).await? {
-            return Ok(endpoint);
+        if let Some(addr) = self.directory.lookup(target).await? {
+            return Ok(addr.endpoint);
         }
 
         // Not found — place the actor
         assert_sometimes!(true, "placement_invoked");
-        let endpoint = self.placement.place(target, &[]).await?;
+        let active_members = self.membership.members().await;
+        let endpoint = self.placement.place(target, &active_members).await?;
 
-        // Register in directory (ignore AlreadyRegistered race — another caller
-        // may have placed the same actor concurrently)
-        match self.directory.register(target, endpoint.clone()).await {
-            Ok(()) => {}
-            Err(DirectoryError::AlreadyRegistered { .. }) => {
-                assert_sometimes!(true, "directory_registration_race");
-                // Another caller placed it first — use their placement
-                if let Some(ep) = self.directory.lookup(target).await? {
-                    return Ok(ep);
-                }
-            }
-            Err(e) => return Err(e.into()),
-        }
+        // Build ActorAddress with a deterministic activation ID
+        let activation_id = ActivationId::new(endpoint.token.first ^ endpoint.token.second);
+        let actor_address = ActorAddress::new(target.clone(), endpoint.clone(), activation_id);
 
-        Ok(endpoint)
+        // Register in directory (Orleans semantics: returns existing on conflict)
+        let registered = self.directory.register(actor_address).await?;
+
+        // If someone else registered first, use their endpoint
+        Ok(registered.endpoint)
     }
 }
 
@@ -215,7 +223,8 @@ mod tests {
     use crate::{JsonCodec, NetworkAddress, UID};
 
     use super::*;
-    use crate::actors::{ActorType, InMemoryDirectory, LocalPlacement};
+    use crate::actors::types::ActivationId;
+    use crate::actors::{ActorType, InMemoryDirectory, LocalPlacement, SharedMembership};
 
     // We use the same MockProviders pattern as transport tests
     #[derive(Clone)]
@@ -344,11 +353,12 @@ mod tests {
             .build()
             .expect("build should succeed");
 
-        let local_endpoint = Endpoint::new(test_address(), UID::new(0xBA4E_4B00, 0));
         let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
-        let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(local_endpoint));
+        let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(test_address()));
+        let membership: Rc<dyn MembershipProvider> =
+            Rc::new(SharedMembership::with_members(vec![test_address()]));
 
-        let _router = ActorRouter::new(transport, directory, placement, JsonCodec);
+        let _router = ActorRouter::new(transport, directory, placement, membership, JsonCodec);
     }
 
     #[tokio::test]
@@ -358,12 +368,18 @@ mod tests {
             .build()
             .expect("build should succeed");
 
-        let local_endpoint = Endpoint::new(test_address(), UID::new(0xBA4E_4B00, 0));
         let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
-        let placement: Rc<dyn PlacementStrategy> =
-            Rc::new(LocalPlacement::new(local_endpoint.clone()));
+        let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(test_address()));
+        let membership: Rc<dyn MembershipProvider> =
+            Rc::new(SharedMembership::with_members(vec![test_address()]));
 
-        let router = ActorRouter::new(transport, directory.clone(), placement, JsonCodec);
+        let router = ActorRouter::new(
+            transport,
+            directory.clone(),
+            placement,
+            membership,
+            JsonCodec,
+        );
 
         let actor_id = ActorId {
             actor_type: ActorType(0xBA4E_4B00),
@@ -375,14 +391,15 @@ mod tests {
             .resolve(&actor_id)
             .await
             .expect("resolve should succeed");
-        assert_eq!(resolved, local_endpoint);
+        assert_eq!(resolved.address, test_address());
 
         // Directory should now have the entry
         let lookup = directory
             .lookup(&actor_id)
             .await
             .expect("lookup should succeed");
-        assert_eq!(lookup, Some(local_endpoint));
+        assert!(lookup.is_some());
+        assert_eq!(lookup.expect("entry").endpoint.address, test_address());
     }
 
     #[tokio::test]
@@ -392,24 +409,36 @@ mod tests {
             .build()
             .expect("build should succeed");
 
-        let local_endpoint = Endpoint::new(test_address(), UID::new(0xBA4E_4B00, 0));
         let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
-        let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(local_endpoint));
+        let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(test_address()));
+        let membership: Rc<dyn MembershipProvider> =
+            Rc::new(SharedMembership::with_members(vec![test_address()]));
 
-        let router = ActorRouter::new(transport, directory.clone(), placement, JsonCodec);
+        let router = ActorRouter::new(
+            transport,
+            directory.clone(),
+            placement,
+            membership,
+            JsonCodec,
+        );
 
         let actor_id = ActorId {
             actor_type: ActorType(0xBA4E_4B00),
             identity: "bob".to_string(),
         };
 
-        // Pre-register in directory
+        // Pre-register in directory with ActorAddress
         let remote_endpoint = Endpoint::new(
             NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4501),
             UID::new(0xBA4E_4B00, 0),
         );
+        let actor_address = ActorAddress::new(
+            actor_id.clone(),
+            remote_endpoint.clone(),
+            ActivationId::new(42),
+        );
         directory
-            .register(&actor_id, remote_endpoint.clone())
+            .register(actor_address)
             .await
             .expect("register should succeed");
 

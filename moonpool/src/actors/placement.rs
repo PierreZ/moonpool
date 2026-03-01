@@ -8,8 +8,8 @@
 //!
 //! - `PlacementStrategy` is a trait so implementations can range from
 //!   local-only to hash-based or load-balanced placement.
-//! - The strategy receives the `ActorId` and a list of candidate endpoints,
-//!   then returns the chosen endpoint.
+//! - The strategy receives the `ActorId` and a list of active member
+//!   addresses from the membership provider, then returns the chosen endpoint.
 //!
 //! # Orleans Reference
 //!
@@ -18,7 +18,7 @@
 
 use std::fmt;
 
-use crate::Endpoint;
+use crate::{Endpoint, NetworkAddress, UID};
 
 use super::ActorId;
 
@@ -36,18 +36,20 @@ pub enum PlacementError {
 /// Strategy for deciding where to place a new actor instance.
 ///
 /// Called by the `ActorRouter` when an actor is not found in the directory.
+/// The `active_members` parameter is populated from the membership provider's
+/// list of currently active nodes.
 #[async_trait::async_trait(?Send)]
 pub trait PlacementStrategy: fmt::Debug {
-    /// Choose an endpoint from the candidates for the given actor.
+    /// Choose an endpoint for the given actor from the active members.
     ///
     /// # Arguments
     ///
     /// * `id` - The actor to place
-    /// * `candidates` - Available endpoints (typically all known nodes)
+    /// * `active_members` - Network addresses of all active cluster members
     async fn place(
         &self,
         id: &ActorId,
-        candidates: &[Endpoint],
+        active_members: &[NetworkAddress],
     ) -> Result<Endpoint, PlacementError>;
 }
 
@@ -57,14 +59,14 @@ pub trait PlacementStrategy: fmt::Debug {
 /// node that first sends it a message. Suitable for single-node systems.
 #[derive(Debug)]
 pub struct LocalPlacement {
-    /// The local node's endpoint for actor dispatch.
-    pub local_endpoint: Endpoint,
+    /// The local node's network address.
+    local_address: NetworkAddress,
 }
 
 impl LocalPlacement {
     /// Create a new local placement strategy.
-    pub fn new(local_endpoint: Endpoint) -> Self {
-        Self { local_endpoint }
+    pub fn new(local_address: NetworkAddress) -> Self {
+        Self { local_address }
     }
 }
 
@@ -72,49 +74,46 @@ impl LocalPlacement {
 impl PlacementStrategy for LocalPlacement {
     async fn place(
         &self,
-        _id: &ActorId,
-        _candidates: &[Endpoint],
+        id: &ActorId,
+        _active_members: &[NetworkAddress],
     ) -> Result<Endpoint, PlacementError> {
-        Ok(self.local_endpoint.clone())
+        // Actor type's dispatch token is always index 0
+        Ok(Endpoint::new(
+            self.local_address.clone(),
+            UID::new(id.actor_type.0, 0),
+        ))
     }
 }
 
-/// Round-robin placement across a known set of nodes.
+/// Round-robin placement across active cluster members.
 ///
-/// Distributes actors evenly across the provided node list. Each call
-/// to `place()` picks the next node in rotation. Suitable for multi-node
-/// systems with a static topology.
+/// Distributes actors evenly across the active members. Each call
+/// to `place()` picks the next member in rotation.
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// let nodes = vec![node_a_endpoint, node_b_endpoint, node_c_endpoint];
-/// let placement = RoundRobinPlacement::new(nodes);
-/// // First actor → node A, second → node B, third → node C, fourth → node A, ...
+/// let placement = RoundRobinPlacement::new();
+/// // With 3 active members: first → A, second → B, third → C, fourth → A, ...
 /// ```
 #[derive(Debug)]
 pub struct RoundRobinPlacement {
-    /// Known node endpoints.
-    nodes: Vec<Endpoint>,
     /// Next index to use (wraps around).
     next: std::cell::Cell<usize>,
 }
 
 impl RoundRobinPlacement {
     /// Create a new round-robin placement strategy.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `nodes` is empty.
-    pub fn new(nodes: Vec<Endpoint>) -> Self {
-        assert!(
-            !nodes.is_empty(),
-            "RoundRobinPlacement requires at least one node"
-        );
+    pub fn new() -> Self {
         Self {
-            nodes,
             next: std::cell::Cell::new(0),
         }
+    }
+}
+
+impl Default for RoundRobinPlacement {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -122,13 +121,17 @@ impl RoundRobinPlacement {
 impl PlacementStrategy for RoundRobinPlacement {
     async fn place(
         &self,
-        _id: &ActorId,
-        _candidates: &[Endpoint],
+        id: &ActorId,
+        active_members: &[NetworkAddress],
     ) -> Result<Endpoint, PlacementError> {
-        let index = self.next.get();
-        let endpoint = self.nodes[index].clone();
-        self.next.set((index + 1) % self.nodes.len());
-        Ok(endpoint)
+        if active_members.is_empty() {
+            return Err(PlacementError::NoCandidates { id: id.clone() });
+        }
+        let index = self.next.get() % active_members.len();
+        self.next.set(index + 1);
+        let address = active_members[index].clone();
+        // Actor type's dispatch token is always index 0
+        Ok(Endpoint::new(address, UID::new(id.actor_type.0, 0)))
     }
 }
 
@@ -136,16 +139,13 @@ impl PlacementStrategy for RoundRobinPlacement {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
-    use crate::{NetworkAddress, UID};
+    use crate::NetworkAddress;
 
     use super::*;
     use crate::actors::ActorType;
 
-    fn local_endpoint() -> Endpoint {
-        Endpoint::new(
-            NetworkAddress::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4500),
-            UID::new(0xBA4E_4B00, 0),
-        )
+    fn addr(port: u16) -> NetworkAddress {
+        NetworkAddress::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
     }
 
     fn alice_id() -> ActorId {
@@ -157,32 +157,52 @@ mod tests {
 
     #[tokio::test]
     async fn test_local_placement_always_returns_local() {
-        let endpoint = local_endpoint();
-        let strategy = LocalPlacement::new(endpoint.clone());
+        let local_addr = addr(4500);
+        let strategy = LocalPlacement::new(local_addr.clone());
 
         let result = strategy
-            .place(&alice_id(), &[])
+            .place(&alice_id(), &[addr(4500), addr(4501)])
             .await
             .expect("placement should succeed");
 
-        assert_eq!(result, endpoint);
+        assert_eq!(result.address, local_addr);
     }
 
     #[tokio::test]
-    async fn test_local_placement_ignores_candidates() {
-        let local = local_endpoint();
-        let strategy = LocalPlacement::new(local.clone());
-
-        let remote = Endpoint::new(
-            NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4501),
-            UID::new(0xBA4E_4B00, 0),
-        );
+    async fn test_local_placement_ignores_active_members() {
+        let local_addr = addr(4500);
+        let strategy = LocalPlacement::new(local_addr.clone());
 
         let result = strategy
-            .place(&alice_id(), &[remote])
+            .place(&alice_id(), &[addr(4501), addr(4502)])
             .await
             .expect("placement should succeed");
 
-        assert_eq!(result, local);
+        // Should always return local address, regardless of active_members
+        assert_eq!(result.address, local_addr);
+    }
+
+    #[tokio::test]
+    async fn test_round_robin_distributes_across_members() {
+        let strategy = RoundRobinPlacement::new();
+        let members = vec![addr(4500), addr(4501), addr(4502)];
+
+        let r1 = strategy.place(&alice_id(), &members).await.expect("place");
+        let r2 = strategy.place(&alice_id(), &members).await.expect("place");
+        let r3 = strategy.place(&alice_id(), &members).await.expect("place");
+        let r4 = strategy.place(&alice_id(), &members).await.expect("place");
+
+        assert_eq!(r1.address, addr(4500));
+        assert_eq!(r2.address, addr(4501));
+        assert_eq!(r3.address, addr(4502));
+        assert_eq!(r4.address, addr(4500)); // wraps around
+    }
+
+    #[tokio::test]
+    async fn test_round_robin_no_candidates_errors() {
+        let strategy = RoundRobinPlacement::new();
+
+        let result = strategy.place(&alice_id(), &[]).await;
+        assert!(matches!(result, Err(PlacementError::NoCandidates { .. })));
     }
 }

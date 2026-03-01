@@ -55,11 +55,17 @@ pub use actor_ref::ActorRef;
 pub use cluster::{ClusterConfig, ClusterConfigBuilder, ClusterConfigError};
 pub use directory::{ActorDirectory, DirectoryError, InMemoryDirectory};
 pub use host::{ActorContext, ActorHandler, ActorHost, DeactivationHint};
-pub use membership::{MembershipProvider, SharedMembership};
-pub use node::{MoonpoolNode, MoonpoolNodeBuilder, NodeError, NodeStatus};
+pub use membership::NodeStatus;
+pub use membership::{
+    ClusterMember, MembershipError, MembershipProvider, MembershipSnapshot, MembershipVersion,
+    SharedMembership,
+};
+pub use node::{MoonpoolNode, MoonpoolNodeBuilder, NodeError, NodeLifecycle};
 pub use node_config::{NodeConfig, NodeConfigBuilder};
 pub use persistent_state::PersistentState;
 pub use placement::{LocalPlacement, PlacementError, PlacementStrategy, RoundRobinPlacement};
 pub use router::{ActorError, ActorRouter};
 pub use state::{ActorStateError, ActorStateStore, InMemoryStateStore, StoredState};
-pub use types::{ActorId, ActorMessage, ActorResponse, ActorType, CacheInvalidation};
+pub use types::{
+    ActivationId, ActorAddress, ActorId, ActorMessage, ActorResponse, ActorType, CacheInvalidation,
+};
