@@ -1,19 +1,273 @@
-//! LLVM SanitizerCoverage `inline-8bit-counters` integration.
+//! LLVM SanitizerCoverage (`inline-8bit-counters`) for code edge coverage.
 //!
-//! When the binary is compiled with `-C instrument-coverage` or
-//! `-fsanitize-coverage=inline-8bit-counters`, LLVM inserts a counter
-//! increment at every code edge. The linker calls our
-//! [`__sanitizer_cov_8bit_counters_init`] callback with the counter
-//! array's bounds during static initialization (before `main()`).
-//!
-//! This module:
-//! - Captures the BSS counter array pointer via the LLVM callback
-//! - Copies counters to MAP_SHARED memory after each child timeline
-//! - Applies AFL-style bucketing to reduce noise
-//! - Detects novelty by comparing bucketed counters against a history map
+//! This module hooks into LLVM's SanitizerCoverage instrumentation to track
+//! which code edges the simulation actually executes. The explorer uses this
+//! as a second coverage signal — alongside the assertion-path fork bitmap —
+//! to decide whether a forked timeline discovered something new. Together,
+//! the two signals make the adaptive loop significantly more precise at
+//! distinguishing productive forks from barren ones.
 //!
 //! All public functions are no-ops when sancov instrumentation is not
 //! present (i.e., `COUNTERS_PTR` is null).
+//!
+//! # Why two coverage systems?
+//!
+//! The explorer has two independent coverage tracking mechanisms:
+//!
+//! ```text
+//! System                Where it lives         What it tracks
+//! ────────────────────  ─────────────────────  ─────────────────────────────────
+//! Fork bitmap           coverage.rs            Which assert_sometimes! /
+//!   (8192 bits)                                assert_sometimes_each! fired.
+//!                                              Hash-based, high collision rate.
+//!
+//! Sancov edge coverage  sancov.rs (this file)  Which branches/loops/conditions
+//!   (one u8 per edge)                          in the Rust source were executed.
+//!                                              LLVM-instrumented, no collisions.
+//! ```
+//!
+//! The fork bitmap answers "did we trigger a new assertion path?" while
+//! sancov answers "did we execute new code?". Two timelines can trigger
+//! the exact same assertions but take radically different code paths through
+//! the system under test — sancov catches that.
+//!
+//! Both signals feed into the adaptive loop's `batch_has_new` flag in
+//! [`split_loop`](crate::split_loop). A timeline is considered productive
+//! if it contributes new bits to **either** system:
+//!
+//! ```text
+//! batch_has_new |= fork_bitmap.has_new_bits()    // assertion-level
+//! batch_has_new |= has_new_sancov_coverage()      // code-edge-level
+//! ```
+//!
+//! # How LLVM inline-8bit-counters work
+//!
+//! When you compile with the right flags, LLVM inserts a `counter[edge_id]++`
+//! instruction at every control-flow edge in the program. The counters live
+//! in a BSS array (zero-initialized, process-global):
+//!
+//! ```text
+//! rustc + LLVM passes
+//!     │
+//!     ▼
+//! BSS counter array (one u8 per code edge)
+//!     │
+//!     ▼  __sanitizer_cov_8bit_counters_init(start, stop)
+//!     │  called during static constructors, before main()
+//!     │
+//!     ▼
+//! COUNTERS_PTR + COUNTERS_LEN captured in global atomics
+//! ```
+//!
+//! Multiple compilation units each call the init callback with their own
+//! array bounds. We merge them via `min(start)` / `max(stop)` so a single
+//! contiguous range covers all TUs. See [`__sanitizer_cov_8bit_counters_init`].
+//!
+//! # Selective instrumentation with `SANCOV_CRATES`
+//!
+//! You don't want to instrument *everything* — the simulation runtime,
+//! exploration engine, and chaos framework have thousands of edges that
+//! are irrelevant to the system under test. Instrumenting only the
+//! application crate(s) keeps the edge count small and meaningful.
+//!
+//! The build pipeline:
+//!
+//! ```text
+//! flake.nix
+//!   └── RUSTC_WRAPPER="$PWD/scripts/sancov-rustc.sh"
+//!
+//! sancov-rustc.sh intercepts every rustc invocation:
+//!   1. Reads --crate-name from args
+//!   2. Checks if crate is in SANCOV_CRATES (comma-separated whitelist)
+//!   3. If yes → adds LLVM flags:
+//!        -Cpasses=sancov-module
+//!        -Cllvm-args=-sanitizer-coverage-level=3
+//!        -Cllvm-args=-sanitizer-coverage-inline-8bit-counters
+//!        -Ccodegen-units=1
+//!   4. If no  → pass-through (no instrumentation)
+//!   5. Build scripts and proc-macros are never instrumented
+//! ```
+//!
+//! When `SANCOV_CRATES` is unset or empty, the wrapper is a pure
+//! pass-through and all functions in this module are no-ops.
+//!
+//! The `xtask` runner (`cargo xtask sim`) sets `SANCOV_CRATES` per binary
+//! and builds into `target/sancov` to avoid cache conflicts with normal
+//! (non-instrumented) builds.
+//!
+//! # The shared memory data flow
+//!
+//! The BSS counters are process-local — a forked child increments its own
+//! copy, but the parent can't see them. Shared memory bridges the gap:
+//!
+//! ```text
+//! CHILD process                              PARENT process
+//! ─────────────                              ──────────────
+//! BSS counters increment
+//! during simulation
+//!     │
+//!     ▼ copy_counters_to_shared()
+//! TRANSFER buffer ──── MAP_SHARED ────────── classify_counts()
+//! (or pool slot)                             bucketed values
+//!                                                │
+//!                                                ▼ has_new_coverage_inner()
+//!                                            HISTORY map ── global max per edge
+//!                                                │
+//!                                            batch_has_new = true if any
+//!                                            bucketed > history[i]
+//! ```
+//!
+//! Three shared memory regions:
+//!
+//! - **Transfer buffer** ([`SANCOV_TRANSFER`]): child writes raw counters
+//!   via [`copy_counters_to_shared`] before `_exit()`. In sequential mode,
+//!   one buffer is reused. In parallel mode, each concurrent child gets
+//!   its own pool slot instead.
+//!
+//! - **History map** (`SANCOV_HISTORY`): global maximum of bucketed values
+//!   per edge. Never reset within a seed. Preserved across seeds by
+//!   [`prepare_next_seed()`](crate::prepare_next_seed) (cumulative, like
+//!   the explored map).
+//!
+//! - **Pool** ([`SANCOV_POOL`]): parallel mode allocates
+//!   `slot_count × edge_count` bytes. Each concurrent child writes to its
+//!   own slot. Parent reads the slot after `waitpid()`. Allocated lazily
+//!   by [`get_or_init_sancov_pool`].
+//!
+//! # AFL-style bucketing
+//!
+//! Raw counter values are noisy — an edge hit 5 times vs 7 times is the
+//! same execution pattern, but hit 1 time vs 5 times is meaningfully
+//! different. The `COUNT_CLASS_LOOKUP` table maps raw counts to coarser
+//! buckets, following AFL's proven approach:
+//!
+//! ```text
+//! Raw count    Bucket    Meaning
+//! ─────────    ──────    ─────────────────────
+//!   0            0       not hit
+//!   1            1       hit once
+//!   2            2       hit twice
+//!   3            4       hit a few times
+//!   4–7          8       hit several times
+//!   8–15        16       hit many times
+//!  16–31        32       hit frequently
+//!  32–127       64       hit very frequently
+//! 128–255      128       hit extremely often
+//! ```
+//!
+//! This means: an edge going from 5 hits to 7 hits (both bucket 8) is
+//! not novel. But going from 1 hit to 5 hits (bucket 1 → bucket 8) *is*
+//! novel — the code exercised that edge in a meaningfully different way.
+//!
+//! Bucketing is applied in-place by `classify_counts` before comparison.
+//!
+//! # Novelty detection
+//!
+//! `has_new_coverage_inner` is the core novelty check:
+//!
+//! 1. Apply AFL bucketing to the buffer in-place
+//! 2. For each edge: if `bucketed > history[i]`, update history and mark novel
+//! 3. Does **not** early-return — must update all history entries in one pass
+//!    (otherwise a novel edge in position 100 would cause edges 101+ to
+//!    be skipped, leaving stale history values)
+//! 4. Zero entries (unvisited edges) are skipped
+//!
+//! The public API has two entry points:
+//! - [`has_new_sancov_coverage`]: reads from the transfer buffer (sequential)
+//! - [`has_new_sancov_coverage_from`]: reads from a specific pool slot (parallel)
+//!
+//! Novelty feeds into `batch_has_new` in [`split_loop`](crate::split_loop)
+//! alongside the fork bitmap's
+//! [`has_new_bits()`](crate::coverage::ExploredMap::has_new_bits).
+//!
+//! # Integration with the fork loop
+//!
+//! This module hooks into [`split_loop`](crate::split_loop) at five points:
+//!
+//! ```text
+//! setup_child()          After fork: reset_bss_counters() so child
+//!                        captures only its OWN edges. Reset pool pointers
+//!                        so nested splits allocate fresh pools.
+//!
+//! exit_child()           Before _exit(): copy_counters_to_shared() so
+//!                        the parent can read the child's coverage.
+//!
+//! Sequential reap        After waitpid: has_new_sancov_coverage() checks
+//!                        the transfer buffer for novelty.
+//!
+//! Parallel reap          After waitpid: has_new_sancov_coverage_from(slot)
+//!                        checks the child's pool slot for novelty.
+//!
+//! batch_has_new          Both coverage signals are OR'd together:
+//!                        batch_has_new |= sancov_novelty
+//!                        A barren/productive decision uses BOTH signals.
+//! ```
+//!
+//! # Why binary targets? (sancov requires `main()`)
+//!
+//! LLVM calls [`__sanitizer_cov_8bit_counters_init`] during static
+//! constructors, before `main()`. In `cargo test`, the test harness is
+//! `main()` — the counter array is initialized once for the harness, not
+//! for each `#[test]` function. Worse, the BSS counters are process-global
+//! state that accumulates across test functions, making per-test
+//! measurement impossible. And `fork()` in a test harness interacts badly
+//! with the harness's own process management.
+//!
+//! Solution: each simulation runs as a standalone `[[bin]]` target
+//! managed by `cargo xtask sim`. The `xtask` sets `SANCOV_CRATES` per
+//! binary and uses `--target-dir target/sancov` to separate instrumented
+//! from non-instrumented builds.
+//!
+//! # Reporting
+//!
+//! Coverage stats flow through the reporting pipeline:
+//!
+//! - [`sancov_edge_count`] and [`sancov_edges_covered`] provide the raw numbers
+//! - [`ExplorationStats`](crate::shared_stats::ExplorationStats) includes
+//!   `sancov_edges_total` and `sancov_edges_covered`
+//! - `ExplorationReport` carries them to the `SimulationReport`
+//! - The terminal display shows a "Code Cov" progress bar alongside
+//!   the "Exploration" (fork bitmap) progress bar
+//! - Percentage = `edges_covered / edges_total`
+//!
+//! # Running code coverage
+//!
+//! ```bash
+//! # Run all simulations with sancov:
+//! cargo xtask sim run-all
+//!
+//! # Run a specific simulation:
+//! cargo xtask sim run maze
+//!
+//! # List available binaries:
+//! cargo xtask sim list
+//!
+//! # Instrument specific crates manually:
+//! SANCOV_CRATES=moonpool_sim_examples cargo run \
+//!     --bin sim-maze-explore --target-dir target/sancov
+//! ```
+//!
+//! # Lifecycle summary
+//!
+//! ```text
+//! init_sancov_shared()          allocate transfer + history in MAP_SHARED
+//!   │
+//!   ├── per-child:
+//!   │     reset_bss_counters()        zero BSS array after fork
+//!   │     ... simulation runs ...     BSS counters increment
+//!   │     copy_counters_to_shared()   copy BSS → transfer/pool slot
+//!   │     exit_child()                _exit()
+//!   │
+//!   ├── per-reap:
+//!   │     has_new_sancov_coverage()   bucket + compare against history
+//!   │
+//!   ├── prepare_next_seed():
+//!   │     clear_transfer_buffer()     zero transfer buffer
+//!   │     reset_bss_counters()        zero BSS array
+//!   │     (history preserved)         cumulative across seeds
+//!   │
+//!   └── cleanup_sancov_shared()      free transfer + history + pool
+//! ```
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
