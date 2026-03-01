@@ -42,7 +42,7 @@ use super::ActorDirectory;
 use super::cluster::ClusterConfig;
 use super::host::{ActorHandler, ActorTypeDispatcher, TypedDispatcher};
 use super::node_config::NodeConfig;
-use super::router::{ActorError, ActorRouter};
+use super::router::ActorRouter;
 use super::state::ActorStateStore;
 
 /// Type alias for a collection of close handles (one per registered actor type).
@@ -53,7 +53,7 @@ type RegistrationFn<P, C> = Box<dyn FnOnce(&NodeParts<P, C>)>;
 
 /// Lifecycle state of a [`MoonpoolNode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NodeStatus {
+pub enum NodeLifecycle {
     /// Transport created, registrations pending.
     Initializing,
     /// Node is serving requests and processing actor messages.
@@ -76,7 +76,7 @@ pub struct MoonpoolNode<P: Providers, C: MessageCodec = JsonCodec> {
     router: Rc<ActorRouter<P, C>>,
     cluster: ClusterConfig,
     address: NetworkAddress,
-    status: NodeStatus,
+    status: NodeLifecycle,
     pending_tasks: Rc<Cell<usize>>,
     close_handles: RefCell<CloseHandles>,
     providers: P,
@@ -114,7 +114,7 @@ impl<P: Providers, C: MessageCodec> MoonpoolNode<P, C> {
     }
 
     /// Current lifecycle status.
-    pub fn status(&self) -> NodeStatus {
+    pub fn status(&self) -> NodeLifecycle {
         self.status
     }
 
@@ -127,10 +127,19 @@ impl<P: Providers, C: MessageCodec> MoonpoolNode<P, C> {
     ///
     /// Closes all actor request streams, waits for pending tasks to
     /// drain (actors run `on_deactivate`), then marks the node as stopped.
+    /// Also transitions the node through `ShuttingDown` → `Dead` in the
+    /// membership provider and cleans up directory entries.
     ///
     /// After shutdown, the node can no longer process actor messages.
-    pub async fn shutdown(&mut self) -> Result<(), ActorError> {
-        self.status = NodeStatus::Stopping;
+    pub async fn shutdown(&mut self) -> Result<(), NodeError> {
+        self.status = NodeLifecycle::Stopping;
+
+        // Mark as ShuttingDown in membership
+        let _ = self
+            .cluster
+            .membership()
+            .update_status(&self.address, super::membership::NodeStatus::ShuttingDown)
+            .await;
 
         // Close all request streams
         for close_fn in self.close_handles.borrow().iter() {
@@ -141,6 +150,20 @@ impl<P: Providers, C: MessageCodec> MoonpoolNode<P, C> {
         while self.pending_tasks.get() > 0 {
             self.providers.task().yield_now().await;
         }
+
+        // Clean up directory entries for actors on this node
+        let _ = self
+            .cluster
+            .directory()
+            .unregister_members(std::slice::from_ref(&self.address))
+            .await;
+
+        // Mark as Dead in membership
+        let _ = self
+            .cluster
+            .membership()
+            .update_status(&self.address, super::membership::NodeStatus::Dead)
+            .await;
 
         Ok(())
     }
@@ -283,6 +306,23 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
             .build()
             .map_err(|e| NodeError::Transport(e.to_string()))?;
 
+        // Register this node into membership
+        let node_name = self
+            .cluster
+            .name()
+            .map(|n| format!("{}-{}", n, address))
+            .unwrap_or_else(|| format!("node-{}", address));
+
+        self.cluster
+            .membership()
+            .register_node(
+                address.clone(),
+                super::membership::NodeStatus::Active,
+                node_name,
+            )
+            .await
+            .map_err(|e| NodeError::MembershipRegistration(e.to_string()))?;
+
         // Determine placement strategy
         let placement = self.config.placement().cloned().unwrap_or_else(|| {
             let local_endpoint = Endpoint::new(address.clone(), UID::new(0, 0));
@@ -324,7 +364,7 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
             router,
             cluster: self.cluster,
             address,
-            status: NodeStatus::Active,
+            status: NodeLifecycle::Active,
             pending_tasks,
             close_handles: close_handles_owned,
             providers,
@@ -348,6 +388,10 @@ pub enum NodeError {
     /// Transport creation failed.
     #[error("transport error: {0}")]
     Transport(String),
+
+    /// Membership registration failed during start.
+    #[error("membership registration failed: {0}")]
+    MembershipRegistration(String),
 }
 
 #[cfg(test)]
@@ -357,7 +401,7 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     use crate::actors::types::{ActorId, ActorType};
-    use crate::actors::{LocalPlacement, PlacementStrategy};
+    use crate::actors::{ActorDirectory, LocalPlacement, MembershipProvider, PlacementStrategy};
     use crate::{Endpoint, TokioProviders, UID};
 
     use super::super::host::{ActorContext, ActorHandler};
@@ -498,7 +542,7 @@ mod tests {
                 .await
                 .expect("start node");
 
-            assert_eq!(node.status(), NodeStatus::Active);
+            assert_eq!(node.status(), NodeLifecycle::Active);
 
             tokio::task::yield_now().await;
 
@@ -516,7 +560,7 @@ mod tests {
             assert_eq!(resp, ValueResponse { value: 42 });
 
             node.shutdown().await.expect("shutdown");
-            assert_eq!(node.status(), NodeStatus::Stopping);
+            assert_eq!(node.status(), NodeLifecycle::Stopping);
         });
     }
 
@@ -569,6 +613,109 @@ mod tests {
                 .expect("start node");
 
             assert_eq!(node.address(), &local_addr);
+        });
+    }
+
+    #[test]
+    fn test_node_registers_in_membership() {
+        run_local_test(async {
+            let local_addr = addr(4703);
+            let membership = Rc::new(crate::actors::SharedMembership::new());
+            let cluster = ClusterConfig::builder()
+                .membership(membership.clone())
+                .build()
+                .expect("build cluster");
+
+            let _node = MoonpoolNode::new(cluster, NodeConfig::for_address(local_addr.clone()))
+                .with_providers(TokioProviders::new())
+                .start()
+                .await
+                .expect("start node");
+
+            // After start, membership should show this node as Active
+            let snap = membership.snapshot().await;
+            let member = snap
+                .get_member(&local_addr)
+                .expect("node should be in membership");
+            assert!(member.is_active());
+            assert!(!member.name.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_node_shutdown_marks_dead() {
+        run_local_test(async {
+            let local_addr = addr(4704);
+            let membership = Rc::new(crate::actors::SharedMembership::new());
+            let cluster = ClusterConfig::builder()
+                .membership(membership.clone())
+                .build()
+                .expect("build cluster");
+
+            let mut node = MoonpoolNode::new(cluster, NodeConfig::for_address(local_addr.clone()))
+                .with_providers(TokioProviders::new())
+                .start()
+                .await
+                .expect("start node");
+
+            node.shutdown().await.expect("shutdown");
+
+            // After shutdown, membership should show this node as Dead
+            let snap = membership.snapshot().await;
+            let member = snap
+                .get_member(&local_addr)
+                .expect("node should be in membership");
+            assert_eq!(member.status, super::super::membership::NodeStatus::Dead);
+        });
+    }
+
+    #[test]
+    fn test_node_shutdown_cleans_directory() {
+        run_local_test(async {
+            let local_addr = addr(4705);
+            let directory = Rc::new(crate::actors::InMemoryDirectory::new());
+            let membership = Rc::new(crate::actors::SharedMembership::new());
+
+            let cluster = ClusterConfig::builder()
+                .directory(directory.clone())
+                .membership(membership.clone())
+                .build()
+                .expect("build cluster");
+
+            let local_endpoint = Endpoint::new(local_addr.clone(), UID::new(TEST_ACTOR_TYPE.0, 0));
+            let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(local_endpoint));
+
+            let config = NodeConfig::builder()
+                .address(local_addr.clone())
+                .placement(placement)
+                .build();
+
+            let mut node = MoonpoolNode::new(cluster, config)
+                .with_providers(TokioProviders::new())
+                .register::<CounterActor>()
+                .start()
+                .await
+                .expect("start node");
+
+            tokio::task::yield_now().await;
+
+            // Send a message to activate an actor (registers it in directory)
+            let actor_id = ActorId::new(TEST_ACTOR_TYPE, "cleanup-test");
+            let _resp: ValueResponse = node
+                .router()
+                .send_actor_request(&actor_id, test_methods::GET_VALUE, &GetValueRequest {})
+                .await
+                .expect("send");
+
+            // Verify actor is registered
+            let lookup = directory.lookup(&actor_id).await.expect("lookup");
+            assert!(lookup.is_some(), "actor should be in directory");
+
+            // Shutdown cleans directory
+            node.shutdown().await.expect("shutdown");
+
+            let lookup = directory.lookup(&actor_id).await.expect("lookup");
+            assert!(lookup.is_none(), "actor should be removed from directory");
         });
     }
 }
