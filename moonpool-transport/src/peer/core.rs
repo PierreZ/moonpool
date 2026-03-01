@@ -1,4 +1,5 @@
-//! Core peer implementation with automatic reconnection and message queuing.
+//! Core peer implementation with automatic reconnection, message queuing,
+//! and connection health monitoring.
 //!
 //! Provides wire format with UID-based endpoint addressing.
 
@@ -10,7 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
-use super::config::PeerConfig;
+use super::config::{MonitorConfig, PeerConfig};
 use super::error::{PeerError, PeerResult};
 use super::metrics::PeerMetrics;
 use crate::{
@@ -18,6 +19,152 @@ use crate::{
     serialize_packet, try_deserialize_packet,
 };
 use moonpool_sim::{assert_sometimes, assert_sometimes_each};
+
+// =============================================================================
+// Ping/Pong Protocol Constants
+// =============================================================================
+
+/// Wire token for ping requests (uses existing `WellKnownToken::Ping`).
+///
+/// Intercepted by `connection_task`, never delivered to application.
+///
+/// FDB ref: `WLTOKEN_PING_PACKET` in `FlowTransport.h`
+const PING_TOKEN: UID = UID::well_known(1);
+
+/// Wire token for pong replies.
+///
+/// Uses a non-well-known UID (`first != u64::MAX`) to avoid conflicts
+/// with the endpoint dispatch system. Intercepted by `connection_task`,
+/// never delivered to application.
+const PONG_TOKEN: UID = UID::new(u64::MAX - 1, 0);
+
+// =============================================================================
+// Ping Tracker State Machine
+// =============================================================================
+
+/// Action to take after a ping timer event.
+enum PingAction {
+    /// Send a ping packet to the remote peer.
+    SendPing,
+    /// Tolerate the timeout (bytes were received, connection alive but slow).
+    Tolerate,
+    /// Tear down the connection (unresponsive).
+    TearDown,
+}
+
+/// Tracks ping/pong state within `connection_task`.
+///
+/// Implements the state machine:
+/// ```text
+/// Idle ──(interval timer)──► SendPing ──► AwaitingPong
+/// AwaitingPong ──(pong received)──────► Idle (record RTT)
+/// AwaitingPong ──(timeout + bytes changed)──► re-ping (tolerate)
+/// AwaitingPong ──(timeout + no bytes)────► TearDown
+/// AwaitingPong ──(>max_tolerated)────► TearDown
+/// ```
+///
+/// FDB ref: `connectionMonitor` (`FlowTransport.actor.cpp:616-699`)
+struct PingTracker {
+    /// Monitoring configuration.
+    config: MonitorConfig,
+
+    /// Simulation time when the outstanding ping was sent.
+    /// `Some` means we are in `AwaitingPong` phase; `None` means `Idle`.
+    ping_sent_at: Option<Duration>,
+
+    /// When the last ping cycle started (for computing next ping interval).
+    last_ping_cycle: Option<Duration>,
+
+    /// Bytes received at the time the ping was sent. Used to detect
+    /// if the connection is still active even when pong is delayed.
+    bytes_at_ping: u64,
+
+    /// Consecutive timeout count for the current ping cycle.
+    ///
+    /// FDB: `timeoutCount` in `connectionMonitor`
+    timeout_count: u32,
+}
+
+impl PingTracker {
+    fn new(config: MonitorConfig) -> Self {
+        Self {
+            config,
+            ping_sent_at: None,
+            last_ping_cycle: None,
+            bytes_at_ping: 0,
+            timeout_count: 0,
+        }
+    }
+
+    /// Compute how long until the next ping action should occur.
+    fn time_until_next_action(&self, now: Duration) -> Duration {
+        match self.ping_sent_at {
+            Some(sent_at) => {
+                // AwaitingPong — timer is the ping timeout
+                let elapsed = now.saturating_sub(sent_at);
+                self.config.ping_timeout.saturating_sub(elapsed)
+            }
+            None => {
+                // Idle — timer is the ping interval
+                let last = self.last_ping_cycle.unwrap_or(now);
+                let elapsed = now.saturating_sub(last);
+                self.config.ping_interval.saturating_sub(elapsed)
+            }
+        }
+    }
+
+    /// Called when a pong is received. Returns the measured RTT.
+    fn on_pong_received(&mut self, now: Duration) -> Option<Duration> {
+        if let Some(sent_at) = self.ping_sent_at.take() {
+            self.timeout_count = 0;
+            self.last_ping_cycle = Some(now);
+            Some(now.saturating_sub(sent_at))
+        } else {
+            // Spurious pong (no outstanding ping), ignore
+            None
+        }
+    }
+
+    /// Called when the ping timer fires. Returns the action to take.
+    fn on_timer_fired(&mut self, now: Duration, current_bytes_received: u64) -> PingAction {
+        if self.ping_sent_at.is_some() {
+            // We were awaiting pong and timed out
+            self.timeout_count += 1;
+
+            if current_bytes_received > self.bytes_at_ping {
+                // Connection is still active (receiving data), tolerate
+                self.bytes_at_ping = current_bytes_received;
+                if self.timeout_count > self.config.max_tolerated_timeouts {
+                    PingAction::TearDown
+                } else {
+                    PingAction::Tolerate
+                }
+            } else {
+                // No bytes received since ping — connection is dead
+                PingAction::TearDown
+            }
+        } else {
+            // Idle timer fired — time to send a ping
+            self.ping_sent_at = Some(now);
+            self.bytes_at_ping = current_bytes_received;
+            self.timeout_count = 0;
+            self.last_ping_cycle = Some(now);
+            PingAction::SendPing
+        }
+    }
+
+    /// Reset tracker state (called on connection loss or reconnection).
+    fn reset(&mut self) {
+        self.ping_sent_at = None;
+        self.last_ping_cycle = None;
+        self.bytes_at_ping = 0;
+        self.timeout_count = 0;
+    }
+}
+
+// =============================================================================
+// Peer Public API
+// =============================================================================
 
 /// Type alias for the peer receiver channel.
 /// Used when taking ownership via `take_receiver()`.
@@ -482,6 +629,10 @@ impl<P: Providers> Peer<P> {
     }
 }
 
+// =============================================================================
+// Connection Task (Background Actor)
+// =============================================================================
+
 /// Behavior when connection is lost.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ConnectionLossBehavior {
@@ -493,13 +644,14 @@ enum ConnectionLossBehavior {
 
 /// Background connection task that handles all async TCP I/O.
 ///
-/// Matches FoundationDB's connectionWriter pattern:
+/// Matches FoundationDB's connectionWriter + connectionMonitor patterns:
 /// - Waits for dataToSend trigger
 /// - Drains unsent queue continuously
 /// - Handles connection failures and reconnection (or exit for incoming)
 /// - Owns the connection exclusively to avoid RefCell conflicts
 /// - Handles both reading and writing operations
 /// - Parses wire format packets from the read stream
+/// - Periodically pings to detect unresponsive connections (when monitoring enabled)
 async fn connection_task<P: Providers>(
     shared_state: Rc<RefCell<PeerSharedState<P>>>,
     data_to_send: Rc<Notify>,
@@ -514,7 +666,36 @@ async fn connection_task<P: Providers>(
     // Buffer for accumulating partial packet reads
     let mut read_buffer: Vec<u8> = Vec::with_capacity(4096);
 
+    // Initialize ping tracker: only for outbound peers with monitoring enabled
+    let mut ping_tracker: Option<PingTracker> = match (&config.monitor, on_connection_loss) {
+        (Some(monitor_config), ConnectionLossBehavior::Reconnect) => {
+            Some(PingTracker::new(monitor_config.clone()))
+        }
+        _ => None,
+    };
+
+    // If we start with an existing connection, initialize the ping cycle
+    if current_connection.is_some()
+        && let Some(ref mut tracker) = ping_tracker
+    {
+        let now = shared_state.borrow().time.now();
+        tracker.last_ping_cycle = Some(now);
+    }
+
     loop {
+        // Compute ping timer duration before select! to avoid borrow conflicts
+        let ping_sleep_duration = if let Some(ref tracker) = ping_tracker {
+            if current_connection.is_some() {
+                let now = shared_state.borrow().time.now();
+                Some(tracker.time_until_next_action(now))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let ping_active = ping_sleep_duration.is_some();
+
         tokio::select! {
             // Check for shutdown
             _ = shutdown_rx.recv() => {
@@ -551,6 +732,12 @@ async fn connection_task<P: Providers>(
                                         let mut state = shared_state.borrow_mut();
                                         state.connection = Some(());
                                         state.metrics.is_connected = true;
+                                    }
+                                    // Reset ping tracker on new connection
+                                    if let Some(ref mut tracker) = ping_tracker {
+                                        let now = shared_state.borrow().time.now();
+                                        tracker.reset();
+                                        tracker.last_ping_cycle = Some(now);
                                     }
                                 }
                                 Err(e) => {
@@ -603,6 +790,9 @@ async fn connection_task<P: Providers>(
                             &mut read_buffer,
                             Some((data, is_reliable)),
                         );
+                        if let Some(ref mut tracker) = ping_tracker {
+                            tracker.reset();
+                        }
                         break; // Exit send loop, will retry on next trigger
                     }
 
@@ -625,6 +815,9 @@ async fn connection_task<P: Providers>(
                                 &mut read_buffer,
                                 Some((data, is_reliable)),
                             );
+                            if let Some(ref mut tracker) = ping_tracker {
+                                tracker.reset();
+                            }
                             break; // Exit send loop, will retry on next trigger
                         }
                     }
@@ -651,6 +844,9 @@ async fn connection_task<P: Providers>(
                             &mut read_buffer,
                             None,
                         );
+                        if let Some(ref mut tracker) = ping_tracker {
+                            tracker.reset();
+                        }
                         if on_connection_loss == ConnectionLossBehavior::Exit {
                             break;
                         }
@@ -661,13 +857,18 @@ async fn connection_task<P: Providers>(
                         tracing::debug!("connection_task: received {} bytes, buffer now {} bytes", n, read_buffer.len());
 
                         // Try to parse complete packets from buffer
+                        // Pong replies are enqueued in unreliable_queue by process_read_buffer
+                        // and picked up by the writer branch (FDB pattern: connectionWriter is sole TCP writer)
                         let should_exit = process_read_buffer(
                             &shared_state,
                             &mut current_connection,
                             &mut read_buffer,
                             &receive_tx,
                             on_connection_loss,
+                            &mut ping_tracker,
+                            &data_to_send,
                         );
+
                         if should_exit {
                             break;
                         }
@@ -680,8 +881,99 @@ async fn connection_task<P: Providers>(
                             &mut read_buffer,
                             None,
                         );
+                        if let Some(ref mut tracker) = ping_tracker {
+                            tracker.reset();
+                        }
                         if on_connection_loss == ConnectionLossBehavior::Exit {
                             break;
+                        }
+                    }
+                }
+            }
+
+            // Connection monitor: periodic ping to detect unresponsive connections
+            // FDB ref: connectionMonitor (FlowTransport.actor.cpp:616-699)
+            _ = async {
+                match ping_sleep_duration {
+                    Some(duration) => {
+                        let time = shared_state.borrow().time.clone();
+                        let _ = time.sleep(duration).await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            }, if ping_active => {
+                let (now, bytes_received) = {
+                    let state = shared_state.borrow();
+                    (state.time.now(), state.metrics.bytes_received)
+                };
+
+                if let Some(ref mut tracker) = ping_tracker {
+                    match tracker.on_timer_fired(now, bytes_received) {
+                        PingAction::SendPing => {
+                            // Buggify: occasionally skip sending ping to test timeout path
+                            let skip_ping = moonpool_sim::buggify_with_prob!(0.05);
+                            if skip_ping {
+                                assert_sometimes!(true, "buggified_ping_skip");
+                                tracing::debug!("connection_task: buggify skipped ping send");
+                            } else if current_connection.is_some()
+                                && let Ok(ping_packet) = serialize_packet(PING_TOKEN, &[])
+                            {
+                                // FDB pattern: enqueue ping via unreliable queue, writer sends it
+                                // (FlowTransport.actor.cpp:663 — connectionMonitor uses sendUnreliable)
+                                let mut state = shared_state.borrow_mut();
+                                let first_unsent = state.are_queues_empty();
+                                state.unreliable_queue.push_back(ping_packet);
+                                state.metrics.record_ping_sent();
+                                drop(state);
+                                if first_unsent {
+                                    data_to_send.notify_one();
+                                }
+                                tracing::debug!("connection_task: enqueued ping in unreliable_queue");
+                            }
+                        }
+                        PingAction::Tolerate => {
+                            assert_sometimes!(true, "ping_timeout_tolerated");
+                            shared_state
+                                .borrow_mut()
+                                .metrics
+                                .record_ping_timeout_tolerated();
+                            tracing::debug!(
+                                "connection_task: ping timeout tolerated (bytes still flowing), count={}",
+                                tracker.timeout_count
+                            );
+                            // Re-send a ping for the next timeout window via unreliable queue
+                            if current_connection.is_some()
+                                && let Ok(ping_packet) = serialize_packet(PING_TOKEN, &[])
+                            {
+                                let mut state = shared_state.borrow_mut();
+                                let first_unsent = state.are_queues_empty();
+                                state.unreliable_queue.push_back(ping_packet);
+                                state.metrics.record_ping_sent();
+                                let sent_at = state.time.now();
+                                drop(state);
+                                tracker.ping_sent_at = Some(sent_at);
+                                if first_unsent {
+                                    data_to_send.notify_one();
+                                }
+                            }
+                        }
+                        PingAction::TearDown => {
+                            assert_sometimes!(true, "ping_timeout_teardown");
+                            shared_state.borrow_mut().metrics.record_ping_timeout();
+                            tracing::warn!(
+                                "connection_task: ping timeout, tearing down connection to {}",
+                                shared_state.borrow().destination
+                            );
+                            tracker.reset();
+                            handle_connection_failure(
+                                &shared_state,
+                                &mut current_connection,
+                                &mut read_buffer,
+                                None,
+                            );
+                            if on_connection_loss == ConnectionLossBehavior::Exit {
+                                break;
+                            }
                         }
                     }
                 }
@@ -689,6 +981,10 @@ async fn connection_task<P: Providers>(
         }
     }
 }
+
+// =============================================================================
+// Connection Helpers
+// =============================================================================
 
 /// Handle connection failure by clearing state and optionally requeuing data.
 fn handle_connection_failure<P: Providers>(
@@ -732,6 +1028,11 @@ fn handle_connection_failure<P: Providers>(
 }
 
 /// Process the read buffer and parse packets.
+///
+/// Intercepts ping/pong tokens:
+/// - `PING_TOKEN`: enqueues pong in `unreliable_queue` (FDB pattern: writer sends it)
+/// - `PONG_TOKEN`: updates `ping_tracker` with RTT measurement
+///
 /// Returns true if the task should exit.
 fn process_read_buffer<P: Providers>(
     shared_state: &Rc<RefCell<PeerSharedState<P>>>,
@@ -739,6 +1040,8 @@ fn process_read_buffer<P: Providers>(
     read_buffer: &mut Vec<u8>,
     receive_tx: &mpsc::UnboundedSender<(UID, Vec<u8>)>,
     on_connection_loss: ConnectionLossBehavior,
+    ping_tracker: &mut Option<PingTracker>,
+    data_to_send: &Notify,
 ) -> bool {
     loop {
         if read_buffer.len() < HEADER_SIZE {
@@ -762,7 +1065,38 @@ fn process_read_buffer<P: Providers>(
                 // Remove consumed bytes from buffer
                 read_buffer.drain(..consumed);
 
-                // Send to receiver
+                // Intercept ping token — enqueue pong in unreliable queue
+                // FDB pattern: pong goes through sendPacket → unsent queue → connectionWriter
+                if token == PING_TOKEN {
+                    if let Ok(pong_packet) = serialize_packet(PONG_TOKEN, &[]) {
+                        let mut state = shared_state.borrow_mut();
+                        let first_unsent = state.are_queues_empty();
+                        state.unreliable_queue.push_back(pong_packet);
+                        drop(state);
+                        if first_unsent {
+                            data_to_send.notify_one();
+                        }
+                    }
+                    tracing::debug!(
+                        "connection_task: received ping, enqueued pong in unreliable_queue"
+                    );
+                    continue; // Do NOT deliver to application
+                }
+
+                // Intercept pong token — update ping tracker with RTT
+                if token == PONG_TOKEN {
+                    if let Some(tracker) = ping_tracker.as_mut() {
+                        let now = shared_state.borrow().time.now();
+                        if let Some(rtt) = tracker.on_pong_received(now) {
+                            shared_state.borrow_mut().metrics.record_pong_received(rtt);
+                            tracing::debug!("connection_task: received pong, rtt={:?}", rtt);
+                            assert_sometimes!(true, "pong_received_with_rtt");
+                        }
+                    }
+                    continue; // Do NOT deliver to application
+                }
+
+                // Normal packet — deliver to application
                 if receive_tx.send((token, payload)).is_err() {
                     return true; // Receiver dropped, exit
                 }
@@ -801,6 +1135,11 @@ fn process_read_buffer<P: Providers>(
 
                 *current_connection = None;
                 read_buffer.clear();
+
+                // Reset ping tracker on wire error
+                if let Some(tracker) = ping_tracker.as_mut() {
+                    tracker.reset();
+                }
 
                 {
                     let mut state = shared_state.borrow_mut();
@@ -941,4 +1280,169 @@ fn record_connection_failure<P: Providers>(
     state.reconnect_state.current_delay = next_delay;
     let now = state.time.now();
     state.metrics.record_connection_failure_at(now, next_delay);
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ping_tracker_idle_sends_ping() {
+        let config = MonitorConfig {
+            ping_interval: Duration::from_secs(1),
+            ping_timeout: Duration::from_secs(2),
+            max_tolerated_timeouts: 3,
+        };
+        let mut tracker = PingTracker::new(config);
+
+        let action = tracker.on_timer_fired(Duration::from_secs(1), 0);
+        assert!(matches!(action, PingAction::SendPing));
+        assert!(tracker.ping_sent_at.is_some());
+        assert_eq!(tracker.timeout_count, 0);
+    }
+
+    #[test]
+    fn test_ping_tracker_pong_records_rtt() {
+        let config = MonitorConfig::default();
+        let mut tracker = PingTracker::new(config);
+
+        // Send ping at t=1s
+        tracker.on_timer_fired(Duration::from_secs(1), 0);
+        assert!(tracker.ping_sent_at.is_some());
+
+        // Receive pong at t=1.5s
+        let rtt = tracker.on_pong_received(Duration::from_millis(1500));
+        assert_eq!(rtt, Some(Duration::from_millis(500)));
+        assert!(tracker.ping_sent_at.is_none()); // Back to idle
+        assert_eq!(tracker.timeout_count, 0);
+    }
+
+    #[test]
+    fn test_ping_tracker_timeout_with_bytes_tolerates() {
+        let config = MonitorConfig {
+            ping_interval: Duration::from_secs(1),
+            ping_timeout: Duration::from_secs(2),
+            max_tolerated_timeouts: 3,
+        };
+        let mut tracker = PingTracker::new(config);
+
+        // Send ping at t=0, with 100 bytes received
+        tracker.on_timer_fired(Duration::ZERO, 100);
+        assert!(tracker.ping_sent_at.is_some());
+
+        // Timeout at t=2, but 200 bytes now (increased)
+        let action = tracker.on_timer_fired(Duration::from_secs(2), 200);
+        assert!(matches!(action, PingAction::Tolerate));
+        assert_eq!(tracker.timeout_count, 1);
+    }
+
+    #[test]
+    fn test_ping_tracker_timeout_without_bytes_tears_down() {
+        let config = MonitorConfig::default();
+        let mut tracker = PingTracker::new(config);
+
+        // Send ping at t=0
+        tracker.on_timer_fired(Duration::ZERO, 100);
+
+        // Timeout with same bytes — connection dead
+        let action = tracker.on_timer_fired(Duration::from_secs(2), 100);
+        assert!(matches!(action, PingAction::TearDown));
+    }
+
+    #[test]
+    fn test_ping_tracker_max_tolerated_timeouts() {
+        let config = MonitorConfig {
+            ping_interval: Duration::from_secs(1),
+            ping_timeout: Duration::from_secs(2),
+            max_tolerated_timeouts: 2,
+        };
+        let mut tracker = PingTracker::new(config);
+
+        // Send ping
+        tracker.on_timer_fired(Duration::ZERO, 0);
+
+        // First timeout with bytes — tolerate
+        let action = tracker.on_timer_fired(Duration::from_secs(2), 10);
+        assert!(matches!(action, PingAction::Tolerate));
+
+        // Second timeout with bytes — tolerate
+        let action = tracker.on_timer_fired(Duration::from_secs(4), 20);
+        assert!(matches!(action, PingAction::Tolerate));
+
+        // Third timeout with bytes — exceeds max_tolerated (2), tear down
+        let action = tracker.on_timer_fired(Duration::from_secs(6), 30);
+        assert!(matches!(action, PingAction::TearDown));
+    }
+
+    #[test]
+    fn test_ping_tracker_reset() {
+        let config = MonitorConfig::default();
+        let mut tracker = PingTracker::new(config);
+
+        // Set some state
+        tracker.on_timer_fired(Duration::from_secs(1), 100);
+        assert!(tracker.ping_sent_at.is_some());
+
+        // Reset
+        tracker.reset();
+        assert!(tracker.ping_sent_at.is_none());
+        assert!(tracker.last_ping_cycle.is_none());
+        assert_eq!(tracker.bytes_at_ping, 0);
+        assert_eq!(tracker.timeout_count, 0);
+    }
+
+    #[test]
+    fn test_ping_tracker_time_until_next_action_idle() {
+        let config = MonitorConfig {
+            ping_interval: Duration::from_secs(5),
+            ping_timeout: Duration::from_secs(2),
+            max_tolerated_timeouts: 3,
+        };
+        let mut tracker = PingTracker::new(config);
+        tracker.last_ping_cycle = Some(Duration::from_secs(10));
+
+        // 3 seconds after last cycle, should wait 2 more seconds
+        let wait = tracker.time_until_next_action(Duration::from_secs(13));
+        assert_eq!(wait, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn test_ping_tracker_time_until_next_action_awaiting_pong() {
+        let config = MonitorConfig {
+            ping_interval: Duration::from_secs(5),
+            ping_timeout: Duration::from_secs(3),
+            max_tolerated_timeouts: 3,
+        };
+        let mut tracker = PingTracker::new(config);
+
+        // Send ping at t=10
+        tracker.on_timer_fired(Duration::from_secs(10), 0);
+
+        // At t=11, should wait 2 more seconds for timeout
+        let wait = tracker.time_until_next_action(Duration::from_secs(11));
+        assert_eq!(wait, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn test_ping_tracker_spurious_pong() {
+        let config = MonitorConfig::default();
+        let mut tracker = PingTracker::new(config);
+
+        // Receive pong without sending ping — should return None
+        let rtt = tracker.on_pong_received(Duration::from_secs(1));
+        assert!(rtt.is_none());
+    }
+
+    #[test]
+    fn test_ping_pong_tokens_distinct() {
+        assert_ne!(PING_TOKEN, PONG_TOKEN);
+        // PING_TOKEN is well-known
+        assert!(PING_TOKEN.is_well_known());
+        // PONG_TOKEN is NOT well-known (avoids endpoint dispatch)
+        assert!(!PONG_TOKEN.is_well_known());
+    }
 }

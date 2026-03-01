@@ -64,7 +64,7 @@ pub mod metrics;
 pub mod error;
 
 // Re-export main types
-pub use config::PeerConfig;
+pub use config::{MonitorConfig, PeerConfig};
 pub use core::{Peer, PeerReceiver};
 pub use error::PeerError;
 pub use metrics::PeerMetrics;

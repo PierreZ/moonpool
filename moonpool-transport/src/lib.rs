@@ -86,7 +86,7 @@ pub mod rpc;
 pub use error::MessagingError;
 
 // Peer exports
-pub use peer::{Peer, PeerConfig, PeerError, PeerMetrics, PeerReceiver};
+pub use peer::{MonitorConfig, Peer, PeerConfig, PeerError, PeerMetrics, PeerReceiver};
 
 // Wire format exports
 pub use wire::{
