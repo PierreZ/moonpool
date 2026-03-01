@@ -32,7 +32,9 @@ use crate::{
 
 use super::router::ActorError;
 use super::state::ActorStateStore;
-use super::types::{ActorId, ActorMessage, ActorResponse, ActorType, CacheInvalidation};
+use super::types::{
+    ActivationId, ActorAddress, ActorId, ActorMessage, ActorResponse, ActorType, CacheInvalidation,
+};
 use super::{ActorDirectory, ActorRouter};
 
 /// Maximum number of times a message can be forwarded before being rejected.
@@ -388,12 +390,12 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
         let dir_lookup = directory.lookup(&actor_id).await;
 
         match dir_lookup {
-            Ok(Some(registered_endpoint)) if registered_endpoint.address != local_address => {
+            Ok(Some(registered_addr)) if registered_addr.endpoint.address != local_address => {
                 // Actor is registered on another node — forward
                 forward_message::<P, C>(
                     &transport,
                     &actor_msg,
-                    &registered_endpoint,
+                    &registered_addr.endpoint,
                     &local_address,
                     actor_type,
                     &codec,
@@ -448,6 +450,10 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
 ) {
     let mut actor: Option<H> = None;
     let mut was_previously_active = false;
+    // Track the current activation's address for directory unregister
+    let mut current_activation: Option<ActorAddress> = None;
+    // Monotonically increasing activation counter for this identity
+    let mut activation_counter: u64 = 0;
 
     loop {
         // Wait for next message, with optional idle timeout when actor is active.
@@ -471,7 +477,10 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                             assert_sometimes!(true, "deactivate_after_idle_timeout");
                         }
                         actor = None;
-                        let _ = directory.unregister(&actor_id).await;
+                        if let Some(ref addr) = current_activation {
+                            let _ = directory.unregister(addr).await;
+                        }
+                        current_activation = None;
                         continue;
                     }
                 }
@@ -511,9 +520,15 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                 continue;
             }
 
-            // Register in directory (best-effort)
+            // Register in directory (best-effort) with ActorAddress
             let endpoint = Endpoint::new(local_address.clone(), UID::new(actor_type.0, 0));
-            let _ = directory.register(&actor_id, endpoint).await;
+            activation_counter += 1;
+            let activation_id = ActivationId::new(
+                endpoint.token.first ^ endpoint.token.second ^ activation_counter,
+            );
+            let actor_address = ActorAddress::new(actor_id, endpoint, activation_id);
+            let _ = directory.register(actor_address.clone()).await;
+            current_activation = Some(actor_address);
 
             actor = Some(new_actor);
             assert_sometimes!(true, "actor_activated");
@@ -560,7 +575,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
             let actor_id = ActorId::new(actor_type, identity.clone());
             if let Some(a) = actor.as_mut() {
                 let ctx = ActorContext {
-                    id: actor_id.clone(),
+                    id: actor_id,
                     router: router.clone(),
                     state_store: state_store.clone(),
                 };
@@ -568,7 +583,10 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                 assert_sometimes!(true, "deactivate_on_idle");
             }
             actor = None;
-            let _ = directory.unregister(&actor_id).await;
+            if let Some(ref addr) = current_activation {
+                let _ = directory.unregister(addr).await;
+            }
+            current_activation = None;
         }
     }
 
@@ -576,12 +594,14 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
     if let Some(ref mut a) = actor {
         let actor_id = ActorId::new(actor_type, identity.clone());
         let ctx = ActorContext {
-            id: actor_id.clone(),
+            id: actor_id,
             router: router.clone(),
             state_store: state_store.clone(),
         };
         let _ = a.on_deactivate(&ctx).await;
-        let _ = directory.unregister(&actor_id).await;
+        if let Some(ref addr) = current_activation {
+            let _ = directory.unregister(addr).await;
+        }
     }
 
     // Signal identity task completion to the host.
