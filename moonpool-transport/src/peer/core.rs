@@ -960,7 +960,7 @@ async fn connection_task<P: Providers>(
                         PingAction::TearDown => {
                             assert_sometimes!(true, "ping_timeout_teardown");
                             shared_state.borrow_mut().metrics.record_ping_timeout();
-                            tracing::warn!(
+                            tracing::debug!(
                                 "connection_task: ping timeout, tearing down connection to {}",
                                 shared_state.borrow().destination
                             );

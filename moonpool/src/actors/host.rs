@@ -153,6 +153,18 @@ impl<P: Providers, C: MessageCodec> ActorContext<P, C> {
     pub fn state_store(&self) -> Option<&Rc<dyn ActorStateStore>> {
         self.state_store.as_ref()
     }
+
+    /// Get a typed actor reference for calling other actors.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let other: BankAccountRef<_, _> = ctx.actor_ref("other-account");
+    /// other.deposit(req).await?;
+    /// ```
+    pub fn actor_ref<R: super::ActorRef<P, C>>(&self, identity: impl Into<String>) -> R {
+        R::from_router(identity, &self.router)
+    }
 }
 
 /// Trait implemented by each actor type for method dispatch and lifecycle.
@@ -253,7 +265,7 @@ pub trait ActorHandler: Default + 'static {
 ///
 /// Each registered actor type gets a `TypedDispatcher<H>` that implements
 /// this trait. The host stores these as `Box<dyn ActorTypeDispatcher<P, C>>`.
-trait ActorTypeDispatcher<P: Providers, C: MessageCodec> {
+pub(super) trait ActorTypeDispatcher<P: Providers, C: MessageCodec> {
     /// Start the processing loop for this actor type.
     ///
     /// Spawns a task that receives `ActorMessage`s from the transport,
@@ -273,12 +285,12 @@ trait ActorTypeDispatcher<P: Providers, C: MessageCodec> {
 }
 
 /// Type-erased dispatcher for a specific actor handler type.
-struct TypedDispatcher<H: ActorHandler> {
+pub(super) struct TypedDispatcher<H: ActorHandler> {
     _marker: std::marker::PhantomData<H>,
 }
 
 impl<H: ActorHandler> TypedDispatcher<H> {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             _marker: std::marker::PhantomData,
         }

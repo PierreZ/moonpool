@@ -11,13 +11,12 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::actors::{
-    ActorContext, ActorDirectory, ActorError, ActorHandler, ActorHost, ActorRouter,
-    ActorStateStore, DeactivationHint, InMemoryDirectory, InMemoryStateStore, LocalPlacement,
-    PersistentState, PlacementStrategy,
+    ActorContext, ActorError, ActorHandler, ActorStateStore, ClusterConfig, DeactivationHint,
+    InMemoryStateStore, MoonpoolNode, NodeConfig, PersistentState,
 };
 use crate::{
-    Endpoint, JsonCodec, MessageCodec, NetTransportBuilder, NetworkAddress, Providers,
-    RandomProvider, RpcError, TimeProvider, UID, actor_impl, service,
+    MessageCodec, NetworkAddress, Providers, RandomProvider, RpcError, TimeProvider, actor_impl,
+    service,
 };
 use moonpool_sim::providers::SimProviders;
 use moonpool_sim::{SimContext, SimulationResult, Workload, assert_sometimes};
@@ -88,7 +87,11 @@ impl BankAccountImpl {
 
 #[async_trait(?Send)]
 impl BankAccount for BankAccountImpl {
-    async fn deposit(&mut self, req: DepositRequest) -> Result<BalanceResponse, RpcError> {
+    async fn deposit<P: Providers, C: MessageCodec>(
+        &mut self,
+        _ctx: &ActorContext<P, C>,
+        req: DepositRequest,
+    ) -> Result<BalanceResponse, RpcError> {
         let new_balance = self.balance() + req.amount;
         if let Some(s) = &mut self.state {
             s.state_mut().balance = new_balance;
@@ -99,7 +102,11 @@ impl BankAccount for BankAccountImpl {
         })
     }
 
-    async fn withdraw(&mut self, req: WithdrawRequest) -> Result<BalanceResponse, RpcError> {
+    async fn withdraw<P: Providers, C: MessageCodec>(
+        &mut self,
+        _ctx: &ActorContext<P, C>,
+        req: WithdrawRequest,
+    ) -> Result<BalanceResponse, RpcError> {
         let new_balance = self.balance() - req.amount;
         if let Some(s) = &mut self.state {
             s.state_mut().balance = new_balance;
@@ -110,7 +117,11 @@ impl BankAccount for BankAccountImpl {
         })
     }
 
-    async fn get_balance(&mut self, _req: GetBalanceRequest) -> Result<BalanceResponse, RpcError> {
+    async fn get_balance<P: Providers, C: MessageCodec>(
+        &mut self,
+        _ctx: &ActorContext<P, C>,
+        _req: GetBalanceRequest,
+    ) -> Result<BalanceResponse, RpcError> {
         Ok(BalanceResponse {
             balance: self.balance(),
         })
@@ -156,9 +167,8 @@ pub struct BankingWorkload {
     num_ops: usize,
     /// Account names to use.
     accounts: Vec<String>,
-    /// Actor infrastructure (populated in setup).
-    host: Option<ActorHost<SimProviders>>,
-    router: Option<Rc<ActorRouter<SimProviders>>>,
+    /// Actor runtime (populated in setup).
+    node: Option<MoonpoolNode<SimProviders>>,
     /// Reference model for tracking expected state.
     model: BankingModel,
 }
@@ -169,8 +179,7 @@ impl BankingWorkload {
         Self {
             num_ops,
             accounts,
-            host: None,
-            router: None,
+            node: None,
             model: BankingModel::default(),
         }
     }
@@ -188,50 +197,39 @@ impl Workload for BankingWorkload {
             moonpool_sim::SimulationError::InvalidState(format!("invalid address: {e}"))
         })?;
 
-        let transport = NetTransportBuilder::new(ctx.providers().clone())
-            .local_address(local_addr.clone())
+        let state_store: Rc<dyn ActorStateStore> = Rc::new(InMemoryStateStore::new());
+
+        let cluster = ClusterConfig::builder()
+            .name("banking-sim")
+            .topology(vec![local_addr.clone()])
             .build()
             .map_err(|e| {
-                moonpool_sim::SimulationError::InvalidState(format!("transport build: {e}"))
+                moonpool_sim::SimulationError::InvalidState(format!("cluster config: {e}"))
             })?;
 
-        let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
-        let state_store: Rc<dyn ActorStateStore> = Rc::new(InMemoryStateStore::new());
-        let local_endpoint = Endpoint::new(
-            local_addr,
-            UID::new(BankAccountRef::<SimProviders>::ACTOR_TYPE.0, 0),
-        );
-        let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(local_endpoint));
-        let router = Rc::new(ActorRouter::new(
-            transport.clone(),
-            directory.clone(),
-            placement,
-            JsonCodec,
-        ));
-        let host =
-            ActorHost::new(transport, router.clone(), directory).with_state_store(state_store);
+        let config = NodeConfig::builder().state_store(state_store).build();
 
-        host.register::<BankAccountImpl>();
+        let node = MoonpoolNode::new(cluster, config)
+            .with_providers(ctx.providers().clone())
+            .register::<BankAccountImpl>()
+            .start()
+            .await
+            .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("node start: {e}")))?;
 
-        self.host = Some(host);
-        self.router = Some(router);
+        self.node = Some(node);
         self.model = BankingModel::default();
 
         Ok(())
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let router = self
-            .router
-            .as_ref()
-            .ok_or_else(|| {
-                moonpool_sim::SimulationError::InvalidState("router not initialized".to_string())
-            })?
-            .clone();
+        let node = self.node.as_ref().ok_or_else(|| {
+            moonpool_sim::SimulationError::InvalidState("node not initialized".to_string())
+        })?;
 
         // Seed initial deposits so accounts have funds
         for account in &self.accounts {
-            let actor_ref = BankAccountRef::new(account.clone(), &router);
+            let actor_ref: BankAccountRef<_> = node.actor_ref(account.clone());
             let initial = ctx.random().random_range(100..500);
             match actor_ref.deposit(DepositRequest { amount: initial }).await {
                 Ok(_) => self.model.deposit(account, initial),
@@ -261,10 +259,13 @@ impl Workload for BankingWorkload {
             }
 
             let op = random_op(ctx.random(), &self.accounts);
+            let node = self.node.as_ref().ok_or_else(|| {
+                moonpool_sim::SimulationError::InvalidState("node not initialized".to_string())
+            })?;
 
             match op {
                 ActorOp::Deposit { account, amount } => {
-                    let actor_ref = BankAccountRef::new(account.clone(), &router);
+                    let actor_ref: BankAccountRef<_> = node.actor_ref(account.clone());
                     match actor_ref.deposit(DepositRequest { amount }).await {
                         Ok(resp) => {
                             self.model.deposit(&account, amount);
@@ -288,7 +289,7 @@ impl Workload for BankingWorkload {
                         assert_sometimes!(true, "insufficient_funds_rejected");
                         continue;
                     }
-                    let actor_ref = BankAccountRef::new(account.clone(), &router);
+                    let actor_ref: BankAccountRef<_> = node.actor_ref(account.clone());
                     match actor_ref.withdraw(WithdrawRequest { amount }).await {
                         Ok(resp) => {
                             let withdrew = self.model.withdraw(&account, amount);
@@ -312,7 +313,7 @@ impl Workload for BankingWorkload {
                     }
                 }
                 ActorOp::GetBalance { account } => {
-                    let actor_ref = BankAccountRef::new(account.clone(), &router);
+                    let actor_ref: BankAccountRef<_> = node.actor_ref(account.clone());
                     match actor_ref.get_balance(GetBalanceRequest {}).await {
                         Ok(resp) => {
                             let expected = self.model.balance(&account);
@@ -335,7 +336,7 @@ impl Workload for BankingWorkload {
                         assert_sometimes!(true, "transfer_insufficient_funds");
                         continue;
                     }
-                    let from_ref = BankAccountRef::new(from.clone(), &router);
+                    let from_ref: BankAccountRef<_> = node.actor_ref(from.clone());
                     match from_ref.withdraw(WithdrawRequest { amount }).await {
                         Ok(_) => {
                             let withdrew = self.model.withdraw(&from, amount);
@@ -344,7 +345,7 @@ impl Workload for BankingWorkload {
                                 "model withdraw should succeed for transfer"
                             );
 
-                            let to_ref = BankAccountRef::new(to.clone(), &router);
+                            let to_ref: BankAccountRef<_> = node.actor_ref(to.clone());
                             match to_ref.deposit(DepositRequest { amount }).await {
                                 Ok(_) => {
                                     self.model.deposit(&to, amount);
@@ -374,8 +375,8 @@ impl Workload for BankingWorkload {
             ctx.state().publish(BANKING_MODEL_KEY, self.model.clone());
         }
 
-        // Shutdown: drop host to trigger deactivation
-        drop(self.host.take());
+        // Shutdown: drop node to trigger deactivation
+        drop(self.node.take());
 
         Ok(())
     }
