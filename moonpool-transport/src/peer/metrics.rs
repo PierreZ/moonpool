@@ -52,6 +52,30 @@ pub struct PeerMetrics {
 
     /// Whether the peer is currently connected
     pub is_connected: bool,
+
+    /// Total number of ping packets sent
+    pub pings_sent: u64,
+
+    /// Total number of pong replies received
+    pub pongs_received: u64,
+
+    /// Total number of ping timeouts (no pong reply within deadline)
+    pub ping_timeouts: u64,
+
+    /// Number of timeouts tolerated because bytes were still being received
+    pub ping_timeouts_tolerated: u64,
+
+    /// Last measured round-trip time from ping to pong
+    pub last_ping_rtt: Option<Duration>,
+
+    /// Minimum observed ping RTT
+    pub min_ping_rtt: Option<Duration>,
+
+    /// Maximum observed ping RTT
+    pub max_ping_rtt: Option<Duration>,
+
+    /// Sum of all ping RTTs (for computing average: `total / pongs_received`)
+    pub total_ping_rtt: Duration,
 }
 
 impl Default for PeerMetrics {
@@ -85,6 +109,14 @@ impl PeerMetrics {
             consecutive_failures: 0,
             current_reconnect_delay: Duration::from_millis(100),
             is_connected: false,
+            pings_sent: 0,
+            pongs_received: 0,
+            ping_timeouts: 0,
+            ping_timeouts_tolerated: 0,
+            last_ping_rtt: None,
+            min_ping_rtt: None,
+            max_ping_rtt: None,
+            total_ping_rtt: Duration::ZERO,
         }
     }
 
@@ -137,6 +169,47 @@ impl PeerMetrics {
     pub fn record_message_dequeued(&mut self) {
         if self.current_queue_size > 0 {
             self.current_queue_size -= 1;
+        }
+    }
+
+    /// Record a ping sent.
+    pub fn record_ping_sent(&mut self) {
+        self.pings_sent += 1;
+    }
+
+    /// Record a pong received with the measured round-trip time.
+    pub fn record_pong_received(&mut self, rtt: Duration) {
+        self.pongs_received += 1;
+        self.last_ping_rtt = Some(rtt);
+        self.total_ping_rtt += rtt;
+
+        self.min_ping_rtt = Some(match self.min_ping_rtt {
+            Some(prev) => prev.min(rtt),
+            None => rtt,
+        });
+
+        self.max_ping_rtt = Some(match self.max_ping_rtt {
+            Some(prev) => prev.max(rtt),
+            None => rtt,
+        });
+    }
+
+    /// Record a ping timeout.
+    pub fn record_ping_timeout(&mut self) {
+        self.ping_timeouts += 1;
+    }
+
+    /// Record a tolerated ping timeout (bytes were still flowing).
+    pub fn record_ping_timeout_tolerated(&mut self) {
+        self.ping_timeouts_tolerated += 1;
+    }
+
+    /// Calculate average ping RTT, or `None` if no pongs received.
+    pub fn average_ping_rtt(&self) -> Option<Duration> {
+        if self.pongs_received == 0 {
+            None
+        } else {
+            Some(self.total_ping_rtt / self.pongs_received as u32)
         }
     }
 
