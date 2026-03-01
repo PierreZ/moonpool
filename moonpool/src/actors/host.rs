@@ -840,7 +840,7 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     use crate::actors::{InMemoryDirectory, LocalPlacement, PlacementStrategy};
-    use crate::{Endpoint, NetTransportBuilder, NetworkAddress, TokioProviders};
+    use crate::{NetTransportBuilder, NetworkAddress, TokioProviders};
 
     use super::*;
 
@@ -913,12 +913,16 @@ mod tests {
             .expect("build transport");
 
         let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
-        let local_endpoint = Endpoint::new(local_addr, UID::new(TEST_ACTOR_TYPE.0, 0));
-        let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(local_endpoint));
+        let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(local_addr.clone()));
+        let membership: Rc<dyn crate::actors::MembershipProvider> =
+            Rc::new(crate::actors::SharedMembership::with_members(vec![
+                local_addr,
+            ]));
         let router = Rc::new(ActorRouter::new(
             transport.clone(),
             directory.clone(),
             placement,
+            membership,
             JsonCodec,
         ));
         let host = ActorHost::new(transport, router.clone(), directory.clone());
@@ -1165,12 +1169,17 @@ mod tests {
                 .expect("build transport");
 
             let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
-            let local_endpoint = Endpoint::new(local_addr, UID::new(TRACKER_TYPE.0, 0));
-            let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(local_endpoint));
+            let placement: Rc<dyn PlacementStrategy> =
+                Rc::new(LocalPlacement::new(local_addr.clone()));
+            let membership: Rc<dyn crate::actors::MembershipProvider> =
+                Rc::new(crate::actors::SharedMembership::with_members(vec![
+                    local_addr,
+                ]));
             let router = Rc::new(ActorRouter::new(
                 transport.clone(),
                 directory.clone(),
                 placement,
+                membership,
                 JsonCodec,
             ));
 

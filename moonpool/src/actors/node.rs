@@ -34,8 +34,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::{
-    Endpoint, JsonCodec, MessageCodec, NetTransport, NetTransportBuilder, NetworkAddress,
-    Providers, TaskProvider, UID,
+    JsonCodec, MessageCodec, NetTransport, NetTransportBuilder, NetworkAddress, Providers,
+    TaskProvider,
 };
 
 use super::ActorDirectory;
@@ -324,17 +324,20 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
             .map_err(|e| NodeError::MembershipRegistration(e.to_string()))?;
 
         // Determine placement strategy
-        let placement = self.config.placement().cloned().unwrap_or_else(|| {
-            let local_endpoint = Endpoint::new(address.clone(), UID::new(0, 0));
-            Rc::new(super::LocalPlacement::new(local_endpoint))
-        });
+        let placement = self
+            .config
+            .placement()
+            .cloned()
+            .unwrap_or_else(|| Rc::new(super::LocalPlacement::new(address.clone())));
 
         // Create router
         let directory = self.cluster.directory().clone();
+        let membership = self.cluster.membership().clone();
         let router = Rc::new(ActorRouter::new(
             transport.clone(),
             directory.clone(),
             placement,
+            membership,
             self.codec,
         ));
 
@@ -400,9 +403,9 @@ mod tests {
 
     use serde::{Deserialize, Serialize};
 
+    use crate::TokioProviders;
     use crate::actors::types::{ActorId, ActorType};
     use crate::actors::{ActorDirectory, LocalPlacement, MembershipProvider, PlacementStrategy};
-    use crate::{Endpoint, TokioProviders, UID};
 
     use super::super::host::{ActorContext, ActorHandler};
     use super::super::router::ActorError;
@@ -525,8 +528,8 @@ mod tests {
     fn test_node_start_and_send() {
         run_local_test(async {
             let local_addr = addr(4700);
-            let local_endpoint = Endpoint::new(local_addr.clone(), UID::new(TEST_ACTOR_TYPE.0, 0));
-            let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(local_endpoint));
+            let placement: Rc<dyn PlacementStrategy> =
+                Rc::new(LocalPlacement::new(local_addr.clone()));
 
             let cluster = ClusterConfig::builder()
                 .topology(vec![local_addr.clone()])
@@ -682,8 +685,8 @@ mod tests {
                 .build()
                 .expect("build cluster");
 
-            let local_endpoint = Endpoint::new(local_addr.clone(), UID::new(TEST_ACTOR_TYPE.0, 0));
-            let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(local_endpoint));
+            let placement: Rc<dyn PlacementStrategy> =
+                Rc::new(LocalPlacement::new(local_addr.clone()));
 
             let config = NodeConfig::builder()
                 .address(local_addr.clone())

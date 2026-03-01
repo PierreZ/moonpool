@@ -26,6 +26,7 @@ use serde::de::DeserializeOwned;
 
 use crate::{Endpoint, JsonCodec, MessageCodec, NetTransport, Providers, UID, send_request};
 
+use super::membership::MembershipProvider;
 use super::types::{ActivationId, ActorAddress};
 use super::{
     ActorDirectory, ActorId, ActorMessage, ActorResponse, DirectoryError, PlacementError,
@@ -88,6 +89,7 @@ pub struct ActorRouter<P: Providers, C: MessageCodec = JsonCodec> {
     transport: Rc<NetTransport<P>>,
     directory: Rc<dyn ActorDirectory>,
     placement: Rc<dyn PlacementStrategy>,
+    membership: Rc<dyn MembershipProvider>,
     codec: C,
 }
 
@@ -99,17 +101,20 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
     /// * `transport` - The transport for sending messages
     /// * `directory` - Directory for resolving actor locations
     /// * `placement` - Strategy for placing new actors
+    /// * `membership` - Membership provider for active member list
     /// * `codec` - Codec for serializing request/response bodies
     pub fn new(
         transport: Rc<NetTransport<P>>,
         directory: Rc<dyn ActorDirectory>,
         placement: Rc<dyn PlacementStrategy>,
+        membership: Rc<dyn MembershipProvider>,
         codec: C,
     ) -> Self {
         Self {
             transport,
             directory,
             placement,
+            membership,
             codec,
         }
     }
@@ -196,7 +201,8 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
 
         // Not found — place the actor
         assert_sometimes!(true, "placement_invoked");
-        let endpoint = self.placement.place(target, &[]).await?;
+        let active_members = self.membership.members().await;
+        let endpoint = self.placement.place(target, &active_members).await?;
 
         // Build ActorAddress with a deterministic activation ID
         let activation_id = ActivationId::new(endpoint.token.first ^ endpoint.token.second);
@@ -218,7 +224,7 @@ mod tests {
 
     use super::*;
     use crate::actors::types::ActivationId;
-    use crate::actors::{ActorType, InMemoryDirectory, LocalPlacement};
+    use crate::actors::{ActorType, InMemoryDirectory, LocalPlacement, SharedMembership};
 
     // We use the same MockProviders pattern as transport tests
     #[derive(Clone)]
@@ -347,11 +353,12 @@ mod tests {
             .build()
             .expect("build should succeed");
 
-        let local_endpoint = Endpoint::new(test_address(), UID::new(0xBA4E_4B00, 0));
         let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
-        let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(local_endpoint));
+        let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(test_address()));
+        let membership: Rc<dyn MembershipProvider> =
+            Rc::new(SharedMembership::with_members(vec![test_address()]));
 
-        let _router = ActorRouter::new(transport, directory, placement, JsonCodec);
+        let _router = ActorRouter::new(transport, directory, placement, membership, JsonCodec);
     }
 
     #[tokio::test]
@@ -361,12 +368,18 @@ mod tests {
             .build()
             .expect("build should succeed");
 
-        let local_endpoint = Endpoint::new(test_address(), UID::new(0xBA4E_4B00, 0));
         let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
-        let placement: Rc<dyn PlacementStrategy> =
-            Rc::new(LocalPlacement::new(local_endpoint.clone()));
+        let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(test_address()));
+        let membership: Rc<dyn MembershipProvider> =
+            Rc::new(SharedMembership::with_members(vec![test_address()]));
 
-        let router = ActorRouter::new(transport, directory.clone(), placement, JsonCodec);
+        let router = ActorRouter::new(
+            transport,
+            directory.clone(),
+            placement,
+            membership,
+            JsonCodec,
+        );
 
         let actor_id = ActorId {
             actor_type: ActorType(0xBA4E_4B00),
@@ -378,7 +391,7 @@ mod tests {
             .resolve(&actor_id)
             .await
             .expect("resolve should succeed");
-        assert_eq!(resolved, local_endpoint);
+        assert_eq!(resolved.address, test_address());
 
         // Directory should now have the entry
         let lookup = directory
@@ -386,7 +399,7 @@ mod tests {
             .await
             .expect("lookup should succeed");
         assert!(lookup.is_some());
-        assert_eq!(lookup.expect("entry").endpoint, local_endpoint);
+        assert_eq!(lookup.expect("entry").endpoint.address, test_address());
     }
 
     #[tokio::test]
@@ -396,11 +409,18 @@ mod tests {
             .build()
             .expect("build should succeed");
 
-        let local_endpoint = Endpoint::new(test_address(), UID::new(0xBA4E_4B00, 0));
         let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
-        let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(local_endpoint));
+        let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(test_address()));
+        let membership: Rc<dyn MembershipProvider> =
+            Rc::new(SharedMembership::with_members(vec![test_address()]));
 
-        let router = ActorRouter::new(transport, directory.clone(), placement, JsonCodec);
+        let router = ActorRouter::new(
+            transport,
+            directory.clone(),
+            placement,
+            membership,
+            JsonCodec,
+        );
 
         let actor_id = ActorId {
             actor_type: ActorType(0xBA4E_4B00),
