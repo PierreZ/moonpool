@@ -8,15 +8,6 @@ success-output = "never"
 # Run tests in parallel
 test-threads = "num-cpus"
 
-# Slow simulation tests (chaos + exploration) get extra time
-[[profile.default.overrides]]
-filter = 'test(slow_simulation)'
-slow-timeout = { period = "10m", terminate-after = 5 }
-
-# Run only fast tests
-[profile.fast]
-default-filter = "not test(slow_simulation)"
-
 [profile.default.junit]
 # Store test results
 path = "target/nextest/default/junit.xml"

@@ -6,19 +6,12 @@
 **Validation**: All must pass before completing work:
 - `nix develop --command cargo fmt`
 - `nix develop --command cargo clippy`
-- `nix develop --command cargo nextest run --profile fast`
+- `nix develop --command cargo nextest run`
 
-**IMPORTANT**: NEVER run `cargo nextest run` without `--profile fast`. The default profile runs ALL tests including slow simulation tests that saturate CPU for minutes. Always use a profile.
-
-**Test profiles**: Configured in `.config/nextest.toml`, aliases in `.cargo/config.toml`
-- `cargo test-fast` — fast tests only (unit + SimWorld) — **use this by default**
-- `cargo nextest run --profile fast` — same as `cargo test-fast`
-
-**Simulation binaries**: Slow simulation tests run as binary targets (sancov requires `main()` thread). Managed via xtask:
-- `cargo xtask sim` — run all simulation binaries (sancov always enabled)
-- `cargo xtask sim maze` — filter by name substring
-
-**Naming convention**: Slow tests use `slow_simulation_` prefix (e.g. `slow_simulation_maze`). Fast tests use `test_` prefix.
+**Simulation binaries**: Managed via xtask:
+- `cargo xtask sim list` — list all simulation binaries
+- `cargo xtask sim run maze` — run binaries matching filter
+- `cargo xtask sim run-all` — run all simulation binaries
 
 **Debug testing**:
 - Default: `UntilAllSometimesReached(1000)` for comprehensive chaos testing
