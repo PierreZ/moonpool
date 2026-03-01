@@ -55,7 +55,7 @@ pub use actor_ref::ActorRef;
 pub use cluster::{ClusterConfig, ClusterConfigBuilder, ClusterConfigError};
 pub use directory::{ActorDirectory, DirectoryError, InMemoryDirectory};
 pub use host::{ActorContext, ActorHandler, ActorHost, DeactivationHint};
-pub use membership::{MembershipProvider, SharedMembership};
+pub use membership::{ClusterMember, MembershipProvider, MembershipVersion, SharedMembership};
 pub use node::{MoonpoolNode, MoonpoolNodeBuilder, NodeError, NodeStatus};
 pub use node_config::{NodeConfig, NodeConfigBuilder};
 pub use persistent_state::PersistentState;

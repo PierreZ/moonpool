@@ -14,7 +14,109 @@
 use std::cell::RefCell;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use crate::NetworkAddress;
+
+/// Monotonically increasing membership version.
+///
+/// Every membership change (join, status transition, leave) bumps the version.
+/// Used to detect stale snapshots and order membership updates.
+///
+/// # Orleans Reference
+///
+/// Corresponds to Orleans' `MembershipVersion` — a simple monotonic counter
+/// that increases with every table write.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
+pub struct MembershipVersion(pub u64);
+
+impl MembershipVersion {
+    /// Create version 0 (initial).
+    pub fn new() -> Self {
+        Self(0)
+    }
+
+    /// Return the next version.
+    pub fn next(self) -> Self {
+        Self(self.0 + 1)
+    }
+}
+
+impl std::fmt::Display for MembershipVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "v{}", self.0)
+    }
+}
+
+/// Status of a node in the cluster.
+///
+/// Follows the Orleans silo lifecycle: nodes join, become active,
+/// and eventually shut down or are declared dead by failure detection.
+///
+/// # Orleans Reference
+///
+/// Corresponds to Orleans' `SiloStatus` enum. We omit `Created` and `Stopping`
+/// (Orleans-internal states) and keep only the states visible to the membership
+/// protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NodeStatus {
+    /// Node is joining the cluster (announced but not yet ready to serve).
+    Joining,
+    /// Node is fully operational and serving requests.
+    Active,
+    /// Node is gracefully shutting down (draining work).
+    ShuttingDown,
+    /// Node is no longer reachable (crashed or completed shutdown).
+    Dead,
+}
+
+impl std::fmt::Display for NodeStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Joining => write!(f, "Joining"),
+            Self::Active => write!(f, "Active"),
+            Self::ShuttingDown => write!(f, "ShuttingDown"),
+            Self::Dead => write!(f, "Dead"),
+        }
+    }
+}
+
+/// A single member of the cluster.
+///
+/// Combines a network address with its current lifecycle status.
+///
+/// # Orleans Reference
+///
+/// Corresponds to Orleans' `ClusterMember` (SiloAddress + SiloStatus + Name).
+/// We use `NetworkAddress` instead of a separate `SiloAddress` type for now.
+/// Generation (to distinguish restarts at the same address) can be added later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClusterMember {
+    /// Network address of this member.
+    pub address: NetworkAddress,
+    /// Current lifecycle status.
+    pub status: NodeStatus,
+    /// Human-readable name (for logging/debugging).
+    pub name: String,
+}
+
+impl ClusterMember {
+    /// Create a new cluster member.
+    pub fn new(address: NetworkAddress, status: NodeStatus, name: impl Into<String>) -> Self {
+        Self {
+            address,
+            status,
+            name: name.into(),
+        }
+    }
+
+    /// Check if this member is in a status where it can serve requests.
+    pub fn is_active(&self) -> bool {
+        self.status == NodeStatus::Active
+    }
+}
 
 /// Provides the current cluster membership view.
 ///
@@ -126,5 +228,47 @@ mod tests {
         let m = SharedMembership::new(vec![addr(4500)]);
         assert!(!m.remove_member(&addr(9999)));
         assert_eq!(m.members().await.len(), 1);
+    }
+
+    #[test]
+    fn test_membership_version_ordering() {
+        let v0 = MembershipVersion::new();
+        let v1 = v0.next();
+        let v2 = v1.next();
+
+        assert!(v0 < v1);
+        assert!(v1 < v2);
+        assert_eq!(v0.0, 0);
+        assert_eq!(v1.0, 1);
+        assert_eq!(v2.0, 2);
+    }
+
+    #[test]
+    fn test_membership_version_display() {
+        let v = MembershipVersion(42);
+        assert_eq!(format!("{v}"), "v42");
+    }
+
+    #[test]
+    fn test_node_status_display() {
+        assert_eq!(format!("{}", NodeStatus::Joining), "Joining");
+        assert_eq!(format!("{}", NodeStatus::Active), "Active");
+        assert_eq!(format!("{}", NodeStatus::ShuttingDown), "ShuttingDown");
+        assert_eq!(format!("{}", NodeStatus::Dead), "Dead");
+    }
+
+    #[test]
+    fn test_cluster_member_is_active() {
+        let active = ClusterMember::new(addr(4500), NodeStatus::Active, "node-0");
+        assert!(active.is_active());
+
+        let joining = ClusterMember::new(addr(4501), NodeStatus::Joining, "node-1");
+        assert!(!joining.is_active());
+
+        let shutting_down = ClusterMember::new(addr(4502), NodeStatus::ShuttingDown, "node-2");
+        assert!(!shutting_down.is_active());
+
+        let dead = ClusterMember::new(addr(4503), NodeStatus::Dead, "node-3");
+        assert!(!dead.is_active());
     }
 }
