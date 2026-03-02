@@ -42,6 +42,16 @@ pub enum Event {
 
     /// Shutdown event to wake all tasks for graceful termination
     Shutdown,
+
+    /// Process restart event: a rebooted process is ready to boot again.
+    ///
+    /// Scheduled after a process is killed, at `now + recovery_delay`.
+    /// The orchestrator handles this by calling the process factory
+    /// and spawning a new `run()` task.
+    ProcessRestart {
+        /// The IP address of the process to restart.
+        ip: std::net::IpAddr,
+    },
 }
 
 impl Event {
@@ -59,8 +69,7 @@ impl Event {
                     | ConnectionStateChange::RecvPartitionClear
                     | ConnectionStateChange::CutRestore,
                 ..
-            } // Could add other infrastructure events here if needed:
-              // | Event::Connection { state: ConnectionStateChange::ClogClear, .. }
+            } | Event::ProcessRestart { .. }
         )
     }
 }

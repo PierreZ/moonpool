@@ -183,6 +183,9 @@ impl TokioRunner {
                 client_count: 1,
                 peer_ips,
                 peer_names,
+                process_ips: Vec::new(),
+                my_tags: crate::runner::tags::ProcessTags::default(),
+                tag_registry: crate::runner::tags::TagRegistry::default(),
                 shutdown_signal: shutdown_signal.clone(),
             };
 
@@ -222,6 +225,9 @@ impl TokioRunner {
                     client_count: 1,
                     peer_ips,
                     peer_names,
+                    process_ips: Vec::new(),
+                    my_tags: crate::runner::tags::ProcessTags::default(),
+                    tag_registry: crate::runner::tags::TagRegistry::default(),
                     shutdown_signal: shutdown_signal.clone(),
                 };
 
