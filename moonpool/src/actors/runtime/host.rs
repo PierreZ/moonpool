@@ -55,6 +55,9 @@ struct MailboxInner<C: MessageCodec> {
     queue: VecDeque<(ActorMessage, crate::ReplyPromise<ActorResponse, C>)>,
     waker: Option<Waker>,
     closed: bool,
+    /// Set when the identity task exits (e.g., lost a directory conflict).
+    /// Signals to the routing loop that this mailbox should be removed.
+    dead: bool,
 }
 
 impl<C: MessageCodec> IdentityMailbox<C> {
@@ -64,6 +67,7 @@ impl<C: MessageCodec> IdentityMailbox<C> {
                 queue: VecDeque::new(),
                 waker: None,
                 closed: false,
+                dead: false,
             }),
         })
     }
@@ -98,12 +102,27 @@ impl<C: MessageCodec> IdentityMailbox<C> {
         })
     }
 
+    /// Non-blocking drain: returns the next queued message if any.
+    fn try_recv(&self) -> Option<(ActorMessage, crate::ReplyPromise<ActorResponse, C>)> {
+        self.inner.borrow_mut().queue.pop_front()
+    }
+
     fn close(&self) {
         let mut inner = self.inner.borrow_mut();
         inner.closed = true;
         if let Some(waker) = inner.waker.take() {
             waker.wake();
         }
+    }
+
+    /// Mark this mailbox as dead (identity task exited, e.g., lost directory conflict).
+    fn mark_dead(&self) {
+        self.inner.borrow_mut().dead = true;
+    }
+
+    /// Check if the identity task has exited.
+    fn is_dead(&self) -> bool {
+        self.inner.borrow().dead
     }
 }
 
@@ -390,6 +409,11 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
 
         let identity = actor_msg.target.identity.clone();
 
+        // Remove dead mailbox (identity task exited, e.g., lost directory conflict)
+        if mailboxes.get(&identity).is_some_and(|mb| mb.is_dead()) {
+            mailboxes.remove(&identity);
+        }
+
         // Route to existing per-identity mailbox if present
         if let Some(mailbox) = mailboxes.get(&identity) {
             mailbox.send(actor_msg, reply);
@@ -427,6 +451,8 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
                         state_store.clone(),
                         actor_type,
                         local_address.clone(),
+                        transport.clone(),
+                        codec.clone(),
                         transport.providers().time().clone(),
                         pending_tasks.clone(),
                     ),
@@ -456,6 +482,8 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
     state_store: Option<Rc<dyn ActorStateStore>>,
     actor_type: ActorType,
     local_address: crate::NetworkAddress,
+    transport: Rc<NetTransport<P>>,
+    codec: C,
     time: P::Time,
     pending_tasks: Rc<Cell<usize>>,
 ) {
@@ -531,19 +559,52 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                 continue;
             }
 
-            // Register in directory (best-effort) with ActorAddress
+            // Register in directory with conflict detection (Orleans model)
             let endpoint = Endpoint::new(local_address.clone(), UID::new(actor_type.0, 0));
             activation_counter += 1;
             let activation_id = ActivationId::new(
                 endpoint.token.first ^ endpoint.token.second ^ activation_counter,
             );
             let actor_address = ActorAddress::new(actor_id, endpoint, activation_id);
-            let _ = directory.register(actor_address.clone()).await;
-            current_activation = Some(actor_address);
-
-            actor = Some(new_actor);
-            assert_sometimes!(true, "actor_activated");
-            was_previously_active = true;
+            match directory.register(actor_address.clone()).await {
+                Ok(existing)
+                    if existing.activation_id != actor_address.activation_id
+                        && existing.endpoint.address != local_address =>
+                {
+                    // Another node won — deactivate, forward message, drain mailbox
+                    assert_sometimes!(true, "directory_conflict_on_activation");
+                    let _ = new_actor.on_deactivate(&ctx).await;
+                    forward_message::<P, C>(
+                        &transport,
+                        &actor_msg,
+                        &existing.endpoint,
+                        &local_address,
+                        actor_type,
+                        &codec,
+                        reply,
+                    );
+                    // Drain queued messages (arrived while we were activating)
+                    while let Some((queued_msg, queued_reply)) = mailbox.try_recv() {
+                        forward_message::<P, C>(
+                            &transport,
+                            &queued_msg,
+                            &existing.endpoint,
+                            &local_address,
+                            actor_type,
+                            &codec,
+                            queued_reply,
+                        );
+                    }
+                    mailbox.mark_dead();
+                    break;
+                }
+                _ => {
+                    current_activation = Some(actor_address);
+                    actor = Some(new_actor);
+                    assert_sometimes!(true, "actor_activated");
+                    was_previously_active = true;
+                }
+            }
         }
 
         // Dispatch

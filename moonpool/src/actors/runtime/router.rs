@@ -9,10 +9,12 @@
 //! 1. Directory lookup for the target actor
 //! 2. If not found, look up the actor type's placement strategy in the registry
 //! 3. Pass the strategy hint + context to the placement director
-//! 4. Register the new placement in the directory
-//! 5. Build `ActorMessage` with target identity, method, and serialized body
-//! 6. `send_request()` to `UID::new(actor_type, 0)` on the target node
-//! 7. Await `ActorResponse`, deserialize the inner body
+//! 4. Build `ActorMessage` with target identity, method, and serialized body
+//! 5. `send_request()` to `UID::new(actor_type, 0)` on the target node
+//! 6. Await `ActorResponse`, deserialize the inner body
+//!
+//! Directory registration happens at the **target host** during actor activation
+//! (Orleans model), not here in the caller.
 //!
 //! # Orleans Reference
 //!
@@ -213,13 +215,16 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
     }
 
     /// Resolve an actor's endpoint, placing it if not found in the directory.
+    ///
+    /// Directory registration happens at the target host during actor activation
+    /// (Orleans model). The caller only does placement and sends the message.
     async fn resolve(&self, target: &ActorId) -> Result<Endpoint, ActorError> {
         // Check directory first
         if let Some(addr) = self.directory.lookup(target).await? {
             return Ok(addr.endpoint);
         }
 
-        // Not found — place the actor
+        // Not found — place the actor (target host registers during activation)
         assert_sometimes!(true, "placement_invoked");
         let active_members = self.membership.members().await;
 
@@ -236,15 +241,7 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
             .place(strategy, target, &active_members, &self.local_address)
             .await?;
 
-        // Build ActorAddress with a deterministic activation ID
-        let activation_id = ActivationId::new(endpoint.token.first ^ endpoint.token.second);
-        let actor_address = ActorAddress::new(target.clone(), endpoint.clone(), activation_id);
-
-        // Register in directory (Orleans semantics: returns existing on conflict)
-        let registered = self.directory.register(actor_address).await?;
-
-        // If someone else registered first, use their endpoint
-        Ok(registered.endpoint)
+        Ok(endpoint)
     }
 }
 
@@ -426,20 +423,19 @@ mod tests {
             identity: "alice".to_string(),
         };
 
-        // Resolve should place the actor and register it
+        // Resolve should place the actor (but NOT register in directory)
         let resolved = router
             .resolve(&actor_id)
             .await
             .expect("resolve should succeed");
         assert_eq!(resolved.address, test_address());
 
-        // Directory should now have the entry
+        // Directory should NOT have the entry — registration happens at the target host
         let lookup = directory
             .lookup(&actor_id)
             .await
             .expect("lookup should succeed");
-        assert!(lookup.is_some());
-        assert_eq!(lookup.expect("entry").endpoint.address, test_address());
+        assert!(lookup.is_none());
     }
 
     #[tokio::test]
