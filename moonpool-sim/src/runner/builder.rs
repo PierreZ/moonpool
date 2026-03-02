@@ -621,13 +621,22 @@ impl SimulationBuilder {
                     let mut registry = crate::runner::tags::TagRegistry::new();
                     let mut ips = Vec::with_capacity(count);
                     let mut info = Vec::with_capacity(count);
+                    // Get process name from factory sample for topology naming
+                    let sample = (entry.factory)();
+                    let base_name = sample.name().to_string();
+                    drop(sample);
                     for i in 0..count {
                         let ip = format!("10.0.1.{}", i + 1);
                         let ip_addr: std::net::IpAddr = ip.parse().expect("valid process IP");
                         let tags = entry.tags.resolve(i);
                         registry.register(ip_addr, tags);
                         ips.push(ip.clone());
-                        info.push((format!("process-{}", i), ip));
+                        let name = if count == 1 {
+                            base_name.clone()
+                        } else {
+                            format!("{}-{}", base_name, i)
+                        };
+                        info.push((name, ip));
                     }
                     super::orchestrator::ProcessConfig {
                         factory: &*entry.factory,

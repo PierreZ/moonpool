@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use crate::{NetworkProvider, Peer, TcpListenerTrait, TimeProvider, try_deserialize_packet};
 use async_trait::async_trait;
-use moonpool_sim::{SimContext, SimulationResult, Workload, assert_sometimes};
+use moonpool_sim::{Process, SimContext, SimulationResult, Workload, assert_sometimes};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::TestMessage;
@@ -218,7 +218,7 @@ impl WireServerWorkload {
 }
 
 #[async_trait(?Send)]
-impl Workload for WireServerWorkload {
+impl Process for WireServerWorkload {
     fn name(&self) -> &str {
         "server"
     }
@@ -396,7 +396,7 @@ impl EchoServerWorkload {
 }
 
 #[async_trait(?Send)]
-impl Workload for EchoServerWorkload {
+impl Process for EchoServerWorkload {
     fn name(&self) -> &str {
         "echo_server"
     }

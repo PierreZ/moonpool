@@ -15,7 +15,7 @@ use crate::{
     ReplyPromise, TimeProvider, UID, send_request,
 };
 use async_trait::async_trait;
-use moonpool_sim::{SimContext, SimulationResult, Workload, assert_sometimes};
+use moonpool_sim::{Process, SimContext, SimulationResult, Workload, assert_sometimes};
 
 use super::invariants::{MessageInvariants, RpcInvariants};
 use super::operations::{
@@ -401,13 +401,9 @@ impl MultiNodeServerWorkload {
 }
 
 #[async_trait(?Send)]
-impl Workload for MultiNodeServerWorkload {
+impl Process for MultiNodeServerWorkload {
     fn name(&self) -> &str {
         "server"
-    }
-
-    async fn setup(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
-        Ok(())
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {

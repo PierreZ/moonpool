@@ -224,7 +224,7 @@ mod tests {
     fn test_basic_client_server() {
         let report = run_simulation(
             SimulationBuilder::new()
-                .workload(WireServerWorkload::new())
+                .processes(1, || Box::new(WireServerWorkload::new()))
                 .workload(ClientWorkload::new(ClientConfig {
                     num_operations: 50,
                     weights: OpWeights::reliable_focused(),
