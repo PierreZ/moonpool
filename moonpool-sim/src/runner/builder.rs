@@ -140,7 +140,7 @@ impl ClientId {
 /// // 3 to 7 server processes, randomized per iteration
 /// ProcessCount::Range(3..=7)
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ProcessCount {
     /// Spawn exactly N process instances every iteration.
     Fixed(usize),
@@ -183,6 +183,7 @@ pub(crate) struct ProcessEntry {
     pub(crate) count: ProcessCount,
     pub(crate) factory: Box<dyn Fn() -> Box<dyn Process>>,
     pub(crate) tags: TagDistribution,
+    pub(crate) name: String,
 }
 
 /// Internal storage for workload entries in the builder.
@@ -284,10 +285,14 @@ impl SimulationBuilder {
         count: impl Into<ProcessCount>,
         factory: impl Fn() -> Box<dyn Process> + 'static,
     ) -> Self {
+        let sample = factory();
+        let name = sample.name().to_string();
+        drop(sample);
         self.process_entry = Some(ProcessEntry {
             count: count.into(),
             factory: Box::new(factory),
             tags: TagDistribution::new(),
+            name,
         });
         self
     }
@@ -326,6 +331,9 @@ impl SimulationBuilder {
     ///
     /// Attrition randomly kills and restarts server processes. It respects
     /// `max_dead` to limit the number of simultaneously dead processes.
+    ///
+    /// **Requires** [`.phases()`](Self::phases) — attrition injectors only run during
+    /// the chaos phase. Without a phase config, the injector will not be spawned.
     ///
     /// For custom fault injection, use `.fault()` with a [`FaultInjector`] instead.
     pub fn attrition(mut self, config: Attrition) -> Self {
@@ -621,10 +629,7 @@ impl SimulationBuilder {
                     let mut registry = crate::runner::tags::TagRegistry::new();
                     let mut ips = Vec::with_capacity(count);
                     let mut info = Vec::with_capacity(count);
-                    // Get process name from factory sample for topology naming
-                    let sample = (entry.factory)();
-                    let base_name = sample.name().to_string();
-                    drop(sample);
+                    let base_name = &entry.name;
                     for i in 0..count {
                         let ip = format!("10.0.1.{}", i + 1);
                         let ip_addr: std::net::IpAddr = ip.parse().expect("valid process IP");

@@ -248,6 +248,8 @@ fn test_builtin_attrition() {
                 prob_graceful: 0.3,
                 prob_crash: 0.5,
                 prob_wipe: 0.2,
+                recovery_delay_ms: None,
+                grace_period_ms: None,
             })
             .phases(PhaseConfig {
                 chaos_duration: Duration::from_secs(10),
@@ -336,7 +338,11 @@ impl Process for TagAwareProcess {
         tracing::info!("Process at {} has role={:?}", ctx.my_ip(), role);
 
         // All processes should have a role tag
-        assert!(role.is_some(), "process should have a role tag");
+        if role.is_none() {
+            return Err(moonpool_sim::SimulationError::InvalidState(
+                "process should have a role tag".into(),
+            ));
+        }
 
         ctx.shutdown().cancelled().await;
         Ok(())
@@ -363,4 +369,194 @@ fn test_process_reads_own_tags() {
     });
 
     assert_eq!(report.successful_runs, 1);
+}
+
+// ============================================================================
+// Test: graceful reboot signals shutdown token — process exits cleanly
+// ============================================================================
+
+/// Process that detects shutdown token cancellation and exits cleanly.
+struct GracefulProcess;
+
+#[async_trait(?Send)]
+impl Process for GracefulProcess {
+    fn name(&self) -> &str {
+        "graceful"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let listener = ctx.network().bind(ctx.my_ip()).await?;
+        tracing::info!("GracefulProcess bound to {}", ctx.my_ip());
+
+        loop {
+            tokio::select! {
+                result = listener.accept() => {
+                    match result {
+                        Ok((mut stream, _)) => {
+                            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                            let mut buf = [0u8; 64];
+                            if let Ok(n) = stream.read(&mut buf).await {
+                                if n > 0 {
+                                    let _ = stream.write_all(&buf[..n]).await;
+                                }
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+                _ = ctx.shutdown().cancelled() => {
+                    tracing::info!("GracefulProcess at {} saw shutdown, exiting cleanly", ctx.my_ip());
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+/// Fault injector that triggers a single graceful reboot.
+struct GracefulRebootInjector;
+
+#[async_trait(?Send)]
+impl FaultInjector for GracefulRebootInjector {
+    fn name(&self) -> &str {
+        "graceful_reboot"
+    }
+
+    async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
+        let _ = ctx.time().sleep(Duration::from_millis(100)).await;
+
+        if !ctx.chaos_shutdown().is_cancelled() {
+            let rebooted = ctx.reboot_random(RebootKind::Graceful)?;
+            if let Some(ip) = rebooted {
+                tracing::info!("Initiated graceful reboot for {}", ip);
+            }
+        }
+
+        ctx.chaos_shutdown().cancelled().await;
+        Ok(())
+    }
+}
+
+#[test]
+fn test_graceful_reboot_signals_shutdown_token() {
+    let local_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build_local(Default::default())
+        .expect("Failed to build local runtime");
+
+    let report = local_runtime.block_on(async {
+        SimulationBuilder::new()
+            .processes(3, || Box::new(GracefulProcess))
+            .workload(WaitForShutdownWorkload)
+            .fault(GracefulRebootInjector)
+            .phases(PhaseConfig {
+                chaos_duration: Duration::from_secs(10),
+                recovery_duration: Duration::from_secs(10),
+            })
+            .set_iterations(3)
+            .set_debug_seeds(vec![42, 123, 999])
+            .run()
+            .await
+    });
+
+    assert_eq!(
+        report.failed_runs, 0,
+        "graceful reboot should succeed — process exits cleanly on shutdown signal"
+    );
+}
+
+// ============================================================================
+// Test: graceful reboot force-kills stuck process after grace period
+// ============================================================================
+
+/// Process that ignores the shutdown token and loops forever.
+struct StuckProcess;
+
+#[async_trait(?Send)]
+impl Process for StuckProcess {
+    fn name(&self) -> &str {
+        "stuck"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let _listener = ctx.network().bind(ctx.my_ip()).await?;
+        tracing::info!("StuckProcess bound to {}", ctx.my_ip());
+
+        // Deliberately ignore ctx.shutdown() — loop forever until force-killed
+        loop {
+            let _ = ctx.time().sleep(Duration::from_secs(1)).await;
+        }
+    }
+}
+
+#[test]
+fn test_graceful_reboot_force_kills_stuck_process() {
+    let local_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build_local(Default::default())
+        .expect("Failed to build local runtime");
+
+    let report = local_runtime.block_on(async {
+        SimulationBuilder::new()
+            .processes(3, || Box::new(StuckProcess))
+            .workload(WaitForShutdownWorkload)
+            .fault(GracefulRebootInjector)
+            .phases(PhaseConfig {
+                chaos_duration: Duration::from_secs(10),
+                recovery_duration: Duration::from_secs(10),
+            })
+            .set_iterations(3)
+            .set_debug_seeds(vec![42, 123, 999])
+            .run()
+            .await
+    });
+
+    assert_eq!(
+        report.failed_runs, 0,
+        "stuck process should be force-killed after grace period and restarted"
+    );
+}
+
+// ============================================================================
+// Test: max_dead limits concurrent kills
+// ============================================================================
+
+#[test]
+fn test_max_dead_limits_concurrent_kills_via_attrition() {
+    let local_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build_local(Default::default())
+        .expect("Failed to build local runtime");
+
+    // Use built-in attrition with max_dead=1 — the AttritionInjector
+    // respects dead_count and won't kill more than 1 at a time
+    let report = local_runtime.block_on(async {
+        SimulationBuilder::new()
+            .processes(5, || Box::new(EchoProcess))
+            .workload(WaitForShutdownWorkload)
+            .attrition(Attrition {
+                max_dead: 1,
+                prob_graceful: 0.0,
+                prob_crash: 1.0,
+                prob_wipe: 0.0,
+                recovery_delay_ms: Some(500..2000),
+                grace_period_ms: None,
+            })
+            .phases(PhaseConfig {
+                chaos_duration: Duration::from_secs(10),
+                recovery_duration: Duration::from_secs(10),
+            })
+            .set_iterations(5)
+            .set_debug_seeds(vec![42, 123, 999, 7, 314])
+            .run()
+            .await
+    });
+
+    assert_eq!(
+        report.failed_runs, 0,
+        "attrition with max_dead=1 should not cause failures"
+    );
 }

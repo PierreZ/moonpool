@@ -18,12 +18,15 @@
 //! impl Process for PaxosNode {
 //!     fn name(&self) -> &str { "paxos" }
 //!     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-//!         let role = ctx.topology().my_tags().get("role").unwrap();
+//!         let role = ctx.topology().my_tags().get("role")
+//!             .ok_or_else(|| moonpool_sim::SimulationError::InvalidState("missing role tag".into()))?;
 //!         // Run based on assigned role from tags...
 //!         Ok(())
 //!     }
 //! }
 //! ```
+
+use std::ops::Range;
 
 use async_trait::async_trait;
 
@@ -97,9 +100,11 @@ pub enum RebootKind {
 ///     prob_graceful: 0.3,
 ///     prob_crash: 0.5,
 ///     prob_wipe: 0.2,
+///     recovery_delay_ms: None,
+///     grace_period_ms: None,
 /// }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Attrition {
     /// Maximum number of simultaneously dead processes.
     ///
@@ -115,6 +120,23 @@ pub struct Attrition {
 
     /// Weight for [`RebootKind::CrashAndWipe`] reboots.
     pub prob_wipe: f64,
+
+    /// Recovery delay range in milliseconds.
+    ///
+    /// After a process is killed (crash or force-kill after grace), it restarts
+    /// after a seeded random delay drawn from this range.
+    ///
+    /// Defaults to `1000..10000` (1-10 seconds) if not set.
+    pub recovery_delay_ms: Option<Range<usize>>,
+
+    /// Grace period range in milliseconds (for graceful reboots).
+    ///
+    /// After the per-process shutdown token is cancelled, the process has this
+    /// long to clean up before being force-killed. The actual duration is a
+    /// seeded random value from this range.
+    ///
+    /// Defaults to `2000..5000` (2-5 seconds) if not set.
+    pub grace_period_ms: Option<Range<usize>>,
 }
 
 impl Attrition {

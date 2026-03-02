@@ -23,7 +23,7 @@ use std::net::IpAddr;
 /// Distribution specification for a single tag dimension.
 ///
 /// Contains the tag key and the values to round-robin across processes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TagDimension {
     /// The tag key (e.g., "dc", "rack", "role").
     pub key: String,
@@ -77,7 +77,7 @@ impl TagDistribution {
 }
 
 /// Resolved tags for a specific process instance.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProcessTags {
     tags: HashMap<String, String>,
 }
@@ -108,7 +108,7 @@ impl ProcessTags {
 ///
 /// Used by the orchestrator and fault context to look up tags by IP
 /// and find IPs matching tag queries.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TagRegistry {
     ip_tags: HashMap<IpAddr, ProcessTags>,
 }

@@ -835,10 +835,12 @@ impl SimWorld {
                 super::storage_ops::handle_storage_event(inner, file_id, operation)
             }
             Event::Shutdown => Self::handle_shutdown_event(inner),
-            Event::ProcessRestart { ip } => {
-                // ProcessRestart is handled by the orchestrator, not SimWorld.
-                // We just log it here; the orchestrator reads the event after step().
-                tracing::debug!("ProcessRestart event for IP {}", ip);
+            Event::ProcessRestart { ip }
+            | Event::ProcessGracefulShutdown { ip, .. }
+            | Event::ProcessForceKill { ip, .. } => {
+                // Process lifecycle events are handled by the orchestrator, not SimWorld.
+                // We just log them here; the orchestrator reads the event after step().
+                tracing::debug!("Process lifecycle event for IP {}", ip);
             }
         }
     }
@@ -1327,7 +1329,6 @@ impl SimWorld {
         crate::chaos::reset_assertion_results();
     }
 
-    /// Extract simulation metrics for reporting.
     /// Abort all connections involving a specific IP address.
     ///
     /// This is used during process reboot to immediately kill all network

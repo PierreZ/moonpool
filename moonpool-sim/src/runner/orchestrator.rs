@@ -3,7 +3,9 @@
 //! This module provides utilities for orchestrating workload execution
 //! and managing simulation iterations.
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::chaos::invariant_trait::Invariant;
@@ -85,9 +87,15 @@ pub(crate) struct ProcessConfig<'a> {
 struct ProcessManager<'a> {
     factory: Option<&'a dyn Fn() -> Box<dyn Process>>,
     handles: Vec<Option<tokio::task::JoinHandle<()>>>,
+    /// Per-process shutdown tokens (child of the global shutdown_signal).
+    /// Cancelling a child signals only that process; cancelling the parent
+    /// signals all processes.
+    process_tokens: Vec<Option<tokio_util::sync::CancellationToken>>,
     ips: Vec<String>,
     tag_registry: TagRegistry,
     all_entities: Vec<(String, String)>,
+    /// Count of currently dead (killed but not yet restarted) processes.
+    dead_count: Rc<Cell<usize>>,
 }
 
 impl<'a> ProcessManager<'a> {
@@ -96,9 +104,11 @@ impl<'a> ProcessManager<'a> {
         Self {
             factory: None,
             handles: Vec::new(),
+            process_tokens: Vec::new(),
             ips: Vec::new(),
             tag_registry: TagRegistry::default(),
             all_entities: Vec::new(),
+            dead_count: Rc::new(Cell::new(0)),
         }
     }
 
@@ -106,6 +116,7 @@ impl<'a> ProcessManager<'a> {
     fn new(
         factory: &'a dyn Fn() -> Box<dyn Process>,
         handles: Vec<Option<tokio::task::JoinHandle<()>>>,
+        process_tokens: Vec<Option<tokio_util::sync::CancellationToken>>,
         ips: Vec<String>,
         tag_registry: TagRegistry,
         all_entities: Vec<(String, String)>,
@@ -113,13 +124,60 @@ impl<'a> ProcessManager<'a> {
         Self {
             factory: Some(factory),
             handles,
+            process_tokens,
             ips,
             tag_registry,
             all_entities,
+            dead_count: Rc::new(Cell::new(0)),
         }
     }
 
-    /// Handle a ProcessRestart event by aborting the old task and spawning a new one.
+    /// Get a shared reference to the dead process counter.
+    fn dead_count(&self) -> Rc<Cell<usize>> {
+        self.dead_count.clone()
+    }
+
+    /// Resolve process index from IP, returning None for unknown IPs.
+    fn index_for_ip(&self, ip: std::net::IpAddr) -> Option<usize> {
+        let ip_str = ip.to_string();
+        self.ips.iter().position(|p| p == &ip_str)
+    }
+
+    /// Signal a graceful shutdown for a process by cancelling its per-process token.
+    ///
+    /// The process will see `ctx.shutdown().is_cancelled()` and can perform
+    /// cleanup before the force-kill timer fires.
+    fn signal_graceful_shutdown(&mut self, ip: std::net::IpAddr) {
+        let Some(idx) = self.index_for_ip(ip) else {
+            tracing::warn!("ProcessGracefulShutdown for unknown IP {}", ip);
+            return;
+        };
+        if let Some(token) = &self.process_tokens[idx] {
+            token.cancel();
+            self.dead_count.set(self.dead_count.get() + 1);
+            tracing::info!(
+                "Signaled graceful shutdown for process at {} (index {})",
+                ip,
+                idx
+            );
+        }
+    }
+
+    /// Abort a specific process task (force-kill after grace period).
+    fn abort_process(&mut self, ip: std::net::IpAddr) {
+        let Some(idx) = self.index_for_ip(ip) else {
+            tracing::warn!("ProcessForceKill for unknown IP {}", ip);
+            return;
+        };
+        if let Some(handle) = self.handles[idx].take() {
+            handle.abort();
+            tracing::info!("Force-killed process at {} (index {})", ip, idx);
+        }
+        // Clear the token — a new one will be created on restart
+        self.process_tokens[idx] = None;
+    }
+
+    /// Handle a ProcessRestart event by spawning a new process task.
     fn handle_restart(
         &mut self,
         ip: std::net::IpAddr,
@@ -128,7 +186,7 @@ impl<'a> ProcessManager<'a> {
         shutdown_signal: &tokio_util::sync::CancellationToken,
     ) {
         let ip_str = ip.to_string();
-        let Some(idx) = self.ips.iter().position(|p| p == &ip_str) else {
+        let Some(idx) = self.index_for_ip(ip) else {
             tracing::warn!("ProcessRestart for unknown IP {}", ip);
             return;
         };
@@ -137,10 +195,14 @@ impl<'a> ProcessManager<'a> {
             return;
         };
 
-        // Abort old task if still running
+        // Abort old task if still running (safety net)
         if let Some(handle) = self.handles[idx].take() {
             handle.abort();
         }
+
+        // Create fresh per-process token as child of global shutdown
+        let process_token = shutdown_signal.child_token();
+        self.process_tokens[idx] = Some(process_token.clone());
 
         // Create fresh process instance
         let mut process = factory();
@@ -153,7 +215,7 @@ impl<'a> ProcessManager<'a> {
             &self.ips,
             process_tags,
             self.tag_registry.clone(),
-            shutdown_signal.clone(),
+            process_token,
         );
         let ctx = SimContext::new(providers.clone(), topology, state.clone());
         let ip_for_log = ip_str.clone();
@@ -163,6 +225,11 @@ impl<'a> ProcessManager<'a> {
             }
         });
         self.handles[idx] = Some(handle);
+        // Process is alive again
+        let current = self.dead_count.get();
+        if current > 0 {
+            self.dead_count.set(current - 1);
+        }
         tracing::info!("Process at {} restarted (index {})", ip_str, idx);
     }
 
@@ -249,15 +316,18 @@ impl WorkloadOrchestrator {
 
         // === BOOT PROCESSES ===
         let mut process_handles: Vec<Option<tokio::task::JoinHandle<()>>> = Vec::new();
+        let mut process_tokens: Vec<Option<tokio_util::sync::CancellationToken>> = Vec::new();
         if let Some(ref pc) = process_config {
             for (i, ip) in pc.ips.iter().enumerate() {
                 let mut process = (pc.factory)();
-                let ip_addr: std::net::IpAddr = ip.parse().expect("valid process IP");
+                let ip_addr: std::net::IpAddr = ip.parse().map_err(|_| (vec![seed], 1usize))?;
                 let process_tags = pc
                     .tag_registry
                     .tags_for(ip_addr)
                     .cloned()
                     .unwrap_or_default();
+                // Per-process token: child of global shutdown_signal
+                let process_token = shutdown_signal.child_token();
                 let topology = TopologyFactory::create_topology_with_processes(
                     ip,
                     i,
@@ -266,7 +336,7 @@ impl WorkloadOrchestrator {
                     &pc.ips,
                     process_tags,
                     pc.tag_registry.clone(),
-                    shutdown_signal.clone(),
+                    process_token.clone(),
                 );
                 let ctx = SimContext::new(providers.clone(), topology, state.clone());
                 let ip_for_log = ip.clone();
@@ -276,6 +346,7 @@ impl WorkloadOrchestrator {
                     }
                 });
                 process_handles.push(Some(handle));
+                process_tokens.push(Some(process_token));
                 tracing::debug!("Booted process {} at {}", i, ip);
             }
         }
@@ -285,6 +356,7 @@ impl WorkloadOrchestrator {
             Some(pc) => ProcessManager::new(
                 pc.factory,
                 process_handles,
+                process_tokens,
                 pc.ips,
                 pc.tag_registry,
                 all_entities.clone(),
@@ -482,8 +554,34 @@ impl WorkloadOrchestrator {
                 Self::check_invariants(state, current_time_ms, invariants);
 
                 // Handle process restarts
-                if let Some(crate::sim::Event::ProcessRestart { ip }) = sim.last_processed_event() {
-                    process_manager.handle_restart(ip, providers, state, shutdown_signal);
+                // Handle process lifecycle events
+                match sim.last_processed_event() {
+                    Some(crate::sim::Event::ProcessGracefulShutdown {
+                        ip,
+                        grace_period_ms,
+                        recovery_delay_ms,
+                    }) => {
+                        process_manager.signal_graceful_shutdown(ip);
+                        sim.schedule_event(
+                            crate::sim::Event::ProcessForceKill {
+                                ip,
+                                recovery_delay_ms,
+                            },
+                            Duration::from_millis(grace_period_ms),
+                        );
+                    }
+                    Some(crate::sim::Event::ProcessForceKill {
+                        ip,
+                        recovery_delay_ms,
+                    }) => {
+                        process_manager.abort_process(ip);
+                        sim.abort_all_connections_for_ip(ip);
+                        sim.schedule_process_restart(ip, Duration::from_millis(recovery_delay_ms));
+                    }
+                    Some(crate::sim::Event::ProcessRestart { ip }) => {
+                        process_manager.handle_restart(ip, providers, state, shutdown_signal);
+                    }
+                    _ => {}
                 }
             }
 
@@ -627,11 +725,14 @@ impl WorkloadOrchestrator {
                 .downgrade()
                 .upgrade()
                 .map_err(|_| (vec![seed], 1usize))?;
-            let fault_ctx = FaultContext::new_with_processes(
+            let fault_ctx = FaultContext::new(
                 fault_sim,
                 all_ips.clone(),
-                process_manager.ips.clone(),
-                process_manager.tag_registry.clone(),
+                crate::runner::fault_injector::ProcessInfo {
+                    process_ips: process_manager.ips.clone(),
+                    tag_registry: process_manager.tag_registry.clone(),
+                    dead_count: process_manager.dead_count(),
+                },
                 crate::SimRandomProvider::new(seed),
                 sim.time_provider(),
                 chaos_shutdown.clone(),
@@ -689,8 +790,34 @@ impl WorkloadOrchestrator {
                 Self::check_invariants(state, current_time_ms, invariants);
 
                 // Handle process restarts
-                if let Some(crate::sim::Event::ProcessRestart { ip }) = sim.last_processed_event() {
-                    process_manager.handle_restart(ip, providers, state, shutdown_signal);
+                // Handle process lifecycle events
+                match sim.last_processed_event() {
+                    Some(crate::sim::Event::ProcessGracefulShutdown {
+                        ip,
+                        grace_period_ms,
+                        recovery_delay_ms,
+                    }) => {
+                        process_manager.signal_graceful_shutdown(ip);
+                        sim.schedule_event(
+                            crate::sim::Event::ProcessForceKill {
+                                ip,
+                                recovery_delay_ms,
+                            },
+                            Duration::from_millis(grace_period_ms),
+                        );
+                    }
+                    Some(crate::sim::Event::ProcessForceKill {
+                        ip,
+                        recovery_delay_ms,
+                    }) => {
+                        process_manager.abort_process(ip);
+                        sim.abort_all_connections_for_ip(ip);
+                        sim.schedule_process_restart(ip, Duration::from_millis(recovery_delay_ms));
+                    }
+                    Some(crate::sim::Event::ProcessRestart { ip }) => {
+                        process_manager.handle_restart(ip, providers, state, shutdown_signal);
+                    }
+                    _ => {}
                 }
             }
 

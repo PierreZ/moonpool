@@ -109,7 +109,7 @@ impl TopologyFactory {
             client_count,
             peer_ips,
             peer_names,
-            process_ips: process_ips.to_vec(),
+            process_ips: process_ips.iter().filter(|p| *p != ip).cloned().collect(),
             my_tags,
             tag_registry,
             shutdown_signal,

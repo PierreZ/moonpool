@@ -45,6 +45,16 @@ use crate::runner::process::RebootKind;
 use crate::runner::tags::TagRegistry;
 use crate::sim::SimWorld;
 
+/// Process-related state for fault injection targeting.
+pub struct ProcessInfo {
+    /// Server process IP addresses.
+    pub process_ips: Vec<String>,
+    /// Tag registry mapping process IPs to their resolved tags.
+    pub tag_registry: TagRegistry,
+    /// Shared count of currently dead (killed but not yet restarted) processes.
+    pub dead_count: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
 /// Context for fault injectors — gives access to SimWorld fault injection methods.
 ///
 /// Unlike `SimContext` (which workloads receive), `FaultContext` provides direct
@@ -53,18 +63,18 @@ use crate::sim::SimWorld;
 pub struct FaultContext {
     sim: SimWorld,
     all_ips: Vec<String>,
-    process_ips: Vec<String>,
-    tag_registry: TagRegistry,
+    process_info: ProcessInfo,
     random: SimRandomProvider,
     time: SimTimeProvider,
     chaos_shutdown: tokio_util::sync::CancellationToken,
 }
 
 impl FaultContext {
-    /// Create a new fault context.
+    /// Create a new fault context with process information.
     pub fn new(
         sim: SimWorld,
         all_ips: Vec<String>,
+        process_info: ProcessInfo,
         random: SimRandomProvider,
         time: SimTimeProvider,
         chaos_shutdown: tokio_util::sync::CancellationToken,
@@ -72,33 +82,16 @@ impl FaultContext {
         Self {
             sim,
             all_ips,
-            process_ips: Vec::new(),
-            tag_registry: TagRegistry::default(),
+            process_info,
             random,
             time,
             chaos_shutdown,
         }
     }
 
-    /// Create a new fault context with process information.
-    pub fn new_with_processes(
-        sim: SimWorld,
-        all_ips: Vec<String>,
-        process_ips: Vec<String>,
-        tag_registry: TagRegistry,
-        random: SimRandomProvider,
-        time: SimTimeProvider,
-        chaos_shutdown: tokio_util::sync::CancellationToken,
-    ) -> Self {
-        Self {
-            sim,
-            all_ips,
-            process_ips,
-            tag_registry,
-            random,
-            time,
-            chaos_shutdown,
-        }
+    /// Get the number of currently dead (killed but not yet restarted) processes.
+    pub fn dead_count(&self) -> usize {
+        self.process_info.dead_count.get()
     }
 
     /// Create a bidirectional network partition between two IPs.
@@ -163,32 +156,76 @@ impl FaultContext {
 
     /// Get all server process IPs.
     pub fn process_ips(&self) -> &[String] {
-        &self.process_ips
+        &self.process_info.process_ips
     }
 
     /// Reboot a specific process by IP.
     ///
-    /// Immediately aborts all connections for the IP and schedules a
-    /// `ProcessRestart` event after a seeded random recovery delay.
-    /// The actual process task cancellation is handled by the orchestrator.
-    pub fn reboot(&self, ip: &str, _kind: RebootKind) -> SimulationResult<()> {
+    /// For [`RebootKind::Graceful`]: schedules a `ProcessGracefulShutdown` event.
+    /// The orchestrator cancels the per-process shutdown token, giving the process
+    /// a grace period to drain buffers and clean up. After the grace period,
+    /// a force-kill aborts the task and connections, then schedules restart.
+    ///
+    /// For [`RebootKind::Crash`] and [`RebootKind::CrashAndWipe`]: immediately
+    /// aborts all connections and schedules a `ProcessRestart` event.
+    pub fn reboot(&self, ip: &str, kind: RebootKind) -> SimulationResult<()> {
+        let recovery_range = 1000..10000;
+        let grace_range = 2000..5000;
+        self.reboot_with_delays(ip, kind, &recovery_range, &grace_range)
+    }
+
+    /// Reboot a process with custom delay ranges.
+    ///
+    /// Like [`reboot`](Self::reboot) but with configurable recovery delay and
+    /// grace period ranges (in milliseconds). Used by [`AttritionInjector`] to
+    /// pass through [`Attrition`](super::process::Attrition) configuration.
+    pub fn reboot_with_delays(
+        &self,
+        ip: &str,
+        kind: RebootKind,
+        recovery_delay_range_ms: &std::ops::Range<usize>,
+        grace_period_range_ms: &std::ops::Range<usize>,
+    ) -> SimulationResult<()> {
         let ip_addr: std::net::IpAddr = ip.parse().map_err(|e| {
             crate::SimulationError::InvalidState(format!("invalid IP '{}': {}", ip, e))
         })?;
 
-        // Abort all connections for this IP
-        self.sim.abort_all_connections_for_ip(ip_addr);
+        match kind {
+            RebootKind::Graceful => {
+                let grace_ms = crate::sim::sim_random_range(grace_period_range_ms.clone()) as u64;
+                let recovery_ms =
+                    crate::sim::sim_random_range(recovery_delay_range_ms.clone()) as u64;
+                self.sim.schedule_event(
+                    crate::sim::Event::ProcessGracefulShutdown {
+                        ip: ip_addr,
+                        grace_period_ms: grace_ms,
+                        recovery_delay_ms: recovery_ms,
+                    },
+                    Duration::from_nanos(1),
+                );
+                tracing::info!(
+                    "Initiated graceful reboot for process at IP {} (grace={}ms, recovery={}ms)",
+                    ip,
+                    grace_ms,
+                    recovery_ms
+                );
+            }
+            RebootKind::Crash | RebootKind::CrashAndWipe => {
+                self.sim.abort_all_connections_for_ip(ip_addr);
+                self.process_info
+                    .dead_count
+                    .set(self.process_info.dead_count.get() + 1);
+                let delay_ms = crate::sim::sim_random_range(recovery_delay_range_ms.clone()) as u64;
+                let recovery_delay = Duration::from_millis(delay_ms);
+                self.sim.schedule_process_restart(ip_addr, recovery_delay);
+                tracing::info!(
+                    "Crashed process at IP {} (recovery in {:?})",
+                    ip,
+                    recovery_delay
+                );
+            }
+        }
 
-        // Schedule restart with seeded random delay (1-10 seconds)
-        let delay_ms = crate::sim::sim_random_range(1000..10000);
-        let recovery_delay = Duration::from_millis(delay_ms as u64);
-        self.sim.schedule_process_restart(ip_addr, recovery_delay);
-
-        tracing::info!(
-            "Rebooted process at IP {} (recovery in {:?})",
-            ip,
-            recovery_delay
-        );
         Ok(())
     }
 
@@ -197,11 +234,11 @@ impl FaultContext {
     /// Picks a random process from the process IP list and reboots it.
     /// Returns `Ok(None)` if no processes are available.
     pub fn reboot_random(&self, kind: RebootKind) -> SimulationResult<Option<String>> {
-        if self.process_ips.is_empty() {
+        if self.process_info.process_ips.is_empty() {
             return Ok(None);
         }
-        let idx = crate::sim::sim_random_range(0..self.process_ips.len());
-        let ip = self.process_ips[idx].clone();
+        let idx = crate::sim::sim_random_range(0..self.process_info.process_ips.len());
+        let ip = self.process_info.process_ips[idx].clone();
         self.reboot(&ip, kind)?;
         Ok(Some(ip))
     }
@@ -214,6 +251,7 @@ impl FaultContext {
         kind: RebootKind,
     ) -> SimulationResult<Vec<String>> {
         let matching_ips: Vec<String> = self
+            .process_info
             .tag_registry
             .ips_tagged(key, value)
             .into_iter()
@@ -251,7 +289,7 @@ pub trait FaultInjector: 'static {
 ///    Invariants are checked after every simulation event.
 /// 2. **Recovery phase** (`recovery_duration`): Fault injectors stopped, workloads
 ///    continue, system heals. Verifies convergence after faults cease.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PhaseConfig {
     /// Duration of the chaos phase (faults + workloads run concurrently).
     pub chaos_duration: Duration,
@@ -300,13 +338,25 @@ impl FaultInjector for AttritionInjector {
                 continue;
             }
 
+            // Respect max_dead: skip this cycle if already at the limit
+            if ctx.dead_count() >= self.config.max_dead {
+                continue;
+            }
+
             // Choose reboot kind by weighted probability
             let rand_val = crate::sim::sim_random_range(0..10000) as f64 / 10000.0;
             let kind = self.config.choose_kind(rand_val);
 
-            // TODO: respect max_dead by checking how many processes are currently dead.
-            // For now, always attempt a reboot (the orchestrator handles restart scheduling).
-            ctx.reboot_random(kind)?;
+            // Use configured delay ranges (or defaults)
+            let recovery_range = self.config.recovery_delay_ms.clone().unwrap_or(1000..10000);
+            let grace_range = self.config.grace_period_ms.clone().unwrap_or(2000..5000);
+
+            if ctx.process_ips().is_empty() {
+                continue;
+            }
+            let idx = crate::sim::sim_random_range(0..ctx.process_ips().len());
+            let ip = ctx.process_ips()[idx].to_string();
+            ctx.reboot_with_delays(&ip, kind, &recovery_range, &grace_range)?;
         }
         Ok(())
     }
