@@ -20,7 +20,7 @@ use std::fmt;
 
 use crate::{Endpoint, NetworkAddress, UID};
 
-use super::ActorId;
+use crate::actors::ActorId;
 
 /// Errors from placement operations.
 #[derive(Debug, thiserror::Error)]

@@ -15,10 +15,10 @@
 
 use std::rc::Rc;
 
-use super::directory::ActorDirectory;
-use super::membership::MembershipProvider;
-use super::{InMemoryDirectory, SharedMembership};
 use crate::NetworkAddress;
+use crate::actors::infrastructure::directory::ActorDirectory;
+use crate::actors::infrastructure::membership::MembershipProvider;
+use crate::actors::{InMemoryDirectory, SharedMembership};
 
 /// Shared cluster configuration for simulation.
 ///

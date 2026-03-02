@@ -1,29 +1,36 @@
-//! Banking Example: Virtual actors with state persistence.
+//! Banking Example: Virtual actors with state persistence across 3 nodes.
 //!
 //! This example demonstrates the virtual actor networking layer with
-//! `PersistentState<T>` for durable actor state.
+//! `PersistentState<T>` for durable actor state, distributed across
+//! 3 nodes using round-robin placement.
 //!
 //! # What It Shows
 //!
 //! - A virtual `BankAccount` actor defined with `#[service]` macro
 //! - **State persistence**: `PersistentState<BankAccountData>` + `InMemoryStateStore`
 //! - **Lifecycle**: `on_activate` loads state, `DeactivateAfterIdle` removes actor after idle timeout
+//! - **Multi-node**: 3 nodes on same process with `SharedMembership` and `RoundRobinPlacement`
+//! - **Directory listing**: Print where each actor was placed
 //! - Typed `BankAccountRef` via `node.actor_ref("alice")`
-//! - Single process, local delivery, single transport
 //!
 //! # Architecture
 //!
 //! ```text
-//! EndpointMap:
-//!   UID(0xBA4E_4B00, 0) → BankAccount handler             (virtual, all methods)
+//! Node1 (127.0.0.1:4700) ─┐
+//! Node2 (127.0.0.1:4701) ─┤── SharedMembership + InMemoryDirectory
+//! Node3 (127.0.0.1:4702) ─┘   RoundRobinPlacement distributes actors
+//!
+//! EndpointMap (per node):
+//!   UID(0xBA4E_4B00, 0) → BankAccount handler
 //! ```
 
 use std::rc::Rc;
 use std::time::Duration;
 
 use moonpool::actors::{
-    ActorContext, ActorError, ActorHandler, ActorStateStore, ClusterConfig, DeactivationHint,
-    InMemoryStateStore, MoonpoolNode, NodeConfig, PersistentState,
+    ActorContext, ActorDirectory, ActorError, ActorHandler, ActorStateStore, ClusterConfig,
+    DeactivationHint, InMemoryDirectory, InMemoryStateStore, MoonpoolNode, NodeConfig,
+    PersistentState, PlacementStrategy, RoundRobinPlacement, SharedMembership,
 };
 use moonpool::{MessageCodec, NetworkAddress, Providers, RpcError, actor_impl, service};
 use serde::{Deserialize, Serialize};
@@ -175,7 +182,7 @@ impl ActorHandler for BankAccountImpl {
 // ============================================================================
 
 fn main() {
-    println!("=== Banking Example: Virtual Actors ===\n");
+    println!("=== Banking Example: 3-Node Virtual Actors ===\n");
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -191,28 +198,67 @@ fn main() {
 }
 
 async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
-    let local_addr = NetworkAddress::parse("127.0.0.1:4700")?;
+    // --- 3 node addresses ---
+    let addr1 = NetworkAddress::parse("127.0.0.1:4700")?;
+    let addr2 = NetworkAddress::parse("127.0.0.1:4701")?;
+    let addr3 = NetworkAddress::parse("127.0.0.1:4702")?;
 
+    // --- Shared cluster resources ---
+    // SharedMembership starts empty; each node self-registers during start().
+    let membership = Rc::new(SharedMembership::new());
+    let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
+    let placement: Rc<dyn PlacementStrategy> = Rc::new(RoundRobinPlacement::new());
     let state_store: Rc<dyn ActorStateStore> = Rc::new(InMemoryStateStore::new());
 
     let cluster = ClusterConfig::builder()
         .name("banking")
-        .topology(vec![local_addr.clone()])
+        .membership(membership.clone())
+        .directory(directory.clone())
         .build()?;
 
-    let config = NodeConfig::builder().state_store(state_store).build();
+    // Per-node config: own address, shared placement and state store.
+    let make_config = |addr: NetworkAddress| -> NodeConfig {
+        NodeConfig::builder()
+            .address(addr)
+            .placement(placement.clone())
+            .state_store(state_store.clone())
+            .build()
+    };
 
-    let mut node = MoonpoolNode::new(cluster, config)
+    // --- Start all 3 nodes before making actor calls ---
+    // This ensures all 3 are Active in membership so round-robin sees them.
+    let mut node1 = MoonpoolNode::new(cluster.clone(), make_config(addr1.clone()))
         .with_providers(moonpool::TokioProviders::new())
         .register::<BankAccountImpl>()
         .start()
         .await?;
 
-    // Create typed actor references via node.actor_ref()
-    let alice: BankAccountRef<_> = node.actor_ref("alice");
-    let bob: BankAccountRef<_> = node.actor_ref("bob");
+    let mut node2 = MoonpoolNode::new(cluster.clone(), make_config(addr2.clone()))
+        .with_providers(moonpool::TokioProviders::new())
+        .register::<BankAccountImpl>()
+        .start()
+        .await?;
 
-    println!("\n--- Virtual Actor: BankAccount ---\n");
+    let mut node3 = MoonpoolNode::new(cluster.clone(), make_config(addr3.clone()))
+        .with_providers(moonpool::TokioProviders::new())
+        .register::<BankAccountImpl>()
+        .start()
+        .await?;
+
+    println!(
+        "Started 3 nodes: {}, {}, {}",
+        node1.address(),
+        node2.address(),
+        node3.address()
+    );
+
+    // --- Create typed actor references from node1 ---
+    // Any node could be used; round-robin placement determines where actors land.
+    let alice: BankAccountRef<_> = node1.actor_ref("alice");
+    let bob: BankAccountRef<_> = node1.actor_ref("bob");
+    let charlie: BankAccountRef<_> = node1.actor_ref("charlie");
+
+    println!("\n--- Virtual Actor: BankAccount (3 nodes, round-robin) ---\n");
 
     // Deposit to alice
     let resp = alice.deposit(DepositRequest { amount: 100 }).await?;
@@ -223,6 +269,11 @@ async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
     let resp = bob.deposit(DepositRequest { amount: 50 }).await?;
     println!("  [client] Bob balance after deposit: {}", resp.balance);
     assert_eq!(resp.balance, 50);
+
+    // Deposit to charlie
+    let resp = charlie.deposit(DepositRequest { amount: 75 }).await?;
+    println!("  [client] Charlie balance after deposit: {}", resp.balance);
+    assert_eq!(resp.balance, 75);
 
     // Transfer: withdraw from alice, deposit to bob
     let resp = alice.withdraw(WithdrawRequest { amount: 30 }).await?;
@@ -245,10 +296,32 @@ async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(bob_balance.balance, 80);
     println!("  [client] Bob final balance: {}", bob_balance.balance);
 
-    println!("\n--- Results ---\n");
-    println!("  Virtual actors (BankAccount): alice=70, bob=80");
+    let charlie_balance = charlie.get_balance(GetBalanceRequest {}).await?;
+    assert_eq!(charlie_balance.balance, 75);
+    println!(
+        "  [client] Charlie final balance: {}",
+        charlie_balance.balance
+    );
 
-    node.shutdown().await?;
+    // --- Directory listing: show where each actor was placed ---
+    println!("\n--- Actor Directory ---\n");
+    let mut entries = directory.list_all().await?;
+    entries.sort_by(|a, b| a.actor_id.identity.cmp(&b.actor_id.identity));
+    for entry in &entries {
+        println!(
+            "  BankAccount/{} → {}",
+            entry.actor_id.identity, entry.endpoint.address
+        );
+    }
+
+    println!("\n--- Results ---\n");
+    println!("  Virtual actors: alice=70, bob=80, charlie=75");
+    println!("  Actors distributed across 3 nodes via round-robin");
+
+    // --- Shutdown all nodes ---
+    node1.shutdown().await?;
+    node2.shutdown().await?;
+    node3.shutdown().await?;
 
     println!("\nExample completed successfully!");
     Ok(())

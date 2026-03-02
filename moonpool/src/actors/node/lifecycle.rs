@@ -38,12 +38,12 @@ use crate::{
     TaskProvider,
 };
 
-use super::ActorDirectory;
 use super::cluster::ClusterConfig;
-use super::host::{ActorHandler, ActorTypeDispatcher, TypedDispatcher};
-use super::node_config::NodeConfig;
-use super::router::ActorRouter;
-use super::state::ActorStateStore;
+use super::config::NodeConfig;
+use crate::actors::infrastructure::directory::ActorDirectory;
+use crate::actors::runtime::host::{ActorHandler, ActorTypeDispatcher, TypedDispatcher};
+use crate::actors::runtime::router::ActorRouter;
+use crate::actors::state::store::ActorStateStore;
 
 /// Type alias for a collection of close handles (one per registered actor type).
 type CloseHandles = Vec<Box<dyn Fn()>>;
@@ -91,7 +91,7 @@ impl<P: Providers, C: MessageCodec> MoonpoolNode<P, C> {
     /// let alice: BankAccountRef<_> = node.actor_ref("alice");
     /// alice.deposit(req).await?;
     /// ```
-    pub fn actor_ref<R: super::ActorRef<P, C>>(&self, identity: impl Into<String>) -> R {
+    pub fn actor_ref<R: crate::actors::ActorRef<P, C>>(&self, identity: impl Into<String>) -> R {
         R::from_router(identity, &self.router)
     }
 
@@ -138,7 +138,7 @@ impl<P: Providers, C: MessageCodec> MoonpoolNode<P, C> {
         let _ = self
             .cluster
             .membership()
-            .update_status(&self.address, super::membership::NodeStatus::ShuttingDown)
+            .update_status(&self.address, crate::actors::NodeStatus::ShuttingDown)
             .await;
 
         // Close all request streams
@@ -162,7 +162,7 @@ impl<P: Providers, C: MessageCodec> MoonpoolNode<P, C> {
         let _ = self
             .cluster
             .membership()
-            .update_status(&self.address, super::membership::NodeStatus::Dead)
+            .update_status(&self.address, crate::actors::NodeStatus::Dead)
             .await;
 
         Ok(())
@@ -300,10 +300,11 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
             }
         };
 
-        // Create transport
+        // Create transport (with TCP listener for cross-node RPC)
         let transport = NetTransportBuilder::new(providers.clone())
             .local_address(address.clone())
-            .build()
+            .build_listening()
+            .await
             .map_err(|e| NodeError::Transport(e.to_string()))?;
 
         // Register this node into membership
@@ -317,7 +318,7 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
             .membership()
             .register_node(
                 address.clone(),
-                super::membership::NodeStatus::Active,
+                crate::actors::NodeStatus::Active,
                 node_name,
             )
             .await
@@ -328,7 +329,7 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
             .config
             .placement()
             .cloned()
-            .unwrap_or_else(|| Rc::new(super::LocalPlacement::new(address.clone())));
+            .unwrap_or_else(|| Rc::new(crate::actors::LocalPlacement::new(address.clone())));
 
         // Create router
         let directory = self.cluster.directory().clone();
@@ -407,9 +408,9 @@ mod tests {
     use crate::actors::types::{ActorId, ActorType};
     use crate::actors::{ActorDirectory, LocalPlacement, MembershipProvider, PlacementStrategy};
 
-    use super::super::host::{ActorContext, ActorHandler};
-    use super::super::router::ActorError;
     use super::*;
+    use crate::actors::runtime::host::{ActorContext, ActorHandler};
+    use crate::actors::runtime::router::ActorError;
 
     const TEST_ACTOR_TYPE: ActorType = ActorType(0x7E57_AC70);
 
@@ -668,7 +669,7 @@ mod tests {
             let member = snap
                 .get_member(&local_addr)
                 .expect("node should be in membership");
-            assert_eq!(member.status, super::super::membership::NodeStatus::Dead);
+            assert_eq!(member.status, crate::actors::NodeStatus::Dead);
         });
     }
 

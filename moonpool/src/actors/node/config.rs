@@ -7,8 +7,8 @@ use std::rc::Rc;
 
 use crate::NetworkAddress;
 
-use super::placement::PlacementStrategy;
-use super::state::ActorStateStore;
+use crate::actors::infrastructure::placement::PlacementStrategy;
+use crate::actors::state::store::ActorStateStore;
 
 /// Per-node configuration for a [`MoonpoolNode`](super::MoonpoolNode).
 ///

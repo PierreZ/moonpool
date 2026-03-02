@@ -31,11 +31,12 @@ use crate::{
 };
 
 use super::router::ActorError;
-use super::state::ActorStateStore;
-use super::types::{
+use super::router::ActorRouter;
+use crate::actors::infrastructure::directory::ActorDirectory;
+use crate::actors::state::store::ActorStateStore;
+use crate::actors::types::{
     ActivationId, ActorAddress, ActorId, ActorMessage, ActorResponse, ActorType, CacheInvalidation,
 };
-use super::{ActorDirectory, ActorRouter};
 
 /// Maximum number of times a message can be forwarded before being rejected.
 /// Prevents infinite forwarding loops.
@@ -164,7 +165,7 @@ impl<P: Providers, C: MessageCodec> ActorContext<P, C> {
     /// let other: BankAccountRef<_, _> = ctx.actor_ref("other-account");
     /// other.deposit(req).await?;
     /// ```
-    pub fn actor_ref<R: super::ActorRef<P, C>>(&self, identity: impl Into<String>) -> R {
+    pub fn actor_ref<R: crate::actors::ActorRef<P, C>>(&self, identity: impl Into<String>) -> R {
         R::from_router(identity, &self.router)
     }
 }
@@ -267,7 +268,7 @@ pub trait ActorHandler: Default + 'static {
 ///
 /// Each registered actor type gets a `TypedDispatcher<H>` that implements
 /// this trait. The host stores these as `Box<dyn ActorTypeDispatcher<P, C>>`.
-pub(super) trait ActorTypeDispatcher<P: Providers, C: MessageCodec> {
+pub(crate) trait ActorTypeDispatcher<P: Providers, C: MessageCodec> {
     /// Start the processing loop for this actor type.
     ///
     /// Spawns a task that receives `ActorMessage`s from the transport,
@@ -287,12 +288,12 @@ pub(super) trait ActorTypeDispatcher<P: Providers, C: MessageCodec> {
 }
 
 /// Type-erased dispatcher for a specific actor handler type.
-pub(super) struct TypedDispatcher<H: ActorHandler> {
+pub(crate) struct TypedDispatcher<H: ActorHandler> {
     _marker: std::marker::PhantomData<H>,
 }
 
 impl<H: ActorHandler> TypedDispatcher<H> {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             _marker: std::marker::PhantomData,
         }

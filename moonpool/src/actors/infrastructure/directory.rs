@@ -25,7 +25,7 @@ use std::fmt;
 
 use crate::NetworkAddress;
 
-use super::types::{ActorAddress, ActorId};
+use crate::actors::types::{ActorAddress, ActorId};
 
 /// Errors from directory operations.
 #[derive(Debug, thiserror::Error)]
@@ -110,6 +110,12 @@ pub trait ActorDirectory: fmt::Debug {
         &self,
         addresses: &[NetworkAddress],
     ) -> Result<Vec<ActorAddress>, DirectoryError>;
+
+    /// List all actor entries currently in the directory.
+    ///
+    /// Returns all registered `ActorAddress` entries. Useful for debugging,
+    /// monitoring, and tooling. The order of returned entries is unspecified.
+    async fn list_all(&self) -> Result<Vec<ActorAddress>, DirectoryError>;
 }
 
 /// Simple in-memory directory for single-node and simulation usage.
@@ -189,6 +195,10 @@ impl ActorDirectory for InMemoryDirectory {
             }
         });
         Ok(removed)
+    }
+
+    async fn list_all(&self) -> Result<Vec<ActorAddress>, DirectoryError> {
+        Ok(self.entries.borrow().values().cloned().collect())
     }
 }
 
