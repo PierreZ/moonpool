@@ -159,9 +159,23 @@ impl ActorDirectory for InMemoryDirectory {
         match entries.get(&address.actor_id) {
             Some(existing) => {
                 // Entry already exists — return existing WITHOUT overwriting (Orleans semantics)
+                tracing::debug!(
+                    actor_type = %address.actor_id.actor_type,
+                    identity = %address.actor_id.identity,
+                    existing_activation = %existing.activation_id,
+                    new_activation = %address.activation_id,
+                    "register conflict, returning existing"
+                );
                 Ok(existing.clone())
             }
             None => {
+                tracing::debug!(
+                    actor_type = %address.actor_id.actor_type,
+                    identity = %address.actor_id.identity,
+                    activation = %address.activation_id,
+                    endpoint = %address.endpoint.address,
+                    "registered new actor"
+                );
                 entries.insert(address.actor_id.clone(), address.clone());
                 Ok(address)
             }
@@ -175,6 +189,12 @@ impl ActorDirectory for InMemoryDirectory {
             && existing.activation_id == address.activation_id
         {
             entries.remove(&address.actor_id);
+            tracing::debug!(
+                actor_type = %address.actor_id.actor_type,
+                identity = %address.actor_id.identity,
+                activation = %address.activation_id,
+                "unregistered actor"
+            );
         }
         // If not found, that's fine too — idempotent
         Ok(())
@@ -194,6 +214,7 @@ impl ActorDirectory for InMemoryDirectory {
                 true
             }
         });
+        tracing::info!(removed_count = removed.len(), "cleaned up member entries");
         Ok(removed)
     }
 

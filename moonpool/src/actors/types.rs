@@ -37,6 +37,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize, Debug)]
 pub struct ActorType(pub u64);
 
+impl std::fmt::Display for ActorType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "0x{:08x}", self.0)
+    }
+}
+
 /// Full virtual actor address = type + string identity.
 ///
 /// Uniquely identifies a specific actor instance within the system.

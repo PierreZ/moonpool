@@ -131,8 +131,10 @@ impl<P: Providers, C: MessageCodec> MoonpoolNode<P, C> {
     /// membership provider and cleans up directory entries.
     ///
     /// After shutdown, the node can no longer process actor messages.
+    #[tracing::instrument(skip_all, fields(address = %self.address))]
     pub async fn shutdown(&mut self) -> Result<(), NodeError> {
         self.status = NodeLifecycle::Stopping;
+        tracing::info!("node shutdown initiated");
 
         // Mark as ShuttingDown in membership
         let _ = self
@@ -165,6 +167,7 @@ impl<P: Providers, C: MessageCodec> MoonpoolNode<P, C> {
             .update_status(&self.address, crate::actors::NodeStatus::Dead)
             .await;
 
+        tracing::info!("node shutdown complete");
         Ok(())
     }
 }
@@ -219,7 +222,7 @@ impl<P: Providers> MoonpoolNode<P> {
     /// # Arguments
     ///
     /// * `cluster` - Shared cluster configuration (directory, membership)
-    /// * `config` - Per-node settings (address, placement, state store)
+    /// * `config` - Per-node settings (address, state store)
     #[allow(clippy::new_ret_no_self)]
     pub fn new(cluster: ClusterConfig, config: NodeConfig) -> MoonpoolNodeBuilder<P> {
         MoonpoolNodeBuilder {
@@ -256,6 +259,11 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
     /// [`start()`](Self::start). Multiple actor types can be registered.
     pub fn register<H: ActorHandler>(mut self) -> Self {
         self.registrations.push(Box::new(|parts: &NodeParts<P, C>| {
+            // Register the per-actor-type placement hint on the router
+            parts
+                .router
+                .register_placement(H::actor_type(), H::placement_strategy());
+
             let dispatcher = TypedDispatcher::<H>::new();
             let close_handle = dispatcher.start(
                 parts.transport.clone(),
@@ -281,6 +289,7 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
     /// # Errors
     ///
     /// Returns an error if required fields are missing or transport creation fails.
+    #[tracing::instrument(skip_all, fields(address))]
     pub async fn start(self) -> Result<MoonpoolNode<P, C>, NodeError> {
         let providers = self.providers.ok_or(NodeError::MissingProviders)?;
 
@@ -300,12 +309,17 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
             }
         };
 
+        // Record the resolved address in the span
+        tracing::Span::current().record("address", tracing::field::display(&address));
+
         // Create transport (with TCP listener for cross-node RPC)
         let transport = NetTransportBuilder::new(providers.clone())
             .local_address(address.clone())
             .build_listening()
             .await
             .map_err(|e| NodeError::Transport(e.to_string()))?;
+
+        tracing::debug!("transport created");
 
         // Register this node into membership
         let node_name = self
@@ -319,17 +333,12 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
             .register_node(
                 address.clone(),
                 crate::actors::NodeStatus::Active,
-                node_name,
+                node_name.clone(),
             )
             .await
             .map_err(|e| NodeError::MembershipRegistration(e.to_string()))?;
 
-        // Determine placement strategy
-        let placement = self
-            .config
-            .placement()
-            .cloned()
-            .unwrap_or_else(|| Rc::new(crate::actors::LocalPlacement::new(address.clone())));
+        tracing::info!(name = %node_name, "node registered in membership");
 
         // Create router
         let directory = self.cluster.directory().clone();
@@ -337,7 +346,8 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
         let router = Rc::new(ActorRouter::new(
             transport.clone(),
             directory.clone(),
-            placement,
+            address.clone(),
+            self.cluster.placement_director().clone(),
             membership,
             self.codec,
         ));
@@ -362,6 +372,8 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
 
         // Drain close handles from the shared RefCell into an owned collection.
         let close_handles_owned = RefCell::new(std::mem::take(&mut *close_handles.borrow_mut()));
+
+        tracing::info!("node started");
 
         Ok(MoonpoolNode {
             transport,
@@ -406,7 +418,7 @@ mod tests {
 
     use crate::TokioProviders;
     use crate::actors::types::{ActorId, ActorType};
-    use crate::actors::{ActorDirectory, LocalPlacement, MembershipProvider, PlacementStrategy};
+    use crate::actors::{ActorDirectory, MembershipProvider};
 
     use super::*;
     use crate::actors::runtime::host::{ActorContext, ActorHandler};
@@ -529,17 +541,13 @@ mod tests {
     fn test_node_start_and_send() {
         run_local_test(async {
             let local_addr = addr(4700);
-            let placement: Rc<dyn PlacementStrategy> =
-                Rc::new(LocalPlacement::new(local_addr.clone()));
 
             let cluster = ClusterConfig::builder()
                 .topology(vec![local_addr.clone()])
                 .build()
                 .expect("build cluster");
 
-            let config = NodeConfig::builder().placement(placement).build();
-
-            let mut node = MoonpoolNode::new(cluster, config)
+            let mut node = MoonpoolNode::new(cluster, NodeConfig::default())
                 .with_providers(TokioProviders::new())
                 .register::<CounterActor>()
                 .start()
@@ -686,13 +694,7 @@ mod tests {
                 .build()
                 .expect("build cluster");
 
-            let placement: Rc<dyn PlacementStrategy> =
-                Rc::new(LocalPlacement::new(local_addr.clone()));
-
-            let config = NodeConfig::builder()
-                .address(local_addr.clone())
-                .placement(placement)
-                .build();
+            let config = NodeConfig::builder().address(local_addr.clone()).build();
 
             let mut node = MoonpoolNode::new(cluster, config)
                 .with_providers(TokioProviders::new())

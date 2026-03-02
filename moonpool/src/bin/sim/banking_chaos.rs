@@ -13,8 +13,9 @@ fn main() {
         .with_max_level(tracing::Level::WARN)
         .try_init();
 
-    eprintln!("WARNING: Banking chaos simulation has a known transfer revert bug.");
-    eprintln!("Running anyway for coverage data...");
+    tracing::warn!(
+        "banking chaos simulation has a known transfer revert bug, running anyway for coverage data"
+    );
 
     let names = ["alice", "bob", "charlie", "dave", "eve"];
     let accounts: Vec<String> = names.iter().map(|s| s.to_string()).collect();

@@ -96,8 +96,8 @@ where
             message: e.to_string(),
         })?;
 
-    // Send the request
-    transport.send_unreliable(destination, &payload)?;
+    // Send the request (reliable so it survives reconnection)
+    transport.send_reliable(destination, &payload)?;
 
     // Return the reply future
     Ok(ReplyFuture::new(reply_queue, reply_endpoint))

@@ -1,8 +1,8 @@
 //! Cluster configuration: shared state for all nodes in a cluster.
 //!
-//! [`ClusterConfig`] bundles the directory and membership provider that
-//! nodes share. In simulation, all nodes reference the same `ClusterConfig`
-//! via `Rc`, giving them a unified view of the cluster.
+//! [`ClusterConfig`] bundles the directory, membership provider, and placement
+//! director that nodes share. In simulation, all nodes reference the same
+//! `ClusterConfig` via `Rc`, giving them a unified view of the cluster.
 //!
 //! # Example
 //!
@@ -18,17 +18,20 @@ use std::rc::Rc;
 use crate::NetworkAddress;
 use crate::actors::infrastructure::directory::ActorDirectory;
 use crate::actors::infrastructure::membership::MembershipProvider;
+use crate::actors::infrastructure::placement::{DefaultPlacementDirector, PlacementDirector};
 use crate::actors::{InMemoryDirectory, SharedMembership};
 
 /// Shared cluster configuration for simulation.
 ///
 /// In simulation, all nodes share the same `ClusterConfig` via `Rc`,
-/// giving them a single shared directory and membership view.
+/// giving them a single shared directory, membership view, and placement
+/// director.
 #[derive(Debug, Clone)]
 pub struct ClusterConfig {
     name: Option<String>,
     directory: Rc<dyn ActorDirectory>,
     membership: Rc<dyn MembershipProvider>,
+    placement_director: Rc<dyn PlacementDirector>,
 }
 
 impl ClusterConfig {
@@ -38,6 +41,7 @@ impl ClusterConfig {
             name: None,
             directory: None,
             membership: None,
+            placement_director: None,
         }
     }
 
@@ -55,6 +59,11 @@ impl ClusterConfig {
     pub fn membership(&self) -> &Rc<dyn MembershipProvider> {
         &self.membership
     }
+
+    /// The shared placement director.
+    pub fn placement_director(&self) -> &Rc<dyn PlacementDirector> {
+        &self.placement_director
+    }
 }
 
 /// Builder for [`ClusterConfig`].
@@ -62,6 +71,7 @@ pub struct ClusterConfigBuilder {
     name: Option<String>,
     directory: Option<Rc<dyn ActorDirectory>>,
     membership: Option<Rc<dyn MembershipProvider>>,
+    placement_director: Option<Rc<dyn PlacementDirector>>,
 }
 
 impl ClusterConfigBuilder {
@@ -93,6 +103,14 @@ impl ClusterConfigBuilder {
         self.membership(Rc::new(SharedMembership::with_members(addresses)))
     }
 
+    /// Set the placement director.
+    ///
+    /// If not set, defaults to [`DefaultPlacementDirector`].
+    pub fn placement_director(mut self, director: Rc<dyn PlacementDirector>) -> Self {
+        self.placement_director = Some(director);
+        self
+    }
+
     /// Build the cluster configuration.
     ///
     /// # Errors
@@ -106,11 +124,15 @@ impl ClusterConfigBuilder {
         let directory = self
             .directory
             .unwrap_or_else(|| Rc::new(InMemoryDirectory::new()));
+        let placement_director = self
+            .placement_director
+            .unwrap_or_else(|| Rc::new(DefaultPlacementDirector::default()));
 
         Ok(ClusterConfig {
             name: self.name,
             directory,
             membership,
+            placement_director,
         })
     }
 }
@@ -144,6 +166,7 @@ mod tests {
         assert_eq!(cluster.name(), Some("test"));
         let _ = cluster.directory();
         let _ = cluster.membership();
+        let _ = cluster.placement_director();
     }
 
     #[test]
@@ -200,5 +223,17 @@ mod tests {
         let members = cluster.membership().members().await;
         assert_eq!(members.len(), 1);
         assert_eq!(members[0], addr(4500));
+    }
+
+    #[test]
+    fn test_builder_defaults_placement_director() {
+        let cluster = ClusterConfig::builder()
+            .topology(vec![addr(4500)])
+            .build()
+            .expect("build should succeed");
+
+        // Should have a default placement director
+        let debug_str = format!("{:?}", cluster.placement_director());
+        assert!(debug_str.contains("DefaultPlacementDirector"));
     }
 }

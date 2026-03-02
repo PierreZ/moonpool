@@ -159,6 +159,13 @@ impl ActorStateStore for InMemoryStateStore {
             match entries.get(&key) {
                 Some(existing) if existing.etag != expected => {
                     assert_sometimes!(true, "etag_conflict");
+                    tracing::debug!(
+                        actor_type = %actor_type,
+                        actor_id = %actor_id,
+                        expected_etag = %expected,
+                        actual_etag = %existing.etag,
+                        "state write ETag conflict"
+                    );
                     return Err(ActorStateError::ETagMismatch {
                         expected: expected.to_string(),
                         actual: existing.etag.clone(),
@@ -181,6 +188,12 @@ impl ActorStateStore for InMemoryStateStore {
                 data,
                 etag: new_etag.clone(),
             },
+        );
+        tracing::debug!(
+            actor_type = %actor_type,
+            actor_id = %actor_id,
+            etag = %new_etag,
+            "state written"
         );
         Ok(new_etag)
     }
@@ -215,6 +228,11 @@ impl ActorStateStore for InMemoryStateStore {
         }
 
         entries.remove(&key);
+        tracing::debug!(
+            actor_type = %actor_type,
+            actor_id = %actor_id,
+            "state cleared"
+        );
         Ok(())
     }
 }

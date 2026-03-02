@@ -1,19 +1,18 @@
 //! Per-node configuration for [`MoonpoolNode`](super::MoonpoolNode).
 //!
-//! Separates node-level settings (address, placement, state store)
-//! from cluster-level settings ([`ClusterConfig`](super::ClusterConfig)).
+//! Separates node-level settings (address, state store) from cluster-level
+//! settings ([`ClusterConfig`](super::ClusterConfig)).
 
 use std::rc::Rc;
 
 use crate::NetworkAddress;
 
-use crate::actors::infrastructure::placement::PlacementStrategy;
 use crate::actors::state::store::ActorStateStore;
 
 /// Per-node configuration for a [`MoonpoolNode`](super::MoonpoolNode).
 ///
-/// Separates node-level settings (address, placement, state store)
-/// from cluster-level settings ([`ClusterConfig`](super::ClusterConfig)).
+/// Separates node-level settings (address, state store) from cluster-level
+/// settings ([`ClusterConfig`](super::ClusterConfig)).
 ///
 /// # Example
 ///
@@ -33,7 +32,6 @@ use crate::actors::state::store::ActorStateStore;
 #[derive(Debug, Clone, Default)]
 pub struct NodeConfig {
     address: Option<NetworkAddress>,
-    placement: Option<Rc<dyn PlacementStrategy>>,
     state_store: Option<Rc<dyn ActorStateStore>>,
 }
 
@@ -45,7 +43,6 @@ impl NodeConfig {
     pub fn for_address(address: NetworkAddress) -> Self {
         Self {
             address: Some(address),
-            placement: None,
             state_store: None,
         }
     }
@@ -60,11 +57,6 @@ impl NodeConfig {
         self.address.as_ref()
     }
 
-    /// The placement strategy, if explicitly set.
-    pub fn placement(&self) -> Option<&Rc<dyn PlacementStrategy>> {
-        self.placement.as_ref()
-    }
-
     /// The actor state store, if explicitly set.
     pub fn state_store(&self) -> Option<&Rc<dyn ActorStateStore>> {
         self.state_store.as_ref()
@@ -75,7 +67,6 @@ impl NodeConfig {
 #[derive(Debug, Clone, Default)]
 pub struct NodeConfigBuilder {
     address: Option<NetworkAddress>,
-    placement: Option<Rc<dyn PlacementStrategy>>,
     state_store: Option<Rc<dyn ActorStateStore>>,
 }
 
@@ -83,12 +74,6 @@ impl NodeConfigBuilder {
     /// Set the node's network address.
     pub fn address(mut self, address: NetworkAddress) -> Self {
         self.address = Some(address);
-        self
-    }
-
-    /// Set the placement strategy.
-    pub fn placement(mut self, placement: Rc<dyn PlacementStrategy>) -> Self {
-        self.placement = Some(placement);
         self
     }
 
@@ -102,7 +87,6 @@ impl NodeConfigBuilder {
     pub fn build(self) -> NodeConfig {
         NodeConfig {
             address: self.address,
-            placement: self.placement,
             state_store: self.state_store,
         }
     }
@@ -122,7 +106,6 @@ mod tests {
     fn test_default() {
         let config = NodeConfig::default();
         assert!(config.address().is_none());
-        assert!(config.placement().is_none());
         assert!(config.state_store().is_none());
     }
 
@@ -130,7 +113,6 @@ mod tests {
     fn test_for_address() {
         let config = NodeConfig::for_address(addr(4500));
         assert_eq!(config.address(), Some(&addr(4500)));
-        assert!(config.placement().is_none());
         assert!(config.state_store().is_none());
     }
 
