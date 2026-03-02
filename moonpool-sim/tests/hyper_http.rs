@@ -13,7 +13,7 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 
 use moonpool_sim::{
-    NetworkProvider, SimContext, SimulationBuilder, SimulationReport, SimulationResult,
+    NetworkProvider, Process, SimContext, SimulationBuilder, SimulationReport, SimulationResult,
     TcpListenerTrait, Workload,
 };
 
@@ -83,7 +83,7 @@ async fn handle_request(
 struct HyperServer;
 
 #[async_trait(?Send)]
-impl Workload for HyperServer {
+impl Process for HyperServer {
     fn name(&self) -> &str {
         "server"
     }
@@ -239,7 +239,7 @@ async fn send_requests(
 fn test_hyper_http_basic() {
     let report = run_simulation(
         SimulationBuilder::new()
-            .workload(HyperServer)
+            .processes(1, || Box::new(HyperServer))
             .workload(HyperClient)
             .set_iterations(3)
             .set_debug_seeds(vec![1, 2, 3]),

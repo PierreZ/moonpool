@@ -129,8 +129,22 @@ Strategic placement: error handling, timeouts, retries, resource limits
 - Ping → Ping.actor.cpp:29-38,147-169
 - Queuing → Net2Packet.h:43-91
 - Chaos → foundationdb/Buggify.h:79-88
+- Process lifecycle → sim2.actor.cpp (reboot/kill mechanics)
 
 **Focus**: TCP-level simulation (connection faults) not packet-level
+
+## Process / Workload Separation
+**Process** — system under test. Runs on server node. Factory creates fresh instance per boot.
+**Workload** — test driver. Survives reboots. Drives requests and validates correctness.
+
+**Builder API**:
+- `.processes(count, factory)` — register server processes (IPs: `10.0.1.{1..N}`)
+- `.tags(&[("key", &["val1", "val2"])])` — round-robin tag distribution
+- `.attrition(config)` — built-in chaos reboots (requires `.phases()`)
+
+**Reboot lifecycle**: Graceful (signal token → grace period → force kill → restart) vs Crash (immediate abort → restart)
+**Key types**: `Process`, `RebootKind`, `Attrition`, `ProcessTags`, `TagRegistry`
+**FDB reference**: Process ≈ `fdbd`, Workload ≈ `tester.actor.cpp`
 
 ## Invariant System
 **When to use invariants**: Cross-actor properties, global system constraints, deterministic bug detection

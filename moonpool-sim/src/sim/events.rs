@@ -42,6 +42,42 @@ pub enum Event {
 
     /// Shutdown event to wake all tasks for graceful termination
     Shutdown,
+
+    /// Process restart event: a rebooted process is ready to boot again.
+    ///
+    /// Scheduled after a process is killed, at `now + recovery_delay`.
+    /// The orchestrator handles this by calling the process factory
+    /// and spawning a new `run()` task.
+    ProcessRestart {
+        /// The IP address of the process to restart.
+        ip: std::net::IpAddr,
+    },
+
+    /// Graceful shutdown initiated for a process.
+    ///
+    /// Cancels the per-process shutdown token so the process can observe
+    /// `ctx.shutdown().is_cancelled()` and perform cleanup. A
+    /// [`ProcessForceKill`](Event::ProcessForceKill) is scheduled after the
+    /// grace period expires.
+    ProcessGracefulShutdown {
+        /// The IP address of the process being gracefully shut down.
+        ip: std::net::IpAddr,
+        /// Grace period in milliseconds before force-kill.
+        grace_period_ms: u64,
+        /// Recovery delay in milliseconds after force-kill before restart.
+        recovery_delay_ms: u64,
+    },
+
+    /// Force-kill a process after a graceful shutdown grace period.
+    ///
+    /// Aborts the process task and all its connections, then schedules a
+    /// [`ProcessRestart`](Event::ProcessRestart) after a recovery delay.
+    ProcessForceKill {
+        /// The IP address of the process to force-kill.
+        ip: std::net::IpAddr,
+        /// Recovery delay in milliseconds before restart.
+        recovery_delay_ms: u64,
+    },
 }
 
 impl Event {
@@ -59,8 +95,7 @@ impl Event {
                     | ConnectionStateChange::RecvPartitionClear
                     | ConnectionStateChange::CutRestore,
                 ..
-            } // Could add other infrastructure events here if needed:
-              // | Event::Connection { state: ConnectionStateChange::ClogClear, .. }
+            } | Event::ProcessRestart { .. }
         )
     }
 }

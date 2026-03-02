@@ -60,6 +60,9 @@ pub(crate) struct SimInner {
 
     // Chaos tracking
     pub(crate) last_bit_flip_time: Duration,
+
+    // Last event processed by step() — used by orchestrator to detect ProcessRestart
+    pub(crate) last_processed_event: Option<Event>,
 }
 
 impl SimInner {
@@ -76,6 +79,7 @@ impl SimInner {
             awakened_tasks: HashSet::new(),
             events_processed: 0,
             last_bit_flip_time: Duration::ZERO,
+            last_processed_event: None,
         }
     }
 
@@ -92,6 +96,7 @@ impl SimInner {
             awakened_tasks: HashSet::new(),
             events_processed: 0,
             last_bit_flip_time: Duration::ZERO,
+            last_processed_event: None,
         }
     }
 
@@ -201,12 +206,17 @@ impl SimWorld {
             // Trigger random partitions based on configuration
             Self::randomly_trigger_partitions_with_inner(&mut inner);
 
+            // Store the event for orchestrator inspection (e.g., ProcessRestart)
+            let event = scheduled_event.into_event();
+            inner.last_processed_event = Some(event.clone());
+
             // Process the event with the mutable reference
-            Self::process_event_with_inner(&mut inner, scheduled_event.into_event());
+            Self::process_event_with_inner(&mut inner, event);
 
             // Return true if more events are available
             !inner.event_queue.is_empty()
         } else {
+            inner.last_processed_event = None;
             // No more events to process
             false
         }
@@ -825,6 +835,13 @@ impl SimWorld {
                 super::storage_ops::handle_storage_event(inner, file_id, operation)
             }
             Event::Shutdown => Self::handle_shutdown_event(inner),
+            Event::ProcessRestart { ip }
+            | Event::ProcessGracefulShutdown { ip, .. }
+            | Event::ProcessForceKill { ip, .. } => {
+                // Process lifecycle events are handled by the orchestrator, not SimWorld.
+                // We just log them here; the orchestrator reads the event after step().
+                tracing::debug!("Process lifecycle event for IP {}", ip);
+            }
         }
     }
 
@@ -1312,7 +1329,63 @@ impl SimWorld {
         crate::chaos::reset_assertion_results();
     }
 
-    /// Extract simulation metrics for reporting.
+    /// Abort all connections involving a specific IP address.
+    ///
+    /// This is used during process reboot to immediately kill all network
+    /// connections for the rebooted process. Both local and remote connections
+    /// are aborted (RST semantics — peer sees ECONNRESET).
+    pub fn abort_all_connections_for_ip(&self, ip: std::net::IpAddr) {
+        let connection_ids: Vec<ConnectionId> = {
+            let inner = self.inner.borrow();
+            inner
+                .network
+                .connections
+                .iter()
+                .filter_map(|(id, conn)| {
+                    if conn.local_ip == Some(ip) || conn.remote_ip == Some(ip) {
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        let count = connection_ids.len();
+        for conn_id in connection_ids {
+            self.close_connection_abort(conn_id);
+        }
+
+        if count > 0 {
+            tracing::debug!("Aborted {} connections for rebooted IP {}", count, ip);
+        }
+    }
+
+    /// Schedule a `ProcessRestart` event after a recovery delay.
+    ///
+    /// Called after a process is killed to schedule its restart.
+    pub fn schedule_process_restart(
+        &self,
+        ip: std::net::IpAddr,
+        recovery_delay: std::time::Duration,
+    ) {
+        self.schedule_event(Event::ProcessRestart { ip }, recovery_delay);
+        tracing::debug!(
+            "Scheduled process restart for IP {} in {:?}",
+            ip,
+            recovery_delay
+        );
+    }
+
+    /// Returns the last event processed by `step()`, if any.
+    ///
+    /// This is used by the orchestrator to detect `ProcessRestart` events
+    /// and handle them (respawn the process).
+    pub fn last_processed_event(&self) -> Option<Event> {
+        self.inner.borrow().last_processed_event.clone()
+    }
+
+    /// Extract simulation metrics (simulated time, events processed).
     pub fn extract_metrics(&self) -> crate::runner::SimulationMetrics {
         let inner = self.inner.borrow();
 

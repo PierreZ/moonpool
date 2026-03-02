@@ -370,11 +370,12 @@ mod tests {
             .with_max_level(tracing::Level::INFO)
             .try_init();
 
+        let server_config = MultiNodeServerConfig::happy_path();
         let report = run_simulation(
             SimulationBuilder::new()
-                .workload(MultiNodeServerWorkload::new(
-                    MultiNodeServerConfig::happy_path(),
-                ))
+                .processes(1, move || {
+                    Box::new(MultiNodeServerWorkload::new(server_config.clone()))
+                })
                 .workload(MultiNodeClientWorkload::new(
                     MultiNodeClientConfig::happy_path(),
                 ))
@@ -392,11 +393,12 @@ mod tests {
             .with_max_level(tracing::Level::INFO)
             .try_init();
 
+        let server_config = MultiNodeServerConfig::happy_path();
         let report = run_simulation(
             SimulationBuilder::new()
-                .workload(MultiNodeServerWorkload::new(
-                    MultiNodeServerConfig::happy_path(),
-                ))
+                .processes(1, move || {
+                    Box::new(MultiNodeServerWorkload::new(server_config.clone()))
+                })
                 .workload(MultiNodeClientWorkload::new(
                     MultiNodeClientConfig::happy_path(),
                 ))

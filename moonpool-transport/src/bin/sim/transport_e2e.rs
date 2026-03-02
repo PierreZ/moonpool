@@ -56,7 +56,7 @@ fn main() {
     let report = run_simulation(
         SimulationBuilder::new()
             .random_network()
-            .workload(WireServerWorkload::new())
+            .processes(1, || Box::new(WireServerWorkload::new()))
             .workload(ClientWorkload::new(ClientConfig {
                 num_operations: 200,
                 weights: OpWeights::reliable_focused(),
@@ -77,7 +77,7 @@ fn main() {
     let report = run_simulation(
         SimulationBuilder::new()
             .random_network()
-            .workload(WireServerWorkload::new())
+            .processes(1, || Box::new(WireServerWorkload::new()))
             .workload(ClientWorkload::new(ClientConfig {
                 num_operations: 200,
                 weights: OpWeights::unreliable_focused(),
@@ -98,7 +98,7 @@ fn main() {
     let report = run_simulation(
         SimulationBuilder::new()
             .random_network()
-            .workload(WireServerWorkload::new())
+            .processes(1, || Box::new(WireServerWorkload::new()))
             .workload(ClientWorkload::new(ClientConfig {
                 num_operations: 200,
                 weights: OpWeights::mixed_queues(),
@@ -119,7 +119,7 @@ fn main() {
     let report = run_simulation(
         SimulationBuilder::new()
             .random_network()
-            .workload(WireServerWorkload::new())
+            .processes(1, || Box::new(WireServerWorkload::new()))
             .workload(ClientWorkload::new(ClientConfig {
                 num_operations: 200,
                 weights: OpWeights::reconnection_focused(),
@@ -140,7 +140,7 @@ fn main() {
     let report = run_simulation(
         SimulationBuilder::new()
             .random_network()
-            .workload(WireServerWorkload::new())
+            .processes(1, || Box::new(WireServerWorkload::new()))
             .workload(ClientWorkload::new(ClientConfig {
                 num_operations: 100,
                 weights: OpWeights::default(),

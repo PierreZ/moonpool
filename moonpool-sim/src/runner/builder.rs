@@ -4,12 +4,14 @@
 //! and executing simulation experiments.
 
 use std::collections::HashMap;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 use std::time::{Duration, Instant};
 use tracing::instrument;
 
 use crate::chaos::invariant_trait::Invariant;
 use crate::runner::fault_injector::{FaultInjector, PhaseConfig};
+use crate::runner::process::{Attrition, Process};
+use crate::runner::tags::TagDistribution;
 use crate::runner::workload::Workload;
 
 use super::orchestrator::{IterationManager, MetricsCollector, WorkloadOrchestrator};
@@ -124,6 +126,66 @@ impl ClientId {
     }
 }
 
+/// How many process instances to spawn per iteration.
+///
+/// Use `Fixed` for deterministic topologies or `Range` for chaos testing
+/// with varying cluster sizes.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Always 3 server processes
+/// ProcessCount::Fixed(3)
+///
+/// // 3 to 7 server processes, randomized per iteration
+/// ProcessCount::Range(3..=7)
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProcessCount {
+    /// Spawn exactly N process instances every iteration.
+    Fixed(usize),
+    /// Spawn a random number in `[start..=end]` per iteration,
+    /// using the simulation RNG (deterministic per seed).
+    Range(RangeInclusive<usize>),
+}
+
+impl ProcessCount {
+    /// Resolve the count for the current iteration.
+    fn resolve(&self) -> usize {
+        match self {
+            ProcessCount::Fixed(n) => *n,
+            ProcessCount::Range(range) => {
+                let start = *range.start();
+                let end = *range.end() + 1; // RangeInclusive -> exclusive for sim_random_range
+                if start >= end {
+                    return start;
+                }
+                crate::sim::sim_random_range(start..end)
+            }
+        }
+    }
+}
+
+impl From<usize> for ProcessCount {
+    fn from(n: usize) -> Self {
+        ProcessCount::Fixed(n)
+    }
+}
+
+impl From<RangeInclusive<usize>> for ProcessCount {
+    fn from(range: RangeInclusive<usize>) -> Self {
+        ProcessCount::Range(range)
+    }
+}
+
+/// Internal storage for a process entry in the builder.
+pub(crate) struct ProcessEntry {
+    pub(crate) count: ProcessCount,
+    pub(crate) factory: Box<dyn Fn() -> Box<dyn Process>>,
+    pub(crate) tags: TagDistribution,
+    pub(crate) name: String,
+}
+
 /// Internal storage for workload entries in the builder.
 enum WorkloadEntry {
     /// Single instance, reused across iterations (from `.workload()`).
@@ -140,6 +202,8 @@ enum WorkloadEntry {
 pub struct SimulationBuilder {
     iteration_control: IterationControl,
     entries: Vec<WorkloadEntry>,
+    process_entry: Option<ProcessEntry>,
+    attrition: Option<Attrition>,
     seeds: Vec<u64>,
     use_random_config: bool,
     invariants: Vec<Box<dyn Invariant>>,
@@ -161,6 +225,8 @@ impl SimulationBuilder {
         Self {
             iteration_control: IterationControl::FixedCount(1),
             entries: Vec::new(),
+            process_entry: None,
+            attrition: None,
             seeds: Vec::new(),
             use_random_config: false,
             invariants: Vec::new(),
@@ -190,6 +256,88 @@ impl SimulationBuilder {
     pub fn workload_with_client_id(mut self, client_id: ClientId, w: impl Workload) -> Self {
         self.entries
             .push(WorkloadEntry::Instance(Some(Box::new(w)), client_id));
+        self
+    }
+
+    /// Add server processes to the simulation.
+    ///
+    /// Processes represent the **system under test** — they can be killed and
+    /// restarted (rebooted). A fresh instance is created from the factory on
+    /// every boot.
+    ///
+    /// The `count` parameter accepts either a fixed `usize` or a
+    /// `RangeInclusive<usize>` for seeded random count per iteration.
+    ///
+    /// Only one `.processes()` call is supported per builder. Subsequent calls
+    /// overwrite the previous one.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Fixed 3 server processes
+    /// builder.processes(3, || Box::new(MyNode::new()))
+    ///
+    /// // 3 to 7 processes, randomized per iteration
+    /// builder.processes(3..=7, || Box::new(MyNode::new()))
+    /// ```
+    pub fn processes(
+        mut self,
+        count: impl Into<ProcessCount>,
+        factory: impl Fn() -> Box<dyn Process> + 'static,
+    ) -> Self {
+        let sample = factory();
+        let name = sample.name().to_string();
+        drop(sample);
+        self.process_entry = Some(ProcessEntry {
+            count: count.into(),
+            factory: Box::new(factory),
+            tags: TagDistribution::new(),
+            name,
+        });
+        self
+    }
+
+    /// Attach tag distribution to the last `.processes()` call.
+    ///
+    /// Tags are distributed round-robin across process instances. Each tag
+    /// dimension is distributed independently.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called without a preceding `.processes()` call.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // 5 processes: dc cycles east/west/eu, rack cycles r1/r2
+    /// builder.processes(5, || Box::new(MyNode::new()))
+    ///     .tags(&[
+    ///         ("dc", &["east", "west", "eu"]),
+    ///         ("rack", &["r1", "r2"]),
+    ///     ])
+    /// ```
+    pub fn tags(mut self, dimensions: &[(&str, &[&str])]) -> Self {
+        let entry = self
+            .process_entry
+            .as_mut()
+            .expect("tags() must be called after processes()");
+        for (key, values) in dimensions {
+            entry.tags.add(key, values);
+        }
+        self
+    }
+
+    /// Set built-in attrition for automatic process reboots during chaos phase.
+    ///
+    /// Attrition randomly kills and restarts server processes. It respects
+    /// `max_dead` to limit the number of simultaneously dead processes.
+    ///
+    /// **Requires** [`.phases()`](Self::phases) — attrition injectors only run during
+    /// the chaos phase. Without a phase config, the injector will not be spawned.
+    ///
+    /// For custom fault injection, use `.fault()` with a [`FaultInjector`] instead.
+    pub fn attrition(mut self, config: Attrition) -> Self {
+        self.attrition = Some(config);
         self
     }
 
@@ -474,6 +622,36 @@ impl SimulationBuilder {
                 .map(|(i, w)| (w.name().to_string(), format!("10.0.0.{}", i + 1)))
                 .collect();
 
+            // Resolve process configuration (if any)
+            let process_config = self.process_entry.as_ref().map(
+                |entry| -> super::orchestrator::ProcessConfig<'_> {
+                    let count = entry.count.resolve();
+                    let mut registry = crate::runner::tags::TagRegistry::new();
+                    let mut ips = Vec::with_capacity(count);
+                    let mut info = Vec::with_capacity(count);
+                    let base_name = &entry.name;
+                    for i in 0..count {
+                        let ip = format!("10.0.1.{}", i + 1);
+                        let ip_addr: std::net::IpAddr = ip.parse().expect("valid process IP");
+                        let tags = entry.tags.resolve(i);
+                        registry.register(ip_addr, tags);
+                        ips.push(ip.clone());
+                        let name = if count == 1 {
+                            base_name.clone()
+                        } else {
+                            format!("{}-{}", base_name, i)
+                        };
+                        info.push((name, ip));
+                    }
+                    super::orchestrator::ProcessConfig {
+                        factory: &*entry.factory,
+                        info,
+                        ips,
+                        tag_registry: registry,
+                    }
+                },
+            );
+
             // Create fresh NetworkConfiguration for this iteration
             let network_config = if self.use_random_config {
                 crate::NetworkConfiguration::random_for_seed()
@@ -492,7 +670,14 @@ impl SimulationBuilder {
             let start_time = Instant::now();
 
             // Move fault injectors to orchestrator, get them back after
-            let fault_injectors = std::mem::take(&mut self.fault_injectors);
+            let mut fault_injectors = std::mem::take(&mut self.fault_injectors);
+
+            // Add built-in attrition injector if configured
+            if let Some(ref attrition) = self.attrition {
+                fault_injectors.push(Box::new(
+                    crate::runner::fault_injector::AttritionInjector::new(attrition.clone()),
+                ));
+            }
 
             // Execute workloads using orchestrator
             let orchestration_result = WorkloadOrchestrator::orchestrate_workloads(
@@ -501,6 +686,7 @@ impl SimulationBuilder {
                 &self.invariants,
                 &workload_info,
                 &client_info,
+                process_config,
                 seed,
                 sim,
                 self.phase_config.as_ref(),

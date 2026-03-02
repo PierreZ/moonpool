@@ -103,12 +103,13 @@ fn main() {
 
     // --- Multi-node RPC ---
     eprintln!("=== Multi-Node RPC ===");
+    let server_config = MultiNodeServerConfig::default();
     let report = run_simulation(
         SimulationBuilder::new()
             .random_network()
-            .workload(MultiNodeServerWorkload::new(
-                MultiNodeServerConfig::default(),
-            ))
+            .processes(1, move || {
+                Box::new(MultiNodeServerWorkload::new(server_config.clone()))
+            })
             .workload(MultiNodeClientWorkload::new(
                 MultiNodeClientConfig::default(),
             ))

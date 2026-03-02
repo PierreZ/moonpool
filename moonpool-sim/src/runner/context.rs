@@ -116,6 +116,11 @@ impl SimContext {
         &self.topology.shutdown_signal
     }
 
+    /// Get the workload topology (peer IPs, process IPs, tags, etc.).
+    pub fn topology(&self) -> &WorkloadTopology {
+        &self.topology
+    }
+
     /// Get the shared state handle for cross-workload communication.
     pub fn state(&self) -> &StateHandle {
         &self.state
