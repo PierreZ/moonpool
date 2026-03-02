@@ -34,7 +34,7 @@ use moonpool_sim::assert_sometimes;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use super::state::{ActorStateError, ActorStateStore};
+use super::store::{ActorStateError, ActorStateStore};
 
 /// Typed persistent state for a virtual actor.
 ///

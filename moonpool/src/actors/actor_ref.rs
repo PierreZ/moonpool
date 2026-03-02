@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use crate::{JsonCodec, MessageCodec, Providers};
 
-use super::router::ActorRouter;
+use super::runtime::router::ActorRouter;
 
 /// Trait for constructing typed actor references from a router.
 ///

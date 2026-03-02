@@ -26,9 +26,9 @@ use serde::de::DeserializeOwned;
 
 use crate::{Endpoint, JsonCodec, MessageCodec, NetTransport, Providers, UID, send_request};
 
-use super::membership::MembershipProvider;
-use super::types::{ActivationId, ActorAddress};
-use super::{
+use crate::actors::infrastructure::membership::MembershipProvider;
+use crate::actors::types::{ActivationId, ActorAddress};
+use crate::actors::{
     ActorDirectory, ActorId, ActorMessage, ActorResponse, DirectoryError, PlacementError,
     PlacementStrategy,
 };

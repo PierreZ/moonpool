@@ -38,34 +38,42 @@
 //! The processing loop dequeues a message, finds/activates the actor,
 //! calls the method, sends the response, then processes the next message.
 
+// --- Core types ---
 mod actor_ref;
-mod cluster;
-mod directory;
-mod host;
-mod membership;
-mod node;
-mod node_config;
-mod persistent_state;
-mod placement;
-mod router;
-mod state;
 mod types;
 
 pub use actor_ref::ActorRef;
-pub use cluster::{ClusterConfig, ClusterConfigBuilder, ClusterConfigError};
-pub use directory::{ActorDirectory, DirectoryError, InMemoryDirectory};
-pub use host::{ActorContext, ActorHandler, ActorHost, DeactivationHint};
-pub use membership::NodeStatus;
-pub use membership::{
-    ClusterMember, MembershipError, MembershipProvider, MembershipSnapshot, MembershipVersion,
-    SharedMembership,
-};
-pub use node::{MoonpoolNode, MoonpoolNodeBuilder, NodeError, NodeLifecycle};
-pub use node_config::{NodeConfig, NodeConfigBuilder};
-pub use persistent_state::PersistentState;
-pub use placement::{LocalPlacement, PlacementError, PlacementStrategy, RoundRobinPlacement};
-pub use router::{ActorError, ActorRouter};
-pub use state::{ActorStateError, ActorStateStore, InMemoryStateStore, StoredState};
 pub use types::{
     ActivationId, ActorAddress, ActorId, ActorMessage, ActorResponse, ActorType, CacheInvalidation,
+};
+
+// --- Runtime ---
+mod runtime;
+
+pub use runtime::{
+    ActorContext, ActorError, ActorHandler, ActorHost, ActorRouter, DeactivationHint,
+};
+
+// --- Node lifecycle ---
+mod node;
+
+pub use node::{
+    ClusterConfig, ClusterConfigBuilder, ClusterConfigError, MoonpoolNode, MoonpoolNodeBuilder,
+    NodeConfig, NodeConfigBuilder, NodeError, NodeLifecycle,
+};
+
+// --- Infrastructure ---
+mod infrastructure;
+
+pub use infrastructure::{
+    ActorDirectory, ClusterMember, DirectoryError, InMemoryDirectory, LocalPlacement,
+    MembershipError, MembershipProvider, MembershipSnapshot, MembershipVersion, NodeStatus,
+    PlacementError, PlacementStrategy, RoundRobinPlacement, SharedMembership,
+};
+
+// --- State persistence ---
+mod state;
+
+pub use state::{
+    ActorStateError, ActorStateStore, InMemoryStateStore, PersistentState, StoredState,
 };
