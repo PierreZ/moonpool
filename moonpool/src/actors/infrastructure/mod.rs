@@ -9,4 +9,6 @@ pub use membership::{
     ClusterMember, MembershipError, MembershipProvider, MembershipSnapshot, MembershipVersion,
     NodeStatus, SharedMembership,
 };
-pub use placement::{LocalPlacement, PlacementError, PlacementStrategy, RoundRobinPlacement};
+pub use placement::{
+    DefaultPlacementDirector, PlacementDirector, PlacementError, PlacementStrategy,
+};

@@ -1,36 +1,41 @@
 //! Actor router: caller-side resolution and request dispatch.
 //!
 //! The `ActorRouter` resolves `ActorId → Endpoint` using the directory
-//! and placement strategy, then sends the request via `send_request()`
+//! and placement director, then sends the request via `send_request()`
 //! to the actor type's dispatch token (index 0).
 //!
 //! # Flow
 //!
 //! 1. Directory lookup for the target actor
-//! 2. If not found, placement strategy chooses the node
-//! 3. Register the new placement in the directory
-//! 4. Build `ActorMessage` with target identity, method, and serialized body
-//! 5. `send_request()` to `UID::new(actor_type, 0)` on the target node
-//! 6. Await `ActorResponse`, deserialize the inner body
+//! 2. If not found, look up the actor type's placement strategy in the registry
+//! 3. Pass the strategy hint + context to the placement director
+//! 4. Register the new placement in the directory
+//! 5. Build `ActorMessage` with target identity, method, and serialized body
+//! 6. `send_request()` to `UID::new(actor_type, 0)` on the target node
+//! 7. Await `ActorResponse`, deserialize the inner body
 //!
 //! # Orleans Reference
 //!
 //! This corresponds to Orleans' OutsideRuntimeClient / GrainReference:
 //! the caller-side proxy that resolves grain location and sends messages.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use moonpool_sim::assert_sometimes;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::{Endpoint, JsonCodec, MessageCodec, NetTransport, Providers, UID, send_request};
+use crate::{
+    Endpoint, JsonCodec, MessageCodec, NetTransport, NetworkAddress, Providers, UID, send_request,
+};
 
 use crate::actors::infrastructure::membership::MembershipProvider;
-use crate::actors::types::{ActivationId, ActorAddress};
+use crate::actors::infrastructure::placement::{PlacementDirector, PlacementStrategy};
+use crate::actors::types::{ActivationId, ActorAddress, ActorType};
 use crate::actors::{
     ActorDirectory, ActorId, ActorMessage, ActorResponse, DirectoryError, PlacementError,
-    PlacementStrategy,
 };
 
 /// Errors from actor router operations.
@@ -72,12 +77,12 @@ pub enum ActorError {
 /// Caller-side actor request router.
 ///
 /// Resolves actor locations via the directory, places new actors via the
-/// placement strategy, and dispatches requests using the existing transport.
+/// placement director, and dispatches requests using the existing transport.
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// let router = ActorRouter::new(transport, directory, placement, JsonCodec);
+/// let router = ActorRouter::new(transport, directory, local_address, director, membership, JsonCodec);
 ///
 /// let resp: BalanceResponse = router.send_actor_request(
 ///     &ActorId { actor_type: BANK_ACCOUNT_TYPE, identity: "alice".into() },
@@ -88,7 +93,9 @@ pub enum ActorError {
 pub struct ActorRouter<P: Providers, C: MessageCodec = JsonCodec> {
     transport: Rc<NetTransport<P>>,
     directory: Rc<dyn ActorDirectory>,
-    placement: Rc<dyn PlacementStrategy>,
+    local_address: NetworkAddress,
+    placement_director: Rc<dyn PlacementDirector>,
+    placement_registry: RefCell<HashMap<ActorType, PlacementStrategy>>,
     membership: Rc<dyn MembershipProvider>,
     codec: C,
 }
@@ -100,23 +107,36 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
     ///
     /// * `transport` - The transport for sending messages
     /// * `directory` - Directory for resolving actor locations
-    /// * `placement` - Strategy for placing new actors
+    /// * `local_address` - This node's network address
+    /// * `placement_director` - Cluster-level placement algorithm
     /// * `membership` - Membership provider for active member list
     /// * `codec` - Codec for serializing request/response bodies
     pub fn new(
         transport: Rc<NetTransport<P>>,
         directory: Rc<dyn ActorDirectory>,
-        placement: Rc<dyn PlacementStrategy>,
+        local_address: NetworkAddress,
+        placement_director: Rc<dyn PlacementDirector>,
         membership: Rc<dyn MembershipProvider>,
         codec: C,
     ) -> Self {
         Self {
             transport,
             directory,
-            placement,
+            local_address,
+            placement_director,
+            placement_registry: RefCell::new(HashMap::new()),
             membership,
             codec,
         }
+    }
+
+    /// Register a per-actor-type placement strategy hint.
+    ///
+    /// Called during node startup for each registered actor type.
+    pub fn register_placement(&self, actor_type: ActorType, strategy: PlacementStrategy) {
+        self.placement_registry
+            .borrow_mut()
+            .insert(actor_type, strategy);
     }
 
     /// Get a reference to the codec used by this router.
@@ -202,7 +222,19 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
         // Not found — place the actor
         assert_sometimes!(true, "placement_invoked");
         let active_members = self.membership.members().await;
-        let endpoint = self.placement.place(target, &active_members).await?;
+
+        // Look up per-type hint (default to Local)
+        let strategy = self
+            .placement_registry
+            .borrow()
+            .get(&target.actor_type)
+            .copied()
+            .unwrap_or_default();
+
+        let endpoint = self
+            .placement_director
+            .place(strategy, target, &active_members, &self.local_address)
+            .await?;
 
         // Build ActorAddress with a deterministic activation ID
         let activation_id = ActivationId::new(endpoint.token.first ^ endpoint.token.second);
@@ -224,7 +256,7 @@ mod tests {
 
     use super::*;
     use crate::actors::types::ActivationId;
-    use crate::actors::{ActorType, InMemoryDirectory, LocalPlacement, SharedMembership};
+    use crate::actors::{ActorType, DefaultPlacementDirector, InMemoryDirectory, SharedMembership};
 
     // We use the same MockProviders pattern as transport tests
     #[derive(Clone)]
@@ -354,11 +386,18 @@ mod tests {
             .expect("build should succeed");
 
         let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
-        let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(test_address()));
+        let director: Rc<dyn PlacementDirector> = Rc::new(DefaultPlacementDirector::default());
         let membership: Rc<dyn MembershipProvider> =
             Rc::new(SharedMembership::with_members(vec![test_address()]));
 
-        let _router = ActorRouter::new(transport, directory, placement, membership, JsonCodec);
+        let _router = ActorRouter::new(
+            transport,
+            directory,
+            test_address(),
+            director,
+            membership,
+            JsonCodec,
+        );
     }
 
     #[tokio::test]
@@ -369,14 +408,15 @@ mod tests {
             .expect("build should succeed");
 
         let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
-        let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(test_address()));
+        let director: Rc<dyn PlacementDirector> = Rc::new(DefaultPlacementDirector::default());
         let membership: Rc<dyn MembershipProvider> =
             Rc::new(SharedMembership::with_members(vec![test_address()]));
 
         let router = ActorRouter::new(
             transport,
             directory.clone(),
-            placement,
+            test_address(),
+            director,
             membership,
             JsonCodec,
         );
@@ -410,14 +450,15 @@ mod tests {
             .expect("build should succeed");
 
         let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
-        let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(test_address()));
+        let director: Rc<dyn PlacementDirector> = Rc::new(DefaultPlacementDirector::default());
         let membership: Rc<dyn MembershipProvider> =
             Rc::new(SharedMembership::with_members(vec![test_address()]));
 
         let router = ActorRouter::new(
             transport,
             directory.clone(),
-            placement,
+            test_address(),
+            director,
             membership,
             JsonCodec,
         );

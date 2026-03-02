@@ -7,15 +7,15 @@
 //! # Architecture
 //!
 //! ```text
-//! ┌───────────────────────────────────────────────────┐
-//! │               Virtual Actor Layer                 │
-//! │  ActorRouter → Directory → PlacementStrategy      │
-//! │  ActorMessage carries identity + method + body    │
-//! ├───────────────────────────────────────────────────┤
-//! │               Transport Layer                     │
-//! │  NetTransport → EndpointMap → Peer connections    │
-//! │  Token 0 reserved for actor dispatch per type     │
-//! └───────────────────────────────────────────────────┘
+//! ┌───────────────────────────────────────────────────────┐
+//! │               Virtual Actor Layer                     │
+//! │  ActorRouter → Directory → PlacementDirector          │
+//! │  ActorMessage carries identity + method + body        │
+//! ├───────────────────────────────────────────────────────┤
+//! │               Transport Layer                         │
+//! │  NetTransport → EndpointMap → Peer connections        │
+//! │  Token 0 reserved for actor dispatch per type         │
+//! └───────────────────────────────────────────────────────┘
 //! ```
 //!
 //! # Token Layout
@@ -66,9 +66,9 @@ pub use node::{
 mod infrastructure;
 
 pub use infrastructure::{
-    ActorDirectory, ClusterMember, DirectoryError, InMemoryDirectory, LocalPlacement,
+    ActorDirectory, ClusterMember, DefaultPlacementDirector, DirectoryError, InMemoryDirectory,
     MembershipError, MembershipProvider, MembershipSnapshot, MembershipVersion, NodeStatus,
-    PlacementError, PlacementStrategy, RoundRobinPlacement, SharedMembership,
+    PlacementDirector, PlacementError, PlacementStrategy, SharedMembership,
 };
 
 // --- State persistence ---

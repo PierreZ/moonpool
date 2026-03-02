@@ -211,6 +211,16 @@ pub trait ActorHandler: Default + 'static {
     /// The actor type ID (matches the token registered in the transport).
     fn actor_type() -> ActorType;
 
+    /// Per-actor-type placement hint.
+    ///
+    /// Tells the [`PlacementDirector`] what kind of placement this actor
+    /// type wants. Defaults to [`PlacementStrategy::Local`].
+    ///
+    /// [`PlacementDirector`]: crate::actors::PlacementDirector
+    fn placement_strategy() -> crate::actors::PlacementStrategy {
+        crate::actors::PlacementStrategy::default()
+    }
+
     /// Hint about when this actor type should be deactivated.
     ///
     /// - `KeepAlive` (default): actor stays in memory between messages.
@@ -840,7 +850,7 @@ mod tests {
 
     use serde::{Deserialize, Serialize};
 
-    use crate::actors::{InMemoryDirectory, LocalPlacement, PlacementStrategy};
+    use crate::actors::{DefaultPlacementDirector, InMemoryDirectory, PlacementDirector};
     use crate::{NetTransportBuilder, NetworkAddress, TokioProviders};
 
     use super::*;
@@ -914,15 +924,16 @@ mod tests {
             .expect("build transport");
 
         let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
-        let placement: Rc<dyn PlacementStrategy> = Rc::new(LocalPlacement::new(local_addr.clone()));
+        let director: Rc<dyn PlacementDirector> = Rc::new(DefaultPlacementDirector::default());
         let membership: Rc<dyn crate::actors::MembershipProvider> =
             Rc::new(crate::actors::SharedMembership::with_members(vec![
-                local_addr,
+                local_addr.clone(),
             ]));
         let router = Rc::new(ActorRouter::new(
             transport.clone(),
             directory.clone(),
-            placement,
+            local_addr,
+            director,
             membership,
             JsonCodec,
         ));
@@ -1170,16 +1181,16 @@ mod tests {
                 .expect("build transport");
 
             let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
-            let placement: Rc<dyn PlacementStrategy> =
-                Rc::new(LocalPlacement::new(local_addr.clone()));
+            let director: Rc<dyn PlacementDirector> = Rc::new(DefaultPlacementDirector::default());
             let membership: Rc<dyn crate::actors::MembershipProvider> =
                 Rc::new(crate::actors::SharedMembership::with_members(vec![
-                    local_addr,
+                    local_addr.clone(),
                 ]));
             let router = Rc::new(ActorRouter::new(
                 transport.clone(),
                 directory.clone(),
-                placement,
+                local_addr,
+                director,
                 membership,
                 JsonCodec,
             ));

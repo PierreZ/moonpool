@@ -887,6 +887,7 @@ fn actor_impl_impl(trait_name: Ident, mut item: ItemImpl) -> syn::Result<proc_ma
         .collect();
 
     let has_actor_type = user_methods.iter().any(|m| m == "actor_type");
+    let has_placement_strategy = user_methods.iter().any(|m| m == "placement_strategy");
     let has_dispatch = user_methods.iter().any(|m| m == "dispatch");
     let has_deactivation_hint = user_methods.iter().any(|m| m == "deactivation_hint");
     let has_on_activate = user_methods.iter().any(|m| m == "on_activate");
@@ -900,6 +901,16 @@ fn actor_impl_impl(trait_name: Ident, mut item: ItemImpl) -> syn::Result<proc_ma
             }
         };
         item.items.insert(0, method);
+    }
+
+    // Inject default placement_strategy() if not provided
+    if !has_placement_strategy {
+        let method: ImplItem = syn::parse_quote! {
+            fn placement_strategy() -> moonpool::actors::PlacementStrategy {
+                moonpool::actors::PlacementStrategy::default()
+            }
+        };
+        item.items.push(method);
     }
 
     // Always inject dispatch()

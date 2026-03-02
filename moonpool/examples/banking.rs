@@ -9,7 +9,8 @@
 //! - A virtual `BankAccount` actor defined with `#[service]` macro
 //! - **State persistence**: `PersistentState<BankAccountData>` + `InMemoryStateStore`
 //! - **Lifecycle**: `on_activate` loads state, `DeactivateAfterIdle` removes actor after idle timeout
-//! - **Multi-node**: 3 nodes on same process with `SharedMembership` and `RoundRobinPlacement`
+//! - **Multi-node**: 3 nodes on same process with `SharedMembership` and round-robin placement
+//! - **Per-actor placement**: `BankAccount` declares `RoundRobin` via `placement_strategy()`
 //! - **Directory listing**: Print where each actor was placed
 //! - Typed `BankAccountRef` via `node.actor_ref("alice")`
 //!
@@ -18,7 +19,7 @@
 //! ```text
 //! Node1 (127.0.0.1:4700) ─┐
 //! Node2 (127.0.0.1:4701) ─┤── SharedMembership + InMemoryDirectory
-//! Node3 (127.0.0.1:4702) ─┘   RoundRobinPlacement distributes actors
+//! Node3 (127.0.0.1:4702) ─┘   DefaultPlacementDirector + RoundRobin hint
 //!
 //! EndpointMap (per node):
 //!   UID(0xBA4E_4B00, 0) → BankAccount handler
@@ -30,7 +31,7 @@ use std::time::Duration;
 use moonpool::actors::{
     ActorContext, ActorDirectory, ActorError, ActorHandler, ActorStateStore, ClusterConfig,
     DeactivationHint, InMemoryDirectory, InMemoryStateStore, MoonpoolNode, NodeConfig,
-    PersistentState, PlacementStrategy, RoundRobinPlacement, SharedMembership,
+    PersistentState, PlacementStrategy, SharedMembership,
 };
 use moonpool::{MessageCodec, NetworkAddress, Providers, RpcError, actor_impl, service};
 use serde::{Deserialize, Serialize};
@@ -150,6 +151,10 @@ impl BankAccount for BankAccountImpl {
 /// by `#[actor_impl]`. Only lifecycle overrides are hand-written.
 #[actor_impl(BankAccount)]
 impl ActorHandler for BankAccountImpl {
+    fn placement_strategy() -> PlacementStrategy {
+        PlacementStrategy::RoundRobin
+    }
+
     fn deactivation_hint(&self) -> DeactivationHint {
         DeactivationHint::DeactivateAfterIdle(Duration::from_secs(30))
     }
@@ -207,20 +212,20 @@ async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
     // SharedMembership starts empty; each node self-registers during start().
     let membership = Rc::new(SharedMembership::new());
     let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
-    let placement: Rc<dyn PlacementStrategy> = Rc::new(RoundRobinPlacement::new());
     let state_store: Rc<dyn ActorStateStore> = Rc::new(InMemoryStateStore::new());
 
+    // Cluster uses DefaultPlacementDirector (handles both Local and RoundRobin).
+    // BankAccountImpl declares RoundRobin via placement_strategy().
     let cluster = ClusterConfig::builder()
         .name("banking")
         .membership(membership.clone())
         .directory(directory.clone())
         .build()?;
 
-    // Per-node config: own address, shared placement and state store.
+    // Per-node config: own address and shared state store (no placement needed).
     let make_config = |addr: NetworkAddress| -> NodeConfig {
         NodeConfig::builder()
             .address(addr)
-            .placement(placement.clone())
             .state_store(state_store.clone())
             .build()
     };

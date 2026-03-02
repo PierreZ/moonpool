@@ -219,7 +219,7 @@ impl<P: Providers> MoonpoolNode<P> {
     /// # Arguments
     ///
     /// * `cluster` - Shared cluster configuration (directory, membership)
-    /// * `config` - Per-node settings (address, placement, state store)
+    /// * `config` - Per-node settings (address, state store)
     #[allow(clippy::new_ret_no_self)]
     pub fn new(cluster: ClusterConfig, config: NodeConfig) -> MoonpoolNodeBuilder<P> {
         MoonpoolNodeBuilder {
@@ -256,6 +256,11 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
     /// [`start()`](Self::start). Multiple actor types can be registered.
     pub fn register<H: ActorHandler>(mut self) -> Self {
         self.registrations.push(Box::new(|parts: &NodeParts<P, C>| {
+            // Register the per-actor-type placement hint on the router
+            parts
+                .router
+                .register_placement(H::actor_type(), H::placement_strategy());
+
             let dispatcher = TypedDispatcher::<H>::new();
             let close_handle = dispatcher.start(
                 parts.transport.clone(),
@@ -324,20 +329,14 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
             .await
             .map_err(|e| NodeError::MembershipRegistration(e.to_string()))?;
 
-        // Determine placement strategy
-        let placement = self
-            .config
-            .placement()
-            .cloned()
-            .unwrap_or_else(|| Rc::new(crate::actors::LocalPlacement::new(address.clone())));
-
         // Create router
         let directory = self.cluster.directory().clone();
         let membership = self.cluster.membership().clone();
         let router = Rc::new(ActorRouter::new(
             transport.clone(),
             directory.clone(),
-            placement,
+            address.clone(),
+            self.cluster.placement_director().clone(),
             membership,
             self.codec,
         ));
@@ -406,7 +405,7 @@ mod tests {
 
     use crate::TokioProviders;
     use crate::actors::types::{ActorId, ActorType};
-    use crate::actors::{ActorDirectory, LocalPlacement, MembershipProvider, PlacementStrategy};
+    use crate::actors::{ActorDirectory, MembershipProvider};
 
     use super::*;
     use crate::actors::runtime::host::{ActorContext, ActorHandler};
@@ -529,17 +528,13 @@ mod tests {
     fn test_node_start_and_send() {
         run_local_test(async {
             let local_addr = addr(4700);
-            let placement: Rc<dyn PlacementStrategy> =
-                Rc::new(LocalPlacement::new(local_addr.clone()));
 
             let cluster = ClusterConfig::builder()
                 .topology(vec![local_addr.clone()])
                 .build()
                 .expect("build cluster");
 
-            let config = NodeConfig::builder().placement(placement).build();
-
-            let mut node = MoonpoolNode::new(cluster, config)
+            let mut node = MoonpoolNode::new(cluster, NodeConfig::default())
                 .with_providers(TokioProviders::new())
                 .register::<CounterActor>()
                 .start()
@@ -686,13 +681,7 @@ mod tests {
                 .build()
                 .expect("build cluster");
 
-            let placement: Rc<dyn PlacementStrategy> =
-                Rc::new(LocalPlacement::new(local_addr.clone()));
-
-            let config = NodeConfig::builder()
-                .address(local_addr.clone())
-                .placement(placement)
-                .build();
+            let config = NodeConfig::builder().address(local_addr.clone()).build();
 
             let mut node = MoonpoolNode::new(cluster, config)
                 .with_providers(TokioProviders::new())
