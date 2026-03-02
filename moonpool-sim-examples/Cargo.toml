@@ -9,7 +9,7 @@ description = "Example simulation workloads for moonpool"
 documentation = "https://docs.rs/moonpool-sim-examples"
 
 [dependencies]
-moonpool-sim = { path = "../moonpool-sim", version = "0.4.0" }
+moonpool-sim = { path = "../moonpool-sim", version = "0.5.0" }
 
 async-trait = "0.1"
 rand = "0.10"

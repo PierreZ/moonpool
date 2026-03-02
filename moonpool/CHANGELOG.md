@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.5.0] - 2026-03-02
+
+### 🚀 Features
+
+- **moonpool**: Add structured tracing across actor runtime
+- **moonpool**: Wire placement to membership active members
+- **moonpool**: Add node self-registration and shutdown cleanup
+- **moonpool**: Evolve ActorDirectory with Orleans-style semantics
+- **moonpool**: Add ActivationId and ActorAddress types
+- **moonpool**: Evolve MembershipProvider with snapshot and registration
+- **moonpool**: Add core membership types for Orleans parity
+- **moonpool**: Pass ActorContext to virtual actor trait methods, add NodeConfig and ClusterConfig builder
+- **moonpool**: Add MoonpoolNode unified actor runtime
+- **moonpool-sim**: Add colored terminal display for simulation reports
+- Add cargo xtask sim for running simulation binaries with sancov
+- Move simulation tests to per-crate binary targets for sancov compatibility
+
+### 🚜 Refactor
+
+- **moonpool**: Move directory registration from caller to target host
+- **moonpool**: Separate PlacementStrategy enum from PlacementDirector trait
+- **moonpool**: Reorganize actors/ into folder-based sub-modules
+- Remove nextest fast profile, add xtask sim subcommands
+
+
 ## [0.4.0] - 2026-02-19
 
 ### 🚀 Features

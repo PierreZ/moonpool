@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-03-02
+
+### 🚀 Features
+
+- **moonpool**: Add MoonpoolNode unified actor runtime
+- **moonpool-transport**: Add peer monitoring with ping/pong health detection
+- **moonpool-sim**: Add colored terminal display for simulation reports
+- Add cargo xtask sim for running simulation binaries with sancov
+- Move simulation tests to per-crate binary targets for sancov compatibility
+
+### 🚜 Refactor
+
+- **moonpool**: Separate PlacementStrategy enum from PlacementDirector trait
+
+
 ## [0.4.0] - 2026-02-19
 
 ### 🚀 Features
