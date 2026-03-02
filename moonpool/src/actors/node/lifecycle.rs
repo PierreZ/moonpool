@@ -131,8 +131,10 @@ impl<P: Providers, C: MessageCodec> MoonpoolNode<P, C> {
     /// membership provider and cleans up directory entries.
     ///
     /// After shutdown, the node can no longer process actor messages.
+    #[tracing::instrument(skip_all, fields(address = %self.address))]
     pub async fn shutdown(&mut self) -> Result<(), NodeError> {
         self.status = NodeLifecycle::Stopping;
+        tracing::info!("node shutdown initiated");
 
         // Mark as ShuttingDown in membership
         let _ = self
@@ -165,6 +167,7 @@ impl<P: Providers, C: MessageCodec> MoonpoolNode<P, C> {
             .update_status(&self.address, crate::actors::NodeStatus::Dead)
             .await;
 
+        tracing::info!("node shutdown complete");
         Ok(())
     }
 }
@@ -286,6 +289,7 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
     /// # Errors
     ///
     /// Returns an error if required fields are missing or transport creation fails.
+    #[tracing::instrument(skip_all, fields(address))]
     pub async fn start(self) -> Result<MoonpoolNode<P, C>, NodeError> {
         let providers = self.providers.ok_or(NodeError::MissingProviders)?;
 
@@ -305,12 +309,17 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
             }
         };
 
+        // Record the resolved address in the span
+        tracing::Span::current().record("address", tracing::field::display(&address));
+
         // Create transport (with TCP listener for cross-node RPC)
         let transport = NetTransportBuilder::new(providers.clone())
             .local_address(address.clone())
             .build_listening()
             .await
             .map_err(|e| NodeError::Transport(e.to_string()))?;
+
+        tracing::debug!("transport created");
 
         // Register this node into membership
         let node_name = self
@@ -324,10 +333,12 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
             .register_node(
                 address.clone(),
                 crate::actors::NodeStatus::Active,
-                node_name,
+                node_name.clone(),
             )
             .await
             .map_err(|e| NodeError::MembershipRegistration(e.to_string()))?;
+
+        tracing::info!(name = %node_name, "node registered in membership");
 
         // Create router
         let directory = self.cluster.directory().clone();
@@ -361,6 +372,8 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
 
         // Drain close handles from the shared RefCell into an owned collection.
         let close_handles_owned = RefCell::new(std::mem::take(&mut *close_handles.borrow_mut()));
+
+        tracing::info!("node started");
 
         Ok(MoonpoolNode {
             transport,

@@ -89,17 +89,35 @@ impl PlacementDirector for DefaultPlacementDirector {
         local_address: &NetworkAddress,
     ) -> Result<Endpoint, PlacementError> {
         match strategy {
-            PlacementStrategy::Local => Ok(Endpoint::new(
-                local_address.clone(),
-                UID::new(id.actor_type.0, 0),
-            )),
+            PlacementStrategy::Local => {
+                tracing::debug!(
+                    actor_type = %id.actor_type,
+                    identity = %id.identity,
+                    "placed locally"
+                );
+                Ok(Endpoint::new(
+                    local_address.clone(),
+                    UID::new(id.actor_type.0, 0),
+                ))
+            }
             PlacementStrategy::RoundRobin => {
                 if active_members.is_empty() {
+                    tracing::warn!(
+                        actor_type = %id.actor_type,
+                        identity = %id.identity,
+                        "no active candidates"
+                    );
                     return Err(PlacementError::NoCandidates { id: id.clone() });
                 }
                 let index = self.round_robin_next.get() % active_members.len();
                 self.round_robin_next.set(index + 1);
                 let address = active_members[index].clone();
+                tracing::debug!(
+                    actor_type = %id.actor_type,
+                    identity = %id.identity,
+                    result = %address,
+                    "placed via round-robin"
+                );
                 Ok(Endpoint::new(address, UID::new(id.actor_type.0, 0)))
             }
         }

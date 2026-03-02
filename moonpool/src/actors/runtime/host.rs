@@ -346,6 +346,8 @@ impl<H: ActorHandler, P: Providers, C: MessageCodec> ActorTypeDispatcher<P, C>
         let stream: RequestStream<ActorMessage, C> =
             transport.register_handler(token, router.codec().clone());
 
+        tracing::debug!(actor_type = %actor_type, "registered actor type handler");
+
         let close_handle = stream.queue();
         pending_tasks.set(pending_tasks.get() + 1);
         providers.task().spawn_task(
@@ -381,6 +383,7 @@ impl<H: ActorHandler, P: Providers, C: MessageCodec> ActorTypeDispatcher<P, C>
 /// indicates the actor lives on another node, the message is forwarded
 /// (up to `MAX_FORWARD_COUNT` hops). The response includes a
 /// `CacheInvalidation` hint so the caller can update its stale cache.
+#[tracing::instrument(skip_all, fields(actor_type = %H::actor_type()))]
 async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
     transport: Rc<NetTransport<P>>,
     router: Rc<ActorRouter<P, C>>,
@@ -394,6 +397,8 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
     let local_address = transport.local_address().clone();
     let codec = router.codec().clone();
 
+    tracing::debug!("actor routing loop started");
+
     loop {
         let Some((actor_msg, reply)) = stream
             .recv_with_transport::<_, ActorResponse>(&transport)
@@ -401,6 +406,11 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
         else {
             // Stream closed — shutdown. Close all mailboxes so per-identity
             // tasks deactivate their actors and exit.
+            tracing::debug!(
+                actor_type = %actor_type,
+                mailbox_count = mailboxes.len(),
+                "routing loop shutting down"
+            );
             for mailbox in mailboxes.values() {
                 mailbox.close();
             }
@@ -427,6 +437,12 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
         match dir_lookup {
             Ok(Some(registered_addr)) if registered_addr.endpoint.address != local_address => {
                 // Actor is registered on another node — forward
+                tracing::debug!(
+                    actor_type = %actor_type,
+                    identity = %identity,
+                    destination = %registered_addr.endpoint.address,
+                    "forwarding message to remote node"
+                );
                 forward_message::<P, C>(
                     &transport,
                     &actor_msg,
@@ -439,6 +455,11 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
             }
             _ => {
                 // Actor not registered, or registered on this node — create mailbox + task
+                tracing::debug!(
+                    actor_type = %actor_type,
+                    identity = %identity,
+                    "spawning identity task"
+                );
                 let mailbox = IdentityMailbox::new();
                 pending_tasks.set(pending_tasks.get() + 1);
                 transport.providers().task().spawn_task(
@@ -474,6 +495,7 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
 /// deactivation. Runs as a spawned task, maintaining turn-based concurrency
 /// for this identity while allowing other identities to process concurrently.
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(skip_all, fields(actor_type = %actor_type, identity = %identity))]
 async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
     mailbox: Rc<IdentityMailbox<C>>,
     identity: String,
@@ -494,6 +516,8 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
     // Monotonically increasing activation counter for this identity
     let mut activation_counter: u64 = 0;
 
+    tracing::debug!("identity processing loop started");
+
     loop {
         // Wait for next message, with optional idle timeout when actor is active.
         let msg_opt = if let Some(ref a) = actor {
@@ -505,6 +529,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                     Ok(msg) => msg,
                     Err(_) => {
                         // Idle timeout elapsed — deactivate the actor
+                        tracing::info!("deactivating after idle timeout");
                         let actor_id = ActorId::new(actor_type, identity.clone());
                         if let Some(ref mut a) = actor {
                             let ctx = ActorContext {
@@ -552,6 +577,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
 
             if let Err(e) = new_actor.on_activate(&ctx).await {
                 assert_sometimes!(true, "on_activate_failed");
+                tracing::warn!(error = %e, "actor activation failed");
                 reply.send(ActorResponse {
                     body: Err(format!("activation failed: {e}")),
                     cache_invalidation: None,
@@ -573,6 +599,10 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                 {
                     // Another node won — deactivate, forward message, drain mailbox
                     assert_sometimes!(true, "directory_conflict_on_activation");
+                    tracing::warn!(
+                        winning_node = %existing.endpoint.address,
+                        "directory conflict, forwarding"
+                    );
                     let _ = new_actor.on_deactivate(&ctx).await;
                     forward_message::<P, C>(
                         &transport,
@@ -599,9 +629,14 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                     break;
                 }
                 _ => {
-                    current_activation = Some(actor_address);
+                    current_activation = Some(actor_address.clone());
                     actor = Some(new_actor);
                     assert_sometimes!(true, "actor_activated");
+                    tracing::info!(
+                        host = %local_address,
+                        activation_id = %actor_address.activation_id,
+                        "actor activated"
+                    );
                     was_previously_active = true;
                 }
             }
@@ -622,6 +657,8 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
             state_store: state_store.clone(),
         };
 
+        tracing::debug!(method = actor_msg.method, "dispatching method");
+
         let result = actor_ref
             .dispatch(&ctx, actor_msg.method, &actor_msg.body)
             .await;
@@ -631,10 +668,17 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                 body: Ok(body),
                 cache_invalidation: None,
             },
-            Err(e) => ActorResponse {
-                body: Err(e.to_string()),
-                cache_invalidation: None,
-            },
+            Err(e) => {
+                tracing::debug!(
+                    method = actor_msg.method,
+                    error = %e,
+                    "dispatch returned error"
+                );
+                ActorResponse {
+                    body: Err(e.to_string()),
+                    cache_invalidation: None,
+                }
+            }
         };
 
         reply.send(response);
@@ -653,6 +697,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                 };
                 let _ = a.on_deactivate(&ctx).await;
                 assert_sometimes!(true, "deactivate_on_idle");
+                tracing::debug!("deactivating (idle)");
             }
             actor = None;
             if let Some(ref addr) = current_activation {
@@ -664,6 +709,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
 
     // Shutdown: deactivate if still active
     if let Some(ref mut a) = actor {
+        tracing::debug!("deactivating on shutdown");
         let actor_id = ActorId::new(actor_type, identity.clone());
         let ctx = ActorContext {
             id: actor_id,
@@ -696,6 +742,12 @@ fn forward_message<P: Providers, C: MessageCodec>(
 ) {
     // Check forward count limit
     if actor_msg.forward_count >= MAX_FORWARD_COUNT {
+        tracing::warn!(
+            actor_type = %actor_type,
+            identity = %actor_msg.target.identity,
+            forward_count = actor_msg.forward_count,
+            "forward count exceeded"
+        );
         reply.send(ActorResponse {
             body: Err(format!(
                 "message forwarded too many times ({})",
@@ -739,6 +791,12 @@ fn forward_message<P: Providers, C: MessageCodec>(
             );
         }
         Err(_e) => {
+            tracing::warn!(
+                actor_type = %actor_type,
+                identity = %actor_msg.target.identity,
+                destination = %registered_endpoint.address,
+                "failed to forward message"
+            );
             reply.send(ActorResponse {
                 body: Err("failed to forward message".to_string()),
                 cache_invalidation: Some(cache_invalidation),
@@ -882,6 +940,7 @@ impl<P: Providers, C: MessageCodec> ActorHost<P, C> {
     /// idempotent and the yield loop exits immediately when no loops
     /// are pending.
     pub async fn stop(&self) {
+        tracing::info!("actor host stop initiated");
         // Phase 1: Close all request streams.
         for close_fn in self.close_handles.borrow().iter() {
             close_fn();
@@ -892,6 +951,7 @@ impl<P: Providers, C: MessageCodec> ActorHost<P, C> {
         while self.pending_tasks.get() > 0 {
             self.providers.task().yield_now().await;
         }
+        tracing::debug!("actor host stop completed");
     }
 }
 

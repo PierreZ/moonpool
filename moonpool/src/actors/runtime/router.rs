@@ -162,6 +162,7 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
     ///
     /// * `Req` - Request type (must be serializable)
     /// * `Resp` - Response type (must be deserializable)
+    #[tracing::instrument(skip_all, fields(actor_type = %target.actor_type, identity = %target.identity, method))]
     pub async fn send_actor_request<Req: Serialize, Resp: DeserializeOwned>(
         &self,
         target: &ActorId,
@@ -170,6 +171,8 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
     ) -> Result<Resp, ActorError> {
         // 1. Resolve actor location
         let endpoint = self.resolve(target).await?;
+
+        tracing::debug!(destination = %endpoint.address, "sending actor request");
 
         // 2. Serialize the method body
         let body = self.codec.encode(req).map_err(ActorError::Codec)?;
@@ -192,6 +195,10 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
 
         // 6. Handle cache invalidation if present
         if let Some(invalidation) = &response.cache_invalidation {
+            tracing::debug!(
+                stale = %invalidation.invalid_endpoint.address,
+                "processing cache invalidation"
+            );
             // Unregister the stale entry (use activation_id 0 as a wildcard —
             // if the activation doesn't match, the directory ignores it)
             let stale_address = ActorAddress::new(
@@ -209,9 +216,16 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
             }
         }
 
-        let body = response.body.map_err(ActorError::HandlerError)?;
-        let result = self.codec.decode(&body).map_err(ActorError::Codec)?;
-        Ok(result)
+        match response.body {
+            Ok(body) => {
+                let result = self.codec.decode(&body).map_err(ActorError::Codec)?;
+                Ok(result)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "handler returned error");
+                Err(ActorError::HandlerError(e))
+            }
+        }
     }
 
     /// Resolve an actor's endpoint, placing it if not found in the directory.
@@ -221,6 +235,7 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
     async fn resolve(&self, target: &ActorId) -> Result<Endpoint, ActorError> {
         // Check directory first
         if let Some(addr) = self.directory.lookup(target).await? {
+            tracing::debug!(endpoint = %addr.endpoint.address, "directory hit");
             return Ok(addr.endpoint);
         }
 
@@ -240,6 +255,12 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
             .placement_director
             .place(strategy, target, &active_members, &self.local_address)
             .await?;
+
+        tracing::debug!(
+            strategy = ?strategy,
+            result = %endpoint.address,
+            "placement resolved"
+        );
 
         Ok(endpoint)
     }

@@ -65,6 +65,12 @@ impl<T: Serialize + DeserializeOwned + Default> PersistentState<T> {
         match stored {
             Some(entry) => {
                 assert_sometimes!(true, "persistent_state_loaded");
+                tracing::debug!(
+                    actor_type = %actor_type_name,
+                    identity = %actor_identity,
+                    etag = %entry.etag,
+                    "state loaded from store"
+                );
                 let value: T = serde_json::from_slice(&entry.data)
                     .map_err(|e| ActorStateError::SerializationError(e.to_string()))?;
                 Ok(Self {
@@ -76,14 +82,21 @@ impl<T: Serialize + DeserializeOwned + Default> PersistentState<T> {
                     actor_identity: actor_identity.to_string(),
                 })
             }
-            None => Ok(Self {
-                value: T::default(),
-                etag: None,
-                record_exists: false,
-                store,
-                actor_type_name: actor_type_name.to_string(),
-                actor_identity: actor_identity.to_string(),
-            }),
+            None => {
+                tracing::debug!(
+                    actor_type = %actor_type_name,
+                    identity = %actor_identity,
+                    "no existing state, using default"
+                );
+                Ok(Self {
+                    value: T::default(),
+                    etag: None,
+                    record_exists: false,
+                    store,
+                    actor_type_name: actor_type_name.to_string(),
+                    actor_identity: actor_identity.to_string(),
+                })
+            }
         }
     }
 
@@ -130,6 +143,11 @@ impl<T: Serialize + DeserializeOwned + Default> PersistentState<T> {
         self.etag = Some(new_etag);
         self.record_exists = true;
         assert_sometimes!(true, "persistent_state_written");
+        tracing::debug!(
+            actor_type = %self.actor_type_name,
+            identity = %self.actor_identity,
+            "state persisted"
+        );
         Ok(())
     }
 
@@ -169,6 +187,11 @@ impl<T: Serialize + DeserializeOwned + Default> PersistentState<T> {
         self.value = T::default();
         self.etag = None;
         self.record_exists = false;
+        tracing::debug!(
+            actor_type = %self.actor_type_name,
+            identity = %self.actor_identity,
+            "state cleared"
+        );
         Ok(())
     }
 }

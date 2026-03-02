@@ -97,9 +97,10 @@ impl BankAccountImpl {
 
 #[async_trait::async_trait(?Send)]
 impl BankAccount for BankAccountImpl {
+    #[tracing::instrument(skip_all, fields(identity = %ctx.id.identity, amount = req.amount))]
     async fn deposit<P: Providers, C: MessageCodec>(
         &mut self,
-        _ctx: &ActorContext<P, C>,
+        ctx: &ActorContext<P, C>,
         req: DepositRequest,
     ) -> Result<BalanceResponse, RpcError> {
         let new_balance = self.balance() + req.amount;
@@ -107,18 +108,15 @@ impl BankAccount for BankAccountImpl {
             s.state_mut().balance = new_balance;
             let _ = s.write_state().await;
         }
-        println!(
-            "  [server] DEPOSIT +{} → balance={}",
-            req.amount, new_balance
-        );
         Ok(BalanceResponse {
             balance: new_balance,
         })
     }
 
+    #[tracing::instrument(skip_all, fields(identity = %ctx.id.identity, amount = req.amount))]
     async fn withdraw<P: Providers, C: MessageCodec>(
         &mut self,
-        _ctx: &ActorContext<P, C>,
+        ctx: &ActorContext<P, C>,
         req: WithdrawRequest,
     ) -> Result<BalanceResponse, RpcError> {
         let new_balance = self.balance() - req.amount;
@@ -126,23 +124,19 @@ impl BankAccount for BankAccountImpl {
             s.state_mut().balance = new_balance;
             let _ = s.write_state().await;
         }
-        println!(
-            "  [server] WITHDRAW -{} → balance={}",
-            req.amount, new_balance
-        );
         Ok(BalanceResponse {
             balance: new_balance,
         })
     }
 
+    #[tracing::instrument(skip_all, fields(identity = %ctx.id.identity))]
     async fn get_balance<P: Providers, C: MessageCodec>(
         &mut self,
-        _ctx: &ActorContext<P, C>,
+        ctx: &ActorContext<P, C>,
         req: GetBalanceRequest,
     ) -> Result<BalanceResponse, RpcError> {
         let _ = req;
         let balance = self.balance();
-        println!("  [server] GET_BALANCE → balance={}", balance);
         Ok(BalanceResponse { balance })
     }
 }
@@ -171,11 +165,6 @@ impl ActorHandler for BankAccountImpl {
             )
             .await
             .map_err(|e| ActorError::HandlerError(format!("state load: {e}")))?;
-            println!(
-                "  [server] ACTIVATE {} (balance={})",
-                ctx.id.identity,
-                ps.state().balance
-            );
             self.state = Some(ps);
         }
         Ok(())
@@ -187,7 +176,11 @@ impl ActorHandler for BankAccountImpl {
 // ============================================================================
 
 fn main() {
-    println!("=== Banking Example: 3-Node Virtual Actors ===\n");
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
+    tracing::info!("=== Banking Example: 3-Node Virtual Actors ===");
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -196,7 +189,7 @@ fn main() {
 
     runtime.block_on(async {
         if let Err(e) = run_example().await {
-            eprintln!("Example error: {}", e);
+            tracing::error!(error = %e, "example failed");
             std::process::exit(1);
         }
     });
@@ -250,11 +243,11 @@ async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
         .start()
         .await?;
 
-    println!(
-        "Started 3 nodes: {}, {}, {}",
-        node1.address(),
-        node2.address(),
-        node3.address()
+    tracing::info!(
+        node1 = %node1.address(),
+        node2 = %node2.address(),
+        node3 = %node3.address(),
+        "started 3 nodes"
     );
 
     // --- Create typed actor references from node1 ---
@@ -263,71 +256,56 @@ async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
     let bob: BankAccountRef<_> = node1.actor_ref("bob");
     let charlie: BankAccountRef<_> = node1.actor_ref("charlie");
 
-    println!("\n--- Virtual Actor: BankAccount (3 nodes, round-robin) ---\n");
-
-    // Deposit to alice
+    // Deposit to alice, bob, charlie
     let resp = alice.deposit(DepositRequest { amount: 100 }).await?;
-    println!("  [client] Alice balance after deposit: {}", resp.balance);
     assert_eq!(resp.balance, 100);
 
-    // Deposit to bob
     let resp = bob.deposit(DepositRequest { amount: 50 }).await?;
-    println!("  [client] Bob balance after deposit: {}", resp.balance);
     assert_eq!(resp.balance, 50);
 
-    // Deposit to charlie
     let resp = charlie.deposit(DepositRequest { amount: 75 }).await?;
-    println!("  [client] Charlie balance after deposit: {}", resp.balance);
     assert_eq!(resp.balance, 75);
 
     // Transfer: withdraw from alice, deposit to bob
     let resp = alice.withdraw(WithdrawRequest { amount: 30 }).await?;
-    println!("  [client] Alice balance after withdraw: {}", resp.balance);
     assert_eq!(resp.balance, 70);
 
     let resp = bob.deposit(DepositRequest { amount: 30 }).await?;
-    println!(
-        "  [client] Bob balance after transfer deposit: {}",
-        resp.balance
-    );
     assert_eq!(resp.balance, 80);
 
     // Check final balances
     let alice_balance = alice.get_balance(GetBalanceRequest {}).await?;
     assert_eq!(alice_balance.balance, 70);
-    println!("  [client] Alice final balance: {}", alice_balance.balance);
 
     let bob_balance = bob.get_balance(GetBalanceRequest {}).await?;
     assert_eq!(bob_balance.balance, 80);
-    println!("  [client] Bob final balance: {}", bob_balance.balance);
 
     let charlie_balance = charlie.get_balance(GetBalanceRequest {}).await?;
     assert_eq!(charlie_balance.balance, 75);
-    println!(
-        "  [client] Charlie final balance: {}",
-        charlie_balance.balance
+
+    tracing::info!(
+        alice = alice_balance.balance,
+        bob = bob_balance.balance,
+        charlie = charlie_balance.balance,
+        "final balances"
     );
 
     // --- Directory listing: show where each actor was placed ---
-    println!("\n--- Actor Directory ---\n");
     let mut entries = directory.list_all().await?;
     entries.sort_by(|a, b| a.actor_id.identity.cmp(&b.actor_id.identity));
     for entry in &entries {
-        println!(
-            "  BankAccount/{} → {}",
-            entry.actor_id.identity, entry.endpoint.address
+        tracing::info!(
+            identity = %entry.actor_id.identity,
+            host = %entry.endpoint.address,
+            "actor placement"
         );
     }
-
-    println!("\n--- Results ---\n");
-    println!("  Virtual actors: alice=70, bob=80, charlie=75");
-    println!("  Actors distributed across 3 nodes via round-robin");
 
     // --- Shutdown all nodes ---
     node1.shutdown().await?;
     node2.shutdown().await?;
     node3.shutdown().await?;
 
-    println!("\nExample completed successfully!");
+    tracing::info!("example completed successfully");
     Ok(())
 }

@@ -371,9 +371,17 @@ impl MembershipProvider for SharedMembership {
     ) -> Result<MembershipVersion, MembershipError> {
         let mut inner = self.inner.borrow_mut();
         inner.version = inner.version.next();
-        inner
-            .members
-            .insert(address.clone(), ClusterMember::new(address, status, name));
+        inner.members.insert(
+            address.clone(),
+            ClusterMember::new(address.clone(), status, name.clone()),
+        );
+        tracing::info!(
+            address = %address,
+            status = %status,
+            name = %name,
+            version = %inner.version,
+            "node registered"
+        );
         Ok(inner.version)
     }
 
@@ -385,13 +393,27 @@ impl MembershipProvider for SharedMembership {
         let mut inner = self.inner.borrow_mut();
         match inner.members.get_mut(address) {
             Some(member) => {
+                let old_status = member.status;
                 member.status = status;
                 inner.version = inner.version.next();
+                tracing::info!(
+                    address = %address,
+                    old_status = %old_status,
+                    new_status = %status,
+                    version = %inner.version,
+                    "node status updated"
+                );
                 Ok(inner.version)
             }
-            None => Err(MembershipError::NotFound {
-                address: address.clone(),
-            }),
+            None => {
+                tracing::warn!(
+                    address = %address,
+                    "update_status for unknown node"
+                );
+                Err(MembershipError::NotFound {
+                    address: address.clone(),
+                })
+            }
         }
     }
 }
