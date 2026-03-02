@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-03-02
+
+### 🚀 Features
+
+- Move simulation tests to per-crate binary targets for sancov compatibility
+- **moonpool-explorer**: Add sancov edge coverage to stats and reporting
+- **moonpool-explorer**: Wire sancov into fork loop for code-edge coverage signals
+- **moonpool-explorer**: Add SANCOV_CRATES build infrastructure for selective sancov instrumentation
+- **moonpool-explorer**: Add sancov.rs core module for LLVM inline-8bit-counters
+
+### 📚 Documentation
+
+- **moonpool-explorer**: Add comprehensive rustdoc to sancov.rs
+
+
 ## [0.4.0] - 2026-02-19
 
 ### 🚀 Features
