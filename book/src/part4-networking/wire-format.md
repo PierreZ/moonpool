@@ -55,7 +55,7 @@ UIDs come in two flavors:
 - **Well-known tokens** have `first == u64::MAX`. The `second` field is an index into a fixed-size array for O(1) lookup. These are used for system endpoints like ping (`WellKnownToken::Ping`).
 - **Dynamic tokens** use arbitrary values for both fields. These are looked up in a `BTreeMap` and are used for request-response correlation and service endpoints.
 
-The `UID::adjusted()` method derives related tokens from a base UID, which is how service methods get their individual endpoint tokens from a single service ID.
+Service methods derive their individual endpoint tokens from a single service ID using `UID::new(interface_id, method_index)`, where `interface_id` is the service's base UID and `method_index` is the method's position in the trait definition.
 
 ## Streaming Deserialization
 

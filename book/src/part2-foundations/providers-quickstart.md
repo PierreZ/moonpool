@@ -15,7 +15,7 @@ async fn connect_with_retry<P: Providers>(
     providers: &P,
     addr: &str,
     max_retries: u32,
-) -> std::io::Result<P::Network::TcpStream> {
+) -> std::io::Result<<P::Network as NetworkProvider>::TcpStream> {
     let mut delay = Duration::from_millis(100);
 
     for attempt in 0..max_retries {

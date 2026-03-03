@@ -24,7 +24,7 @@ A single test scenario might be: "Node B crashes during a leader election while 
 
 Even with coarse-grained modeling, a three-node cluster with five failure types and ten time steps produces thousands of distinct failure histories. A five-node cluster with realistic failure granularity produces millions. And that is before considering application-level state: what data was in flight, which transactions were uncommitted, which clients were retrying.
 
-Pierre Zemb demonstrated this concretely with a simple e-commerce API. Six variable dimensions (user types, payment methods, delivery options, promotions, inventory status, currencies) require 648 unique test combinations for basic coverage. Adding one option to each dimension pushes it past 4,000. A real system has hundreds of dimensions. In one case, a 300-line feature required a 10,000-line test PR to maintain combinatorial coverage.
+Consider a simple e-commerce API as an example. Six variable dimensions (user types, payment methods, delivery options, promotions, inventory status, currencies) require 648 unique test combinations for basic coverage. Adding one option to each dimension pushes it past 4,000. A real system has hundreds of dimensions. In one case we experienced at Clever Cloud, a 300-line feature required a 10,000-line test PR to maintain combinatorial coverage.
 
 This is not a tooling problem. No test framework makes writing 10,000 tests sustainable. The combinatorial space of a distributed system grows faster than any team can write tests for it.
 

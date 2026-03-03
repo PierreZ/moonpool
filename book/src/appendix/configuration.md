@@ -280,7 +280,7 @@ Controls how many forked children run concurrently.
 | Variant | Slot count |
 |---------|-----------|
 | `MaxCores` | All available CPU cores |
-| `HalfCores` | Half of available cores (rounded up, min 1) |
+| `HalfCores` | Half of available cores (integer division, min 1) |
 | `Cores(n)` | Exactly `n` concurrent children |
 | `MaxCoresMinus(n)` | All cores minus `n` (min 1) |
 

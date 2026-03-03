@@ -49,7 +49,7 @@ One iteration is not enough. Different seeds produce different scheduling orders
 .set_time_limit(Duration::from_secs(60))
 ```
 
-Each iteration gets a different seed, producing a different execution. The seeds are deterministic, starting from a base and incrementing, so the same iteration count always explores the same seeds.
+Each iteration gets a different seed, producing a different execution. The seeds are deterministic and derived from the iteration manager, so the same configuration always explores the same seeds.
 
 ## Seed Control
 

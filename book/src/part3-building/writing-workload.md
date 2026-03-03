@@ -6,7 +6,7 @@ The workload drives our key-value server and checks that it behaves correctly. I
 
 ## The Workload Struct
 
-Unlike Processes, workloads accumulate state across the entire simulation. The struct holds everything the workload needs to track:
+When registered via `.workload()`, a single workload instance is reused across all iterations, letting it accumulate state. (Workloads registered via `.workloads()` with a factory are recreated each iteration.) The struct holds everything the workload needs to track:
 
 ```rust
 use async_trait::async_trait;

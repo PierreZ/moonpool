@@ -2,7 +2,7 @@
 
 <!-- toc -->
 
-Moonpool is organized as a workspace of seven crates. The dependency graph is deliberately layered: lower crates know nothing about higher ones, and the leaf crate (`moonpool-explorer`) has no moonpool dependencies at all.
+Moonpool is organized as a workspace of eight crates. The dependency graph is deliberately layered: lower crates know nothing about higher ones, and the leaf crate (`moonpool-explorer`) has no moonpool dependencies at all.
 
 ## Dependency Diagram
 
@@ -30,6 +30,7 @@ Moonpool is organized as a workspace of seven crates. The dependency graph is de
                    v
                  libc
 
+  moonpool-sim-examples (example simulation binaries)
   xtask (cargo automation, not a library dependency)
 ```
 
@@ -158,6 +159,21 @@ This is a proc-macro crate and cannot export regular types or functions.
 - `split_on_discovery()` -- fork the process at a splitpoint
 - `exit_child()` -- terminate a forked child process
 - `prepare_next_seed()` -- selective reset for multi-seed exploration
+- `sancov_edges_covered()`, `sancov_edge_count()`, `sancov_is_available()` -- sanitizer coverage integration
+
+---
+
+### moonpool-sim-examples
+
+**Role**: Example simulation binaries demonstrating exploration features.
+
+**Dependencies**: moonpool-sim
+
+**Binaries**:
+- `sim-maze-explore` -- adaptive exploration on maze workload
+- `sim-dungeon-explore` -- adaptive exploration on dungeon workload
+
+**Not a library dependency** -- contains only binary targets for demonstration and testing of the exploration subsystem.
 
 ---
 

@@ -99,7 +99,7 @@ Not all deaths are equal. Moonpool supports three reboot kinds:
 
 **Crash**: Instant death. The process task is cancelled immediately. All connections abort. No cleanup, no buffer drain. Peers see connection reset errors.
 
-**CrashAndWipe**: Same as Crash but also wipes persistent storage. Simulates total data loss or a fresh node joining the cluster.
+**CrashAndWipe**: Same as Crash but also wipes persistent storage. Simulates total disk failure or a fresh node joining the cluster. (Storage wipe is not yet fully implemented since storage is not yet scoped per IP; currently behaves the same as Crash.)
 
 To handle graceful shutdown, check the cancellation token in your main loop:
 

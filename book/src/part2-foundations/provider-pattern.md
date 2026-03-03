@@ -74,8 +74,8 @@ The swap between "testing a real distributed system" and "testing inside a deter
 let providers = TokioProviders::new();
 run_server(providers);
 
-// Simulation (inside the simulation builder)
-let providers = sim.providers();  // SimProviders
+// Simulation (inside a workload, the builder provides SimProviders via SimContext)
+let providers = ctx.providers().clone();  // SimProviders
 run_server(providers);
 ```
 

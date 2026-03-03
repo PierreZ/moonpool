@@ -12,11 +12,13 @@ Moonpool uses `ChaCha8Rng` from the `rand_chacha` crate, seeded from the `u64` v
 // At the start of every simulation run
 set_sim_seed(seed);
 
-// Every decision that needs randomness goes through these
+// Inside the simulation engine, every decision uses the thread-local RNG:
 let latency: u64 = sim_random_range(1..50);  // network delay in ms
 let should_fail: bool = sim_random_f64() < 0.25;  // 25% fault probability
 let value: f64 = sim_random();  // general-purpose random value
 ```
+
+These are **framework-internal** functions used by the simulation engine itself. Your application code should use `providers.random().random()` and `providers.random().random_range()` instead, which route through the same underlying RNG but go through the provider abstraction.
 
 The functions `sim_random()`, `sim_random_range()`, and `sim_random_f64()` all draw from the same thread-local RNG. This means the **order of calls matters**. Adding a new `sim_random()` call anywhere in the simulation shifts every subsequent random value. This is intentional. It means small code changes produce different simulation trajectories, naturally exploring new parts of the state space.
 

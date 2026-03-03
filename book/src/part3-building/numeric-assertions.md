@@ -48,8 +48,8 @@ The first time committed_transactions reaches 50, the explorer branches. Then it
 
 Every numeric assertion, whether always or sometimes, maintains a watermark in shared memory. The watermark is the best value of the left operand observed so far:
 
-- For assertions with `maximize=true` (greater-than variants, and less-than always-assertions that implicitly drive maximization): the watermark is the highest value seen.
-- For assertions with `maximize=false` (less-than sometimes variants): the watermark is the lowest value seen.
+- For assertions that track the **highest** value (`maximize=true`): `assert_always_less_than!`, `assert_always_less_than_or_equal_to!`, `assert_sometimes_greater_than!`, `assert_sometimes_greater_than_or_equal_to!`. These seek the boundary from below (always) or ratchet upward (sometimes).
+- For assertions that track the **lowest** value (`maximize=false`): `assert_always_greater_than!`, `assert_always_greater_than_or_equal_to!`, `assert_sometimes_less_than!`, `assert_sometimes_less_than_or_equal_to!`. These seek the boundary from above (always) or ratchet downward (sometimes).
 
 The watermark persists across fork boundaries in multiverse mode. When a child timeline improves the watermark, the improvement is visible to subsequent timelines through shared memory. This means the explorer collectively pushes toward the boundary rather than each timeline searching independently.
 

@@ -16,6 +16,7 @@ pub trait ActorDirectory: fmt::Debug {
     async fn unregister(&self, address: &ActorAddress) -> Result<(), DirectoryError>;
     async fn unregister_members(&self, addresses: &[NetworkAddress])
         -> Result<Vec<ActorAddress>, DirectoryError>;
+    async fn list_all(&self) -> Result<Vec<ActorAddress>, DirectoryError>;
 }
 ```
 

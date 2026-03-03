@@ -2,7 +2,7 @@
 
 <!-- toc -->
 
-Now that we understand what `#[service]` generates, let us walk through defining a complete service from scratch: the trait definition, the request and response types, and how the generated code fits together.
+The `#[service]` macro generates a complete RPC infrastructure from a trait definition. This chapter walks through defining a service from scratch: the trait definition, the request and response types, and how the generated code fits together.
 
 ## The Trait Definition
 

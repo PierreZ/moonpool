@@ -38,7 +38,7 @@ The third era is happening now. Simulation-driven development is spreading beyon
 
 At [Clever Cloud](https://www.clever-cloud.com/), a French hosting company with 80 employees, a team of 5 engineers (including 2 junior apprentices) uses simulation-driven development to build Materia, a distributed multi-model multi-tenant database. 30 minutes of simulation covers roughly 24 hours of equivalent chaos testing. New engineers learn distributed systems intuition through the simulation feedback loop instead of through painful 3am on-call incidents.
 
-The pattern is clear. What took an elite team two years of custom infrastructure in 2009 is becoming accessible to small teams building on existing frameworks and languages. The investment required is shrinking. The bugs found per engineering-hour are increasing.
+What took an elite team two years of custom infrastructure in 2009 is becoming accessible to small teams building on existing frameworks and languages. The investment required is shrinking. The bugs found per engineering-hour are increasing.
 
 ## The unifying philosophy
 

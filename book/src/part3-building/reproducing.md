@@ -23,13 +23,13 @@ Run it. You should see the same failure, the same panic message, the same assert
 
 ## Turning Up the Logging
 
-By default, simulation runs are quiet. When debugging a specific seed, we want maximum detail. Set the log level to `ERROR` (or `TRACE` if you need the full firehose) via the `RUST_LOG` environment variable:
+By default, simulation runs are quiet. When debugging a specific seed, turn up logging via the `RUST_LOG` environment variable. Start with `ERROR` to see assertion violations and failure messages:
 
 ```bash
 RUST_LOG=error cargo xtask sim run my_simulation
 ```
 
-The event trace and assertion messages will give you a clear picture of what happened. For deeper investigation, `RUST_LOG=trace` shows every event processed, every timer fired, every connection state change.
+For deeper investigation, `RUST_LOG=trace` shows the full event trace: every event processed, every timer fired, every connection state change. This is the firehose, but with a pinned seed it is a reproducible firehose.
 
 ## When the Bug Disappears
 

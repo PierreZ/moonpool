@@ -16,8 +16,9 @@ Moonpool uses tokio's **single-threaded, local runtime**:
 
 ```rust
 tokio::runtime::Builder::new_current_thread()
-    .enable_all()
-    .build_local(&tokio::runtime::LocalOptions::default())
+    .enable_io()
+    .enable_time()
+    .build_local(Default::default())
 ```
 
 This is **not** a `LocalSet` on top of a multi-threaded runtime. `build_local` creates a true single-threaded runtime where `spawn_local` is the only spawn mechanism. No `Send` bounds. No `Sync` bounds. No possibility of cross-thread data races.

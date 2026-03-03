@@ -26,9 +26,9 @@ There is a different approach. Instead of replacing entire subsystems with hand-
 
 ```rust
 #[async_trait(?Send)]
-pub trait TimeProvider {
-    async fn sleep(&self, duration: Duration);
-    fn now(&self) -> Instant;
+pub trait TimeProvider: Clone {
+    async fn sleep(&self, duration: Duration) -> Result<(), TimeError>;
+    fn now(&self) -> Duration;
 }
 ```
 

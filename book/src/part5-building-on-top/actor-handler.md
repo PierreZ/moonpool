@@ -6,7 +6,7 @@ Now that we understand the concept and concurrency model, let us look at the con
 
 ## The ActorHandler Trait
 
-Every actor type implements `ActorHandler`. The trait has five items, three of which have defaults:
+Every actor type implements `ActorHandler`. The trait has six items, four of which have defaults:
 
 ```rust
 #[async_trait(?Send)]
@@ -119,7 +119,7 @@ When the `ActorHost` shuts down (or the owning `MoonpoolNode` calls `shutdown()`
 
 ## Registering Actor Types
 
-You never interact with `ActorHost` directly. Instead, use the `MoonpoolNode` builder:
+In practice, you interact with `ActorHost` through the `MoonpoolNode` builder rather than directly:
 
 ```rust
 let node = MoonpoolNode::new(cluster, config)

@@ -58,7 +58,7 @@ Attrition {
 Attrition is configured on the simulation builder and requires phases to be set:
 
 ```rust
-SimulationBuilder::new(seed)
+SimulationBuilder::new()
     .processes(3, || Box::new(MyProcess::new()))
     .attrition(Attrition {
         max_dead: 1,
@@ -74,6 +74,7 @@ SimulationBuilder::new(seed)
     })
     .workload(MyWorkload::new())
     .run()
+    .await;
 ```
 
 The `.phases()` call is required because attrition runs only during the chaos phase. During the recovery phase, the attrition injector stops and the system heals. This two-phase structure lets you verify that the system converges to a correct state after faults stop.
