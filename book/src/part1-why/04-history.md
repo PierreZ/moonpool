@@ -16,7 +16,7 @@ Two techniques made the simulation radically effective. **BUGGIFY** injected fau
 
 **Hurst exponent manipulation** produced correlated, cascading hardware failures. Real datacenters exhibit failure correlation: a hard drive failing in a rack makes nearby drives more likely to fail. Naive testing models failures as independent events, making cascading failures astronomically rare. FoundationDB's simulator cranked the correlation up, producing failure patterns that would take years to encounter in production but that simulation could generate in milliseconds.
 
-The scale was staggering. 5 to 10 million simulation runs per night, each simulating minutes to hours of cluster behavior under extreme fault injection. A physical validation cluster called **Sinkhole**, real server motherboards wired to programmable power switches and toggled continuously, served as the ultimate reality check. Sinkhole never found a single database bug that simulation had missed. It only found bugs in other software and hardware.
+The scale was staggering. [Tens of thousands of simulations every night](https://apple.github.io/foundationdb/testing.html), each simulating minutes to hours of cluster behavior under extreme fault injection, amounting to roughly one trillion CPU-hours of simulated testing. A physical validation cluster called **Sinkhole**, real server motherboards wired to programmable power switches and toggled continuously, served as the ultimate reality check. Sinkhole never found a single database bug that simulation had missed. It only found bugs in other software and hardware.
 
 The cost was equally staggering. The approach required a custom language, simulation-first architecture, and two years of pure infrastructure investment before building the actual product. Only an elite team with unusual patience and conviction could pull it off. For over a decade, FoundationDB's simulation remained a benchmark that others admired but could not replicate.
 
@@ -30,13 +30,13 @@ On top of the hypervisor, Antithesis built a guided exploration engine. Their SD
 
 The results validated the approach. Customers with mature, well-tested systems found new bugs within 2 to 3 weeks of onboarding. Not shallow bugs. Deep concurrency issues, subtle data corruption, failure recovery defects that had survived years of conventional testing. The exploration engine required minimal domain knowledge to be effective. In one demonstration, Antithesis [beat the entire game of Gradius](https://antithesis.com/blog/gradius/) by tracking just 3 bytes of game memory and maximizing time alive. No game-specific strategy. Just depth and coverage.
 
-## The adoption wave (2024-present)
+## The adoption wave (2020-present)
 
 The third era is happening now. Simulation-driven development is spreading beyond the teams that invented it.
 
 [TigerBeetle](https://tigerbeetle.com/), building a financial transactions database, adopted deterministic simulation from day one, adding storage fault patterns (misdirected reads, phantom writes, uninitialized memory) that go beyond network-level testing. [Dropbox used simulation](https://dropbox.tech/infrastructure/-testing-our-new-sync-engine) to validate their sync engine rewrite. [WarpStream](https://www.warpstream.com/blog/deterministic-simulation-testing-for-our-entire-saas) applied deterministic simulation testing across their entire SaaS platform.
 
-At [Clever Cloud](https://www.clever-cloud.com/), a French hosting company with 80 employees, a team of 5 engineers (including 2 junior apprentices) uses simulation-driven development to build Materia, a distributed multi-model multi-tenant database. 30 minutes of simulation covers roughly 24 hours of equivalent chaos testing. New engineers learn distributed systems intuition through the simulation feedback loop instead of through painful 3am on-call incidents.
+[Clever Cloud](https://www.clever-cloud.com/) uses simulation-driven development to build Materia, a distributed multi-model multi-tenant database. 30 minutes of simulation covers roughly 24 hours of equivalent chaos testing.
 
 What took an elite team two years of custom infrastructure in 2009 is becoming accessible to small teams building on existing frameworks and languages. The investment required is shrinking. The bugs found per engineering-hour are increasing.
 

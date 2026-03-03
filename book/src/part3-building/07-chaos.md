@@ -45,7 +45,7 @@ This is what separates simulation chaos from production chaos. In production, a 
 
 Each dimension of chaos has its own chapter with configuration details, code examples, and the design reasoning behind the choices moonpool makes:
 
-- [Buggify: Fault Injection](buggify.md) covers the `buggify!()` macro and code-level fault injection patterns
-- [Attrition: Process Reboots](attrition.md) covers automatic process lifecycle chaos
-- [Network Faults](network-faults.md) covers TCP-level network fault simulation
-- [Storage Faults](storage-faults.md) covers TigerBeetle-inspired storage fault patterns
+- [Buggify: Fault Injection](08-buggify.md) covers the `buggify!()` macro and code-level fault injection patterns
+- [Attrition: Process Reboots](09-attrition.md) covers automatic process lifecycle chaos
+- [Network Faults](10-network-faults.md) covers TCP-level network fault simulation
+- [Storage Faults](11-storage-faults.md) covers TigerBeetle-inspired storage fault patterns

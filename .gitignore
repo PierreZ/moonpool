@@ -8,3 +8,4 @@ Cargo.lock
 
 # mdbook
 book/output
+book/book

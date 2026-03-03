@@ -2,11 +2,11 @@
 
 <!-- toc -->
 
-Moonpool is under active development. It is not production-ready, and the APIs will change. This book documents the framework as it exists today, with honest markers for what works and what remains experimental.
+Moonpool is a hobby project under active development. It is not production-ready, and the APIs will change. This book documents the framework as it exists today, with honest markers for what works and what remains experimental.
 
 ## What works
 
-The **simulation engine** is the most mature piece. Single-threaded deterministic execution, seed-driven reproducibility, and simulated time advancement all function as described in this book. A failing seed gives you a reproducible local debugging session, every time.
+The **simulation engine** is the most mature piece. Single-threaded deterministic execution, seed-driven reproducibility, and simulated time advancement all function as described in this book and exercised by the simulation binaries shipped with the repository. A failing seed gives you a reproducible local debugging session, every time.
 
 **Chaos testing** covers network faults (partitions, latency, connection drops, reordering) and storage faults (corruption, torn writes, misdirected I/O). The BUGGIFY-style injection system runs at configurable probability, and the Hurst exponent manipulation produces correlated, cascading failures that mirror real datacenter behavior.
 

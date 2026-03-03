@@ -12,7 +12,7 @@ The code was correct for the world your tests described. It was not correct for 
 
 Development environments are clean. The network is localhost. Disks never fail. Clocks agree. Messages arrive in order, exactly once. We know this is fictional, yet our test environments faithfully reproduce the fiction. We test against a world that does not exist, then express surprise when the real world finds the bugs we missed.
 
-Production is a different animal. A [study of failures across Google, Microsoft, and Yahoo services](https://www.usenix.org/system/files/conference/osdi14/osdi14-paper-yuan.pdf) found that a 2,000-machine service experiences more than 10 machine crashes per day as **normal operations**. Network partitions are not rare events reserved for conference war stories. Research on [network partition failures in cloud services](https://www.usenix.org/system/files/conference/osdi14/osdi14-paper-alquraan.pdf) showed that 80% of catastrophic failures in distributed systems are caused by partition-related bugs, and 27% of those result in data loss. These are not exotic edge cases. They are Tuesday.
+Production is a different animal. A [study of 198 failures in Cassandra, HBase, HDFS, MapReduce, and Redis](https://www.usenix.org/system/files/conference/osdi14/osdi14-paper-yuan.pdf) found that 74% were deterministic, most could be reproduced on 3 or fewer nodes, and 77% could have been caught by a unit test asserting against the correct error condition. The bugs were not exotic. They were ordinary mistakes in error handling code that nobody thought to test. Research on [network partition failures in cloud services](https://www.usenix.org/system/files/osdi18-alquraan.pdf) showed that 80% of catastrophic failures in distributed systems are caused by partition-related bugs, and 27% of those result in data loss. These are not exotic edge cases. They are Tuesday.
 
 The gap between development and production is not a minor oversight we can close by writing more careful tests. It is structural.
 
@@ -24,7 +24,7 @@ A single test scenario might be: "Node B crashes during a leader election while 
 
 Even with coarse-grained modeling, a three-node cluster with five failure types and ten time steps produces thousands of distinct failure histories. A five-node cluster with realistic failure granularity produces millions. And that is before considering application-level state: what data was in flight, which transactions were uncommitted, which clients were retrying.
 
-Consider a simple e-commerce API as an example. Six variable dimensions (user types, payment methods, delivery options, promotions, inventory status, currencies) require 648 unique test combinations for basic coverage. Adding one option to each dimension pushes it past 4,000. A real system has hundreds of dimensions. In one case we experienced at Clever Cloud, a 300-line feature required a 10,000-line test PR to maintain combinatorial coverage.
+Consider a simple e-commerce API as an example. Six variable dimensions (user types, payment methods, delivery options, promotions, inventory status, currencies) require 648 unique test combinations for basic coverage. Adding one option to each dimension pushes it past 4,000. A real system has hundreds of dimensions. In one real project, a 300-line feature required a 10,000-line test PR to maintain combinatorial coverage.
 
 This is not a tooling problem. No test framework makes writing 10,000 tests sustainable. The combinatorial space of a distributed system grows faster than any team can write tests for it.
 

@@ -2,9 +2,9 @@
 
 <!-- toc -->
 
-You get paged at 3am. A distributed system dropped writes for 47 seconds. Logs show three nodes disagreed about leadership, but the window where it happened has already passed. The cluster self-healed. You cannot reproduce it locally. You cannot reproduce it in staging. You spend three days staring at logs, form a theory, ship a fix you are 60% sure about, and go back to sleep. Until it happens again.
+A distributed system dropped writes for 47 seconds. Logs show three nodes disagreed about leadership, but the window where it happened has already passed. The cluster self-healed. You cannot reproduce it locally. You cannot reproduce it in staging. You spend three days staring at logs, form a theory, ship a fix you are 60% sure about, and wait. Until it happens again.
 
-This is what debugging looks like without determinism. And it is the norm, not the exception.
+This is what debugging looks like without determinism. The bug is real, but the conditions that triggered it are gone. You cannot replay the execution. You cannot step through it. You cannot even confirm your fix addresses the right cause.
 
 ## The Two Enemies
 
@@ -30,7 +30,7 @@ With both sources eliminated, the simulation becomes a **pure function** of its 
 
 ## What This Gives You
 
-A failing seed turns that 3am production catastrophe into a local debugging session. Instead of "it happened once at 3:17am between nodes 7 and 12 under load," you get:
+A failing seed turns a production incident into a local debugging session. Instead of "it happened once between nodes 7 and 12 under load," you get:
 
 ```
 FAILED seed=8839214571 — leadership invariant violated at sim_time=12.4s

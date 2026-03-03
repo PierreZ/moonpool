@@ -17,7 +17,7 @@ Our systems speak TCP. They open connections, send messages, read responses, and
 
 These failure modes do not require modeling individual packet routing. They require modeling **connection lifecycle**: establishment, latency, graceful close, abrupt close, and half-open states.
 
-FoundationDB reached the same conclusion. Their `FlowTransport` layer (the inspiration for our `moonpool-transport` crate) simulates connections, not packets. Their `sim2.actor.cpp` provides TCP-like streams that can be delayed, corrupted, or severed. Individual packet routing, MTU sizes, and congestion control are left to the real kernel.
+FoundationDB reached the same conclusion. Their `FlowTransport` layer simulates connections, not packets. Their `sim2.actor.cpp` provides TCP-like streams that can be delayed, corrupted, or severed. Individual packet routing, MTU sizes, and congestion control are left to the real kernel. The `moonpool-transport` crate is a Rust reimplementation of FlowTransport's architecture. The key difference: moonpool's transport is **codec-agnostic**. A pluggable `MessageCodec` trait lets you use any serialization format, where FoundationDB is locked to its own serializer.
 
 ## What We Simulate
 

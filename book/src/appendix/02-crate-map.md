@@ -93,7 +93,7 @@ Moonpool is organized as a workspace of eight crates. The dependency graph is de
 - `SimulationReport` -- results, metrics, and assertion data
 - `Invariant` -- trait for cross-actor property validation
 
-**Assertion macros** (15 total): `assert_always!`, `assert_sometimes!`, `assert_reachable!`, `assert_unreachable!`, `assert_always_greater_than!`, `assert_sometimes_each!`, and more. See the [Assertion Reference](./assertion-reference.md) for the complete list.
+**Assertion macros** (15 total): `assert_always!`, `assert_sometimes!`, `assert_reachable!`, `assert_unreachable!`, `assert_always_greater_than!`, `assert_sometimes_each!`, and more. See the [Assertion Reference](./01-assertion-reference.md) for the complete list.
 
 ---
 

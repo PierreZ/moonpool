@@ -2,13 +2,13 @@
 
 <!-- toc -->
 
-This project started with a 3am phone call.
+After ten years of operating distributed systems, one pattern keeps repeating: the bugs that hurt most are the ones nobody imagined.
 
-I was at Clever Cloud, a French hosting company, building Materia: a distributed multi-model multi-tenant database. Small team, five engineers, two of them junior apprentices. We were building the kind of system that large companies staff with dozens of senior distributed systems engineers. We did not have that luxury.
+You build a system. You test the scenarios you can think of. You deploy. Then a network partition overlaps with a retry storm during a rolling upgrade, and the system enters a state no developer on the team anticipated. The code was not wrong. It just was not tested against that particular combination of events.
 
-What we had were on-call incidents. A network partition left a 70-machine Hadoop cluster in an inconsistent state. During recovery, a NullPointerException fired. The bug had been patched upstream months earlier. We just had not deployed it yet. The bug did not surface during normal operation. It surfaced during **recovery from a failure**, the worst possible moment, under pressure, at 3am, in a combination of circumstances nobody on the team had anticipated.
+The combinatorial problem makes this inevitable. A simple e-commerce API with six variable dimensions (user types, payment methods, delivery options, promotions, inventory status, currencies) requires 648 unique test combinations for basic coverage. Adding one option to each dimension pushes it past 4,000. A distributed system with network partitions, node crashes, disk faults, and clock drift has orders of magnitude more dimensions. You cannot test what you do not know. Manual tests ensure regression coverage, not absence of bugs.
 
-That incident crystallized a question: how do you build a system that handles failure combinations no developer imagined?
+That realization is what led to moonpool: the testing toolbox I wish I had when I started building distributed systems.
 
 ## What I found
 

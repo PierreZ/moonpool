@@ -2,6 +2,8 @@
 
 <!-- toc -->
 
+**This is the most experimental part of moonpool.** The virtual actor layer exists primarily as a proving ground: a non-trivial programming model built on top of the simulation framework, used to stress-test the framework itself. It is inspired by Microsoft's Orleans and by curiosity about how actors compose with deterministic simulation. The APIs here are the most likely to change.
+
 We have a simulation runtime that controls time, a network layer that moves bytes between peers, and an RPC system that turns those bytes into method calls. That is enough to build distributed systems. But most distributed systems are not built around raw RPC calls. They are built around **entities**: bank accounts, user sessions, device controllers, game players. Each entity has an identity, some state, and a set of operations. The question is how we model those entities in code.
 
 ## The Problem with Manual Lifecycle

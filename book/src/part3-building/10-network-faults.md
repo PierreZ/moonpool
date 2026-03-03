@@ -73,7 +73,7 @@ The distinction matters because many protocols depend on reading remaining data 
 
 ## The Swizzling Insight
 
-One finding from simulation testing at Clever Cloud deserves special mention: **restoring network connections in reverse order of disconnection finds more bugs than restoring in forward order**. This is called swizzling.
+One finding from FoundationDB's simulation work deserves special mention: **restoring network connections in reverse order of disconnection finds more bugs than restoring in forward order**. This is called swizzling. As Will Wilson described it: "for reasons that we totally don't understand, this is better at finding bugs than normal clogging."
 
 Why does this work? Forward restoration tests the easy case: the first connection dropped is the first restored, so recovery happens in the order the system expects. Reverse restoration forces the system to handle partial recovery where the most recently dropped connection comes back first. This creates asymmetric states that exercise recovery logic in ways no developer would think to test manually.
 
