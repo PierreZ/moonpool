@@ -42,7 +42,11 @@
             pkg-config
             openssl
             cargo-nextest
-	          cargo-edit
+	    cargo-edit
+
+	    # mdbook
+	    mdbook
+            mdbook-toc
           ];
 
           shellHook = ''
