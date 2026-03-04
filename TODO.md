@@ -1,6 +1,67 @@
-# SpaceSim: Incremental Virtual Actor Simulation for Moonpool
+# Moonpool Development Plan
 
 > **Rule**: Mark each commit as ~~done~~ in this file when completed. Each commit = one git commit.
+
+---
+
+## [x] Exploration Infrastructure (`moonpool-explorer`)
+
+Fork-based multiverse exploration for deterministic simulation testing. Splits timelines at assertion discovery points to find rare bugs. Inspired by FoundationDB's simulation and Antithesis.
+
+### [x] Core exploration crate
+- `moonpool-explorer/` — standalone leaf crate, only depends on `libc`
+- `fork()` + `MAP_SHARED` memory for cross-process state
+- Sequential fork tree: parent waits on child, merges coverage, loops
+- `CoverageBitmap` + `ExploredMap` (8192-bit bitmaps) for new-path detection
+- `SharedStats`, `SharedRecipe` for bug replay (`"count@seed -> count@seed"` format)
+- RNG hooks (`fn()->u64` get_count, `fn(u64)` reseed) — zero moonpool knowledge
+
+### [x] Antithesis assertion suite
+- 15 assertion macros: `assert_always!`, `assert_sometimes!`, `assert_reachable!`, `assert_unreachable!`, numeric variants (`_greater_than!`, etc.), `assert_sometimes_all!`, `assert_sometimes_each!`
+- Rich `AssertionSlot` (112 bytes) in shared memory, counter-based layout
+- Non-panicking always-assertions (Antithesis principle: assertions never crash)
+- `validate_assertion_contracts()` for post-run verification
+- `EachBucket` infrastructure for per-value bucketed assertions (256 buckets)
+
+### [x] Adaptive forking + energy budgets
+- 3-level energy: global → per-mark → reallocation pool
+- Coverage-yield-driven batch forking: barren marks return energy
+- `AdaptiveConfig { batch_size, min_timelines, max_timelines, per_mark_energy }`
+
+### [x] Multi-core parallel exploration
+- `Parallelism` enum: `MaxCores`, `HalfCores`, `Cores(n)`, `MaxCoresMinus(n)`
+- Sliding window of concurrent fork children capped at core count
+- Bitmap pool: one coverage bitmap slot per active child
+- `waitpid(-1)` reaps whichever child finishes first
+
+### [x] Coverage-preserving multi-seed exploration
+- `prepare_next_seed()`: selective reset preserving explored map + watermarks
+- Warm start: `warm_min_timelines` for barren marks on subsequent seeds
+- Pass/fail counts accumulate across seeds (avoids false "was never reached")
+- `UntilConverged` iteration control: stop when all sometimes reached + no new coverage
+- `convergence_timeout` + `is_success()` for exit code reporting
+
+### [x] Sancov integration
+- LLVM `inline-8bit-counters` via `__sanitizer_cov_8bit_counters_init`
+- `SANCOV_CRATES` build infrastructure for selective instrumentation
+- Edge coverage wired into fork loop as exploration signal
+- `sancov_edges_covered` / `sancov_edges_total` in stats and reporting
+- `moonpool-sim-examples` crate extracted for focused sancov coverage
+
+### [x] Rich reporting
+- `SimulationReport` with `assertion_details`, `bucket_summaries`, per-seed metrics
+- `ExplorationReport` with timelines, fork points, bugs, coverage bits, convergence
+- Colored terminal display with sections for assertions, buckets, violations, exploration
+
+### [x] Bug fixes
+- Duplicate assertion slots from parallel fork children (TOCTOU in `find_or_alloc_slot`, tombstone dedup)
+- False "was never reached" from `prepare_next_seed()` zeroing counts
+- Coverage bitmap not set for `assert_sometimes_each!` (broke adaptive forking)
+- Assertion violations decoupled from workload errors
+
+---
+
+## SpaceSim: Incremental Virtual Actor Simulation
 
 ## Context
 
