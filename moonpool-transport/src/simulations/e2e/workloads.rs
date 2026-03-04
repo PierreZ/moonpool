@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use crate::{NetworkProvider, Peer, TcpListenerTrait, TimeProvider, try_deserialize_packet};
 use async_trait::async_trait;
-use moonpool_sim::{Process, SimContext, SimulationResult, Workload, assert_sometimes};
+use moonpool_sim::{Process, SimContext, SimulationResult, Workload, assert_reachable};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::TestMessage;
@@ -123,7 +123,7 @@ impl Workload for ClientWorkload {
                     );
                 }
                 OpResult::Failed { error } => {
-                    assert_sometimes!(true, "Client operation should sometimes fail");
+                    assert_reachable!("client: operation failed");
                     tracing::trace!("Client {}: operation failed: {}", my_id, error);
                 }
                 _ => {}
@@ -274,10 +274,7 @@ impl Process for WireServerWorkload {
                         match read_result {
                             Ok(Ok(0)) => {
                                 // Connection closed
-                                assert_sometimes!(
-                                    true,
-                                    "Wire server should sometimes see connections close"
-                                );
+                                assert_reachable!("wire_server: connection closed");
                                 break;
                             }
                             Ok(Ok(n)) => {
@@ -325,10 +322,7 @@ impl Process for WireServerWorkload {
                                         }
                                         Err(e) => {
                                             // Wire format error (checksum mismatch, etc.)
-                                            assert_sometimes!(
-                                                true,
-                                                "Wire server should sometimes see wire errors"
-                                            );
+                                            assert_reachable!("wire_server: wire error");
                                             tracing::trace!(
                                                 "Wire server {} wire error: {:?}",
                                                 my_addr,

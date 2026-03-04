@@ -17,7 +17,9 @@ use crate::runner::process::Process;
 use crate::runner::tags::{ProcessTags, TagRegistry};
 use crate::runner::topology::TopologyFactory;
 use crate::runner::workload::Workload;
-use crate::{SimulationResult, chaos::AssertionStats};
+use crate::{
+    SimulationResult, assert_always_less_than_or_equal_to, assert_reachable, chaos::AssertionStats,
+};
 
 use super::report::SimulationMetrics;
 
@@ -155,6 +157,12 @@ impl<'a> ProcessManager<'a> {
         if let Some(token) = &self.process_tokens[idx] {
             token.cancel();
             self.dead_count.set(self.dead_count.get() + 1);
+            assert_always_less_than_or_equal_to!(
+                self.dead_count.get(),
+                self.ips.len(),
+                "dead_count <= process_count"
+            );
+            assert_reachable!("process_manager: graceful shutdown signaled");
             tracing::info!(
                 "Signaled graceful shutdown for process at {} (index {})",
                 ip,
@@ -230,6 +238,7 @@ impl<'a> ProcessManager<'a> {
         if current > 0 {
             self.dead_count.set(current - 1);
         }
+        assert_reachable!("process_manager: process restarted");
         tracing::info!("Process at {} restarted (index {})", ip_str, idx);
     }
 
@@ -561,6 +570,7 @@ impl WorkloadOrchestrator {
                         grace_period_ms,
                         recovery_delay_ms,
                     }) => {
+                        assert_reachable!("event: ProcessGracefulShutdown");
                         process_manager.signal_graceful_shutdown(ip);
                         sim.schedule_event(
                             crate::sim::Event::ProcessForceKill {
@@ -579,6 +589,7 @@ impl WorkloadOrchestrator {
                         sim.schedule_process_restart(ip, Duration::from_millis(recovery_delay_ms));
                     }
                     Some(crate::sim::Event::ProcessRestart { ip }) => {
+                        assert_reachable!("event: ProcessRestart");
                         process_manager.handle_restart(ip, providers, state, shutdown_signal);
                     }
                     _ => {}
@@ -771,6 +782,7 @@ impl WorkloadOrchestrator {
                 chaos_shutdown.cancel();
                 Self::heal_all_partitions(sim, &all_ips);
                 chaos_ended = true;
+                assert_reachable!("phase: chaos ended");
             }
 
             if !recovery_ended
@@ -781,6 +793,7 @@ impl WorkloadOrchestrator {
                 Self::trigger_shutdown(sim, shutdown_signal);
                 recovery_ended = true;
                 shutdown_triggered = true;
+                assert_reachable!("phase: recovery ended");
             }
 
             // Process one simulation event
@@ -797,6 +810,7 @@ impl WorkloadOrchestrator {
                         grace_period_ms,
                         recovery_delay_ms,
                     }) => {
+                        assert_reachable!("event: ProcessGracefulShutdown");
                         process_manager.signal_graceful_shutdown(ip);
                         sim.schedule_event(
                             crate::sim::Event::ProcessForceKill {
@@ -815,6 +829,7 @@ impl WorkloadOrchestrator {
                         sim.schedule_process_restart(ip, Duration::from_millis(recovery_delay_ms));
                     }
                     Some(crate::sim::Event::ProcessRestart { ip }) => {
+                        assert_reachable!("event: ProcessRestart");
                         process_manager.handle_restart(ip, providers, state, shutdown_signal);
                     }
                     _ => {}

@@ -44,6 +44,7 @@ use crate::providers::{SimRandomProvider, SimTimeProvider};
 use crate::runner::process::RebootKind;
 use crate::runner::tags::TagRegistry;
 use crate::sim::SimWorld;
+use crate::{assert_reachable, assert_sometimes_each};
 
 /// Process-related state for fault injection targeting.
 pub struct ProcessInfo {
@@ -192,6 +193,7 @@ impl FaultContext {
 
         match kind {
             RebootKind::Graceful => {
+                assert_reachable!("reboot: graceful path");
                 let grace_ms = crate::sim::sim_random_range(grace_period_range_ms.clone()) as u64;
                 let recovery_ms =
                     crate::sim::sim_random_range(recovery_delay_range_ms.clone()) as u64;
@@ -211,6 +213,7 @@ impl FaultContext {
                 );
             }
             RebootKind::Crash | RebootKind::CrashAndWipe => {
+                assert_reachable!("reboot: crash path");
                 self.sim.abort_all_connections_for_ip(ip_addr);
                 self.process_info
                     .dead_count
@@ -340,12 +343,14 @@ impl FaultInjector for AttritionInjector {
 
             // Respect max_dead: skip this cycle if already at the limit
             if ctx.dead_count() >= self.config.max_dead {
+                assert_reachable!("attrition: max_dead limit enforced");
                 continue;
             }
 
             // Choose reboot kind by weighted probability
             let rand_val = crate::sim::sim_random_range(0..10000) as f64 / 10000.0;
             let kind = self.config.choose_kind(rand_val);
+            assert_sometimes_each!("attrition_reboot_kind", [("kind", kind as i64)]);
 
             // Use configured delay ranges (or defaults)
             let recovery_range = self.config.recovery_delay_ms.clone().unwrap_or(1000..10000);
@@ -356,6 +361,7 @@ impl FaultInjector for AttritionInjector {
             }
             let idx = crate::sim::sim_random_range(0..ctx.process_ips().len());
             let ip = ctx.process_ips()[idx].to_string();
+            assert_sometimes_each!("attrition_process_targeted", [("process_idx", idx as i64)]);
             ctx.reboot_with_delays(&ip, kind, &recovery_range, &grace_range)?;
         }
         Ok(())

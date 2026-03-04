@@ -29,7 +29,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::{Endpoint, MessageCodec};
-use moonpool_sim::assert_sometimes;
+use moonpool_sim::assert_reachable;
 use serde::Serialize;
 
 use super::reply_error::ReplyError;
@@ -110,13 +110,13 @@ impl<T: Serialize, C: MessageCodec> ReplyPromise<T, C> {
             Ok(payload) => {
                 if let Some(sender) = inner.sender.take() {
                     sender(&inner.reply_endpoint, &payload);
-                    assert_sometimes!(true, "Reply successfully sent");
+                    assert_reachable!("reply_promise: sent");
                 }
             }
             Err(e) => {
                 // Serialization failed - send error instead
                 tracing::error!(error = %e, "failed to serialize reply");
-                assert_sometimes!(true, "reply_serialization_failed");
+                assert_reachable!("reply_promise: serialization failed");
                 let error_result: Result<T, ReplyError> = Err(ReplyError::Serialization {
                     message: e.to_string(),
                 });
@@ -140,7 +140,7 @@ impl<T: Serialize, C: MessageCodec> ReplyPromise<T, C> {
             return;
         }
 
-        assert_sometimes!(true, "error_reply_sent");
+        assert_reachable!("reply_promise: error sent");
         let result: Result<T, ReplyError> = Err(error);
         if let Ok(payload) = inner.codec.encode(&result)
             && let Some(sender) = inner.sender.take()
@@ -166,7 +166,7 @@ impl<T: Serialize, C: MessageCodec> Drop for ReplyPromise<T, C> {
     fn drop(&mut self) {
         let mut inner = self.inner.borrow_mut();
         if !inner.fulfilled {
-            assert_sometimes!(true, "Promise dropped without reply");
+            assert_reachable!("reply_promise: broken");
 
             // Send BrokenPromise error to client
             let result: Result<T, ReplyError> = Err(ReplyError::BrokenPromise);

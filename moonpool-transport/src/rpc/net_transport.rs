@@ -34,7 +34,7 @@ use crate::{
     Endpoint, NetworkAddress, NetworkProvider, Peer, PeerConfig, Providers, TaskProvider,
     TcpListenerTrait, UID, WellKnownToken,
 };
-use moonpool_sim::assert_sometimes;
+use moonpool_sim::assert_reachable;
 use tokio::sync::watch;
 
 use super::endpoint_map::{EndpointMap, MessageReceiver};
@@ -366,12 +366,12 @@ impl<P: Providers> NetTransport<P> {
     ) -> Result<(), MessagingError> {
         // Check for local delivery
         if self.is_local_address(&endpoint.address) {
-            assert_sometimes!(true, "Unreliable send uses local delivery path");
+            assert_reachable!("send_unreliable: local delivery");
             return self.deliver_local(&endpoint.token, payload);
         }
 
         // Get or create peer for remote address
-        assert_sometimes!(true, "Unreliable send uses remote peer path");
+        assert_reachable!("send_unreliable: remote peer");
         let peer = self.get_or_open_peer(&endpoint.address);
         peer.borrow_mut()
             .send_unreliable(endpoint.token, payload)
@@ -422,12 +422,12 @@ impl<P: Providers> NetTransport<P> {
             receiver.receive(payload);
             drop(data); // Release borrow before mutating stats
             self.data.borrow_mut().stats.packets_dispatched += 1;
-            assert_sometimes!(true, "Local delivery found registered endpoint");
+            assert_reachable!("local_delivery: endpoint found");
             Ok(())
         } else {
             drop(data); // Release borrow before mutating stats
             self.data.borrow_mut().stats.packets_undelivered += 1;
-            assert_sometimes!(true, "Local delivery to unregistered endpoint");
+            assert_reachable!("local_delivery: endpoint not found");
             Err(MessagingError::EndpointNotFound { token: *token })
         }
     }
@@ -450,14 +450,14 @@ impl<P: Providers> NetTransport<P> {
 
         // Check if outgoing peer already exists
         if let Some(peer) = self.data.borrow().peers.get(&addr_str) {
-            assert_sometimes!(true, "Existing peer reused for address");
+            assert_reachable!("peer: outgoing reused");
             return Rc::clone(peer);
         }
 
         // Check incoming peers — reuse accepted connection for responses
         // (FDB pattern: responses flow back on the same connection)
         if let Some(peer) = self.data.borrow().incoming_peers.get(&addr_str) {
-            assert_sometimes!(true, "Incoming peer reused for response");
+            assert_reachable!("peer: incoming reused for response");
             return Rc::clone(peer);
         }
 
@@ -480,7 +480,7 @@ impl<P: Providers> NetTransport<P> {
         // This handles responses for outgoing requests
         self.spawn_connection_reader(Rc::clone(&peer), addr_str);
 
-        assert_sometimes!(true, "New peer created for address");
+        assert_reachable!("peer: new created");
         peer
     }
 
@@ -497,12 +497,12 @@ impl<P: Providers> NetTransport<P> {
             receiver.receive(payload);
             drop(data); // Release borrow before mutating stats
             self.data.borrow_mut().stats.packets_dispatched += 1;
-            assert_sometimes!(true, "Message dispatched to endpoint");
+            assert_reachable!("dispatch: endpoint found");
             Ok(())
         } else {
             drop(data); // Release borrow before mutating stats
             self.data.borrow_mut().stats.packets_undelivered += 1;
-            assert_sometimes!(true, "Dispatch to unregistered endpoint");
+            assert_reachable!("dispatch: endpoint not found");
             Err(MessagingError::EndpointNotFound { token: *token })
         }
     }
@@ -812,7 +812,7 @@ async fn connection_reader<P: Providers>(
                     );
                 }
 
-                assert_sometimes!(true, "connectionReader dispatched incoming message");
+                assert_reachable!("connection_reader: dispatched message");
             }
             None => {
                 // Channel closed - peer disconnected or shutdown
@@ -890,7 +890,7 @@ async fn listen_task<P: Providers>(
                             &transport_rc,
                         );
 
-                        assert_sometimes!(true, "listen() accepted incoming connection");
+                        assert_reachable!("listen: accepted connection");
                     }
                     Err(e) => {
                         tracing::warn!("listen_task: accept error on {}: {:?}", listen_addr, e);
