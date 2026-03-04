@@ -101,6 +101,9 @@ Strategic placement: error handling, timeouts, retries, resource limits
 - Library is not in external use — prefer replacing code over maintaining backward compatibility
 - No deprecation needed — delete old APIs when replacing them
 
+## Documentation
+**Keep the book up to date**: When changing public APIs, adding features, or modifying behavior in any moonpool crate, update the corresponding chapters in `book/src/`. Build with `nix develop --command mdbook build book/` to verify.
+
 ## API Design Principles
 **Keep APIs familiar**: APIs should match what developers expect from tokio objects
 - Maintain async patterns where developers expect them
