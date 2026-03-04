@@ -18,7 +18,10 @@ use crate::{
     HEADER_SIZE, NetworkProvider, Providers, TaskProvider, TimeProvider, UID, WireError,
     serialize_packet, try_deserialize_packet,
 };
-use moonpool_sim::{assert_sometimes, assert_sometimes_each};
+use moonpool_sim::{
+    assert_always_less_than_or_equal_to, assert_reachable, assert_sometimes, assert_sometimes_all,
+    assert_sometimes_each, assert_sometimes_greater_than,
+};
 
 // =============================================================================
 // Ping/Pong Protocol Constants
@@ -447,7 +450,7 @@ impl<P: Providers> Peer<P> {
             // Check queue capacity before adding
             assert_sometimes!(
                 state.reliable_queue.len() >= (self.config.max_queue_size as f64 * 0.8) as usize,
-                "Message queue should sometimes approach capacity limit"
+                "reliable_queue_near_capacity"
             );
 
             // Handle queue overflow
@@ -467,10 +470,7 @@ impl<P: Providers> Peer<P> {
             );
 
             // Check if queue is growing with multiple messages
-            assert_sometimes!(
-                state.reliable_queue.len() > 1,
-                "Message queue should sometimes contain multiple messages"
-            );
+            assert_sometimes!(state.reliable_queue.len() > 1, "reliable_queue_has_backlog");
 
             // Wake connection task if this is first message (FoundationDB pattern)
             if first_unsent {
@@ -783,7 +783,7 @@ async fn connection_task<P: Providers>(
                     // Buggify: Sometimes force write failures to test requeuing
                     if moonpool_sim::buggify_with_prob!(0.02) {
                         tracing::debug!("Buggify forcing write failure for requeue testing");
-                        assert_sometimes!(true, "buggified_write_failure");
+                        assert_reachable!("buggified_write_failure");
                         handle_connection_failure(
                             &shared_state,
                             &mut current_connection,
@@ -837,7 +837,7 @@ async fn connection_task<P: Providers>(
                 match read_result {
                     Ok((_buffer, 0)) => {
                         // Connection closed
-                        assert_sometimes!(true, "graceful_close_on_read");
+                        assert_reachable!("graceful_close_on_read");
                         handle_connection_failure(
                             &shared_state,
                             &mut current_connection,
@@ -913,7 +913,7 @@ async fn connection_task<P: Providers>(
                             // Buggify: occasionally skip sending ping to test timeout path
                             let skip_ping = moonpool_sim::buggify_with_prob!(0.05);
                             if skip_ping {
-                                assert_sometimes!(true, "buggified_ping_skip");
+                                assert_reachable!("buggified_ping_skip");
                                 tracing::debug!("connection_task: buggify skipped ping send");
                             } else if current_connection.is_some()
                                 && let Ok(ping_packet) = serialize_packet(PING_TOKEN, &[])
@@ -932,7 +932,7 @@ async fn connection_task<P: Providers>(
                             }
                         }
                         PingAction::Tolerate => {
-                            assert_sometimes!(true, "ping_timeout_tolerated");
+                            assert_reachable!("ping_timeout_tolerated");
                             shared_state
                                 .borrow_mut()
                                 .metrics
@@ -958,7 +958,7 @@ async fn connection_task<P: Providers>(
                             }
                         }
                         PingAction::TearDown => {
-                            assert_sometimes!(true, "ping_timeout_teardown");
+                            assert_reachable!("ping_timeout_teardown");
                             shared_state.borrow_mut().metrics.record_ping_timeout();
                             tracing::debug!(
                                 "connection_task: ping timeout, tearing down connection to {}",
@@ -1003,10 +1003,7 @@ fn handle_connection_failure<P: Providers>(
     // Handle the failed send if provided
     if let Some((data, is_reliable)) = failed_send {
         if is_reliable {
-            assert_sometimes!(
-                true,
-                "Peer should sometimes re-queue reliable messages after send failure"
-            );
+            assert_reachable!("reliable_message_requeued");
             state.reliable_queue.push_front(data);
         } else {
             state.metrics.record_message_dropped();
@@ -1090,7 +1087,9 @@ fn process_read_buffer<P: Providers>(
                         if let Some(rtt) = tracker.on_pong_received(now) {
                             shared_state.borrow_mut().metrics.record_pong_received(rtt);
                             tracing::debug!("connection_task: received pong, rtt={:?}", rtt);
-                            assert_sometimes!(true, "pong_received_with_rtt");
+                            let rtt_ms = rtt.as_millis() as i64;
+                            assert_reachable!("pong_received");
+                            assert_sometimes_greater_than!(rtt_ms, 0, "pong_rtt_positive");
                         }
                     }
                     continue; // Do NOT deliver to application
@@ -1115,10 +1114,7 @@ fn process_read_buffer<P: Providers>(
                             expected,
                             actual
                         );
-                        assert_sometimes!(
-                            true,
-                            "Checksum validation should sometimes catch corrupted packets"
-                        );
+                        assert_reachable!("checksum_mismatch_detected");
                     }
                     _ => {
                         tracing::warn!(
@@ -1128,10 +1124,7 @@ fn process_read_buffer<P: Providers>(
                     }
                 }
 
-                assert_sometimes!(
-                    true,
-                    "Connection should sometimes be torn down on wire format errors"
-                );
+                assert_reachable!("wire_error_teardown");
 
                 *current_connection = None;
                 read_buffer.clear();
@@ -1152,10 +1145,7 @@ fn process_read_buffer<P: Providers>(
                             "connection_task: discarding {} unreliable packets after wire error (FDB pattern)",
                             unreliable_count
                         );
-                        assert_sometimes!(
-                            true,
-                            "Unreliable packets should sometimes be discarded on connection errors"
-                        );
+                        assert_reachable!("unreliable_packets_discarded");
                         for _ in 0..unreliable_count {
                             state.metrics.record_message_dropped();
                         }
@@ -1183,7 +1173,7 @@ async fn establish_connection<P: Providers>(
             if let Some(max_failures) = config.max_connection_failures
                 && state.reconnect_state.failure_count >= max_failures
             {
-                assert_sometimes!(true, "max_failures_reached");
+                assert_reachable!("max_failures_reached");
                 return Err(PeerError::ConnectionFailed);
             }
 
@@ -1232,12 +1222,21 @@ async fn establish_connection<P: Providers>(
                 {
                     let mut state = shared_state.borrow_mut();
 
-                    if state.reconnect_state.failure_count > 0 {
-                        assert_sometimes!(
-                            true,
-                            "Peer should sometimes successfully connect after previous failures"
-                        );
+                    let reliable_empty = state.reliable_queue.is_empty();
+                    let failure_count = state.reconnect_state.failure_count;
+
+                    if failure_count > 0 {
+                        assert_reachable!("reconnect_after_previous_failures");
                     }
+
+                    assert_sometimes_all!(
+                        "healthy_peer",
+                        [
+                            ("connected", true),
+                            ("queue_empty", reliable_empty),
+                            ("no_prior_failures", failure_count == 0)
+                        ]
+                    );
 
                     let now = state.time.now();
                     state.connection = Some(()); // Mark as connected
@@ -1254,7 +1253,7 @@ async fn establish_connection<P: Providers>(
             }
             Err(_) => {
                 // Connection attempt timed out
-                assert_sometimes!(true, "connection_timed_out");
+                assert_reachable!("connection_attempt_timed_out");
                 record_connection_failure(shared_state, config);
                 // Continue loop to retry
             }
@@ -1278,6 +1277,11 @@ fn record_connection_failure<P: Providers>(
         config.max_reconnect_delay,
     );
     state.reconnect_state.current_delay = next_delay;
+    assert_always_less_than_or_equal_to!(
+        next_delay.as_millis() as i64,
+        config.max_reconnect_delay.as_millis() as i64,
+        "backoff_within_max"
+    );
     let now = state.time.now();
     state.metrics.record_connection_failure_at(now, next_delay);
 }
