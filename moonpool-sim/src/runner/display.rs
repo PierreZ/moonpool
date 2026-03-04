@@ -525,30 +525,41 @@ fn write_seeds(w: &mut impl Write, report: &SimulationReport, color: bool) {
     let dim = if color { ansi::DIM } else { "" };
     let reset = if color { ansi::RESET } else { "" };
 
+    let per_seed_tl = report
+        .exploration
+        .as_ref()
+        .map(|e| &e.per_seed_timelines);
+
     for (i, seed) in report.seeds_used.iter().enumerate() {
         if let Some(Ok(m)) = report.individual_metrics.get(i) {
+            let tl_suffix = per_seed_tl
+                .and_then(|v| v.get(i))
+                .map(|t| format!("   {} timelines", fmt_num(*t)))
+                .unwrap_or_default();
             let is_failed = report.seeds_failing.contains(seed);
             if is_failed && color {
                 let _ = writeln!(
                     w,
-                    "  {red}#{:<3}  seed={:<14}  {}   {} sim   {} events{reset}",
+                    "  {red}#{:<3}  seed={:<14}  {}   {} sim   {} events{tl}{reset}",
                     i + 1,
                     seed,
                     fmt_duration(m.wall_time),
                     fmt_duration(m.simulated_time),
                     fmt_num(m.events_processed),
+                    tl = tl_suffix,
                     red = ansi::RED,
                     reset = ansi::RESET,
                 );
             } else {
                 let _ = writeln!(
                     w,
-                    "  {dim}#{:<3}  seed={:<14}  {}   {} sim   {} events{reset}",
+                    "  {dim}#{:<3}  seed={:<14}  {}   {} sim   {} events{tl}{reset}",
                     i + 1,
                     seed,
                     fmt_duration(m.wall_time),
                     fmt_duration(m.simulated_time),
                     fmt_num(m.events_processed),
+                    tl = tl_suffix,
                     dim = dim,
                     reset = reset,
                 );

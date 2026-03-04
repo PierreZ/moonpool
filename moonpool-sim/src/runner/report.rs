@@ -66,6 +66,8 @@ pub struct ExplorationReport {
     pub sancov_edges_covered: usize,
     /// Whether the multi-seed loop stopped because convergence was detected.
     pub converged: bool,
+    /// Timelines explored per seed (parallel to `seeds_used`).
+    pub per_seed_timelines: Vec<u64>,
 }
 
 /// Pass/fail/miss status for an assertion in the report.
@@ -488,16 +490,22 @@ impl fmt::Display for SimulationReport {
         if self.seeds_used.len() > 1 {
             writeln!(f)?;
             writeln!(f, "--- Seeds ---")?;
+            let per_seed_tl = self.exploration.as_ref().map(|e| &e.per_seed_timelines);
             for (i, seed) in self.seeds_used.iter().enumerate() {
                 if let Some(Ok(m)) = self.individual_metrics.get(i) {
+                    let tl_suffix = per_seed_tl
+                        .and_then(|v| v.get(i))
+                        .map(|t| format!("  timelines={}", fmt_num(*t)))
+                        .unwrap_or_default();
                     writeln!(
                         f,
-                        "  #{:<3}  seed={:<14}  wall={:<10}  sim={:<10}  events={}",
+                        "  #{:<3}  seed={:<14}  wall={:<10}  sim={:<10}  events={}{}",
                         i + 1,
                         seed,
                         fmt_duration(m.wall_time),
                         fmt_duration(m.simulated_time),
-                        fmt_num(m.events_processed)
+                        fmt_num(m.events_processed),
+                        tl_suffix,
                     )?;
                 } else if let Some(Err(_)) = self.individual_metrics.get(i) {
                     writeln!(f, "  #{:<3}  seed={:<14}  FAILED", i + 1, seed)?;

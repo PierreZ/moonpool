@@ -585,6 +585,7 @@ impl SimulationBuilder {
         let mut total_exploration_fork_points: u64 = 0;
         let mut total_exploration_bugs: u64 = 0;
         let mut bug_recipes: Vec<super::report::BugRecipe> = Vec::new();
+        let mut per_seed_timelines: Vec<u64> = Vec::new();
 
         // Convergence tracking (used only with UntilConverged)
         let mut reached_sometimes: std::collections::HashSet<String> =
@@ -782,9 +783,12 @@ impl SimulationBuilder {
             // Accumulate exploration stats across seeds (before reset)
             if self.exploration_config.is_some() {
                 if let Some(stats) = moonpool_explorer::get_exploration_stats() {
+                    per_seed_timelines.push(stats.total_timelines);
                     total_exploration_timelines += stats.total_timelines;
                     total_exploration_fork_points += stats.fork_points;
                     total_exploration_bugs += stats.bug_found;
+                } else {
+                    per_seed_timelines.push(0);
                 }
                 if let Some(recipe) = moonpool_explorer::get_bug_recipe() {
                     bug_recipes.push(super::report::BugRecipe { seed, recipe });
@@ -905,6 +909,7 @@ impl SimulationBuilder {
                     .map(|s| s.sancov_edges_covered)
                     .unwrap_or(0),
                 converged,
+                per_seed_timelines,
             })
         } else {
             None
