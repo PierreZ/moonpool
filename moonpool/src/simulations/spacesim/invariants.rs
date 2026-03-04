@@ -18,13 +18,7 @@ impl Invariant for CreditConservation {
     fn check(&self, state: &StateHandle, _sim_time_ms: u64) {
         if let Some(model) = state.get::<SpaceModel>(SPACE_MODEL_KEY) {
             let sum = model.total_station_credits();
-            assert_always!(
-                sum == model.total_credits,
-                format!(
-                    "credit conservation violated: sum({}) != total({})",
-                    sum, model.total_credits
-                )
-            );
+            assert_always!(sum == model.total_credits, "credit conservation violated");
         }
     }
 }
@@ -39,14 +33,8 @@ impl Invariant for NonNegativeBalances {
 
     fn check(&self, state: &StateHandle, _sim_time_ms: u64) {
         if let Some(model) = state.get::<SpaceModel>(SPACE_MODEL_KEY) {
-            for (name, station) in &model.stations {
-                assert_always!(
-                    station.credits >= 0,
-                    format!(
-                        "station '{}' has negative credits: {}",
-                        name, station.credits
-                    )
-                );
+            for station in model.stations.values() {
+                assert_always!(station.credits >= 0, "non-negative station credits");
             }
         }
     }

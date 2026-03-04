@@ -300,6 +300,21 @@ fn write_report(w: &mut impl Write, report: &SimulationReport, color: bool) {
         write_buckets(w, &report.bucket_summaries, color);
     }
 
+    // === Convergence Timeout ===
+    if report.convergence_timeout {
+        section_header(w, "Convergence FAILED", color, ansi::BOLD_RED);
+        if color {
+            let _ = writeln!(
+                w,
+                "  {}UntilConverged hit iteration cap without converging.{}",
+                ansi::BOLD_RED,
+                ansi::RESET,
+            );
+        } else {
+            let _ = writeln!(w, "  UntilConverged hit iteration cap without converging.");
+        }
+    }
+
     // === Per-Seed Metrics ===
     if report.seeds_used.len() > 1 {
         write_seeds(w, report, color);
@@ -314,6 +329,19 @@ fn write_report(w: &mut impl Write, report: &SimulationReport, color: bool) {
 
 fn write_exploration(w: &mut impl Write, exp: &ExplorationReport, color: bool) {
     section_header(w, "Exploration", color, ansi::BOLD_CYAN);
+
+    if exp.converged {
+        if color {
+            let _ = writeln!(
+                w,
+                "  Status       {}CONVERGED{}",
+                ansi::BOLD_GREEN,
+                ansi::RESET
+            );
+        } else {
+            let _ = writeln!(w, "  Status       CONVERGED");
+        }
+    }
 
     let _ = writeln!(
         w,

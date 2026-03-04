@@ -45,6 +45,13 @@ pub enum IterationControl {
     FixedCount(usize),
     /// Run for a specific duration of wall-clock time
     TimeLimit(Duration),
+    /// Stop when all `assert_sometimes!` have been reached AND a new seed
+    /// produces no new code coverage. Requires exploration to be enabled.
+    /// The `max_iterations` field is a safety cap.
+    UntilConverged {
+        /// Maximum number of seeds before stopping regardless.
+        max_iterations: usize,
+    },
 }
 
 /// How many instances of a workload to spawn per iteration.
@@ -447,6 +454,16 @@ impl SimulationBuilder {
         self
     }
 
+    /// Run until exploration has converged: all `assert_sometimes!` assertions
+    /// have been reached and no new coverage was found on the last seed.
+    ///
+    /// Requires `.enable_exploration()` to be configured.
+    /// `max_iterations` is a safety cap to prevent infinite loops.
+    pub fn until_converged(mut self, max_iterations: usize) -> Self {
+        self.iteration_control = IterationControl::UntilConverged { max_iterations };
+        self
+    }
+
     /// Set specific seeds for deterministic debugging and regression testing.
     pub fn set_debug_seeds(mut self, seeds: Vec<u64>) -> Self {
         self.seeds = seeds;
@@ -554,6 +571,7 @@ impl SimulationBuilder {
                 exploration: None,
                 assertion_details: Vec::new(),
                 bucket_summaries: Vec::new(),
+                convergence_timeout: false,
             };
         }
 
@@ -567,6 +585,12 @@ impl SimulationBuilder {
         let mut total_exploration_fork_points: u64 = 0;
         let mut total_exploration_bugs: u64 = 0;
         let mut bug_recipes: Vec<super::report::BugRecipe> = Vec::new();
+
+        // Convergence tracking (used only with UntilConverged)
+        let mut reached_sometimes: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut prev_coverage_bits: u32 = 0;
+        let mut converged = false;
 
         // Initialize assertion table (unconditional — works even without exploration)
         if let Err(e) = moonpool_explorer::init_assertions() {
@@ -582,6 +606,17 @@ impl SimulationBuilder {
             if let Err(e) = moonpool_explorer::init(config.clone()) {
                 tracing::error!("Failed to initialize exploration: {}", e);
             }
+        }
+
+        // Validate UntilConverged requires exploration
+        if matches!(
+            self.iteration_control,
+            IterationControl::UntilConverged { .. }
+        ) && self.exploration_config.is_none()
+        {
+            panic!(
+                "IterationControl::UntilConverged requires enable_exploration() to be configured"
+            );
         }
 
         while iteration_manager.should_continue() {
@@ -606,6 +641,14 @@ impl SimulationBuilder {
             // Initialize buggify system for this iteration
             // Use moderate probabilities: 50% activation rate, 25% firing rate
             crate::chaos::buggify_init(0.5, 0.25);
+
+            // Snapshot coverage before this seed for convergence detection
+            if matches!(
+                self.iteration_control,
+                IterationControl::UntilConverged { .. }
+            ) {
+                prev_coverage_bits = moonpool_explorer::explored_map_bits_set().unwrap_or(0);
+            }
 
             // Resolve workload entries into concrete instances for this iteration
             // (WorkloadCount::Random and ClientId::RandomRange use the sim RNG, already seeded above)
@@ -731,6 +774,7 @@ impl SimulationBuilder {
                         None,
                         Vec::new(),
                         Vec::new(),
+                        false,
                     );
                 }
             }
@@ -747,8 +791,84 @@ impl SimulationBuilder {
                 }
             }
 
+            // Accumulate which Sometimes/Reachable assertions have been reached
+            // (must read before next prepare_next_seed resets pass_count)
+            if matches!(
+                self.iteration_control,
+                IterationControl::UntilConverged { .. }
+            ) {
+                let slots = moonpool_explorer::assertion_read_all();
+                for slot in &slots {
+                    if let Some(kind) = moonpool_explorer::AssertKind::from_u8(slot.kind)
+                        && matches!(
+                            kind,
+                            moonpool_explorer::AssertKind::Sometimes
+                                | moonpool_explorer::AssertKind::Reachable
+                        )
+                    {
+                        if slot.pass_count > 0 {
+                            reached_sometimes.insert(slot.msg.clone());
+                        } else if !reached_sometimes.contains(&slot.msg) {
+                            tracing::warn!(
+                                "UNREACHED slot: kind={:?} msg={:?} pass={} fail={}",
+                                kind,
+                                slot.msg,
+                                slot.pass_count,
+                                slot.fail_count
+                            );
+                        }
+                    }
+                }
+
+                // Check convergence from seed 2 onward (need baseline for coverage delta)
+                if iteration_count >= 2 {
+                    let all_sometimes_count = slots
+                        .iter()
+                        .filter(|s| {
+                            moonpool_explorer::AssertKind::from_u8(s.kind)
+                                .map(|k| {
+                                    matches!(
+                                        k,
+                                        moonpool_explorer::AssertKind::Sometimes
+                                            | moonpool_explorer::AssertKind::Reachable
+                                    )
+                                })
+                                .unwrap_or(false)
+                        })
+                        .count();
+                    let all_reached =
+                        all_sometimes_count > 0 && reached_sometimes.len() >= all_sometimes_count;
+
+                    let current_bits = moonpool_explorer::explored_map_bits_set().unwrap_or(0);
+                    let no_new_coverage = current_bits == prev_coverage_bits;
+
+                    tracing::warn!(
+                        "convergence: seed={} reached={}/{} coverage={}->{} delta={}",
+                        iteration_count,
+                        reached_sometimes.len(),
+                        all_sometimes_count,
+                        prev_coverage_bits,
+                        current_bits,
+                        current_bits.saturating_sub(prev_coverage_bits),
+                    );
+
+                    if all_reached && no_new_coverage {
+                        tracing::info!(
+                            "Converged after {} seeds: all {} sometimes reached, no new coverage",
+                            iteration_count,
+                            all_sometimes_count
+                        );
+                        converged = true;
+                    }
+                }
+            }
+
             // Reset buggify state after each iteration to ensure clean state
             crate::chaos::buggify_reset();
+
+            if converged {
+                break;
+            }
         }
 
         // End of main iteration loop
@@ -784,6 +904,7 @@ impl SimulationBuilder {
                     .as_ref()
                     .map(|s| s.sancov_edges_covered)
                     .unwrap_or(0),
+                converged,
             })
         } else {
             None
@@ -811,6 +932,12 @@ impl SimulationBuilder {
 
         let iteration_count = iteration_manager.current_iteration();
 
+        // Detect convergence timeout: UntilConverged was used but we didn't converge
+        let convergence_timeout = matches!(
+            self.iteration_control,
+            IterationControl::UntilConverged { .. }
+        ) && !converged;
+
         // Final buggify reset to ensure no impact on subsequent code
         crate::chaos::buggify_reset();
 
@@ -823,6 +950,7 @@ impl SimulationBuilder {
             exploration_report,
             assertion_details,
             bucket_summaries,
+            convergence_timeout,
         )
     }
 }

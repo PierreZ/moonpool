@@ -195,13 +195,7 @@ impl moonpool_sim::Workload for SpaceWorkload {
                         Ok(resp) => {
                             self.model.deposit(&station, amount);
                             let expected = self.model.station_credits(&station);
-                            assert_always!(
-                                resp.credits == expected,
-                                format!(
-                                    "deposit credit mismatch: got {}, expected {}",
-                                    resp.credits, expected
-                                )
-                            );
+                            assert_always!(resp.credits == expected, "deposit credit mismatch");
                         }
                         Err(e) => {
                             tracing::warn!("deposit failed: {}", e);
@@ -227,13 +221,7 @@ impl moonpool_sim::Workload for SpaceWorkload {
                                 "model withdraw should succeed when actor succeeded"
                             );
                             let expected = self.model.station_credits(&station);
-                            assert_always!(
-                                resp.credits == expected,
-                                format!(
-                                    "withdraw credit mismatch: got {}, expected {}",
-                                    resp.credits, expected
-                                )
-                            );
+                            assert_always!(resp.credits == expected, "withdraw credit mismatch");
                             assert_sometimes!(true, "withdraw_succeeded");
                         }
                         Err(e) => {
@@ -246,13 +234,7 @@ impl moonpool_sim::Workload for SpaceWorkload {
                     match actor_ref.query_state(QueryStateRequest {}).await {
                         Ok(resp) => {
                             let expected = self.model.station_credits(&station);
-                            assert_always!(
-                                resp.credits == expected,
-                                format!(
-                                    "query credit mismatch for '{}': got {}, expected {}",
-                                    station, resp.credits, expected
-                                )
-                            );
+                            assert_always!(resp.credits == expected, "query credit mismatch");
                         }
                         Err(e) => {
                             tracing::warn!("query_state failed: {}", e);
@@ -277,23 +259,11 @@ impl moonpool_sim::Workload for SpaceWorkload {
     async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         // Final conservation check
         let sum = self.model.total_station_credits();
-        assert_always!(
-            sum == self.model.total_credits,
-            format!(
-                "final credit conservation: sum({}) != total({})",
-                sum, self.model.total_credits
-            )
-        );
+        assert_always!(sum == self.model.total_credits, "final credit conservation");
 
         // Final non-negative check
-        for (name, station) in &self.model.stations {
-            assert_always!(
-                station.credits >= 0,
-                format!(
-                    "final check: station '{}' has negative credits: {}",
-                    name, station.credits
-                )
-            );
+        for station in self.model.stations.values() {
+            assert_always!(station.credits >= 0, "final non-negative station credits");
         }
 
         // Publish final model

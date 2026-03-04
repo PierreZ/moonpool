@@ -44,7 +44,7 @@ Passed into `Process` factories and `Workload` constructors via closure capture 
 
 ---
 
-## [ ] Commit 1: `feat(sim): scaffold spacesim with single StationActor on one process`
+## [x] Commit 1: `feat(sim): scaffold spacesim with single StationActor on one process`
 
 **Goal**: Prove actors work inside a `Process` in simulation. Delete banking sim.
 

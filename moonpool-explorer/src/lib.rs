@@ -683,8 +683,9 @@ pub fn prepare_next_seed(per_seed_energy: i64) {
     // 1. PRESERVE explored map — do nothing
 
     // 2. Selectively reset assertion table slots:
-    //    PRESERVE: watermark, split_watermark, frontier (quality context)
-    //    RESET: split_triggered, pass_count, fail_count (per-seed transient)
+    //    PRESERVE: watermark, split_watermark, frontier (quality context),
+    //              pass_count, fail_count (cumulative — needed by validate_assertion_contracts)
+    //    RESET: split_triggered (per-seed, controls re-forking)
     let table_ptr = ASSERTION_TABLE.with(|c| c.get());
     if !table_ptr.is_null() {
         unsafe {
@@ -695,16 +696,23 @@ pub fn prepare_next_seed(per_seed_energy: i64) {
             let base = table_ptr.add(8) as *mut assertion_slots::AssertionSlot;
             for i in 0..count {
                 let slot = &mut *base.add(i);
+                // Skip tombstones (msg_hash == 0) left by the duplicate-slot race fix.
+                if slot.msg_hash == 0 {
+                    continue;
+                }
                 slot.split_triggered = 0;
-                slot.pass_count = 0;
-                slot.fail_count = 0;
+                // pass_count/fail_count accumulate across seeds — needed by
+                // validate_assertion_contracts() to avoid false "was never reached"
+                // when a seed doesn't reach a guarded assertion (e.g. invariants
+                // behind `if let Some(model)`).  Forking uses split_triggered,
+                // not counts.
             }
         }
     }
 
     // 3. Selectively reset each-bucket slots:
-    //    PRESERVE: best_score (quality watermark), key_values, msg
-    //    RESET: split_triggered, pass_count (per-seed transient)
+    //    PRESERVE: best_score (quality watermark), key_values, msg, pass_count
+    //    RESET: split_triggered (per-seed transient)
     let each_ptr = EACH_BUCKET_PTR.with(|c| c.get());
     if !each_ptr.is_null() {
         unsafe {
@@ -716,7 +724,7 @@ pub fn prepare_next_seed(per_seed_energy: i64) {
             for i in 0..count {
                 let bucket = &mut *base.add(i);
                 bucket.split_triggered = 0;
-                bucket.pass_count = 0;
+                // pass_count accumulates across seeds (same rationale as assertion slots)
             }
         }
     }

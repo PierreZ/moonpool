@@ -62,10 +62,14 @@ fn main() {
                 }),
                 parallelism: Some(Parallelism::Cores(3)),
             })
-            .set_iterations(3)
+            .until_converged(10)
             .run()
             .await
     });
 
     report.eprint();
+
+    if !report.is_success() {
+        std::process::exit(1);
+    }
 }

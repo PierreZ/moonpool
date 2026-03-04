@@ -6,8 +6,8 @@
 //! boolean assertions (sometimes-all with frontier tracking).
 //!
 //! Each slot is accessed via raw pointer arithmetic on `MAP_SHARED` memory.
-//! The sequential fork tree (parent waits on children) means no true atomic
-//! CAS races occur — simple CAS suffices for correctness across forks.
+//! With `Parallelism::Cores(N)`, multiple fork children run concurrently,
+//! so `find_or_alloc_slot` uses a post-allocation re-scan to deduplicate.
 
 use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, Ordering};
 
@@ -165,6 +165,22 @@ unsafe fn find_or_alloc_slot(
             return (std::ptr::null_mut(), 0);
         }
 
+        // Re-scan 0..new_idx for a concurrent registration of the same hash.
+        // With Parallelism::Cores(N), multiple children can race here.
+        for i in 0..new_idx {
+            let existing = base.add(i);
+            if (*existing).msg_hash == hash {
+                // Another process beat us. Zero our slot (tombstone, msg_hash = 0).
+                std::ptr::write_bytes(
+                    base.add(new_idx) as *mut u8,
+                    0,
+                    std::mem::size_of::<AssertionSlot>(),
+                );
+                return (existing, i);
+            }
+        }
+
+        // No duplicate found — write our new slot.
         let slot = base.add(new_idx);
         let mut msg_buf = [0u8; SLOT_MSG_LEN];
         let n = msg.len().min(SLOT_MSG_LEN - 1);
@@ -463,9 +479,13 @@ pub fn assertion_read_all() -> Vec<AssertionSlotSnapshot> {
         let base = table_ptr.add(8) as *const AssertionSlot;
 
         (0..count)
-            .map(|i| {
+            .filter_map(|i| {
                 let slot = &*base.add(i);
-                AssertionSlotSnapshot {
+                // Skip tombstones (msg_hash == 0) left by the duplicate-slot race fix.
+                if slot.msg_hash == 0 {
+                    return None;
+                }
+                Some(AssertionSlotSnapshot {
                     msg: slot.msg_str().to_string(),
                     kind: slot.kind,
                     must_hit: slot.must_hit,
@@ -473,7 +493,7 @@ pub fn assertion_read_all() -> Vec<AssertionSlotSnapshot> {
                     fail_count: slot.fail_count,
                     watermark: slot.watermark,
                     frontier: slot.frontier,
-                }
+                })
             })
             .collect()
     }

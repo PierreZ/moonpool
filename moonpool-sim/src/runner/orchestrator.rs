@@ -1022,6 +1022,9 @@ impl IterationManager {
             super::builder::IterationControl::TimeLimit(duration) => {
                 self.start_time.elapsed() < *duration
             }
+            super::builder::IterationControl::UntilConverged { max_iterations } => {
+                self.iteration_count < *max_iterations
+            }
         }
     }
 
@@ -1050,6 +1053,9 @@ impl IterationManager {
             match &self.control {
                 super::builder::IterationControl::FixedCount(count) => *count,
                 super::builder::IterationControl::TimeLimit(_) => 0,
+                super::builder::IterationControl::UntilConverged { max_iterations } => {
+                    *max_iterations
+                }
             }
         );
 
@@ -1158,6 +1164,7 @@ impl MetricsCollector {
         exploration: Option<super::report::ExplorationReport>,
         assertion_details: Vec<super::report::AssertionDetail>,
         bucket_summaries: Vec<super::report::BucketSiteSummary>,
+        convergence_timeout: bool,
     ) -> super::report::SimulationReport {
         super::report::SimulationReport {
             iterations: iteration_count,
@@ -1173,6 +1180,7 @@ impl MetricsCollector {
             exploration,
             assertion_details,
             bucket_summaries,
+            convergence_timeout,
         }
     }
 }

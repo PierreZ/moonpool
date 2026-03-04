@@ -64,6 +64,8 @@ pub struct ExplorationReport {
     pub sancov_edges_total: usize,
     /// Code edges covered across all timelines. 0 when sancov unavailable.
     pub sancov_edges_covered: usize,
+    /// Whether the multi-seed loop stopped because convergence was detected.
+    pub converged: bool,
 }
 
 /// Pass/fail/miss status for an assertion in the report.
@@ -136,9 +138,20 @@ pub struct SimulationReport {
     pub assertion_details: Vec<AssertionDetail>,
     /// Per-site summaries of `assert_sometimes_each!` buckets.
     pub bucket_summaries: Vec<BucketSiteSummary>,
+    /// True when `UntilConverged` hit its iteration cap without converging.
+    pub convergence_timeout: bool,
 }
 
 impl SimulationReport {
+    /// Whether the simulation run is considered successful.
+    ///
+    /// Returns `false` when any of the following hold:
+    /// - There are assertion violations (always-type failures).
+    /// - `UntilConverged` hit its iteration cap without converging.
+    pub fn is_success(&self) -> bool {
+        self.assertion_violations.is_empty() && !self.convergence_timeout
+    }
+
     /// Calculate the success rate as a percentage.
     pub fn success_rate(&self) -> f64 {
         if self.iterations == 0 {
@@ -462,6 +475,13 @@ impl fmt::Display for SimulationReport {
                     fmt_num(bs.total_hits)
                 )?;
             }
+        }
+
+        // === Convergence Timeout ===
+        if self.convergence_timeout {
+            writeln!(f)?;
+            writeln!(f, "--- Convergence FAILED ---")?;
+            writeln!(f, "  UntilConverged hit iteration cap without converging.")?;
         }
 
         // === Per-Seed Metrics ===
