@@ -120,6 +120,12 @@ impl InMemoryStateStore {
         }
     }
 
+    /// Clear all stored state. Used between simulation iterations.
+    pub fn clear(&self) {
+        self.entries.borrow_mut().clear();
+        self.counter.set(0);
+    }
+
     fn next_etag(&self) -> String {
         let val = self.counter.get() + 1;
         self.counter.set(val);

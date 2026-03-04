@@ -28,7 +28,7 @@ const SIM_BINARIES: &[SimBinary] = &[
         sancov_crates: "moonpool_explorer",
     },
     SimBinary {
-        name: "sim-banking-chaos",
+        name: "sim-spacesim",
         sancov_crates: "moonpool,moonpool_transport",
     },
     SimBinary {
