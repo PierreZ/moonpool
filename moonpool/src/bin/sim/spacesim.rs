@@ -7,7 +7,7 @@ use moonpool::actors::{
     SharedMembership,
 };
 use moonpool::simulations::spacesim::{
-    invariants::{CreditConservation, NonNegativeBalances},
+    invariants::{CargoConservation, CreditConservation, NonNegativeBalances},
     workloads::{SpaceProcess, SpaceWorkload},
 };
 use moonpool_sim::{AdaptiveConfig, ExplorationConfig, Parallelism, SimulationBuilder};
@@ -48,6 +48,7 @@ fn main() {
             })
             .workload(SpaceWorkload::new(200, &stations, cluster, state_store))
             .invariant(CreditConservation)
+            .invariant(CargoConservation)
             .invariant(NonNegativeBalances)
             .enable_exploration(ExplorationConfig {
                 max_depth: 30,

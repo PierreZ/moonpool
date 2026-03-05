@@ -26,6 +26,24 @@ pub struct WithdrawCreditsRequest {
     pub amount: i64,
 }
 
+/// Request to add cargo to a station.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddCargoRequest {
+    /// Commodity name.
+    pub commodity: String,
+    /// Amount to add.
+    pub amount: i64,
+}
+
+/// Request to remove cargo from a station.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoveCargoRequest {
+    /// Commodity name.
+    pub commodity: String,
+    /// Amount to remove.
+    pub amount: i64,
+}
+
 /// Request to query a station's current state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryStateRequest {}
@@ -62,6 +80,12 @@ pub trait Station {
         &mut self,
         req: WithdrawCreditsRequest,
     ) -> Result<StationResponse, RpcError>;
+
+    /// Add cargo to the station.
+    async fn add_cargo(&mut self, req: AddCargoRequest) -> Result<StationResponse, RpcError>;
+
+    /// Remove cargo from the station.
+    async fn remove_cargo(&mut self, req: RemoveCargoRequest) -> Result<StationResponse, RpcError>;
 
     /// Query the current station state.
     async fn query_state(&mut self, req: QueryStateRequest) -> Result<StationResponse, RpcError>;
@@ -115,6 +139,30 @@ impl Station for StationActorImpl {
         // The actor always succeeds.
         if let Some(s) = &mut self.state {
             s.state_mut().credits -= req.amount;
+            let _ = s.write_state().await;
+        }
+        Ok(self.response())
+    }
+
+    async fn add_cargo<P: Providers, C: MessageCodec>(
+        &mut self,
+        _ctx: &ActorContext<P, C>,
+        req: AddCargoRequest,
+    ) -> Result<StationResponse, RpcError> {
+        if let Some(s) = &mut self.state {
+            *s.state_mut().inventory.entry(req.commodity).or_insert(0) += req.amount;
+            let _ = s.write_state().await;
+        }
+        Ok(self.response())
+    }
+
+    async fn remove_cargo<P: Providers, C: MessageCodec>(
+        &mut self,
+        _ctx: &ActorContext<P, C>,
+        req: RemoveCargoRequest,
+    ) -> Result<StationResponse, RpcError> {
+        if let Some(s) = &mut self.state {
+            *s.state_mut().inventory.entry(req.commodity).or_insert(0) -= req.amount;
             let _ = s.write_state().await;
         }
         Ok(self.response())

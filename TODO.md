@@ -148,7 +148,7 @@ trait Station {
 
 ---
 
-## [ ] Commit 2: `feat(sim): add cargo tracking and VerifyAll operation to spacesim`
+## [x] Commit 2: `feat(sim): add cargo tracking and VerifyAll operation to spacesim`
 
 **Goal**: Extend StationActor with cargo operations. Add cross-verification that queries all stations and compares to model.
 

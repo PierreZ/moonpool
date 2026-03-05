@@ -15,7 +15,8 @@ use moonpool_sim::providers::SimProviders;
 use moonpool_sim::{Process, SimContext, SimulationResult, assert_always, assert_sometimes};
 
 use super::actors::{
-    DepositCreditsRequest, QueryStateRequest, StationActorImpl, StationRef, WithdrawCreditsRequest,
+    AddCargoRequest, DepositCreditsRequest, QueryStateRequest, RemoveCargoRequest,
+    StationActorImpl, StationRef, WithdrawCreditsRequest,
 };
 use super::model::{SPACE_MODEL_KEY, SpaceModel};
 use super::operations::{SpaceOp, random_op};
@@ -241,6 +242,97 @@ impl moonpool_sim::Workload for SpaceWorkload {
                         }
                     }
                 }
+                SpaceOp::AddCargo {
+                    station,
+                    commodity,
+                    amount,
+                } => {
+                    let actor_ref: StationRef<_> = node.actor_ref(station.clone());
+                    match actor_ref
+                        .add_cargo(AddCargoRequest {
+                            commodity: commodity.clone(),
+                            amount,
+                        })
+                        .await
+                    {
+                        Ok(resp) => {
+                            self.model.add_cargo(&station, &commodity, amount);
+                            let expected = self.model.station_cargo(&station, &commodity);
+                            let actual = resp.inventory.get(&commodity).copied().unwrap_or(0);
+                            assert_always!(actual == expected, "add_cargo inventory mismatch");
+                        }
+                        Err(e) => {
+                            tracing::warn!("add_cargo failed: {}", e);
+                        }
+                    }
+                }
+                SpaceOp::RemoveCargo {
+                    station,
+                    commodity,
+                    amount,
+                } => {
+                    let can_remove = self.model.station_cargo(&station, &commodity) >= amount;
+                    if !can_remove {
+                        assert_sometimes!(true, "remove_cargo_rejected");
+                        continue;
+                    }
+                    let actor_ref: StationRef<_> = node.actor_ref(station.clone());
+                    match actor_ref
+                        .remove_cargo(RemoveCargoRequest {
+                            commodity: commodity.clone(),
+                            amount,
+                        })
+                        .await
+                    {
+                        Ok(resp) => {
+                            let removed = self.model.remove_cargo(&station, &commodity, amount);
+                            assert_always!(
+                                removed,
+                                "model remove_cargo should succeed when actor succeeded"
+                            );
+                            let expected = self.model.station_cargo(&station, &commodity);
+                            let actual = resp.inventory.get(&commodity).copied().unwrap_or(0);
+                            assert_always!(actual == expected, "remove_cargo inventory mismatch");
+                            assert_sometimes!(true, "remove_cargo_succeeded");
+                        }
+                        Err(e) => {
+                            tracing::warn!("remove_cargo failed: {}", e);
+                        }
+                    }
+                }
+                SpaceOp::VerifyAll => {
+                    let mut all_match = true;
+                    for name in &self.station_names {
+                        let actor_ref: StationRef<_> = node.actor_ref(name.clone());
+                        match actor_ref.query_state(QueryStateRequest {}).await {
+                            Ok(resp) => {
+                                let expected_credits = self.model.station_credits(name);
+                                assert_always!(
+                                    resp.credits == expected_credits,
+                                    "verify: credit mismatch"
+                                );
+                                let expected_inv = self
+                                    .model
+                                    .stations
+                                    .get(name)
+                                    .map(|s| &s.inventory)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                assert_always!(
+                                    resp.inventory == expected_inv,
+                                    "verify: cargo mismatch"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!("verify query failed for {}: {}", name, e);
+                                all_match = false;
+                            }
+                        }
+                    }
+                    if all_match {
+                        assert_sometimes!(true, "verify_all_passed");
+                    }
+                }
                 SpaceOp::SmallDelay => {
                     let _ = ctx.time().sleep(Duration::from_millis(10)).await;
                 }
@@ -264,6 +356,12 @@ impl moonpool_sim::Workload for SpaceWorkload {
         // Final non-negative check
         for station in self.model.stations.values() {
             assert_always!(station.credits >= 0, "final non-negative station credits");
+        }
+
+        // Final cargo conservation check
+        for (commodity, &expected) in &self.model.total_cargo {
+            let actual = self.model.total_cargo_for(commodity);
+            assert_always!(actual == expected, "final cargo conservation");
         }
 
         // Publish final model

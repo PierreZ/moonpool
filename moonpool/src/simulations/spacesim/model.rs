@@ -18,6 +18,8 @@ pub struct SpaceModel {
     pub stations: BTreeMap<String, StationState>,
     /// Sum of all station credits (invariant target).
     pub total_credits: i64,
+    /// Sum of all cargo per commodity (invariant target).
+    pub total_cargo: BTreeMap<String, i64>,
 }
 
 /// Per-station expected state.
@@ -71,8 +73,45 @@ impl SpaceModel {
         self.stations.values().map(|s| s.credits).sum()
     }
 
+    /// Add cargo to a station.
+    pub fn add_cargo(&mut self, name: &str, commodity: &str, amount: i64) {
+        let station = self.stations.entry(name.to_string()).or_default();
+        *station.inventory.entry(commodity.to_string()).or_insert(0) += amount;
+        *self.total_cargo.entry(commodity.to_string()).or_insert(0) += amount;
+    }
+
+    /// Remove cargo from a station. Returns true if successful (sufficient cargo).
+    pub fn remove_cargo(&mut self, name: &str, commodity: &str, amount: i64) -> bool {
+        let station = self.stations.entry(name.to_string()).or_default();
+        let current = station.inventory.get(commodity).copied().unwrap_or(0);
+        if current >= amount {
+            *station.inventory.entry(commodity.to_string()).or_insert(0) -= amount;
+            *self.total_cargo.entry(commodity.to_string()).or_insert(0) -= amount;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get a station's cargo for a specific commodity.
+    pub fn station_cargo(&self, name: &str, commodity: &str) -> i64 {
+        self.stations
+            .get(name)
+            .and_then(|s| s.inventory.get(commodity))
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// Get a station's inventory.
     pub fn station_inventory(&self, name: &str) -> Option<&BTreeMap<String, i64>> {
         self.stations.get(name).map(|s| &s.inventory)
+    }
+
+    /// Sum of all cargo for a commodity across all stations.
+    pub fn total_cargo_for(&self, commodity: &str) -> i64 {
+        self.stations
+            .values()
+            .map(|s| s.inventory.get(commodity).copied().unwrap_or(0))
+            .sum()
     }
 }

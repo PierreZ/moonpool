@@ -23,6 +23,24 @@ impl Invariant for CreditConservation {
     }
 }
 
+/// Cargo conservation invariant: sum(station cargo[c]) == total_cargo[c] for all commodities.
+pub struct CargoConservation;
+
+impl Invariant for CargoConservation {
+    fn name(&self) -> &str {
+        "cargo_conservation"
+    }
+
+    fn check(&self, state: &StateHandle, _sim_time_ms: u64) {
+        if let Some(model) = state.get::<SpaceModel>(SPACE_MODEL_KEY) {
+            for (commodity, &expected) in &model.total_cargo {
+                let actual = model.total_cargo_for(commodity);
+                assert_always!(actual == expected, "cargo conservation violated");
+            }
+        }
+    }
+}
+
 /// Non-negative balances invariant: all station credits >= 0.
 pub struct NonNegativeBalances;
 
