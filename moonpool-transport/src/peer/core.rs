@@ -267,6 +267,10 @@ struct PeerSharedState<P: Providers> {
 
     /// Metrics collection
     metrics: PeerMetrics,
+
+    /// Fired on every connection failure.
+    /// FDB ref: `Peer::disconnect` (`FlowTransport.h:180`)
+    disconnect_notify: Rc<Notify>,
 }
 
 impl<P: Providers> PeerSharedState<P> {
@@ -292,6 +296,7 @@ impl<P: Providers> Peer<P> {
             unreliable_queue: VecDeque::new(),
             reconnect_state,
             metrics: PeerMetrics::new_at(now),
+            disconnect_notify: Rc::new(Notify::new()),
         }));
 
         // Create coordination primitives
@@ -355,6 +360,7 @@ impl<P: Providers> Peer<P> {
             unreliable_queue: VecDeque::new(),
             reconnect_state,
             metrics: PeerMetrics::new_at(now),
+            disconnect_notify: Rc::new(Notify::new()),
         }));
 
         // Mark metrics as connected
@@ -397,6 +403,17 @@ impl<P: Providers> Peer<P> {
     /// Check if currently connected.
     pub fn is_connected(&self) -> bool {
         self.shared_state.borrow().connection.is_some()
+    }
+
+    /// Get the disconnect notification handle.
+    ///
+    /// FDB ref: `Peer::disconnect` (`FlowTransport.h:180`)
+    ///
+    /// Returns an `Rc<Notify>` that fires `notify_waiters()` on every
+    /// connection failure. Consumers should call `.notified()` before
+    /// checking `is_connected()` to avoid races.
+    pub fn disconnect_notify(&self) -> Rc<Notify> {
+        self.shared_state.borrow().disconnect_notify.clone()
     }
 
     /// Get current queue size (reliable + unreliable).
@@ -815,7 +832,7 @@ async fn connection_task<P: Providers>(
                                 &mut current_connection,
                                 &mut read_buffer,
                                 Some((data, is_reliable)),
-                            );
+                                );
                             if let Some(ref mut tracker) = ping_tracker {
                                 tracker.reset();
                             }
@@ -974,7 +991,7 @@ async fn connection_task<P: Providers>(
                                 &mut current_connection,
                                 &mut read_buffer,
                                 None,
-                            );
+                                );
                             if on_connection_loss == ConnectionLossBehavior::Exit {
                                 break;
                             }
@@ -992,6 +1009,8 @@ async fn connection_task<P: Providers>(
 // =============================================================================
 
 /// Handle connection failure by clearing state and optionally requeuing data.
+///
+/// Fires `disconnect_notify` to wake all watchers (FDB pattern: `Peer::disconnect`).
 fn handle_connection_failure<P: Providers>(
     shared_state: &Rc<RefCell<PeerSharedState<P>>>,
     current_connection: &mut Option<<P::Network as moonpool_core::NetworkProvider>::TcpStream>,
@@ -1001,32 +1020,39 @@ fn handle_connection_failure<P: Providers>(
     *current_connection = None;
     read_buffer.clear();
 
-    let mut state = shared_state.borrow_mut();
-    state.connection = None;
-    state.metrics.is_connected = false;
+    let disconnect_notify = {
+        let mut state = shared_state.borrow_mut();
+        state.connection = None;
+        state.metrics.is_connected = false;
 
-    // Handle the failed send if provided
-    if let Some((data, is_reliable)) = failed_send {
-        if is_reliable {
-            assert_reachable!("reliable_message_requeued");
-            state.reliable_queue.push_front(data);
-        } else {
-            state.metrics.record_message_dropped();
+        // Handle the failed send if provided
+        if let Some((data, is_reliable)) = failed_send {
+            if is_reliable {
+                assert_reachable!("reliable_message_requeued");
+                state.reliable_queue.push_front(data);
+            } else {
+                state.metrics.record_message_dropped();
+            }
         }
-    }
 
-    // Discard all remaining unreliable packets (FDB pattern: discardUnreliablePackets)
-    let unreliable_count = state.unreliable_queue.len();
-    if unreliable_count > 0 {
-        tracing::debug!(
-            "connection_task: discarding {} unreliable packets on failure",
-            unreliable_count
-        );
-        for _ in 0..unreliable_count {
-            state.metrics.record_message_dropped();
+        // Discard all remaining unreliable packets (FDB pattern: discardUnreliablePackets)
+        let unreliable_count = state.unreliable_queue.len();
+        if unreliable_count > 0 {
+            tracing::debug!(
+                "connection_task: discarding {} unreliable packets on failure",
+                unreliable_count
+            );
+            for _ in 0..unreliable_count {
+                state.metrics.record_message_dropped();
+            }
+            state.unreliable_queue.clear();
         }
-        state.unreliable_queue.clear();
-    }
+
+        state.disconnect_notify.clone()
+    };
+
+    // Wake all disconnect watchers (FDB: Peer::disconnect.send(Void()))
+    disconnect_notify.notify_waiters();
 }
 
 /// Process the read buffer and parse packets.
@@ -1139,7 +1165,7 @@ fn process_read_buffer<P: Providers>(
                     tracker.reset();
                 }
 
-                {
+                let disconnect_notify = {
                     let mut state = shared_state.borrow_mut();
                     state.connection = None;
                     state.metrics.is_connected = false;
@@ -1156,7 +1182,12 @@ fn process_read_buffer<P: Providers>(
                         }
                         state.unreliable_queue.clear();
                     }
-                }
+
+                    state.disconnect_notify.clone()
+                };
+
+                // Wake all disconnect watchers (FDB: Peer::disconnect.send(Void()))
+                disconnect_notify.notify_waiters();
 
                 return on_connection_loss == ConnectionLossBehavior::Exit;
             }
