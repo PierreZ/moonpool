@@ -35,22 +35,17 @@ use crate::error::MessagingError;
 
 /// Send a typed request and return a future for the response.
 ///
-/// This is the primary client-side RPC function. It:
+/// This is the primary client-side RPC function using **reliable delivery**
+/// (at-least-once). It:
 /// 1. Creates a temporary endpoint for receiving the reply
 /// 2. Wraps the request in a `RequestEnvelope` with the reply endpoint
-/// 3. Sends the envelope to the destination
+/// 3. Sends the envelope reliably (survives reconnection)
 /// 4. Returns a `ReplyFuture` that resolves when the server responds
 ///
-/// # Arguments
-///
-/// * `transport` - The NetTransport to use for sending
-/// * `destination` - The server endpoint to send the request to
-/// * `request` - The request payload
-/// * `codec` - The codec for serialization
-///
-/// # Returns
-///
-/// A `ReplyFuture` that resolves to the response or an error.
+/// For delivery mode functions with different guarantees, see
+/// [`get_reply`](super::delivery::get_reply),
+/// [`try_get_reply`](super::delivery::try_get_reply), and
+/// [`send`](super::delivery::send).
 ///
 /// # Errors
 ///
@@ -67,37 +62,76 @@ where
     P: Providers,
     C: MessageCodec,
 {
-    // Generate a unique token for the reply endpoint using deterministic random
+    prepare_and_send(transport, destination, request, codec, |t, ep, payload| {
+        t.send_reliable(ep, payload)
+    })
+}
+
+/// Send a typed request **unreliably** and return a future for the response.
+///
+/// Same as [`send_request`] but uses unreliable transport — the request is
+/// dropped on connection failure instead of being retransmitted. Used by
+/// [`try_get_reply`](super::delivery::try_get_reply) for at-most-once semantics.
+///
+/// # FDB Reference
+/// `sendUnreliable` in `tryGetReply` (fdbrpc.h:797)
+pub(crate) fn send_request_unreliable<Req, Resp, P, C>(
+    transport: &NetTransport<P>,
+    destination: &Endpoint,
+    request: Req,
+    codec: C,
+) -> Result<ReplyFuture<Resp, C>, MessagingError>
+where
+    Req: Serialize,
+    Resp: DeserializeOwned + 'static,
+    P: Providers,
+    C: MessageCodec,
+{
+    prepare_and_send(transport, destination, request, codec, |t, ep, payload| {
+        t.send_unreliable(ep, payload)
+    })
+}
+
+/// Shared request preparation: create reply queue, serialize envelope, send via
+/// caller-provided function, register pending reply for disconnect cleanup.
+fn prepare_and_send<Req, Resp, P, C, F>(
+    transport: &NetTransport<P>,
+    destination: &Endpoint,
+    request: Req,
+    codec: C,
+    send_fn: F,
+) -> Result<ReplyFuture<Resp, C>, MessagingError>
+where
+    Req: Serialize,
+    Resp: DeserializeOwned + 'static,
+    P: Providers,
+    C: MessageCodec,
+    F: FnOnce(&NetTransport<P>, &Endpoint, &[u8]) -> Result<(), MessagingError>,
+{
     let reply_token = UID::new(
         transport.random().random::<u64>(),
         transport.random().random::<u64>(),
     );
 
-    // Create reply endpoint using transport's local address
     let reply_endpoint = Endpoint::new(transport.local_address().clone(), reply_token);
 
-    // Create queue for receiving the reply
     let reply_queue: Rc<NetNotifiedQueue<Result<Resp, ReplyError>, C>> =
         Rc::new(NetNotifiedQueue::new(reply_endpoint.clone(), codec.clone()));
 
-    // Register the reply queue with transport
     transport.register(reply_token, reply_queue.clone());
 
-    // Create the request envelope
     let envelope = RequestEnvelope {
         request,
         reply_to: reply_endpoint.clone(),
     };
 
-    // Serialize the envelope
     let payload = codec
         .encode(&envelope)
         .map_err(|e| MessagingError::SerializationFailed {
             message: e.to_string(),
         })?;
 
-    // Send the request (reliable so it survives reconnection)
-    transport.send_reliable(destination, &payload)?;
+    send_fn(transport, destination, &payload)?;
 
     // Track this reply queue for disconnect cleanup (skip local sends)
     if !transport.is_local_address(&destination.address) {
@@ -109,7 +143,6 @@ where
         );
     }
 
-    // Return the reply future
     Ok(ReplyFuture::new(reply_queue, reply_endpoint))
 }
 

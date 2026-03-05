@@ -12,6 +12,7 @@
 //! Well-known endpoints (Ping, EndpointNotFound) use deterministic addressing.
 //! Dynamic endpoints are allocated at runtime but still have fixed lifetimes.
 
+mod delivery;
 mod endpoint_map;
 mod failure_monitor;
 mod interface;
@@ -25,6 +26,7 @@ mod request_stream;
 mod rpc_error;
 mod server_handle;
 
+pub use delivery::{get_reply, get_reply_unless_failed_for, send, try_get_reply};
 pub use endpoint_map::{EndpointMap, MessageReceiver};
 pub use failure_monitor::{FailedReason, FailureMonitor, FailureStatus};
 pub use interface::{method_endpoint, method_uid};

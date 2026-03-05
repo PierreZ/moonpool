@@ -216,7 +216,8 @@ This is the fundamental at-most-once delivery problem (FDB error_code 1030: `req
 - ~~2.7a~~ Peer disconnect signal — done (commit `642364d`)
 - ~~2.7b~~ FailureMonitor — done (address/endpoint failure tracking, 11 unit tests, wired into connection_task)
 - ~~2.7c~~ MaybeDelivered error + reply queue closure on disconnect — done
-- **Next: 2.7d** — 4 delivery modes (send, try_get_reply, get_reply, get_reply_unless_failed_for)
+- ~~2.7d~~ 4 delivery modes — done (send, try_get_reply, get_reply, get_reply_unless_failed_for)
+- **Next: 2.8** — Make spacesim RPC fault-aware with try_get_reply
 
 **New reference files added:**
 - `docs/references/foundationdb/FailureMonitor.{h,actor.cpp}` — address/endpoint failure tracking
@@ -237,7 +238,7 @@ This is the fundamental at-most-once delivery problem (FDB error_code 1030: `req
 - ❌ FailureMonitor (`notify_disconnect`, `on_disconnect_or_failure`)
 - ~~❌ `request_maybe_delivered` error (MaybeDelivered vs NotDelivered)~~
 - ~~❌ Reply queue closure on peer disconnect (ReplyFutures hang until 30s timeout)~~
-- ❌ 3 delivery modes: `send()` / `try_get_reply()` / `get_reply()`
+- ~~❌ 3 delivery modes: `send()` / `try_get_reply()` / `get_reply()`~~
 - ❌ Request IDs for dedup
 - ❌ sendUnreliable exposed to RPC layer
 
@@ -387,7 +388,7 @@ Add `close_reason: Option<ReplyError>` to `NetNotifiedQueueInner` to distinguish
 
 ---
 
-## [ ] Commit 2.7d: `feat(transport): add try_get_reply and send delivery modes`
+## [x] Commit 2.7d: `feat(transport): add try_get_reply and send delivery modes`
 
 **Goal**: The 4 FDB delivery modes as free functions.
 
@@ -616,7 +617,7 @@ if buggify!() { ctx.time().sleep(Duration::from_millis(50)).await; } // slow wri
 | ~~2.7a~~ | ~~Peer disconnect signal~~ | ~~moonpool-transport~~ | ~~Signal fires on connection loss~~ |
 | ~~2.7b~~ | ~~FailureMonitor~~ | ~~moonpool-transport~~ | ~~Watchers wake on disconnect~~ |
 | ~~2.7c~~ | ~~MaybeDelivered + reply queue closure~~ | ~~moonpool-transport~~ | ~~Fast failure (~2s vs 30s)~~ |
-| 2.7d | 4 delivery modes | moonpool-transport | try_get_reply returns MaybeDelivered |
+| ~~2.7d~~ | ~~4 delivery modes~~ | ~~moonpool-transport~~ | ~~try_get_reply returns MaybeDelivered~~ |
 | 2.8 | Spacesim fault-aware RPCs | moonpool (spacesim) | Model reconciliation after ambiguity |
 | 3 | Multi-process (3 nodes) | moonpool (spacesim) | **First multi-node test** |
 | 4 | ShipActor + actor-to-actor | moonpool (spacesim) | Cross-actor RPC |
