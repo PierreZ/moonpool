@@ -369,6 +369,7 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
             address.clone(),
             self.cluster.placement_director().clone(),
             membership,
+            transport.providers().time().clone(),
             self.codec,
         ));
 

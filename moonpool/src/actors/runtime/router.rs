@@ -24,7 +24,9 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::time::Duration;
 
+use moonpool_core::TimeProvider;
 use moonpool_sim::assert_sometimes;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -32,6 +34,9 @@ use serde::de::DeserializeOwned;
 use crate::{
     Endpoint, JsonCodec, MessageCodec, NetTransport, NetworkAddress, Providers, UID, send_request,
 };
+
+/// Default RPC timeout for actor requests (30 seconds).
+const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
 use crate::actors::infrastructure::membership::MembershipProvider;
 use crate::actors::infrastructure::placement::{PlacementDirector, PlacementStrategy};
@@ -74,6 +79,10 @@ pub enum ActorError {
     /// RPC-level error (wraps MessagingError or ReplyError).
     #[error("rpc error: {0}")]
     Rpc(#[from] crate::RpcError),
+
+    /// The RPC request timed out waiting for a response.
+    #[error("rpc timeout after {0:?}")]
+    Timeout(Duration),
 }
 
 /// Caller-side actor request router.
@@ -99,6 +108,8 @@ pub struct ActorRouter<P: Providers, C: MessageCodec = JsonCodec> {
     placement_director: Rc<dyn PlacementDirector>,
     placement_registry: RefCell<BTreeMap<ActorType, PlacementStrategy>>,
     membership: Rc<dyn MembershipProvider>,
+    time: P::Time,
+    rpc_timeout: Duration,
     codec: C,
 }
 
@@ -119,6 +130,7 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
         local_address: NetworkAddress,
         placement_director: Rc<dyn PlacementDirector>,
         membership: Rc<dyn MembershipProvider>,
+        time: P::Time,
         codec: C,
     ) -> Self {
         Self {
@@ -128,8 +140,20 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
             placement_director,
             placement_registry: RefCell::new(BTreeMap::new()),
             membership,
+            time,
+            rpc_timeout: DEFAULT_RPC_TIMEOUT,
             codec,
         }
+    }
+
+    /// Get the RPC timeout duration.
+    pub fn rpc_timeout(&self) -> Duration {
+        self.rpc_timeout
+    }
+
+    /// Get a reference to the time provider.
+    pub fn time(&self) -> &P::Time {
+        &self.time
     }
 
     /// Register a per-actor-type placement strategy hint.
@@ -190,8 +214,12 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
         let dest = Endpoint::new(endpoint.address.clone(), UID::new(target.actor_type.0, 0));
         let future = send_request(&self.transport, &dest, actor_msg, self.codec.clone())?;
 
-        // 5. Await and decode response
-        let response: ActorResponse = future.await?;
+        // 5. Await and decode response (with RPC timeout)
+        let response: ActorResponse = self
+            .time
+            .timeout(self.rpc_timeout, future)
+            .await
+            .map_err(|_| ActorError::Timeout(self.rpc_timeout))??;
 
         // 6. Handle cache invalidation if present
         if let Some(invalidation) = &response.cache_invalidation {
@@ -414,6 +442,7 @@ mod tests {
             test_address(),
             director,
             membership,
+            crate::TokioTimeProvider::new(),
             JsonCodec,
         );
     }
@@ -436,6 +465,7 @@ mod tests {
             test_address(),
             director,
             membership,
+            crate::TokioTimeProvider::new(),
             JsonCodec,
         );
 
@@ -477,6 +507,7 @@ mod tests {
             test_address(),
             director,
             membership,
+            crate::TokioTimeProvider::new(),
             JsonCodec,
         );
 

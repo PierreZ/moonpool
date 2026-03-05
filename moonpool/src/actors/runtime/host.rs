@@ -470,6 +470,7 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
                     actor_type,
                     &codec,
                     reply,
+                    router.rpc_timeout(),
                 );
             }
             _ => {
@@ -651,6 +652,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                         actor_type,
                         &codec,
                         reply,
+                        router.rpc_timeout(),
                     );
                     // Drain queued messages (arrived while we were activating)
                     while let Some((queued_msg, queued_reply)) = mailbox.try_recv() {
@@ -662,6 +664,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                             actor_type,
                             &codec,
                             queued_reply,
+                            router.rpc_timeout(),
                         );
                     }
                     mailbox.mark_dead();
@@ -778,6 +781,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
 /// Increments `forward_count` and sends the message to the registered endpoint.
 /// The response is proxied back to the original caller with a `CacheInvalidation`
 /// hint appended.
+#[allow(clippy::too_many_arguments)]
 fn forward_message<P: Providers, C: MessageCodec>(
     transport: &Rc<NetTransport<P>>,
     actor_msg: &ActorMessage,
@@ -786,6 +790,7 @@ fn forward_message<P: Providers, C: MessageCodec>(
     actor_type: ActorType,
     codec: &C,
     reply: crate::ReplyPromise<ActorResponse, C>,
+    rpc_timeout: std::time::Duration,
 ) {
     // Check forward count limit
     if actor_msg.forward_count >= MAX_FORWARD_COUNT {
@@ -832,9 +837,10 @@ fn forward_message<P: Providers, C: MessageCodec>(
     match crate::send_request(transport, &dest, forwarded_msg, codec.clone()) {
         Ok(future) => {
             // Spawn a task to proxy the response back
+            let time = transport.providers().time().clone();
             transport.providers().task().spawn_task(
                 "actor_forward_proxy",
-                proxy_forwarded_response(future, reply, cache_invalidation),
+                proxy_forwarded_response(future, reply, cache_invalidation, time, rpc_timeout),
             );
         }
         Err(_e) => {
@@ -854,18 +860,20 @@ fn forward_message<P: Providers, C: MessageCodec>(
 
 /// Proxy the response from a forwarded message back to the original caller,
 /// attaching the cache invalidation hint.
-async fn proxy_forwarded_response<C: MessageCodec>(
+async fn proxy_forwarded_response<T: moonpool_core::TimeProvider, C: MessageCodec>(
     future: crate::ReplyFuture<ActorResponse, C>,
     reply: crate::ReplyPromise<ActorResponse, C>,
     cache_invalidation: CacheInvalidation,
+    time: T,
+    rpc_timeout: std::time::Duration,
 ) {
-    match future.await {
-        Ok(mut response) => {
+    match time.timeout(rpc_timeout, future).await {
+        Ok(Ok(mut response)) => {
             // Attach cache invalidation hint so caller updates its directory
             response.cache_invalidation = Some(cache_invalidation);
             reply.send(response);
         }
-        Err(_e) => {
+        Ok(Err(_)) | Err(_) => {
             reply.send(ActorResponse {
                 body: Err("forwarded request failed".to_string()),
                 cache_invalidation: Some(cache_invalidation),
@@ -1120,6 +1128,7 @@ mod tests {
             local_addr,
             director,
             membership,
+            crate::TokioTimeProvider::new(),
             JsonCodec,
         ));
         let host = ActorHost::new(transport, router.clone(), directory.clone());
@@ -1377,6 +1386,7 @@ mod tests {
                 local_addr,
                 director,
                 membership,
+                crate::TokioTimeProvider::new(),
                 JsonCodec,
             ));
 
