@@ -6,4 +6,7 @@ pub(crate) mod lifecycle;
 
 pub use cluster::{ClusterConfig, ClusterConfigBuilder, ClusterConfigError};
 pub use config::{NodeConfig, NodeConfigBuilder};
-pub use lifecycle::{MoonpoolNode, MoonpoolNodeBuilder, NodeError, NodeLifecycle};
+pub use lifecycle::{
+    MoonpoolClient, MoonpoolClientBuilder, MoonpoolNode, MoonpoolNodeBuilder, NodeError,
+    NodeLifecycle,
+};

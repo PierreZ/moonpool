@@ -10,8 +10,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::actors::{
-    ActorStateStore, ClusterConfig, InMemoryDirectory, InMemoryStateStore, MoonpoolNode,
-    NodeConfig, SharedMembership,
+    ActorStateStore, ClusterConfig, InMemoryDirectory, MoonpoolClient, MoonpoolNode, NodeConfig,
+    SharedMembership,
 };
 use crate::{NetworkAddress, RandomProvider, TimeProvider};
 use moonpool_sim::providers::SimProviders;
@@ -89,16 +89,14 @@ pub struct SpaceWorkload {
     station_names: Vec<String>,
     /// Shared cluster config.
     cluster: ClusterConfig,
-    /// Shared state store (concrete for `clear()`).
-    state_store: Rc<InMemoryStateStore>,
     /// Concrete directory (for `set_state_handle`).
     directory: Rc<InMemoryDirectory>,
     /// Concrete membership (for `set_state_handle`).
     membership: Rc<SharedMembership>,
     /// Reference model.
     model: SpaceModel,
-    /// Actor runtime (populated in setup).
-    node: Option<MoonpoolNode<SimProviders>>,
+    /// Client runtime (populated in setup).
+    client: Option<MoonpoolClient<SimProviders>>,
 }
 
 impl SpaceWorkload {
@@ -107,7 +105,6 @@ impl SpaceWorkload {
         num_ops: usize,
         stations: &[&str],
         cluster: ClusterConfig,
-        state_store: Rc<InMemoryStateStore>,
         directory: Rc<InMemoryDirectory>,
         membership: Rc<SharedMembership>,
     ) -> Self {
@@ -115,11 +112,10 @@ impl SpaceWorkload {
             num_ops,
             station_names: stations.iter().map(|s| s.to_string()).collect(),
             cluster,
-            state_store,
             directory,
             membership,
             model: SpaceModel::new(),
-            node: None,
+            client: None,
         }
     }
 }
@@ -132,7 +128,6 @@ impl moonpool_sim::Workload for SpaceWorkload {
 
     async fn setup(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         // Fresh state per iteration
-        self.state_store.clear();
         self.model = SpaceModel::new();
 
         // Wire state handles for invariant checking
@@ -144,33 +139,29 @@ impl moonpool_sim::Workload for SpaceWorkload {
             moonpool_sim::SimulationError::InvalidState(format!("invalid address: {e}"))
         })?;
 
-        let config = NodeConfig::builder()
-            .address(local_addr)
-            .state_store(self.state_store.clone() as Rc<dyn ActorStateStore>)
-            .build();
-
-        let node = MoonpoolNode::new(self.cluster.clone(), config)
+        let client = MoonpoolClient::new(self.cluster.clone(), local_addr)
             .with_providers(ctx.providers().clone())
-            .with_state_handle(ctx.state().clone())
-            .register::<StationActorImpl>()
+            .knows::<StationActorImpl>()
             .start()
             .await
-            .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("node start: {e}")))?;
+            .map_err(|e| {
+                moonpool_sim::SimulationError::InvalidState(format!("client start: {e}"))
+            })?;
 
-        self.node = Some(node);
+        self.client = Some(client);
 
         Ok(())
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let node = self.node.as_ref().ok_or_else(|| {
-            moonpool_sim::SimulationError::InvalidState("node not initialized".to_string())
+        let client = self.client.as_ref().ok_or_else(|| {
+            moonpool_sim::SimulationError::InvalidState("client not initialized".to_string())
         })?;
 
         // Seed stations with initial credits
         for name in &self.station_names {
             let initial = ctx.random().random_range(10..100) as i64;
-            let actor_ref: StationRef<_> = node.actor_ref(name.clone());
+            let actor_ref: StationRef<_> = client.actor_ref(name.clone());
             match actor_ref
                 .deposit_credits(DepositCreditsRequest { amount: initial })
                 .await
@@ -200,13 +191,10 @@ impl moonpool_sim::Workload for SpaceWorkload {
             }
 
             let op = random_op(ctx.random(), &self.station_names);
-            let node = self.node.as_ref().ok_or_else(|| {
-                moonpool_sim::SimulationError::InvalidState("node not initialized".to_string())
-            })?;
 
             match op {
                 SpaceOp::Deposit { station, amount } => {
-                    let actor_ref: StationRef<_> = node.actor_ref(station.clone());
+                    let actor_ref: StationRef<_> = client.actor_ref(station.clone());
                     match actor_ref
                         .deposit_credits(DepositCreditsRequest { amount })
                         .await
@@ -228,7 +216,7 @@ impl moonpool_sim::Workload for SpaceWorkload {
                         assert_sometimes!(true, "withdraw_rejected_insufficient");
                         continue;
                     }
-                    let actor_ref: StationRef<_> = node.actor_ref(station.clone());
+                    let actor_ref: StationRef<_> = client.actor_ref(station.clone());
                     match actor_ref
                         .withdraw_credits(WithdrawCreditsRequest { amount })
                         .await
@@ -249,7 +237,7 @@ impl moonpool_sim::Workload for SpaceWorkload {
                     }
                 }
                 SpaceOp::QueryState { station } => {
-                    let actor_ref: StationRef<_> = node.actor_ref(station.clone());
+                    let actor_ref: StationRef<_> = client.actor_ref(station.clone());
                     match actor_ref.query_state(QueryStateRequest {}).await {
                         Ok(resp) => {
                             let expected = self.model.station_credits(&station);
@@ -265,7 +253,7 @@ impl moonpool_sim::Workload for SpaceWorkload {
                     commodity,
                     amount,
                 } => {
-                    let actor_ref: StationRef<_> = node.actor_ref(station.clone());
+                    let actor_ref: StationRef<_> = client.actor_ref(station.clone());
                     match actor_ref
                         .add_cargo(AddCargoRequest {
                             commodity: commodity.clone(),
@@ -294,7 +282,7 @@ impl moonpool_sim::Workload for SpaceWorkload {
                         assert_sometimes!(true, "remove_cargo_rejected");
                         continue;
                     }
-                    let actor_ref: StationRef<_> = node.actor_ref(station.clone());
+                    let actor_ref: StationRef<_> = client.actor_ref(station.clone());
                     match actor_ref
                         .remove_cargo(RemoveCargoRequest {
                             commodity: commodity.clone(),
@@ -321,7 +309,7 @@ impl moonpool_sim::Workload for SpaceWorkload {
                 SpaceOp::VerifyAll => {
                     let mut all_match = true;
                     for name in &self.station_names {
-                        let actor_ref: StationRef<_> = node.actor_ref(name.clone());
+                        let actor_ref: StationRef<_> = client.actor_ref(name.clone());
                         match actor_ref.query_state(QueryStateRequest {}).await {
                             Ok(resp) => {
                                 let expected_credits = self.model.station_credits(name);
@@ -361,7 +349,7 @@ impl moonpool_sim::Workload for SpaceWorkload {
         }
 
         // Shutdown: drop node to trigger deactivation
-        drop(self.node.take());
+        drop(self.client.take());
 
         Ok(())
     }

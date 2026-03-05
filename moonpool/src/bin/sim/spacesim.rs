@@ -11,7 +11,7 @@ use moonpool::simulations::spacesim::{
     invariants::{CargoConservation, CreditConservation, NonNegativeBalances},
     workloads::{SpaceProcess, SpaceWorkload},
 };
-use moonpool_sim::{AdaptiveConfig, ExplorationConfig, Parallelism, SimulationBuilder};
+use moonpool_sim::SimulationBuilder;
 use tokio::runtime::RngSeed;
 
 fn main() {
@@ -51,12 +51,7 @@ fn main() {
                 }
             })
             .workload(SpaceWorkload::new(
-                200,
-                &stations,
-                cluster,
-                state_store,
-                directory,
-                membership,
+                200, &stations, cluster, directory, membership,
             ))
             .invariant(CreditConservation)
             .invariant(CargoConservation)

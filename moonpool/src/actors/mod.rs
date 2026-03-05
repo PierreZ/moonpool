@@ -58,8 +58,8 @@ pub use runtime::{
 mod node;
 
 pub use node::{
-    ClusterConfig, ClusterConfigBuilder, ClusterConfigError, MoonpoolNode, MoonpoolNodeBuilder,
-    NodeConfig, NodeConfigBuilder, NodeError, NodeLifecycle,
+    ClusterConfig, ClusterConfigBuilder, ClusterConfigError, MoonpoolClient, MoonpoolClientBuilder,
+    MoonpoolNode, MoonpoolNodeBuilder, NodeConfig, NodeConfigBuilder, NodeError, NodeLifecycle,
 };
 
 // --- Infrastructure ---
