@@ -793,7 +793,8 @@ async fn connection_task<P: Providers>(
                         if let Some(ref mut tracker) = ping_tracker {
                             tracker.reset();
                         }
-                        break; // Exit send loop, will retry on next trigger
+                        data_to_send.notify_one();
+                        break; // Exit send loop, reconnect on next select iteration
                     }
 
                     // Send the message (no RefCell borrow held)
@@ -818,7 +819,8 @@ async fn connection_task<P: Providers>(
                             if let Some(ref mut tracker) = ping_tracker {
                                 tracker.reset();
                             }
-                            break; // Exit send loop, will retry on next trigger
+                            data_to_send.notify_one();
+                            break; // Exit send loop, reconnect on next select iteration
                         }
                     }
                 }
@@ -850,6 +852,7 @@ async fn connection_task<P: Providers>(
                         if on_connection_loss == ConnectionLossBehavior::Exit {
                             break;
                         }
+                        data_to_send.notify_one();
                     }
                     Ok((buffer, n)) => {
                         // Append to read buffer
@@ -887,6 +890,7 @@ async fn connection_task<P: Providers>(
                         if on_connection_loss == ConnectionLossBehavior::Exit {
                             break;
                         }
+                        data_to_send.notify_one();
                     }
                 }
             }
@@ -974,6 +978,7 @@ async fn connection_task<P: Providers>(
                             if on_connection_loss == ConnectionLossBehavior::Exit {
                                 break;
                             }
+                            data_to_send.notify_one();
                         }
                     }
                 }

@@ -64,6 +64,10 @@ pub struct ExplorationReport {
     pub sancov_edges_total: usize,
     /// Code edges covered across all timelines. 0 when sancov unavailable.
     pub sancov_edges_covered: usize,
+    /// Whether the multi-seed loop stopped because convergence was detected.
+    pub converged: bool,
+    /// Timelines explored per seed (parallel to `seeds_used`).
+    pub per_seed_timelines: Vec<u64>,
 }
 
 /// Pass/fail/miss status for an assertion in the report.
@@ -136,9 +140,20 @@ pub struct SimulationReport {
     pub assertion_details: Vec<AssertionDetail>,
     /// Per-site summaries of `assert_sometimes_each!` buckets.
     pub bucket_summaries: Vec<BucketSiteSummary>,
+    /// True when `UntilConverged` hit its iteration cap without converging.
+    pub convergence_timeout: bool,
 }
 
 impl SimulationReport {
+    /// Whether the simulation run is considered successful.
+    ///
+    /// Returns `false` when any of the following hold:
+    /// - There are assertion violations (always-type failures).
+    /// - `UntilConverged` hit its iteration cap without converging.
+    pub fn is_success(&self) -> bool {
+        self.assertion_violations.is_empty() && !self.convergence_timeout
+    }
+
     /// Calculate the success rate as a percentage.
     pub fn success_rate(&self) -> f64 {
         if self.iterations == 0 {
@@ -464,20 +479,33 @@ impl fmt::Display for SimulationReport {
             }
         }
 
+        // === Convergence Timeout ===
+        if self.convergence_timeout {
+            writeln!(f)?;
+            writeln!(f, "--- Convergence FAILED ---")?;
+            writeln!(f, "  UntilConverged hit iteration cap without converging.")?;
+        }
+
         // === Per-Seed Metrics ===
         if self.seeds_used.len() > 1 {
             writeln!(f)?;
             writeln!(f, "--- Seeds ---")?;
+            let per_seed_tl = self.exploration.as_ref().map(|e| &e.per_seed_timelines);
             for (i, seed) in self.seeds_used.iter().enumerate() {
                 if let Some(Ok(m)) = self.individual_metrics.get(i) {
+                    let tl_suffix = per_seed_tl
+                        .and_then(|v| v.get(i))
+                        .map(|t| format!("  timelines={}", fmt_num(*t)))
+                        .unwrap_or_default();
                     writeln!(
                         f,
-                        "  #{:<3}  seed={:<14}  wall={:<10}  sim={:<10}  events={}",
+                        "  #{:<3}  seed={:<14}  wall={:<10}  sim={:<10}  events={}{}",
                         i + 1,
                         seed,
                         fmt_duration(m.wall_time),
                         fmt_duration(m.simulated_time),
-                        fmt_num(m.events_processed)
+                        fmt_num(m.events_processed),
+                        tl_suffix,
                     )?;
                 } else if let Some(Err(_)) = self.individual_metrics.get(i) {
                     writeln!(f, "  #{:<3}  seed={:<14}  FAILED", i + 1, seed)?;

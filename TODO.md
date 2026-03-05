@@ -1,382 +1,408 @@
-# Sancov Integration: Incremental Rebuild Plan
+# Moonpool Development Plan
+
+> **Rule**: Mark each commit as ~~done~~ in this file when completed. Each commit = one git commit.
+
+---
+
+## [x] Exploration Infrastructure (`moonpool-explorer`)
+
+Fork-based multiverse exploration for deterministic simulation testing. Splits timelines at assertion discovery points to find rare bugs. Inspired by FoundationDB's simulation and Antithesis.
+
+### [x] Core exploration crate
+- `moonpool-explorer/` — standalone leaf crate, only depends on `libc`
+- `fork()` + `MAP_SHARED` memory for cross-process state
+- Sequential fork tree: parent waits on child, merges coverage, loops
+- `CoverageBitmap` + `ExploredMap` (8192-bit bitmaps) for new-path detection
+- `SharedStats`, `SharedRecipe` for bug replay (`"count@seed -> count@seed"` format)
+- RNG hooks (`fn()->u64` get_count, `fn(u64)` reseed) — zero moonpool knowledge
+
+### [x] Antithesis assertion suite
+- 15 assertion macros: `assert_always!`, `assert_sometimes!`, `assert_reachable!`, `assert_unreachable!`, numeric variants (`_greater_than!`, etc.), `assert_sometimes_all!`, `assert_sometimes_each!`
+- Rich `AssertionSlot` (112 bytes) in shared memory, counter-based layout
+- Non-panicking always-assertions (Antithesis principle: assertions never crash)
+- `validate_assertion_contracts()` for post-run verification
+- `EachBucket` infrastructure for per-value bucketed assertions (256 buckets)
+
+### [x] Adaptive forking + energy budgets
+- 3-level energy: global → per-mark → reallocation pool
+- Coverage-yield-driven batch forking: barren marks return energy
+- `AdaptiveConfig { batch_size, min_timelines, max_timelines, per_mark_energy }`
+
+### [x] Multi-core parallel exploration
+- `Parallelism` enum: `MaxCores`, `HalfCores`, `Cores(n)`, `MaxCoresMinus(n)`
+- Sliding window of concurrent fork children capped at core count
+- Bitmap pool: one coverage bitmap slot per active child
+- `waitpid(-1)` reaps whichever child finishes first
+
+### [x] Coverage-preserving multi-seed exploration
+- `prepare_next_seed()`: selective reset preserving explored map + watermarks
+- Warm start: `warm_min_timelines` for barren marks on subsequent seeds
+- Pass/fail counts accumulate across seeds (avoids false "was never reached")
+- `UntilConverged` iteration control: stop when all sometimes reached + no new coverage
+- `convergence_timeout` + `is_success()` for exit code reporting
+
+### [x] Sancov integration
+- LLVM `inline-8bit-counters` via `__sanitizer_cov_8bit_counters_init`
+- `SANCOV_CRATES` build infrastructure for selective instrumentation
+- Edge coverage wired into fork loop as exploration signal
+- `sancov_edges_covered` / `sancov_edges_total` in stats and reporting
+- `moonpool-sim-examples` crate extracted for focused sancov coverage
+
+### [x] Rich reporting
+- `SimulationReport` with `assertion_details`, `bucket_summaries`, per-seed metrics
+- `ExplorationReport` with timelines, fork points, bugs, coverage bits, convergence
+- Colored terminal display with sections for assertions, buckets, violations, exploration
+
+### [x] Bug fixes
+- Duplicate assertion slots from parallel fork children (TOCTOU in `find_or_alloc_slot`, tombstone dedup)
+- False "was never reached" from `prepare_next_seed()` zeroing counts
+- Coverage bitmap not set for `assert_sometimes_each!` (broke adaptive forking)
+- Assertion violations decoupled from workload errors
+
+---
+
+## SpaceSim: Incremental Virtual Actor Simulation
 
 ## Context
 
-moonpool-explorer uses fork()-based multiverse exploration with an assertion-level coverage bitmap (8192 bits) to decide when to fork. We're adding LLVM SanitizerCoverage `inline-8bit-counters` as an **additional** coverage signal — when a child timeline discovers new code edges in the code under test, the explorer considers it productive and forks more.
+Moonpool has virtual actors (`ActorHandler`, `PersistentState`, `MoonpoolNode`, directory, placement, membership) but **no simulation workload tests them under chaos**. The existing banking sim is single-node only, uses no `Process` trait, no attrition, no network chaos. Multi-node actors in simulation have **never been tested**. This plan builds a space-economy themed workload ("spacesim") that incrementally tests every layer: single-actor lifecycle, multi-node placement, cross-actor RPC, network faults, and process reboots.
 
-**Critical design principle**: Sancov instruments everything **built on top of** the simulation framework — the user's application, and the moonpool libraries that the application uses (`moonpool`, `moonpool-transport`). What's **excluded** is the testing infrastructure itself: `moonpool_sim` (simulation runtime) and `moonpool_explorer` (fork machinery). Their code paths are noise — the same chaos injection and fork logic fire regardless of whether the target is doing interesting things. Proc-macros (`moonpool-transport-derive`) are host code and can't be instrumented anyway. `moonpool-core` is just trait definitions with minimal executable code.
+## Files overview
 
-**Key constraint**: `__sanitizer_cov_8bit_counters_init` stores pointers in TLS during static init. libtest runs tests in worker threads where this TLS is invisible. **Sancov only works in binary targets, not `cargo test`.**
+**Delete** (commit 1):
+- `moonpool/src/simulations/banking/` (entire directory: `mod.rs`, `workloads.rs`, `invariants.rs`, `operations.rs`)
+- `moonpool/src/bin/sim/banking_chaos.rs`
 
-**Branch**: `dev/pz/code_coverage` — 5 incremental commits.
+**Create** (across commits):
+- `moonpool/src/simulations/spacesim/mod.rs`
+- `moonpool/src/simulations/spacesim/actors.rs` — StationActor, ShipActor
+- `moonpool/src/simulations/spacesim/model.rs` — Reference model
+- `moonpool/src/simulations/spacesim/invariants.rs` — Conservation, non-negative, directory integrity
+- `moonpool/src/simulations/spacesim/operations.rs` — Operation alphabet
+- `moonpool/src/simulations/spacesim/workloads.rs` — SpaceProcess + SpaceWorkload
+- `moonpool/src/bin/sim/spacesim.rs` — Binary entry point
+
+**Modify**:
+- `moonpool/src/simulations/mod.rs` — Replace `banking` with `spacesim`
+- `xtask/src/main.rs` — Replace `sim-banking-chaos` with `sim-spacesim`, sancov_crates: `moonpool,moonpool_transport`
+
+## Shared infrastructure pattern
+
+All processes and workloads share `Rc`-based resources (safe because moonpool is single-threaded `!Send`):
+
+```rust
+let membership = Rc::new(SharedMembership::new());
+let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
+let state_store: Rc<dyn ActorStateStore> = Rc::new(InMemoryStateStore::new());
+let cluster = ClusterConfig::builder()
+    .name("spacesim")
+    .membership(membership.clone())
+    .directory(directory.clone())
+    .build()?;
+```
+
+Passed into `Process` factories and `Workload` constructors via closure capture / constructor args.
 
 ---
 
-## ~~Commit 1: `sancov.rs` core module~~ ✅ DONE
+## [x] Commit 1: `feat(sim): scaffold spacesim with single StationActor on one process`
 
-Add the sancov module to moonpool-explorer with no fork loop integration yet.
+**Goal**: Prove actors work inside a `Process` in simulation. Delete banking sim.
 
-### Files
-- **Create** `moonpool-explorer/src/sancov.rs`
-- **Modify** `moonpool-explorer/src/lib.rs` — add `pub mod sancov` + re-exports
+**Config**: 1 process, 1 workload, `NetworkConfiguration::fast_local()`, no attrition, 100 iterations.
 
-### sancov.rs contents
-
-**LLVM callbacks** (called during static init, once per compilation unit):
+**StationActor** (`actors.rs`):
 ```rust
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __sanitizer_cov_8bit_counters_init(start: *mut u8, stop: *mut u8)
-// Merges ranges via min(start)/max(stop) across callbacks.
-// With -Ccodegen-units=1, one callback per instrumented crate.
-// Gaps between crate BSS sections contain zeros (skipped by novelty detector).
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __sanitizer_cov_pcs_init(_beg: *const usize, _end: *const usize)
-// Stub — PC table unused for now
-```
-
-**Global statics** (set during static init, before `main()`):
-- `COUNTERS_PTR: AtomicPtr<u8>` — BSS counter array pointer
-- `COUNTERS_LEN: AtomicUsize` — edge count
-
-These use `static Atomic*` (not thread-local `Cell`) because `__sanitizer_cov_8bit_counters_init`
-is called by LLVM during static constructors, before Rust's runtime is fully initialized.
-`Atomic*` statics are zero-initialized at compile time and require no runtime setup.
-
-**Thread-local state** (set during `init()` from `main()`):
-- `SANCOV_TRANSFER: Cell<*mut u8>` — MAP_SHARED child→parent buffer
-- `SANCOV_HISTORY: Cell<*mut u8>` — MAP_SHARED global max map
-- `SANCOV_POOL: Cell<*mut u8>` — parallel mode pool base
-- `SANCOV_POOL_SLOTS: Cell<usize>` — pool slot count
-
-**AFL bucketing** — `COUNT_CLASS_LOOKUP[256]`:
-```
-0→0, 1→1, 2→2, 3→4, 4-7→8, 8-15→16, 16-31→32, 32-127→64, 128-255→128
-```
-From LibAFL `libafl/src/observers/map/hitcount_map.rs:22-36`. Applied via `classify_counts()`.
-
-**Novelty detection** — `has_new_coverage_inner(buffer, history, len) -> bool`:
-- Skip zeros (unexecuted edges)
-- For each edge: if `bucketed_current > history[i]`, update history, return true
-- This is the max-reduce from LibAFL `libafl_bolts/src/simd.rs:437-473`
-
-**Public API**: `sancov_is_available()` (checks `COUNTERS_PTR.load(Relaxed).is_null()`), `sancov_edge_count()`, `sancov_edges_covered()`
-
-**Lifecycle**: `init_sancov_shared()`, `cleanup_sancov_shared()`, `clear_transfer_buffer()`
-
-**Child transfer**: `copy_counters_to_shared()` — memcpy BSS→transfer before `_exit()`
-
-**BSS counter reset**: `reset_bss_counters()` — zero BSS counters in child after fork:
-```rust
-pub fn reset_bss_counters() {
-    let ptr = COUNTERS_PTR.load(Ordering::Relaxed);
-    if !ptr.is_null() {
-        let len = COUNTERS_LEN.load(Ordering::Relaxed);
-        unsafe { std::ptr::write_bytes(ptr, 0, len); }
-    }
+#[service(id = 0x5741_7100)]
+trait Station {
+    async fn deposit_credits(&mut self, req: DepositCreditsRequest) -> Result<StationResponse, RpcError>;
+    async fn withdraw_credits(&mut self, req: WithdrawCreditsRequest) -> Result<StationResponse, RpcError>;
+    async fn query_state(&mut self, req: QueryStateRequest) -> Result<StationResponse, RpcError>;
 }
 ```
-This is needed because after `fork()`, children inherit the parent's accumulated BSS counters.
-Without zeroing, parent-accumulated values crossing AFL bucket boundaries cause spurious
-novelty detections at deeper fork depths — wasting fork budget on unproductive marks.
+- `PersistentState<StationData>` with `credits: i64`, `inventory: BTreeMap<String, i64>`
+- `DeactivateOnIdle` for max lifecycle exercise
+- `PlacementStrategy::Local` (single process for now)
 
-**No-op safety**: All public functions must early-return when `sancov_is_available()` is false
-(i.e. `COUNTERS_PTR` is null). This ensures graceful degradation when running without
-`SANCOV_CRATES` — no null pointer dereferences.
+**SpaceProcess** (`workloads.rs`): Creates `MoonpoolNode`, registers `StationActorImpl`, holds alive until shutdown.
 
-**Parallel pool**: `get_or_init_sancov_pool(slot_count)`, `sancov_pool_slot(base, idx)`, `has_new_sancov_coverage_from(slot_ptr)`
+**SpaceWorkload** (`workloads.rs`):
+- `setup()`: Wait for process to register in membership
+- `run()`: Create client-side `MoonpoolNode` (no actor registrations), seed 5 stations with random credits (1000..5000), run 200 random ops (deposit/withdraw/query), validate responses against reference model
+- `check()`: Final conservation check
 
-**Tests**: bucketing, novelty, known-skip, higher-bucket novelty, unavailable no-op, init/cleanup lifecycle
+**Reference model** (`model.rs`): `SpaceModel { stations: BTreeMap<String, StationState>, total_credits: i64 }`. Published to `StateHandle` after each op.
 
-**Re-exports from lib.rs**:
-```rust
-pub use sancov::{sancov_edge_count, sancov_edges_covered, sancov_is_available};
-```
+**Invariants** (`invariants.rs`): `CreditConservation` + `NonNegativeBalances`.
 
----
+**Operations** (`operations.rs`): Deposit (30%), Withdraw (25%), QueryState (25%), SmallDelay (20%). Model only updated on successful RPC response.
 
-## ~~Commit 2: Build infrastructure — SANCOV_CRATES~~ ✅ DONE
+**Assertions**:
+- `assert_always!(sum == expected, "credit conservation")` — in invariant
+- `assert_always!(*balance >= 0, "non-negative credits")` — in invariant
+- `assert_always!(resp.credits == model_credits, "response matches model")` — after each op
+- `assert_sometimes!(true, "withdraw_rejected_insufficient")` — when station rejects
+- `assert_sometimes!(true, "withdraw_succeeded")` — when withdrawal works
 
-Build infrastructure comes before fork loop integration so that commit 3 can be
-end-to-end tested with actual sancov instrumentation.
-
-### Decision: RUSTC_WRAPPER script (per-crate whitelist)
-
-Instrumenting `moonpool_sim` is actively harmful: different seeds and chaos injection paths produce genuinely novel edges in the sim runtime, triggering forks that have nothing to do with the code under test. Per-crate selectivity is required.
-
-### Files
-
-**Create `scripts/sancov-rustc.sh`**:
-- When `SANCOV_CRATES` is unset/empty → pass through to rustc unchanged (no-op)
-- Skip `build_script_build` and `--crate-type proc-macro` unconditionally
-- Parse `--crate-name`, check against `SANCOV_CRATES` (comma-separated whitelist)
-- Matching crates get: `-Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-inline-8bit-counters -Ccodegen-units=1`
-
-**Modify `flake.nix`**:
-- Set `RUSTC_WRAPPER` pointing to the script (always active, no-op when `SANCOV_CRATES` unset)
-
-**Usage** — `SANCOV_CRATES` is the only knob:
-```bash
-# Example crate only (maze/dungeon logic is self-contained):
-SANCOV_CRATES=moonpool_explorer_examples cargo run --bin maze_explore
-
-# Real application — instrument app + framework libraries:
-SANCOV_CRATES=my_app,moonpool,moonpool_transport cargo run --bin my_app
-
-# Without sancov (script passes through):
-cargo run --bin maze_explore
-```
+**xtask**: Replace `sim-banking-chaos` entry with `sim-spacesim`, sancov: `moonpool,moonpool_transport`.
 
 ---
 
-## ~~Commit 3: Fork loop integration~~ ✅ DONE
+## [x] Commit 2: `feat(sim): add cargo tracking and VerifyAll operation to spacesim`
 
-Wire sancov into `split_loop.rs` so it contributes to fork decisions.
+**Goal**: Extend StationActor with cargo operations. Add cross-verification that queries all stations and compares to model.
 
-### Files
-- **Modify** `moonpool-explorer/src/split_loop.rs`
-- **Modify** `moonpool-explorer/src/lib.rs` — init/cleanup/prepare_next_seed hooks
-
-### Integration points
-
-**`exit_child()`** — copy counters before `_exit()`:
+**StationActor gains**:
 ```rust
-pub fn exit_child(code: i32) -> ! {
-    crate::sancov::copy_counters_to_shared();
-    unsafe { libc::_exit(code) }
+async fn add_cargo(&mut self, req: AddCargoRequest) -> Result<StationResponse, RpcError>;
+async fn remove_cargo(&mut self, req: RemoveCargoRequest) -> Result<StationResponse, RpcError>;
+```
+
+**Model gains**: `total_cargo: BTreeMap<String, i64>` per commodity.
+
+**New invariant**: `CargoConservation` — `sum(all station inventory[c]) == total_cargo[c]` for all commodities.
+
+**New operations**: AddCargo (15%), RemoveCargo (15%), VerifyAll (5%). Rebalance weights.
+
+**VerifyAll**: Queries every station and asserts response matches model exactly:
+```rust
+assert_always!(resp.credits == expected.credits, "verify: credit mismatch");
+assert_always!(resp_cargo == expected_cargo, "verify: cargo mismatch");
+```
+
+**New assertions**:
+- `assert_always!(cargo_sum == expected, "cargo conservation")` — in CargoConservation
+- `assert_sometimes!(true, "remove_cargo_rejected")` — insufficient cargo
+- `assert_sometimes!(true, "verify_all_passed")` — full verification succeeded
+
+---
+
+## [x] Commit 2.5: `feat(sim): add DirectoryConsistency invariant via StateHandle`
+
+**Goal**: Real-time directory/membership/node consistency checking after every simulation event.
+
+**Architecture**: `InMemoryDirectory`, `SharedMembership`, and `ActorHost` each hold `Option<StateHandle>`. When set, they publish state snapshots after every mutation. A reusable `DirectoryConsistency` invariant cross-checks all three.
+
+**Published state**:
+- `directory_entries` → `HashMap<ActorId, ActorAddress>` (after register/unregister)
+- `membership_snapshot` → `MembershipSnapshot` (after register_node/update_status/add/remove)
+- `node_actors:{addr}` → `HashSet<ActorId>` (after activation/deactivation)
+
+**Invariant checks** (`simulations/invariants.rs`, reusable):
+1. No directory entry points to a Dead node
+2. Directory → Node: if directory says X is on N, node N has X active
+3. Node → Directory: if node N has X active, directory points X to N
+4. Single activation: no actor active on two nodes simultaneously
+
+**Files changed**: `directory.rs`, `membership.rs`, `host.rs`, `lifecycle.rs`, `infrastructure/mod.rs`, `actors/mod.rs`, `simulations/mod.rs`, `simulations/invariants.rs` (new), `spacesim/invariants.rs`, `spacesim/workloads.rs`, `spacesim.rs`
+---
+
+## [x] Commit 2.6: various transport/actor fixes
+
+- `fix(transport): self-notify connection task after write failure to enable reconnection`
+- `feat(sim): add before_iteration hook and clear methods for multi-seed reset`
+- `feat(actors): add MoonpoolClient for client-only actor runtime`
+- `fix(actors): add RPC timeout to prevent deadlock on connection death`
+
+---
+
+## Current Situation (2026-03-05)
+
+**Spacesim is blocked.** Two seeds fail (`15204012862878889900`, `3780034198488802454`) with model-vs-actual divergence. Root cause: the **maybe-delivered ambiguity** — transport chaos drops a response after the actor processed the request, workload sees `Err`, doesn't update model, but actor state is already persisted.
+
+This is the fundamental at-most-once delivery problem (FDB error_code 1030: `request_maybe_delivered`). Before proceeding to Commit 3 (multi-process), moonpool's transport needs fdbrpc-level delivery semantics.
+
+**New reference files added:**
+- `docs/references/foundationdb/FailureMonitor.{h,actor.cpp}` — address/endpoint failure tracking
+- `docs/references/foundationdb/HealthMonitor.{h,actor.cpp}` — connection closure tracking
+- `docs/references/foundationdb/fdbrpc.h` — RequestStream with 3 delivery modes
+- `docs/references/foundationdb/genericactors.actor.h` — waitValueOrSignal, sendCanceler, retryBrokenPromise
+- `docs/analysis/foundationdb/fdbrpc-backport-guide.md` — Rust mapping guide
+
+**What moonpool transport already has** (= FlowTransport basics):
+- ✅ sendReliable (reliable queue, retransmit on reconnect)
+- ✅ Peer connection management + reconnect with backoff
+- ✅ Ping-based liveness detection
+- ✅ ReplyPromise/ReplyFuture + endpoint routing
+- ✅ BrokenPromise on Drop
+
+**What's missing** (= fdbrpc layer):
+- ❌ `peer.disconnect` signal — no exposed disconnect notification
+- ❌ FailureMonitor (`notify_disconnect`, `on_disconnect_or_failure`)
+- ❌ `request_maybe_delivered` error (MaybeDelivered vs NotDelivered)
+- ❌ Reply queue closure on peer disconnect (ReplyFutures hang until 30s timeout)
+- ❌ 3 delivery modes: `send()` / `try_get_reply()` / `get_reply()`
+- ❌ Request IDs for dedup
+- ❌ sendUnreliable exposed to RPC layer
+
+**Next: Commit 2.7 series — implement fdbrpc backport (see `docs/analysis/foundationdb/fdbrpc-backport-guide.md`)**
+
+---
+
+## [ ] Commit 3: `feat(sim): multi-process spacesim with 3 station nodes`
+
+**Goal**: **First-ever multi-node actor simulation**. Highest-risk commit. 3 processes each hosting MoonpoolNode, actors placed via RoundRobin across all 3.
+
+**Config**: 3 processes, 1 workload, `NetworkConfiguration::fast_local()`, no attrition. Reduce to 50 iterations initially.
+
+**Changes**:
+- `PlacementStrategy::RoundRobin` on StationActor
+- Binary: `.processes(3, factory)`
+- Workload `setup()`: Wait for all 3 processes to register in membership (poll loop with timeout)
+- Workload creates its own client-side MoonpoolNode (also registers StationActorImpl so it can host actors too)
+
+**New assertions**:
+- `assert_reachable!("all_processes_registered")` — cluster formed successfully
+- `assert_sometimes!(true, "cross_node_call")` — actor placed on different node from caller
+
+**What might break**:
+- Directory race conditions (two nodes activating same actor)
+- Deadlock from workload waiting for processes
+- Placement targeting nodes that haven't finished starting
+- Deadlock detector false positives
+
+**Debug approach**: If failing, use `IterationControl::FixedCount(1)` with specific seed and `RUST_LOG=error`.
+
+---
+
+## [ ] Commit 4: `feat(sim): add ShipActor with actor-to-actor trade calls`
+
+**Goal**: Second actor type making cross-actor calls. Ship calls Station within its own dispatch handler.
+
+**ShipActor** (`actors.rs`):
+```rust
+#[service(id = 0x5348_1900)]
+trait Ship {
+    async fn trade(&mut self, req: TradeRequest) -> Result<ShipResponse, RpcError>;
+    async fn query_ship(&mut self, req: QueryShipRequest) -> Result<ShipResponse, RpcError>;
+}
+```
+- `PersistentState<ShipData>` with `credits: i64`, `cargo: BTreeMap<String, i64>`, `docked_at: Option<String>`
+- `DeactivateOnIdle`, `PlacementStrategy::RoundRobin`
+
+**Trade operation**: Ship calls `station.remove_cargo()` then adds cargo locally (or vice versa for selling). Actor-to-actor call via `ctx.actor_ref::<StationRef<_>>(station_id)`.
+
+**Process**: Registers both `StationActorImpl` and `ShipActorImpl`.
+
+**Model gains**: `ships: BTreeMap<String, ShipState>`. Conservation now spans stations + ships.
+
+**New operations**: Trade (20% of alphabet) — pick random ship, random station, random commodity, random buy/sell direction.
+
+**Conservation invariants updated**: `sum(station_credits) + sum(ship_credits) == total_credits`, same for cargo.
+
+**Partial failure handling**: If station call succeeds but ship state write fails, model tracks `lost_credits`/`lost_cargo`. Conservation: `sum + lost == total`.
+
+**New assertions**:
+- `assert_always!(total + lost == initial, "conservation with ships")`
+- `assert_sometimes!(true, "trade_buy_succeeded")` — ship bought from station
+- `assert_sometimes!(true, "trade_sell_succeeded")` — ship sold to station
+- `assert_sometimes!(true, "trade_insufficient_cargo")` — station had no cargo
+
+**What might break**: Deadlock in actor-to-actor calls (ship→station on same node), two-phase transfer atomicity.
+
+---
+
+## [ ] Commit 5: `feat(sim): enable network chaos for spacesim`
+
+**Goal**: Turn on `random_network()`. RPC calls will fail with timeouts and connection errors.
+
+**Config change**: `.random_network()` added to builder.
+
+**Workload changes**: Every operation wrapped in error handling — on RPC failure, do NOT update model:
+```rust
+match actor_ref.deposit_credits(req).await {
+    Ok(resp) => { model.deposit(...); assert_always!(...); }
+    Err(_) => { assert_sometimes!(true, "deposit_rpc_failed"); }
 }
 ```
 
-**`setup_child()`** — reset BSS counters + sancov pool for nested splits:
+**Transfer partial failure**: If withdraw succeeds but deposit fails (network error mid-transfer), credits are lost from station but never arrive at ship. Model records this in `lost_credits`. Conservation: `sum + lost == total`.
+
+**New assertions**:
+- `assert_sometimes!(true, "deposit_rpc_failed")` — network chaos causes failures
+- `assert_sometimes!(true, "trade_partial_failure")` — half-completed trade
+- `assert_sometimes!(true, "query_rpc_failed")` — queries fail too
+
+**What might break**: Stale directory cache entries after connection failures, RPC timeouts too short for chaos latencies, forwarding bugs.
+
+---
+
+## [ ] Commit 6: `feat(sim): enable attrition with process reboots for spacesim`
+
+**Goal**: Process crash/restart cycles. Actor state must survive via shared `InMemoryStateStore`. Actors re-register in directory after reboot.
+
+**Config**:
 ```rust
-// Zero BSS counters so child captures only its OWN edges, not parent's accumulated noise.
-// Without this, parent-accumulated counters crossing AFL bucket boundaries cause
-// spurious novelty detections at deeper fork depths.
-crate::sancov::reset_bss_counters();
-
-// Reset pool so nested splits allocate a fresh pool
-crate::sancov::SANCOV_POOL.with(|c| c.set(std::ptr::null_mut()));
-crate::sancov::SANCOV_POOL_SLOTS.with(|c| c.set(0));
+.attrition(Attrition {
+    max_dead: 1,
+    prob_graceful: 0.4,
+    prob_crash: 0.5,
+    prob_wipe: 0.1,
+    recovery_delay_ms: Some(500..3000),
+    grace_period_ms: Some(1000..3000),
+})
+.phases(PhaseConfig {
+    chaos_duration: Duration::from_secs(30),
+    recovery_duration: Duration::from_secs(15),
+})
 ```
 
-**Sequential fork** (in both `split_on_discovery` and `adaptive_split_on_discovery`):
-- Before fork: `crate::sancov::clear_transfer_buffer()`
-- After waitpid: `batch_has_new |= crate::sancov::has_new_sancov_coverage()`
+**Process changes**: On shutdown signal, call `node.shutdown().await` for graceful deactivation.
 
-**Parallel fork** (sliding window):
-- Init: `sancov_pool_base = crate::sancov::get_or_init_sancov_pool(slot_count)`
-- Save: `parent_sancov_transfer = SANCOV_TRANSFER.with(|c| c.get())`
-- Per child: clear slot, redirect `SANCOV_TRANSFER` to pool slot
-- `reap_one()` gains `sancov_pool_base` param, checks `has_new_sancov_coverage_from(slot_ptr)`
-- After loop: restore parent's transfer pointer
+**Workload changes**: Wrap operations in timeouts. Tolerate higher error rates during chaos phase.
 
-**`init()`** — add `sancov::init_sancov_shared()?` after `init_assertions()`
-**`cleanup()`** — add `sancov::cleanup_sancov_shared()` before `cleanup_assertions()`
-**`prepare_next_seed()`** — add `sancov::clear_transfer_buffer()` + `sancov::reset_bss_counters()` (preserves history map, avoids counter wrapping noise across seeds)
+**State recovery**: `InMemoryStateStore` is `Rc`-shared outside simulation — survives process reboots. On re-activation, `on_activate` loads last-persisted state.
+
+**New assertions**:
+- `assert_sometimes!(true, "rpc_failed_during_reboot")` — calls fail during process death
+- `assert_sometimes!(true, "operation_timeout")` — timeouts during chaos
+- `assert_always!(total + lost == initial, "conservation survives reboots")`
+
+**What might break**: Directory retaining stale entries for dead nodes, membership not cleaning up crashed nodes, two activations of same actor during reboot window.
 
 ---
 
-## ~~Commit 4: Stats & reporting~~ ✅ DONE
+## [ ] Commit 7: `feat(sim): add buggify to spacesim actor handlers`
 
-### Files
-- **Modify** `moonpool-explorer/src/shared_stats.rs` — add to `ExplorationStats`:
-  ```rust
-  pub sancov_edges_total: usize,
-  pub sancov_edges_covered: usize,
-  ```
-  Populated from `crate::sancov::sancov_edge_count()` and `sancov_edges_covered()`.
+**Goal**: Fault injection inside actor handlers. Polish for production.
 
-- **Modify** `moonpool-sim/src/runner/report.rs` — add to `ExplorationReport`:
-  ```rust
-  pub sancov_edges_total: usize,
-  pub sancov_edges_covered: usize,
-  ```
+**DirectoryIntegrity invariant**: ~~Done in Commit 2.5~~ — `DirectoryConsistency` invariant via `StateHandle` runs after every event (not just check phase).
 
-- **Modify** `moonpool-sim/src/runner/builder.rs` — populate from `final_stats`
-
-- **Modify** `moonpool-sim/tests/exploration/maze.rs` — print sancov stats
-
----
-
-## ~~Commit 5: Move simulation tests to binary targets~~ ✅ DONE
-
-Sancov only works in binary targets (`main()` runs on the main thread where TLS from static init is visible). `cargo test` uses worker threads where `__sanitizer_cov_8bit_counters_init` TLS is invisible. Moving all `slow_simulation_*` tests to binary targets enables sancov-guided exploration and eliminates the test-vs-binary duplication problem.
-
-### Source tests to move (7 files, 4 crates)
-
-| Source file | Tests |
-|---|---|
-| `moonpool-sim/tests/exploration/maze.rs` | `slow_simulation_maze`, `slow_simulation_maze_bug_replay` |
-| `moonpool-sim/tests/exploration/dungeon.rs` | `slow_simulation_dungeon`, `slow_simulation_dungeon_bug_replay` |
-| `moonpool/tests/metastable/tests.rs` | `slow_simulation_metastable_failure` |
-| `moonpool/tests/simulation/test_scenarios.rs` | `slow_simulation_banking_chaos` (ignored) |
-| `moonpool-transport/tests/e2e/tests.rs` | `slow_simulation_reliable_delivery`, `slow_simulation_unreliable_drops`, `slow_simulation_mixed_queues`, `slow_simulation_reconnection` |
-| `moonpool-transport/tests/simulation/test_scenarios.rs` | `slow_simulation_local_delivery`, ... |
-| `moonpool-explorer/tests/adaptive_scenarios.rs` | `slow_simulation_adaptive_maze_cascade` |
-
-### Files
-
-**Create `moonpool-simulations/Cargo.toml`** — deps: `moonpool`, `moonpool-sim`, `moonpool-explorer`, `moonpool-transport`, `async-trait`, `tokio`, `tracing`, `tracing-subscriber`, `serde`, `serde_json`
-
-**Create `moonpool-simulations/src/lib.rs`** — shared `run_simulation()` harness + report validation:
+**Buggify points in actors**:
 ```rust
-pub fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build_local(Default::default())
-        .expect("Failed to build local runtime");
-    rt.block_on(async { builder.run().await })
-}
+// In StationActor handlers:
+if buggify!() { return Err(RpcError::Internal("buggified".into())); }
+if buggify!() { ctx.time().sleep(Duration::from_millis(50)).await; } // slow write
 ```
 
-**Create workload modules** (moved from test files):
-- `moonpool-simulations/src/maze.rs` — `Maze` struct + `MazeWorkload` (from `moonpool-sim/tests/exploration/maze.rs`)
-- `moonpool-simulations/src/dungeon.rs` — `Dungeon` + `DungeonWorkload` (from `moonpool-sim/tests/exploration/dungeon.rs`)
-- `moonpool-simulations/src/metastable.rs` — metastable workloads (from `moonpool/tests/metastable/`)
-- `moonpool-simulations/src/banking.rs` — banking workloads (from `moonpool/tests/simulation/`)
-- `moonpool-simulations/src/transport.rs` — transport workloads (from `moonpool-transport/tests/e2e/` + `simulation/`)
-- `moonpool-simulations/src/adaptive.rs` — adaptive maze (from `moonpool-explorer/tests/adaptive_scenarios.rs`)
+**Production config**: 200 iterations, 200 ops per iteration.
 
-**Create binary targets** — one per simulation scenario:
-- `moonpool-simulations/src/bin/maze_explore.rs`
-- `moonpool-simulations/src/bin/dungeon_explore.rs`
-- `moonpool-simulations/src/bin/metastable_explore.rs`
-- `moonpool-simulations/src/bin/banking_chaos.rs`
-- `moonpool-simulations/src/bin/transport_e2e.rs`
-- `moonpool-simulations/src/bin/adaptive_maze.rs`
-
-Each binary: configure `SimulationBuilder`, call `run_simulation()`, print report, `process::exit(1)` on assertion violations.
-
-Bug replay tests (`slow_simulation_*_bug_replay`) become `#[test]` in the simulations crate — they're fast (no exploration) and don't need sancov.
-
-**Delete original test files** from source crates:
-- `moonpool-sim/tests/exploration/{maze,dungeon}.rs` + `mod.rs`
-- `moonpool/tests/metastable/tests.rs` (keep non-slow tests if any)
-- `moonpool/tests/simulation/test_scenarios.rs` (keep non-slow tests if any)
-- `moonpool-transport/tests/e2e/tests.rs` (keep non-slow tests if any)
-- `moonpool-transport/tests/simulation/test_scenarios.rs` (keep non-slow tests if any)
-- `moonpool-explorer/tests/adaptive_scenarios.rs`
-
-**Modify root `Cargo.toml`** — add `moonpool-simulations` to workspace members
-
-**Update `.config/nextest.toml`** — adjust profiles now that `slow_simulation_*` tests no longer exist as cargo test targets
-
-### Usage
-
-```bash
-# Run a specific simulation:
-cargo run --bin maze_explore
-
-# With sancov:
-SANCOV_CRATES=moonpool_simulations,moonpool,moonpool_transport cargo run --bin maze_explore
-
-# Run all simulations:
-cargo run --bin maze_explore && cargo run --bin dungeon_explore && ...
-
-# Fast unit tests (unchanged):
-cargo test-fast
-```
+**New assertions**:
+- `assert_always!(!has_duplicates, "no duplicate activations")`
+- `assert_always!(!has_stale_entries, "no stale directory entries")`
+- `assert_sometimes!(true, "buggified_station_error")` — error path exercised
+- `assert_sometimes!(true, "buggified_slow_write")` — slow path exercised
 
 ---
+
+## Summary
+
+| # | Commit | Procs | Network | Attrition | Actors | Key test |
+|---|--------|-------|---------|-----------|--------|----------|
+| 1 | Scaffold + single process | 1 | fast_local | No | Station | Actor lifecycle in Process |
+| 2 | Cargo + VerifyAll | 1 | fast_local | No | Station | Model accuracy |
+| 3 | Multi-process (3 nodes) | 3 | fast_local | No | Station | **First multi-node test** |
+| 4 | ShipActor + actor-to-actor | 3 | fast_local | No | Station+Ship | Cross-actor RPC |
+| 5 | Network chaos | 3 | random | No | Station+Ship | RPC failures |
+| 6 | Attrition | 3 | random | max_dead=1 | Station+Ship | State recovery |
+| 7 | Directory invariant + buggify | 3 | random | max_dead=1 | Station+Ship | Full coverage |
 
 ## Verification
 
-For each commit:
+After each commit:
 ```bash
 nix develop --command cargo fmt
 nix develop --command cargo clippy
-nix develop --command cargo nextest run --profile fast
+nix develop --command cargo nextest run
+cargo xtask sim run spacesim
 ```
-
-End-to-end (after commit 5):
-```bash
-nix develop --command cargo xtask sim maze   # sancov always on via xtask
-# → Sancov: N / M edges (X.Y%)
-```
-
----
-
-## Corrections Applied
-
-Changes from the original plan:
-
-1. **Added `reset_bss_counters()` in commit 1 + called in `setup_child()` in commit 3**: After `fork()`, children inherit parent's accumulated BSS counters. Without zeroing, parent-accumulated values crossing AFL bucket boundaries at deeper fork depths cause spurious novelty detections that waste fork budget. Zeroing in `setup_child()` ensures each child captures only its own edges.
-
-2. **Reordered commits: build infra (was 4) → now commit 2**: The RUSTC_WRAPPER script is needed before fork loop integration (was commit 2, now 3) can be end-to-end tested. Without sancov compiler flags, `__sanitizer_cov_8bit_counters_init` is never called and integration code is dead.
-
-3. **Added `reset_bss_counters()` in `prepare_next_seed()`**: Parent BSS counters accumulate across seeds. 8-bit counters can wrap (255→0). Resetting prevents stale counter noise between seeds.
-
-4. **Made no-op guards explicit in commit 1**: All sancov public functions must early-return when `sancov_is_available()` is false. Prevents null pointer dereferences when running without `SANCOV_CRATES`.
-
-5. **Fixed `SANCOV_CRATES` documentation**: Added general-case usage example (`SANCOV_CRATES=my_app,moonpool,moonpool_transport`) alongside the example-only shorthand, to match the stated design principle.
-
-6. **Changed COUNTERS_PTR/COUNTERS_LEN to `static Atomic*`**: The LLVM callback `__sanitizer_cov_8bit_counters_init` runs during static constructors (before `main()`). Thread-local `Cell` requires Rust's `thread_local!` machinery; `static AtomicPtr`/`AtomicUsize` are zero-initialized at compile time and universally safe for pre-main use. MAP_SHARED buffer pointers (`SANCOV_TRANSFER`, `SANCOV_HISTORY`, `SANCOV_POOL`, `SANCOV_POOL_SLOTS`) remain `Cell` since they're set during `init()` from `main()`.
-
-7. **Documented range merging algorithm**: `min(start)/max(stop)` across multiple `__sanitizer_cov_8bit_counters_init` callbacks. With `-Ccodegen-units=1`, one callback per instrumented crate. Gaps between BSS sections contain zeros, skipped by novelty detector.
-
----
-
-## ~~Extract `moonpool-sim-examples` crate for better sancov coverage~~ ✅ DONE
-
-Extracted maze/dungeon game logic to `moonpool-sim-examples/` crate. Sancov now targets ~139 edges at 59.7% coverage instead of 21K+ edges at 6.9%.
-
----
-
-## Future: Move all simulation binaries to exploration/forking
-
-### Problem
-
-Transport and banking simulation binaries (`sim-transport-e2e`, `sim-transport-messaging`, `sim-banking-chaos`) run chaos-only tests with `IterationControl` — no fork-based exploration. They don't benefit from sancov coverage signals or adaptive forking, leaving bugs that hide behind rare event combinations undiscovered.
-
-### Binaries to convert
-
-| Binary | Current mode | Sancov crates |
-|---|---|---|
-| `sim-transport-e2e` | Chaos only (5 scenarios) | `moonpool_transport` |
-| `sim-transport-messaging` | Chaos only (5 scenarios) | `moonpool_transport` |
-| `sim-banking-chaos` | Chaos only (100 iterations) | `moonpool,moonpool_transport` |
-
-`sim-metastable-explore` and `sim-adaptive-explore` already use exploration.
-
-### Changes needed
-
-- Add `enable_exploration(ExplorationConfig { ... })` with appropriate energy budgets to each binary
-- Tune `AdaptiveConfig` per workload (batch size, min/max timelines, per-mark energy)
-- Add `assert_sometimes_each!` / `assert_sometimes!` fork points in transport and banking workloads where interesting state transitions happen
-- Verify sancov edge counts and coverage percentages are reasonable
-- Update `xtask/src/main.rs` sancov_crates if needed
-
----
-
-## Future: Extract `moonpool-sim-examples` crate for better sancov coverage
-
-### Problem
-
-Maze and dungeon game logic currently lives inside `moonpool_sim::simulations::*`. When sancov instruments `moonpool_sim`, it instruments **all** 21K+ edges — the simulation runtime, chaos engine, orchestrator, event loop, assertions, RNG, etc. — but the dungeon only exercises ~1,450 of those edges (6.9%). The vast majority are unreachable dead code for these workloads (networking, RPC, actors, storage).
-
-This contradicts the sancov design principle: instrument the **code under test**, not the testing infrastructure. `moonpool_sim` is the testing infrastructure.
-
-### Solution
-
-Create `moonpool-sim-examples/` crate containing only the game logic:
-- `moonpool-sim-examples/src/maze.rs` — Maze struct, MazeWorkload
-- `moonpool-sim-examples/src/dungeon.rs` — Dungeon game engine, DungeonWorkload, SimRngAdapter
-
-The crate depends on `moonpool-sim` (for Workload trait, SimContext, assertions, sim_random) but contains only application-level code.
-
-### Impact on sancov
-
-- **Before**: `SANCOV_CRATES=moonpool_sim` → 21K edges, ~7% coverage (noisy)
-- **After**: `SANCOV_CRATES=moonpool_sim_examples` → ~2-3K edges, ~60%+ coverage (focused)
-
-Novel code paths in the game logic produce novel sancov edges directly, without being drowned out by the 19K irrelevant runtime edges. Fork decisions become more precise — sancov novelty correlates with actual exploration progress.
-
-### Changes needed
-
-- Create `moonpool-sim-examples/` with `Cargo.toml`, `src/lib.rs`, `src/maze.rs`, `src/dungeon.rs`
-- Move `moonpool-sim/src/simulations/{maze,dungeon}.rs` → `moonpool-sim-examples/src/`
-- Update `moonpool-sim/src/bin/sim/` binaries to import from `moonpool_sim_examples`
-- Update `xtask/src/main.rs` sancov mapping: `sim-maze-explore` → `moonpool_sim_examples`
-- Update `moonpool-sim/Cargo.toml` to add `moonpool-sim-examples` as a dev-dep (for replay tests)
-- Keep `moonpool-sim/src/simulations/mod.rs` with `run_simulation()` helper (shared by all crates)

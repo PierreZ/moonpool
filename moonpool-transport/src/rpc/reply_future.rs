@@ -76,6 +76,12 @@ impl<T: DeserializeOwned, C: MessageCodec> Future for ReplyFuture<T, C> {
     }
 }
 
+impl<T: DeserializeOwned, C: MessageCodec> Drop for ReplyFuture<T, C> {
+    fn drop(&mut self) {
+        self.queue.close();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};

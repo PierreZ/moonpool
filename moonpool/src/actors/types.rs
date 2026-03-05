@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 /// use moonpool::actors::ActorType;
 /// const BANK_ACCOUNT: ActorType = ActorType(0xBA4E_4B00);
 /// ```
-#[derive(Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize, Debug)]
+#[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Debug)]
 pub struct ActorType(pub u64);
 
 impl std::fmt::Display for ActorType {
@@ -57,7 +57,7 @@ impl std::fmt::Display for ActorType {
 ///     identity: "player-42".to_string(),
 /// };
 /// ```
-#[derive(Clone, Hash, Eq, PartialEq, Serialize, Deserialize, Debug)]
+#[derive(Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Debug)]
 pub struct ActorId {
     /// The type of actor (identifies the handler).
     pub actor_type: ActorType,

@@ -6,8 +6,9 @@
 //! boolean assertions (sometimes-all with frontier tracking).
 //!
 //! Each slot is accessed via raw pointer arithmetic on `MAP_SHARED` memory.
-//! The sequential fork tree (parent waits on children) means no true atomic
-//! CAS races occur — simple CAS suffices for correctness across forks.
+//! With `Parallelism::Cores(N)`, multiple fork children run concurrently,
+//! so `find_or_alloc_slot` claims slots by atomically writing `msg_hash`
+//! before re-scanning, ensuring concurrent allocators see each other.
 
 use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, Ordering};
 
@@ -147,46 +148,62 @@ unsafe fn find_or_alloc_slot(
 ) -> (*mut AssertionSlot, usize) {
     unsafe {
         let next_atomic = &*(table_ptr as *const AtomicU32);
-        let count = next_atomic.load(Ordering::Relaxed) as usize;
+        let count = next_atomic.load(Ordering::Acquire) as usize;
         let base = table_ptr.add(8) as *mut AssertionSlot;
 
-        // Search existing slots.
+        // Search existing slots (atomic load to see concurrent writers).
         for i in 0..count.min(MAX_ASSERTION_SLOTS) {
             let slot = base.add(i);
-            if (*slot).msg_hash == hash {
+            let h = &*(std::ptr::addr_of!((*slot).msg_hash) as *const AtomicU32);
+            if h.load(Ordering::Acquire) == hash {
                 return (slot, i);
             }
         }
 
         // Allocate new slot atomically.
-        let new_idx = next_atomic.fetch_add(1, Ordering::Relaxed) as usize;
+        let new_idx = next_atomic.fetch_add(1, Ordering::AcqRel) as usize;
         if new_idx >= MAX_ASSERTION_SLOTS {
-            next_atomic.fetch_sub(1, Ordering::Relaxed);
+            next_atomic.fetch_sub(1, Ordering::AcqRel);
             return (std::ptr::null_mut(), 0);
         }
 
+        // Claim our slot by writing msg_hash atomically BEFORE re-scanning.
+        // This makes our claim visible to any concurrent process doing
+        // its own re-scan, preventing the TOCTOU duplicate slot race.
         let slot = base.add(new_idx);
+        let hash_atomic = &*(std::ptr::addr_of!((*slot).msg_hash) as *const AtomicU32);
+        hash_atomic.store(hash, Ordering::Release);
+
+        // Re-scan 0..new_idx for a concurrent registration of the same hash.
+        // Lower index always wins — if we find a match, tombstone ourselves.
+        for i in 0..new_idx {
+            let existing = base.add(i);
+            let existing_hash = &*(std::ptr::addr_of!((*existing).msg_hash) as *const AtomicU32);
+            if existing_hash.load(Ordering::Acquire) == hash {
+                // Another process claimed a lower slot. Tombstone ours.
+                hash_atomic.store(0, Ordering::Release);
+                std::ptr::write_bytes(slot as *mut u8, 0, std::mem::size_of::<AssertionSlot>());
+                return (existing, i);
+            }
+        }
+
+        // No duplicate found — write remaining slot fields (msg_hash already set).
         let mut msg_buf = [0u8; SLOT_MSG_LEN];
         let n = msg.len().min(SLOT_MSG_LEN - 1);
         msg_buf[..n].copy_from_slice(&msg.as_bytes()[..n]);
 
-        std::ptr::write(
-            slot,
-            AssertionSlot {
-                msg_hash: hash,
-                kind: kind as u8,
-                must_hit,
-                maximize,
-                split_triggered: 0,
-                pass_count: 0,
-                fail_count: 0,
-                watermark: if maximize == 1 { i64::MIN } else { i64::MAX },
-                split_watermark: if maximize == 1 { i64::MIN } else { i64::MAX },
-                frontier: 0,
-                _pad: [0; 7],
-                msg: msg_buf,
-            },
-        );
+        (*slot).kind = kind as u8;
+        (*slot).must_hit = must_hit;
+        (*slot).maximize = maximize;
+        (*slot).split_triggered = 0;
+        (*slot).pass_count = 0;
+        (*slot).fail_count = 0;
+        (*slot).watermark = if maximize == 1 { i64::MIN } else { i64::MAX };
+        (*slot).split_watermark = if maximize == 1 { i64::MIN } else { i64::MAX };
+        (*slot).frontier = 0;
+        (*slot)._pad = [0; 7];
+        (*slot).msg = msg_buf;
+
         (slot, new_idx)
     }
 }
@@ -463,9 +480,13 @@ pub fn assertion_read_all() -> Vec<AssertionSlotSnapshot> {
         let base = table_ptr.add(8) as *const AssertionSlot;
 
         (0..count)
-            .map(|i| {
+            .filter_map(|i| {
                 let slot = &*base.add(i);
-                AssertionSlotSnapshot {
+                // Skip tombstones (msg_hash == 0) left by the duplicate-slot race fix.
+                if slot.msg_hash == 0 {
+                    return None;
+                }
+                Some(AssertionSlotSnapshot {
                     msg: slot.msg_str().to_string(),
                     kind: slot.kind,
                     must_hit: slot.must_hit,
@@ -473,7 +494,7 @@ pub fn assertion_read_all() -> Vec<AssertionSlotSnapshot> {
                     fail_count: slot.fail_count,
                     watermark: slot.watermark,
                     frontier: slot.frontier,
-                }
+                })
             })
             .collect()
     }

@@ -20,7 +20,7 @@
 //! concurrency matching Orleans' write model.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use moonpool_sim::assert_sometimes;
@@ -103,11 +103,11 @@ pub trait ActorStateStore: fmt::Debug {
 
 /// In-memory state store for testing and simulation.
 ///
-/// All state lives in a `HashMap`. ETags are monotonically increasing
+/// All state lives in a `BTreeMap`. ETags are monotonically increasing
 /// counter values. No persistence across process restarts.
 #[derive(Debug)]
 pub struct InMemoryStateStore {
-    entries: RefCell<HashMap<(String, String), StoredState>>,
+    entries: RefCell<BTreeMap<(String, String), StoredState>>,
     counter: Cell<u64>,
 }
 
@@ -115,9 +115,15 @@ impl InMemoryStateStore {
     /// Create a new empty in-memory state store.
     pub fn new() -> Self {
         Self {
-            entries: RefCell::new(HashMap::new()),
+            entries: RefCell::new(BTreeMap::new()),
             counter: Cell::new(0),
         }
+    }
+
+    /// Clear all stored state. Used between simulation iterations.
+    pub fn clear(&self) {
+        self.entries.borrow_mut().clear();
+        self.counter.set(0);
     }
 
     fn next_etag(&self) -> String {

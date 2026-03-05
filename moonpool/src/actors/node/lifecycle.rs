@@ -31,7 +31,10 @@
 //! 3. **Stopping**: Request streams closed, pending tasks drained
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 use std::rc::Rc;
+
+use moonpool_sim::StateHandle;
 
 use crate::{
     JsonCodec, MessageCodec, NetTransport, NetTransportBuilder, NetworkAddress, Providers,
@@ -44,6 +47,7 @@ use crate::actors::infrastructure::directory::ActorDirectory;
 use crate::actors::runtime::host::{ActorHandler, ActorTypeDispatcher, TypedDispatcher};
 use crate::actors::runtime::router::ActorRouter;
 use crate::actors::state::store::ActorStateStore;
+use crate::actors::types::ActorId;
 
 /// Type alias for a collection of close handles (one per registered actor type).
 type CloseHandles = Vec<Box<dyn Fn()>>;
@@ -200,6 +204,7 @@ pub struct MoonpoolNodeBuilder<P: Providers, C: MessageCodec = JsonCodec> {
     providers: Option<P>,
     codec: C,
     registrations: Vec<RegistrationFn<P, C>>,
+    state_handle: Option<StateHandle>,
 }
 
 /// Internal bag of references passed to registration closures during start().
@@ -211,6 +216,8 @@ struct NodeParts<P: Providers, C: MessageCodec> {
     providers: P,
     pending_tasks: Rc<Cell<usize>>,
     close_handles: Rc<RefCell<CloseHandles>>,
+    active_actors: Rc<RefCell<BTreeSet<ActorId>>>,
+    state_handle: Option<StateHandle>,
 }
 
 impl<P: Providers> MoonpoolNode<P> {
@@ -231,6 +238,7 @@ impl<P: Providers> MoonpoolNode<P> {
             providers: None,
             codec: JsonCodec,
             registrations: Vec::new(),
+            state_handle: None,
         }
     }
 }
@@ -250,7 +258,17 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
             providers: self.providers,
             codec,
             registrations: Vec::new(), // type changed, must re-register
+            state_handle: self.state_handle,
         }
+    }
+
+    /// Attach a state handle for publishing active actors state.
+    ///
+    /// When set, each node publishes the set of currently active actor IDs
+    /// for invariant checking in simulation.
+    pub fn with_state_handle(mut self, handle: StateHandle) -> Self {
+        self.state_handle = Some(handle);
+        self
     }
 
     /// Register an actor handler type.
@@ -272,6 +290,8 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
                 parts.state_store.clone(),
                 parts.providers.clone(),
                 parts.pending_tasks.clone(),
+                parts.active_actors.clone(),
+                parts.state_handle.clone(),
             );
             parts.close_handles.borrow_mut().push(close_handle);
         }));
@@ -349,6 +369,7 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
             address.clone(),
             self.cluster.placement_director().clone(),
             membership,
+            transport.providers().time().clone(),
             self.codec,
         ));
 
@@ -356,6 +377,7 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
         let close_handles: Rc<RefCell<CloseHandles>> = Rc::new(RefCell::new(Vec::new()));
 
         // Execute registrations
+        let active_actors = Rc::new(RefCell::new(BTreeSet::new()));
         let parts = NodeParts {
             transport: transport.clone(),
             router: router.clone(),
@@ -364,6 +386,8 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
             providers: providers.clone(),
             pending_tasks: pending_tasks.clone(),
             close_handles: close_handles.clone(),
+            active_actors,
+            state_handle: self.state_handle,
         };
 
         for registration in self.registrations {
@@ -384,6 +408,140 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
             pending_tasks,
             close_handles: close_handles_owned,
             providers,
+        })
+    }
+}
+
+// ============================================================================
+// MoonpoolClient — client-only actor runtime (no hosting, no membership)
+// ============================================================================
+
+/// Type alias for a placement registration closure (placement only, no dispatcher).
+type PlacementRegistrationFn<P, C> = Box<dyn FnOnce(&Rc<ActorRouter<P, C>>)>;
+
+/// Client-only actor runtime that can send RPCs but never hosts actors.
+///
+/// Unlike [`MoonpoolNode`], a `MoonpoolClient` does not register in membership
+/// and does not spawn any actor processing loops. It is invisible to the
+/// placement director, so actors are never placed on a client address.
+///
+/// Use this for workloads / test drivers that need to call actors without
+/// interfering with placement decisions.
+pub struct MoonpoolClient<P: Providers, C: MessageCodec = JsonCodec> {
+    transport: Rc<NetTransport<P>>,
+    router: Rc<ActorRouter<P, C>>,
+    address: NetworkAddress,
+}
+
+impl<P: Providers, C: MessageCodec> MoonpoolClient<P, C> {
+    /// Get a typed actor reference by identity.
+    pub fn actor_ref<R: crate::actors::ActorRef<P, C>>(&self, identity: impl Into<String>) -> R {
+        R::from_router(identity, &self.router)
+    }
+
+    /// Get a reference to the actor router.
+    pub fn router(&self) -> &Rc<ActorRouter<P, C>> {
+        &self.router
+    }
+
+    /// Get a reference to the underlying transport.
+    pub fn transport(&self) -> &Rc<NetTransport<P>> {
+        &self.transport
+    }
+
+    /// This client's network address.
+    pub fn address(&self) -> &NetworkAddress {
+        &self.address
+    }
+}
+
+impl<P: Providers> MoonpoolClient<P> {
+    /// Create a builder for a client in the given cluster.
+    ///
+    /// Uses [`JsonCodec`] by default.
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new(cluster: ClusterConfig, address: NetworkAddress) -> MoonpoolClientBuilder<P> {
+        MoonpoolClientBuilder {
+            cluster,
+            address,
+            providers: None,
+            codec: JsonCodec,
+            placement_registrations: Vec::new(),
+        }
+    }
+}
+
+/// Builder for [`MoonpoolClient`].
+pub struct MoonpoolClientBuilder<P: Providers, C: MessageCodec = JsonCodec> {
+    cluster: ClusterConfig,
+    address: NetworkAddress,
+    providers: Option<P>,
+    codec: C,
+    placement_registrations: Vec<PlacementRegistrationFn<P, C>>,
+}
+
+impl<P: Providers, C: MessageCodec> MoonpoolClientBuilder<P, C> {
+    /// Set the providers bundle (required).
+    pub fn with_providers(mut self, providers: P) -> Self {
+        self.providers = Some(providers);
+        self
+    }
+
+    /// Register knowledge of an actor type for placement routing.
+    ///
+    /// This tells the router about the actor type's placement strategy so it
+    /// can route RPCs correctly, but does NOT spawn any dispatcher — the
+    /// client can never host actors.
+    pub fn knows<H: ActorHandler>(mut self) -> Self {
+        self.placement_registrations
+            .push(Box::new(|router: &Rc<ActorRouter<P, C>>| {
+                router.register_placement(H::actor_type(), H::placement_strategy());
+            }));
+        self
+    }
+
+    /// Build and start the client.
+    ///
+    /// Creates the transport and router. Does NOT register in membership
+    /// and does NOT spawn any actor dispatchers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if providers are missing or transport creation fails.
+    pub async fn start(self) -> Result<MoonpoolClient<P, C>, NodeError> {
+        let providers = self.providers.ok_or(NodeError::MissingProviders)?;
+
+        // Create transport (listener needed for RPC responses)
+        let transport = NetTransportBuilder::new(providers.clone())
+            .local_address(self.address.clone())
+            .build_listening()
+            .await
+            .map_err(|e| NodeError::Transport(e.to_string()))?;
+
+        // Create router — same as MoonpoolNode but NO membership registration
+        let directory = self.cluster.directory().clone();
+        let membership = self.cluster.membership().clone();
+        let router = Rc::new(ActorRouter::new(
+            transport.clone(),
+            directory,
+            self.address.clone(),
+            self.cluster.placement_director().clone(),
+            membership,
+            transport.providers().time().clone(),
+            self.codec,
+        ));
+
+        // Apply placement registrations
+        for reg in self.placement_registrations {
+            reg(&router);
+        }
+
+        tracing::info!(address = %self.address, "client started (no membership)");
+
+        Ok(MoonpoolClient {
+            transport,
+            router,
+            address: self.address,
         })
     }
 }
@@ -453,6 +611,10 @@ mod tests {
     impl ActorHandler for CounterActor {
         fn actor_type() -> ActorType {
             TEST_ACTOR_TYPE
+        }
+
+        fn placement_strategy() -> crate::actors::PlacementStrategy {
+            crate::actors::PlacementStrategy::RoundRobin
         }
 
         async fn dispatch<P2: Providers, C2: MessageCodec>(
@@ -678,6 +840,94 @@ mod tests {
                 .get_member(&local_addr)
                 .expect("node should be in membership");
             assert_eq!(member.status, crate::actors::NodeStatus::Dead);
+        });
+    }
+
+    #[test]
+    fn test_client_missing_providers() {
+        run_local_test(async {
+            let cluster = ClusterConfig::builder()
+                .topology(vec![addr(4720)])
+                .build()
+                .expect("build cluster");
+            let result = MoonpoolClient::<TokioProviders>::new(cluster, addr(4720))
+                .start()
+                .await;
+            assert!(matches!(result, Err(NodeError::MissingProviders)));
+        });
+    }
+
+    #[test]
+    fn test_client_not_in_membership() {
+        run_local_test(async {
+            let membership = Rc::new(crate::actors::SharedMembership::new());
+            let cluster = ClusterConfig::builder()
+                .membership(membership.clone())
+                .build()
+                .expect("build cluster");
+
+            let _client = MoonpoolClient::new(cluster, addr(4710))
+                .with_providers(TokioProviders::new())
+                .start()
+                .await
+                .expect("start client");
+
+            // Client should NOT appear in membership
+            let snap = membership.snapshot().await;
+            assert!(
+                snap.get_member(&addr(4710)).is_none(),
+                "client must not register in membership"
+            );
+        });
+    }
+
+    #[test]
+    fn test_client_send_to_node() {
+        run_local_test(async {
+            let node_addr = addr(4730);
+            let client_addr = addr(4731);
+
+            let membership = Rc::new(crate::actors::SharedMembership::new());
+            let directory = Rc::new(crate::actors::InMemoryDirectory::new());
+
+            let cluster = ClusterConfig::builder()
+                .directory(directory.clone())
+                .membership(membership.clone())
+                .build()
+                .expect("build cluster");
+
+            // Start a node that hosts CounterActor
+            let _node =
+                MoonpoolNode::new(cluster.clone(), NodeConfig::for_address(node_addr.clone()))
+                    .with_providers(TokioProviders::new())
+                    .register::<CounterActor>()
+                    .start()
+                    .await
+                    .expect("start node");
+
+            tokio::task::yield_now().await;
+
+            // Start a client that knows about CounterActor but doesn't host it
+            let client = MoonpoolClient::new(cluster, client_addr)
+                .with_providers(TokioProviders::new())
+                .knows::<CounterActor>()
+                .start()
+                .await
+                .expect("start client");
+
+            // Send RPC from client to node
+            let actor_id = ActorId::new(TEST_ACTOR_TYPE, "remote1");
+            let resp: ValueResponse = client
+                .router()
+                .send_actor_request(
+                    &actor_id,
+                    test_methods::INCREMENT,
+                    &IncrementRequest { amount: 7 },
+                )
+                .await
+                .expect("client RPC should succeed");
+
+            assert_eq!(resp, ValueResponse { value: 7 });
         });
     }
 
