@@ -16,7 +16,7 @@ use tokio::runtime::RngSeed;
 
 fn main() {
     let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(tracing::Level::WARN)
         .try_init();
 
     let membership = Rc::new(SharedMembership::new());
@@ -81,10 +81,8 @@ fn main() {
             //     parallelism: None,
             // })
             // .until_converged(10)
-            .set_debug_seeds(vec![
-                3937336182698727299, //, 14597617647669048509, 6767011624512909954
-            ])
-            .set_iterations(1)
+            .set_debug_seeds(vec![15204012862878889900, 3780034198488802454])
+            .set_iterations(200)
             .run()
             .await
     });
