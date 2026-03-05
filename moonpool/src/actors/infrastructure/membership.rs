@@ -341,6 +341,15 @@ impl SharedMembership {
         }
     }
 
+    /// Clear all membership state. Used between simulation iterations.
+    pub fn clear(&self) {
+        let mut inner = self.inner.borrow_mut();
+        inner.members.clear();
+        inner.version = MembershipVersion::new();
+        drop(inner);
+        *self.state_handle.borrow_mut() = None;
+    }
+
     /// Direct access: add a member (backward compatibility helper).
     ///
     /// Prefer `register_node()` via the trait for new code.

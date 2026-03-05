@@ -218,6 +218,7 @@ pub struct SimulationBuilder {
     phase_config: Option<PhaseConfig>,
     exploration_config: Option<moonpool_explorer::ExplorationConfig>,
     replay_recipe: Option<super::report::BugRecipe>,
+    before_iteration_hooks: Vec<Box<dyn FnMut()>>,
 }
 
 impl Default for SimulationBuilder {
@@ -241,6 +242,7 @@ impl SimulationBuilder {
             phase_config: None,
             exploration_config: None,
             replay_recipe: None,
+            before_iteration_hooks: Vec::new(),
         }
     }
 
@@ -464,6 +466,15 @@ impl SimulationBuilder {
         self
     }
 
+    /// Register a callback invoked at the start of each simulation iteration.
+    ///
+    /// Use this to reset shared state (directories, membership, stores) that
+    /// lives outside the builder and is shared via `Rc` across iterations.
+    pub fn before_iteration(mut self, f: impl FnMut() + 'static) -> Self {
+        self.before_iteration_hooks.push(Box::new(f));
+        self
+    }
+
     /// Set specific seeds for deterministic debugging and regression testing.
     pub fn set_debug_seeds(mut self, seeds: Vec<u64>) -> Self {
         self.seeds = seeds;
@@ -632,6 +643,11 @@ impl SimulationBuilder {
                     moonpool_explorer::prepare_next_seed(config.global_energy);
                 }
                 crate::chaos::assertions::skip_next_assertion_reset();
+            }
+
+            // Run user-provided reset hooks
+            for hook in &mut self.before_iteration_hooks {
+                hook();
             }
 
             // Prepare clean state for this iteration

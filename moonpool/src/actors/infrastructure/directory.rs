@@ -158,6 +158,12 @@ impl InMemoryDirectory {
         *self.state_handle.borrow_mut() = Some(handle);
     }
 
+    /// Clear all directory entries. Used between simulation iterations.
+    pub fn clear(&self) {
+        self.entries.borrow_mut().clear();
+        *self.state_handle.borrow_mut() = None;
+    }
+
     fn publish_state(&self, handle: &StateHandle) {
         handle.publish(DIRECTORY_STATE_KEY, self.entries.borrow().clone());
     }

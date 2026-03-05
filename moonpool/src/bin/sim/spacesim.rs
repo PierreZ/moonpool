@@ -16,7 +16,7 @@ use tokio::runtime::RngSeed;
 
 fn main() {
     let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(tracing::Level::WARN)
         .try_init();
 
     let membership = Rc::new(SharedMembership::new());
@@ -42,6 +42,12 @@ fn main() {
 
     let report = local_runtime.block_on(async move {
         SimulationBuilder::new()
+            .before_iteration({
+                let m = membership.clone();
+                let d = directory.clone();
+                let s = state_store.clone();
+                move || { m.clear(); d.clear(); s.clear(); }
+            })
             .processes(1, {
                 let cluster = cluster.clone();
                 let ss = state_store.clone() as Rc<dyn ActorStateStore>;
@@ -71,8 +77,8 @@ fn main() {
             //     parallelism: None,
             // })
             // .until_converged(10)
-            .set_debug_seeds(vec![5539099267278430486])
-            .set_iterations(1)
+            .set_debug_seeds(vec![6509238295089795296])
+            .set_iterations(10)
             .run()
             .await
     });
