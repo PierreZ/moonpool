@@ -37,6 +37,14 @@ pub enum RpcError {
     Reply(ReplyError),
 }
 
+impl RpcError {
+    /// Returns true if this error indicates the request may or may not
+    /// have been delivered (FDB error 1030: request_maybe_delivered).
+    pub fn is_maybe_delivered(&self) -> bool {
+        matches!(self, RpcError::Reply(ReplyError::MaybeDelivered))
+    }
+}
+
 impl std::fmt::Display for RpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

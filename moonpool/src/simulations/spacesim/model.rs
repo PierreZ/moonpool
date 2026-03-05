@@ -3,7 +3,9 @@
 //! Tracks expected station credits and inventory, providing a source of truth
 //! for conservation law and non-negative balance invariants.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+use super::actors::StationResponse;
 
 /// Key used to publish the reference model into `StateHandle`.
 pub const SPACE_MODEL_KEY: &str = "space_model";
@@ -20,6 +22,8 @@ pub struct SpaceModel {
     pub total_credits: i64,
     /// Sum of all cargo per commodity (invariant target).
     pub total_cargo: BTreeMap<String, i64>,
+    /// Stations whose state is uncertain due to MaybeDelivered.
+    pub uncertain: BTreeSet<String>,
 }
 
 /// Per-station expected state.
@@ -113,5 +117,38 @@ impl SpaceModel {
             .values()
             .map(|s| s.inventory.get(commodity).copied().unwrap_or(0))
             .sum()
+    }
+
+    /// Mark a station as uncertain (delivery ambiguity).
+    pub fn mark_uncertain(&mut self, name: &str) {
+        self.uncertain.insert(name.to_string());
+    }
+
+    /// Check if a station has uncertain state.
+    pub fn is_uncertain(&self, name: &str) -> bool {
+        self.uncertain.contains(name)
+    }
+
+    /// Reconcile a station's model state with the actual response from the actor.
+    ///
+    /// Overwrites the station's credits and inventory, removes uncertainty,
+    /// then recalculates totals from scratch.
+    pub fn reconcile(&mut self, name: &str, actual: &StationResponse) {
+        let station = self.stations.entry(name.to_string()).or_default();
+        station.credits = actual.credits;
+        station.inventory = actual.inventory.clone();
+        self.uncertain.remove(name);
+        self.recalculate_totals();
+    }
+
+    /// Recalculate total_credits and total_cargo from all station state.
+    fn recalculate_totals(&mut self) {
+        self.total_credits = self.stations.values().map(|s| s.credits).sum();
+        self.total_cargo.clear();
+        for station in self.stations.values() {
+            for (commodity, &amount) in &station.inventory {
+                *self.total_cargo.entry(commodity.clone()).or_insert(0) += amount;
+            }
+        }
     }
 }

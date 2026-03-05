@@ -217,7 +217,8 @@ This is the fundamental at-most-once delivery problem (FDB error_code 1030: `req
 - ~~2.7b~~ FailureMonitor — done (address/endpoint failure tracking, 11 unit tests, wired into connection_task)
 - ~~2.7c~~ MaybeDelivered error + reply queue closure on disconnect — done
 - ~~2.7d~~ 4 delivery modes — done (send, try_get_reply, get_reply, get_reply_unless_failed_for)
-- **Next: 2.8** — Make spacesim RPC fault-aware with try_get_reply
+- ~~2.8~~ Spacesim fault-aware RPCs — done (try_get_reply + Strategy 4 reconciliation)
+- **Next: 3** — Multi-process spacesim with 3 station nodes
 
 **New reference files added:**
 - `docs/references/foundationdb/FailureMonitor.{h,actor.cpp}` — address/endpoint failure tracking
@@ -427,7 +428,7 @@ tokio::select! {
 
 ---
 
-## [ ] Commit 2.8: `feat(sim): make spacesim RPC fault-aware with try_get_reply`
+## [x] Commit 2.8: `feat(sim): make spacesim RPC fault-aware with try_get_reply`
 
 **Goal**: Update spacesim to use `try_get_reply()` + Strategy 4 (read-before-retry). Unblocks Commit 3.
 
@@ -618,7 +619,7 @@ if buggify!() { ctx.time().sleep(Duration::from_millis(50)).await; } // slow wri
 | ~~2.7b~~ | ~~FailureMonitor~~ | ~~moonpool-transport~~ | ~~Watchers wake on disconnect~~ |
 | ~~2.7c~~ | ~~MaybeDelivered + reply queue closure~~ | ~~moonpool-transport~~ | ~~Fast failure (~2s vs 30s)~~ |
 | ~~2.7d~~ | ~~4 delivery modes~~ | ~~moonpool-transport~~ | ~~try_get_reply returns MaybeDelivered~~ |
-| 2.8 | Spacesim fault-aware RPCs | moonpool (spacesim) | Model reconciliation after ambiguity |
+| ~~2.8~~ | ~~Spacesim fault-aware RPCs~~ | ~~moonpool (spacesim)~~ | ~~Model reconciliation after ambiguity~~ |
 | 3 | Multi-process (3 nodes) | moonpool (spacesim) | **First multi-node test** |
 | 4 | ShipActor + actor-to-actor | moonpool (spacesim) | Cross-actor RPC |
 | 5 | Network chaos | moonpool (spacesim) | RPC failures |

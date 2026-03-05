@@ -100,6 +100,29 @@ pub struct SpaceWorkload {
 }
 
 impl SpaceWorkload {
+    /// Reconcile a station after MaybeDelivered by querying its actual state.
+    async fn reconcile_station(
+        client: &MoonpoolClient<SimProviders>,
+        model: &mut SpaceModel,
+        station: &str,
+    ) {
+        let actor_ref: StationRef<_> = client.actor_ref(station.to_string());
+        match actor_ref.query_state(QueryStateRequest {}).await {
+            Ok(resp) => {
+                model.reconcile(station, &resp);
+                tracing::info!(
+                    station,
+                    credits = resp.credits,
+                    "reconciled after MaybeDelivered"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(station, error = %e, "reconcile query failed, marking uncertain");
+                model.mark_uncertain(station);
+            }
+        }
+    }
+
     /// Create a new space workload.
     pub fn new(
         num_ops: usize,
@@ -196,13 +219,17 @@ impl moonpool_sim::Workload for SpaceWorkload {
                 SpaceOp::Deposit { station, amount } => {
                     let actor_ref: StationRef<_> = client.actor_ref(station.clone());
                     match actor_ref
-                        .deposit_credits(DepositCreditsRequest { amount })
+                        .try_deposit_credits(DepositCreditsRequest { amount })
                         .await
                     {
                         Ok(resp) => {
                             self.model.deposit(&station, amount);
                             let expected = self.model.station_credits(&station);
                             assert_always!(resp.credits == expected, "deposit credit mismatch");
+                        }
+                        Err(e) if e.is_maybe_delivered() => {
+                            assert_sometimes!(true, "deposit_maybe_delivered");
+                            Self::reconcile_station(client, &mut self.model, &station).await;
                         }
                         Err(e) => {
                             tracing::warn!("deposit failed: {}", e);
@@ -211,6 +238,9 @@ impl moonpool_sim::Workload for SpaceWorkload {
                 }
                 SpaceOp::Withdraw { station, amount } => {
                     // Check model first — only issue withdrawals that should succeed
+                    if self.model.is_uncertain(&station) {
+                        Self::reconcile_station(client, &mut self.model, &station).await;
+                    }
                     let can_withdraw = self.model.station_credits(&station) >= amount;
                     if !can_withdraw {
                         assert_sometimes!(true, "withdraw_rejected_insufficient");
@@ -218,7 +248,7 @@ impl moonpool_sim::Workload for SpaceWorkload {
                     }
                     let actor_ref: StationRef<_> = client.actor_ref(station.clone());
                     match actor_ref
-                        .withdraw_credits(WithdrawCreditsRequest { amount })
+                        .try_withdraw_credits(WithdrawCreditsRequest { amount })
                         .await
                     {
                         Ok(resp) => {
@@ -231,6 +261,10 @@ impl moonpool_sim::Workload for SpaceWorkload {
                             assert_always!(resp.credits == expected, "withdraw credit mismatch");
                             assert_sometimes!(true, "withdraw_succeeded");
                         }
+                        Err(e) if e.is_maybe_delivered() => {
+                            assert_sometimes!(true, "withdraw_maybe_delivered");
+                            Self::reconcile_station(client, &mut self.model, &station).await;
+                        }
                         Err(e) => {
                             tracing::warn!("withdraw failed: {}", e);
                         }
@@ -240,8 +274,12 @@ impl moonpool_sim::Workload for SpaceWorkload {
                     let actor_ref: StationRef<_> = client.actor_ref(station.clone());
                     match actor_ref.query_state(QueryStateRequest {}).await {
                         Ok(resp) => {
-                            let expected = self.model.station_credits(&station);
-                            assert_always!(resp.credits == expected, "query credit mismatch");
+                            if self.model.is_uncertain(&station) {
+                                self.model.reconcile(&station, &resp);
+                            } else {
+                                let expected = self.model.station_credits(&station);
+                                assert_always!(resp.credits == expected, "query credit mismatch");
+                            }
                         }
                         Err(e) => {
                             tracing::warn!("query_state failed: {}", e);
@@ -255,7 +293,7 @@ impl moonpool_sim::Workload for SpaceWorkload {
                 } => {
                     let actor_ref: StationRef<_> = client.actor_ref(station.clone());
                     match actor_ref
-                        .add_cargo(AddCargoRequest {
+                        .try_add_cargo(AddCargoRequest {
                             commodity: commodity.clone(),
                             amount,
                         })
@@ -267,6 +305,10 @@ impl moonpool_sim::Workload for SpaceWorkload {
                             let actual = resp.inventory.get(&commodity).copied().unwrap_or(0);
                             assert_always!(actual == expected, "add_cargo inventory mismatch");
                         }
+                        Err(e) if e.is_maybe_delivered() => {
+                            assert_sometimes!(true, "add_cargo_maybe_delivered");
+                            Self::reconcile_station(client, &mut self.model, &station).await;
+                        }
                         Err(e) => {
                             tracing::warn!("add_cargo failed: {}", e);
                         }
@@ -277,6 +319,9 @@ impl moonpool_sim::Workload for SpaceWorkload {
                     commodity,
                     amount,
                 } => {
+                    if self.model.is_uncertain(&station) {
+                        Self::reconcile_station(client, &mut self.model, &station).await;
+                    }
                     let can_remove = self.model.station_cargo(&station, &commodity) >= amount;
                     if !can_remove {
                         assert_sometimes!(true, "remove_cargo_rejected");
@@ -284,7 +329,7 @@ impl moonpool_sim::Workload for SpaceWorkload {
                     }
                     let actor_ref: StationRef<_> = client.actor_ref(station.clone());
                     match actor_ref
-                        .remove_cargo(RemoveCargoRequest {
+                        .try_remove_cargo(RemoveCargoRequest {
                             commodity: commodity.clone(),
                             amount,
                         })
@@ -301,6 +346,10 @@ impl moonpool_sim::Workload for SpaceWorkload {
                             assert_always!(actual == expected, "remove_cargo inventory mismatch");
                             assert_sometimes!(true, "remove_cargo_succeeded");
                         }
+                        Err(e) if e.is_maybe_delivered() => {
+                            assert_sometimes!(true, "remove_cargo_maybe_delivered");
+                            Self::reconcile_station(client, &mut self.model, &station).await;
+                        }
                         Err(e) => {
                             tracing::warn!("remove_cargo failed: {}", e);
                         }
@@ -309,6 +358,10 @@ impl moonpool_sim::Workload for SpaceWorkload {
                 SpaceOp::VerifyAll => {
                     let mut all_match = true;
                     for name in &self.station_names {
+                        if self.model.is_uncertain(name) {
+                            Self::reconcile_station(client, &mut self.model, name).await;
+                            continue;
+                        }
                         let actor_ref: StationRef<_> = client.actor_ref(name.clone());
                         match actor_ref.query_state(QueryStateRequest {}).await {
                             Ok(resp) => {
