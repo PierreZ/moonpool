@@ -12,10 +12,11 @@ use moonpool::simulations::spacesim::{
     workloads::{SpaceProcess, SpaceWorkload},
 };
 use moonpool_sim::{AdaptiveConfig, ExplorationConfig, Parallelism, SimulationBuilder};
+use tokio::runtime::RngSeed;
 
 fn main() {
     let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
+        .with_max_level(tracing::Level::DEBUG)
         .try_init();
 
     let membership = Rc::new(SharedMembership::new());
@@ -30,10 +31,12 @@ fn main() {
         .expect("cluster config");
 
     let stations = ["alpha", "beta", "gamma", "delta", "epsilon"];
+    let seed = RngSeed::from_bytes(b"my_fixed_seed_001");
 
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
+        .rng_seed(seed)
         .build_local(Default::default())
         .expect("Failed to build local runtime");
 
@@ -59,20 +62,22 @@ fn main() {
             .invariant(CargoConservation)
             .invariant(NonNegativeBalances)
             .invariant(DirectoryConsistency)
-            .enable_exploration(ExplorationConfig {
-                max_depth: 30,
-                timelines_per_split: 4,
-                global_energy: 20_000,
-                adaptive: Some(AdaptiveConfig {
-                    batch_size: 20,
-                    min_timelines: 60,
-                    max_timelines: 200,
-                    per_mark_energy: 1_000,
-                    warm_min_timelines: Some(20),
-                }),
-                parallelism: Some(Parallelism::Cores(3)),
-            })
-            .until_converged(10)
+            // .enable_exploration(ExplorationConfig {
+            //     max_depth: 30,
+            //     timelines_per_split: 4,
+            //     global_energy: 20_000,
+            //     adaptive: Some(AdaptiveConfig {
+            //         batch_size: 20,
+            //         min_timelines: 60,
+            //         max_timelines: 200,
+            //         per_mark_energy: 1_000,
+            //         warm_min_timelines: Some(20),
+            //     }),
+            //     parallelism: None,
+            // })
+            // .until_converged(10)
+            .set_debug_seeds(vec![5539099267278430486])
+            .set_iterations(1)
             .run()
             .await
     });

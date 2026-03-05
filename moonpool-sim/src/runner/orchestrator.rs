@@ -643,7 +643,7 @@ impl WorkloadOrchestrator {
                     deadlock_detector.reset();
                 } else {
                     tracing::error!(
-                        "DEADLOCK detected on iteration {} with seed {}: {} tasks remaining after {} no-progress iterations",
+                        "DEADLOCK (without phase) detected on iteration {} with seed {}: {} tasks remaining after {} no-progress iterations",
                         iteration_count,
                         seed,
                         current_active,

@@ -179,6 +179,10 @@ impl Station for StationActorImpl {
 
 #[actor_impl(Station)]
 impl ActorHandler for StationActorImpl {
+    fn placement_strategy() -> crate::actors::PlacementStrategy {
+        crate::actors::PlacementStrategy::RoundRobin
+    }
+
     fn deactivation_hint(&self) -> DeactivationHint {
         DeactivationHint::DeactivateOnIdle
     }
