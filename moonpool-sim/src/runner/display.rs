@@ -525,10 +525,7 @@ fn write_seeds(w: &mut impl Write, report: &SimulationReport, color: bool) {
     let dim = if color { ansi::DIM } else { "" };
     let reset = if color { ansi::RESET } else { "" };
 
-    let per_seed_tl = report
-        .exploration
-        .as_ref()
-        .map(|e| &e.per_seed_timelines);
+    let per_seed_tl = report.exploration.as_ref().map(|e| &e.per_seed_timelines);
 
     for (i, seed) in report.seeds_used.iter().enumerate() {
         if let Some(Ok(m)) = report.individual_metrics.get(i) {

@@ -826,6 +826,8 @@ impl SimulationBuilder {
 
                 // Check convergence from seed 2 onward (need baseline for coverage delta)
                 if iteration_count >= 2 {
+                    // Count unique message strings (not raw slots) to handle
+                    // any residual duplicate slots from the fork allocation race.
                     let all_sometimes_count = slots
                         .iter()
                         .filter(|s| {
@@ -839,7 +841,9 @@ impl SimulationBuilder {
                                 })
                                 .unwrap_or(false)
                         })
-                        .count();
+                        .map(|s| s.msg.clone())
+                        .collect::<std::collections::HashSet<_>>()
+                        .len();
                     let all_reached =
                         all_sometimes_count > 0 && reached_sometimes.len() >= all_sometimes_count;
 
