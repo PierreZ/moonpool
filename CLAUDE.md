@@ -111,8 +111,8 @@ Strategic placement: error handling, timeouts, retries, resource limits
 - Avoid surprises in API behavior vs real networking
 
 ## References
-**Read first**: `docs/analysis/flow.md` (before any `actor.cpp` code)
-**Architecture**: `docs/analysis/fdb-network.md`
+**Read first**: `docs/analysis/foundationdb/layer-1-flow-runtime.md` (before any `actor.cpp` code)
+**Architecture**: `docs/analysis/foundationdb/layer-2-flow-transport.md`
 
 **Available files in docs/references**:
 - foundationdb/: Buggify.h, FlowTransport.actor.cpp, FlowTransport.h, Net2.actor.cpp, Net2Packet.cpp, Net2Packet.h, Ping.actor.cpp, sim2.actor.cpp
