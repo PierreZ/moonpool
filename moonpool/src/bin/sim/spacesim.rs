@@ -81,8 +81,11 @@ fn main() {
             //     parallelism: None,
             // })
             // .until_converged(10)
-            .set_debug_seeds(vec![15204012862878889900, 3780034198488802454])
-            .set_iterations(200)
+            // ******
+            // TODO FIXME .set_debug_seeds(vec![15204012862878889900, 3780034198488802454])
+            // ******
+            .set_debug_seeds(vec![3963017351017282997])
+            .set_iterations(1)
             .run()
             .await
     });

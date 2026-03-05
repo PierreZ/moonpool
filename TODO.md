@@ -195,6 +195,47 @@ assert_always!(resp_cargo == expected_cargo, "verify: cargo mismatch");
 4. Single activation: no actor active on two nodes simultaneously
 
 **Files changed**: `directory.rs`, `membership.rs`, `host.rs`, `lifecycle.rs`, `infrastructure/mod.rs`, `actors/mod.rs`, `simulations/mod.rs`, `simulations/invariants.rs` (new), `spacesim/invariants.rs`, `spacesim/workloads.rs`, `spacesim.rs`
+---
+
+## [x] Commit 2.6: various transport/actor fixes
+
+- `fix(transport): self-notify connection task after write failure to enable reconnection`
+- `feat(sim): add before_iteration hook and clear methods for multi-seed reset`
+- `feat(actors): add MoonpoolClient for client-only actor runtime`
+- `fix(actors): add RPC timeout to prevent deadlock on connection death`
+
+---
+
+## Current Situation (2026-03-05)
+
+**Spacesim is blocked.** Two seeds fail (`15204012862878889900`, `3780034198488802454`) with model-vs-actual divergence. Root cause: the **maybe-delivered ambiguity** — transport chaos drops a response after the actor processed the request, workload sees `Err`, doesn't update model, but actor state is already persisted.
+
+This is the fundamental at-most-once delivery problem (FDB error_code 1030: `request_maybe_delivered`). Before proceeding to Commit 3 (multi-process), moonpool's transport needs fdbrpc-level delivery semantics.
+
+**New reference files added:**
+- `docs/references/foundationdb/FailureMonitor.{h,actor.cpp}` — address/endpoint failure tracking
+- `docs/references/foundationdb/HealthMonitor.{h,actor.cpp}` — connection closure tracking
+- `docs/references/foundationdb/fdbrpc.h` — RequestStream with 3 delivery modes
+- `docs/references/foundationdb/genericactors.actor.h` — waitValueOrSignal, sendCanceler, retryBrokenPromise
+- `docs/analysis/foundationdb/fdbrpc-backport-guide.md` — Rust mapping guide
+
+**What moonpool transport already has** (= FlowTransport basics):
+- ✅ sendReliable (reliable queue, retransmit on reconnect)
+- ✅ Peer connection management + reconnect with backoff
+- ✅ Ping-based liveness detection
+- ✅ ReplyPromise/ReplyFuture + endpoint routing
+- ✅ BrokenPromise on Drop
+
+**What's missing** (= fdbrpc layer):
+- ❌ `peer.disconnect` signal — no exposed disconnect notification
+- ❌ FailureMonitor (`notify_disconnect`, `on_disconnect_or_failure`)
+- ❌ `request_maybe_delivered` error (MaybeDelivered vs NotDelivered)
+- ❌ Reply queue closure on peer disconnect (ReplyFutures hang until 30s timeout)
+- ❌ 3 delivery modes: `send()` / `try_get_reply()` / `get_reply()`
+- ❌ Request IDs for dedup
+- ❌ sendUnreliable exposed to RPC layer
+
+**Next: Commit 2.7 series — implement fdbrpc backport (see `docs/analysis/foundationdb/fdbrpc-backport-guide.md`)**
 
 ---
 
