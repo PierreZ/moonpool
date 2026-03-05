@@ -31,7 +31,10 @@
 //! 3. **Stopping**: Request streams closed, pending tasks drained
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::rc::Rc;
+
+use moonpool_sim::StateHandle;
 
 use crate::{
     JsonCodec, MessageCodec, NetTransport, NetTransportBuilder, NetworkAddress, Providers,
@@ -44,6 +47,7 @@ use crate::actors::infrastructure::directory::ActorDirectory;
 use crate::actors::runtime::host::{ActorHandler, ActorTypeDispatcher, TypedDispatcher};
 use crate::actors::runtime::router::ActorRouter;
 use crate::actors::state::store::ActorStateStore;
+use crate::actors::types::ActorId;
 
 /// Type alias for a collection of close handles (one per registered actor type).
 type CloseHandles = Vec<Box<dyn Fn()>>;
@@ -200,6 +204,7 @@ pub struct MoonpoolNodeBuilder<P: Providers, C: MessageCodec = JsonCodec> {
     providers: Option<P>,
     codec: C,
     registrations: Vec<RegistrationFn<P, C>>,
+    state_handle: Option<StateHandle>,
 }
 
 /// Internal bag of references passed to registration closures during start().
@@ -211,6 +216,8 @@ struct NodeParts<P: Providers, C: MessageCodec> {
     providers: P,
     pending_tasks: Rc<Cell<usize>>,
     close_handles: Rc<RefCell<CloseHandles>>,
+    active_actors: Rc<RefCell<HashSet<ActorId>>>,
+    state_handle: Option<StateHandle>,
 }
 
 impl<P: Providers> MoonpoolNode<P> {
@@ -231,6 +238,7 @@ impl<P: Providers> MoonpoolNode<P> {
             providers: None,
             codec: JsonCodec,
             registrations: Vec::new(),
+            state_handle: None,
         }
     }
 }
@@ -250,7 +258,17 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
             providers: self.providers,
             codec,
             registrations: Vec::new(), // type changed, must re-register
+            state_handle: self.state_handle,
         }
+    }
+
+    /// Attach a state handle for publishing active actors state.
+    ///
+    /// When set, each node publishes the set of currently active actor IDs
+    /// for invariant checking in simulation.
+    pub fn with_state_handle(mut self, handle: StateHandle) -> Self {
+        self.state_handle = Some(handle);
+        self
     }
 
     /// Register an actor handler type.
@@ -272,6 +290,8 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
                 parts.state_store.clone(),
                 parts.providers.clone(),
                 parts.pending_tasks.clone(),
+                parts.active_actors.clone(),
+                parts.state_handle.clone(),
             );
             parts.close_handles.borrow_mut().push(close_handle);
         }));
@@ -356,6 +376,7 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
         let close_handles: Rc<RefCell<CloseHandles>> = Rc::new(RefCell::new(Vec::new()));
 
         // Execute registrations
+        let active_actors = Rc::new(RefCell::new(HashSet::new()));
         let parts = NodeParts {
             transport: transport.clone(),
             router: router.clone(),
@@ -364,6 +385,8 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
             providers: providers.clone(),
             pending_tasks: pending_tasks.clone(),
             close_handles: close_handles.clone(),
+            active_actors,
+            state_handle: self.state_handle,
         };
 
         for registration in self.registrations {

@@ -6,6 +6,7 @@ use moonpool::actors::{
     ActorDirectory, ActorStateStore, ClusterConfig, InMemoryDirectory, InMemoryStateStore,
     SharedMembership,
 };
+use moonpool::simulations::invariants::DirectoryConsistency;
 use moonpool::simulations::spacesim::{
     invariants::{CargoConservation, CreditConservation, NonNegativeBalances},
     workloads::{SpaceProcess, SpaceWorkload},
@@ -18,13 +19,13 @@ fn main() {
         .try_init();
 
     let membership = Rc::new(SharedMembership::new());
-    let directory: Rc<dyn ActorDirectory> = Rc::new(InMemoryDirectory::new());
+    let directory = Rc::new(InMemoryDirectory::new());
     let state_store = Rc::new(InMemoryStateStore::new());
 
     let cluster = ClusterConfig::builder()
         .name("spacesim")
-        .membership(membership.clone())
-        .directory(directory.clone())
+        .membership(membership.clone() as Rc<dyn moonpool::actors::MembershipProvider>)
+        .directory(directory.clone() as Rc<dyn ActorDirectory>)
         .build()
         .expect("cluster config");
 
@@ -46,10 +47,18 @@ fn main() {
                         as Box<dyn moonpool_sim::Process>
                 }
             })
-            .workload(SpaceWorkload::new(200, &stations, cluster, state_store))
+            .workload(SpaceWorkload::new(
+                200,
+                &stations,
+                cluster,
+                state_store,
+                directory,
+                membership,
+            ))
             .invariant(CreditConservation)
             .invariant(CargoConservation)
             .invariant(NonNegativeBalances)
+            .invariant(DirectoryConsistency)
             .enable_exploration(ExplorationConfig {
                 max_depth: 30,
                 timelines_per_split: 4,

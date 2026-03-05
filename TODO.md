@@ -177,6 +177,27 @@ assert_always!(resp_cargo == expected_cargo, "verify: cargo mismatch");
 
 ---
 
+## [x] Commit 2.5: `feat(sim): add DirectoryConsistency invariant via StateHandle`
+
+**Goal**: Real-time directory/membership/node consistency checking after every simulation event.
+
+**Architecture**: `InMemoryDirectory`, `SharedMembership`, and `ActorHost` each hold `Option<StateHandle>`. When set, they publish state snapshots after every mutation. A reusable `DirectoryConsistency` invariant cross-checks all three.
+
+**Published state**:
+- `directory_entries` → `HashMap<ActorId, ActorAddress>` (after register/unregister)
+- `membership_snapshot` → `MembershipSnapshot` (after register_node/update_status/add/remove)
+- `node_actors:{addr}` → `HashSet<ActorId>` (after activation/deactivation)
+
+**Invariant checks** (`simulations/invariants.rs`, reusable):
+1. No directory entry points to a Dead node
+2. Directory → Node: if directory says X is on N, node N has X active
+3. Node → Directory: if node N has X active, directory points X to N
+4. Single activation: no actor active on two nodes simultaneously
+
+**Files changed**: `directory.rs`, `membership.rs`, `host.rs`, `lifecycle.rs`, `infrastructure/mod.rs`, `actors/mod.rs`, `simulations/mod.rs`, `simulations/invariants.rs` (new), `spacesim/invariants.rs`, `spacesim/workloads.rs`, `spacesim.rs`
+
+---
+
 ## [ ] Commit 3: `feat(sim): multi-process spacesim with 3 station nodes`
 
 **Goal**: **First-ever multi-node actor simulation**. Highest-risk commit. 3 processes each hosting MoonpoolNode, actors placed via RoundRobin across all 3.
@@ -300,13 +321,11 @@ match actor_ref.deposit_credits(req).await {
 
 ---
 
-## [ ] Commit 7: `feat(sim): add DirectoryIntegrity invariant and buggify to spacesim`
+## [ ] Commit 7: `feat(sim): add buggify to spacesim actor handlers`
 
-**Goal**: Directory-level invariant checking + fault injection inside actor handlers. Polish for production.
+**Goal**: Fault injection inside actor handlers. Polish for production.
 
-**DirectoryIntegrity invariant**: Published from workload check phase — `directory.list_all()` snapshot. Invariant verifies:
-- No duplicate `(actor_type, identity)` entries (single-activation guarantee)
-- All entries point to active membership nodes (no stale references to dead nodes)
+**DirectoryIntegrity invariant**: ~~Done in Commit 2.5~~ — `DirectoryConsistency` invariant via `StateHandle` runs after every event (not just check phase).
 
 **Buggify points in actors**:
 ```rust

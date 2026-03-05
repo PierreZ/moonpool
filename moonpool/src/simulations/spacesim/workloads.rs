@@ -9,7 +9,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::actors::{ActorStateStore, ClusterConfig, InMemoryStateStore, MoonpoolNode, NodeConfig};
+use crate::actors::{
+    ActorStateStore, ClusterConfig, InMemoryDirectory, InMemoryStateStore, MoonpoolNode,
+    NodeConfig, SharedMembership,
+};
 use crate::{NetworkAddress, RandomProvider, TimeProvider};
 use moonpool_sim::providers::SimProviders;
 use moonpool_sim::{Process, SimContext, SimulationResult, assert_always, assert_sometimes};
@@ -58,9 +61,11 @@ impl Process for SpaceProcess {
             .state_store(self.state_store.clone())
             .build();
 
-        let _node = MoonpoolNode::new(self.cluster.clone(), config)
+        let mut builder = MoonpoolNode::new(self.cluster.clone(), config)
             .with_providers(ctx.providers().clone())
-            .register::<StationActorImpl>()
+            .register::<StationActorImpl>();
+        builder = builder.with_state_handle(ctx.state().clone());
+        let _node = builder
             .start()
             .await
             .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("node start: {e}")))?;
@@ -86,6 +91,10 @@ pub struct SpaceWorkload {
     cluster: ClusterConfig,
     /// Shared state store (concrete for `clear()`).
     state_store: Rc<InMemoryStateStore>,
+    /// Concrete directory (for `set_state_handle`).
+    directory: Rc<InMemoryDirectory>,
+    /// Concrete membership (for `set_state_handle`).
+    membership: Rc<SharedMembership>,
     /// Reference model.
     model: SpaceModel,
     /// Actor runtime (populated in setup).
@@ -99,12 +108,16 @@ impl SpaceWorkload {
         stations: &[&str],
         cluster: ClusterConfig,
         state_store: Rc<InMemoryStateStore>,
+        directory: Rc<InMemoryDirectory>,
+        membership: Rc<SharedMembership>,
     ) -> Self {
         Self {
             num_ops,
             station_names: stations.iter().map(|s| s.to_string()).collect(),
             cluster,
             state_store,
+            directory,
+            membership,
             model: SpaceModel::new(),
             node: None,
         }
@@ -122,6 +135,10 @@ impl moonpool_sim::Workload for SpaceWorkload {
         self.state_store.clear();
         self.model = SpaceModel::new();
 
+        // Wire state handles for invariant checking
+        self.directory.set_state_handle(ctx.state().clone());
+        self.membership.set_state_handle(ctx.state().clone());
+
         let addr_str = format!("{}:4700", ctx.my_ip());
         let local_addr = NetworkAddress::parse(&addr_str).map_err(|e| {
             moonpool_sim::SimulationError::InvalidState(format!("invalid address: {e}"))
@@ -134,6 +151,7 @@ impl moonpool_sim::Workload for SpaceWorkload {
 
         let node = MoonpoolNode::new(self.cluster.clone(), config)
             .with_providers(ctx.providers().clone())
+            .with_state_handle(ctx.state().clone())
             .register::<StationActorImpl>()
             .start()
             .await

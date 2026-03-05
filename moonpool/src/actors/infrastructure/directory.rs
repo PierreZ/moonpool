@@ -23,9 +23,14 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 
+use moonpool_sim::StateHandle;
+
 use crate::NetworkAddress;
 
 use crate::actors::types::{ActorAddress, ActorId};
+
+/// State key under which the directory publishes its entries snapshot.
+pub const DIRECTORY_STATE_KEY: &str = "directory_entries";
 
 /// Errors from directory operations.
 #[derive(Debug, thiserror::Error)]
@@ -131,6 +136,7 @@ pub trait ActorDirectory: fmt::Debug {
 #[derive(Debug)]
 pub struct InMemoryDirectory {
     entries: RefCell<HashMap<ActorId, ActorAddress>>,
+    state_handle: RefCell<Option<StateHandle>>,
 }
 
 impl InMemoryDirectory {
@@ -138,6 +144,27 @@ impl InMemoryDirectory {
     pub fn new() -> Self {
         Self {
             entries: RefCell::new(HashMap::new()),
+            state_handle: RefCell::new(None),
+        }
+    }
+
+    /// Attach a state handle for publishing directory snapshots.
+    ///
+    /// When set, the directory publishes its current entries after every
+    /// mutation under [`DIRECTORY_STATE_KEY`]. Pass `None` in production
+    /// for zero overhead.
+    pub fn set_state_handle(&self, handle: StateHandle) {
+        self.publish_state(&handle);
+        *self.state_handle.borrow_mut() = Some(handle);
+    }
+
+    fn publish_state(&self, handle: &StateHandle) {
+        handle.publish(DIRECTORY_STATE_KEY, self.entries.borrow().clone());
+    }
+
+    fn maybe_publish(&self) {
+        if let Some(ref handle) = *self.state_handle.borrow() {
+            self.publish_state(handle);
         }
     }
 }
@@ -177,6 +204,8 @@ impl ActorDirectory for InMemoryDirectory {
                     "registered new actor"
                 );
                 entries.insert(address.actor_id.clone(), address.clone());
+                drop(entries);
+                self.maybe_publish();
                 Ok(address)
             }
         }
@@ -195,6 +224,9 @@ impl ActorDirectory for InMemoryDirectory {
                 activation = %address.activation_id,
                 "unregistered actor"
             );
+            drop(entries);
+            self.maybe_publish();
+            return Ok(());
         }
         // If not found, that's fine too — idempotent
         Ok(())
@@ -215,6 +247,8 @@ impl ActorDirectory for InMemoryDirectory {
             }
         });
         tracing::info!(removed_count = removed.len(), "cleaned up member entries");
+        drop(entries);
+        self.maybe_publish();
         Ok(removed)
     }
 

@@ -66,10 +66,13 @@ pub use node::{
 mod infrastructure;
 
 pub use infrastructure::{
-    ActorDirectory, ClusterMember, DefaultPlacementDirector, DirectoryError, InMemoryDirectory,
-    MembershipError, MembershipProvider, MembershipSnapshot, MembershipVersion, NodeStatus,
-    PlacementDirector, PlacementError, PlacementStrategy, SharedMembership,
+    ActorDirectory, ClusterMember, DIRECTORY_STATE_KEY, DefaultPlacementDirector, DirectoryError,
+    InMemoryDirectory, MEMBERSHIP_STATE_KEY, MembershipError, MembershipProvider,
+    MembershipSnapshot, MembershipVersion, NodeStatus, PlacementDirector, PlacementError,
+    PlacementStrategy, SharedMembership,
 };
+
+pub use runtime::host::{NODE_ACTORS_KEY_PREFIX, node_actors_key};
 
 // --- State persistence ---
 mod state;

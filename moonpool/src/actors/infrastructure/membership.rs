@@ -15,9 +15,13 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 
+use moonpool_sim::StateHandle;
 use serde::{Deserialize, Serialize};
 
 use crate::NetworkAddress;
+
+/// State key under which the membership publishes its snapshot.
+pub const MEMBERSHIP_STATE_KEY: &str = "membership_snapshot";
 
 /// Monotonically increasing membership version.
 ///
@@ -269,6 +273,7 @@ pub trait MembershipProvider: fmt::Debug {
 #[derive(Debug)]
 pub struct SharedMembership {
     inner: RefCell<SharedMembershipInner>,
+    state_handle: RefCell<Option<StateHandle>>,
 }
 
 #[derive(Debug)]
@@ -285,6 +290,33 @@ impl SharedMembership {
                 members: HashMap::new(),
                 version: MembershipVersion::new(),
             }),
+            state_handle: RefCell::new(None),
+        }
+    }
+
+    /// Attach a state handle for publishing membership snapshots.
+    ///
+    /// When set, the membership publishes a [`MembershipSnapshot`] after every
+    /// mutation under [`MEMBERSHIP_STATE_KEY`].
+    pub fn set_state_handle(&self, handle: StateHandle) {
+        self.publish_state_with(&handle);
+        *self.state_handle.borrow_mut() = Some(handle);
+    }
+
+    fn publish_state_with(&self, handle: &StateHandle) {
+        let inner = self.inner.borrow();
+        handle.publish(
+            MEMBERSHIP_STATE_KEY,
+            MembershipSnapshot {
+                members: inner.members.clone(),
+                version: inner.version,
+            },
+        );
+    }
+
+    fn maybe_publish(&self) {
+        if let Some(ref handle) = *self.state_handle.borrow() {
+            self.publish_state_with(handle);
         }
     }
 
@@ -305,6 +337,7 @@ impl SharedMembership {
                 members,
                 version: MembershipVersion(addresses.len() as u64),
             }),
+            state_handle: RefCell::new(None),
         }
     }
 
@@ -320,6 +353,8 @@ impl SharedMembership {
                 ClusterMember::new(address, NodeStatus::Active, name),
             );
             inner.version = inner.version.next();
+            drop(inner);
+            self.maybe_publish();
         }
     }
 
@@ -330,6 +365,8 @@ impl SharedMembership {
         let mut inner = self.inner.borrow_mut();
         if inner.members.remove(address).is_some() {
             inner.version = inner.version.next();
+            drop(inner);
+            self.maybe_publish();
             true
         } else {
             false
@@ -382,7 +419,10 @@ impl MembershipProvider for SharedMembership {
             version = %inner.version,
             "node registered"
         );
-        Ok(inner.version)
+        let version = inner.version;
+        drop(inner);
+        self.maybe_publish();
+        Ok(version)
     }
 
     async fn update_status(
@@ -403,7 +443,10 @@ impl MembershipProvider for SharedMembership {
                     version = %inner.version,
                     "node status updated"
                 );
-                Ok(inner.version)
+                let version = inner.version;
+                drop(inner);
+                self.maybe_publish();
+                Ok(version)
             }
             None => {
                 tracing::warn!(

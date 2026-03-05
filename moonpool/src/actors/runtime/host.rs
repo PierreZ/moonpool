@@ -18,16 +18,17 @@
 //! ```
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::task::{Poll, Waker};
 use std::time::Duration;
 
+use moonpool_sim::StateHandle;
 use moonpool_sim::assert_sometimes;
 
 use crate::{
-    Endpoint, JsonCodec, MessageCodec, NetTransport, Providers, RequestStream, TaskProvider,
-    TimeProvider, UID,
+    Endpoint, JsonCodec, MessageCodec, NetTransport, NetworkAddress, Providers, RequestStream,
+    TaskProvider, TimeProvider, UID,
 };
 
 use super::router::ActorError;
@@ -37,6 +38,14 @@ use crate::actors::state::store::ActorStateStore;
 use crate::actors::types::{
     ActivationId, ActorAddress, ActorId, ActorMessage, ActorResponse, ActorType, CacheInvalidation,
 };
+
+/// Key prefix for per-node active actors state.
+pub const NODE_ACTORS_KEY_PREFIX: &str = "node_actors:";
+
+/// Build the state key for a node's active actors set.
+pub fn node_actors_key(addr: &NetworkAddress) -> String {
+    format!("{}{}", NODE_ACTORS_KEY_PREFIX, addr)
+}
 
 /// Maximum number of times a message can be forwarded before being rejected.
 /// Prevents infinite forwarding loops.
@@ -297,6 +306,7 @@ pub trait ActorHandler: Default + 'static {
 ///
 /// Each registered actor type gets a `TypedDispatcher<H>` that implements
 /// this trait. The host stores these as `Box<dyn ActorTypeDispatcher<P, C>>`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) trait ActorTypeDispatcher<P: Providers, C: MessageCodec> {
     /// Start the processing loop for this actor type.
     ///
@@ -313,6 +323,8 @@ pub(crate) trait ActorTypeDispatcher<P: Providers, C: MessageCodec> {
         state_store: Option<Rc<dyn ActorStateStore>>,
         providers: P,
         pending_tasks: Rc<Cell<usize>>,
+        active_actors: Rc<RefCell<HashSet<ActorId>>>,
+        state_handle: Option<StateHandle>,
     ) -> Box<dyn Fn()>;
 }
 
@@ -340,6 +352,8 @@ impl<H: ActorHandler, P: Providers, C: MessageCodec> ActorTypeDispatcher<P, C>
         state_store: Option<Rc<dyn ActorStateStore>>,
         providers: P,
         pending_tasks: Rc<Cell<usize>>,
+        active_actors: Rc<RefCell<HashSet<ActorId>>>,
+        state_handle: Option<StateHandle>,
     ) -> Box<dyn Fn()> {
         let actor_type = H::actor_type();
         let token = UID::new(actor_type.0, 0);
@@ -359,6 +373,8 @@ impl<H: ActorHandler, P: Providers, C: MessageCodec> ActorTypeDispatcher<P, C>
                 state_store,
                 stream,
                 pending_tasks,
+                active_actors,
+                state_handle,
             ),
         );
 
@@ -383,6 +399,7 @@ impl<H: ActorHandler, P: Providers, C: MessageCodec> ActorTypeDispatcher<P, C>
 /// indicates the actor lives on another node, the message is forwarded
 /// (up to `MAX_FORWARD_COUNT` hops). The response includes a
 /// `CacheInvalidation` hint so the caller can update its stale cache.
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all, fields(actor_type = %H::actor_type()))]
 async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
     transport: Rc<NetTransport<P>>,
@@ -391,6 +408,8 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
     state_store: Option<Rc<dyn ActorStateStore>>,
     stream: RequestStream<ActorMessage, C>,
     pending_tasks: Rc<Cell<usize>>,
+    active_actors: Rc<RefCell<HashSet<ActorId>>>,
+    state_handle: Option<StateHandle>,
 ) {
     let mut mailboxes: HashMap<String, Rc<IdentityMailbox<C>>> = HashMap::new();
     let actor_type = H::actor_type();
@@ -476,6 +495,8 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
                         codec.clone(),
                         transport.providers().time().clone(),
                         pending_tasks.clone(),
+                        active_actors.clone(),
+                        state_handle.clone(),
                     ),
                 );
                 mailbox.send(actor_msg, reply);
@@ -486,6 +507,20 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
 
     // Signal routing loop completion to the host.
     pending_tasks.set(pending_tasks.get() - 1);
+}
+
+/// Publish the active actors set to the state handle, if present.
+fn publish_active_actors(
+    state_handle: &Option<StateHandle>,
+    local_address: &NetworkAddress,
+    active_actors: &Rc<RefCell<HashSet<ActorId>>>,
+) {
+    if let Some(h) = state_handle {
+        h.publish(
+            &node_actors_key(local_address),
+            active_actors.borrow().clone(),
+        );
+    }
 }
 
 /// Per-identity processing loop for a single actor instance.
@@ -508,6 +543,8 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
     codec: C,
     time: P::Time,
     pending_tasks: Rc<Cell<usize>>,
+    active_actors: Rc<RefCell<HashSet<ActorId>>>,
+    state_handle: Option<StateHandle>,
 ) {
     let mut actor: Option<H> = None;
     let mut was_previously_active = false;
@@ -540,6 +577,8 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                             let _ = a.on_deactivate(&ctx).await;
                             assert_sometimes!(true, "deactivate_after_idle_timeout");
                         }
+                        active_actors.borrow_mut().remove(&actor_id);
+                        publish_active_actors(&state_handle, &local_address, &active_actors);
                         actor = None;
                         if let Some(ref addr) = current_activation {
                             let _ = directory.unregister(addr).await;
@@ -631,6 +670,10 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                 _ => {
                     current_activation = Some(actor_address.clone());
                     actor = Some(new_actor);
+                    active_actors
+                        .borrow_mut()
+                        .insert(ActorId::new(actor_type, identity.clone()));
+                    publish_active_actors(&state_handle, &local_address, &active_actors);
                     assert_sometimes!(true, "actor_activated");
                     tracing::info!(
                         host = %local_address,
@@ -691,7 +734,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
             let actor_id = ActorId::new(actor_type, identity.clone());
             if let Some(a) = actor.as_mut() {
                 let ctx = ActorContext {
-                    id: actor_id,
+                    id: actor_id.clone(),
                     router: router.clone(),
                     state_store: state_store.clone(),
                 };
@@ -699,6 +742,8 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                 assert_sometimes!(true, "deactivate_on_idle");
                 tracing::debug!("deactivating (idle)");
             }
+            active_actors.borrow_mut().remove(&actor_id);
+            publish_active_actors(&state_handle, &local_address, &active_actors);
             actor = None;
             if let Some(ref addr) = current_activation {
                 let _ = directory.unregister(addr).await;
@@ -712,11 +757,13 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
         tracing::debug!("deactivating on shutdown");
         let actor_id = ActorId::new(actor_type, identity.clone());
         let ctx = ActorContext {
-            id: actor_id,
+            id: actor_id.clone(),
             router: router.clone(),
             state_store: state_store.clone(),
         };
         let _ = a.on_deactivate(&ctx).await;
+        active_actors.borrow_mut().remove(&actor_id);
+        publish_active_actors(&state_handle, &local_address, &active_actors);
         if let Some(ref addr) = current_activation {
             let _ = directory.unregister(addr).await;
         }
@@ -867,6 +914,10 @@ pub struct ActorHost<P: Providers, C: MessageCodec = JsonCodec> {
     /// decremented by each when it exits. Used by `stop()` to wait
     /// for all tasks to complete.
     pending_tasks: Rc<Cell<usize>>,
+    /// Shared set of active actor IDs on this node (across all actor types).
+    active_actors: Rc<RefCell<HashSet<ActorId>>>,
+    /// Optional state handle for publishing active actors state.
+    state_handle: Option<StateHandle>,
 }
 
 impl<P: Providers, C: MessageCodec> ActorHost<P, C> {
@@ -891,6 +942,8 @@ impl<P: Providers, C: MessageCodec> ActorHost<P, C> {
             providers,
             close_handles: RefCell::new(Vec::new()),
             pending_tasks: Rc::new(Cell::new(0)),
+            active_actors: Rc::new(RefCell::new(HashSet::new())),
+            state_handle: None,
         }
     }
 
@@ -900,6 +953,15 @@ impl<P: Providers, C: MessageCodec> ActorHost<P, C> {
     /// in their `on_activate`, `dispatch`, and `on_deactivate` methods.
     pub fn with_state_store(mut self, store: Rc<dyn ActorStateStore>) -> Self {
         self.state_store = Some(store);
+        self
+    }
+
+    /// Attach a state handle for publishing active actors state.
+    ///
+    /// When set, the host publishes the set of active actor IDs on this node
+    /// under `node_actors:{address}` after every activation/deactivation.
+    pub fn with_state_handle(mut self, handle: StateHandle) -> Self {
+        self.state_handle = Some(handle);
         self
     }
 
@@ -922,6 +984,8 @@ impl<P: Providers, C: MessageCodec> ActorHost<P, C> {
             self.state_store.clone(),
             self.providers.clone(),
             self.pending_tasks.clone(),
+            self.active_actors.clone(),
+            self.state_handle.clone(),
         );
         self.close_handles.borrow_mut().push(close_handle);
     }
