@@ -215,7 +215,8 @@ This is the fundamental at-most-once delivery problem (FDB error_code 1030: `req
 **Progress (2026-03-05):**
 - ~~2.7a~~ Peer disconnect signal — done (commit `642364d`)
 - ~~2.7b~~ FailureMonitor — done (address/endpoint failure tracking, 11 unit tests, wired into connection_task)
-- **Next: 2.7c** — MaybeDelivered error + reply queue closure on disconnect
+- ~~2.7c~~ MaybeDelivered error + reply queue closure on disconnect — done
+- **Next: 2.7d** — 4 delivery modes (send, try_get_reply, get_reply, get_reply_unless_failed_for)
 
 **New reference files added:**
 - `docs/references/foundationdb/FailureMonitor.{h,actor.cpp}` — address/endpoint failure tracking
@@ -234,8 +235,8 @@ This is the fundamental at-most-once delivery problem (FDB error_code 1030: `req
 **What's missing** (= fdbrpc layer):
 - ❌ `peer.disconnect` signal — no exposed disconnect notification
 - ❌ FailureMonitor (`notify_disconnect`, `on_disconnect_or_failure`)
-- ❌ `request_maybe_delivered` error (MaybeDelivered vs NotDelivered)
-- ❌ Reply queue closure on peer disconnect (ReplyFutures hang until 30s timeout)
+- ~~❌ `request_maybe_delivered` error (MaybeDelivered vs NotDelivered)~~
+- ~~❌ Reply queue closure on peer disconnect (ReplyFutures hang until 30s timeout)~~
 - ❌ 3 delivery modes: `send()` / `try_get_reply()` / `get_reply()`
 - ❌ Request IDs for dedup
 - ❌ sendUnreliable exposed to RPC layer
@@ -350,7 +351,7 @@ struct FailureMonitorInner {
 
 ---
 
-## [ ] Commit 2.7c: `feat(transport): add MaybeDelivered error and reply queue closure on disconnect`
+## [x] Commit 2.7c: `feat(transport): add MaybeDelivered error and reply queue closure on disconnect`
 
 **Goal**: Fast failure detection (~2s vs 30s) + explicit ambiguity error.
 
@@ -614,7 +615,7 @@ if buggify!() { ctx.time().sleep(Duration::from_millis(50)).await; } // slow wri
 |---|--------|-------|----------|
 | ~~2.7a~~ | ~~Peer disconnect signal~~ | ~~moonpool-transport~~ | ~~Signal fires on connection loss~~ |
 | ~~2.7b~~ | ~~FailureMonitor~~ | ~~moonpool-transport~~ | ~~Watchers wake on disconnect~~ |
-| 2.7c | MaybeDelivered + reply queue closure | moonpool-transport | Fast failure (~2s vs 30s) |
+| ~~2.7c~~ | ~~MaybeDelivered + reply queue closure~~ | ~~moonpool-transport~~ | ~~Fast failure (~2s vs 30s)~~ |
 | 2.7d | 4 delivery modes | moonpool-transport | try_get_reply returns MaybeDelivered |
 | 2.8 | Spacesim fault-aware RPCs | moonpool (spacesim) | Model reconciliation after ambiguity |
 | 3 | Multi-process (3 nodes) | moonpool (spacesim) | **First multi-node test** |

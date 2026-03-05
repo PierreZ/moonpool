@@ -26,7 +26,7 @@ use crate::{Endpoint, MessageCodec, Providers, RandomProvider, UID};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use super::net_notified_queue::NetNotifiedQueue;
+use super::net_notified_queue::{NetNotifiedQueue, ReplyQueueCloser};
 use super::net_transport::NetTransport;
 use super::reply_error::ReplyError;
 use super::reply_future::ReplyFuture;
@@ -98,6 +98,16 @@ where
 
     // Send the request (reliable so it survives reconnection)
     transport.send_reliable(destination, &payload)?;
+
+    // Track this reply queue for disconnect cleanup (skip local sends)
+    if !transport.is_local_address(&destination.address) {
+        let closer: Rc<dyn ReplyQueueCloser> = reply_queue.clone();
+        transport.register_pending_reply(
+            &destination.address.to_string(),
+            reply_token,
+            Rc::downgrade(&closer),
+        );
+    }
 
     // Return the reply future
     Ok(ReplyFuture::new(reply_queue, reply_endpoint))

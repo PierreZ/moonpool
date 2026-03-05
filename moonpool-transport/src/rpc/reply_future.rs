@@ -53,10 +53,14 @@ impl<T: DeserializeOwned, C: MessageCodec> Future for ReplyFuture<T, C> {
             return Poll::Ready(result);
         }
 
-        // Check if queue is closed (connection failed)
+        // Check if queue is closed (connection failed or peer disconnected)
         if self.queue.is_closed() {
             assert_sometimes!(true, "Reply queue closed before response");
-            return Poll::Ready(Err(ReplyError::ConnectionFailed));
+            let reason = self
+                .queue
+                .close_reason()
+                .unwrap_or(ReplyError::ConnectionFailed);
+            return Poll::Ready(Err(reason));
         }
 
         // Poll the recv future to register the waker
@@ -69,7 +73,11 @@ impl<T: DeserializeOwned, C: MessageCodec> Future for ReplyFuture<T, C> {
             }
             Poll::Ready(None) => {
                 assert_sometimes!(true, "Reply queue closed before response");
-                Poll::Ready(Err(ReplyError::ConnectionFailed))
+                let reason = self
+                    .queue
+                    .close_reason()
+                    .unwrap_or(ReplyError::ConnectionFailed);
+                Poll::Ready(Err(reason))
             }
             Poll::Pending => Poll::Pending,
         }
@@ -150,6 +158,21 @@ mod tests {
 
         let result = future.await;
         assert_eq!(result, Err(ReplyError::ConnectionFailed));
+    }
+
+    #[tokio::test]
+    async fn test_reply_future_maybe_delivered() {
+        let endpoint = test_endpoint();
+        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>, JsonCodec>> =
+            Rc::new(NetNotifiedQueue::new(endpoint.clone(), JsonCodec));
+
+        let future = ReplyFuture::new(queue.clone(), endpoint);
+
+        // Close the queue with MaybeDelivered (simulating peer disconnect)
+        queue.close_with_reason(ReplyError::MaybeDelivered);
+
+        let result = future.await;
+        assert_eq!(result, Err(ReplyError::MaybeDelivered));
     }
 
     #[test]

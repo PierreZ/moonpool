@@ -31,6 +31,8 @@ use std::collections::BTreeMap;
 use std::rc::{Rc, Weak};
 
 use super::failure_monitor::FailureMonitor;
+use super::net_notified_queue::ReplyQueueCloser;
+use super::reply_error::ReplyError;
 use crate::{
     Endpoint, NetworkAddress, NetworkProvider, Peer, PeerConfig, Providers, TaskProvider,
     TcpListenerTrait, UID, WellKnownToken,
@@ -46,6 +48,9 @@ use serde::de::DeserializeOwned;
 
 /// Type alias for shared peer reference.
 type SharedPeer<P> = Rc<RefCell<Peer<P>>>;
+
+/// Pending reply entry: token + weak reference to the queue closer.
+type PendingReplyEntry = (UID, Weak<dyn ReplyQueueCloser>);
 
 /// Internal transport data (FDB TransportData equivalent).
 ///
@@ -76,6 +81,14 @@ struct TransportData<P: Providers> {
     /// FDB: IFailureMonitor (FailureMonitor.h)
     failure_monitor: Rc<FailureMonitor>,
 
+    /// Pending reply queues per remote address.
+    ///
+    /// Uses Weak refs so entries are automatically invalidated when ReplyFuture drops.
+    /// Cleaned lazily during `close_pending_replies`.
+    ///
+    /// FDB: endStreamOnDisconnect pattern (genericactors.actor.h:332)
+    pending_replies: BTreeMap<String, Vec<PendingReplyEntry>>,
+
     /// Statistics.
     stats: TransportStats,
 }
@@ -87,6 +100,7 @@ impl<P: Providers> TransportData<P> {
             peers: BTreeMap::new(),
             incoming_peers: BTreeMap::new(),
             failure_monitor: Rc::new(FailureMonitor::new()),
+            pending_replies: BTreeMap::new(),
             stats: TransportStats::default(),
         }
     }
@@ -259,6 +273,55 @@ impl<P: Providers> NetTransport<P> {
         self.data.borrow_mut().endpoints.remove(token)
     }
 
+    /// Register a pending reply queue for a remote address.
+    ///
+    /// Called by `send_request` to track which reply queues should be closed
+    /// when a peer disconnects. Uses Weak refs so stale entries are cleaned lazily.
+    pub(crate) fn register_pending_reply(
+        &self,
+        addr: &str,
+        token: UID,
+        closer: Weak<dyn ReplyQueueCloser>,
+    ) {
+        self.data
+            .borrow_mut()
+            .pending_replies
+            .entry(addr.to_string())
+            .or_default()
+            .push((token, closer));
+    }
+
+    /// Close all pending reply queues for a disconnected address.
+    ///
+    /// Upgrades Weak refs and calls `close_with_error`, then removes the
+    /// corresponding endpoints from the EndpointMap.
+    ///
+    /// FDB: endStreamOnDisconnect pattern (genericactors.actor.h:332)
+    pub(crate) fn close_pending_replies(&self, addr: &str, reason: ReplyError) {
+        let entries = {
+            let mut data = self.data.borrow_mut();
+            data.pending_replies.remove(addr).unwrap_or_default()
+        };
+
+        if entries.is_empty() {
+            return;
+        }
+
+        tracing::debug!(
+            "close_pending_replies: closing {} reply queues for {}",
+            entries.len(),
+            addr,
+        );
+
+        for (token, weak_closer) in entries {
+            if let Some(closer) = weak_closer.upgrade() {
+                closer.close_with_error(reason.clone());
+            }
+            // Remove from endpoint map regardless (either closed or already dropped)
+            self.data.borrow_mut().endpoints.remove(&token);
+        }
+    }
+
     /// Register a typed request handler in a single step.
     ///
     /// This is the preferred method for registering RPC handlers. It combines:
@@ -427,7 +490,7 @@ impl<P: Providers> NetTransport<P> {
     }
 
     /// Check if address is local (same as this transport).
-    fn is_local_address(&self, address: &NetworkAddress) -> bool {
+    pub(crate) fn is_local_address(&self, address: &NetworkAddress) -> bool {
         self.local_address == *address
     }
 
@@ -835,6 +898,10 @@ async fn connection_reader<P: Providers>(
             None => {
                 // Channel closed - peer disconnected or shutdown
                 tracing::debug!("connection_reader: peer {} receiver closed", peer_addr);
+                // Close all pending reply queues for this peer with MaybeDelivered
+                if let Some(transport) = transport.upgrade() {
+                    transport.close_pending_replies(&peer_addr, ReplyError::MaybeDelivered);
+                }
                 break;
             }
         }

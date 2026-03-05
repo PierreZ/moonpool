@@ -42,6 +42,14 @@ pub enum ReplyError {
     ///
     /// The destination endpoint is not registered.
     EndpointNotFound,
+
+    /// The peer disconnected while the request was in flight.
+    ///
+    /// The request may or may not have been delivered and processed.
+    /// Callers must handle this ambiguity (e.g., query state before retrying).
+    ///
+    /// FDB: request_maybe_delivered (error 1030)
+    MaybeDelivered,
 }
 
 impl std::fmt::Display for ReplyError {
@@ -52,6 +60,7 @@ impl std::fmt::Display for ReplyError {
             ReplyError::Timeout => write!(f, "request timed out"),
             ReplyError::Serialization { message } => write!(f, "serialization error: {}", message),
             ReplyError::EndpointNotFound => write!(f, "endpoint not found"),
+            ReplyError::MaybeDelivered => write!(f, "peer disconnected, delivery uncertain"),
         }
     }
 }
@@ -84,6 +93,10 @@ mod tests {
             ReplyError::EndpointNotFound.to_string(),
             "endpoint not found"
         );
+        assert_eq!(
+            ReplyError::MaybeDelivered.to_string(),
+            "peer disconnected, delivery uncertain"
+        );
     }
 
     #[test]
@@ -96,6 +109,7 @@ mod tests {
                 message: "test error".to_string(),
             },
             ReplyError::EndpointNotFound,
+            ReplyError::MaybeDelivered,
         ];
 
         for error in errors {
