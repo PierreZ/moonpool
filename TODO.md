@@ -1,6 +1,6 @@
 # Moonpool Development Plan
 
-> **Rule**: Mark each commit as ~~done~~ in this file when completed. Each commit = one git commit.
+> **Rule**: Mark each commit as ~~done~~ in this file when completed. Mark progress before committing. Each commit = one git commit.
 
 ---
 
@@ -212,6 +212,11 @@ assert_always!(resp_cargo == expected_cargo, "verify: cargo mismatch");
 
 This is the fundamental at-most-once delivery problem (FDB error_code 1030: `request_maybe_delivered`). Before proceeding to Commit 3 (multi-process), moonpool's transport needs fdbrpc-level delivery semantics.
 
+**Progress (2026-03-05):**
+- ~~2.7a~~ Peer disconnect signal — done (commit `642364d`)
+- ~~2.7b~~ FailureMonitor — done (address/endpoint failure tracking, 11 unit tests, wired into connection_task)
+- **Next: 2.7c** — MaybeDelivered error + reply queue closure on disconnect
+
 **New reference files added:**
 - `docs/references/foundationdb/FailureMonitor.{h,actor.cpp}` — address/endpoint failure tracking
 - `docs/references/foundationdb/HealthMonitor.{h,actor.cpp}` — connection closure tracking
@@ -283,7 +288,7 @@ Is the endpoint well-known (survives reboots)?
 
 ---
 
-## [ ] Commit 2.7a: `feat(transport): add peer disconnect signal`
+## [x] Commit 2.7a: `feat(transport): add peer disconnect signal`
 
 **Goal**: Peer emits a signal when connection drops. Foundation for FailureMonitor and delivery modes.
 
@@ -298,7 +303,7 @@ Is the endpoint well-known (survives reboots)?
 
 ---
 
-## [ ] Commit 2.7b: `feat(transport): add FailureMonitor for address/endpoint failure tracking`
+## [x] Commit 2.7b: `feat(transport): add FailureMonitor for address/endpoint failure tracking`
 
 **Goal**: Reactive failure tracking. Address-level (is machine reachable?) + endpoint-level (is endpoint permanently dead?).
 
@@ -607,8 +612,8 @@ if buggify!() { ctx.time().sleep(Duration::from_millis(50)).await; } // slow wri
 
 | # | Commit | Scope | Key test |
 |---|--------|-------|----------|
-| 2.7a | Peer disconnect signal | moonpool-transport | Signal fires on connection loss |
-| 2.7b | FailureMonitor | moonpool-transport | Watchers wake on disconnect |
+| ~~2.7a~~ | ~~Peer disconnect signal~~ | ~~moonpool-transport~~ | ~~Signal fires on connection loss~~ |
+| ~~2.7b~~ | ~~FailureMonitor~~ | ~~moonpool-transport~~ | ~~Watchers wake on disconnect~~ |
 | 2.7c | MaybeDelivered + reply queue closure | moonpool-transport | Fast failure (~2s vs 30s) |
 | 2.7d | 4 delivery modes | moonpool-transport | try_get_reply returns MaybeDelivered |
 | 2.8 | Spacesim fault-aware RPCs | moonpool (spacesim) | Model reconciliation after ambiguity |

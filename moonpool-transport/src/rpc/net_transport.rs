@@ -30,6 +30,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::{Rc, Weak};
 
+use super::failure_monitor::FailureMonitor;
 use crate::{
     Endpoint, NetworkAddress, NetworkProvider, Peer, PeerConfig, Providers, TaskProvider,
     TcpListenerTrait, UID, WellKnownToken,
@@ -71,16 +72,21 @@ struct TransportData<P: Providers> {
     /// Separate from outgoing peers to avoid conflicts.
     incoming_peers: BTreeMap<String, SharedPeer<P>>,
 
+    /// Failure monitor for address/endpoint failure tracking.
+    /// FDB: IFailureMonitor (FailureMonitor.h)
+    failure_monitor: Rc<FailureMonitor>,
+
     /// Statistics.
     stats: TransportStats,
 }
 
-impl<P: Providers> Default for TransportData<P> {
-    fn default() -> Self {
+impl<P: Providers> TransportData<P> {
+    fn new() -> Self {
         Self {
             endpoints: EndpointMap::new(),
             peers: BTreeMap::new(),
             incoming_peers: BTreeMap::new(),
+            failure_monitor: Rc::new(FailureMonitor::new()),
             stats: TransportStats::default(),
         }
     }
@@ -161,7 +167,7 @@ impl<P: Providers> NetTransport<P> {
     pub fn new(local_address: NetworkAddress, providers: P) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
         Self {
-            data: RefCell::new(TransportData::default()),
+            data: RefCell::new(TransportData::new()),
             local_address,
             providers,
             peer_config: PeerConfig::default(),
@@ -214,6 +220,16 @@ impl<P: Providers> NetTransport<P> {
     /// Get the local address.
     pub fn local_address(&self) -> &NetworkAddress {
         &self.local_address
+    }
+
+    /// Get the failure monitor for this transport.
+    ///
+    /// Used by delivery mode functions to race replies against disconnect signals.
+    ///
+    /// # FDB Reference
+    /// `IFailureMonitor::failureMonitor()` (FailureMonitor.h)
+    pub fn failure_monitor(&self) -> Rc<FailureMonitor> {
+        Rc::clone(&self.data.borrow().failure_monitor)
     }
 
     /// Register a well-known endpoint.
@@ -461,11 +477,13 @@ impl<P: Providers> NetTransport<P> {
             return Rc::clone(peer);
         }
 
-        // Create new peer
+        // Create new peer with failure monitor
+        let fm = Some(Rc::clone(&self.data.borrow().failure_monitor));
         let peer = Peer::new(
             self.providers.clone(),
             addr_str.clone(),
             self.peer_config.clone(),
+            fm,
         );
         let peer = Rc::new(RefCell::new(peer));
 
@@ -948,11 +966,13 @@ fn connection_incoming<P: Providers>(
         // FDB Pattern: Use Peer::new_incoming() with the accepted stream
         // (NetTransport.actor.cpp:1123 Peer::onIncomingConnection)
         // This uses the already-established connection rather than trying to connect back.
+        let fm = Some(Rc::clone(&transport.data.borrow().failure_monitor));
         let peer = Peer::new_incoming(
             transport.providers.clone(),
             peer_addr.clone(),
             stream,
             transport.peer_config.clone(),
+            fm,
         );
         let peer = Rc::new(RefCell::new(peer));
 

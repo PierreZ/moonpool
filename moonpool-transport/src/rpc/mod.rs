@@ -13,6 +13,7 @@
 //! Dynamic endpoints are allocated at runtime but still have fixed lifetimes.
 
 mod endpoint_map;
+mod failure_monitor;
 mod interface;
 mod net_notified_queue;
 mod net_transport;
@@ -25,6 +26,7 @@ mod rpc_error;
 mod server_handle;
 
 pub use endpoint_map::{EndpointMap, MessageReceiver};
+pub use failure_monitor::{FailedReason, FailureMonitor, FailureStatus};
 pub use interface::{method_endpoint, method_uid};
 pub use net_notified_queue::{NetNotifiedQueue, RecvFuture, SharedNetNotifiedQueue};
 pub use net_transport::{NetTransport, NetTransportBuilder};
