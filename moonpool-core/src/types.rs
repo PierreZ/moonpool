@@ -115,7 +115,7 @@ pub mod flags {
 /// let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4500);
 /// assert_eq!(addr.to_string(), "127.0.0.1:4500");
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct NetworkAddress {
     /// IP address (IPv4 or IPv6).
     pub ip: IpAddr,

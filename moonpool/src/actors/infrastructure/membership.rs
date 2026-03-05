@@ -12,7 +12,7 @@
 //!   simulation where all nodes share the same membership view.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use moonpool_sim::StateHandle;
@@ -130,11 +130,11 @@ impl ClusterMember {
 /// Corresponds to Orleans' `ClusterMembershipSnapshot` — an immutable
 /// dictionary of members keyed by address, plus a version number.
 /// Orleans uses `ImmutableDictionary<SiloAddress, ClusterMember>`;
-/// we use `HashMap` since we're single-threaded (`!Send`).
+/// we use `BTreeMap` since we're single-threaded (`!Send`).
 #[derive(Debug, Clone)]
 pub struct MembershipSnapshot {
     /// All known members, keyed by network address.
-    pub members: HashMap<NetworkAddress, ClusterMember>,
+    pub members: BTreeMap<NetworkAddress, ClusterMember>,
     /// Version of this snapshot (monotonically increasing).
     pub version: MembershipVersion,
 }
@@ -143,7 +143,7 @@ impl MembershipSnapshot {
     /// Create an empty snapshot at version 0.
     pub fn new() -> Self {
         Self {
-            members: HashMap::new(),
+            members: BTreeMap::new(),
             version: MembershipVersion::new(),
         }
     }
@@ -278,7 +278,7 @@ pub struct SharedMembership {
 
 #[derive(Debug)]
 struct SharedMembershipInner {
-    members: HashMap<NetworkAddress, ClusterMember>,
+    members: BTreeMap<NetworkAddress, ClusterMember>,
     version: MembershipVersion,
 }
 
@@ -287,7 +287,7 @@ impl SharedMembership {
     pub fn new() -> Self {
         Self {
             inner: RefCell::new(SharedMembershipInner {
-                members: HashMap::new(),
+                members: BTreeMap::new(),
                 version: MembershipVersion::new(),
             }),
             state_handle: RefCell::new(None),
@@ -325,7 +325,7 @@ impl SharedMembership {
     /// Convenience for tests and simple simulations. Each address is
     /// registered as `Active` with an auto-generated name.
     pub fn with_members(addresses: Vec<NetworkAddress>) -> Self {
-        let mut members = HashMap::new();
+        let mut members = BTreeMap::new();
         for (i, addr) in addresses.iter().enumerate() {
             members.insert(
                 addr.clone(),

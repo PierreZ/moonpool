@@ -18,7 +18,7 @@
 //! ```
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 use std::task::{Poll, Waker};
 use std::time::Duration;
@@ -323,7 +323,7 @@ pub(crate) trait ActorTypeDispatcher<P: Providers, C: MessageCodec> {
         state_store: Option<Rc<dyn ActorStateStore>>,
         providers: P,
         pending_tasks: Rc<Cell<usize>>,
-        active_actors: Rc<RefCell<HashSet<ActorId>>>,
+        active_actors: Rc<RefCell<BTreeSet<ActorId>>>,
         state_handle: Option<StateHandle>,
     ) -> Box<dyn Fn()>;
 }
@@ -352,7 +352,7 @@ impl<H: ActorHandler, P: Providers, C: MessageCodec> ActorTypeDispatcher<P, C>
         state_store: Option<Rc<dyn ActorStateStore>>,
         providers: P,
         pending_tasks: Rc<Cell<usize>>,
-        active_actors: Rc<RefCell<HashSet<ActorId>>>,
+        active_actors: Rc<RefCell<BTreeSet<ActorId>>>,
         state_handle: Option<StateHandle>,
     ) -> Box<dyn Fn()> {
         let actor_type = H::actor_type();
@@ -408,10 +408,10 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
     state_store: Option<Rc<dyn ActorStateStore>>,
     stream: RequestStream<ActorMessage, C>,
     pending_tasks: Rc<Cell<usize>>,
-    active_actors: Rc<RefCell<HashSet<ActorId>>>,
+    active_actors: Rc<RefCell<BTreeSet<ActorId>>>,
     state_handle: Option<StateHandle>,
 ) {
-    let mut mailboxes: HashMap<String, Rc<IdentityMailbox<C>>> = HashMap::new();
+    let mut mailboxes: BTreeMap<String, Rc<IdentityMailbox<C>>> = BTreeMap::new();
     let actor_type = H::actor_type();
     let local_address = transport.local_address().clone();
     let codec = router.codec().clone();
@@ -513,7 +513,7 @@ async fn actor_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec>(
 fn publish_active_actors(
     state_handle: &Option<StateHandle>,
     local_address: &NetworkAddress,
-    active_actors: &Rc<RefCell<HashSet<ActorId>>>,
+    active_actors: &Rc<RefCell<BTreeSet<ActorId>>>,
 ) {
     if let Some(h) = state_handle {
         h.publish(
@@ -543,7 +543,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
     codec: C,
     time: P::Time,
     pending_tasks: Rc<Cell<usize>>,
-    active_actors: Rc<RefCell<HashSet<ActorId>>>,
+    active_actors: Rc<RefCell<BTreeSet<ActorId>>>,
     state_handle: Option<StateHandle>,
 ) {
     let mut actor: Option<H> = None;
@@ -915,7 +915,7 @@ pub struct ActorHost<P: Providers, C: MessageCodec = JsonCodec> {
     /// for all tasks to complete.
     pending_tasks: Rc<Cell<usize>>,
     /// Shared set of active actor IDs on this node (across all actor types).
-    active_actors: Rc<RefCell<HashSet<ActorId>>>,
+    active_actors: Rc<RefCell<BTreeSet<ActorId>>>,
     /// Optional state handle for publishing active actors state.
     state_handle: Option<StateHandle>,
 }
@@ -942,7 +942,7 @@ impl<P: Providers, C: MessageCodec> ActorHost<P, C> {
             providers,
             close_handles: RefCell::new(Vec::new()),
             pending_tasks: Rc::new(Cell::new(0)),
-            active_actors: Rc::new(RefCell::new(HashSet::new())),
+            active_actors: Rc::new(RefCell::new(BTreeSet::new())),
             state_handle: None,
         }
     }

@@ -22,7 +22,7 @@
 //! the caller-side proxy that resolves grain location and sends messages.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use moonpool_sim::assert_sometimes;
@@ -97,7 +97,7 @@ pub struct ActorRouter<P: Providers, C: MessageCodec = JsonCodec> {
     directory: Rc<dyn ActorDirectory>,
     local_address: NetworkAddress,
     placement_director: Rc<dyn PlacementDirector>,
-    placement_registry: RefCell<HashMap<ActorType, PlacementStrategy>>,
+    placement_registry: RefCell<BTreeMap<ActorType, PlacementStrategy>>,
     membership: Rc<dyn MembershipProvider>,
     codec: C,
 }
@@ -126,7 +126,7 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
             directory,
             local_address,
             placement_director,
-            placement_registry: RefCell::new(HashMap::new()),
+            placement_registry: RefCell::new(BTreeMap::new()),
             membership,
             codec,
         }

@@ -31,7 +31,7 @@
 //! 3. **Stopping**: Request streams closed, pending tasks drained
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use moonpool_sim::StateHandle;
@@ -216,7 +216,7 @@ struct NodeParts<P: Providers, C: MessageCodec> {
     providers: P,
     pending_tasks: Rc<Cell<usize>>,
     close_handles: Rc<RefCell<CloseHandles>>,
-    active_actors: Rc<RefCell<HashSet<ActorId>>>,
+    active_actors: Rc<RefCell<BTreeSet<ActorId>>>,
     state_handle: Option<StateHandle>,
 }
 
@@ -376,7 +376,7 @@ impl<P: Providers, C: MessageCodec> MoonpoolNodeBuilder<P, C> {
         let close_handles: Rc<RefCell<CloseHandles>> = Rc::new(RefCell::new(Vec::new()));
 
         // Execute registrations
-        let active_actors = Rc::new(RefCell::new(HashSet::new()));
+        let active_actors = Rc::new(RefCell::new(BTreeSet::new()));
         let parts = NodeParts {
             transport: transport.clone(),
             router: router.clone(),

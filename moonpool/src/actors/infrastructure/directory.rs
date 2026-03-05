@@ -20,7 +20,7 @@
 //! - `UnregisterSilos(List<SiloAddress>)` → batch cleanup on node death
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use moonpool_sim::StateHandle;
@@ -125,7 +125,7 @@ pub trait ActorDirectory: fmt::Debug {
 
 /// Simple in-memory directory for single-node and simulation usage.
 ///
-/// All lookups are O(1) HashMap operations. No network calls, no persistence.
+/// All lookups are O(1) BTreeMap operations. No network calls, no persistence.
 /// Suitable for single-process actor systems and testing.
 ///
 /// # Orleans Reference
@@ -135,7 +135,7 @@ pub trait ActorDirectory: fmt::Debug {
 /// across silos using consistent hashing — that layer sits above this.
 #[derive(Debug)]
 pub struct InMemoryDirectory {
-    entries: RefCell<HashMap<ActorId, ActorAddress>>,
+    entries: RefCell<BTreeMap<ActorId, ActorAddress>>,
     state_handle: RefCell<Option<StateHandle>>,
 }
 
@@ -143,7 +143,7 @@ impl InMemoryDirectory {
     /// Create a new empty directory.
     pub fn new() -> Self {
         Self {
-            entries: RefCell::new(HashMap::new()),
+            entries: RefCell::new(BTreeMap::new()),
             state_handle: RefCell::new(None),
         }
     }
