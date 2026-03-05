@@ -235,7 +235,225 @@ This is the fundamental at-most-once delivery problem (FDB error_code 1030: `req
 - ❌ Request IDs for dedup
 - ❌ sendUnreliable exposed to RPC layer
 
-**Next: Commit 2.7 series — implement fdbrpc backport (see `docs/analysis/foundationdb/fdbrpc-backport-guide.md`)**
+**Next: Commit 2.7 series — implement fdbrpc backport**
+
+---
+
+## RPC Strategies (from FDB fdbrpc layer)
+
+Reference for choosing delivery modes. See `docs/analysis/foundationdb/layer-3-fdbrpc.md` for full details.
+
+### The 6 Strategies
+
+1. **Idempotent-by-Design**: Formulate request as desired end state, not delta. Re-delivery harmless. Use `get_reply()`.
+2. **Generation/Sequence Dedup**: Tag requests with monotonic counter. Server ignores old generations. Use `get_reply()`.
+3. **Fire-and-Forget**: Use `send()` for messages where losing one is fine (heartbeats, notifications).
+4. **Read-Before-Retry**: On `MaybeDelivered`, query server state to check if request succeeded before retrying. **This is the spacesim pattern.**
+5. **Well-Known Endpoint + retryBrokenPromise**: For endpoints surviving restarts. Catch `BrokenPromise`, retry with jitter.
+6. **Load-Balanced with AtMostOnce**: Multiple equivalent servers. `AtMostOnce=true` for commits (don't retry), `false` for reads.
+
+### Decision Flowchart
+
+```text
+Is losing the message acceptable?
+  YES → Strategy 3: send(), fire-and-forget
+  NO ↓
+Can you reformulate as "set state = X"?
+  YES → Strategy 1: idempotent-by-design + get_reply()
+  NO ↓
+Can the server track per-client sequence numbers?
+  YES → Strategy 2: generation dedup + get_reply()
+  NO ↓
+Can you read state after failure to check?
+  YES → Strategy 4: try_get_reply() + read-before-retry
+  NO ↓
+Is the endpoint well-known (survives reboots)?
+  YES → Strategy 5: retryBrokenPromise loop
+  NO → Strategy 2 (add server state) or Strategy 6 (load balance)
+```
+
+### Delivery Mode → Strategy Mapping
+
+| Mode | Guarantee | Transport | On Disconnect | Typical Strategy |
+|------|-----------|-----------|---------------|-----------------|
+| `send()` | Fire-and-forget | sendUnreliable | Silently lost | Strategy 3 |
+| `try_get_reply()` | At-most-once | sendUnreliable | `MaybeDelivered` | Strategy 4, 6 |
+| `get_reply()` | At-least-once | sendReliable | Retransmits | Strategy 1, 2, 5 |
+| `get_reply_unless_failed_for(d)` | At-least-once + timeout | sendReliable | `MaybeDelivered` after d | Singleton RPCs |
+
+---
+
+## [ ] Commit 2.7a: `feat(transport): add peer disconnect signal`
+
+**Goal**: Peer emits a signal when connection drops. Foundation for FailureMonitor and delivery modes.
+
+**FDB ref**: `Peer::disconnect` (`FlowTransport.h:174`) — `Promise<Void>` fired by `connectionKeeper`.
+
+**Design**: Add `disconnect_notify: Rc<Notify>` to `PeerSharedState`. Fire in `handle_connection_failure()` and `ConnectionLossBehavior::Exit` paths. Reset (new `Rc<Notify>`) on successful reconnection.
+
+**Why `Rc<Notify>`**: Matches existing `data_to_send: Rc<Notify>` pattern. Works with `tokio::select!`. Multiple waiters supported.
+
+**Files**:
+- `moonpool-transport/src/peer/core.rs` — add `disconnect_notify` field, fire on failure, reset on reconnect
+
+---
+
+## [ ] Commit 2.7b: `feat(transport): add FailureMonitor for address/endpoint failure tracking`
+
+**Goal**: Reactive failure tracking. Address-level (is machine reachable?) + endpoint-level (is endpoint permanently dead?).
+
+**FDB ref**: `SimpleFailureMonitor` (`FailureMonitor.h:146`, `FailureMonitor.actor.cpp`)
+
+**Design**: Concrete struct (not trait — KISS, one implementation). Owned by `NetTransport` in `TransportData`. Uses `Rc<RefCell<Vec<Waker>>>` pattern from `NetNotifiedQueue` for async watchers.
+
+```rust
+pub struct FailureMonitor {
+    inner: RefCell<FailureMonitorInner>,
+}
+struct FailureMonitorInner {
+    address_status: BTreeMap<String, FailureStatus>,          // Missing = Failed
+    failed_endpoints: BTreeMap<(String, UID), FailedReason>,  // Permanent failures
+    endpoint_watchers: BTreeMap<String, Vec<Waker>>,          // State change watchers
+    disconnect_watchers: BTreeMap<String, Vec<Waker>>,        // Disconnect watchers
+}
+```
+
+**Producer methods** (called by connection_task):
+- `set_status(addr, Available|Failed)` — on connect/disconnect
+- `notify_disconnect(addr)` — on connection drop, wakes all watchers for that address
+- `endpoint_not_found(ep)` — on broken_promise, marks permanently failed
+
+**Consumer methods** (called by delivery mode functions):
+- `get_state(ep) -> FailureStatus` — failed if endpoint perm-failed OR address failed
+- `permanently_failed(ep) -> bool`
+- `on_disconnect_or_failure(ep) -> impl Future<Output=()>` — resolves on disconnect or permanent failure
+- `on_state_changed(ep) -> impl Future<Output=()>` — resolves on any status change
+
+**Watcher impl**: Custom `Future` that checks if already failed → `Ready`, else registers waker → `Pending`. Producer methods drain+wake all registered wakers.
+
+**Integration**:
+- Add `Rc<FailureMonitor>` to `TransportData`, create in builder, expose accessor
+- Pass to `connection_task`: call `set_status(Available)` on connect, `notify_disconnect()` + `set_status(Failed)` on failure
+- In `dispatch()`: call `endpoint_not_found()` when endpoint not found
+
+**Files**:
+- `moonpool-transport/src/rpc/failure_monitor.rs` — **CREATE** (~250 lines)
+- `moonpool-transport/src/rpc/mod.rs` — add module + re-exports
+- `moonpool-transport/src/rpc/net_transport.rs` — add FM to TransportData, wire to peers
+- `moonpool-transport/src/peer/core.rs` — accept FM param, call set_status/notify_disconnect
+- `moonpool-transport/src/lib.rs` — re-export FailureMonitor, FailureStatus
+
+---
+
+## [ ] Commit 2.7c: `feat(transport): add MaybeDelivered error and reply queue closure on disconnect`
+
+**Goal**: Fast failure detection (~2s vs 30s) + explicit ambiguity error.
+
+**FDB ref**: `request_maybe_delivered` (error 1030), `endStreamOnDisconnect` (`genericactors.actor.h:332`)
+
+**New error variant**:
+```rust
+pub enum ReplyError {
+    BrokenPromise,
+    ConnectionFailed,
+    Timeout,
+    Serialization { message: String },
+    EndpointNotFound,
+    MaybeDelivered,  // NEW — FDB error 1030
+}
+```
+
+**Reply queue closure on disconnect**: Track which reply queues are pending on which remote address. When `connection_reader` detects peer closure → close all reply queues for that address with `MaybeDelivered`.
+
+Add to `TransportData`:
+```rust
+pending_replies: BTreeMap<String, Vec<Weak<dyn ReplyQueueCloser>>>,
+```
+
+Add `close_reason: Option<ReplyError>` to `NetNotifiedQueueInner` to distinguish "closed by drop" (ConnectionFailed) vs "closed by disconnect" (MaybeDelivered).
+
+**Files**:
+- `moonpool-transport/src/rpc/reply_error.rs` — add MaybeDelivered
+- `moonpool-transport/src/rpc/net_transport.rs` — pending_replies tracking, close on disconnect
+- `moonpool-transport/src/rpc/request.rs` — register pending reply on send
+- `moonpool-transport/src/rpc/reply_future.rs` — return MaybeDelivered on external close
+- `moonpool-transport/src/rpc/net_notified_queue.rs` — add close_reason
+
+---
+
+## [ ] Commit 2.7d: `feat(transport): add try_get_reply and send delivery modes`
+
+**Goal**: The 4 FDB delivery modes as free functions.
+
+**FDB ref**: `fdbrpc.h:727-895`, `genericactors.actor.h:362-431` (waitValueOrSignal, sendCanceler)
+
+**4 functions** in new `delivery.rs`:
+
+1. **`send()`** — fire-and-forget via sendUnreliable, no reply endpoint, no queue registration
+2. **`try_get_reply()`** — at-most-once, sendUnreliable, race reply vs `fm.on_disconnect_or_failure()`
+3. **`get_reply()`** — at-least-once via sendReliable (= current `send_request`, renamed for FDB alignment)
+4. **`get_reply_unless_failed_for(timeout)`** — at-least-once + timeout, race `get_reply` vs `fm.on_failed_for()`
+
+**`try_get_reply()` implementation** (the critical one):
+```rust
+let fm = transport.failure_monitor();
+let disc = fm.on_disconnect_or_failure(destination);
+if fm.get_state(destination) == FailureStatus::Failed {
+    return Err(ReplyError::MaybeDelivered);
+}
+let reply_future = send_request_unreliable(transport, destination, request, codec)?;
+tokio::select! {
+    result = reply_future => match result {
+        Ok(resp) => Ok(resp),
+        Err(ReplyError::BrokenPromise) => { fm.endpoint_not_found(destination); Err(ReplyError::MaybeDelivered) }
+        Err(e) => Err(e),
+    },
+    _ = disc => Err(ReplyError::MaybeDelivered),
+}
+```
+
+**Files**:
+- `moonpool-transport/src/rpc/delivery.rs` — **CREATE** (~200 lines)
+- `moonpool-transport/src/rpc/request.rs` — add `send_request_unreliable` helper
+- `moonpool-transport/src/rpc/mod.rs` — add module + re-exports
+- `moonpool-transport/src/lib.rs` — re-export delivery functions
+
+---
+
+## [ ] Commit 2.8: `feat(sim): make spacesim RPC fault-aware with try_get_reply`
+
+**Goal**: Update spacesim to use `try_get_reply()` + Strategy 4 (read-before-retry). Unblocks Commit 3.
+
+**Pattern change** — 3-way error handling on all mutation RPCs:
+```rust
+match try_get_reply(transport, station_ep, deposit_req, codec).await {
+    Ok(resp) => {
+        model.deposit(station, amount);
+        assert_always!(resp.credits == model.credits(station), "response matches model");
+    }
+    Err(ReplyError::MaybeDelivered) => {
+        assert_sometimes!(true, "deposit_maybe_delivered");
+        // Reconcile: query actual state
+        match get_reply(transport, station_ep, query_req, codec)?.await {
+            Ok(actual) => model.reconcile(station, actual),
+            Err(_) => model.mark_uncertain(station),
+        }
+    }
+    Err(_) => {
+        assert_sometimes!(true, "deposit_not_delivered");
+    }
+}
+```
+
+**Model gains**: `reconcile(station_id, actual_state)` and `mark_uncertain(station_id)`.
+
+**Proc macro**: Generate `try_*` client method variants that use `try_get_reply()` alongside existing methods that use `get_reply()`.
+
+**Files**:
+- `moonpool/src/simulations/spacesim/operations.rs` — 3-way error handling
+- `moonpool/src/simulations/spacesim/model.rs` — add reconcile/mark_uncertain
+- `moonpool/src/simulations/spacesim/workloads.rs` — use try_get_reply
+- `moonpool-transport-derive/src/lib.rs` — generate try_* variants
 
 ---
 
@@ -387,15 +605,18 @@ if buggify!() { ctx.time().sleep(Duration::from_millis(50)).await; } // slow wri
 
 ## Summary
 
-| # | Commit | Procs | Network | Attrition | Actors | Key test |
-|---|--------|-------|---------|-----------|--------|----------|
-| 1 | Scaffold + single process | 1 | fast_local | No | Station | Actor lifecycle in Process |
-| 2 | Cargo + VerifyAll | 1 | fast_local | No | Station | Model accuracy |
-| 3 | Multi-process (3 nodes) | 3 | fast_local | No | Station | **First multi-node test** |
-| 4 | ShipActor + actor-to-actor | 3 | fast_local | No | Station+Ship | Cross-actor RPC |
-| 5 | Network chaos | 3 | random | No | Station+Ship | RPC failures |
-| 6 | Attrition | 3 | random | max_dead=1 | Station+Ship | State recovery |
-| 7 | Directory invariant + buggify | 3 | random | max_dead=1 | Station+Ship | Full coverage |
+| # | Commit | Scope | Key test |
+|---|--------|-------|----------|
+| 2.7a | Peer disconnect signal | moonpool-transport | Signal fires on connection loss |
+| 2.7b | FailureMonitor | moonpool-transport | Watchers wake on disconnect |
+| 2.7c | MaybeDelivered + reply queue closure | moonpool-transport | Fast failure (~2s vs 30s) |
+| 2.7d | 4 delivery modes | moonpool-transport | try_get_reply returns MaybeDelivered |
+| 2.8 | Spacesim fault-aware RPCs | moonpool (spacesim) | Model reconciliation after ambiguity |
+| 3 | Multi-process (3 nodes) | moonpool (spacesim) | **First multi-node test** |
+| 4 | ShipActor + actor-to-actor | moonpool (spacesim) | Cross-actor RPC |
+| 5 | Network chaos | moonpool (spacesim) | RPC failures |
+| 6 | Attrition | moonpool (spacesim) | State recovery |
+| 7 | Directory invariant + buggify | moonpool (spacesim) | Full coverage |
 
 ## Verification
 
