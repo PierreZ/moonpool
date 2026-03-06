@@ -6,6 +6,8 @@
 use crate::RandomProvider;
 use moonpool_sim::SimRandomProvider;
 
+use super::actors::TradeDirection;
+
 /// Available commodities for cargo operations.
 const COMMODITIES: &[&str] = &["fuel", "ore", "food", "water"];
 
@@ -48,7 +50,27 @@ pub enum SpaceOp {
         /// Target station name.
         station: String,
     },
-    /// Verify all stations match the reference model.
+    /// Execute a trade between a ship and a station.
+    Trade {
+        /// Ship performing the trade.
+        ship: String,
+        /// Target station.
+        station: String,
+        /// Commodity to trade.
+        commodity: String,
+        /// Amount of commodity.
+        amount: i64,
+        /// Price in credits.
+        price: i64,
+        /// Buy or sell direction.
+        direction: TradeDirection,
+    },
+    /// Query the current state of a ship.
+    QueryShip {
+        /// Target ship name.
+        ship: String,
+    },
+    /// Verify all stations and ships match the reference model.
     VerifyAll,
     /// Small delay to let background tasks run.
     SmallDelay,
@@ -56,33 +78,47 @@ pub enum SpaceOp {
 
 /// Generate a random operation from the alphabet.
 ///
-/// Weights: deposit 20%, withdraw 15%, add_cargo 15%, remove_cargo 15%,
-/// query 15%, verify_all 5%, delay 15%.
-pub fn random_op(random: &SimRandomProvider, stations: &[String]) -> SpaceOp {
+/// Weights: deposit 15%, withdraw 10%, add_cargo 10%, remove_cargo 10%,
+/// query_state 10%, trade 20%, query_ship 5%, verify_all 5%, delay 15%.
+pub fn random_op(random: &SimRandomProvider, stations: &[String], ships: &[String]) -> SpaceOp {
     let roll = random.random_range(0..100);
     let station = || stations[random.random_range(0..stations.len())].clone();
+    let ship = || ships[random.random_range(0..ships.len())].clone();
     let commodity = || COMMODITIES[random.random_range(0..COMMODITIES.len())].to_string();
 
     match roll {
-        0..20 => SpaceOp::Deposit {
+        0..15 => SpaceOp::Deposit {
             station: station(),
             amount: random.random_range(1..500),
         },
-        20..35 => SpaceOp::Withdraw {
+        15..25 => SpaceOp::Withdraw {
             station: station(),
             amount: random.random_range(1..300),
         },
-        35..50 => SpaceOp::AddCargo {
+        25..35 => SpaceOp::AddCargo {
             station: station(),
             commodity: commodity(),
             amount: random.random_range(1..200),
         },
-        50..65 => SpaceOp::RemoveCargo {
+        35..45 => SpaceOp::RemoveCargo {
             station: station(),
             commodity: commodity(),
             amount: random.random_range(1..150),
         },
-        65..80 => SpaceOp::QueryState { station: station() },
+        45..55 => SpaceOp::QueryState { station: station() },
+        55..75 => SpaceOp::Trade {
+            ship: ship(),
+            station: station(),
+            commodity: commodity(),
+            amount: random.random_range(1..100),
+            price: random.random_range(1..200),
+            direction: if random.random_range(0..2) == 0 {
+                TradeDirection::Buy
+            } else {
+                TradeDirection::Sell
+            },
+        },
+        75..80 => SpaceOp::QueryShip { ship: ship() },
         80..85 => SpaceOp::VerifyAll,
         _ => SpaceOp::SmallDelay,
     }

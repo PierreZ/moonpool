@@ -5,25 +5,34 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::actors::StationResponse;
+use super::actors::{ShipResponse, StationResponse};
 
 /// Key used to publish the reference model into `StateHandle`.
 pub const SPACE_MODEL_KEY: &str = "space_model";
 
 /// Reference model for space station economy.
 ///
-/// Tracks expected credits for each station alongside a running total
-/// for conservation law verification.
+/// Tracks expected credits for each station and ship alongside running totals
+/// for conservation law verification. Loss tracking absorbs gaps from
+/// partial failures in two-phase trades.
 #[derive(Debug, Clone, Default)]
 pub struct SpaceModel {
     /// Current expected state for each station.
     pub stations: BTreeMap<String, StationState>,
-    /// Sum of all station credits (invariant target).
+    /// Current expected state for each ship.
+    pub ships: BTreeMap<String, ShipState>,
+    /// Sum of all injected credits (invariant target).
     pub total_credits: i64,
     /// Sum of all cargo per commodity (invariant target).
     pub total_cargo: BTreeMap<String, i64>,
     /// Stations whose state is uncertain due to MaybeDelivered.
     pub uncertain: BTreeSet<String>,
+    /// Ships whose state is uncertain due to MaybeDelivered.
+    pub uncertain_ships: BTreeSet<String>,
+    /// Credits lost to partial trade failures.
+    pub lost_credits: i64,
+    /// Cargo lost to partial trade failures, per commodity.
+    pub lost_cargo: BTreeMap<String, i64>,
 }
 
 /// Per-station expected state.
@@ -33,6 +42,15 @@ pub struct StationState {
     pub credits: i64,
     /// Current expected inventory.
     pub inventory: BTreeMap<String, i64>,
+}
+
+/// Per-ship expected state.
+#[derive(Debug, Clone, Default)]
+pub struct ShipState {
+    /// Current expected credits.
+    pub credits: i64,
+    /// Current expected cargo.
+    pub cargo: BTreeMap<String, i64>,
 }
 
 impl SpaceModel {
@@ -141,13 +159,131 @@ impl SpaceModel {
         self.recalculate_totals();
     }
 
-    /// Recalculate total_credits and total_cargo from all station state.
+    // ========================================================================
+    // Ship methods
+    // ========================================================================
+
+    /// Seed a ship with initial credits.
+    pub fn seed_ship(&mut self, name: &str, credits: i64) {
+        let ship = self.ships.entry(name.to_string()).or_default();
+        ship.credits += credits;
+        self.total_credits += credits;
+    }
+
+    /// Get credits for a ship.
+    pub fn ship_credits(&self, name: &str) -> i64 {
+        self.ships.get(name).map(|s| s.credits).unwrap_or(0)
+    }
+
+    /// Sum of all ship credits.
+    pub fn total_ship_credits(&self) -> i64 {
+        self.ships.values().map(|s| s.credits).sum()
+    }
+
+    /// Get a ship's cargo for a specific commodity.
+    pub fn ship_cargo(&self, name: &str, commodity: &str) -> i64 {
+        self.ships
+            .get(name)
+            .and_then(|s| s.cargo.get(commodity))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Sum of all cargo for a commodity across all ships.
+    pub fn total_ship_cargo_for(&self, commodity: &str) -> i64 {
+        self.ships
+            .values()
+            .map(|s| s.cargo.get(commodity).copied().unwrap_or(0))
+            .sum()
+    }
+
+    /// Mark a ship as uncertain (delivery ambiguity).
+    pub fn mark_ship_uncertain(&mut self, name: &str) {
+        self.uncertain_ships.insert(name.to_string());
+    }
+
+    /// Check if a ship has uncertain state.
+    pub fn is_ship_uncertain(&self, name: &str) -> bool {
+        self.uncertain_ships.contains(name)
+    }
+
+    /// Reconcile a ship's model state with the actual response from the actor.
+    pub fn reconcile_ship(&mut self, name: &str, actual: &ShipResponse) {
+        let ship = self.ships.entry(name.to_string()).or_default();
+        ship.credits = actual.credits;
+        ship.cargo = actual.cargo.clone();
+        self.uncertain_ships.remove(name);
+        self.recalculate_totals();
+    }
+
+    /// Apply a buy trade: ship pays credits to station, gets cargo from station.
+    ///
+    /// Net effect on totals: zero (credits and cargo just move between entities).
+    pub fn trade_buy(
+        &mut self,
+        ship: &str,
+        station: &str,
+        commodity: &str,
+        amount: i64,
+        price: i64,
+    ) {
+        let s = self.ships.entry(ship.to_string()).or_default();
+        s.credits -= price;
+        *s.cargo.entry(commodity.to_string()).or_insert(0) += amount;
+
+        let st = self.stations.entry(station.to_string()).or_default();
+        *st.inventory.entry(commodity.to_string()).or_insert(0) -= amount;
+        st.credits += price;
+        // Totals unchanged: credits and cargo just moved between entities
+    }
+
+    /// Apply a sell trade: ship gives cargo to station, gets credits from station.
+    ///
+    /// Net effect on totals: zero (credits and cargo just move between entities).
+    pub fn trade_sell(
+        &mut self,
+        ship: &str,
+        station: &str,
+        commodity: &str,
+        amount: i64,
+        price: i64,
+    ) {
+        let s = self.ships.entry(ship.to_string()).or_default();
+        *s.cargo.entry(commodity.to_string()).or_insert(0) -= amount;
+        s.credits += price;
+
+        let st = self.stations.entry(station.to_string()).or_default();
+        *st.inventory.entry(commodity.to_string()).or_insert(0) += amount;
+        st.credits -= price;
+        // Totals unchanged: credits and cargo just moved between entities
+    }
+
+    /// Recalculate totals from all station and ship state.
+    ///
+    /// Any gap between actual and expected totals is absorbed into
+    /// `lost_credits` / `lost_cargo` (from partial trade failures).
     fn recalculate_totals(&mut self) {
-        self.total_credits = self.stations.values().map(|s| s.credits).sum();
-        self.total_cargo.clear();
+        let actual_credits: i64 = self.stations.values().map(|s| s.credits).sum::<i64>()
+            + self.ships.values().map(|s| s.credits).sum::<i64>();
+        self.lost_credits = self.total_credits - actual_credits;
+
+        // Compute actual cargo across stations and ships
+        let mut actual_cargo: BTreeMap<String, i64> = BTreeMap::new();
         for station in self.stations.values() {
-            for (commodity, &amount) in &station.inventory {
-                *self.total_cargo.entry(commodity.clone()).or_insert(0) += amount;
+            for (c, &a) in &station.inventory {
+                *actual_cargo.entry(c.clone()).or_insert(0) += a;
+            }
+        }
+        for ship in self.ships.values() {
+            for (c, &a) in &ship.cargo {
+                *actual_cargo.entry(c.clone()).or_insert(0) += a;
+            }
+        }
+        self.lost_cargo.clear();
+        for (commodity, &expected) in &self.total_cargo {
+            let actual = actual_cargo.get(commodity).copied().unwrap_or(0);
+            if actual != expected {
+                self.lost_cargo.insert(commodity.clone(), expected - actual);
             }
         }
     }

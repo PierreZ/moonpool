@@ -177,6 +177,188 @@ impl Station for StationActorImpl {
     }
 }
 
+// ============================================================================
+// ShipActor: virtual actor for trading ships
+// ============================================================================
+
+/// Direction of a trade between a ship and a station.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TradeDirection {
+    /// Ship buys cargo from station (pays credits, receives cargo).
+    Buy,
+    /// Ship sells cargo to station (gives cargo, receives credits).
+    Sell,
+}
+
+/// Request to execute a trade between a ship and a station.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradeRequest {
+    /// Target station to trade with.
+    pub station: String,
+    /// Commodity to trade.
+    pub commodity: String,
+    /// Amount of commodity to trade.
+    pub amount: i64,
+    /// Price in credits for the trade.
+    pub price: i64,
+    /// Direction of the trade.
+    pub direction: TradeDirection,
+}
+
+/// Request to query a ship's current state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryShipRequest {}
+
+/// Response containing current ship state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ShipResponse {
+    /// Current credit balance.
+    pub credits: i64,
+    /// Current cargo manifest.
+    pub cargo: BTreeMap<String, i64>,
+    /// Whether the trade was executed (false if precondition failed).
+    pub traded: bool,
+}
+
+/// Persistent state for a ship actor.
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct ShipData {
+    /// Credit balance.
+    pub credits: i64,
+    /// Cargo manifest.
+    pub cargo: BTreeMap<String, i64>,
+}
+
+/// Define the ship virtual actor interface.
+#[service(id = 0x5348_1900)]
+pub trait Ship {
+    /// Execute a trade with a station.
+    async fn trade(&mut self, req: TradeRequest) -> Result<ShipResponse, RpcError>;
+
+    /// Query the current ship state.
+    async fn query_ship(&mut self, req: QueryShipRequest) -> Result<ShipResponse, RpcError>;
+}
+
+/// Ship actor implementation with persistent state and cross-actor trading.
+#[derive(Default)]
+pub struct ShipActorImpl {
+    state: Option<PersistentState<ShipData>>,
+}
+
+impl ShipActorImpl {
+    fn data(&self) -> ShipData {
+        self.state
+            .as_ref()
+            .map(|s| s.state().clone())
+            .unwrap_or_default()
+    }
+
+    fn response(&self, traded: bool) -> ShipResponse {
+        let data = self.data();
+        ShipResponse {
+            credits: data.credits,
+            cargo: data.cargo,
+            traded,
+        }
+    }
+}
+
+#[async_trait(?Send)]
+impl Ship for ShipActorImpl {
+    async fn trade<P: Providers, C: MessageCodec>(
+        &mut self,
+        ctx: &ActorContext<P, C>,
+        req: TradeRequest,
+    ) -> Result<ShipResponse, RpcError> {
+        let station_ref: StationRef<P, C> = ctx.actor_ref(req.station.clone());
+
+        match req.direction {
+            TradeDirection::Buy => {
+                // Buy: ship pays credits to station, station gives cargo to ship
+                // Pre-check: ship must have enough credits
+                if self.data().credits < req.price {
+                    return Ok(self.response(false));
+                }
+                // Phase 1: remove cargo from station
+                station_ref
+                    .remove_cargo(RemoveCargoRequest {
+                        commodity: req.commodity.clone(),
+                        amount: req.amount,
+                    })
+                    .await?;
+                // Phase 2: deposit credits into station (payment)
+                station_ref
+                    .deposit_credits(DepositCreditsRequest { amount: req.price })
+                    .await?;
+                // Both station calls succeeded — update ship state
+                if let Some(s) = &mut self.state {
+                    s.state_mut().credits -= req.price;
+                    *s.state_mut().cargo.entry(req.commodity).or_insert(0) += req.amount;
+                    let _ = s.write_state().await;
+                }
+                Ok(self.response(true))
+            }
+            TradeDirection::Sell => {
+                // Sell: ship gives cargo to station, station pays credits to ship
+                // Pre-check: ship must have enough cargo
+                if self.data().cargo.get(&req.commodity).copied().unwrap_or(0) < req.amount {
+                    return Ok(self.response(false));
+                }
+                // Phase 1: add cargo to station
+                station_ref
+                    .add_cargo(AddCargoRequest {
+                        commodity: req.commodity.clone(),
+                        amount: req.amount,
+                    })
+                    .await?;
+                // Phase 2: withdraw credits from station (payment to ship)
+                station_ref
+                    .withdraw_credits(WithdrawCreditsRequest { amount: req.price })
+                    .await?;
+                // Both station calls succeeded — update ship state
+                if let Some(s) = &mut self.state {
+                    *s.state_mut().cargo.entry(req.commodity).or_insert(0) -= req.amount;
+                    s.state_mut().credits += req.price;
+                    let _ = s.write_state().await;
+                }
+                Ok(self.response(true))
+            }
+        }
+    }
+
+    async fn query_ship<P: Providers, C: MessageCodec>(
+        &mut self,
+        _ctx: &ActorContext<P, C>,
+        _req: QueryShipRequest,
+    ) -> Result<ShipResponse, RpcError> {
+        Ok(self.response(false))
+    }
+}
+
+#[actor_impl(Ship)]
+impl ActorHandler for ShipActorImpl {
+    fn placement_strategy() -> crate::actors::PlacementStrategy {
+        crate::actors::PlacementStrategy::RoundRobin
+    }
+
+    fn deactivation_hint(&self) -> DeactivationHint {
+        DeactivationHint::DeactivateOnIdle
+    }
+
+    async fn on_activate<P: Providers, C: MessageCodec>(
+        &mut self,
+        ctx: &ActorContext<P, C>,
+    ) -> Result<(), ActorError> {
+        if let Some(store) = ctx.state_store() {
+            let ps = PersistentState::<ShipData>::load(store.clone(), "Ship", &ctx.id.identity)
+                .await
+                .map_err(|e| ActorError::HandlerError(format!("state load: {e}")))?;
+            self.state = Some(ps);
+        }
+        Ok(())
+    }
+}
+
 #[actor_impl(Station)]
 impl ActorHandler for StationActorImpl {
     fn placement_strategy() -> crate::actors::PlacementStrategy {

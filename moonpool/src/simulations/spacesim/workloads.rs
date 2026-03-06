@@ -20,8 +20,9 @@ use moonpool_sim::{
 };
 
 use super::actors::{
-    AddCargoRequest, DepositCreditsRequest, QueryStateRequest, RemoveCargoRequest,
-    StationActorImpl, StationRef, WithdrawCreditsRequest,
+    AddCargoRequest, DepositCreditsRequest, QueryShipRequest, QueryStateRequest,
+    RemoveCargoRequest, ShipActorImpl, ShipData, ShipRef, StationActorImpl, StationRef,
+    TradeDirection, TradeRequest, WithdrawCreditsRequest,
 };
 use super::model::{SPACE_MODEL_KEY, SpaceModel};
 use super::operations::{SpaceOp, random_op};
@@ -65,7 +66,8 @@ impl Process for SpaceProcess {
 
         let mut builder = MoonpoolNode::new(self.cluster.clone(), config)
             .with_providers(ctx.providers().clone())
-            .register::<StationActorImpl>();
+            .register::<StationActorImpl>()
+            .register::<ShipActorImpl>();
         builder = builder.with_state_handle(ctx.state().clone());
         let _node = builder
             .start()
@@ -83,18 +85,22 @@ impl Process for SpaceProcess {
 // SpaceWorkload — test driver
 // ============================================================================
 
-/// Space economy workload: drives operations against station actors.
+/// Space economy workload: drives operations against station and ship actors.
 pub struct SpaceWorkload {
     /// Number of operations to execute per run.
     num_ops: usize,
     /// Station names to use.
     station_names: Vec<String>,
+    /// Ship names to use.
+    ship_names: Vec<String>,
     /// Shared cluster config.
     cluster: ClusterConfig,
     /// Concrete directory (for `set_state_handle`).
     directory: Rc<InMemoryDirectory>,
     /// Concrete membership (for `set_state_handle`).
     membership: Rc<SharedMembership>,
+    /// State store for ship seeding.
+    state_store: Rc<dyn ActorStateStore>,
     /// Reference model.
     model: SpaceModel,
     /// Client runtime (populated in setup).
@@ -115,7 +121,7 @@ impl SpaceWorkload {
                 tracing::info!(
                     station,
                     credits = resp.credits,
-                    "reconciled after MaybeDelivered"
+                    "reconciled station after MaybeDelivered"
                 );
             }
             Err(e) => {
@@ -125,20 +131,47 @@ impl SpaceWorkload {
         }
     }
 
+    /// Reconcile a ship after MaybeDelivered by querying its actual state.
+    async fn reconcile_ship(
+        client: &MoonpoolClient<SimProviders>,
+        model: &mut SpaceModel,
+        ship: &str,
+    ) {
+        let actor_ref: ShipRef<_> = client.actor_ref(ship.to_string());
+        match actor_ref.query_ship(QueryShipRequest {}).await {
+            Ok(resp) => {
+                model.reconcile_ship(ship, &resp);
+                tracing::info!(
+                    ship,
+                    credits = resp.credits,
+                    "reconciled ship after MaybeDelivered"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(ship, error = %e, "reconcile ship query failed, marking uncertain");
+                model.mark_ship_uncertain(ship);
+            }
+        }
+    }
+
     /// Create a new space workload.
     pub fn new(
         num_ops: usize,
         stations: &[&str],
+        ships: &[&str],
         cluster: ClusterConfig,
         directory: Rc<InMemoryDirectory>,
         membership: Rc<SharedMembership>,
+        state_store: Rc<dyn ActorStateStore>,
     ) -> Self {
         Self {
             num_ops,
             station_names: stations.iter().map(|s| s.to_string()).collect(),
+            ship_names: ships.iter().map(|s| s.to_string()).collect(),
             cluster,
             directory,
             membership,
+            state_store,
             model: SpaceModel::new(),
             client: None,
         }
@@ -167,6 +200,7 @@ impl moonpool_sim::Workload for SpaceWorkload {
         let client = MoonpoolClient::new(self.cluster.clone(), local_addr)
             .with_providers(ctx.providers().clone())
             .knows::<StationActorImpl>()
+            .knows::<ShipActorImpl>()
             .start()
             .await
             .map_err(|e| {
@@ -200,6 +234,25 @@ impl moonpool_sim::Workload for SpaceWorkload {
             }
         }
 
+        // Seed ships with initial credits via state store
+        for name in &self.ship_names {
+            let initial = ctx.random().random_range(50..200) as i64;
+            let data = ShipData {
+                credits: initial,
+                cargo: Default::default(),
+            };
+            let json = serde_json::to_vec(&data).map_err(|e| {
+                moonpool_sim::SimulationError::InvalidState(format!("ship seed serialize: {e}"))
+            })?;
+            self.state_store
+                .write_state("Ship", name, json, None)
+                .await
+                .map_err(|e| {
+                    moonpool_sim::SimulationError::InvalidState(format!("ship seed write: {e}"))
+                })?;
+            self.model.seed_ship(name, initial);
+        }
+
         // Publish initial model
         ctx.state().publish(SPACE_MODEL_KEY, self.model.clone());
 
@@ -225,7 +278,7 @@ impl moonpool_sim::Workload for SpaceWorkload {
                 let _ = ctx.time().sleep(Duration::from_nanos(1)).await;
             }
 
-            let op = random_op(ctx.random(), &self.station_names);
+            let op = random_op(ctx.random(), &self.station_names, &self.ship_names);
 
             match op {
                 SpaceOp::Deposit { station, amount } => {
@@ -367,6 +420,103 @@ impl moonpool_sim::Workload for SpaceWorkload {
                         }
                     }
                 }
+                SpaceOp::Trade {
+                    ship,
+                    station,
+                    commodity,
+                    amount,
+                    price,
+                    direction,
+                } => {
+                    // Reconcile uncertain entities before pre-checks
+                    if self.model.is_ship_uncertain(&ship) {
+                        Self::reconcile_ship(client, &mut self.model, &ship).await;
+                    }
+                    if self.model.is_uncertain(&station) {
+                        Self::reconcile_station(client, &mut self.model, &station).await;
+                    }
+
+                    // Pre-condition checks against model
+                    match &direction {
+                        TradeDirection::Buy => {
+                            if self.model.ship_credits(&ship) < price {
+                                assert_sometimes!(true, "trade_insufficient_credits");
+                                continue;
+                            }
+                            if self.model.station_cargo(&station, &commodity) < amount {
+                                assert_sometimes!(true, "trade_insufficient_cargo");
+                                continue;
+                            }
+                        }
+                        TradeDirection::Sell => {
+                            if self.model.ship_cargo(&ship, &commodity) < amount {
+                                assert_sometimes!(true, "trade_insufficient_cargo");
+                                continue;
+                            }
+                            if self.model.station_credits(&station) < price {
+                                assert_sometimes!(true, "trade_insufficient_credits");
+                                continue;
+                            }
+                        }
+                    }
+
+                    let actor_ref: ShipRef<_> = client.actor_ref(ship.clone());
+                    match actor_ref
+                        .try_trade(TradeRequest {
+                            station: station.clone(),
+                            commodity: commodity.clone(),
+                            amount,
+                            price,
+                            direction: direction.clone(),
+                        })
+                        .await
+                    {
+                        Ok(resp) => {
+                            if resp.traded {
+                                match direction {
+                                    TradeDirection::Buy => {
+                                        self.model
+                                            .trade_buy(&ship, &station, &commodity, amount, price);
+                                        assert_sometimes!(true, "trade_buy_succeeded");
+                                    }
+                                    TradeDirection::Sell => {
+                                        self.model
+                                            .trade_sell(&ship, &station, &commodity, amount, price);
+                                        assert_sometimes!(true, "trade_sell_succeeded");
+                                    }
+                                }
+                            }
+                            // If !resp.traded, precondition failed inside actor (race)
+                        }
+                        Err(e) if e.is_maybe_delivered() => {
+                            assert_sometimes!(true, "trade_maybe_delivered");
+                            Self::reconcile_ship(client, &mut self.model, &ship).await;
+                            Self::reconcile_station(client, &mut self.model, &station).await;
+                        }
+                        Err(e) => {
+                            tracing::warn!("trade failed: {}", e);
+                        }
+                    }
+                }
+                SpaceOp::QueryShip { ship } => {
+                    let actor_ref: ShipRef<_> = client.actor_ref(ship.clone());
+                    match actor_ref.query_ship(QueryShipRequest {}).await {
+                        Ok(resp) => {
+                            if self.model.is_ship_uncertain(&ship) {
+                                self.model.reconcile_ship(&ship, &resp);
+                            } else {
+                                let expected = self.model.ship_credits(&ship);
+                                assert_always!(
+                                    resp.credits == expected,
+                                    "query ship credit mismatch"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("query_ship failed: {}", e);
+                        }
+                    }
+                }
                 SpaceOp::VerifyAll => {
                     let mut all_match = true;
                     for name in &self.station_names {
@@ -400,6 +550,37 @@ impl moonpool_sim::Workload for SpaceWorkload {
                             }
                         }
                     }
+                    for name in &self.ship_names {
+                        if self.model.is_ship_uncertain(name) {
+                            Self::reconcile_ship(client, &mut self.model, name).await;
+                            continue;
+                        }
+                        let actor_ref: ShipRef<_> = client.actor_ref(name.clone());
+                        match actor_ref.query_ship(QueryShipRequest {}).await {
+                            Ok(resp) => {
+                                let expected_credits = self.model.ship_credits(name);
+                                assert_always!(
+                                    resp.credits == expected_credits,
+                                    "verify: ship credit mismatch"
+                                );
+                                let expected_cargo = self
+                                    .model
+                                    .ships
+                                    .get(name)
+                                    .map(|s| &s.cargo)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                assert_always!(
+                                    resp.cargo == expected_cargo,
+                                    "verify: ship cargo mismatch"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!("verify ship query failed for {}: {}", name, e);
+                                all_match = false;
+                            }
+                        }
+                    }
                     if all_match {
                         assert_sometimes!(true, "verify_all_passed");
                     }
@@ -420,19 +601,32 @@ impl moonpool_sim::Workload for SpaceWorkload {
     }
 
     async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        // Final conservation check
-        let sum = self.model.total_station_credits();
-        assert_always!(sum == self.model.total_credits, "final credit conservation");
+        // Final credit conservation: stations + ships + lost == total
+        let credit_sum = self.model.total_station_credits()
+            + self.model.total_ship_credits()
+            + self.model.lost_credits;
+        assert_always!(
+            credit_sum == self.model.total_credits,
+            "final credit conservation"
+        );
 
         // Final non-negative check
         for station in self.model.stations.values() {
             assert_always!(station.credits >= 0, "final non-negative station credits");
         }
+        for ship in self.model.ships.values() {
+            assert_always!(ship.credits >= 0, "final non-negative ship credits");
+        }
 
-        // Final cargo conservation check
+        // Final cargo conservation: stations + ships + lost == total
         for (commodity, &expected) in &self.model.total_cargo {
-            let actual = self.model.total_cargo_for(commodity);
-            assert_always!(actual == expected, "final cargo conservation");
+            let actual_stations = self.model.total_cargo_for(commodity);
+            let actual_ships = self.model.total_ship_cargo_for(commodity);
+            let lost = self.model.lost_cargo.get(commodity).copied().unwrap_or(0);
+            assert_always!(
+                actual_stations + actual_ships + lost == expected,
+                "final cargo conservation"
+            );
         }
 
         // Publish final model

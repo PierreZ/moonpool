@@ -491,7 +491,7 @@ match try_get_reply(transport, station_ep, deposit_req, codec).await {
 
 ---
 
-## [ ] Commit 4: `feat(sim): add ShipActor with actor-to-actor trade calls`
+## [x] Commit 4: `feat(sim): add ShipActor with actor-to-actor trade calls`
 
 **Goal**: Second actor type making cross-actor calls. Ship calls Station within its own dispatch handler.
 
@@ -621,7 +621,7 @@ if buggify!() { ctx.time().sleep(Duration::from_millis(50)).await; } // slow wri
 | ~~2.7d~~ | ~~4 delivery modes~~ | ~~moonpool-transport~~ | ~~try_get_reply returns MaybeDelivered~~ |
 | ~~2.8~~ | ~~Spacesim fault-aware RPCs~~ | ~~moonpool (spacesim)~~ | ~~Model reconciliation after ambiguity~~ |
 | ~~3~~ | ~~Multi-process (3 nodes)~~ | ~~moonpool (spacesim)~~ | ~~**First multi-node test**~~ |
-| 4 | ShipActor + actor-to-actor | moonpool (spacesim) | Cross-actor RPC |
+| ~~4~~ | ~~ShipActor + actor-to-actor~~ | ~~moonpool (spacesim)~~ | ~~Cross-actor RPC~~ |
 | 5 | Network chaos | moonpool (spacesim) | RPC failures |
 | 6 | Attrition | moonpool (spacesim) | State recovery |
 | 7 | Directory invariant + buggify | moonpool (spacesim) | Full coverage |

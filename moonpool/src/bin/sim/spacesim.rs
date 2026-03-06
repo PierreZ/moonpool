@@ -31,6 +31,7 @@ fn main() {
         .expect("cluster config");
 
     let stations = ["alpha", "beta", "gamma", "delta", "epsilon"];
+    let ships = ["ship-1", "ship-2", "ship-3"];
     let seed = RngSeed::from_bytes(b"my_fixed_seed_001");
 
     let local_runtime = tokio::runtime::Builder::new_current_thread()
@@ -61,7 +62,13 @@ fn main() {
                 }
             })
             .workload(SpaceWorkload::new(
-                200, &stations, cluster, directory, membership,
+                200,
+                &stations,
+                &ships,
+                cluster,
+                directory,
+                membership,
+                state_store.clone() as Rc<dyn ActorStateStore>,
             ))
             .invariant(CreditConservation)
             .invariant(CargoConservation)
