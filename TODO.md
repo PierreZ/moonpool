@@ -465,7 +465,7 @@ match try_get_reply(transport, station_ep, deposit_req, codec).await {
 
 ---
 
-## [ ] Commit 3: `feat(sim): multi-process spacesim with 3 station nodes`
+## [x] Commit 3: `feat(sim): multi-process spacesim with 3 station nodes`
 
 **Goal**: **First-ever multi-node actor simulation**. Highest-risk commit. 3 processes each hosting MoonpoolNode, actors placed via RoundRobin across all 3.
 
@@ -620,7 +620,7 @@ if buggify!() { ctx.time().sleep(Duration::from_millis(50)).await; } // slow wri
 | ~~2.7c~~ | ~~MaybeDelivered + reply queue closure~~ | ~~moonpool-transport~~ | ~~Fast failure (~2s vs 30s)~~ |
 | ~~2.7d~~ | ~~4 delivery modes~~ | ~~moonpool-transport~~ | ~~try_get_reply returns MaybeDelivered~~ |
 | ~~2.8~~ | ~~Spacesim fault-aware RPCs~~ | ~~moonpool (spacesim)~~ | ~~Model reconciliation after ambiguity~~ |
-| 3 | Multi-process (3 nodes) | moonpool (spacesim) | **First multi-node test** |
+| ~~3~~ | ~~Multi-process (3 nodes)~~ | ~~moonpool (spacesim)~~ | ~~**First multi-node test**~~ |
 | 4 | ShipActor + actor-to-actor | moonpool (spacesim) | Cross-actor RPC |
 | 5 | Network chaos | moonpool (spacesim) | RPC failures |
 | 6 | Attrition | moonpool (spacesim) | State recovery |

@@ -10,12 +10,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::actors::{
-    ActorStateStore, ClusterConfig, InMemoryDirectory, MoonpoolClient, MoonpoolNode, NodeConfig,
-    SharedMembership,
+    ActorStateStore, ClusterConfig, InMemoryDirectory, MembershipProvider, MoonpoolClient,
+    MoonpoolNode, NodeConfig, SharedMembership,
 };
 use crate::{NetworkAddress, RandomProvider, TimeProvider};
 use moonpool_sim::providers::SimProviders;
-use moonpool_sim::{Process, SimContext, SimulationResult, assert_always, assert_sometimes};
+use moonpool_sim::{
+    Process, SimContext, SimulationResult, assert_always, assert_reachable, assert_sometimes,
+};
 
 use super::actors::{
     AddCargoRequest, DepositCreditsRequest, QueryStateRequest, RemoveCargoRequest,
@@ -200,6 +202,16 @@ impl moonpool_sim::Workload for SpaceWorkload {
 
         // Publish initial model
         ctx.state().publish(SPACE_MODEL_KEY, self.model.clone());
+
+        // Check process registration and actor distribution
+        let expected = ctx.topology().all_process_ips().len();
+        let active = self.membership.members().await.len();
+        if active >= expected {
+            assert_reachable!("all_processes_registered");
+        }
+        if active > 1 {
+            assert_sometimes!(true, "cross_node_rpc");
+        }
 
         // Main operation loop
         for i in 0..self.num_ops {
