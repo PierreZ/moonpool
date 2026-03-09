@@ -107,14 +107,20 @@ Moonpool is organized as a workspace of eight crates. The dependency graph is de
 - `Peer` -- manages a connection to a remote endpoint with automatic reconnection
 - `PeerConfig` -- reconnection delays, queue size, connection timeout
 - `MonitorConfig` -- ping-based connection health monitoring
-- `PeerReceiver` -- receives messages from a peer
-- `WireMessage` / `WireHeader` -- on-the-wire message format with CRC32C integrity
-- RPC types: `ServiceRegistry`, `RpcClient`, `RpcServer`, `ReplyPromise`
+- `NetTransport` -- central coordinator managing peers and packet dispatch
+- `EndpointMap` -- hybrid token routing (O(1) well-known, O(log n) dynamic)
+- `FailureMonitor` / `FailureStatus` -- reactive address/endpoint failure tracking
+- `ReplyPromise` -- server-side response promise (auto-sends `BrokenPromise` on Drop)
+- `ReplyFuture` -- client-side response future (auto-closes queue on Drop)
+- `ReplyError` -- error enum including `MaybeDelivered`, `Timeout`, `BrokenPromise`
+- `RequestStream` -- server-side typed request receiver with `recv_with_transport()`
+- `RequestEnvelope` -- request + reply_to endpoint for bidirectional RPC
 - `MessagingError` -- transport-level error type
+- Delivery modes: `send`, `try_get_reply`, `get_reply`, `get_reply_unless_failed_for`
 
 **Proc macros** (from moonpool-transport-derive):
-- `#[service]` -- generates service trait, request/response enums, and routing
-- `#[actor_impl]` -- generates actor message dispatch boilerplate
+- `#[service]` -- generates service trait, server, client, and bound client types
+- `#[actor_impl]` -- generates actor message dispatch and lifecycle boilerplate
 
 ---
 

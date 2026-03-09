@@ -69,6 +69,9 @@
 - [RPC with #\[service\]](./part4-networking/05-rpc-service.md)
   - [Defining a Service](./part4-networking/06-defining-service.md)
   - [Server, Client, and Endpoints](./part4-networking/07-server-client-endpoints.md)
+- [Delivery Modes](./part4-networking/08-delivery-modes.md)
+- [Failure Monitor](./part4-networking/09-failure-monitor.md)
+- [Designing Simulation-Friendly RPC](./part4-networking/10-designing-rpc.md)
 
 ---
 
