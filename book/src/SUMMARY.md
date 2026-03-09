@@ -60,7 +60,16 @@
 
 ---
 
-# Part IV: Networking and RPC
+# Part IV: Simulating Existing Applications
+
+- [moonpool-sim Without the Actor System](./part4-integration/01-standalone-sim.md)
+  - [Where to Draw the Line](./part4-integration/02-mock-boundaries.md)
+  - [Wiring a Web Service](./part4-integration/03-wiring-a-web-service.md)
+  - [What You're Testing (and What You're Not)](./part4-integration/04-scope-and-tradeoffs.md)
+
+---
+
+# Part V: Networking and RPC
 
 - [Simulating the Network](./part4-networking/01-simulating-network.md)
 - [Peers and Connections](./part4-networking/02-peers.md)
@@ -75,7 +84,7 @@
 
 ---
 
-# Part V: Building on Top
+# Part VI: Building on Top
 
 - [Virtual Actors](./part5-building-on-top/01-virtual-actors.md)
   - [Turn-Based Concurrency](./part5-building-on-top/02-turn-based-concurrency.md)

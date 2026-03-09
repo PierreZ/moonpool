@@ -9,5 +9,6 @@
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 
+pub mod axum_web;
 pub mod dungeon;
 pub mod maze;
