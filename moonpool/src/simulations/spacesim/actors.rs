@@ -329,7 +329,7 @@ impl Ship for ShipActorImpl {
         // Single atomic station RPC — both cargo and credit transfer in one call
         let station_ref: StationRef<P, C> = ctx.actor_ref(req.station.clone());
         station_ref
-            .execute_trade(ExecuteTradeRequest {
+            .try_execute_trade(ExecuteTradeRequest {
                 commodity: req.commodity.clone(),
                 amount: req.amount,
                 price: req.price,

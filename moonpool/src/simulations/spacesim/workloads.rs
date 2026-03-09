@@ -605,6 +605,8 @@ impl moonpool_sim::Workload for SpaceWorkload {
                         }
                         Err(e) => {
                             tracing::warn!("trade failed: {}", e);
+                            self.model.mark_ship_uncertain(&ship);
+                            self.model.mark_uncertain(&station);
                         }
                     }
                 }
