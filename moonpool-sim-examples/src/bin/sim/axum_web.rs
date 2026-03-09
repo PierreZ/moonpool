@@ -14,7 +14,7 @@ fn main() {
         moonpool_sim::SimulationBuilder::new()
             .processes(1, || Box::new(moonpool_sim_examples::axum_web::WebProcess))
             .workload(moonpool_sim_examples::axum_web::WebWorkload)
-            .set_iterations(10),
+            .set_iterations(50),
     );
 
     report.eprint();

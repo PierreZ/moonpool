@@ -29,6 +29,7 @@ use hyper::Request;
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use serde::{Deserialize, Serialize};
+use tracing::instrument;
 
 use moonpool_sim::{
     NetworkProvider, Process, SimContext, SimulationResult, TcpListenerTrait, Workload,
@@ -161,29 +162,41 @@ impl Store for InMemoryStore {
 // Axum handlers — standard axum, nothing moonpool-specific
 // ============================================================================
 
+#[instrument]
 async fn health() -> &'static str {
     "ok"
 }
 
+#[instrument(skip(store))]
 async fn create_item(
     State(store): State<Arc<dyn Store>>,
     Json(body): Json<CreateItemRequest>,
 ) -> impl IntoResponse {
     match store.create(&body.name) {
-        Ok(item) => (StatusCode::CREATED, Json(item)).into_response(),
+        Ok(item) => {
+            tracing::info!(?item, "item created");
+            (StatusCode::CREATED, Json(item)).into_response()
+        }
         Err(e) => {
-            tracing::debug!("create_item failed: {e}");
+            tracing::warn!("create_item failed: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
         }
     }
 }
 
+#[instrument(skip(store))]
 async fn get_item(State(store): State<Arc<dyn Store>>, Path(id): Path<u64>) -> impl IntoResponse {
     match store.get(id) {
-        Ok(Some(item)) => Json(item).into_response(),
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Some(item)) => {
+            tracing::info!(?item, "item found");
+            Json(item).into_response()
+        }
+        Ok(None) => {
+            tracing::info!(id, "item not found");
+            StatusCode::NOT_FOUND.into_response()
+        }
         Err(e) => {
-            tracing::debug!("get_item failed: {e}");
+            tracing::warn!("get_item failed: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
         }
     }
@@ -220,12 +233,18 @@ impl Process for WebProcess {
         let app = build_router(store);
 
         let listener = ctx.network().bind(ctx.my_ip()).await?;
+        tracing::info!("server bound and listening");
 
         loop {
-            let (stream, _addr) = tokio::select! {
+            let (stream, addr) = tokio::select! {
                 result = listener.accept() => result?,
-                _ = ctx.shutdown().cancelled() => return Ok(()),
+                _ = ctx.shutdown().cancelled() => {
+                    tracing::info!("server shutting down");
+                    return Ok(());
+                }
             };
+
+            tracing::info!(%addr, "accepted connection");
 
             // TokioIo adapts SimTcpStream (AsyncRead+AsyncWrite) for hyper.
             let io = TokioIo::new(stream);
@@ -236,13 +255,15 @@ impl Process for WebProcess {
             // Axum handlers ARE Send (axum's requirement), but hyper polls them
             // inline within the connection future. Both coexist correctly.
             tokio::task::spawn_local(async move {
+                tracing::info!("serve_connection starting");
                 if let Err(e) = hyper::server::conn::http1::Builder::new()
                     .serve_connection(io, service)
                     .await
                 {
                     // Expected under chaos: connection reset, incomplete message
-                    tracing::debug!("hyper error (expected under chaos): {e}");
+                    tracing::warn!("hyper serve_connection error (expected under chaos): {e}");
                 }
+                tracing::info!("serve_connection finished");
             });
         }
     }
@@ -266,19 +287,35 @@ impl Workload for WebWorkload {
             moonpool_sim::SimulationError::InvalidState("web process not found".into())
         })?;
 
-        // Multiple rounds of requests to exercise chaos
+        tracing::info!(%server_ip, "workload starting");
+
+        // Multiple rounds of requests to exercise chaos.
+        // Each round is wrapped in a shutdown-aware select so the workload
+        // exits cleanly when the orchestrator triggers shutdown (e.g., after
+        // a chaos-induced connect hang is detected as no-progress).
         for round in 0..5 {
-            match self.send_round(ctx, &server_ip, round).await {
-                Ok(()) => {}
+            tracing::info!(round, "starting round");
+            let result = tokio::select! {
+                result = self.send_round(ctx, &server_ip, round) => result,
+                _ = ctx.shutdown().cancelled() => {
+                    tracing::info!(round, "shutdown during round, exiting");
+                    break;
+                }
+            };
+            match result {
+                Ok(()) => {
+                    tracing::info!(round, "round completed successfully");
+                }
                 Err(e) => {
                     // Under chaos (connection drops, process reboots), requests
                     // can fail. That's expected — we're testing resilience.
                     moonpool_sim::assert_sometimes!(true, "request_round_failed");
-                    tracing::debug!("round {round} failed (expected under chaos): {e}");
+                    tracing::warn!(round, "round failed (expected under chaos): {e}");
                 }
             }
         }
 
+        tracing::info!("workload finished all rounds");
         Ok(())
     }
 }
@@ -288,25 +325,31 @@ impl WebWorkload {
         &self,
         ctx: &SimContext,
         server_ip: &str,
-        _round: u32,
+        round: u32,
     ) -> SimulationResult<()> {
+        tracing::info!(round, "connecting to server");
         let stream = tokio::select! {
             result = ctx.network().connect(server_ip) => result?,
             _ = ctx.shutdown().cancelled() => return Ok(()),
         };
+        tracing::info!(round, "connected, starting handshake");
 
         let io = TokioIo::new(stream);
         let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
             .await
             .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("handshake: {e}")))?;
 
+        tracing::info!(round, "handshake complete, spawning conn driver");
         tokio::task::spawn_local(async move {
+            tracing::info!("client conn driver starting");
             if let Err(e) = conn.await {
-                tracing::debug!("client conn driver error: {e}");
+                tracing::warn!("client conn driver error: {e}");
             }
+            tracing::info!("client conn driver finished");
         });
 
         // GET /health
+        tracing::info!(round, "sending GET /health");
         let req = Request::builder()
             .uri("/health")
             .header("host", server_ip)
@@ -317,12 +360,14 @@ impl WebWorkload {
             .send_request(req)
             .await
             .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("health: {e}")))?;
+        tracing::info!(round, status = %res.status(), "GET /health response");
         moonpool_sim::assert_always!(
             res.status() == StatusCode::OK,
             "health endpoint must return 200"
         );
 
         // POST /items — create an item
+        tracing::info!(round, "sending POST /items");
         let body = serde_json::to_vec(&CreateItemRequest {
             name: "test-item".to_string(),
         })
@@ -342,6 +387,7 @@ impl WebWorkload {
             .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("create: {e}")))?;
 
         let status = res.status();
+        tracing::info!(round, %status, "POST /items response");
         let body_bytes = res
             .into_body()
             .collect()
@@ -357,6 +403,7 @@ impl WebWorkload {
             })?;
 
             // GET /items/:id — read it back
+            tracing::info!(round, item_id = item.id, "sending GET /items/{}", item.id);
             let req = Request::builder()
                 .uri(format!("/items/{}", item.id))
                 .header("host", server_ip)
@@ -369,6 +416,7 @@ impl WebWorkload {
                 .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("get: {e}")))?;
 
             let get_status = res.status();
+            tracing::info!(round, %get_status, "GET /items/{} response", item.id);
             if get_status == StatusCode::OK {
                 let get_body = res
                     .into_body()
@@ -400,6 +448,7 @@ impl WebWorkload {
         }
 
         // GET /items/999999 — nonexistent item → 404
+        tracing::info!(round, "sending GET /items/999999");
         let req = Request::builder()
             .uri("/items/999999")
             .header("host", server_ip)
@@ -413,6 +462,7 @@ impl WebWorkload {
 
         // May get 404 (normal) or 500 (buggified read failure)
         let not_found_status = res.status();
+        tracing::info!(round, %not_found_status, "GET /items/999999 response");
         moonpool_sim::assert_always!(
             not_found_status == StatusCode::NOT_FOUND
                 || not_found_status == StatusCode::INTERNAL_SERVER_ERROR,
