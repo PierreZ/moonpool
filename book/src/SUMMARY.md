@@ -1,6 +1,7 @@
 # Summary
 
 [Welcome](./welcome.md)
+[For AI Assistants](./llms.md)
 
 # Foreword
 
