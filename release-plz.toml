@@ -32,6 +32,11 @@ changelog_path = "moonpool-core/CHANGELOG.md"
 version_group = "moonpool"
 
 [[package]]
+name = "moonpool-explorer"
+changelog_path = "moonpool-explorer/CHANGELOG.md"
+version_group = "moonpool"
+
+[[package]]
 name = "moonpool-sim"
 changelog_path = "moonpool-sim/CHANGELOG.md"
 version_group = "moonpool"
@@ -50,6 +55,16 @@ version_group = "moonpool"
 name = "moonpool"
 changelog_path = "moonpool/CHANGELOG.md"
 version_group = "moonpool"
+
+[[package]]
+name = "moonpool-sim-examples"
+release = false
+publish = false
+
+[[package]]
+name = "xtask"
+release = false
+publish = false
 
 # Changelog configuration
 [changelog]
