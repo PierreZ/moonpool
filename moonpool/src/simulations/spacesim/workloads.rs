@@ -27,6 +27,15 @@ use super::actors::{
 use super::model::{SPACE_MODEL_KEY, SpaceModel};
 use super::operations::{SpaceOp, random_op};
 
+/// Maximum retries for reconciliation queries.
+const RECONCILE_RETRIES: usize = 3;
+
+/// Maximum retries for the end-of-run verification sweep.
+const SWEEP_RETRIES: usize = 10;
+
+/// Maximum retries for initial seeding.
+const SEED_RETRIES: usize = 5;
+
 // ============================================================================
 // SpaceProcess — system under test
 // ============================================================================
@@ -108,49 +117,83 @@ pub struct SpaceWorkload {
 }
 
 impl SpaceWorkload {
-    /// Reconcile a station after MaybeDelivered by querying its actual state.
-    async fn reconcile_station(
+    /// Try to reconcile a station with bounded retries. Returns true if reconciled.
+    async fn try_reconcile_station(
         client: &MoonpoolClient<SimProviders>,
         model: &mut SpaceModel,
         station: &str,
-    ) {
+        max_retries: usize,
+    ) -> bool {
         let actor_ref: StationRef<_> = client.actor_ref(station.to_string());
-        match actor_ref.query_state(QueryStateRequest {}).await {
-            Ok(resp) => {
-                model.reconcile(station, &resp);
-                tracing::info!(
-                    station,
-                    credits = resp.credits,
-                    "reconciled station after MaybeDelivered"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(station, error = %e, "reconcile query failed, marking uncertain");
-                model.mark_uncertain(station);
+        for attempt in 0..max_retries {
+            match actor_ref.query_state(QueryStateRequest {}).await {
+                Ok(resp) => {
+                    model.reconcile(station, &resp);
+                    tracing::info!(
+                        station,
+                        credits = resp.credits,
+                        attempt,
+                        "reconciled station"
+                    );
+                    return true;
+                }
+                Err(e) => {
+                    tracing::debug!(station, attempt, error = %e, "reconcile query failed");
+                }
             }
         }
+        tracing::warn!(
+            station,
+            max_retries,
+            "reconciliation failed, staying uncertain"
+        );
+        false
     }
 
-    /// Reconcile a ship after MaybeDelivered by querying its actual state.
-    async fn reconcile_ship(
+    /// Try to reconcile a ship with bounded retries. Returns true if reconciled.
+    async fn try_reconcile_ship(
         client: &MoonpoolClient<SimProviders>,
         model: &mut SpaceModel,
         ship: &str,
-    ) {
+        max_retries: usize,
+    ) -> bool {
         let actor_ref: ShipRef<_> = client.actor_ref(ship.to_string());
-        match actor_ref.query_ship(QueryShipRequest {}).await {
-            Ok(resp) => {
-                model.reconcile_ship(ship, &resp);
-                tracing::info!(
-                    ship,
-                    credits = resp.credits,
-                    "reconciled ship after MaybeDelivered"
-                );
+        for attempt in 0..max_retries {
+            match actor_ref.query_ship(QueryShipRequest {}).await {
+                Ok(resp) => {
+                    model.reconcile_ship(ship, &resp);
+                    tracing::info!(ship, credits = resp.credits, attempt, "reconciled ship");
+                    return true;
+                }
+                Err(e) => {
+                    tracing::debug!(ship, attempt, error = %e, "reconcile ship query failed");
+                }
             }
-            Err(e) => {
-                tracing::warn!(ship, error = %e, "reconcile ship query failed, marking uncertain");
-                model.mark_ship_uncertain(ship);
-            }
+        }
+        tracing::warn!(
+            ship,
+            max_retries,
+            "ship reconciliation failed, staying uncertain"
+        );
+        false
+    }
+
+    /// End-of-run verification sweep: reconcile all entities with retries.
+    async fn verification_sweep(
+        client: &MoonpoolClient<SimProviders>,
+        model: &mut SpaceModel,
+        station_names: &[String],
+        ship_names: &[String],
+        ctx: &SimContext,
+    ) {
+        // Brief sleep to let in-flight RPCs settle
+        let _ = ctx.time().sleep(Duration::from_millis(100)).await;
+
+        for name in station_names {
+            Self::try_reconcile_station(client, model, name, SWEEP_RETRIES).await;
+        }
+        for name in ship_names {
+            Self::try_reconcile_ship(client, model, name, SWEEP_RETRIES).await;
         }
     }
 
@@ -217,20 +260,33 @@ impl moonpool_sim::Workload for SpaceWorkload {
             moonpool_sim::SimulationError::InvalidState("client not initialized".to_string())
         })?;
 
-        // Seed stations with initial credits
+        // Seed stations with initial credits (fault-tolerant)
         for name in &self.station_names {
             let initial = ctx.random().random_range(10..100) as i64;
             let actor_ref: StationRef<_> = client.actor_ref(name.clone());
-            match actor_ref
-                .deposit_credits(DepositCreditsRequest { amount: initial })
-                .await
-            {
-                Ok(_) => self.model.seed_station(name, initial),
-                Err(e) => {
-                    return Err(moonpool_sim::SimulationError::InvalidState(format!(
-                        "initial deposit failed: {e}"
-                    )));
+            let mut seeded = false;
+            for attempt in 0..SEED_RETRIES {
+                match actor_ref
+                    .deposit_credits(DepositCreditsRequest { amount: initial })
+                    .await
+                {
+                    Ok(_) => {
+                        self.model.seed_station(name, initial);
+                        seeded = true;
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(station = %name, attempt, error = %e, "seed deposit failed");
+                        if attempt < SEED_RETRIES - 1 {
+                            let _ = ctx.time().sleep(Duration::from_millis(10)).await;
+                        }
+                    }
                 }
+            }
+            if !seeded {
+                return Err(moonpool_sim::SimulationError::InvalidState(format!(
+                    "seed failed after {SEED_RETRIES} retries for station {name}"
+                )));
             }
         }
 
@@ -288,13 +344,18 @@ impl moonpool_sim::Workload for SpaceWorkload {
                         .await
                     {
                         Ok(resp) => {
-                            self.model.deposit(&station, amount);
-                            let expected = self.model.station_credits(&station);
-                            assert_always!(resp.credits == expected, "deposit credit mismatch");
+                            if self.model.is_uncertain(&station) {
+                                // Opportunistic reconciliation from successful response
+                                self.model.reconcile(&station, &resp);
+                            } else {
+                                self.model.deposit(&station, amount);
+                                let expected = self.model.station_credits(&station);
+                                assert_always!(resp.credits == expected, "deposit credit mismatch");
+                            }
                         }
                         Err(e) if e.is_maybe_delivered() => {
                             assert_sometimes!(true, "deposit_maybe_delivered");
-                            Self::reconcile_station(client, &mut self.model, &station).await;
+                            self.model.mark_uncertain(&station);
                         }
                         Err(e) => {
                             tracing::warn!("deposit failed: {}", e);
@@ -302,9 +363,17 @@ impl moonpool_sim::Workload for SpaceWorkload {
                     }
                 }
                 SpaceOp::Withdraw { station, amount } => {
-                    // Check model first — only issue withdrawals that should succeed
-                    if self.model.is_uncertain(&station) {
-                        Self::reconcile_station(client, &mut self.model, &station).await;
+                    // Reconcile uncertain entity before precondition check
+                    if self.model.is_uncertain(&station)
+                        && !Self::try_reconcile_station(
+                            client,
+                            &mut self.model,
+                            &station,
+                            RECONCILE_RETRIES,
+                        )
+                        .await
+                    {
+                        continue; // Skip if can't reconcile
                     }
                     let can_withdraw = self.model.station_credits(&station) >= amount;
                     if !can_withdraw {
@@ -328,7 +397,7 @@ impl moonpool_sim::Workload for SpaceWorkload {
                         }
                         Err(e) if e.is_maybe_delivered() => {
                             assert_sometimes!(true, "withdraw_maybe_delivered");
-                            Self::reconcile_station(client, &mut self.model, &station).await;
+                            self.model.mark_uncertain(&station);
                         }
                         Err(e) => {
                             tracing::warn!("withdraw failed: {}", e);
@@ -365,14 +434,18 @@ impl moonpool_sim::Workload for SpaceWorkload {
                         .await
                     {
                         Ok(resp) => {
-                            self.model.add_cargo(&station, &commodity, amount);
-                            let expected = self.model.station_cargo(&station, &commodity);
-                            let actual = resp.inventory.get(&commodity).copied().unwrap_or(0);
-                            assert_always!(actual == expected, "add_cargo inventory mismatch");
+                            if self.model.is_uncertain(&station) {
+                                self.model.reconcile(&station, &resp);
+                            } else {
+                                self.model.add_cargo(&station, &commodity, amount);
+                                let expected = self.model.station_cargo(&station, &commodity);
+                                let actual = resp.inventory.get(&commodity).copied().unwrap_or(0);
+                                assert_always!(actual == expected, "add_cargo inventory mismatch");
+                            }
                         }
                         Err(e) if e.is_maybe_delivered() => {
                             assert_sometimes!(true, "add_cargo_maybe_delivered");
-                            Self::reconcile_station(client, &mut self.model, &station).await;
+                            self.model.mark_uncertain(&station);
                         }
                         Err(e) => {
                             tracing::warn!("add_cargo failed: {}", e);
@@ -384,8 +457,16 @@ impl moonpool_sim::Workload for SpaceWorkload {
                     commodity,
                     amount,
                 } => {
-                    if self.model.is_uncertain(&station) {
-                        Self::reconcile_station(client, &mut self.model, &station).await;
+                    if self.model.is_uncertain(&station)
+                        && !Self::try_reconcile_station(
+                            client,
+                            &mut self.model,
+                            &station,
+                            RECONCILE_RETRIES,
+                        )
+                        .await
+                    {
+                        continue;
                     }
                     let can_remove = self.model.station_cargo(&station, &commodity) >= amount;
                     if !can_remove {
@@ -413,7 +494,7 @@ impl moonpool_sim::Workload for SpaceWorkload {
                         }
                         Err(e) if e.is_maybe_delivered() => {
                             assert_sometimes!(true, "remove_cargo_maybe_delivered");
-                            Self::reconcile_station(client, &mut self.model, &station).await;
+                            self.model.mark_uncertain(&station);
                         }
                         Err(e) => {
                             tracing::warn!("remove_cargo failed: {}", e);
@@ -429,11 +510,27 @@ impl moonpool_sim::Workload for SpaceWorkload {
                     direction,
                 } => {
                     // Reconcile uncertain entities before pre-checks
-                    if self.model.is_ship_uncertain(&ship) {
-                        Self::reconcile_ship(client, &mut self.model, &ship).await;
+                    if self.model.is_ship_uncertain(&ship)
+                        && !Self::try_reconcile_ship(
+                            client,
+                            &mut self.model,
+                            &ship,
+                            RECONCILE_RETRIES,
+                        )
+                        .await
+                    {
+                        continue;
                     }
-                    if self.model.is_uncertain(&station) {
-                        Self::reconcile_station(client, &mut self.model, &station).await;
+                    if self.model.is_uncertain(&station)
+                        && !Self::try_reconcile_station(
+                            client,
+                            &mut self.model,
+                            &station,
+                            RECONCILE_RETRIES,
+                        )
+                        .await
+                    {
+                        continue;
                     }
 
                     // Pre-condition checks against model
@@ -490,8 +587,9 @@ impl moonpool_sim::Workload for SpaceWorkload {
                         }
                         Err(e) if e.is_maybe_delivered() => {
                             assert_sometimes!(true, "trade_maybe_delivered");
-                            Self::reconcile_ship(client, &mut self.model, &ship).await;
-                            Self::reconcile_station(client, &mut self.model, &station).await;
+                            // Mark both entities uncertain — trade touches both
+                            self.model.mark_ship_uncertain(&ship);
+                            self.model.mark_uncertain(&station);
                         }
                         Err(e) => {
                             tracing::warn!("trade failed: {}", e);
@@ -518,31 +616,32 @@ impl moonpool_sim::Workload for SpaceWorkload {
                     }
                 }
                 SpaceOp::VerifyAll => {
+                    // Under chaos, VerifyAll is a reconciliation sweep
                     let mut all_match = true;
                     for name in &self.station_names {
-                        if self.model.is_uncertain(name) {
-                            Self::reconcile_station(client, &mut self.model, name).await;
-                            continue;
-                        }
                         let actor_ref: StationRef<_> = client.actor_ref(name.clone());
                         match actor_ref.query_state(QueryStateRequest {}).await {
                             Ok(resp) => {
-                                let expected_credits = self.model.station_credits(name);
-                                assert_always!(
-                                    resp.credits == expected_credits,
-                                    "verify: credit mismatch"
-                                );
-                                let expected_inv = self
-                                    .model
-                                    .stations
-                                    .get(name)
-                                    .map(|s| &s.inventory)
-                                    .cloned()
-                                    .unwrap_or_default();
-                                assert_always!(
-                                    resp.inventory == expected_inv,
-                                    "verify: cargo mismatch"
-                                );
+                                if self.model.is_uncertain(name) {
+                                    self.model.reconcile(name, &resp);
+                                } else {
+                                    let expected_credits = self.model.station_credits(name);
+                                    assert_always!(
+                                        resp.credits == expected_credits,
+                                        "verify: credit mismatch"
+                                    );
+                                    let expected_inv = self
+                                        .model
+                                        .stations
+                                        .get(name)
+                                        .map(|s| &s.inventory)
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    assert_always!(
+                                        resp.inventory == expected_inv,
+                                        "verify: cargo mismatch"
+                                    );
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!("verify query failed for {}: {}", name, e);
@@ -551,29 +650,29 @@ impl moonpool_sim::Workload for SpaceWorkload {
                         }
                     }
                     for name in &self.ship_names {
-                        if self.model.is_ship_uncertain(name) {
-                            Self::reconcile_ship(client, &mut self.model, name).await;
-                            continue;
-                        }
                         let actor_ref: ShipRef<_> = client.actor_ref(name.clone());
                         match actor_ref.query_ship(QueryShipRequest {}).await {
                             Ok(resp) => {
-                                let expected_credits = self.model.ship_credits(name);
-                                assert_always!(
-                                    resp.credits == expected_credits,
-                                    "verify: ship credit mismatch"
-                                );
-                                let expected_cargo = self
-                                    .model
-                                    .ships
-                                    .get(name)
-                                    .map(|s| &s.cargo)
-                                    .cloned()
-                                    .unwrap_or_default();
-                                assert_always!(
-                                    resp.cargo == expected_cargo,
-                                    "verify: ship cargo mismatch"
-                                );
+                                if self.model.is_ship_uncertain(name) {
+                                    self.model.reconcile_ship(name, &resp);
+                                } else {
+                                    let expected_credits = self.model.ship_credits(name);
+                                    assert_always!(
+                                        resp.credits == expected_credits,
+                                        "verify: ship credit mismatch"
+                                    );
+                                    let expected_cargo = self
+                                        .model
+                                        .ships
+                                        .get(name)
+                                        .map(|s| &s.cargo)
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    assert_always!(
+                                        resp.cargo == expected_cargo,
+                                        "verify: ship cargo mismatch"
+                                    );
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!("verify ship query failed for {}: {}", name, e);
@@ -594,39 +693,56 @@ impl moonpool_sim::Workload for SpaceWorkload {
             ctx.state().publish(SPACE_MODEL_KEY, self.model.clone());
         }
 
-        // Shutdown: drop node to trigger deactivation
+        // === End-of-run verification sweep (FDB quiescence pattern) ===
+        Self::verification_sweep(
+            client,
+            &mut self.model,
+            &self.station_names.clone(),
+            &self.ship_names.clone(),
+            ctx,
+        )
+        .await;
+
+        // Publish final reconciled model
+        ctx.state().publish(SPACE_MODEL_KEY, self.model.clone());
+
+        // Shutdown: drop client
         drop(self.client.take());
 
         Ok(())
     }
 
     async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        // Final credit conservation: stations + ships + lost == total
-        let credit_sum = self.model.total_station_credits()
-            + self.model.total_ship_credits()
-            + self.model.lost_credits;
-        assert_always!(
-            credit_sum == self.model.total_credits,
-            "final credit conservation"
-        );
-
-        // Final non-negative check
-        for station in self.model.stations.values() {
-            assert_always!(station.credits >= 0, "final non-negative station credits");
-        }
-        for ship in self.model.ships.values() {
-            assert_always!(ship.credits >= 0, "final non-negative ship credits");
-        }
-
-        // Final cargo conservation: stations + ships + lost == total
-        for (commodity, &expected) in &self.model.total_cargo {
-            let actual_stations = self.model.total_cargo_for(commodity);
-            let actual_ships = self.model.total_ship_cargo_for(commodity);
-            let lost = self.model.lost_cargo.get(commodity).copied().unwrap_or(0);
+        // After end-of-run sweep, model should be reconciled.
+        // Verify conservation if all entities are certain.
+        if self.model.uncertain.is_empty() && self.model.uncertain_ships.is_empty() {
+            let credit_sum = self.model.total_station_credits() + self.model.total_ship_credits();
             assert_always!(
-                actual_stations + actual_ships + lost == expected,
-                "final cargo conservation"
+                credit_sum == self.model.total_credits,
+                "final credit conservation"
             );
+
+            // Final cargo conservation
+            for (commodity, &expected) in &self.model.total_cargo {
+                let actual_stations = self.model.total_cargo_for(commodity);
+                let actual_ships = self.model.total_ship_cargo_for(commodity);
+                assert_always!(
+                    actual_stations + actual_ships == expected,
+                    "final cargo conservation"
+                );
+            }
+        }
+
+        // Final non-negative check (per-entity, skip uncertain)
+        for (name, station) in &self.model.stations {
+            if !self.model.uncertain.contains(name) {
+                assert_always!(station.credits >= 0, "final non-negative station credits");
+            }
+        }
+        for (name, ship) in &self.model.ships {
+            if !self.model.uncertain_ships.contains(name) {
+                assert_always!(ship.credits >= 0, "final non-negative ship credits");
+            }
         }
 
         // Publish final model

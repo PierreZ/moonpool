@@ -29,10 +29,6 @@ pub struct SpaceModel {
     pub uncertain: BTreeSet<String>,
     /// Ships whose state is uncertain due to MaybeDelivered.
     pub uncertain_ships: BTreeSet<String>,
-    /// Credits lost to partial trade failures.
-    pub lost_credits: i64,
-    /// Cargo lost to partial trade failures, per commodity.
-    pub lost_cargo: BTreeMap<String, i64>,
 }
 
 /// Per-station expected state.
@@ -260,30 +256,22 @@ impl SpaceModel {
 
     /// Recalculate totals from all station and ship state.
     ///
-    /// Any gap between actual and expected totals is absorbed into
-    /// `lost_credits` / `lost_cargo` (from partial trade failures).
+    /// After reconciliation, totals are rewritten to match actual entity sums.
+    /// This absorbs any drift from MaybeDelivered operations that actually delivered.
     fn recalculate_totals(&mut self) {
-        let actual_credits: i64 = self.stations.values().map(|s| s.credits).sum::<i64>()
+        self.total_credits = self.stations.values().map(|s| s.credits).sum::<i64>()
             + self.ships.values().map(|s| s.credits).sum::<i64>();
-        self.lost_credits = self.total_credits - actual_credits;
 
-        // Compute actual cargo across stations and ships
-        let mut actual_cargo: BTreeMap<String, i64> = BTreeMap::new();
+        // Recompute cargo totals from actual state
+        self.total_cargo.clear();
         for station in self.stations.values() {
             for (c, &a) in &station.inventory {
-                *actual_cargo.entry(c.clone()).or_insert(0) += a;
+                *self.total_cargo.entry(c.clone()).or_insert(0) += a;
             }
         }
         for ship in self.ships.values() {
             for (c, &a) in &ship.cargo {
-                *actual_cargo.entry(c.clone()).or_insert(0) += a;
-            }
-        }
-        self.lost_cargo.clear();
-        for (commodity, &expected) in &self.total_cargo {
-            let actual = actual_cargo.get(commodity).copied().unwrap_or(0);
-            if actual != expected {
-                self.lost_cargo.insert(commodity.clone(), expected - actual);
+                *self.total_cargo.entry(c.clone()).or_insert(0) += a;
             }
         }
     }

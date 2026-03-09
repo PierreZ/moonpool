@@ -44,6 +44,19 @@ pub struct RemoveCargoRequest {
     pub amount: i64,
 }
 
+/// Request to execute a trade at the station (atomic cargo + credit transfer).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecuteTradeRequest {
+    /// Commodity to trade.
+    pub commodity: String,
+    /// Amount of commodity.
+    pub amount: i64,
+    /// Price in credits.
+    pub price: i64,
+    /// Direction from the ship's perspective.
+    pub direction: TradeDirection,
+}
+
 /// Request to query a station's current state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryStateRequest {}
@@ -86,6 +99,12 @@ pub trait Station {
 
     /// Remove cargo from the station.
     async fn remove_cargo(&mut self, req: RemoveCargoRequest) -> Result<StationResponse, RpcError>;
+
+    /// Execute a trade atomically: adjust both cargo and credits in one operation.
+    async fn execute_trade(
+        &mut self,
+        req: ExecuteTradeRequest,
+    ) -> Result<StationResponse, RpcError>;
 
     /// Query the current station state.
     async fn query_state(&mut self, req: QueryStateRequest) -> Result<StationResponse, RpcError>;
@@ -163,6 +182,29 @@ impl Station for StationActorImpl {
     ) -> Result<StationResponse, RpcError> {
         if let Some(s) = &mut self.state {
             *s.state_mut().inventory.entry(req.commodity).or_insert(0) -= req.amount;
+            let _ = s.write_state().await;
+        }
+        Ok(self.response())
+    }
+
+    async fn execute_trade<P: Providers, C: MessageCodec>(
+        &mut self,
+        _ctx: &ActorContext<P, C>,
+        req: ExecuteTradeRequest,
+    ) -> Result<StationResponse, RpcError> {
+        if let Some(s) = &mut self.state {
+            match req.direction {
+                TradeDirection::Buy => {
+                    // Ship buys from station: station loses cargo, gains credits
+                    *s.state_mut().inventory.entry(req.commodity).or_insert(0) -= req.amount;
+                    s.state_mut().credits += req.price;
+                }
+                TradeDirection::Sell => {
+                    // Ship sells to station: station gains cargo, loses credits
+                    *s.state_mut().inventory.entry(req.commodity).or_insert(0) += req.amount;
+                    s.state_mut().credits -= req.price;
+                }
+            }
             let _ = s.write_state().await;
         }
         Ok(self.response())
@@ -270,60 +312,46 @@ impl Ship for ShipActorImpl {
         ctx: &ActorContext<P, C>,
         req: TradeRequest,
     ) -> Result<ShipResponse, RpcError> {
-        let station_ref: StationRef<P, C> = ctx.actor_ref(req.station.clone());
-
+        // Pre-check ship's own state
         match req.direction {
             TradeDirection::Buy => {
-                // Buy: ship pays credits to station, station gives cargo to ship
-                // Pre-check: ship must have enough credits
                 if self.data().credits < req.price {
                     return Ok(self.response(false));
                 }
-                // Phase 1: remove cargo from station
-                station_ref
-                    .remove_cargo(RemoveCargoRequest {
-                        commodity: req.commodity.clone(),
-                        amount: req.amount,
-                    })
-                    .await?;
-                // Phase 2: deposit credits into station (payment)
-                station_ref
-                    .deposit_credits(DepositCreditsRequest { amount: req.price })
-                    .await?;
-                // Both station calls succeeded — update ship state
-                if let Some(s) = &mut self.state {
-                    s.state_mut().credits -= req.price;
-                    *s.state_mut().cargo.entry(req.commodity).or_insert(0) += req.amount;
-                    let _ = s.write_state().await;
-                }
-                Ok(self.response(true))
             }
             TradeDirection::Sell => {
-                // Sell: ship gives cargo to station, station pays credits to ship
-                // Pre-check: ship must have enough cargo
                 if self.data().cargo.get(&req.commodity).copied().unwrap_or(0) < req.amount {
                     return Ok(self.response(false));
                 }
-                // Phase 1: add cargo to station
-                station_ref
-                    .add_cargo(AddCargoRequest {
-                        commodity: req.commodity.clone(),
-                        amount: req.amount,
-                    })
-                    .await?;
-                // Phase 2: withdraw credits from station (payment to ship)
-                station_ref
-                    .withdraw_credits(WithdrawCreditsRequest { amount: req.price })
-                    .await?;
-                // Both station calls succeeded — update ship state
-                if let Some(s) = &mut self.state {
-                    *s.state_mut().cargo.entry(req.commodity).or_insert(0) -= req.amount;
-                    s.state_mut().credits += req.price;
-                    let _ = s.write_state().await;
-                }
-                Ok(self.response(true))
             }
         }
+
+        // Single atomic station RPC — both cargo and credit transfer in one call
+        let station_ref: StationRef<P, C> = ctx.actor_ref(req.station.clone());
+        station_ref
+            .execute_trade(ExecuteTradeRequest {
+                commodity: req.commodity.clone(),
+                amount: req.amount,
+                price: req.price,
+                direction: req.direction.clone(),
+            })
+            .await?;
+
+        // Station call succeeded — update ship state locally
+        if let Some(s) = &mut self.state {
+            match req.direction {
+                TradeDirection::Buy => {
+                    s.state_mut().credits -= req.price;
+                    *s.state_mut().cargo.entry(req.commodity).or_insert(0) += req.amount;
+                }
+                TradeDirection::Sell => {
+                    *s.state_mut().cargo.entry(req.commodity).or_insert(0) -= req.amount;
+                    s.state_mut().credits += req.price;
+                }
+            }
+            let _ = s.write_state().await;
+        }
+        Ok(self.response(true))
     }
 
     async fn query_ship<P: Providers, C: MessageCodec>(
