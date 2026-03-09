@@ -1,7 +1,7 @@
-//! Space economy simulation workload.
+//! Galactic cargo hauling network simulation.
 //!
-//! FDB-style alphabet workload for the virtual actor system with
-//! process lifecycle, credit conservation, and chaos testing.
+//! Idempotent cargo operations with op_id dedup for crash-safe
+//! at-least-once delivery. No reconciliation needed.
 
 pub mod actors;
 pub mod invariants;

@@ -1,125 +1,158 @@
-//! Operation alphabet for spacesim workloads.
+//! Operation alphabet for the cargo hauling network.
 //!
-//! Defines the set of operations that can be randomly generated and executed
-//! against space station actors. Weights control the distribution.
+//! Operations are generated based on model state to ensure preconditions
+//! are satisfiable.
 
-use crate::RandomProvider;
 use moonpool_sim::SimRandomProvider;
 
-use super::actors::TradeDirection;
+use crate::RandomProvider;
 
-/// Available commodities for cargo operations.
-const COMMODITIES: &[&str] = &["fuel", "ore", "food", "water"];
+use super::model::SpaceModel;
+
+/// Available commodities.
+const COMMODITIES: &[&str] = &["ore", "electronics", "fuel"];
 
 /// An operation in the spacesim alphabet.
 pub enum SpaceOp {
-    /// Deposit credits into a station.
-    Deposit {
-        /// Target station name.
-        station: String,
-        /// Amount to deposit.
-        amount: i64,
-    },
-    /// Withdraw credits from a station.
-    Withdraw {
-        /// Target station name.
-        station: String,
-        /// Amount to withdraw.
-        amount: i64,
-    },
-    /// Add cargo to a station.
-    AddCargo {
-        /// Target station name.
-        station: String,
-        /// Commodity type.
-        commodity: String,
-        /// Amount to add.
-        amount: i64,
-    },
-    /// Remove cargo from a station.
-    RemoveCargo {
-        /// Target station name.
-        station: String,
-        /// Commodity type.
-        commodity: String,
-        /// Amount to remove.
-        amount: i64,
-    },
-    /// Query the current state of a station.
-    QueryState {
-        /// Target station name.
-        station: String,
-    },
-    /// Execute a trade between a ship and a station.
-    Trade {
-        /// Ship performing the trade.
+    /// Move a ship to a different station.
+    TravelTo {
+        /// Ship name.
         ship: String,
-        /// Target station.
+        /// Destination station.
         station: String,
-        /// Commodity to trade.
-        commodity: String,
-        /// Amount of commodity.
-        amount: i64,
-        /// Price in credits.
-        price: i64,
-        /// Buy or sell direction.
-        direction: TradeDirection,
     },
-    /// Query the current state of a ship.
+    /// Load cargo from station onto ship.
+    LoadCargo {
+        /// Ship name.
+        ship: String,
+        /// Commodity to load.
+        commodity: String,
+        /// Amount to load.
+        amount: i64,
+    },
+    /// Unload cargo from ship to station.
+    UnloadCargo {
+        /// Ship name.
+        ship: String,
+        /// Commodity to unload.
+        commodity: String,
+        /// Amount to unload.
+        amount: i64,
+    },
+    /// Query a ship's state.
     QueryShip {
-        /// Target ship name.
+        /// Ship name.
         ship: String,
     },
-    /// Verify all stations and ships match the reference model.
+    /// Query a station's state.
+    QueryStation {
+        /// Station name.
+        station: String,
+    },
+    /// Verify all actors match the reference model.
     VerifyAll,
-    /// Small delay to let background tasks run.
+    /// Small delay for simulation progress.
     SmallDelay,
 }
 
-/// Generate a random operation from the alphabet.
+/// Generate a random operation based on model state.
 ///
-/// Weights: deposit 15%, withdraw 10%, add_cargo 10%, remove_cargo 10%,
-/// query_state 10%, trade 20%, query_ship 5%, verify_all 5%, delay 15%.
-pub fn random_op(random: &SimRandomProvider, stations: &[String], ships: &[String]) -> SpaceOp {
+/// Weights: TravelTo 20%, LoadCargo 20%, UnloadCargo 15%,
+/// QueryShip 10%, QueryStation 10%, VerifyAll 10%, SmallDelay 15%.
+pub fn random_op(
+    random: &SimRandomProvider,
+    model: &SpaceModel,
+    stations: &[String],
+    ships: &[String],
+) -> SpaceOp {
     let roll = random.random_range(0..100);
     let station = || stations[random.random_range(0..stations.len())].clone();
     let ship = || ships[random.random_range(0..ships.len())].clone();
-    let commodity = || COMMODITIES[random.random_range(0..COMMODITIES.len())].to_string();
 
     match roll {
-        0..15 => SpaceOp::Deposit {
-            station: station(),
-            amount: random.random_range(1..500),
-        },
-        15..25 => SpaceOp::Withdraw {
-            station: station(),
-            amount: random.random_range(1..300),
-        },
-        25..35 => SpaceOp::AddCargo {
-            station: station(),
-            commodity: commodity(),
-            amount: random.random_range(1..200),
-        },
-        35..45 => SpaceOp::RemoveCargo {
-            station: station(),
-            commodity: commodity(),
-            amount: random.random_range(1..150),
-        },
-        45..55 => SpaceOp::QueryState { station: station() },
-        55..75 => SpaceOp::Trade {
-            ship: ship(),
-            station: station(),
-            commodity: commodity(),
-            amount: random.random_range(1..100),
-            price: random.random_range(1..200),
-            direction: if random.random_range(0..2) == 0 {
-                TradeDirection::Buy
-            } else {
-                TradeDirection::Sell
-            },
-        },
-        75..80 => SpaceOp::QueryShip { ship: ship() },
-        80..85 => SpaceOp::VerifyAll,
+        0..20 => {
+            // TravelTo: pick ship, pick station different from current
+            let s = ship();
+            let current = model.ship_location(&s).unwrap_or("");
+            let others: Vec<_> = stations
+                .iter()
+                .filter(|st| st.as_str() != current)
+                .collect();
+            if others.is_empty() {
+                return SpaceOp::SmallDelay;
+            }
+            let dest = others[random.random_range(0..others.len())].clone();
+            SpaceOp::TravelTo {
+                ship: s,
+                station: dest,
+            }
+        }
+        20..40 => {
+            // LoadCargo: pick ship, find what its station has
+            let s = ship();
+            let loc = model.ship_location(&s).unwrap_or("").to_string();
+            if loc.is_empty() {
+                return SpaceOp::SmallDelay;
+            }
+            let commodity = COMMODITIES[random.random_range(0..COMMODITIES.len())].to_string();
+            let available = model
+                .stations
+                .get(&loc)
+                .and_then(|st| st.inventory.get(&commodity))
+                .copied()
+                .unwrap_or(0);
+            if available <= 0 {
+                // Station doesn't have this commodity, try anyway with small amount
+                return SpaceOp::LoadCargo {
+                    ship: s,
+                    commodity,
+                    amount: random.random_range(1..10),
+                };
+            }
+            let amount = random.random_range(1..(available + 1));
+            SpaceOp::LoadCargo {
+                ship: s,
+                commodity,
+                amount,
+            }
+        }
+        40..55 => {
+            // UnloadCargo: pick ship with cargo
+            let s = ship();
+            let ship_data = model.ships.get(&s);
+            let has_cargo: Vec<_> = ship_data
+                .map(|sd| {
+                    sd.cargo
+                        .iter()
+                        .filter(|&(_, v)| *v > 0)
+                        .map(|(k, _)| k.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if has_cargo.is_empty() {
+                // Ship has nothing, try anyway
+                let commodity = COMMODITIES[random.random_range(0..COMMODITIES.len())].to_string();
+                return SpaceOp::UnloadCargo {
+                    ship: s,
+                    commodity,
+                    amount: random.random_range(1..10),
+                };
+            }
+            let commodity = has_cargo[random.random_range(0..has_cargo.len())].clone();
+            let available = ship_data
+                .and_then(|sd| sd.cargo.get(&commodity))
+                .copied()
+                .unwrap_or(0);
+            let amount = random.random_range(1..(available + 1));
+            SpaceOp::UnloadCargo {
+                ship: s,
+                commodity,
+                amount,
+            }
+        }
+        55..65 => SpaceOp::QueryShip { ship: ship() },
+        65..75 => SpaceOp::QueryStation { station: station() },
+        75..85 => SpaceOp::VerifyAll,
         _ => SpaceOp::SmallDelay,
     }
 }

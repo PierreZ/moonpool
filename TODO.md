@@ -206,44 +206,12 @@ assert_always!(resp_cargo == expected_cargo, "verify: cargo mismatch");
 
 ---
 
-## Current Situation (2026-03-05)
+## Current Situation (2026-03-09)
 
-**Spacesim is blocked.** Two seeds fail (`15204012862878889900`, `3780034198488802454`) with model-vs-actual divergence. Root cause: the **maybe-delivered ambiguity** — transport chaos drops a response after the actor processed the request, workload sees `Err`, doesn't update model, but actor state is already persisted.
+**Spacesim rewritten as idempotent cargo hauling network.** Eliminated ~70% reconciliation code by switching from `try_get_reply()` + Strategy 4 to `get_reply()` + op_id dedup (hybrid of FDB Strategy 1 + Strategy 2). 50/50 iterations pass with full assertion coverage.
 
-This is the fundamental at-most-once delivery problem (FDB error_code 1030: `request_maybe_delivered`). Before proceeding to Commit 3 (multi-process), moonpool's transport needs fdbrpc-level delivery semantics.
-
-**Progress (2026-03-05):**
-- ~~2.7a~~ Peer disconnect signal — done (commit `642364d`)
-- ~~2.7b~~ FailureMonitor — done (address/endpoint failure tracking, 11 unit tests, wired into connection_task)
-- ~~2.7c~~ MaybeDelivered error + reply queue closure on disconnect — done
-- ~~2.7d~~ 4 delivery modes — done (send, try_get_reply, get_reply, get_reply_unless_failed_for)
-- ~~2.8~~ Spacesim fault-aware RPCs — done (try_get_reply + Strategy 4 reconciliation)
-- **Next: 3** — Multi-process spacesim with 3 station nodes
-
-**New reference files added:**
-- `docs/references/foundationdb/FailureMonitor.{h,actor.cpp}` — address/endpoint failure tracking
-- `docs/references/foundationdb/HealthMonitor.{h,actor.cpp}` — connection closure tracking
-- `docs/references/foundationdb/fdbrpc.h` — RequestStream with 3 delivery modes
-- `docs/references/foundationdb/genericactors.actor.h` — waitValueOrSignal, sendCanceler, retryBrokenPromise
-- `docs/analysis/foundationdb/fdbrpc-backport-guide.md` — Rust mapping guide
-
-**What moonpool transport already has** (= FlowTransport basics):
-- ✅ sendReliable (reliable queue, retransmit on reconnect)
-- ✅ Peer connection management + reconnect with backoff
-- ✅ Ping-based liveness detection
-- ✅ ReplyPromise/ReplyFuture + endpoint routing
-- ✅ BrokenPromise on Drop
-
-**What's missing** (= fdbrpc layer):
-- ❌ `peer.disconnect` signal — no exposed disconnect notification
-- ❌ FailureMonitor (`notify_disconnect`, `on_disconnect_or_failure`)
-- ~~❌ `request_maybe_delivered` error (MaybeDelivered vs NotDelivered)~~
-- ~~❌ Reply queue closure on peer disconnect (ReplyFutures hang until 30s timeout)~~
-- ~~❌ 3 delivery modes: `send()` / `try_get_reply()` / `get_reply()`~~
-- ❌ Request IDs for dedup
-- ❌ sendUnreliable exposed to RPC layer
-
-**Next: Commit 2.7 series — implement fdbrpc backport**
+**Completed**: Commits 1-5 (scaffold → cargo → directory → transport fixes → multi-process → ships → idempotent rewrite)
+**Next**: Commit 6 (attrition/reboots) — op_id dedup should make this straightforward
 
 ---
 
@@ -528,34 +496,33 @@ trait Ship {
 
 ---
 
-## [ ] Commit 5: `feat(sim): enable network chaos for spacesim`
+## [x] Commit 5: `refactor(sim): rewrite spacesim as idempotent cargo hauling network`
 
-**Goal**: Turn on `random_network()`. RPC calls will fail with timeouts and connection errors.
+**Goal**: Eliminate ~70% reconciliation infrastructure by switching from `try_get_reply()` (at-most-once + Strategy 4 read-before-retry) to `get_reply()` (at-least-once) with **op_id dedup** in actors.
 
-**Config change**: `.random_network()` added to builder.
+**Theme**: Galactic cargo network — 3 sectors, 6 stations, 4 hauler ships, 3 commodities (ore, electronics, fuel). Ships travel between stations loading/unloading cargo. Cross-sector operations exercise cross-process actor RPCs.
 
-**Workload changes**: Every operation wrapped in error handling — on RPC failure, do NOT update model:
-```rust
-match actor_ref.deposit_credits(req).await {
-    Ok(resp) => { model.deposit(...); assert_always!(...); }
-    Err(_) => { assert_sometimes!(true, "deposit_rpc_failed"); }
-}
-```
+**Actors rewritten**:
+- `StationActor` (service ID `0x5741_8000`) — `add_cargo`, `remove_cargo`, `query_state` with op_id dedup via `BTreeSet<u64>`
+- `ShipActor` (service ID `0x5348_2000`) — `travel_to` (Strategy 1: idempotent state assertion, no op_id), `load_cargo`/`unload_cargo` (Strategy 2: op_id dedup + cross-actor coordination), `query_ship`
 
-**Transfer partial failure**: If withdraw succeeds but deposit fails (network error mid-transfer), credits are lost from station but never arrive at ship. Model records this in `lost_credits`. Conservation: `sum + lost == total`.
+**Crash recovery for load_cargo**: If ship crashes after `station.remove_cargo()` but before persist, retry with same op_id → station dedup returns cached success → ship adds cargo + persists → conservation maintained.
 
-**New assertions**:
-- `assert_sometimes!(true, "deposit_rpc_failed")` — network chaos causes failures
-- `assert_sometimes!(true, "trade_partial_failure")` — half-completed trade
-- `assert_sometimes!(true, "query_rpc_failed")` — queries fail too
+**Model rewritten**: No uncertainty tracking. `SpaceModel { stations, ships, total_cargo }`. Always consistent — model only updated on successful response.
 
-**What might break**: Stale directory cache entries after connection failures, RPC timeouts too short for chaos latencies, forwarding bugs.
+**Invariants rewritten**: `CargoConservation` + `NonNegativeInventory`, always-on (no uncertainty guards needed).
+
+**Workload rewritten**: Simple retry loop (3 attempts, 100ms delay). No reconciliation, no uncertain sets, no end-of-run sweep. Op_id: monotonic counter.
+
+**Removed**: `uncertain: BTreeSet`, `uncertain_ships: BTreeSet`, `try_reconcile_station()`, `try_reconcile_ship()`, `recalculate_totals()`, `mark_uncertain()`, `reconcile()`, `reconcile_ship()`, `verification_sweep()`, credits system, `TradeDirection`, `CreditConservation`, `NonNegativeBalances`.
+
+**Results**: 50/50 iterations pass. All `assert_sometimes!` fire (load_succeeded, load_rejected_insufficient, unload_succeeded, unload_rejected_insufficient, travel_succeeded, verify_all_passed). CargoConservation holds on every event.
 
 ---
 
 ## [ ] Commit 6: `feat(sim): enable attrition with process reboots for spacesim`
 
-**Goal**: Process crash/restart cycles. Actor state must survive via shared `InMemoryStateStore`. Actors re-register in directory after reboot.
+**Goal**: Process crash/restart cycles. Actor state must survive via shared `InMemoryStateStore`. Op_id dedup makes retries after reboots safe.
 
 **Config**:
 ```rust
@@ -573,18 +540,10 @@ match actor_ref.deposit_credits(req).await {
 })
 ```
 
-**Process changes**: On shutdown signal, call `node.shutdown().await` for graceful deactivation.
-
-**Workload changes**: Wrap operations in timeouts. Tolerate higher error rates during chaos phase.
-
-**State recovery**: `InMemoryStateStore` is `Rc`-shared outside simulation — survives process reboots. On re-activation, `on_activate` loads last-persisted state.
-
 **New assertions**:
 - `assert_sometimes!(true, "rpc_failed_during_reboot")` — calls fail during process death
-- `assert_sometimes!(true, "operation_timeout")` — timeouts during chaos
-- `assert_always!(total + lost == initial, "conservation survives reboots")`
-
-**What might break**: Directory retaining stale entries for dead nodes, membership not cleaning up crashed nodes, two activations of same actor during reboot window.
+- `assert_sometimes!(true, "dedup_hit")` — op_id dedup activated under chaos/retries
+- `assert_always!(conservation, "conservation survives reboots")`
 
 ---
 
@@ -592,11 +551,8 @@ match actor_ref.deposit_credits(req).await {
 
 **Goal**: Fault injection inside actor handlers. Polish for production.
 
-**DirectoryIntegrity invariant**: ~~Done in Commit 2.5~~ — `DirectoryConsistency` invariant via `StateHandle` runs after every event (not just check phase).
-
 **Buggify points in actors**:
 ```rust
-// In StationActor handlers:
 if buggify!() { return Err(RpcError::Internal("buggified".into())); }
 if buggify!() { ctx.time().sleep(Duration::from_millis(50)).await; } // slow write
 ```
@@ -604,8 +560,6 @@ if buggify!() { ctx.time().sleep(Duration::from_millis(50)).await; } // slow wri
 **Production config**: 200 iterations, 200 ops per iteration.
 
 **New assertions**:
-- `assert_always!(!has_duplicates, "no duplicate activations")`
-- `assert_always!(!has_stale_entries, "no stale directory entries")`
 - `assert_sometimes!(true, "buggified_station_error")` — error path exercised
 - `assert_sometimes!(true, "buggified_slow_write")` — slow path exercised
 
@@ -622,9 +576,9 @@ if buggify!() { ctx.time().sleep(Duration::from_millis(50)).await; } // slow wri
 | ~~2.8~~ | ~~Spacesim fault-aware RPCs~~ | ~~moonpool (spacesim)~~ | ~~Model reconciliation after ambiguity~~ |
 | ~~3~~ | ~~Multi-process (3 nodes)~~ | ~~moonpool (spacesim)~~ | ~~**First multi-node test**~~ |
 | ~~4~~ | ~~ShipActor + actor-to-actor~~ | ~~moonpool (spacesim)~~ | ~~Cross-actor RPC~~ |
-| 5 | Network chaos | moonpool (spacesim) | RPC failures |
+| ~~5~~ | ~~Idempotent cargo hauling rewrite~~ | ~~moonpool (spacesim)~~ | ~~Op_id dedup, no reconciliation~~ |
 | 6 | Attrition | moonpool (spacesim) | State recovery |
-| 7 | Directory invariant + buggify | moonpool (spacesim) | Full coverage |
+| 7 | Buggify | moonpool (spacesim) | Fault injection |
 
 ## Verification
 

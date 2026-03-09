@@ -1,4 +1,4 @@
-//! Binary target for space economy simulation.
+//! Binary target for cargo hauling network simulation.
 
 use std::rc::Rc;
 
@@ -8,7 +8,7 @@ use moonpool::actors::{
 };
 use moonpool::simulations::invariants::DirectoryConsistency;
 use moonpool::simulations::spacesim::{
-    invariants::{CargoConservation, CreditConservation, NonNegativeBalances},
+    invariants::{CargoConservation, NonNegativeInventory},
     workloads::{SpaceProcess, SpaceWorkload},
 };
 use moonpool_sim::SimulationBuilder;
@@ -56,8 +56,15 @@ fn main() {
         .build()
         .expect("cluster config");
 
-    let stations = ["alpha", "beta", "gamma", "delta", "epsilon"];
-    let ships = ["ship-1", "ship-2", "ship-3"];
+    let stations = [
+        "alpha-mine",
+        "alpha-dock",
+        "beta-fab",
+        "beta-dock",
+        "gamma-refinery",
+        "gamma-dock",
+    ];
+    let ships = ["hauler-1", "hauler-2", "hauler-3", "hauler-4"];
 
     let builder = SimulationBuilder::new()
         .before_iteration({
@@ -87,9 +94,8 @@ fn main() {
             membership,
             state_store.clone() as Rc<dyn ActorStateStore>,
         ))
-        .invariant(CreditConservation)
         .invariant(CargoConservation)
-        .invariant(NonNegativeBalances)
+        .invariant(NonNegativeInventory)
         .invariant(DirectoryConsistency);
 
     let builder = if let Some(ref seeds) = debug_seeds {
@@ -97,22 +103,7 @@ fn main() {
             .set_debug_seeds(seeds.clone())
             .set_iterations(seeds.len())
     } else {
-        builder
-            // .enable_exploration(ExplorationConfig {
-            //     max_depth: 30,
-            //     timelines_per_split: 4,
-            //     global_energy: 20_000,
-            //     adaptive: Some(AdaptiveConfig {
-            //         batch_size: 20,
-            //         min_timelines: 60,
-            //         max_timelines: 200,
-            //         per_mark_energy: 1_000,
-            //         warm_min_timelines: Some(20),
-            //     }),
-            //     parallelism: None,
-            // })
-            // .until_converged(10)
-            .set_iterations(50)
+        builder.set_iterations(50)
     };
 
     let report = builder.run();
