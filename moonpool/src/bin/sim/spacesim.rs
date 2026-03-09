@@ -12,7 +12,6 @@ use moonpool::simulations::spacesim::{
     workloads::{SpaceProcess, SpaceWorkload},
 };
 use moonpool_sim::SimulationBuilder;
-use tokio::runtime::RngSeed;
 
 /// Parse `--seeds 42,123,999` from command-line arguments.
 fn parse_seeds() -> Option<Vec<u64>> {
@@ -59,74 +58,64 @@ fn main() {
 
     let stations = ["alpha", "beta", "gamma", "delta", "epsilon"];
     let ships = ["ship-1", "ship-2", "ship-3"];
-    let seed = RngSeed::from_bytes(b"my_fixed_seed_001");
 
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .rng_seed(seed)
-        .build_local(Default::default())
-        .expect("Failed to build local runtime");
+    let builder = SimulationBuilder::new()
+        .before_iteration({
+            let m = membership.clone();
+            let d = directory.clone();
+            let s = state_store.clone();
+            move || {
+                m.clear();
+                d.clear();
+                s.clear();
+            }
+        })
+        .processes(3, {
+            let cluster = cluster.clone();
+            let ss = state_store.clone() as Rc<dyn ActorStateStore>;
+            move || {
+                Box::new(SpaceProcess::new(cluster.clone(), ss.clone()))
+                    as Box<dyn moonpool_sim::Process>
+            }
+        })
+        .workload(SpaceWorkload::new(
+            200,
+            &stations,
+            &ships,
+            cluster,
+            directory,
+            membership,
+            state_store.clone() as Rc<dyn ActorStateStore>,
+        ))
+        .invariant(CreditConservation)
+        .invariant(CargoConservation)
+        .invariant(NonNegativeBalances)
+        .invariant(DirectoryConsistency);
 
-    let report = local_runtime.block_on(async move {
-        let builder = SimulationBuilder::new()
-            .before_iteration({
-                let m = membership.clone();
-                let d = directory.clone();
-                let s = state_store.clone();
-                move || {
-                    m.clear();
-                    d.clear();
-                    s.clear();
-                }
-            })
-            .processes(3, {
-                let cluster = cluster.clone();
-                let ss = state_store.clone() as Rc<dyn ActorStateStore>;
-                move || {
-                    Box::new(SpaceProcess::new(cluster.clone(), ss.clone()))
-                        as Box<dyn moonpool_sim::Process>
-                }
-            })
-            .workload(SpaceWorkload::new(
-                200,
-                &stations,
-                &ships,
-                cluster,
-                directory,
-                membership,
-                state_store.clone() as Rc<dyn ActorStateStore>,
-            ))
-            .invariant(CreditConservation)
-            .invariant(CargoConservation)
-            .invariant(NonNegativeBalances)
-            .invariant(DirectoryConsistency);
+    let builder = if let Some(ref seeds) = debug_seeds {
+        builder
+            .set_debug_seeds(seeds.clone())
+            .set_iterations(seeds.len())
+    } else {
+        builder
+            // .enable_exploration(ExplorationConfig {
+            //     max_depth: 30,
+            //     timelines_per_split: 4,
+            //     global_energy: 20_000,
+            //     adaptive: Some(AdaptiveConfig {
+            //         batch_size: 20,
+            //         min_timelines: 60,
+            //         max_timelines: 200,
+            //         per_mark_energy: 1_000,
+            //         warm_min_timelines: Some(20),
+            //     }),
+            //     parallelism: None,
+            // })
+            // .until_converged(10)
+            .set_iterations(50)
+    };
 
-        let builder = if let Some(ref seeds) = debug_seeds {
-            builder
-                .set_debug_seeds(seeds.clone())
-                .set_iterations(seeds.len())
-        } else {
-            builder
-                // .enable_exploration(ExplorationConfig {
-                //     max_depth: 30,
-                //     timelines_per_split: 4,
-                //     global_energy: 20_000,
-                //     adaptive: Some(AdaptiveConfig {
-                //         batch_size: 20,
-                //         min_timelines: 60,
-                //         max_timelines: 200,
-                //         per_mark_energy: 1_000,
-                //         warm_min_timelines: Some(20),
-                //     }),
-                //     parallelism: None,
-                // })
-                // .until_converged(10)
-                .set_iterations(50)
-        };
-
-        builder.run().await
-    });
+    let report = builder.run();
 
     report.eprint();
 
