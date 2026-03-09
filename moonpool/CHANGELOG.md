@@ -6,6 +6,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.5.0] - 2026-03-09
+
+### 🚀 Features
+
+- **sim**: Add --seeds CLI flag for runtime seed debugging
+- **sim**: Add details parameter to assertion macros for debug context
+- **sim**: Redesign spacesim RPC model for network chaos resilience
+- **sim**: Add ShipActor with actor-to-actor trade calls
+- **sim**: Multi-process spacesim with 3 station nodes
+- **sim**: Make spacesim RPC fault-aware with try_get_reply
+- **sim**: Add before_iteration hook and clear methods for multi-seed reset
+- **actors**: Add MoonpoolClient for client-only actor runtime
+- **sim**: Add DirectoryConsistency invariant via StateHandle
+- **sim**: Add cargo tracking and VerifyAll operation to spacesim
+- **sim**: Scaffold spacesim with single StationActor on one process
+- **moonpool**: Add structured tracing across actor runtime
+- **moonpool**: Wire placement to membership active members
+- **moonpool**: Add node self-registration and shutdown cleanup
+- **moonpool**: Evolve ActorDirectory with Orleans-style semantics
+- **moonpool**: Add ActivationId and ActorAddress types
+- **moonpool**: Evolve MembershipProvider with snapshot and registration
+- **moonpool**: Add core membership types for Orleans parity
+- **moonpool**: Pass ActorContext to virtual actor trait methods, add NodeConfig and ClusterConfig builder
+- **moonpool**: Add MoonpoolNode unified actor runtime
+- **moonpool-sim**: Add colored terminal display for simulation reports
+- Add cargo xtask sim for running simulation binaries with sancov
+- Move simulation tests to per-crate binary targets for sancov compatibility
+
+### 🐛 Bug Fixes
+
+- **sim**: Prevent trade model drift from at-least-once duplication
+- **sim**: Create fresh tokio runtime per iteration for determinism
+- **transport**: Self-notify connection task after write failure to enable reconnection
+- **actors**: Add RPC timeout to prevent deadlock on connection death
+- **moonpool**: Replace HashMap/HashSet with BTreeMap/BTreeSet for deterministic simulation
+- **sim,explorer**: Fix duplicate assertion slots and false "was never reached" violations
+
+### 🚜 Refactor
+
+- **sim**: Rewrite spacesim as idempotent cargo hauling network
+- **moonpool**: Move directory registration from caller to target host
+- **moonpool**: Separate PlacementStrategy enum from PlacementDirector trait
+- **moonpool**: Reorganize actors/ into folder-based sub-modules
+- Remove nextest fast profile, add xtask sim subcommands
+
+### ⚙️ Miscellaneous Tasks
+
+- Add fdbrpc reference files and document situation status
+- Setting place for the bug
+- Checkpoint to non-deterministic bug
+
+
 ## [0.4.0] - 2026-02-19
 
 ### 🚀 Features
