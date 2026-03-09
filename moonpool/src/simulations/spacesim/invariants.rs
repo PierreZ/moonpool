@@ -23,7 +23,9 @@ impl Invariant for CreditConservation {
                 return;
             }
             let sum = model.total_station_credits() + model.total_ship_credits();
-            assert_always!(sum == model.total_credits, "credit conservation violated");
+            assert_always!(sum == model.total_credits, "credit conservation violated", {
+                "sum" => sum, "expected" => model.total_credits
+            });
         }
     }
 }
@@ -48,7 +50,8 @@ impl Invariant for CargoConservation {
                 let actual_ships = model.total_ship_cargo_for(commodity);
                 assert_always!(
                     actual_stations + actual_ships == expected,
-                    "cargo conservation violated"
+                    "cargo conservation violated",
+                    { "commodity" => commodity, "actual" => actual_stations + actual_ships, "expected" => expected }
                 );
             }
         }
@@ -71,13 +74,17 @@ impl Invariant for NonNegativeBalances {
                 if model.uncertain.contains(name) {
                     continue;
                 }
-                assert_always!(station.credits >= 0, "non-negative station credits");
+                assert_always!(station.credits >= 0, "non-negative station credits", {
+                    "station" => name, "credits" => station.credits
+                });
             }
             for (name, ship) in &model.ships {
                 if model.uncertain_ships.contains(name) {
                     continue;
                 }
-                assert_always!(ship.credits >= 0, "non-negative ship credits");
+                assert_always!(ship.credits >= 0, "non-negative ship credits", {
+                    "ship" => name, "credits" => ship.credits
+                });
             }
         }
     }

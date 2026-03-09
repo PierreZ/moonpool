@@ -350,7 +350,9 @@ impl moonpool_sim::Workload for SpaceWorkload {
                             } else {
                                 self.model.deposit(&station, amount);
                                 let expected = self.model.station_credits(&station);
-                                assert_always!(resp.credits == expected, "deposit credit mismatch");
+                                assert_always!(resp.credits == expected, "deposit credit mismatch", {
+                                    "station" => &station, "actual" => resp.credits, "expected" => expected, "amount" => amount
+                                });
                             }
                         }
                         Err(e) if e.is_maybe_delivered() => {
@@ -389,10 +391,13 @@ impl moonpool_sim::Workload for SpaceWorkload {
                             let withdrew = self.model.withdraw(&station, amount);
                             assert_always!(
                                 withdrew,
-                                "model withdraw should succeed when actor succeeded"
+                                "model withdraw should succeed when actor succeeded",
+                                { "station" => &station, "amount" => amount }
                             );
                             let expected = self.model.station_credits(&station);
-                            assert_always!(resp.credits == expected, "withdraw credit mismatch");
+                            assert_always!(resp.credits == expected, "withdraw credit mismatch", {
+                                "station" => &station, "actual" => resp.credits, "expected" => expected, "amount" => amount
+                            });
                             assert_sometimes!(true, "withdraw_succeeded");
                         }
                         Err(e) if e.is_maybe_delivered() => {
@@ -412,7 +417,9 @@ impl moonpool_sim::Workload for SpaceWorkload {
                                 self.model.reconcile(&station, &resp);
                             } else {
                                 let expected = self.model.station_credits(&station);
-                                assert_always!(resp.credits == expected, "query credit mismatch");
+                                assert_always!(resp.credits == expected, "query credit mismatch", {
+                                    "station" => &station, "actual" => resp.credits, "expected" => expected
+                                });
                             }
                         }
                         Err(e) => {
@@ -440,7 +447,9 @@ impl moonpool_sim::Workload for SpaceWorkload {
                                 self.model.add_cargo(&station, &commodity, amount);
                                 let expected = self.model.station_cargo(&station, &commodity);
                                 let actual = resp.inventory.get(&commodity).copied().unwrap_or(0);
-                                assert_always!(actual == expected, "add_cargo inventory mismatch");
+                                assert_always!(actual == expected, "add_cargo inventory mismatch", {
+                                    "station" => &station, "commodity" => &commodity, "actual" => actual, "expected" => expected, "amount" => amount
+                                });
                             }
                         }
                         Err(e) if e.is_maybe_delivered() => {
@@ -485,11 +494,14 @@ impl moonpool_sim::Workload for SpaceWorkload {
                             let removed = self.model.remove_cargo(&station, &commodity, amount);
                             assert_always!(
                                 removed,
-                                "model remove_cargo should succeed when actor succeeded"
+                                "model remove_cargo should succeed when actor succeeded",
+                                { "station" => &station, "commodity" => &commodity, "amount" => amount }
                             );
                             let expected = self.model.station_cargo(&station, &commodity);
                             let actual = resp.inventory.get(&commodity).copied().unwrap_or(0);
-                            assert_always!(actual == expected, "remove_cargo inventory mismatch");
+                            assert_always!(actual == expected, "remove_cargo inventory mismatch", {
+                                "station" => &station, "commodity" => &commodity, "actual" => actual, "expected" => expected
+                            });
                             assert_sometimes!(true, "remove_cargo_succeeded");
                         }
                         Err(e) if e.is_maybe_delivered() => {
@@ -606,7 +618,8 @@ impl moonpool_sim::Workload for SpaceWorkload {
                                 let expected = self.model.ship_credits(&ship);
                                 assert_always!(
                                     resp.credits == expected,
-                                    "query ship credit mismatch"
+                                    "query ship credit mismatch",
+                                    { "ship" => &ship, "actual" => resp.credits, "expected" => expected }
                                 );
                             }
                         }
@@ -628,7 +641,8 @@ impl moonpool_sim::Workload for SpaceWorkload {
                                     let expected_credits = self.model.station_credits(name);
                                     assert_always!(
                                         resp.credits == expected_credits,
-                                        "verify: credit mismatch"
+                                        "verify: credit mismatch",
+                                        { "station" => name, "actual" => resp.credits, "expected" => expected_credits }
                                     );
                                     let expected_inv = self
                                         .model
@@ -639,7 +653,8 @@ impl moonpool_sim::Workload for SpaceWorkload {
                                         .unwrap_or_default();
                                     assert_always!(
                                         resp.inventory == expected_inv,
-                                        "verify: cargo mismatch"
+                                        "verify: cargo mismatch",
+                                        { "station" => name, "actual" => format!("{:?}", resp.inventory), "expected" => format!("{:?}", expected_inv) }
                                     );
                                 }
                             }
@@ -659,7 +674,8 @@ impl moonpool_sim::Workload for SpaceWorkload {
                                     let expected_credits = self.model.ship_credits(name);
                                     assert_always!(
                                         resp.credits == expected_credits,
-                                        "verify: ship credit mismatch"
+                                        "verify: ship credit mismatch",
+                                        { "ship" => name, "actual" => resp.credits, "expected" => expected_credits }
                                     );
                                     let expected_cargo = self
                                         .model
@@ -670,7 +686,8 @@ impl moonpool_sim::Workload for SpaceWorkload {
                                         .unwrap_or_default();
                                     assert_always!(
                                         resp.cargo == expected_cargo,
-                                        "verify: ship cargo mismatch"
+                                        "verify: ship cargo mismatch",
+                                        { "ship" => name, "actual" => format!("{:?}", resp.cargo), "expected" => format!("{:?}", expected_cargo) }
                                     );
                                 }
                             }
@@ -719,7 +736,8 @@ impl moonpool_sim::Workload for SpaceWorkload {
             let credit_sum = self.model.total_station_credits() + self.model.total_ship_credits();
             assert_always!(
                 credit_sum == self.model.total_credits,
-                "final credit conservation"
+                "final credit conservation",
+                { "sum" => credit_sum, "expected" => self.model.total_credits }
             );
 
             // Final cargo conservation
@@ -728,7 +746,8 @@ impl moonpool_sim::Workload for SpaceWorkload {
                 let actual_ships = self.model.total_ship_cargo_for(commodity);
                 assert_always!(
                     actual_stations + actual_ships == expected,
-                    "final cargo conservation"
+                    "final cargo conservation",
+                    { "commodity" => commodity, "actual" => actual_stations + actual_ships, "expected" => expected }
                 );
             }
         }
@@ -736,12 +755,16 @@ impl moonpool_sim::Workload for SpaceWorkload {
         // Final non-negative check (per-entity, skip uncertain)
         for (name, station) in &self.model.stations {
             if !self.model.uncertain.contains(name) {
-                assert_always!(station.credits >= 0, "final non-negative station credits");
+                assert_always!(station.credits >= 0, "final non-negative station credits", {
+                    "station" => name, "credits" => station.credits
+                });
             }
         }
         for (name, ship) in &self.model.ships {
             if !self.model.uncertain_ships.contains(name) {
-                assert_always!(ship.credits >= 0, "final non-negative ship credits");
+                assert_always!(ship.credits >= 0, "final non-negative ship credits", {
+                    "ship" => name, "credits" => ship.credits
+                });
             }
         }
 

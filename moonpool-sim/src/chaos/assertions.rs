@@ -115,6 +115,22 @@ impl Default for AssertionStats {
 }
 
 // =============================================================================
+// Details formatting (log-only, never stored in shared memory)
+// =============================================================================
+
+/// Format key-value details for assertion logging.
+///
+/// Used by assertion macros to produce human-readable context on failure.
+/// Output format: `key1=val1, key2=val2, ...`
+pub fn format_details(pairs: &[(&str, &dyn std::fmt::Display)]) -> String {
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+// =============================================================================
 // Thin backing wrappers (for $crate:: macro hygiene)
 // =============================================================================
 
@@ -347,6 +363,27 @@ macro_rules! assert_always {
             $crate::chaos::assertions::record_always_violation();
         }
     };
+    ($condition:expr, $message:expr, { $($key:expr => $val:expr),+ $(,)? }) => {
+        let __msg = $message;
+        let cond = $condition;
+        $crate::chaos::assertions::on_assertion_bool(
+            &__msg,
+            cond,
+            $crate::chaos::assertions::_re_export::AssertKind::Always,
+            true,
+        );
+        if !cond {
+            $crate::chaos::assertions::record_always_violation();
+            eprintln!(
+                "[ASSERTION FAILED] {} (seed={}) | {}",
+                __msg,
+                $crate::get_current_sim_seed(),
+                $crate::chaos::assertions::format_details(
+                    &[ $(($key, &$val as &dyn std::fmt::Display)),+ ]
+                )
+            );
+        }
+    };
 }
 
 /// Assert that a condition is always true when reached, but the code path
@@ -366,6 +403,27 @@ macro_rules! assert_always_or_unreachable {
         );
         if !cond {
             $crate::chaos::assertions::record_always_violation();
+        }
+    };
+    ($condition:expr, $message:expr, { $($key:expr => $val:expr),+ $(,)? }) => {
+        let __msg = $message;
+        let cond = $condition;
+        $crate::chaos::assertions::on_assertion_bool(
+            &__msg,
+            cond,
+            $crate::chaos::assertions::_re_export::AssertKind::AlwaysOrUnreachable,
+            false,
+        );
+        if !cond {
+            $crate::chaos::assertions::record_always_violation();
+            eprintln!(
+                "[ASSERTION FAILED] {} (seed={}) | {}",
+                __msg,
+                $crate::get_current_sim_seed(),
+                $crate::chaos::assertions::format_details(
+                    &[ $(($key, &$val as &dyn std::fmt::Display)),+ ]
+                )
+            );
         }
     };
 }
@@ -416,6 +474,23 @@ macro_rules! assert_unreachable {
         );
         $crate::chaos::assertions::record_always_violation();
     };
+    ($message:expr, { $($key:expr => $val:expr),+ $(,)? }) => {
+        let __msg = $message;
+        $crate::chaos::assertions::on_assertion_bool(
+            &__msg,
+            true,
+            $crate::chaos::assertions::_re_export::AssertKind::Unreachable,
+            false,
+        );
+        $crate::chaos::assertions::record_always_violation();
+        eprintln!(
+            "[ASSERTION FAILED] {} | {}",
+            __msg,
+            $crate::chaos::assertions::format_details(
+                &[ $(($key, &$val as &dyn std::fmt::Display)),+ ]
+            )
+        );
+    };
 }
 
 /// Assert that `val > threshold` always holds.
@@ -437,6 +512,30 @@ macro_rules! assert_always_greater_than {
         );
         if !(__v > __t) {
             $crate::chaos::assertions::record_always_violation();
+        }
+    };
+    ($val:expr, $thresh:expr, $message:expr, { $($key:expr => $dval:expr),+ $(,)? }) => {
+        let __msg = $message;
+        let __v = $val as i64;
+        let __t = $thresh as i64;
+        $crate::chaos::assertions::on_assertion_numeric(
+            &__msg,
+            __v,
+            $crate::chaos::assertions::_re_export::AssertCmp::Gt,
+            __t,
+            $crate::chaos::assertions::_re_export::AssertKind::NumericAlways,
+            false,
+        );
+        if !(__v > __t) {
+            $crate::chaos::assertions::record_always_violation();
+            eprintln!(
+                "[ASSERTION FAILED] {} ({}>{} failed, seed={}) | {}",
+                __msg, __v, __t,
+                $crate::get_current_sim_seed(),
+                $crate::chaos::assertions::format_details(
+                    &[ $(($key, &$dval as &dyn std::fmt::Display)),+ ]
+                )
+            );
         }
     };
 }
@@ -462,6 +561,30 @@ macro_rules! assert_always_greater_than_or_equal_to {
             $crate::chaos::assertions::record_always_violation();
         }
     };
+    ($val:expr, $thresh:expr, $message:expr, { $($key:expr => $dval:expr),+ $(,)? }) => {
+        let __msg = $message;
+        let __v = $val as i64;
+        let __t = $thresh as i64;
+        $crate::chaos::assertions::on_assertion_numeric(
+            &__msg,
+            __v,
+            $crate::chaos::assertions::_re_export::AssertCmp::Ge,
+            __t,
+            $crate::chaos::assertions::_re_export::AssertKind::NumericAlways,
+            false,
+        );
+        if !(__v >= __t) {
+            $crate::chaos::assertions::record_always_violation();
+            eprintln!(
+                "[ASSERTION FAILED] {} ({}>={} failed, seed={}) | {}",
+                __msg, __v, __t,
+                $crate::get_current_sim_seed(),
+                $crate::chaos::assertions::format_details(
+                    &[ $(($key, &$dval as &dyn std::fmt::Display)),+ ]
+                )
+            );
+        }
+    };
 }
 
 /// Assert that `val < threshold` always holds.
@@ -485,6 +608,30 @@ macro_rules! assert_always_less_than {
             $crate::chaos::assertions::record_always_violation();
         }
     };
+    ($val:expr, $thresh:expr, $message:expr, { $($key:expr => $dval:expr),+ $(,)? }) => {
+        let __msg = $message;
+        let __v = $val as i64;
+        let __t = $thresh as i64;
+        $crate::chaos::assertions::on_assertion_numeric(
+            &__msg,
+            __v,
+            $crate::chaos::assertions::_re_export::AssertCmp::Lt,
+            __t,
+            $crate::chaos::assertions::_re_export::AssertKind::NumericAlways,
+            true,
+        );
+        if !(__v < __t) {
+            $crate::chaos::assertions::record_always_violation();
+            eprintln!(
+                "[ASSERTION FAILED] {} ({}<{} failed, seed={}) | {}",
+                __msg, __v, __t,
+                $crate::get_current_sim_seed(),
+                $crate::chaos::assertions::format_details(
+                    &[ $(($key, &$dval as &dyn std::fmt::Display)),+ ]
+                )
+            );
+        }
+    };
 }
 
 /// Assert that `val <= threshold` always holds.
@@ -506,6 +653,30 @@ macro_rules! assert_always_less_than_or_equal_to {
         );
         if !(__v <= __t) {
             $crate::chaos::assertions::record_always_violation();
+        }
+    };
+    ($val:expr, $thresh:expr, $message:expr, { $($key:expr => $dval:expr),+ $(,)? }) => {
+        let __msg = $message;
+        let __v = $val as i64;
+        let __t = $thresh as i64;
+        $crate::chaos::assertions::on_assertion_numeric(
+            &__msg,
+            __v,
+            $crate::chaos::assertions::_re_export::AssertCmp::Le,
+            __t,
+            $crate::chaos::assertions::_re_export::AssertKind::NumericAlways,
+            true,
+        );
+        if !(__v <= __t) {
+            $crate::chaos::assertions::record_always_violation();
+            eprintln!(
+                "[ASSERTION FAILED] {} ({}<={} failed, seed={}) | {}",
+                __msg, __v, __t,
+                $crate::get_current_sim_seed(),
+                $crate::chaos::assertions::format_details(
+                    &[ $(($key, &$dval as &dyn std::fmt::Display)),+ ]
+                )
+            );
         }
     };
 }
