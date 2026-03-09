@@ -14,9 +14,36 @@ use moonpool::simulations::spacesim::{
 use moonpool_sim::SimulationBuilder;
 use tokio::runtime::RngSeed;
 
+/// Parse `--seeds 42,123,999` from command-line arguments.
+fn parse_seeds() -> Option<Vec<u64>> {
+    let args: Vec<String> = std::env::args().collect();
+    let pos = args.iter().position(|a| a == "--seeds")?;
+    let raw = args.get(pos + 1).unwrap_or_else(|| {
+        eprintln!("error: --seeds requires a comma-separated list of u64 values");
+        std::process::exit(1);
+    });
+    let seeds: Vec<u64> = raw
+        .split(',')
+        .map(|s| {
+            s.trim().parse::<u64>().unwrap_or_else(|e| {
+                eprintln!("error: invalid seed '{s}': {e}");
+                std::process::exit(1);
+            })
+        })
+        .collect();
+    Some(seeds)
+}
+
 fn main() {
+    let debug_seeds = parse_seeds();
+
+    let log_level = if debug_seeds.is_some() {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::WARN
+    };
     let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
+        .with_max_level(log_level)
         .try_init();
 
     let membership = Rc::new(SharedMembership::new());
@@ -42,7 +69,7 @@ fn main() {
         .expect("Failed to build local runtime");
 
     let report = local_runtime.block_on(async move {
-        SimulationBuilder::new()
+        let builder = SimulationBuilder::new()
             .before_iteration({
                 let m = membership.clone();
                 let d = directory.clone();
@@ -73,24 +100,32 @@ fn main() {
             .invariant(CreditConservation)
             .invariant(CargoConservation)
             .invariant(NonNegativeBalances)
-            .invariant(DirectoryConsistency)
-            // .enable_exploration(ExplorationConfig {
-            //     max_depth: 30,
-            //     timelines_per_split: 4,
-            //     global_energy: 20_000,
-            //     adaptive: Some(AdaptiveConfig {
-            //         batch_size: 20,
-            //         min_timelines: 60,
-            //         max_timelines: 200,
-            //         per_mark_energy: 1_000,
-            //         warm_min_timelines: Some(20),
-            //     }),
-            //     parallelism: None,
-            // })
-            // .until_converged(10)
-            .set_iterations(50)
-            .run()
-            .await
+            .invariant(DirectoryConsistency);
+
+        let builder = if let Some(ref seeds) = debug_seeds {
+            builder
+                .set_debug_seeds(seeds.clone())
+                .set_iterations(seeds.len())
+        } else {
+            builder
+                // .enable_exploration(ExplorationConfig {
+                //     max_depth: 30,
+                //     timelines_per_split: 4,
+                //     global_energy: 20_000,
+                //     adaptive: Some(AdaptiveConfig {
+                //         batch_size: 20,
+                //         min_timelines: 60,
+                //         max_timelines: 200,
+                //         per_mark_energy: 1_000,
+                //         warm_min_timelines: Some(20),
+                //     }),
+                //     parallelism: None,
+                // })
+                // .until_converged(10)
+                .set_iterations(50)
+        };
+
+        builder.run().await
     });
 
     report.eprint();
