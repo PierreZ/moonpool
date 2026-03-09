@@ -9,9 +9,13 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::{NetworkProvider, Peer, TcpListenerTrait, TimeProvider, try_deserialize_packet};
+use crate::{
+    NetworkProvider, Peer, TaskProvider, TcpListenerTrait, TimeProvider, try_deserialize_packet,
+};
 use async_trait::async_trait;
-use moonpool_sim::{Process, SimContext, SimulationResult, Workload, assert_reachable};
+use moonpool_sim::{
+    Process, SimContext, SimulationResult, Workload, assert_reachable, assert_sometimes,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::TestMessage;
@@ -81,6 +85,15 @@ impl Workload for ClientWorkload {
 
         // Create peer with default config
         let mut peer = Peer::new_with_defaults(ctx.providers().clone(), server_addr.clone());
+
+        // Spawn disconnect monitor task — validates disconnect_notify fires under chaos
+        let disconnect_notify = peer.disconnect_notify();
+        let _monitor = ctx.task().spawn_task("disconnect_monitor", async move {
+            loop {
+                disconnect_notify.notified().await;
+                assert_sometimes!(true, "disconnect_notified");
+            }
+        });
 
         // Track messages for invariant validation
         let invariants = Rc::new(RefCell::new(MessageInvariants::new()));

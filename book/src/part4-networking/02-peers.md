@@ -69,6 +69,14 @@ Ping and pong packets use special wire tokens (`PING_TOKEN` and `PONG_TOKEN`) th
 
 This monitoring runs only on outbound peers. Incoming peers passively respond to pings but never initiate them.
 
+## FailureMonitor Integration
+
+The peer's connection task feeds status updates to the `FailureMonitor`, a reactive failure tracking system that delivery modes depend on. When the TCP link connects successfully, the task calls `set_status(address, Available)`. When the connection drops, it calls `set_status(address, Failed)` and `notify_disconnect(address)`.
+
+These signals drive the RPC layer. `try_get_reply` races the server's response against the disconnect signal. `get_reply_unless_failed_for` starts a timeout countdown from the disconnect event. Without the peer feeding accurate status updates, the delivery modes cannot detect failures.
+
+See [Failure Monitor](./09-failure-monitor.md) for the full consumer API and [Delivery Modes](./08-delivery-modes.md) for how each mode uses these signals.
+
 ## Under Simulation
 
 In simulation, peers experience chaos:

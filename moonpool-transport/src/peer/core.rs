@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use super::config::{MonitorConfig, PeerConfig};
 use super::error::{PeerError, PeerResult};
 use super::metrics::PeerMetrics;
+use crate::rpc::{FailureMonitor, FailureStatus};
 use crate::{
     HEADER_SIZE, NetworkProvider, Providers, TaskProvider, TimeProvider, UID, WireError,
     serialize_packet, try_deserialize_packet,
@@ -267,6 +268,14 @@ struct PeerSharedState<P: Providers> {
 
     /// Metrics collection
     metrics: PeerMetrics,
+
+    /// Fired on every connection failure.
+    /// FDB ref: `Peer::disconnect` (`FlowTransport.h:180`)
+    disconnect_notify: Rc<Notify>,
+
+    /// Failure monitor for address-level failure tracking.
+    /// FDB ref: `IFailureMonitor` (FailureMonitor.h)
+    failure_monitor: Option<Rc<FailureMonitor>>,
 }
 
 impl<P: Providers> PeerSharedState<P> {
@@ -278,7 +287,19 @@ impl<P: Providers> PeerSharedState<P> {
 
 impl<P: Providers> Peer<P> {
     /// Create a new peer for the destination address.
-    pub fn new(providers: P, destination: String, config: PeerConfig) -> Self {
+    ///
+    /// # Arguments
+    ///
+    /// * `providers` - Provider bundle for network, time, task
+    /// * `destination` - Remote address to connect to
+    /// * `config` - Peer configuration
+    /// * `failure_monitor` - Optional failure monitor for address-level tracking
+    pub fn new(
+        providers: P,
+        destination: String,
+        config: PeerConfig,
+        failure_monitor: Option<Rc<FailureMonitor>>,
+    ) -> Self {
         let reconnect_state = ReconnectState::new(config.initial_reconnect_delay);
         let now = providers.time().now();
 
@@ -292,6 +313,8 @@ impl<P: Providers> Peer<P> {
             unreliable_queue: VecDeque::new(),
             reconnect_state,
             metrics: PeerMetrics::new_at(now),
+            disconnect_notify: Rc::new(Notify::new()),
+            failure_monitor,
         }));
 
         // Create coordination primitives
@@ -324,9 +347,9 @@ impl<P: Providers> Peer<P> {
         }
     }
 
-    /// Create a new peer with default configuration.
+    /// Create a new peer with default configuration (no failure monitor).
     pub fn new_with_defaults(providers: P, destination: String) -> Self {
-        Self::new(providers, destination, PeerConfig::default())
+        Self::new(providers, destination, PeerConfig::default(), None)
     }
 
     /// Create a new peer from an incoming (already-connected) stream.
@@ -341,6 +364,7 @@ impl<P: Providers> Peer<P> {
         peer_address: String,
         stream: <P::Network as moonpool_core::NetworkProvider>::TcpStream,
         config: PeerConfig,
+        failure_monitor: Option<Rc<FailureMonitor>>,
     ) -> Self {
         let reconnect_state = ReconnectState::new(config.initial_reconnect_delay);
         let now = providers.time().now();
@@ -355,6 +379,8 @@ impl<P: Providers> Peer<P> {
             unreliable_queue: VecDeque::new(),
             reconnect_state,
             metrics: PeerMetrics::new_at(now),
+            disconnect_notify: Rc::new(Notify::new()),
+            failure_monitor,
         }));
 
         // Mark metrics as connected
@@ -397,6 +423,17 @@ impl<P: Providers> Peer<P> {
     /// Check if currently connected.
     pub fn is_connected(&self) -> bool {
         self.shared_state.borrow().connection.is_some()
+    }
+
+    /// Get the disconnect notification handle.
+    ///
+    /// FDB ref: `Peer::disconnect` (`FlowTransport.h:180`)
+    ///
+    /// Returns an `Rc<Notify>` that fires `notify_waiters()` on every
+    /// connection failure. Consumers should call `.notified()` before
+    /// checking `is_connected()` to avoid races.
+    pub fn disconnect_notify(&self) -> Rc<Notify> {
+        self.shared_state.borrow().disconnect_notify.clone()
     }
 
     /// Get current queue size (reliable + unreliable).
@@ -666,6 +703,9 @@ async fn connection_task<P: Providers>(
     // Buffer for accumulating partial packet reads
     let mut read_buffer: Vec<u8> = Vec::with_capacity(4096);
 
+    // Extract failure monitor from shared state (clone the Option<Rc>)
+    let failure_monitor = shared_state.borrow().failure_monitor.clone();
+
     // Initialize ping tracker: only for outbound peers with monitoring enabled
     let mut ping_tracker: Option<PingTracker> = match (&config.monitor, on_connection_loss) {
         (Some(monitor_config), ConnectionLossBehavior::Reconnect) => {
@@ -675,11 +715,16 @@ async fn connection_task<P: Providers>(
     };
 
     // If we start with an existing connection, initialize the ping cycle
-    if current_connection.is_some()
-        && let Some(ref mut tracker) = ping_tracker
-    {
-        let now = shared_state.borrow().time.now();
-        tracker.last_ping_cycle = Some(now);
+    // and notify failure monitor that this address is available
+    if current_connection.is_some() {
+        if let Some(ref mut tracker) = ping_tracker {
+            let now = shared_state.borrow().time.now();
+            tracker.last_ping_cycle = Some(now);
+        }
+        if let Some(ref fm) = failure_monitor {
+            let dest = shared_state.borrow().destination.clone();
+            fm.set_status(&dest, FailureStatus::Available);
+        }
     }
 
     loop {
@@ -728,10 +773,15 @@ async fn connection_task<P: Providers>(
                                     tracing::debug!("connection_task: successfully established connection");
                                     current_connection = Some(stream);
                                     read_buffer.clear();
-                                    {
+                                    let dest = {
                                         let mut state = shared_state.borrow_mut();
                                         state.connection = Some(());
                                         state.metrics.is_connected = true;
+                                        state.destination.clone()
+                                    };
+                                    // Notify failure monitor: address is available
+                                    if let Some(ref fm) = failure_monitor {
+                                        fm.set_status(&dest, FailureStatus::Available);
                                     }
                                     // Reset ping tracker on new connection
                                     if let Some(ref mut tracker) = ping_tracker {
@@ -789,6 +839,7 @@ async fn connection_task<P: Providers>(
                             &mut current_connection,
                             &mut read_buffer,
                             Some((data, is_reliable)),
+                            &failure_monitor,
                         );
                         if let Some(ref mut tracker) = ping_tracker {
                             tracker.reset();
@@ -815,7 +866,8 @@ async fn connection_task<P: Providers>(
                                 &mut current_connection,
                                 &mut read_buffer,
                                 Some((data, is_reliable)),
-                            );
+                                &failure_monitor,
+                                );
                             if let Some(ref mut tracker) = ping_tracker {
                                 tracker.reset();
                             }
@@ -845,6 +897,7 @@ async fn connection_task<P: Providers>(
                             &mut current_connection,
                             &mut read_buffer,
                             None,
+                            &failure_monitor,
                         );
                         if let Some(ref mut tracker) = ping_tracker {
                             tracker.reset();
@@ -883,6 +936,7 @@ async fn connection_task<P: Providers>(
                             &mut current_connection,
                             &mut read_buffer,
                             None,
+                            &failure_monitor,
                         );
                         if let Some(ref mut tracker) = ping_tracker {
                             tracker.reset();
@@ -974,7 +1028,8 @@ async fn connection_task<P: Providers>(
                                 &mut current_connection,
                                 &mut read_buffer,
                                 None,
-                            );
+                                &failure_monitor,
+                                );
                             if on_connection_loss == ConnectionLossBehavior::Exit {
                                 break;
                             }
@@ -992,40 +1047,57 @@ async fn connection_task<P: Providers>(
 // =============================================================================
 
 /// Handle connection failure by clearing state and optionally requeuing data.
+///
+/// Fires `disconnect_notify` to wake all watchers (FDB pattern: `Peer::disconnect`).
+/// Notifies failure monitor of address failure and disconnect.
 fn handle_connection_failure<P: Providers>(
     shared_state: &Rc<RefCell<PeerSharedState<P>>>,
     current_connection: &mut Option<<P::Network as moonpool_core::NetworkProvider>::TcpStream>,
     read_buffer: &mut Vec<u8>,
     failed_send: Option<(Vec<u8>, bool)>, // (data, is_reliable)
+    failure_monitor: &Option<Rc<FailureMonitor>>,
 ) {
     *current_connection = None;
     read_buffer.clear();
 
-    let mut state = shared_state.borrow_mut();
-    state.connection = None;
-    state.metrics.is_connected = false;
+    let (disconnect_notify, destination) = {
+        let mut state = shared_state.borrow_mut();
+        state.connection = None;
+        state.metrics.is_connected = false;
 
-    // Handle the failed send if provided
-    if let Some((data, is_reliable)) = failed_send {
-        if is_reliable {
-            assert_reachable!("reliable_message_requeued");
-            state.reliable_queue.push_front(data);
-        } else {
-            state.metrics.record_message_dropped();
+        // Handle the failed send if provided
+        if let Some((data, is_reliable)) = failed_send {
+            if is_reliable {
+                assert_reachable!("reliable_message_requeued");
+                state.reliable_queue.push_front(data);
+            } else {
+                state.metrics.record_message_dropped();
+            }
         }
-    }
 
-    // Discard all remaining unreliable packets (FDB pattern: discardUnreliablePackets)
-    let unreliable_count = state.unreliable_queue.len();
-    if unreliable_count > 0 {
-        tracing::debug!(
-            "connection_task: discarding {} unreliable packets on failure",
-            unreliable_count
-        );
-        for _ in 0..unreliable_count {
-            state.metrics.record_message_dropped();
+        // Discard all remaining unreliable packets (FDB pattern: discardUnreliablePackets)
+        let unreliable_count = state.unreliable_queue.len();
+        if unreliable_count > 0 {
+            tracing::debug!(
+                "connection_task: discarding {} unreliable packets on failure",
+                unreliable_count
+            );
+            for _ in 0..unreliable_count {
+                state.metrics.record_message_dropped();
+            }
+            state.unreliable_queue.clear();
         }
-        state.unreliable_queue.clear();
+
+        (state.disconnect_notify.clone(), state.destination.clone())
+    };
+
+    // Wake all disconnect watchers (FDB: Peer::disconnect.send(Void()))
+    disconnect_notify.notify_waiters();
+
+    // Notify failure monitor: address failed + disconnect signal
+    if let Some(fm) = failure_monitor {
+        fm.set_status(&destination, FailureStatus::Failed);
+        fm.notify_disconnect(&destination);
     }
 }
 
@@ -1139,7 +1211,7 @@ fn process_read_buffer<P: Providers>(
                     tracker.reset();
                 }
 
-                {
+                let (disconnect_notify, destination, failure_monitor) = {
                     let mut state = shared_state.borrow_mut();
                     state.connection = None;
                     state.metrics.is_connected = false;
@@ -1156,6 +1228,21 @@ fn process_read_buffer<P: Providers>(
                         }
                         state.unreliable_queue.clear();
                     }
+
+                    (
+                        state.disconnect_notify.clone(),
+                        state.destination.clone(),
+                        state.failure_monitor.clone(),
+                    )
+                };
+
+                // Wake all disconnect watchers (FDB: Peer::disconnect.send(Void()))
+                disconnect_notify.notify_waiters();
+
+                // Notify failure monitor: address failed + disconnect signal
+                if let Some(fm) = failure_monitor {
+                    fm.set_status(&destination, FailureStatus::Failed);
+                    fm.notify_disconnect(&destination);
                 }
 
                 return on_connection_loss == ConnectionLossBehavior::Exit;

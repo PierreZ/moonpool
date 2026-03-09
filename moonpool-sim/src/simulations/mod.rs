@@ -6,13 +6,7 @@
 
 use crate::SimulationReport;
 
-/// Run a SimulationBuilder inside a local tokio runtime and return the report.
+/// Run a SimulationBuilder and return the report.
 pub fn run_simulation(builder: crate::SimulationBuilder) -> SimulationReport {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build_local(Default::default())
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move { builder.run().await })
+    builder.run()
 }

@@ -226,7 +226,7 @@ pub enum NetworkAddressParseError {
 ///
 /// assert!(endpoint.token.is_well_known());
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Endpoint {
     /// Network address for this endpoint.
     pub address: NetworkAddress,

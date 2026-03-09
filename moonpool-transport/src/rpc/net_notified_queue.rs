@@ -35,6 +35,7 @@ use crate::{Endpoint, MessageCodec, NetworkAddress, UID};
 use moonpool_sim::assert_reachable;
 
 use super::endpoint_map::MessageReceiver;
+use super::reply_error::ReplyError;
 
 /// Type-safe message queue with async notification.
 ///
@@ -74,6 +75,11 @@ struct NetNotifiedQueueInner<T> {
     /// Whether the queue has been closed (no more messages expected).
     closed: bool,
 
+    /// Reason the queue was closed, if closed externally with a reason.
+    /// `None` means closed by Drop (default: ConnectionFailed).
+    /// `Some(MaybeDelivered)` means closed by peer disconnect.
+    close_reason: Option<ReplyError>,
+
     /// Statistics for debugging.
     messages_received: u64,
     messages_dropped: u64,
@@ -85,6 +91,7 @@ impl<T> Default for NetNotifiedQueueInner<T> {
             queue: VecDeque::new(),
             wakers: Vec::new(),
             closed: false,
+            close_reason: None,
             messages_received: 0,
             messages_dropped: 0,
         }
@@ -161,6 +168,26 @@ impl<T, C: MessageCodec> NetNotifiedQueue<T, C> {
     /// Check if the queue is closed.
     pub fn is_closed(&self) -> bool {
         self.inner.borrow().closed
+    }
+
+    /// Close the queue with a specific reason.
+    ///
+    /// Like `close()`, but stores the reason so consumers can distinguish
+    /// between different close causes (e.g., Drop vs peer disconnect).
+    pub fn close_with_reason(&self, reason: ReplyError) {
+        let mut inner = self.inner.borrow_mut();
+        inner.close_reason = Some(reason);
+        inner.closed = true;
+        for waker in inner.wakers.drain(..) {
+            waker.wake();
+        }
+    }
+
+    /// Get the close reason, if one was set via `close_with_reason`.
+    ///
+    /// Returns `None` if the queue was closed via `close()` (no explicit reason).
+    pub fn close_reason(&self) -> Option<ReplyError> {
+        self.inner.borrow().close_reason.clone()
     }
 
     /// Push a pre-deserialized message directly (for testing).
@@ -275,6 +302,23 @@ impl<T: DeserializeOwned + 'static, C: MessageCodec> SharedNetNotifiedQueue<T, C
     /// Get a clone of the Rc for registration with EndpointMap.
     pub fn as_receiver(&self) -> Rc<NetNotifiedQueue<T, C>> {
         Rc::clone(&self.0)
+    }
+}
+
+/// Trait for closing reply queues with a specific error reason.
+///
+/// Used by `NetTransport` to close pending reply queues on peer disconnect,
+/// without knowing the concrete response type `T`.
+///
+/// FDB: endStreamOnDisconnect pattern (genericactors.actor.h:332)
+pub(crate) trait ReplyQueueCloser {
+    /// Close the queue and set the error reason.
+    fn close_with_error(&self, reason: ReplyError);
+}
+
+impl<T, C: MessageCodec> ReplyQueueCloser for NetNotifiedQueue<Result<T, ReplyError>, C> {
+    fn close_with_error(&self, reason: ReplyError) {
+        self.close_with_reason(reason);
     }
 }
 
@@ -431,6 +475,41 @@ mod tests {
 
         let result = queue.recv().await;
         assert_eq!(result, Some("async hello".to_string()));
+    }
+
+    #[test]
+    fn test_close_with_reason() {
+        let queue: NetNotifiedQueue<Result<String, ReplyError>, JsonCodec> =
+            NetNotifiedQueue::new(test_endpoint(), JsonCodec);
+
+        assert!(queue.close_reason().is_none());
+
+        queue.close_with_reason(ReplyError::MaybeDelivered);
+        assert!(queue.is_closed());
+        assert_eq!(queue.close_reason(), Some(ReplyError::MaybeDelivered));
+    }
+
+    #[test]
+    fn test_close_without_reason() {
+        let queue: NetNotifiedQueue<String, JsonCodec> =
+            NetNotifiedQueue::new(test_endpoint(), JsonCodec);
+
+        queue.close();
+        assert!(queue.is_closed());
+        assert!(queue.close_reason().is_none());
+    }
+
+    #[test]
+    fn test_reply_queue_closer_trait() {
+        let queue: Rc<NetNotifiedQueue<Result<String, ReplyError>, JsonCodec>> =
+            Rc::new(NetNotifiedQueue::new(test_endpoint(), JsonCodec));
+
+        // Use through trait object
+        let closer: Rc<dyn ReplyQueueCloser> = queue.clone();
+        closer.close_with_error(ReplyError::MaybeDelivered);
+
+        assert!(queue.is_closed());
+        assert_eq!(queue.close_reason(), Some(ReplyError::MaybeDelivered));
     }
 
     #[tokio::test]

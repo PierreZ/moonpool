@@ -39,6 +39,10 @@ const SIM_BINARIES: &[SimBinary] = &[
         name: "sim-transport-messaging",
         sancov_crates: "moonpool_transport",
     },
+    SimBinary {
+        name: "sim-axum-web",
+        sancov_crates: "moonpool_sim_examples",
+    },
 ];
 
 fn main() {
@@ -133,12 +137,18 @@ fn sim_list(args: &[String]) {
 }
 
 fn sim_run(args: &[String]) {
-    let filters: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    // Split on "--" to separate filter args from binary args.
+    let (filter_args, binary_args) = match args.iter().position(|a| a == "--") {
+        Some(pos) => (&args[..pos], &args[pos + 1..]),
+        None => (args, [].as_slice()),
+    };
+
+    let filters: Vec<&str> = filter_args.iter().map(|s| s.as_str()).collect();
 
     if filters.is_empty() {
         eprintln!("error: 'run' requires at least one filter argument");
         eprintln!();
-        eprintln!("Usage: cargo xtask sim run <filter...>");
+        eprintln!("Usage: cargo xtask sim run <filter...> [-- <binary-args...>]");
         eprintln!("       cargo xtask sim run-all    (to run all binaries)");
         process::exit(1);
     }
@@ -150,15 +160,15 @@ fn sim_run(args: &[String]) {
         process::exit(1);
     }
 
-    run_binaries(&binaries);
+    run_binaries(&binaries, binary_args);
 }
 
 fn sim_run_all() {
     let binaries: Vec<&SimBinary> = SIM_BINARIES.iter().collect();
-    run_binaries(&binaries);
+    run_binaries(&binaries, &[]);
 }
 
-fn run_binaries(binaries: &[&SimBinary]) {
+fn run_binaries(binaries: &[&SimBinary], extra_args: &[String]) {
     eprintln!(
         "Running {} simulation binaries (sancov enabled)",
         binaries.len()
@@ -180,6 +190,11 @@ fn run_binaries(binaries: &[&SimBinary]) {
         // Use a separate target dir so cargo doesn't serve a cached
         // non-instrumented build (SANCOV_CRATES isn't in cargo's fingerprint).
         cmd.args(["--target-dir", "target/sancov"]);
+
+        if !extra_args.is_empty() {
+            cmd.arg("--");
+            cmd.args(extra_args);
+        }
 
         match cmd.status() {
             Ok(status) if status.success() => {

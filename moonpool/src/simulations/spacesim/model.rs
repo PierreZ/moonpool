@@ -1,34 +1,38 @@
 //! Reference model for spacesim invariant checking.
 //!
-//! Tracks expected station credits and inventory, providing a source of truth
-//! for conservation law and non-negative balance invariants.
+//! No uncertainty tracking. The model is always consistent because
+//! all mutations use op_id dedup and at-least-once delivery.
 
 use std::collections::BTreeMap;
 
 /// Key used to publish the reference model into `StateHandle`.
 pub const SPACE_MODEL_KEY: &str = "space_model";
 
-/// Reference model for space station economy.
-///
-/// Tracks expected credits for each station alongside a running total
-/// for conservation law verification.
+/// Reference model for the cargo hauling network.
 #[derive(Debug, Clone, Default)]
 pub struct SpaceModel {
-    /// Current expected state for each station.
-    pub stations: BTreeMap<String, StationState>,
-    /// Sum of all station credits (invariant target).
-    pub total_credits: i64,
-    /// Sum of all cargo per commodity (invariant target).
+    /// Per-station inventory.
+    pub stations: BTreeMap<String, ModelStation>,
+    /// Per-ship state.
+    pub ships: BTreeMap<String, ModelShip>,
+    /// Per-commodity conservation target (sum of all cargo everywhere).
     pub total_cargo: BTreeMap<String, i64>,
 }
 
-/// Per-station expected state.
+/// Per-station model state.
 #[derive(Debug, Clone, Default)]
-pub struct StationState {
-    /// Current expected credits.
-    pub credits: i64,
-    /// Current expected inventory.
+pub struct ModelStation {
+    /// Current inventory.
     pub inventory: BTreeMap<String, i64>,
+}
+
+/// Per-ship model state.
+#[derive(Debug, Clone, Default)]
+pub struct ModelShip {
+    /// Station the ship is docked at.
+    pub docked_at: String,
+    /// Current cargo manifest.
+    pub cargo: BTreeMap<String, i64>,
 }
 
 impl SpaceModel {
@@ -37,81 +41,65 @@ impl SpaceModel {
         Self::default()
     }
 
-    /// Seed a station with initial credits.
-    pub fn seed_station(&mut self, name: &str, credits: i64) {
-        let station = self.stations.entry(name.to_string()).or_default();
-        station.credits += credits;
-        self.total_credits += credits;
-    }
-
-    /// Apply a deposit to a station.
-    pub fn deposit(&mut self, name: &str, amount: i64) {
-        let station = self.stations.entry(name.to_string()).or_default();
-        station.credits += amount;
-        self.total_credits += amount;
-    }
-
-    /// Apply a withdrawal. Returns true if successful (sufficient funds).
-    pub fn withdraw(&mut self, name: &str, amount: i64) -> bool {
-        let station = self.stations.entry(name.to_string()).or_default();
-        if station.credits >= amount {
-            station.credits -= amount;
-            self.total_credits -= amount;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Get credits for a station.
-    pub fn station_credits(&self, name: &str) -> i64 {
-        self.stations.get(name).map(|s| s.credits).unwrap_or(0)
-    }
-
-    /// Sum of all station credits.
-    pub fn total_station_credits(&self) -> i64 {
-        self.stations.values().map(|s| s.credits).sum()
-    }
-
-    /// Add cargo to a station.
-    pub fn add_cargo(&mut self, name: &str, commodity: &str, amount: i64) {
+    /// Seed a station with initial cargo inventory.
+    pub fn seed_station(&mut self, name: &str, commodity: &str, amount: i64) {
         let station = self.stations.entry(name.to_string()).or_default();
         *station.inventory.entry(commodity.to_string()).or_insert(0) += amount;
         *self.total_cargo.entry(commodity.to_string()).or_insert(0) += amount;
     }
 
-    /// Remove cargo from a station. Returns true if successful (sufficient cargo).
-    pub fn remove_cargo(&mut self, name: &str, commodity: &str, amount: i64) -> bool {
-        let station = self.stations.entry(name.to_string()).or_default();
-        let current = station.inventory.get(commodity).copied().unwrap_or(0);
-        if current >= amount {
-            *station.inventory.entry(commodity.to_string()).or_insert(0) -= amount;
-            *self.total_cargo.entry(commodity.to_string()).or_insert(0) -= amount;
-            true
-        } else {
-            false
-        }
+    /// Seed a ship at a starting station.
+    pub fn seed_ship(&mut self, name: &str, station: &str) {
+        let ship = self.ships.entry(name.to_string()).or_default();
+        ship.docked_at = station.to_string();
     }
 
-    /// Get a station's cargo for a specific commodity.
-    pub fn station_cargo(&self, name: &str, commodity: &str) -> i64 {
+    /// Move a ship to a new station.
+    pub fn travel_to(&mut self, ship: &str, station: &str) {
+        let s = self.ships.entry(ship.to_string()).or_default();
+        s.docked_at = station.to_string();
+    }
+
+    /// Transfer cargo from station to ship. Totals unchanged.
+    pub fn load_cargo(&mut self, ship: &str, station: &str, commodity: &str, amount: i64) {
+        let st = self.stations.entry(station.to_string()).or_default();
+        *st.inventory.entry(commodity.to_string()).or_insert(0) -= amount;
+
+        let s = self.ships.entry(ship.to_string()).or_default();
+        *s.cargo.entry(commodity.to_string()).or_insert(0) += amount;
+    }
+
+    /// Transfer cargo from ship to station. Totals unchanged.
+    pub fn unload_cargo(&mut self, ship: &str, station: &str, commodity: &str, amount: i64) {
+        let s = self.ships.entry(ship.to_string()).or_default();
+        *s.cargo.entry(commodity.to_string()).or_insert(0) -= amount;
+
+        let st = self.stations.entry(station.to_string()).or_default();
+        *st.inventory.entry(commodity.to_string()).or_insert(0) += amount;
+    }
+
+    /// Check if station has at least `amount` of `commodity`.
+    pub fn station_has(&self, station: &str, commodity: &str, amount: i64) -> bool {
         self.stations
-            .get(name)
+            .get(station)
             .and_then(|s| s.inventory.get(commodity))
             .copied()
             .unwrap_or(0)
+            >= amount
     }
 
-    /// Get a station's inventory.
-    pub fn station_inventory(&self, name: &str) -> Option<&BTreeMap<String, i64>> {
-        self.stations.get(name).map(|s| &s.inventory)
+    /// Check if ship has at least `amount` of `commodity`.
+    pub fn ship_has(&self, ship: &str, commodity: &str, amount: i64) -> bool {
+        self.ships
+            .get(ship)
+            .and_then(|s| s.cargo.get(commodity))
+            .copied()
+            .unwrap_or(0)
+            >= amount
     }
 
-    /// Sum of all cargo for a commodity across all stations.
-    pub fn total_cargo_for(&self, commodity: &str) -> i64 {
-        self.stations
-            .values()
-            .map(|s| s.inventory.get(commodity).copied().unwrap_or(0))
-            .sum()
+    /// Get the station a ship is docked at.
+    pub fn ship_location(&self, ship: &str) -> Option<&str> {
+        self.ships.get(ship).map(|s| s.docked_at.as_str())
     }
 }

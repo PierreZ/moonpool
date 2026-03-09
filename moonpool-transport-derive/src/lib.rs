@@ -591,6 +591,32 @@ fn virtual_actor_impl(
         }
     }).collect();
 
+    // Generate ActorRef try_* methods (at-most-once delivery)
+    let try_ref_methods = methods.iter().map(|m| {
+        let try_name = format_ident!("try_{}", m.name);
+        let idx = m.index;
+        let req_type = &m.req_type;
+        let resp_type = &m.resp_type;
+        let doc = format!(
+            "Send a `{}` request with at-most-once delivery (try_get_reply).\n\n\
+             Returns `MaybeDelivered` if the connection drops during the request.",
+            m.name
+        );
+        quote! {
+            #[doc = #doc]
+            pub async fn #try_name(&self, req: #req_type) -> Result<#resp_type, moonpool_transport::RpcError> {
+                self.router.try_send_actor_request(&self.id, #idx, &req).await
+                    .map_err(|e| match e {
+                        moonpool::actors::ActorError::Messaging(m) => moonpool_transport::RpcError::Messaging(m),
+                        moonpool::actors::ActorError::Reply(r) => moonpool_transport::RpcError::Reply(r),
+                        other => moonpool_transport::RpcError::Reply(
+                            moonpool_transport::ReplyError::Serialization { message: other.to_string() }
+                        ),
+                    })
+            }
+        }
+    });
+
     // Generate ActorRef methods
     let ref_methods = methods.iter().map(|m| {
         let name = &m.name;
@@ -683,6 +709,8 @@ fn virtual_actor_impl(
             }
 
             #(#ref_methods)*
+
+            #(#try_ref_methods)*
         }
 
         impl<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec> moonpool::actors::ActorRef<P, C> for #ref_name<P, C> {

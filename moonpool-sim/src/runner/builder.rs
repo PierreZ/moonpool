@@ -566,7 +566,10 @@ impl SimulationBuilder {
 
     #[instrument(skip_all)]
     /// Run the simulation and generate a report.
-    pub async fn run(mut self) -> SimulationReport {
+    ///
+    /// Creates a fresh tokio `LocalRuntime` per iteration for full isolation —
+    /// all tasks are killed when the runtime is dropped at iteration end.
+    pub fn run(mut self) -> SimulationReport {
         if self.entries.is_empty() {
             return SimulationReport {
                 iterations: 0,
@@ -739,20 +742,39 @@ impl SimulationBuilder {
                 ));
             }
 
-            // Execute workloads using orchestrator
-            let orchestration_result = WorkloadOrchestrator::orchestrate_workloads(
-                workloads,
-                fault_injectors,
-                &self.invariants,
-                &workload_info,
-                &client_info,
-                process_config,
-                seed,
-                sim,
-                self.phase_config.as_ref(),
-                iteration_count,
-            )
-            .await;
+            // Create a fresh tokio runtime per iteration for complete isolation.
+            // When this runtime is dropped, ALL tasks are killed — no orphan
+            // tasks leak between iterations.
+            let mut seed_bytes = [0u8; 32];
+            seed_bytes[..8].copy_from_slice(&seed.to_le_bytes());
+            let rng_seed = tokio::runtime::RngSeed::from_bytes(&seed_bytes);
+
+            let local_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .rng_seed(rng_seed)
+                .build_local(Default::default())
+                .expect("per-iteration runtime");
+
+            // Borrow self fields before the async block so we don't move self
+            let invariants_ref = &self.invariants;
+            let phase_ref = self.phase_config.as_ref();
+
+            // Execute workloads using orchestrator inside this iteration's runtime
+            let orchestration_result = local_runtime.block_on(async move {
+                WorkloadOrchestrator::orchestrate_workloads(
+                    workloads,
+                    fault_injectors,
+                    invariants_ref,
+                    &workload_info,
+                    &client_info,
+                    process_config,
+                    seed,
+                    sim,
+                    phase_ref,
+                    iteration_count,
+                )
+                .await
+            });
 
             match orchestration_result {
                 Ok((returned_workloads, returned_injectors, all_results, sim_metrics)) => {
@@ -1102,20 +1124,11 @@ mod tests {
 
     #[test]
     fn test_simulation_builder_basic() {
-        let local_runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .enable_time()
-            .build_local(Default::default())
-            .expect("Failed to build local runtime");
-
-        let report = local_runtime.block_on(async move {
-            SimulationBuilder::new()
-                .workload(BasicWorkload)
-                .set_iterations(3)
-                .set_debug_seeds(vec![1, 2, 3])
-                .run()
-                .await
-        });
+        let report = SimulationBuilder::new()
+            .workload(BasicWorkload)
+            .set_iterations(3)
+            .set_debug_seeds(vec![1, 2, 3])
+            .run();
 
         assert_eq!(report.iterations, 3);
         assert_eq!(report.successful_runs, 3);
@@ -1146,19 +1159,10 @@ mod tests {
 
     #[test]
     fn test_simulation_builder_with_failures() {
-        let local_runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .enable_time()
-            .build_local(Default::default())
-            .expect("Failed to build local runtime");
-
-        let report = local_runtime.block_on(async move {
-            SimulationBuilder::new()
-                .workload(FailingWorkload)
-                .set_iterations(10)
-                .run()
-                .await
-        });
+        let report = SimulationBuilder::new()
+            .workload(FailingWorkload)
+            .set_iterations(10)
+            .run();
 
         assert_eq!(report.iterations, 10);
         assert_eq!(

@@ -1,4 +1,4 @@
-//! Binary target for space economy simulation.
+//! Binary target for cargo hauling network simulation.
 
 use std::rc::Rc;
 
@@ -8,15 +8,41 @@ use moonpool::actors::{
 };
 use moonpool::simulations::invariants::DirectoryConsistency;
 use moonpool::simulations::spacesim::{
-    invariants::{CargoConservation, CreditConservation, NonNegativeBalances},
+    invariants::{CargoConservation, NonNegativeInventory},
     workloads::{SpaceProcess, SpaceWorkload},
 };
 use moonpool_sim::SimulationBuilder;
-use tokio::runtime::RngSeed;
+
+/// Parse `--seeds 42,123,999` from command-line arguments.
+fn parse_seeds() -> Option<Vec<u64>> {
+    let args: Vec<String> = std::env::args().collect();
+    let pos = args.iter().position(|a| a == "--seeds")?;
+    let raw = args.get(pos + 1).unwrap_or_else(|| {
+        eprintln!("error: --seeds requires a comma-separated list of u64 values");
+        std::process::exit(1);
+    });
+    let seeds: Vec<u64> = raw
+        .split(',')
+        .map(|s| {
+            s.trim().parse::<u64>().unwrap_or_else(|e| {
+                eprintln!("error: invalid seed '{s}': {e}");
+                std::process::exit(1);
+            })
+        })
+        .collect();
+    Some(seeds)
+}
 
 fn main() {
+    let debug_seeds = parse_seeds();
+
+    let log_level = if debug_seeds.is_some() {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::WARN
+    };
     let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
+        .with_max_level(log_level)
         .try_init();
 
     let membership = Rc::new(SharedMembership::new());
@@ -30,65 +56,57 @@ fn main() {
         .build()
         .expect("cluster config");
 
-    let stations = ["alpha", "beta", "gamma", "delta", "epsilon"];
-    let seed = RngSeed::from_bytes(b"my_fixed_seed_001");
+    let stations = [
+        "alpha-mine",
+        "alpha-dock",
+        "beta-fab",
+        "beta-dock",
+        "gamma-refinery",
+        "gamma-dock",
+    ];
+    let ships = ["hauler-1", "hauler-2", "hauler-3", "hauler-4"];
 
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .rng_seed(seed)
-        .build_local(Default::default())
-        .expect("Failed to build local runtime");
+    let builder = SimulationBuilder::new()
+        .before_iteration({
+            let m = membership.clone();
+            let d = directory.clone();
+            let s = state_store.clone();
+            move || {
+                m.clear();
+                d.clear();
+                s.clear();
+            }
+        })
+        .processes(3, {
+            let cluster = cluster.clone();
+            let ss = state_store.clone() as Rc<dyn ActorStateStore>;
+            move || {
+                Box::new(SpaceProcess::new(cluster.clone(), ss.clone()))
+                    as Box<dyn moonpool_sim::Process>
+            }
+        })
+        .workload(SpaceWorkload::new(
+            200,
+            &stations,
+            &ships,
+            cluster,
+            directory,
+            membership,
+            state_store.clone() as Rc<dyn ActorStateStore>,
+        ))
+        .invariant(CargoConservation)
+        .invariant(NonNegativeInventory)
+        .invariant(DirectoryConsistency);
 
-    let report = local_runtime.block_on(async move {
-        SimulationBuilder::new()
-            .before_iteration({
-                let m = membership.clone();
-                let d = directory.clone();
-                let s = state_store.clone();
-                move || {
-                    m.clear();
-                    d.clear();
-                    s.clear();
-                }
-            })
-            .processes(1, {
-                let cluster = cluster.clone();
-                let ss = state_store.clone() as Rc<dyn ActorStateStore>;
-                move || {
-                    Box::new(SpaceProcess::new(cluster.clone(), ss.clone()))
-                        as Box<dyn moonpool_sim::Process>
-                }
-            })
-            .workload(SpaceWorkload::new(
-                200, &stations, cluster, directory, membership,
-            ))
-            .invariant(CreditConservation)
-            .invariant(CargoConservation)
-            .invariant(NonNegativeBalances)
-            .invariant(DirectoryConsistency)
-            // .enable_exploration(ExplorationConfig {
-            //     max_depth: 30,
-            //     timelines_per_split: 4,
-            //     global_energy: 20_000,
-            //     adaptive: Some(AdaptiveConfig {
-            //         batch_size: 20,
-            //         min_timelines: 60,
-            //         max_timelines: 200,
-            //         per_mark_energy: 1_000,
-            //         warm_min_timelines: Some(20),
-            //     }),
-            //     parallelism: None,
-            // })
-            // .until_converged(10)
-            // ******
-            // TODO FIXME .set_debug_seeds(vec![15204012862878889900, 3780034198488802454])
-            // ******
-            .set_debug_seeds(vec![3963017351017282997])
-            .set_iterations(1)
-            .run()
-            .await
-    });
+    let builder = if let Some(ref seeds) = debug_seeds {
+        builder
+            .set_debug_seeds(seeds.clone())
+            .set_iterations(seeds.len())
+    } else {
+        builder.set_iterations(50)
+    };
+
+    let report = builder.run();
 
     report.eprint();
 

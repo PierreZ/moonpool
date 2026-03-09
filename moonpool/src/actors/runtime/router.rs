@@ -33,6 +33,7 @@ use serde::de::DeserializeOwned;
 
 use crate::{
     Endpoint, JsonCodec, MessageCodec, NetTransport, NetworkAddress, Providers, UID, send_request,
+    try_get_reply,
 };
 
 /// Default RPC timeout for actor requests (30 seconds).
@@ -229,6 +230,76 @@ impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {
             );
             // Unregister the stale entry (use activation_id 0 as a wildcard —
             // if the activation doesn't match, the directory ignores it)
+            let stale_address = ActorAddress::new(
+                invalidation.actor_id.clone(),
+                invalidation.invalid_endpoint.clone(),
+                ActivationId::new(0),
+            );
+            let _ = self.directory.unregister(&stale_address).await;
+
+            if let Some(valid) = &invalidation.valid_endpoint {
+                let new_activation = ActivationId::new(valid.token.first ^ valid.token.second);
+                let new_address =
+                    ActorAddress::new(invalidation.actor_id.clone(), valid.clone(), new_activation);
+                let _ = self.directory.register(new_address).await;
+            }
+        }
+
+        match response.body {
+            Ok(body) => {
+                let result = self.codec.decode(&body).map_err(ActorError::Codec)?;
+                Ok(result)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "handler returned error");
+                Err(ActorError::HandlerError(e))
+            }
+        }
+    }
+
+    /// Send a request to a virtual actor with at-most-once delivery.
+    ///
+    /// Like [`send_actor_request`](Self::send_actor_request) but uses
+    /// `try_get_reply` (unreliable transport). Returns `MaybeDelivered` if the
+    /// connection drops while the request is in flight.
+    ///
+    /// Callers must handle ambiguity — typically via read-before-retry
+    /// (Strategy 4) or idempotent requests.
+    #[tracing::instrument(skip_all, fields(actor_type = %target.actor_type, identity = %target.identity, method))]
+    pub async fn try_send_actor_request<Req: Serialize, Resp: DeserializeOwned>(
+        &self,
+        target: &ActorId,
+        method: u32,
+        req: &Req,
+    ) -> Result<Resp, ActorError> {
+        // 1. Resolve actor location
+        let endpoint = self.resolve(target).await?;
+
+        tracing::debug!(destination = %endpoint.address, "sending actor request (try)");
+
+        // 2. Serialize the method body
+        let body = self.codec.encode(req).map_err(ActorError::Codec)?;
+
+        // 3. Build ActorMessage
+        let actor_msg = ActorMessage {
+            target: target.clone(),
+            sender: None,
+            method,
+            body,
+            forward_count: 0,
+        };
+
+        // 4. Send via try_get_reply (at-most-once, races reply vs disconnect)
+        let dest = Endpoint::new(endpoint.address.clone(), UID::new(target.actor_type.0, 0));
+        let response: ActorResponse =
+            try_get_reply(&self.transport, &dest, actor_msg, self.codec.clone()).await?;
+
+        // 5. Handle cache invalidation if present
+        if let Some(invalidation) = &response.cache_invalidation {
+            tracing::debug!(
+                stale = %invalidation.invalid_endpoint.address,
+                "processing cache invalidation"
+            );
             let stale_address = ActorAddress::new(
                 invalidation.actor_id.clone(),
                 invalidation.invalid_endpoint.clone(),

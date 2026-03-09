@@ -24,8 +24,9 @@ The book lives in `book/src/` with chapters organized into:
 - **Part I (Why)**: Motivation and philosophy
 - **Part II (Foundations)**: Determinism, providers, process/workload
 - **Part III (Building)**: First simulation, chaos, assertions, invariants, debugging
-- **Part IV (Networking)**: Transport layer, peers, RPC, #[service] macro
-- **Part V (Building on Top)**: Virtual actors, multiverse exploration
+- **Part IV (Integration)**: Standalone moonpool-sim, mock boundaries, axum example
+- **Part V (Networking)**: Transport layer, peers, RPC, #[service] macro
+- **Part VI (Building on Top)**: Virtual actors, multiverse exploration
 - **Appendix**: Reference tables, glossary, configuration
 
 ## Commands

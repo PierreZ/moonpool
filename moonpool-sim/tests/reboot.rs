@@ -85,21 +85,12 @@ impl Workload for ProcessMonitorWorkload {
 
 #[test]
 fn test_process_boot_and_topology() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build_local(Default::default())
-        .expect("Failed to build local runtime");
-
-    let report = local_runtime.block_on(async {
-        SimulationBuilder::new()
-            .processes(3, || Box::new(EchoProcess))
-            .workload(ProcessMonitorWorkload)
-            .set_iterations(1)
-            .set_debug_seeds(vec![42])
-            .run()
-            .await
-    });
+    let report = SimulationBuilder::new()
+        .processes(3, || Box::new(EchoProcess))
+        .workload(ProcessMonitorWorkload)
+        .set_iterations(1)
+        .set_debug_seeds(vec![42])
+        .run();
 
     assert_eq!(report.successful_runs, 1, "simulation should succeed");
     assert_eq!(report.failed_runs, 0);
@@ -135,22 +126,13 @@ impl Workload for TagVerifierWorkload {
 
 #[test]
 fn test_process_tags_round_robin() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build_local(Default::default())
-        .expect("Failed to build local runtime");
-
-    let report = local_runtime.block_on(async {
-        SimulationBuilder::new()
-            .processes(4, || Box::new(EchoProcess))
-            .tags(&[("dc", &["east", "west"])])
-            .workload(TagVerifierWorkload)
-            .set_iterations(1)
-            .set_debug_seeds(vec![42])
-            .run()
-            .await
-    });
+    let report = SimulationBuilder::new()
+        .processes(4, || Box::new(EchoProcess))
+        .tags(&[("dc", &["east", "west"])])
+        .workload(TagVerifierWorkload)
+        .set_iterations(1)
+        .set_debug_seeds(vec![42])
+        .run();
 
     assert_eq!(report.successful_runs, 1, "tag verification should succeed");
 }
@@ -200,26 +182,17 @@ impl Workload for WaitForShutdownWorkload {
 
 #[test]
 fn test_manual_reboot_via_fault_injector() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build_local(Default::default())
-        .expect("Failed to build local runtime");
-
-    let report = local_runtime.block_on(async {
-        SimulationBuilder::new()
-            .processes(3, || Box::new(EchoProcess))
-            .workload(WaitForShutdownWorkload)
-            .fault(RebootOnceInjector)
-            .phases(PhaseConfig {
-                chaos_duration: Duration::from_secs(5),
-                recovery_duration: Duration::from_secs(5),
-            })
-            .set_iterations(3)
-            .set_debug_seeds(vec![42, 123, 999])
-            .run()
-            .await
-    });
+    let report = SimulationBuilder::new()
+        .processes(3, || Box::new(EchoProcess))
+        .workload(WaitForShutdownWorkload)
+        .fault(RebootOnceInjector)
+        .phases(PhaseConfig {
+            chaos_duration: Duration::from_secs(5),
+            recovery_duration: Duration::from_secs(5),
+        })
+        .set_iterations(3)
+        .set_debug_seeds(vec![42, 123, 999])
+        .run();
 
     assert_eq!(
         report.failed_runs, 0,
@@ -233,33 +206,24 @@ fn test_manual_reboot_via_fault_injector() {
 
 #[test]
 fn test_builtin_attrition() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build_local(Default::default())
-        .expect("Failed to build local runtime");
-
-    let report = local_runtime.block_on(async {
-        SimulationBuilder::new()
-            .processes(3, || Box::new(EchoProcess))
-            .workload(WaitForShutdownWorkload)
-            .attrition(Attrition {
-                max_dead: 1,
-                prob_graceful: 0.3,
-                prob_crash: 0.5,
-                prob_wipe: 0.2,
-                recovery_delay_ms: None,
-                grace_period_ms: None,
-            })
-            .phases(PhaseConfig {
-                chaos_duration: Duration::from_secs(10),
-                recovery_duration: Duration::from_secs(10),
-            })
-            .set_iterations(3)
-            .set_debug_seeds(vec![42, 123, 999])
-            .run()
-            .await
-    });
+    let report = SimulationBuilder::new()
+        .processes(3, || Box::new(EchoProcess))
+        .workload(WaitForShutdownWorkload)
+        .attrition(Attrition {
+            max_dead: 1,
+            prob_graceful: 0.3,
+            prob_crash: 0.5,
+            prob_wipe: 0.2,
+            recovery_delay_ms: None,
+            grace_period_ms: None,
+        })
+        .phases(PhaseConfig {
+            chaos_duration: Duration::from_secs(10),
+            recovery_duration: Duration::from_secs(10),
+        })
+        .set_iterations(3)
+        .set_debug_seeds(vec![42, 123, 999])
+        .run();
 
     assert_eq!(
         report.failed_runs, 0,
@@ -294,27 +258,18 @@ impl FaultInjector for RebootTaggedInjector {
 
 #[test]
 fn test_tag_based_reboot() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build_local(Default::default())
-        .expect("Failed to build local runtime");
-
-    let report = local_runtime.block_on(async {
-        SimulationBuilder::new()
-            .processes(4, || Box::new(EchoProcess))
-            .tags(&[("dc", &["east", "west"])])
-            .workload(WaitForShutdownWorkload)
-            .fault(RebootTaggedInjector)
-            .phases(PhaseConfig {
-                chaos_duration: Duration::from_secs(5),
-                recovery_duration: Duration::from_secs(10),
-            })
-            .set_iterations(1)
-            .set_debug_seeds(vec![42])
-            .run()
-            .await
-    });
+    let report = SimulationBuilder::new()
+        .processes(4, || Box::new(EchoProcess))
+        .tags(&[("dc", &["east", "west"])])
+        .workload(WaitForShutdownWorkload)
+        .fault(RebootTaggedInjector)
+        .phases(PhaseConfig {
+            chaos_duration: Duration::from_secs(5),
+            recovery_duration: Duration::from_secs(10),
+        })
+        .set_iterations(1)
+        .set_debug_seeds(vec![42])
+        .run();
 
     assert_eq!(report.failed_runs, 0);
 }
@@ -351,22 +306,13 @@ impl Process for TagAwareProcess {
 
 #[test]
 fn test_process_reads_own_tags() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build_local(Default::default())
-        .expect("Failed to build local runtime");
-
-    let report = local_runtime.block_on(async {
-        SimulationBuilder::new()
-            .processes(3, || Box::new(TagAwareProcess))
-            .tags(&[("role", &["leader", "follower"])])
-            .workload(WaitForShutdownWorkload)
-            .set_iterations(1)
-            .set_debug_seeds(vec![42])
-            .run()
-            .await
-    });
+    let report = SimulationBuilder::new()
+        .processes(3, || Box::new(TagAwareProcess))
+        .tags(&[("role", &["leader", "follower"])])
+        .workload(WaitForShutdownWorkload)
+        .set_iterations(1)
+        .set_debug_seeds(vec![42])
+        .run();
 
     assert_eq!(report.successful_runs, 1);
 }
@@ -439,26 +385,17 @@ impl FaultInjector for GracefulRebootInjector {
 
 #[test]
 fn test_graceful_reboot_signals_shutdown_token() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build_local(Default::default())
-        .expect("Failed to build local runtime");
-
-    let report = local_runtime.block_on(async {
-        SimulationBuilder::new()
-            .processes(3, || Box::new(GracefulProcess))
-            .workload(WaitForShutdownWorkload)
-            .fault(GracefulRebootInjector)
-            .phases(PhaseConfig {
-                chaos_duration: Duration::from_secs(10),
-                recovery_duration: Duration::from_secs(10),
-            })
-            .set_iterations(3)
-            .set_debug_seeds(vec![42, 123, 999])
-            .run()
-            .await
-    });
+    let report = SimulationBuilder::new()
+        .processes(3, || Box::new(GracefulProcess))
+        .workload(WaitForShutdownWorkload)
+        .fault(GracefulRebootInjector)
+        .phases(PhaseConfig {
+            chaos_duration: Duration::from_secs(10),
+            recovery_duration: Duration::from_secs(10),
+        })
+        .set_iterations(3)
+        .set_debug_seeds(vec![42, 123, 999])
+        .run();
 
     assert_eq!(
         report.failed_runs, 0,
@@ -492,26 +429,17 @@ impl Process for StuckProcess {
 
 #[test]
 fn test_graceful_reboot_force_kills_stuck_process() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build_local(Default::default())
-        .expect("Failed to build local runtime");
-
-    let report = local_runtime.block_on(async {
-        SimulationBuilder::new()
-            .processes(3, || Box::new(StuckProcess))
-            .workload(WaitForShutdownWorkload)
-            .fault(GracefulRebootInjector)
-            .phases(PhaseConfig {
-                chaos_duration: Duration::from_secs(10),
-                recovery_duration: Duration::from_secs(10),
-            })
-            .set_iterations(3)
-            .set_debug_seeds(vec![42, 123, 999])
-            .run()
-            .await
-    });
+    let report = SimulationBuilder::new()
+        .processes(3, || Box::new(StuckProcess))
+        .workload(WaitForShutdownWorkload)
+        .fault(GracefulRebootInjector)
+        .phases(PhaseConfig {
+            chaos_duration: Duration::from_secs(10),
+            recovery_duration: Duration::from_secs(10),
+        })
+        .set_iterations(3)
+        .set_debug_seeds(vec![42, 123, 999])
+        .run();
 
     assert_eq!(
         report.failed_runs, 0,
@@ -525,35 +453,26 @@ fn test_graceful_reboot_force_kills_stuck_process() {
 
 #[test]
 fn test_max_dead_limits_concurrent_kills_via_attrition() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build_local(Default::default())
-        .expect("Failed to build local runtime");
-
     // Use built-in attrition with max_dead=1 — the AttritionInjector
     // respects dead_count and won't kill more than 1 at a time
-    let report = local_runtime.block_on(async {
-        SimulationBuilder::new()
-            .processes(5, || Box::new(EchoProcess))
-            .workload(WaitForShutdownWorkload)
-            .attrition(Attrition {
-                max_dead: 1,
-                prob_graceful: 0.0,
-                prob_crash: 1.0,
-                prob_wipe: 0.0,
-                recovery_delay_ms: Some(500..2000),
-                grace_period_ms: None,
-            })
-            .phases(PhaseConfig {
-                chaos_duration: Duration::from_secs(10),
-                recovery_duration: Duration::from_secs(10),
-            })
-            .set_iterations(5)
-            .set_debug_seeds(vec![42, 123, 999, 7, 314])
-            .run()
-            .await
-    });
+    let report = SimulationBuilder::new()
+        .processes(5, || Box::new(EchoProcess))
+        .workload(WaitForShutdownWorkload)
+        .attrition(Attrition {
+            max_dead: 1,
+            prob_graceful: 0.0,
+            prob_crash: 1.0,
+            prob_wipe: 0.0,
+            recovery_delay_ms: Some(500..2000),
+            grace_period_ms: None,
+        })
+        .phases(PhaseConfig {
+            chaos_duration: Duration::from_secs(10),
+            recovery_duration: Duration::from_secs(10),
+        })
+        .set_iterations(5)
+        .set_debug_seeds(vec![42, 123, 999, 7, 314])
+        .run();
 
     assert_eq!(
         report.failed_runs, 0,

@@ -99,9 +99,26 @@ let (req, reply) = stream.recv_with_transport(&transport).await?;
 reply.send(AddResponse { result: req.a + req.b });
 ```
 
-**`ReplyFuture<T, C>`** lives on the client side. It implements `Future` and resolves when the server's response arrives at the temporary endpoint that `send_request` registered. The future polls a `NetNotifiedQueue` for the response. If the queue is closed (connection failure), it resolves with `ReplyError::ConnectionFailed`.
+**`ReplyFuture<T, C>`** lives on the client side. It implements `Future` and resolves when the server's response arrives at the temporary endpoint that `send_request` registered. The future polls a `NetNotifiedQueue` for the response. If the queue is closed (connection failure), it resolves with the appropriate `ReplyError`.
+
+`ReplyFuture` implements `Drop` to close its queue when the future is cancelled or goes out of scope. This prevents leaked wakers and ensures the temporary endpoint is cleaned up even if the caller abandons the request. Without this, a killed process would leave orphaned reply queues that hang forever.
 
 Both types are `!Send` because they contain `Rc<RefCell<...>>` internally. This is deliberate. Our entire execution model is single-threaded, and these types are designed to be efficient within that constraint rather than paying the cost of `Arc<Mutex<...>>` for thread safety we will never use.
+
+## ReplyError
+
+The `ReplyError` enum covers every failure mode in the request-response lifecycle:
+
+| Variant | Meaning |
+|---------|---------|
+| `BrokenPromise` | Server dropped the promise without responding |
+| `ConnectionFailed` | Network connection failed during the request |
+| `Timeout` | RPC timed out (default: 30 seconds) |
+| `Serialization` | Encoding or decoding failed |
+| `EndpointNotFound` | Destination endpoint is not registered |
+| `MaybeDelivered` | Peer disconnected, delivery is uncertain |
+
+`MaybeDelivered` is the most important variant. It maps directly to FoundationDB's `request_maybe_delivered` (error 1030). Instead of hiding delivery ambiguity behind a generic timeout, it tells you explicitly: the connection failed and we do not know whether the server processed your request. See [Delivery Modes](./08-delivery-modes.md) for how each delivery function produces this error and [Designing Simulation-Friendly RPC](./10-designing-rpc.md) for strategies to handle it.
 
 ## Putting It Together
 
