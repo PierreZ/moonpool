@@ -742,7 +742,7 @@ fn virtual_actor_impl(
             method: u32,
             body: &[u8],
         ) -> Result<Vec<u8>, moonpool::actors::ActorError> {
-            let codec = moonpool_transport::JsonCodec;
+            let codec = ctx.router.codec().clone();
             match method {
                 #(#dispatch_arms)*
                 _ => Err(moonpool::actors::ActorError::UnknownMethod(method)),
