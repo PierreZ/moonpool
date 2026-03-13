@@ -9,6 +9,7 @@ use super::model::{SPACE_MODEL_KEY, SpaceModel};
 
 /// Cargo conservation: sum of all cargo across stations and ships
 /// must equal the seeded totals for each commodity.
+#[derive(Debug, Clone, Copy)]
 pub struct CargoConservation;
 
 impl Invariant for CargoConservation {
@@ -40,6 +41,7 @@ impl Invariant for CargoConservation {
 }
 
 /// All inventory and cargo values must be non-negative.
+#[derive(Debug, Clone, Copy)]
 pub struct NonNegativeInventory;
 
 impl Invariant for NonNegativeInventory {

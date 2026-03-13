@@ -32,6 +32,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
+use std::fmt;
 use std::rc::Rc;
 
 use moonpool_sim::StateHandle;
@@ -84,6 +85,15 @@ pub struct MoonpoolNode<P: Providers, C: MessageCodec = JsonCodec> {
     pending_tasks: Rc<Cell<usize>>,
     close_handles: RefCell<CloseHandles>,
     providers: P,
+}
+
+impl<P: Providers, C: MessageCodec> fmt::Debug for MoonpoolNode<P, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MoonpoolNode")
+            .field("address", &self.address)
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<P: Providers, C: MessageCodec> MoonpoolNode<P, C> {
@@ -240,6 +250,15 @@ impl<P: Providers> MoonpoolNode<P> {
             registrations: Vec::new(),
             state_handle: None,
         }
+    }
+}
+
+impl<P: Providers, C: MessageCodec> fmt::Debug for MoonpoolNodeBuilder<P, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MoonpoolNodeBuilder")
+            .field("cluster", &self.cluster)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
     }
 }
 
@@ -433,6 +452,14 @@ pub struct MoonpoolClient<P: Providers, C: MessageCodec = JsonCodec> {
     address: NetworkAddress,
 }
 
+impl<P: Providers, C: MessageCodec> fmt::Debug for MoonpoolClient<P, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MoonpoolClient")
+            .field("address", &self.address)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<P: Providers, C: MessageCodec> MoonpoolClient<P, C> {
     /// Get a typed actor reference by identity.
     pub fn actor_ref<R: crate::actors::ActorRef<P, C>>(&self, identity: impl Into<String>) -> R {
@@ -478,6 +505,15 @@ pub struct MoonpoolClientBuilder<P: Providers, C: MessageCodec = JsonCodec> {
     providers: Option<P>,
     codec: C,
     placement_registrations: Vec<PlacementRegistrationFn<P, C>>,
+}
+
+impl<P: Providers, C: MessageCodec> fmt::Debug for MoonpoolClientBuilder<P, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MoonpoolClientBuilder")
+            .field("cluster", &self.cluster)
+            .field("address", &self.address)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<P: Providers, C: MessageCodec> MoonpoolClientBuilder<P, C> {
