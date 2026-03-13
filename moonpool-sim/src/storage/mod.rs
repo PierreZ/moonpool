@@ -6,6 +6,9 @@
 /// Storage configuration and settings
 pub mod config;
 
+/// Storage error types
+pub mod error;
+
 /// Storage operation events
 pub mod events;
 
@@ -29,6 +32,9 @@ use std::io;
 pub(crate) fn sim_shutdown_error() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown")
 }
+
+// Re-export error
+pub use error::StorageError;
 
 // Re-export configuration
 pub use config::StorageConfiguration;

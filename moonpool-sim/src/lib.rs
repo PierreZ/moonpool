@@ -202,6 +202,7 @@ pub use network::{
 // Storage exports
 pub use storage::{
     InMemoryStorage, SECTOR_SIZE, SectorBitSet, SimStorageProvider, StorageConfiguration,
+    StorageError,
 };
 
 // Provider exports

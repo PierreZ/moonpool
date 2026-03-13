@@ -65,9 +65,7 @@ impl Future for SyncFuture {
         }
 
         // No pending operation - start a new one
-        let op_seq = sim
-            .schedule_sync(self.file_id)
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        let op_seq = sim.schedule_sync(self.file_id)?;
 
         // Store pending state
         self.pending_op.set(Some(op_seq));
@@ -127,9 +125,7 @@ impl Future for SetLenFuture {
         }
 
         // No pending operation - start a new one
-        let op_seq = sim
-            .schedule_set_len(self.file_id, self.new_len)
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        let op_seq = sim.schedule_set_len(self.file_id, self.new_len)?;
 
         // Store pending state
         self.pending_op.set(Some(op_seq));
