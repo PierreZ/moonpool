@@ -7,7 +7,7 @@
 use std::task::Waker;
 use std::time::Duration;
 
-use crate::{SimulationError, SimulationResult};
+use crate::storage::StorageError;
 
 use super::{
     events::{Event, ScheduledEvent, StorageOperation},
@@ -287,7 +287,7 @@ impl SimWorld {
         path: &str,
         options: moonpool_core::OpenOptions,
         initial_size: u64,
-    ) -> SimulationResult<FileId> {
+    ) -> Result<FileId, StorageError> {
         use crate::storage::InMemoryStorage;
 
         let mut inner = self.inner.borrow_mut();
@@ -295,14 +295,12 @@ impl SimWorld {
 
         // Check create_new semantics - fail if file exists
         if options.create_new && inner.storage.path_to_file.contains_key(&path_str) {
-            return Err(SimulationError::IoError(
-                "File already exists (create_new)".to_string(),
-            ));
+            return Err(StorageError::AlreadyExists { path: path_str });
         }
 
         // Check if file was deleted and create is not set
         if inner.storage.deleted_paths.contains(&path_str) && !options.create {
-            return Err(SimulationError::IoError("File not found".to_string()));
+            return Err(StorageError::NotFound { path: path_str });
         }
 
         // If file already exists and we're opening it, return existing file ID
@@ -329,7 +327,7 @@ impl SimWorld {
 
         // File doesn't exist - check if we're allowed to create it
         if !options.create && !options.create_new {
-            return Err(SimulationError::IoError("File not found".to_string()));
+            return Err(StorageError::NotFound { path: path_str });
         }
 
         // Create new file
@@ -375,7 +373,7 @@ impl SimWorld {
     }
 
     /// Delete a file at the given path.
-    pub(crate) fn delete_file(&self, path: &str) -> SimulationResult<()> {
+    pub(crate) fn delete_file(&self, path: &str) -> Result<(), StorageError> {
         let mut inner = self.inner.borrow_mut();
         let path_str = path.to_string();
 
@@ -389,12 +387,12 @@ impl SimWorld {
             tracing::debug!("Deleted file {:?}", path);
             Ok(())
         } else {
-            Err(SimulationError::IoError("File not found".to_string()))
+            Err(StorageError::NotFound { path: path_str })
         }
     }
 
     /// Rename a file from one path to another.
-    pub(crate) fn rename_file(&self, from: &str, to: &str) -> SimulationResult<()> {
+    pub(crate) fn rename_file(&self, from: &str, to: &str) -> Result<(), StorageError> {
         let mut inner = self.inner.borrow_mut();
         let from_str = from.to_string();
         let to_str = to.to_string();
@@ -409,7 +407,7 @@ impl SimWorld {
             tracing::debug!("Renamed file {:?} to {:?}", from, to);
             Ok(())
         } else {
-            Err(SimulationError::IoError("File not found".to_string()))
+            Err(StorageError::NotFound { path: from_str })
         }
     }
 
@@ -421,17 +419,17 @@ impl SimWorld {
         file_id: FileId,
         offset: u64,
         len: usize,
-    ) -> SimulationResult<u64> {
+    ) -> Result<u64, StorageError> {
         let mut inner = self.inner.borrow_mut();
 
         let file_state = inner
             .storage
             .files
             .get_mut(&file_id)
-            .ok_or_else(|| SimulationError::IoError("File not found".to_string()))?;
+            .ok_or(StorageError::InvalidFileHandle { file_id })?;
 
         if file_state.is_closed {
-            return Err(SimulationError::IoError("File is closed".to_string()));
+            return Err(StorageError::FileClosed { file_id });
         }
 
         let op_seq = file_state.next_op_seq;
@@ -481,17 +479,17 @@ impl SimWorld {
         file_id: FileId,
         offset: u64,
         data: Vec<u8>,
-    ) -> SimulationResult<u64> {
+    ) -> Result<u64, StorageError> {
         let mut inner = self.inner.borrow_mut();
 
         let file_state = inner
             .storage
             .files
             .get_mut(&file_id)
-            .ok_or_else(|| SimulationError::IoError("File not found".to_string()))?;
+            .ok_or(StorageError::InvalidFileHandle { file_id })?;
 
         if file_state.is_closed {
-            return Err(SimulationError::IoError("File is closed".to_string()));
+            return Err(StorageError::FileClosed { file_id });
         }
 
         let op_seq = file_state.next_op_seq;
@@ -537,17 +535,17 @@ impl SimWorld {
     /// Schedule a sync operation on a file.
     ///
     /// Returns an operation sequence number that can be used to check completion.
-    pub(crate) fn schedule_sync(&self, file_id: FileId) -> SimulationResult<u64> {
+    pub(crate) fn schedule_sync(&self, file_id: FileId) -> Result<u64, StorageError> {
         let mut inner = self.inner.borrow_mut();
 
         let file_state = inner
             .storage
             .files
             .get_mut(&file_id)
-            .ok_or_else(|| SimulationError::IoError("File not found".to_string()))?;
+            .ok_or(StorageError::InvalidFileHandle { file_id })?;
 
         if file_state.is_closed {
-            return Err(SimulationError::IoError("File is closed".to_string()));
+            return Err(StorageError::FileClosed { file_id });
         }
 
         let op_seq = file_state.next_op_seq;
@@ -586,17 +584,21 @@ impl SimWorld {
     /// Schedule a set_len operation on a file.
     ///
     /// Returns an operation sequence number that can be used to check completion.
-    pub(crate) fn schedule_set_len(&self, file_id: FileId, new_len: u64) -> SimulationResult<u64> {
+    pub(crate) fn schedule_set_len(
+        &self,
+        file_id: FileId,
+        new_len: u64,
+    ) -> Result<u64, StorageError> {
         let mut inner = self.inner.borrow_mut();
 
         let file_state = inner
             .storage
             .files
             .get_mut(&file_id)
-            .ok_or_else(|| SimulationError::IoError("File not found".to_string()))?;
+            .ok_or(StorageError::InvalidFileHandle { file_id })?;
 
         if file_state.is_closed {
-            return Err(SimulationError::IoError("File is closed".to_string()));
+            return Err(StorageError::FileClosed { file_id });
         }
 
         let op_seq = file_state.next_op_seq;
@@ -671,59 +673,67 @@ impl SimWorld {
         file_id: FileId,
         offset: u64,
         buf: &mut [u8],
-    ) -> SimulationResult<usize> {
+    ) -> Result<usize, StorageError> {
         let inner = self.inner.borrow();
 
         let file_state = inner
             .storage
             .files
             .get(&file_id)
-            .ok_or_else(|| SimulationError::IoError("File not found".to_string()))?;
+            .ok_or(StorageError::InvalidFileHandle { file_id })?;
 
         if file_state.is_closed {
-            return Err(SimulationError::IoError("File is closed".to_string()));
+            return Err(StorageError::FileClosed { file_id });
         }
 
         // Read from the in-memory storage
         file_state
             .storage
             .read(offset, buf)
-            .map_err(|e| SimulationError::IoError(e.to_string()))?;
+            .map_err(|e| StorageError::Io {
+                file_id,
+                kind: e.kind(),
+                message: e.to_string(),
+            })?;
 
         Ok(buf.len())
     }
 
     /// Get the current file position.
-    pub(crate) fn file_position(&self, file_id: FileId) -> SimulationResult<u64> {
+    pub(crate) fn file_position(&self, file_id: FileId) -> Result<u64, StorageError> {
         let inner = self.inner.borrow();
         inner
             .storage
             .files
             .get(&file_id)
             .map(|f| f.position)
-            .ok_or_else(|| SimulationError::IoError("File not found".to_string()))
+            .ok_or(StorageError::InvalidFileHandle { file_id })
     }
 
     /// Set the current file position.
-    pub(crate) fn set_file_position(&self, file_id: FileId, position: u64) -> SimulationResult<()> {
+    pub(crate) fn set_file_position(
+        &self,
+        file_id: FileId,
+        position: u64,
+    ) -> Result<(), StorageError> {
         let mut inner = self.inner.borrow_mut();
         if let Some(file_state) = inner.storage.files.get_mut(&file_id) {
             file_state.position = position;
             Ok(())
         } else {
-            Err(SimulationError::IoError("File not found".to_string()))
+            Err(StorageError::InvalidFileHandle { file_id })
         }
     }
 
     /// Get the size of a file.
-    pub(crate) fn file_size(&self, file_id: FileId) -> SimulationResult<u64> {
+    pub(crate) fn file_size(&self, file_id: FileId) -> Result<u64, StorageError> {
         let inner = self.inner.borrow();
         inner
             .storage
             .files
             .get(&file_id)
             .map(|f| f.storage.size())
-            .ok_or_else(|| SimulationError::IoError("File not found".to_string()))
+            .ok_or(StorageError::InvalidFileHandle { file_id })
     }
 
     /// Calculate storage latency using FDB formula.

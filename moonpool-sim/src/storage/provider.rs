@@ -1,23 +1,10 @@
 //! Simulated storage provider implementation.
 
 use super::file::SimStorageFile;
-use crate::SimulationError;
 use crate::sim::WeakSimWorld;
 use async_trait::async_trait;
 use moonpool_core::{OpenOptions, StorageProvider};
 use std::io;
-
-/// Map a SimulationError to an appropriate io::Error kind.
-fn map_sim_error(e: SimulationError) -> io::Error {
-    let msg = e.to_string();
-    if msg.contains("already exists") {
-        io::Error::new(io::ErrorKind::AlreadyExists, msg)
-    } else if msg.contains("not found") {
-        io::Error::new(io::ErrorKind::NotFound, msg)
-    } else {
-        io::Error::other(msg)
-    }
-}
 
 /// Simulated storage provider for deterministic testing.
 ///
@@ -54,8 +41,7 @@ impl StorageProvider for SimStorageProvider {
             .upgrade()
             .map_err(|_| io::Error::other("simulation shutdown"))?;
 
-        // open_file schedules OpenComplete event with latency
-        let file_id = sim.open_file(path, options, 0).map_err(map_sim_error)?;
+        let file_id = sim.open_file(path, options, 0)?;
 
         Ok(SimStorageFile::new(self.sim.clone(), file_id))
     }
@@ -73,7 +59,8 @@ impl StorageProvider for SimStorageProvider {
             .sim
             .upgrade()
             .map_err(|_| io::Error::other("simulation shutdown"))?;
-        sim.delete_file(path).map_err(map_sim_error)
+        sim.delete_file(path)?;
+        Ok(())
     }
 
     async fn rename(&self, from: &str, to: &str) -> io::Result<()> {
@@ -81,6 +68,7 @@ impl StorageProvider for SimStorageProvider {
             .sim
             .upgrade()
             .map_err(|_| io::Error::other("simulation shutdown"))?;
-        sim.rename_file(from, to).map_err(map_sim_error)
+        sim.rename_file(from, to)?;
+        Ok(())
     }
 }

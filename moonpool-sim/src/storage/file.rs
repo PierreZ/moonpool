@@ -115,14 +115,11 @@ impl AsyncRead for SimStorageFile {
 
                 // Read from file at the stored offset
                 let mut temp_buf = vec![0u8; bytes_to_read];
-                let bytes_read = sim
-                    .read_from_file(self.file_id, offset, &mut temp_buf)
-                    .map_err(|e| io::Error::other(e.to_string()))?;
+                let bytes_read = sim.read_from_file(self.file_id, offset, &mut temp_buf)?;
 
                 // Update file position
                 let new_position = offset + bytes_read as u64;
-                sim.set_file_position(self.file_id, new_position)
-                    .map_err(|e| io::Error::other(e.to_string()))?;
+                sim.set_file_position(self.file_id, new_position)?;
 
                 // Copy to output buffer
                 buf.put_slice(&temp_buf[..bytes_read]);
@@ -137,14 +134,10 @@ impl AsyncRead for SimStorageFile {
         // No pending read - start a new one
 
         // Get current position
-        let position = sim
-            .file_position(self.file_id)
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        let position = sim.file_position(self.file_id)?;
 
         // Get file size to check for EOF
-        let file_size = sim
-            .file_size(self.file_id)
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        let file_size = sim.file_size(self.file_id)?;
 
         // Check for EOF
         if position >= file_size {
@@ -160,9 +153,7 @@ impl AsyncRead for SimStorageFile {
         }
 
         // Schedule the read operation
-        let op_seq = sim
-            .schedule_read(self.file_id, position, len)
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        let op_seq = sim.schedule_read(self.file_id, position, len)?;
 
         // Store pending state
         self.pending_read.set(Some((op_seq, position, len)));
@@ -190,12 +181,9 @@ impl AsyncWrite for SimStorageFile {
                 self.pending_write.set(None);
 
                 // Update file position
-                let position = sim
-                    .file_position(self.file_id)
-                    .map_err(|e| io::Error::other(e.to_string()))?;
+                let position = sim.file_position(self.file_id)?;
                 let new_position = position + bytes_written as u64;
-                sim.set_file_position(self.file_id, new_position)
-                    .map_err(|e| io::Error::other(e.to_string()))?;
+                sim.set_file_position(self.file_id, new_position)?;
 
                 return Poll::Ready(Ok(bytes_written));
             }
@@ -212,14 +200,10 @@ impl AsyncWrite for SimStorageFile {
         }
 
         // Get current position
-        let position = sim
-            .file_position(self.file_id)
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        let position = sim.file_position(self.file_id)?;
 
         // Schedule the write operation
-        let op_seq = sim
-            .schedule_write(self.file_id, position, buf.to_vec())
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        let op_seq = sim.schedule_write(self.file_id, position, buf.to_vec())?;
 
         // Store pending state
         self.pending_write.set(Some((op_seq, buf.len())));
@@ -246,13 +230,9 @@ impl AsyncSeek for SimStorageFile {
         let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Calculate target position
-        let current_position = sim
-            .file_position(self.file_id)
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        let current_position = sim.file_position(self.file_id)?;
 
-        let file_size = sim
-            .file_size(self.file_id)
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        let file_size = sim.file_size(self.file_id)?;
 
         let target = match position {
             SeekFrom::Start(pos) => pos,
@@ -283,15 +263,12 @@ impl AsyncSeek for SimStorageFile {
         match self.seek_state.get() {
             SeekState::Idle => {
                 // No seek in progress, return current position
-                let position = sim
-                    .file_position(self.file_id)
-                    .map_err(|e| io::Error::other(e.to_string()))?;
+                let position = sim.file_position(self.file_id)?;
                 Poll::Ready(Ok(position))
             }
             SeekState::Seeking(target) => {
                 // Complete the seek by setting the position
-                sim.set_file_position(self.file_id, target)
-                    .map_err(|e| io::Error::other(e.to_string()))?;
+                sim.set_file_position(self.file_id, target)?;
                 self.seek_state.set(SeekState::Idle);
                 Poll::Ready(Ok(target))
             }
