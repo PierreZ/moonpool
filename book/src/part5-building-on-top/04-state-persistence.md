@@ -99,7 +99,7 @@ async fn on_activate<P: Providers, C: MessageCodec>(
         self.state = Some(
             PersistentState::<BankAccountData>::load(
                 store.clone(), "BankAccount", &ctx.id.identity,
-            ).await.map_err(|e| ActorError::HandlerError(format!("{e}")))?
+            ).await.map_err(|e| ActorError::from(ActorHandlerError::HandlerError { message: format!("{e}") }))?
         );
     }
     Ok(())

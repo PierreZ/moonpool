@@ -76,7 +76,7 @@ pub enum ActorError {
 
     /// The remote actor handler returned an error.
     #[error("handler error: {0}")]
-    HandlerError(String),
+    HandlerError(#[from] crate::actors::types::ActorHandlerError),
 
     /// RPC-level error (wraps MessagingError or ReplyError).
     #[error("rpc error: {0}")]

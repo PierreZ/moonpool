@@ -9,8 +9,87 @@
 //! `fork()`, each must run in its own process (nextest default).
 
 use std::cell::Cell;
+use std::fmt;
 
 use crate::{AdaptiveConfig, ExplorationConfig};
+
+/// Errors from adaptive exploration test scenarios.
+#[derive(Debug)]
+pub enum AdaptiveTestError {
+    /// Exploration initialization failed.
+    Init(std::io::Error),
+    /// Exploration stats were not available after cleanup.
+    StatsUnavailable,
+    /// Expected forked children but none were produced.
+    NoForks {
+        /// Actual timeline count.
+        total: u64,
+    },
+    /// Expected fork points but none were triggered.
+    NoForkPoints {
+        /// Actual fork point count.
+        points: u64,
+    },
+    /// Global energy cap was exceeded.
+    EnergyExceeded {
+        /// Actual timeline count.
+        total: u64,
+        /// Maximum expected.
+        limit: u64,
+    },
+    /// Global energy went negative.
+    EnergyNegative {
+        /// Remaining global energy.
+        energy: i64,
+    },
+    /// Reallocation pool went negative.
+    PoolNegative {
+        /// Remaining pool energy.
+        pool: i64,
+    },
+}
+
+impl fmt::Display for AdaptiveTestError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Init(e) => write!(f, "init failed: {e}"),
+            Self::StatsUnavailable => write!(f, "stats unavailable"),
+            Self::NoForks { total } => {
+                write!(f, "expected forked children, got total_timelines={total}")
+            }
+            Self::NoForkPoints { points } => {
+                write!(f, "expected fork points, got fork_points={points}")
+            }
+            Self::EnergyExceeded { total, limit } => {
+                write!(
+                    f,
+                    "energy limit exceeded: total_timelines={total} (expected <= {limit})"
+                )
+            }
+            Self::EnergyNegative { energy } => {
+                write!(f, "energy went negative: global_energy={energy}")
+            }
+            Self::PoolNegative { pool } => {
+                write!(f, "realloc pool went negative: realloc_pool={pool}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AdaptiveTestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Init(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for AdaptiveTestError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Init(e)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Shared xorshift64 RNG infrastructure
@@ -66,7 +145,7 @@ pub fn random_below(divisor: u32) -> u32 {
 ///
 /// Brute-force probability: (0.3^2)^3 ~ 7x10^-4.
 /// With adaptive forking the cascade amplifies through 7 fork points.
-pub fn run_adaptive_maze_cascade() -> Result<(), String> {
+pub fn run_adaptive_maze_cascade() -> Result<(), AdaptiveTestError> {
     crate::set_rng_hooks(count, reseed);
     reseed(42);
 
@@ -82,8 +161,7 @@ pub fn run_adaptive_maze_cascade() -> Result<(), String> {
             warm_min_timelines: None,
         }),
         parallelism: None,
-    })
-    .map_err(|e| format!("init failed: {e}"))?;
+    })?;
 
     // Entry gate — always triggers, guarantees the adaptive path fires
     crate::assertion_bool(crate::AssertKind::Sometimes, true, true, "maze_entry");
@@ -134,21 +212,18 @@ pub fn run_adaptive_maze_cascade() -> Result<(), String> {
     }
 
     // Parent: read stats before cleanup frees shared memory
-    let stats =
-        crate::exploration_stats().ok_or_else(|| "stats should be available".to_string())?;
+    let stats = crate::exploration_stats().ok_or(AdaptiveTestError::StatsUnavailable)?;
     crate::cleanup();
 
     if stats.total_timelines == 0 {
-        return Err(format!(
-            "expected forked children, got total_timelines={}",
-            stats.total_timelines
-        ));
+        return Err(AdaptiveTestError::NoForks {
+            total: stats.total_timelines,
+        });
     }
     if stats.fork_points == 0 {
-        return Err(format!(
-            "expected fork points, got fork_points={}",
-            stats.fork_points
-        ));
+        return Err(AdaptiveTestError::NoForkPoints {
+            points: stats.fork_points,
+        });
     }
 
     Ok(())
@@ -166,7 +241,7 @@ pub fn run_adaptive_maze_cascade() -> Result<(), String> {
 ///
 /// Brute-force probability: 0.2^5 ~ 3.2x10^-4.
 /// Fork cascade amplifies at each floor.
-pub fn run_adaptive_dungeon_floors() -> Result<(), String> {
+pub fn run_adaptive_dungeon_floors() -> Result<(), AdaptiveTestError> {
     crate::set_rng_hooks(count, reseed);
     reseed(7777);
 
@@ -182,8 +257,7 @@ pub fn run_adaptive_dungeon_floors() -> Result<(), String> {
             warm_min_timelines: None,
         }),
         parallelism: None,
-    })
-    .map_err(|e| format!("init failed: {e}"))?;
+    })?;
 
     // Entry — always triggers, starts the exploration
     crate::assertion_bool(crate::AssertKind::Sometimes, true, true, "dungeon_entry");
@@ -219,21 +293,18 @@ pub fn run_adaptive_dungeon_floors() -> Result<(), String> {
         crate::exit_child(0);
     }
 
-    let stats =
-        crate::exploration_stats().ok_or_else(|| "stats should be available".to_string())?;
+    let stats = crate::exploration_stats().ok_or(AdaptiveTestError::StatsUnavailable)?;
     crate::cleanup();
 
     if stats.total_timelines == 0 {
-        return Err(format!(
-            "expected forked children, got total_timelines={}",
-            stats.total_timelines
-        ));
+        return Err(AdaptiveTestError::NoForks {
+            total: stats.total_timelines,
+        });
     }
     if stats.fork_points == 0 {
-        return Err(format!(
-            "expected fork points, got fork_points={}",
-            stats.fork_points
-        ));
+        return Err(AdaptiveTestError::NoForkPoints {
+            points: stats.fork_points,
+        });
     }
 
     Ok(())
@@ -248,7 +319,7 @@ pub fn run_adaptive_dungeon_floors() -> Result<(), String> {
 ///
 /// 3 always-true gates maximize energy consumption. The global energy cap
 /// of 8 limits total forks regardless of per-mark budgets.
-pub fn run_adaptive_energy_budget() -> Result<(), String> {
+pub fn run_adaptive_energy_budget() -> Result<(), AdaptiveTestError> {
     crate::set_rng_hooks(count, reseed);
     reseed(99);
 
@@ -264,8 +335,7 @@ pub fn run_adaptive_energy_budget() -> Result<(), String> {
             warm_min_timelines: None,
         }),
         parallelism: None,
-    })
-    .map_err(|e| format!("init failed: {e}"))?;
+    })?;
 
     // All gates always fire — maximizes energy consumption
     crate::assertion_bool(crate::AssertKind::Sometimes, true, true, "energy_a");
@@ -276,27 +346,24 @@ pub fn run_adaptive_energy_budget() -> Result<(), String> {
         crate::exit_child(0);
     }
 
-    let stats =
-        crate::exploration_stats().ok_or_else(|| "stats should be available".to_string())?;
+    let stats = crate::exploration_stats().ok_or(AdaptiveTestError::StatsUnavailable)?;
     crate::cleanup();
 
     if stats.total_timelines > 8 {
-        return Err(format!(
-            "energy limit exceeded: total_timelines={} (expected <= 8)",
-            stats.total_timelines
-        ));
+        return Err(AdaptiveTestError::EnergyExceeded {
+            total: stats.total_timelines,
+            limit: 8,
+        });
     }
     if stats.global_energy < 0 {
-        return Err(format!(
-            "energy went negative: global_energy={}",
-            stats.global_energy
-        ));
+        return Err(AdaptiveTestError::EnergyNegative {
+            energy: stats.global_energy,
+        });
     }
     if stats.realloc_pool_remaining < 0 {
-        return Err(format!(
-            "realloc pool went negative: realloc_pool={}",
-            stats.realloc_pool_remaining
-        ));
+        return Err(AdaptiveTestError::PoolNegative {
+            pool: stats.realloc_pool_remaining,
+        });
     }
 
     Ok(())

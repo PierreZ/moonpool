@@ -103,6 +103,41 @@ pub struct ActorMessage {
     pub forward_count: u8,
 }
 
+/// Errors that can occur during actor message handling.
+///
+/// These are wire-level errors serialized in [`ActorResponse`] — they
+/// cross process boundaries, so all variants are `Serialize + Deserialize`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+pub enum ActorHandlerError {
+    /// Actor activation (`on_activate`) failed.
+    #[error("activation failed: {message}")]
+    ActivationFailed {
+        /// The underlying activation error message.
+        message: String,
+    },
+    /// The actor was not in an activated state when a message arrived.
+    #[error("actor not activated")]
+    NotActivated,
+    /// The message was forwarded too many times (loop detected).
+    #[error("forward limit exceeded: {count}")]
+    ForwardLimitExceeded {
+        /// Number of forwards that occurred.
+        count: u8,
+    },
+    /// Forwarding the message to the correct node failed.
+    #[error("forward failed")]
+    ForwardFailed,
+    /// The forwarded request did not receive a successful response.
+    #[error("forwarded request failed")]
+    ForwardedRequestFailed,
+    /// The actor's `dispatch` method returned an error.
+    #[error("handler error: {message}")]
+    HandlerError {
+        /// The error message from the handler.
+        message: String,
+    },
+}
+
 /// Response from a virtual actor.
 ///
 /// Wraps the serialized response body or an error from the handler.
@@ -113,9 +148,8 @@ pub struct ActorMessage {
 /// because the caller's directory cache was stale.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ActorResponse {
-    /// Serialized method-specific response body, or an error message
-    /// from the handler.
-    pub body: Result<Vec<u8>, String>,
+    /// Serialized method-specific response body, or an error from the handler.
+    pub body: Result<Vec<u8>, ActorHandlerError>,
     /// Optional cache invalidation hint piggybacked on the response.
     /// The caller should update its directory cache when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -318,14 +352,21 @@ mod tests {
     #[test]
     fn test_actor_response_error_roundtrip() {
         let resp = ActorResponse {
-            body: Err("unknown method: 99".to_string()),
+            body: Err(ActorHandlerError::HandlerError {
+                message: "unknown method: 99".to_string(),
+            }),
             cache_invalidation: None,
         };
 
         let serialized = serde_json::to_vec(&resp).expect("serialize");
         let deserialized: ActorResponse = serde_json::from_slice(&serialized).expect("deserialize");
 
-        assert_eq!(deserialized.body, Err("unknown method: 99".to_string()));
+        assert_eq!(
+            deserialized.body,
+            Err(ActorHandlerError::HandlerError {
+                message: "unknown method: 99".to_string(),
+            })
+        );
     }
 
     #[test]

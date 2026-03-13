@@ -29,9 +29,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use moonpool::actors::{
-    ActorContext, ActorDirectory, ActorError, ActorHandler, ActorStateStore, ClusterConfig,
-    DeactivationHint, InMemoryDirectory, InMemoryStateStore, MoonpoolNode, NodeConfig,
-    PersistentState, PlacementStrategy, SharedMembership,
+    ActorContext, ActorDirectory, ActorError, ActorHandler, ActorHandlerError, ActorStateStore,
+    ClusterConfig, DeactivationHint, InMemoryDirectory, InMemoryStateStore, MoonpoolNode,
+    NodeConfig, PersistentState, PlacementStrategy, SharedMembership,
 };
 use moonpool::{MessageCodec, NetworkAddress, Providers, RpcError, actor_impl, service};
 use serde::{Deserialize, Serialize};
@@ -164,7 +164,11 @@ impl ActorHandler for BankAccountImpl {
                 &ctx.id.identity,
             )
             .await
-            .map_err(|e| ActorError::HandlerError(format!("state load: {e}")))?;
+            .map_err(|e| {
+                ActorError::from(ActorHandlerError::HandlerError {
+                    message: format!("state load: {e}"),
+                })
+            })?;
             self.state = Some(ps);
         }
         Ok(())

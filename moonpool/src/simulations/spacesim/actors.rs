@@ -8,7 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::actors::{ActorContext, ActorError, ActorHandler, DeactivationHint, PersistentState};
+use crate::actors::{
+    ActorContext, ActorError, ActorHandler, ActorHandlerError, DeactivationHint, PersistentState,
+};
 use crate::{MessageCodec, Providers, RpcError, actor_impl, service};
 
 // ============================================================================
@@ -201,7 +203,11 @@ impl ActorHandler for StationActorImpl {
             let ps =
                 PersistentState::<StationData>::load(store.clone(), "Station", &ctx.id.identity)
                     .await
-                    .map_err(|e| ActorError::HandlerError(format!("state load: {e}")))?;
+                    .map_err(|e| {
+                        ActorError::from(ActorHandlerError::HandlerError {
+                            message: format!("state load: {e}"),
+                        })
+                    })?;
             self.state = Some(ps);
         }
         Ok(())
@@ -406,7 +412,11 @@ impl ActorHandler for ShipActorImpl {
         if let Some(store) = ctx.state_store() {
             let ps = PersistentState::<ShipData>::load(store.clone(), "Ship", &ctx.id.identity)
                 .await
-                .map_err(|e| ActorError::HandlerError(format!("state load: {e}")))?;
+                .map_err(|e| {
+                    ActorError::from(ActorHandlerError::HandlerError {
+                        message: format!("state load: {e}"),
+                    })
+                })?;
             self.state = Some(ps);
         }
         Ok(())
