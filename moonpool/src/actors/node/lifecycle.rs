@@ -809,7 +809,7 @@ mod tests {
             // After start, membership should show this node as Active
             let snap = membership.snapshot().await;
             let member = snap
-                .get_member(&local_addr)
+                .member(&local_addr)
                 .expect("node should be in membership");
             assert!(member.is_active());
             assert!(!member.name.is_empty());
@@ -837,7 +837,7 @@ mod tests {
             // After shutdown, membership should show this node as Dead
             let snap = membership.snapshot().await;
             let member = snap
-                .get_member(&local_addr)
+                .member(&local_addr)
                 .expect("node should be in membership");
             assert_eq!(member.status, crate::actors::NodeStatus::Dead);
         });
@@ -875,7 +875,7 @@ mod tests {
             // Client should NOT appear in membership
             let snap = membership.snapshot().await;
             assert!(
-                snap.get_member(&addr(4710)).is_none(),
+                snap.member(&addr(4710)).is_none(),
                 "client must not register in membership"
             );
         });

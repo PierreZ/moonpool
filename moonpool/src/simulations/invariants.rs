@@ -53,7 +53,7 @@ impl Invariant for DirectoryConsistency {
 
         // Check 1: No directory entry points to a Dead node
         for (id, addr) in &dir {
-            if let Some(status) = membership.get_status(&addr.endpoint.address) {
+            if let Some(status) = membership.status(&addr.endpoint.address) {
                 assert_always!(
                     status != NodeStatus::Dead,
                     format!("directory entry for {} points to dead node", id.identity)

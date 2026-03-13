@@ -694,7 +694,7 @@ impl SimWorld {
     }
 
     /// Get the current file position.
-    pub(crate) fn get_file_position(&self, file_id: FileId) -> SimulationResult<u64> {
+    pub(crate) fn file_position(&self, file_id: FileId) -> SimulationResult<u64> {
         let inner = self.inner.borrow();
         inner
             .storage
@@ -716,7 +716,7 @@ impl SimWorld {
     }
 
     /// Get the size of a file.
-    pub(crate) fn get_file_size(&self, file_id: FileId) -> SimulationResult<u64> {
+    pub(crate) fn file_size(&self, file_id: FileId) -> SimulationResult<u64> {
         let inner = self.inner.borrow();
         inner
             .storage

@@ -703,10 +703,7 @@ impl SimWorld {
     }
 
     /// Get a pending connection for accept() call
-    pub(crate) fn get_pending_connection(
-        &self,
-        addr: &str,
-    ) -> SimulationResult<Option<ConnectionId>> {
+    pub(crate) fn pending_connection(&self, addr: &str) -> SimulationResult<Option<ConnectionId>> {
         let mut inner = self.inner.borrow_mut();
         Ok(inner.network.pending_connections.remove(addr))
     }
@@ -719,10 +716,7 @@ impl SimWorld {
     ///
     /// The returned address may not be connectable for server-side connections,
     /// matching real TCP behavior where servers see client ephemeral ports.
-    pub(crate) fn get_connection_peer_address(
-        &self,
-        connection_id: ConnectionId,
-    ) -> Option<String> {
+    pub(crate) fn connection_peer_address(&self, connection_id: ConnectionId) -> Option<String> {
         let inner = self.inner.borrow();
         inner
             .network
@@ -1321,7 +1315,7 @@ impl SimWorld {
     pub fn assertion_results(
         &self,
     ) -> std::collections::HashMap<String, crate::chaos::AssertionStats> {
-        crate::chaos::get_assertion_results()
+        crate::chaos::assertion_results()
     }
 
     /// Reset assertion statistics to empty state.
@@ -1691,7 +1685,7 @@ impl SimWorld {
 
     /// Get the base latency for a connection pair.
     /// Returns the latency if already set, otherwise None.
-    pub fn get_pair_latency(&self, src: IpAddr, dst: IpAddr) -> Option<Duration> {
+    pub fn pair_latency(&self, src: IpAddr, dst: IpAddr) -> Option<Duration> {
         let inner = self.inner.borrow();
         inner.network.pair_latencies.get(&(src, dst)).copied()
     }
@@ -1722,7 +1716,7 @@ impl SimWorld {
 
     /// Get the base latency for a connection based on its IP pair.
     /// If not set, samples from config and sets it.
-    pub fn get_connection_base_latency(&self, connection_id: ConnectionId) -> Duration {
+    pub fn connection_base_latency(&self, connection_id: ConnectionId) -> Duration {
         let inner = self.inner.borrow();
         let (local_ip, remote_ip) = inner
             .network
@@ -1738,7 +1732,7 @@ impl SimWorld {
         drop(inner);
 
         // Check if latency is already set
-        if let Some(latency) = self.get_pair_latency(local_ip, remote_ip) {
+        if let Some(latency) = self.pair_latency(local_ip, remote_ip) {
             return latency;
         }
 
@@ -1752,7 +1746,7 @@ impl SimWorld {
 
     /// Get the send delay for a connection.
     /// Returns the per-connection override if set, otherwise None.
-    pub fn get_send_delay(&self, connection_id: ConnectionId) -> Option<Duration> {
+    pub fn send_delay(&self, connection_id: ConnectionId) -> Option<Duration> {
         let inner = self.inner.borrow();
         inner
             .network
@@ -1763,7 +1757,7 @@ impl SimWorld {
 
     /// Get the receive delay for a connection.
     /// Returns the per-connection override if set, otherwise None.
-    pub fn get_recv_delay(&self, connection_id: ConnectionId) -> Option<Duration> {
+    pub fn recv_delay(&self, connection_id: ConnectionId) -> Option<Duration> {
         let inner = self.inner.borrow();
         inner
             .network
@@ -1818,7 +1812,7 @@ impl SimWorld {
     }
 
     /// Get the close reason for a connection.
-    pub fn get_close_reason(&self, connection_id: ConnectionId) -> CloseReason {
+    pub fn close_reason(&self, connection_id: ConnectionId) -> CloseReason {
         let inner = self.inner.borrow();
         inner
             .network

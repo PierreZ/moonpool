@@ -123,7 +123,7 @@ pub unsafe fn reset_shared_recipe(recipe: *mut SharedRecipe) {
 /// Get a snapshot of the current exploration statistics.
 ///
 /// Returns `None` if the stats pointer is null (exploration not initialized).
-pub fn get_exploration_stats() -> Option<ExplorationStats> {
+pub fn exploration_stats() -> Option<ExplorationStats> {
     let ptr = crate::context::SHARED_STATS.with(|c| c.get());
     if ptr.is_null() {
         return None;
@@ -157,7 +157,7 @@ pub fn get_exploration_stats() -> Option<ExplorationStats> {
 /// Get the bug recipe if one was captured.
 ///
 /// Returns `None` if no bug was found or exploration is not initialized.
-pub fn get_bug_recipe() -> Option<Vec<(u64, u64)>> {
+pub fn bug_recipe() -> Option<Vec<(u64, u64)>> {
     let ptr = crate::context::SHARED_RECIPE.with(|c| c.get());
     if ptr.is_null() {
         return None;

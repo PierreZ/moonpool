@@ -245,7 +245,7 @@ fn assertion_split(slot_idx: usize, hash: u32) {
 ///
 /// This is a no-op if the assertion table is not initialized.
 pub fn assertion_bool(kind: AssertKind, must_hit: bool, condition: bool, msg: &str) {
-    let table_ptr = crate::context::get_assertion_table_ptr();
+    let table_ptr = crate::context::assertion_table_ptr();
     if table_ptr.is_null() {
         return;
     }
@@ -325,7 +325,7 @@ pub fn assertion_numeric(
     right: i64,
     msg: &str,
 ) {
-    let table_ptr = crate::context::get_assertion_table_ptr();
+    let table_ptr = crate::context::assertion_table_ptr();
     if table_ptr.is_null() {
         return;
     }
@@ -419,7 +419,7 @@ pub fn assertion_numeric(
 ///
 /// This is a no-op if the assertion table is not initialized.
 pub fn assertion_sometimes_all(msg: &str, named_bools: &[(&str, bool)]) {
-    let table_ptr = crate::context::get_assertion_table_ptr();
+    let table_ptr = crate::context::assertion_table_ptr();
     if table_ptr.is_null() {
         return;
     }
@@ -469,7 +469,7 @@ pub fn assertion_sometimes_all(msg: &str, named_bools: &[(&str, bool)]) {
 ///
 /// Returns an empty vector if the assertion table is not initialized.
 pub fn assertion_read_all() -> Vec<AssertionSlotSnapshot> {
-    let table_ptr = crate::context::get_assertion_table_ptr();
+    let table_ptr = crate::context::assertion_table_ptr();
     if table_ptr.is_null() {
         return Vec::new();
     }

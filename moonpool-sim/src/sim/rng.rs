@@ -183,7 +183,7 @@ pub fn sim_random_f64() -> f64 {
 /// The current simulation seed, or 0 if no seed has been set.
 ///
 /// Get the current simulation seed.
-pub fn get_current_sim_seed() -> u64 {
+pub fn current_sim_seed() -> u64 {
     CURRENT_SEED.with(|current| *current.borrow())
 }
 
@@ -209,7 +209,7 @@ pub fn reset_sim_rng() {
 ///
 /// Returns the number of RNG calls made since the last seed set or reset.
 /// Used by the exploration framework to record fork points.
-pub fn get_rng_call_count() -> u64 {
+pub fn rng_call_count() -> u64 {
     RNG_CALL_COUNT.with(|c| c.get())
 }
 
@@ -354,44 +354,44 @@ mod tests {
     }
 
     #[test]
-    fn test_get_current_sim_seed() {
+    fn test_current_sim_seed() {
         // Test getting current seed after setting
         set_sim_seed(12345);
-        assert_eq!(get_current_sim_seed(), 12345);
+        assert_eq!(current_sim_seed(), 12345);
 
         set_sim_seed(98765);
-        assert_eq!(get_current_sim_seed(), 98765);
+        assert_eq!(current_sim_seed(), 98765);
 
         // Test that reset clears the seed
         reset_sim_rng();
-        assert_eq!(get_current_sim_seed(), 0);
+        assert_eq!(current_sim_seed(), 0);
     }
 
     #[test]
     fn test_call_counting() {
         reset_sim_rng();
         set_sim_seed(42);
-        assert_eq!(get_rng_call_count(), 0);
+        assert_eq!(rng_call_count(), 0);
 
         let _: f64 = sim_random();
-        assert_eq!(get_rng_call_count(), 1);
+        assert_eq!(rng_call_count(), 1);
 
         let _: u32 = sim_random();
-        assert_eq!(get_rng_call_count(), 2);
+        assert_eq!(rng_call_count(), 2);
 
         let _ = sim_random_range(0..100);
-        assert_eq!(get_rng_call_count(), 3);
+        assert_eq!(rng_call_count(), 3);
 
         let _ = sim_random_f64();
-        assert_eq!(get_rng_call_count(), 4);
+        assert_eq!(rng_call_count(), 4);
 
         // sim_random_range_or_default with valid range delegates to sim_random_range
         let _ = sim_random_range_or_default(0..100);
-        assert_eq!(get_rng_call_count(), 5);
+        assert_eq!(rng_call_count(), 5);
 
         // sim_random_range_or_default with empty range does NOT consume RNG
         let _ = sim_random_range_or_default(100..100);
-        assert_eq!(get_rng_call_count(), 5);
+        assert_eq!(rng_call_count(), 5);
     }
 
     #[test]
@@ -424,8 +424,8 @@ mod tests {
         // Call 6 triggers breakpoint (count 6 > 5), reseeds to 200
         let after_breakpoint: f64 = sim_random();
         assert_eq!(after_breakpoint, new_seed_first);
-        assert_eq!(get_rng_call_count(), 1);
-        assert_eq!(get_current_sim_seed(), 200);
+        assert_eq!(rng_call_count(), 1);
+        assert_eq!(current_sim_seed(), 200);
     }
 
     #[test]
@@ -438,20 +438,20 @@ mod tests {
         let _: f64 = sim_random(); // count=1
         let _: f64 = sim_random(); // count=2
         let _: f64 = sim_random(); // count=3
-        assert_eq!(get_current_sim_seed(), 10);
+        assert_eq!(current_sim_seed(), 10);
 
         // Call 4: count becomes 4 > 3, breakpoint fires: reseed to 20, count=1
         let _: f64 = sim_random();
-        assert_eq!(get_current_sim_seed(), 20);
-        assert_eq!(get_rng_call_count(), 1);
+        assert_eq!(current_sim_seed(), 20);
+        assert_eq!(rng_call_count(), 1);
 
         // 1 more call with seed 20
         let _: f64 = sim_random(); // count=2
 
         // Call 3 of seed 20: count becomes 3 > 2, breakpoint fires: reseed to 30, count=1
         let _: f64 = sim_random();
-        assert_eq!(get_current_sim_seed(), 30);
-        assert_eq!(get_rng_call_count(), 1);
+        assert_eq!(current_sim_seed(), 30);
+        assert_eq!(rng_call_count(), 1);
     }
 
     #[test]
@@ -462,7 +462,7 @@ mod tests {
         let _: f64 = sim_random();
         let _: f64 = sim_random();
         let _: f64 = sim_random();
-        let fork_count = get_rng_call_count();
+        let fork_count = rng_call_count();
         set_sim_seed(99);
         reset_rng_call_count();
         let post_fork_1: f64 = sim_random();
@@ -490,17 +490,17 @@ mod tests {
         let _: f64 = sim_random();
         set_rng_breakpoints(vec![(10, 99)]);
 
-        assert_eq!(get_rng_call_count(), 2);
+        assert_eq!(rng_call_count(), 2);
 
         reset_sim_rng();
 
-        assert_eq!(get_rng_call_count(), 0);
-        assert_eq!(get_current_sim_seed(), 0);
+        assert_eq!(rng_call_count(), 0);
+        assert_eq!(current_sim_seed(), 0);
 
         // Verify breakpoints were cleared
         set_sim_seed(42);
         let _: f64 = sim_random();
-        assert_eq!(get_rng_call_count(), 1);
-        assert_eq!(get_current_sim_seed(), 42); // no breakpoint triggered
+        assert_eq!(rng_call_count(), 1);
+        assert_eq!(current_sim_seed(), 42); // no breakpoint triggered
     }
 }
