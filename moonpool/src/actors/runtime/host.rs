@@ -19,6 +19,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt;
 use std::rc::Rc;
 use std::task::{Poll, Waker};
 use std::time::Duration;
@@ -174,6 +175,14 @@ pub struct ActorContext<P: Providers, C: MessageCodec = JsonCodec> {
     /// Router for calling other actors.
     pub router: Rc<ActorRouter<P, C>>,
     state_store: Option<Rc<dyn ActorStateStore>>,
+}
+
+impl<P: Providers, C: MessageCodec> fmt::Debug for ActorContext<P, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ActorContext")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<P: Providers, C: MessageCodec> ActorContext<P, C> {
@@ -926,6 +935,12 @@ pub struct ActorHost<P: Providers, C: MessageCodec = JsonCodec> {
     active_actors: Rc<RefCell<BTreeSet<ActorId>>>,
     /// Optional state handle for publishing active actors state.
     state_handle: Option<StateHandle>,
+}
+
+impl<P: Providers, C: MessageCodec> fmt::Debug for ActorHost<P, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ActorHost").finish_non_exhaustive()
+    }
 }
 
 impl<P: Providers, C: MessageCodec> ActorHost<P, C> {

@@ -23,6 +23,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -112,6 +113,15 @@ pub struct ActorRouter<P: Providers, C: MessageCodec = JsonCodec> {
     time: P::Time,
     rpc_timeout: Duration,
     codec: C,
+}
+
+impl<P: Providers, C: MessageCodec> fmt::Debug for ActorRouter<P, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ActorRouter")
+            .field("local_address", &self.local_address)
+            .field("rpc_timeout", &self.rpc_timeout)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<P: Providers, C: MessageCodec> ActorRouter<P, C> {

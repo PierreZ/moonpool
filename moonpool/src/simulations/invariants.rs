@@ -36,6 +36,7 @@ use crate::actors::{
 ///     .invariant(DirectoryConsistency)
 ///     // ...
 /// ```
+#[derive(Debug, Clone, Copy)]
 pub struct DirectoryConsistency;
 
 impl Invariant for DirectoryConsistency {

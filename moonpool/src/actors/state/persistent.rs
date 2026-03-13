@@ -28,6 +28,7 @@
 //!
 //! This corresponds to Orleans' `IPersistentState<T>` / `StateStorageBridge<T>`.
 
+use std::fmt;
 use std::rc::Rc;
 
 use moonpool_sim::assert_sometimes;
@@ -48,6 +49,17 @@ pub struct PersistentState<T> {
     store: Rc<dyn ActorStateStore>,
     actor_type_name: String,
     actor_identity: String,
+}
+
+impl<T> fmt::Debug for PersistentState<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PersistentState")
+            .field("actor_type_name", &self.actor_type_name)
+            .field("actor_identity", &self.actor_identity)
+            .field("etag", &self.etag)
+            .field("record_exists", &self.record_exists)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<T: Serialize + DeserializeOwned + Default> PersistentState<T> {
