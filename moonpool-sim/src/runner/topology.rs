@@ -32,7 +32,7 @@ pub struct WorkloadTopology {
 
 impl WorkloadTopology {
     /// Find the IP address of a peer by its workload name.
-    pub fn get_peer_by_name(&self, name: &str) -> Option<String> {
+    pub fn peer_by_name(&self, name: &str) -> Option<String> {
         self.peer_names
             .iter()
             .position(|peer_name| peer_name == name)
@@ -40,7 +40,7 @@ impl WorkloadTopology {
     }
 
     /// Get all peers with a name prefix (useful for finding multiple clients, servers, etc.)
-    pub fn get_peers_with_prefix(&self, prefix: &str) -> Vec<(String, String)> {
+    pub fn peers_with_prefix(&self, prefix: &str) -> Vec<(String, String)> {
         self.peer_names
             .iter()
             .zip(self.peer_ips.iter())

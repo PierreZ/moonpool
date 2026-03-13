@@ -166,12 +166,12 @@ impl MembershipSnapshot {
     }
 
     /// Get a specific member by address.
-    pub fn get_member(&self, address: &NetworkAddress) -> Option<&ClusterMember> {
+    pub fn member(&self, address: &NetworkAddress) -> Option<&ClusterMember> {
         self.members.get(address)
     }
 
     /// Get the status of a specific member, or `None` if unknown.
-    pub fn get_status(&self, address: &NetworkAddress) -> Option<NodeStatus> {
+    pub fn status(&self, address: &NetworkAddress) -> Option<NodeStatus> {
         self.members.get(address).map(|m| m.status)
     }
 }
@@ -564,7 +564,7 @@ mod tests {
         let snap = m.snapshot().await;
         assert_eq!(snap.version, MembershipVersion(1));
         assert_eq!(snap.members.len(), 1);
-        let member = snap.get_member(&addr(4500)).expect("member should exist");
+        let member = snap.member(&addr(4500)).expect("member should exist");
         assert_eq!(member.status, NodeStatus::Active);
         assert_eq!(member.name, "node-a");
     }
@@ -587,7 +587,7 @@ mod tests {
 
         // snapshot still has the entry
         let snap = m.snapshot().await;
-        assert_eq!(snap.get_status(&addr(4500)), Some(NodeStatus::Dead));
+        assert_eq!(snap.status(&addr(4500)), Some(NodeStatus::Dead));
     }
 
     #[tokio::test]
@@ -640,8 +640,8 @@ mod tests {
 
         let snap = m.snapshot().await;
         assert_eq!(snap.version, MembershipVersion(2));
-        assert!(snap.get_member(&addr(4500)).expect("exists").is_active());
-        assert!(snap.get_member(&addr(4501)).expect("exists").is_active());
+        assert!(snap.member(&addr(4500)).expect("exists").is_active());
+        assert!(snap.member(&addr(4501)).expect("exists").is_active());
     }
 
     #[tokio::test]

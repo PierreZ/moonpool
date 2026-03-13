@@ -185,7 +185,7 @@ pub fn on_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&str, i64)
 ///
 /// Reads from shared memory assertion slots. Returns a snapshot of assertion
 /// results for reporting and validation.
-pub fn get_assertion_results() -> HashMap<String, AssertionStats> {
+pub fn assertion_results() -> HashMap<String, AssertionStats> {
     let slots = moonpool_explorer::assertion_read_all();
     let mut results = HashMap::new();
 
@@ -377,7 +377,7 @@ macro_rules! assert_always {
             eprintln!(
                 "[ASSERTION FAILED] {} (seed={}) | {}",
                 __msg,
-                $crate::get_current_sim_seed(),
+                $crate::current_sim_seed(),
                 $crate::chaos::assertions::format_details(
                     &[ $(($key, &$val as &dyn std::fmt::Display)),+ ]
                 )
@@ -419,7 +419,7 @@ macro_rules! assert_always_or_unreachable {
             eprintln!(
                 "[ASSERTION FAILED] {} (seed={}) | {}",
                 __msg,
-                $crate::get_current_sim_seed(),
+                $crate::current_sim_seed(),
                 $crate::chaos::assertions::format_details(
                     &[ $(($key, &$val as &dyn std::fmt::Display)),+ ]
                 )
@@ -531,7 +531,7 @@ macro_rules! assert_always_greater_than {
             eprintln!(
                 "[ASSERTION FAILED] {} ({}>{} failed, seed={}) | {}",
                 __msg, __v, __t,
-                $crate::get_current_sim_seed(),
+                $crate::current_sim_seed(),
                 $crate::chaos::assertions::format_details(
                     &[ $(($key, &$dval as &dyn std::fmt::Display)),+ ]
                 )
@@ -578,7 +578,7 @@ macro_rules! assert_always_greater_than_or_equal_to {
             eprintln!(
                 "[ASSERTION FAILED] {} ({}>={} failed, seed={}) | {}",
                 __msg, __v, __t,
-                $crate::get_current_sim_seed(),
+                $crate::current_sim_seed(),
                 $crate::chaos::assertions::format_details(
                     &[ $(($key, &$dval as &dyn std::fmt::Display)),+ ]
                 )
@@ -625,7 +625,7 @@ macro_rules! assert_always_less_than {
             eprintln!(
                 "[ASSERTION FAILED] {} ({}<{} failed, seed={}) | {}",
                 __msg, __v, __t,
-                $crate::get_current_sim_seed(),
+                $crate::current_sim_seed(),
                 $crate::chaos::assertions::format_details(
                     &[ $(($key, &$dval as &dyn std::fmt::Display)),+ ]
                 )
@@ -672,7 +672,7 @@ macro_rules! assert_always_less_than_or_equal_to {
             eprintln!(
                 "[ASSERTION FAILED] {} ({}<={} failed, seed={}) | {}",
                 __msg, __v, __t,
-                $crate::get_current_sim_seed(),
+                $crate::current_sim_seed(),
                 $crate::chaos::assertions::format_details(
                     &[ $(($key, &$dval as &dyn std::fmt::Display)),+ ]
                 )
@@ -842,10 +842,10 @@ mod tests {
     }
 
     #[test]
-    fn test_get_assertion_results_empty() {
+    fn test_assertion_results_empty() {
         // When no assertions have been tracked, results should be empty
         // (assertion table not initialized = empty)
-        let results = get_assertion_results();
+        let results = assertion_results();
         // May or may not be empty depending on prior test state,
         // but should not panic
         let _ = results;

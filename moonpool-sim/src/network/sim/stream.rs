@@ -245,7 +245,7 @@ impl AsyncRead for SimTcpStream {
 
             if sim.is_connection_closed(self.connection_id) {
                 // Local side was closed or connection was aborted
-                match sim.get_close_reason(self.connection_id) {
+                match sim.close_reason(self.connection_id) {
                     CloseReason::Aborted => {
                         tracing::info!(
                             "SimTcpStream::poll_read connection_id={} was aborted (RST), returning ECONNRESET",
@@ -312,7 +312,7 @@ impl AsyncRead for SimTcpStream {
                 }
 
                 if sim.is_connection_closed(self.connection_id) {
-                    match sim.get_close_reason(self.connection_id) {
+                    match sim.close_reason(self.connection_id) {
                         CloseReason::Aborted => {
                             tracing::info!(
                                 "SimTcpStream::poll_read connection_id={} was aborted on recheck (RST), returning ECONNRESET",
@@ -372,7 +372,7 @@ impl AsyncWrite for SimTcpStream {
         // Check if connection is closed or cut
         if sim.is_connection_closed(self.connection_id) {
             // Check how the connection was closed
-            return match sim.get_close_reason(self.connection_id) {
+            return match sim.close_reason(self.connection_id) {
                 CloseReason::Aborted => Poll::Ready(Err(connection_aborted_error())),
                 _ => Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
@@ -485,7 +485,7 @@ impl Future for AcceptFuture {
             Err(_) => return Poll::Ready(Err(sim_shutdown_error())),
         };
 
-        match sim.get_pending_connection(&self.local_addr) {
+        match sim.pending_connection(&self.local_addr) {
             Ok(Some(connection_id)) => {
                 // Get accept delay from network configuration
                 let delay = sim.with_network_config(|config| {
@@ -505,7 +505,7 @@ impl Future for AcceptFuture {
                 // Return the synthesized ephemeral peer address, not the client's real address.
                 // This simulates real TCP where servers see client ephemeral ports.
                 let peer_addr = sim
-                    .get_connection_peer_address(connection_id)
+                    .connection_peer_address(connection_id)
                     .unwrap_or_else(|| "unknown:0".to_string());
 
                 let stream = SimTcpStream::new(self.sim.clone(), connection_id);

@@ -537,7 +537,7 @@
 //!
 //! ```ignore
 //! // In moonpool-sim's runner:
-//! moonpool_explorer::set_rng_hooks(get_rng_call_count, |seed| {
+//! moonpool_explorer::set_rng_hooks(rng_call_count, |seed| {
 //!     set_sim_seed(seed);
 //!     reset_rng_call_count();
 //! });
@@ -575,13 +575,13 @@ pub use assertion_slots::{
     ASSERTION_TABLE_MEM_SIZE, AssertCmp, AssertKind, AssertionSlot, AssertionSlotSnapshot,
     assertion_bool, assertion_numeric, assertion_read_all, assertion_sometimes_all, msg_hash,
 };
-pub use context::{explorer_is_child, get_assertion_table_ptr, set_rng_hooks};
+pub use context::{assertion_table_ptr, explorer_is_child, set_rng_hooks};
 pub use each_buckets::{
     EachBucket, assertion_sometimes_each, each_bucket_read_all, unpack_quality,
 };
 pub use replay::{ParseTimelineError, format_timeline, parse_timeline};
 pub use sancov::{sancov_edge_count, sancov_edges_covered, sancov_is_available};
-pub use shared_stats::{ExplorationStats, get_bug_recipe, get_exploration_stats};
+pub use shared_stats::{ExplorationStats, bug_recipe, exploration_stats};
 pub use split_loop::{AdaptiveConfig, Parallelism, exit_child};
 
 use context::{
@@ -924,7 +924,7 @@ mod tests {
         assert!(!context::explorer_is_child());
 
         // Stats should be available
-        let stats = get_exploration_stats().expect("stats should be available");
+        let stats = exploration_stats().expect("stats should be available");
         assert_eq!(stats.global_energy, 100);
         assert_eq!(stats.total_timelines, 0);
         assert_eq!(stats.fork_points, 0);
@@ -932,7 +932,7 @@ mod tests {
 
         cleanup();
         assert!(!context::explorer_is_active());
-        assert!(get_exploration_stats().is_none());
+        assert!(exploration_stats().is_none());
     }
 
     #[test]
@@ -952,7 +952,7 @@ mod tests {
         init_assertions().expect("init_assertions failed");
 
         // Table pointer should be set
-        let ptr = context::get_assertion_table_ptr();
+        let ptr = context::assertion_table_ptr();
         assert!(!ptr.is_null());
 
         // Idempotent — second call should be no-op
@@ -961,7 +961,7 @@ mod tests {
         cleanup_assertions();
 
         // Should be null after cleanup
-        let ptr = context::get_assertion_table_ptr();
+        let ptr = context::assertion_table_ptr();
         assert!(ptr.is_null());
     }
 

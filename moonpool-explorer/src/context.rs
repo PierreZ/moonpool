@@ -137,7 +137,7 @@ pub fn explorer_is_child() -> bool {
 /// Get the raw pointer to the assertion table shared memory.
 ///
 /// Returns null if the table is not initialized.
-pub fn get_assertion_table_ptr() -> *mut u8 {
+pub fn assertion_table_ptr() -> *mut u8 {
     ASSERTION_TABLE.with(|c| c.get())
 }
 

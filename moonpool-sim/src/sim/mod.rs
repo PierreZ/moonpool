@@ -25,8 +25,8 @@ pub use events::{
     ConnectionStateChange, Event, EventQueue, NetworkOperation, ScheduledEvent, StorageOperation,
 };
 pub use rng::{
-    clear_rng_breakpoints, get_current_sim_seed, get_rng_call_count, reset_rng_call_count,
-    reset_sim_rng, set_rng_breakpoints, set_sim_seed, sim_random, sim_random_f64, sim_random_range,
+    clear_rng_breakpoints, current_sim_seed, reset_rng_call_count, reset_sim_rng, rng_call_count,
+    set_rng_breakpoints, set_sim_seed, sim_random, sim_random_f64, sim_random_range,
     sim_random_range_or_default,
 };
 pub use sleep::SleepFuture;

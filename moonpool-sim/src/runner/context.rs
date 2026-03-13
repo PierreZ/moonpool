@@ -98,7 +98,7 @@ impl SimContext {
 
     /// Find a peer's IP address by workload name.
     pub fn peer(&self, name: &str) -> Option<String> {
-        self.topology.get_peer_by_name(name)
+        self.topology.peer_by_name(name)
     }
 
     /// Get all peers as (name, ip) pairs.

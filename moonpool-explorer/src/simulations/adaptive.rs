@@ -24,7 +24,7 @@ thread_local! {
 }
 
 /// Return the current RNG call count.
-pub fn get_count() -> u64 {
+pub fn count() -> u64 {
     CALL_COUNT.with(|c| c.get())
 }
 
@@ -67,7 +67,7 @@ pub fn random_below(divisor: u32) -> u32 {
 /// Brute-force probability: (0.3^2)^3 ~ 7x10^-4.
 /// With adaptive forking the cascade amplifies through 7 fork points.
 pub fn run_adaptive_maze_cascade() -> Result<(), String> {
-    crate::set_rng_hooks(get_count, reseed);
+    crate::set_rng_hooks(count, reseed);
     reseed(42);
 
     crate::init(ExplorationConfig {
@@ -135,7 +135,7 @@ pub fn run_adaptive_maze_cascade() -> Result<(), String> {
 
     // Parent: read stats before cleanup frees shared memory
     let stats =
-        crate::get_exploration_stats().ok_or_else(|| "stats should be available".to_string())?;
+        crate::exploration_stats().ok_or_else(|| "stats should be available".to_string())?;
     crate::cleanup();
 
     if stats.total_timelines == 0 {
@@ -167,7 +167,7 @@ pub fn run_adaptive_maze_cascade() -> Result<(), String> {
 /// Brute-force probability: 0.2^5 ~ 3.2x10^-4.
 /// Fork cascade amplifies at each floor.
 pub fn run_adaptive_dungeon_floors() -> Result<(), String> {
-    crate::set_rng_hooks(get_count, reseed);
+    crate::set_rng_hooks(count, reseed);
     reseed(7777);
 
     crate::init(ExplorationConfig {
@@ -220,7 +220,7 @@ pub fn run_adaptive_dungeon_floors() -> Result<(), String> {
     }
 
     let stats =
-        crate::get_exploration_stats().ok_or_else(|| "stats should be available".to_string())?;
+        crate::exploration_stats().ok_or_else(|| "stats should be available".to_string())?;
     crate::cleanup();
 
     if stats.total_timelines == 0 {
@@ -249,7 +249,7 @@ pub fn run_adaptive_dungeon_floors() -> Result<(), String> {
 /// 3 always-true gates maximize energy consumption. The global energy cap
 /// of 8 limits total forks regardless of per-mark budgets.
 pub fn run_adaptive_energy_budget() -> Result<(), String> {
-    crate::set_rng_hooks(get_count, reseed);
+    crate::set_rng_hooks(count, reseed);
     reseed(99);
 
     crate::init(ExplorationConfig {
@@ -277,7 +277,7 @@ pub fn run_adaptive_energy_budget() -> Result<(), String> {
     }
 
     let stats =
-        crate::get_exploration_stats().ok_or_else(|| "stats should be available".to_string())?;
+        crate::exploration_stats().ok_or_else(|| "stats should be available".to_string())?;
     crate::cleanup();
 
     if stats.total_timelines > 8 {

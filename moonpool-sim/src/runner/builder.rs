@@ -614,7 +614,7 @@ impl SimulationBuilder {
 
         // Initialize exploration if configured
         if let Some(ref config) = self.exploration_config {
-            moonpool_explorer::set_rng_hooks(crate::sim::get_rng_call_count, |seed| {
+            moonpool_explorer::set_rng_hooks(crate::sim::rng_call_count, |seed| {
                 crate::sim::set_sim_seed(seed);
                 crate::sim::reset_rng_call_count();
             });
@@ -799,7 +799,7 @@ impl SimulationBuilder {
                     metrics_collector.add_failed_runs(failed_count);
 
                     // Create early exit report
-                    let assertion_results = crate::chaos::get_assertion_results();
+                    let assertion_results = crate::chaos::assertion_results();
                     let (assertion_violations, coverage_violations) =
                         crate::chaos::validate_assertion_contracts();
                     crate::chaos::buggify_reset();
@@ -820,7 +820,7 @@ impl SimulationBuilder {
 
             // Accumulate exploration stats across seeds (before reset)
             if self.exploration_config.is_some() {
-                if let Some(stats) = moonpool_explorer::get_exploration_stats() {
+                if let Some(stats) = moonpool_explorer::exploration_stats() {
                     per_seed_timelines.push(stats.total_timelines);
                     total_exploration_timelines += stats.total_timelines;
                     total_exploration_fork_points += stats.fork_points;
@@ -828,7 +828,7 @@ impl SimulationBuilder {
                 } else {
                     per_seed_timelines.push(0);
                 }
-                if let Some(recipe) = moonpool_explorer::get_bug_recipe() {
+                if let Some(recipe) = moonpool_explorer::bug_recipe() {
                     bug_recipes.push(super::report::BugRecipe { seed, recipe });
                 }
             }
@@ -925,7 +925,7 @@ impl SimulationBuilder {
 
         // 1. Read exploration-specific data (freed by cleanup)
         let exploration_report = if self.exploration_config.is_some() {
-            let final_stats = moonpool_explorer::get_exploration_stats();
+            let final_stats = moonpool_explorer::exploration_stats();
             // The per-iteration capture above should have caught all recipes.
             // No fallback needed since we capture after every iteration.
             let coverage_bits = moonpool_explorer::explored_map_bits_set().unwrap_or(0);
@@ -958,7 +958,7 @@ impl SimulationBuilder {
         };
 
         // 2. Read assertion + bucket data (freed by cleanup/cleanup_assertions)
-        let assertion_results = crate::chaos::get_assertion_results();
+        let assertion_results = crate::chaos::assertion_results();
         let (assertion_violations, coverage_violations) =
             crate::chaos::validate_assertion_contracts();
         let raw_assertion_slots = moonpool_explorer::assertion_read_all();

@@ -83,7 +83,7 @@ impl StorageFile for SimStorageFile {
 
     async fn size(&self) -> io::Result<u64> {
         let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
-        sim.get_file_size(self.file_id)
+        sim.file_size(self.file_id)
             .map_err(|e| io::Error::other(e.to_string()))
     }
 
@@ -138,12 +138,12 @@ impl AsyncRead for SimStorageFile {
 
         // Get current position
         let position = sim
-            .get_file_position(self.file_id)
+            .file_position(self.file_id)
             .map_err(|e| io::Error::other(e.to_string()))?;
 
         // Get file size to check for EOF
         let file_size = sim
-            .get_file_size(self.file_id)
+            .file_size(self.file_id)
             .map_err(|e| io::Error::other(e.to_string()))?;
 
         // Check for EOF
@@ -191,7 +191,7 @@ impl AsyncWrite for SimStorageFile {
 
                 // Update file position
                 let position = sim
-                    .get_file_position(self.file_id)
+                    .file_position(self.file_id)
                     .map_err(|e| io::Error::other(e.to_string()))?;
                 let new_position = position + bytes_written as u64;
                 sim.set_file_position(self.file_id, new_position)
@@ -213,7 +213,7 @@ impl AsyncWrite for SimStorageFile {
 
         // Get current position
         let position = sim
-            .get_file_position(self.file_id)
+            .file_position(self.file_id)
             .map_err(|e| io::Error::other(e.to_string()))?;
 
         // Schedule the write operation
@@ -247,11 +247,11 @@ impl AsyncSeek for SimStorageFile {
 
         // Calculate target position
         let current_position = sim
-            .get_file_position(self.file_id)
+            .file_position(self.file_id)
             .map_err(|e| io::Error::other(e.to_string()))?;
 
         let file_size = sim
-            .get_file_size(self.file_id)
+            .file_size(self.file_id)
             .map_err(|e| io::Error::other(e.to_string()))?;
 
         let target = match position {
@@ -284,7 +284,7 @@ impl AsyncSeek for SimStorageFile {
             SeekState::Idle => {
                 // No seek in progress, return current position
                 let position = sim
-                    .get_file_position(self.file_id)
+                    .file_position(self.file_id)
                     .map_err(|e| io::Error::other(e.to_string()))?;
                 Poll::Ready(Ok(position))
             }

@@ -174,8 +174,8 @@ pub mod simulations;
 // Sim module re-exports
 pub use sim::{
     ConnectionStateChange, Event, EventQueue, NetworkOperation, ScheduledEvent, SimWorld,
-    SleepFuture, StorageOperation, WeakSimWorld, clear_rng_breakpoints, get_current_sim_seed,
-    get_rng_call_count, reset_rng_call_count, reset_sim_rng, set_rng_breakpoints, set_sim_seed,
+    SleepFuture, StorageOperation, WeakSimWorld, clear_rng_breakpoints, current_sim_seed,
+    reset_rng_call_count, reset_sim_rng, rng_call_count, set_rng_breakpoints, set_sim_seed,
     sim_random, sim_random_range, sim_random_range_or_default,
 };
 
@@ -188,7 +188,7 @@ pub use runner::{
 
 // Chaos module re-exports
 pub use chaos::{
-    AssertionStats, Invariant, StateHandle, buggify_init, buggify_reset, get_assertion_results,
+    AssertionStats, Invariant, StateHandle, assertion_results, buggify_init, buggify_reset,
     has_always_violations, invariant_fn, panic_on_assertion_violations, reset_always_violations,
     reset_assertion_results, validate_assertion_contracts,
 };
