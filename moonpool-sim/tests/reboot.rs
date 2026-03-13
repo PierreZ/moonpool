@@ -129,6 +129,7 @@ fn test_process_tags_round_robin() {
     let report = SimulationBuilder::new()
         .processes(4, || Box::new(EchoProcess))
         .tags(&[("dc", &["east", "west"])])
+        .expect("tags after processes")
         .workload(TagVerifierWorkload)
         .set_iterations(1)
         .set_debug_seeds(vec![42])
@@ -261,6 +262,7 @@ fn test_tag_based_reboot() {
     let report = SimulationBuilder::new()
         .processes(4, || Box::new(EchoProcess))
         .tags(&[("dc", &["east", "west"])])
+        .expect("tags after processes")
         .workload(WaitForShutdownWorkload)
         .fault(RebootTaggedInjector)
         .phases(PhaseConfig {
@@ -309,6 +311,7 @@ fn test_process_reads_own_tags() {
     let report = SimulationBuilder::new()
         .processes(3, || Box::new(TagAwareProcess))
         .tags(&[("role", &["leader", "follower"])])
+        .expect("tags after processes")
         .workload(WaitForShutdownWorkload)
         .set_iterations(1)
         .set_debug_seeds(vec![42])
