@@ -67,6 +67,8 @@ pub enum Parallelism {
 /// Resolve a [`Parallelism`] value to a concrete slot count (≥ 1).
 #[cfg(unix)]
 fn resolve_parallelism(p: &Parallelism) -> usize {
+    // Safety: sysconf reads a system configuration value and does not
+    // dereference any pointers. It is always safe to call.
     let ncpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
     let ncpus = if ncpus > 0 { ncpus as usize } else { 1 };
     let n = match p {

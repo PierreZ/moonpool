@@ -558,12 +558,16 @@ pub fn cleanup_sancov_shared() {
 
     let transfer = SANCOV_TRANSFER.with(|c| c.get());
     if !transfer.is_null() {
+        // Safety: transfer was returned by alloc_shared(len) in init_sancov_shared().
+        // Pointer is non-null (checked above) and has not been previously freed.
         unsafe { crate::shared_mem::free_shared(transfer, len) };
         SANCOV_TRANSFER.with(|c| c.set(std::ptr::null_mut()));
     }
 
     let history = SANCOV_HISTORY.with(|c| c.get());
     if !history.is_null() {
+        // Safety: history was returned by alloc_shared(len) in init_sancov_shared().
+        // Pointer is non-null (checked above) and has not been previously freed.
         unsafe { crate::shared_mem::free_shared(history, len) };
         SANCOV_HISTORY.with(|c| c.set(std::ptr::null_mut()));
     }
@@ -572,6 +576,8 @@ pub fn cleanup_sancov_shared() {
     if !pool.is_null() {
         let slots = SANCOV_POOL_SLOTS.with(|c| c.get());
         if slots > 0 {
+            // Safety: pool was returned by alloc_shared(slots * len) in
+            // get_or_init_sancov_pool(). Size matches the original allocation.
             unsafe { crate::shared_mem::free_shared(pool, slots * len) };
         }
         SANCOV_POOL.with(|c| c.set(std::ptr::null_mut()));
@@ -591,6 +597,8 @@ pub fn clear_transfer_buffer() {
         return;
     }
     let len = COUNTERS_LEN.load(Ordering::Relaxed);
+    // Safety: transfer was returned by alloc_shared(len) and is non-null (checked
+    // above). write_bytes zeroes exactly len bytes, matching the allocation size.
     unsafe {
         std::ptr::write_bytes(transfer, 0, len);
     }
@@ -614,6 +622,9 @@ pub fn copy_counters_to_shared() {
     }
     let src = COUNTERS_PTR.load(Ordering::Relaxed);
     let len = COUNTERS_LEN.load(Ordering::Relaxed);
+    // Safety: src points to the LLVM-generated BSS counter array (set by
+    // __sanitizer_cov_8bit_counters_init), transfer points to alloc_shared(len).
+    // Both are valid for len bytes. The regions do not overlap (BSS vs mmap).
     unsafe {
         std::ptr::copy_nonoverlapping(src, transfer, len);
     }
@@ -629,6 +640,9 @@ pub fn reset_bss_counters() {
     }
     let ptr = COUNTERS_PTR.load(Ordering::Relaxed);
     let len = COUNTERS_LEN.load(Ordering::Relaxed);
+    // Safety: ptr points to the LLVM-generated BSS counter array (set by
+    // __sanitizer_cov_8bit_counters_init). It is valid for len bytes and writable
+    // (BSS is read-write). write_bytes zeroes exactly len bytes.
     unsafe {
         std::ptr::write_bytes(ptr, 0, len);
     }
@@ -661,6 +675,8 @@ pub fn get_or_init_sancov_pool(slot_count: usize) -> *mut u8 {
 
     // Free old pool if too small
     if !existing.is_null() {
+        // Safety: existing was returned by alloc_shared(existing_slots * len)
+        // in a prior call. Size matches the original allocation.
         unsafe {
             crate::shared_mem::free_shared(existing, existing_slots * len);
         }

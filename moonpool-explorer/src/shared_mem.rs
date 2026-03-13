@@ -17,9 +17,12 @@ use std::io;
 /// Returns an error if `mmap` fails (e.g., insufficient memory).
 #[cfg(unix)]
 pub fn alloc_shared(size: usize) -> Result<*mut u8, io::Error> {
-    // Safety: MAP_ANONYMOUS does not require a file descriptor.
-    // MAP_SHARED ensures visibility across fork().
-    // The returned memory is zeroed by the kernel.
+    // Safety: FFI call to libc::mmap.
+    // - MAP_ANONYMOUS: no file descriptor required (fd = -1).
+    // - MAP_SHARED: memory visible across fork() boundaries.
+    // - Kernel guarantees: returned memory is zeroed and page-aligned.
+    // - We check for MAP_FAILED before returning the pointer.
+    // - The caller owns the returned pointer and must free it via free_shared().
     let ptr = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
@@ -40,8 +43,10 @@ pub fn alloc_shared(size: usize) -> Result<*mut u8, io::Error> {
 ///
 /// # Safety
 ///
-/// `ptr` must have been returned by [`alloc_shared`] with the same `size`.
-/// The pointer must not be used after this call.
+/// - `ptr` must have been returned by [`alloc_shared`] with the same `size`.
+/// - `ptr` must not have been previously freed (no double-free).
+/// - The pointer and any derived references become invalid after this call.
+/// - `size` must exactly match the value passed to `alloc_shared`.
 #[cfg(unix)]
 pub unsafe fn free_shared(ptr: *mut u8, size: usize) {
     unsafe {

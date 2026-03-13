@@ -206,6 +206,8 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
     // so the bitmap distinguishes e.g. floor-1 from floor-2 assertions.
     let bm_ptr = crate::context::COVERAGE_BITMAP_PTR.with(|c| c.get());
     if !bm_ptr.is_null() {
+        // Safety: bm_ptr is non-null (checked above) and was set to a valid
+        // alloc_shared() pointer of COVERAGE_MAP_SIZE bytes during init().
         let bm = unsafe { crate::coverage::CoverageBitmap::new(bm_ptr) };
         bm.set_bit(bucket_hash as usize);
     }
@@ -288,6 +290,11 @@ pub fn each_bucket_read_all() -> Vec<EachBucket> {
     if ptr.is_null() {
         return Vec::new();
     }
+    // Safety: ptr was allocated during init() with EACH_BUCKET_MEM_SIZE bytes.
+    // - The first 4 bytes hold the bucket count (u32), capped at MAX_EACH_BUCKETS.
+    // - base = ptr + 8 is the start of the EachBucket array.
+    // - Loop bound 0..count ensures base.add(i) stays within the allocated region.
+    // - EachBucket is #[repr(C)] + Copy, so ptr::read is valid for initialized slots.
     unsafe {
         let count = (*(ptr as *const u32)) as usize;
         let count = count.min(MAX_EACH_BUCKETS);
