@@ -628,7 +628,9 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                 assert_sometimes!(true, "on_activate_failed");
                 tracing::warn!(error = %e, "actor activation failed");
                 reply.send(ActorResponse {
-                    body: Err(format!("activation failed: {e}")),
+                    body: Err(crate::actors::types::ActorHandlerError::ActivationFailed {
+                        message: e.to_string(),
+                    }),
                     cache_invalidation: None,
                 });
                 continue;
@@ -700,7 +702,7 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
         // Dispatch
         let Some(actor_ref) = actor.as_mut() else {
             reply.send(ActorResponse {
-                body: Err("internal: actor not activated".to_string()),
+                body: Err(crate::actors::types::ActorHandlerError::NotActivated),
                 cache_invalidation: None,
             });
             continue;
@@ -730,7 +732,9 @@ async fn identity_processing_loop<H: ActorHandler, P: Providers, C: MessageCodec
                     "dispatch returned error"
                 );
                 ActorResponse {
-                    body: Err(e.to_string()),
+                    body: Err(crate::actors::types::ActorHandlerError::HandlerError {
+                        message: e.to_string(),
+                    }),
                     cache_invalidation: None,
                 }
             }
@@ -810,10 +814,11 @@ fn forward_message<P: Providers, C: MessageCodec>(
             "forward count exceeded"
         );
         reply.send(ActorResponse {
-            body: Err(format!(
-                "message forwarded too many times ({})",
-                actor_msg.forward_count
-            )),
+            body: Err(
+                crate::actors::types::ActorHandlerError::ForwardLimitExceeded {
+                    count: actor_msg.forward_count,
+                },
+            ),
             cache_invalidation: None,
         });
         return;
@@ -860,7 +865,7 @@ fn forward_message<P: Providers, C: MessageCodec>(
                 "failed to forward message"
             );
             reply.send(ActorResponse {
-                body: Err("failed to forward message".to_string()),
+                body: Err(crate::actors::types::ActorHandlerError::ForwardFailed),
                 cache_invalidation: Some(cache_invalidation),
             });
         }
@@ -884,7 +889,7 @@ async fn proxy_forwarded_response<T: moonpool_core::TimeProvider, C: MessageCode
         }
         Ok(Err(_)) | Err(_) => {
             reply.send(ActorResponse {
-                body: Err("forwarded request failed".to_string()),
+                body: Err(crate::actors::types::ActorHandlerError::ForwardedRequestFailed),
                 cache_invalidation: Some(cache_invalidation),
             });
         }

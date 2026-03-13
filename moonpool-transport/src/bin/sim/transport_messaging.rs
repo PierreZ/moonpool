@@ -17,30 +17,6 @@ fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
     builder.run()
 }
 
-fn check_report(name: &str, report: &SimulationReport) -> Result<(), String> {
-    if !report.seeds_failing.is_empty() {
-        return Err(format!(
-            "{}: {} failing seeds: {:?}",
-            name,
-            report.seeds_failing.len(),
-            report.seeds_failing
-        ));
-    }
-    if !report.assertion_violations.is_empty() {
-        return Err(format!(
-            "{}: assertion violations:\n{}",
-            name,
-            report
-                .assertion_violations
-                .iter()
-                .map(|v| format!("  - {}", v))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
-    }
-    Ok(())
-}
-
 fn main() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
@@ -59,7 +35,7 @@ fn main() {
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
     report.eprint();
-    if let Err(e) = check_report("local_delivery", &report) {
+    if let Err(e) = report.check("local_delivery") {
         eprintln!("FAILED: {e}");
         process::exit(1);
     }
@@ -74,7 +50,7 @@ fn main() {
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
     report.eprint();
-    if let Err(e) = check_report("rpc_happy_path", &report) {
+    if let Err(e) = report.check("rpc_happy_path") {
         eprintln!("FAILED: {e}");
         process::exit(1);
     }
@@ -89,7 +65,7 @@ fn main() {
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
     report.eprint();
-    if let Err(e) = check_report("rpc_error_paths", &report) {
+    if let Err(e) = report.check("rpc_error_paths") {
         eprintln!("FAILED: {e}");
         process::exit(1);
     }
@@ -110,7 +86,7 @@ fn main() {
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
     report.eprint();
-    if let Err(e) = check_report("multi_node_rpc", &report) {
+    if let Err(e) = report.check("multi_node_rpc") {
         eprintln!("FAILED: {e}");
         process::exit(1);
     }
@@ -125,7 +101,7 @@ fn main() {
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
     report.eprint();
-    if let Err(e) = check_report("multi_method", &report) {
+    if let Err(e) = report.check("multi_method") {
         eprintln!("FAILED: {e}");
         process::exit(1);
     }

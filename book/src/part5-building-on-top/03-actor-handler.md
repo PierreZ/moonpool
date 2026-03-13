@@ -86,7 +86,7 @@ impl ActorHandler for BankAccountImpl {
         if let Some(store) = ctx.state_store() {
             let ps = PersistentState::<BankAccountData>::load(
                 store.clone(), "BankAccount", &ctx.id.identity,
-            ).await.map_err(|e| ActorError::HandlerError(format!("state load: {e}")))?;
+            ).await.map_err(|e| ActorError::from(ActorHandlerError::HandlerError { message: format!("state load: {e}") }))?;
             self.state = Some(ps);
         }
         Ok(())

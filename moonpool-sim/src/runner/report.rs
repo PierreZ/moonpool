@@ -144,7 +144,61 @@ pub struct SimulationReport {
     pub convergence_timeout: bool,
 }
 
+/// Errors from [`SimulationReport::check`].
+#[derive(Debug, thiserror::Error)]
+pub enum ReportCheckError {
+    /// One or more seeds produced panics or assertion failures.
+    #[error("{name}: {count} failing seeds: {seeds:?}")]
+    FailingSeeds {
+        /// Name of the scenario that was checked.
+        name: String,
+        /// Number of failing seeds.
+        count: usize,
+        /// The failing seed values.
+        seeds: Vec<u64>,
+    },
+    /// One or more always-type assertion contracts were violated.
+    #[error("{name}: assertion violations:\n{violations}")]
+    AssertionViolations {
+        /// Name of the scenario that was checked.
+        name: String,
+        /// Formatted violation list.
+        violations: String,
+    },
+}
+
 impl SimulationReport {
+    /// Check whether the report contains failures or assertion violations.
+    ///
+    /// Returns `Ok(())` when the report is clean, or the first error found.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReportCheckError::FailingSeeds`] when any seeds failed,
+    /// or [`ReportCheckError::AssertionViolations`] when assertion contracts
+    /// were violated.
+    pub fn check(&self, name: &str) -> Result<(), ReportCheckError> {
+        if !self.seeds_failing.is_empty() {
+            return Err(ReportCheckError::FailingSeeds {
+                name: name.to_string(),
+                count: self.seeds_failing.len(),
+                seeds: self.seeds_failing.clone(),
+            });
+        }
+        if !self.assertion_violations.is_empty() {
+            return Err(ReportCheckError::AssertionViolations {
+                name: name.to_string(),
+                violations: self
+                    .assertion_violations
+                    .iter()
+                    .map(|v| format!("  - {v}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            });
+        }
+        Ok(())
+    }
+
     /// Whether the simulation run is considered successful.
     ///
     /// Returns `false` when any of the following hold:

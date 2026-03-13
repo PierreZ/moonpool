@@ -16,30 +16,6 @@ fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
     builder.run()
 }
 
-fn check_report(name: &str, report: &SimulationReport) -> Result<(), String> {
-    if !report.seeds_failing.is_empty() {
-        return Err(format!(
-            "{}: {} failing seeds: {:?}",
-            name,
-            report.seeds_failing.len(),
-            report.seeds_failing
-        ));
-    }
-    if !report.assertion_violations.is_empty() {
-        return Err(format!(
-            "{}: assertion violations:\n{}",
-            name,
-            report
-                .assertion_violations
-                .iter()
-                .map(|v| format!("  - {}", v))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
-    }
-    Ok(())
-}
-
 fn main() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
@@ -60,7 +36,7 @@ fn main() {
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
     report.eprint();
-    if let Err(e) = check_report("reliable_delivery", &report) {
+    if let Err(e) = report.check("reliable_delivery") {
         eprintln!("FAILED: {e}");
         process::exit(1);
     }
@@ -81,7 +57,7 @@ fn main() {
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
     report.eprint();
-    if let Err(e) = check_report("unreliable_drops", &report) {
+    if let Err(e) = report.check("unreliable_drops") {
         eprintln!("FAILED: {e}");
         process::exit(1);
     }
@@ -102,7 +78,7 @@ fn main() {
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
     report.eprint();
-    if let Err(e) = check_report("mixed_queues", &report) {
+    if let Err(e) = report.check("mixed_queues") {
         eprintln!("FAILED: {e}");
         process::exit(1);
     }
@@ -123,7 +99,7 @@ fn main() {
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
     report.eprint();
-    if let Err(e) = check_report("reconnection", &report) {
+    if let Err(e) = report.check("reconnection") {
         eprintln!("FAILED: {e}");
         process::exit(1);
     }
@@ -156,7 +132,7 @@ fn main() {
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
     report.eprint();
-    if let Err(e) = check_report("multi_client", &report) {
+    if let Err(e) = report.check("multi_client") {
         eprintln!("FAILED: {e}");
         process::exit(1);
     }

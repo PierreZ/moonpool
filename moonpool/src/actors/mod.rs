@@ -44,7 +44,8 @@ mod types;
 
 pub use actor_ref::ActorRef;
 pub use types::{
-    ActivationId, ActorAddress, ActorId, ActorMessage, ActorResponse, ActorType, CacheInvalidation,
+    ActivationId, ActorAddress, ActorHandlerError, ActorId, ActorMessage, ActorResponse, ActorType,
+    CacheInvalidation,
 };
 
 // --- Runtime ---
