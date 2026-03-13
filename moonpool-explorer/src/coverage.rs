@@ -32,7 +32,9 @@ impl CoverageBitmap {
         let bit_index = index % (COVERAGE_MAP_SIZE * 8);
         let byte = bit_index / 8;
         let bit = bit_index % 8;
-        // Safety: ptr points to COVERAGE_MAP_SIZE bytes, byte < COVERAGE_MAP_SIZE
+        // Safety: self.ptr points to COVERAGE_MAP_SIZE bytes (constructor invariant).
+        // The modular arithmetic (bit_index % (COVERAGE_MAP_SIZE * 8)) guarantees
+        // byte = bit_index / 8 < COVERAGE_MAP_SIZE, so ptr.add(byte) is in bounds.
         unsafe {
             *self.ptr.add(byte) |= 1 << bit;
         }
@@ -40,7 +42,8 @@ impl CoverageBitmap {
 
     /// Clear all bits to zero.
     pub fn clear(&self) {
-        // Safety: ptr points to COVERAGE_MAP_SIZE bytes
+        // Safety: self.ptr points to COVERAGE_MAP_SIZE bytes of writable shared
+        // memory (constructor invariant). write_bytes zeroes exactly that region.
         unsafe {
             std::ptr::write_bytes(self.ptr, 0, COVERAGE_MAP_SIZE);
         }
@@ -74,6 +77,8 @@ impl ExploredMap {
     /// Merge a timeline's coverage bitmap into this explored map (bitwise OR).
     pub fn merge_from(&self, other: &CoverageBitmap) {
         // Safety: both pointers are valid for COVERAGE_MAP_SIZE bytes
+        // (constructor invariants of ExploredMap and CoverageBitmap).
+        // Loop bound 0..COVERAGE_MAP_SIZE ensures all ptr.add(i) are in bounds.
         unsafe {
             for i in 0..COVERAGE_MAP_SIZE {
                 *self.ptr.add(i) |= *other.as_ptr().add(i);
@@ -87,7 +92,8 @@ impl ExploredMap {
     /// all timelines.
     pub fn count_bits_set(&self) -> u32 {
         let mut count: u32 = 0;
-        // Safety: ptr points to COVERAGE_MAP_SIZE bytes
+        // Safety: self.ptr points to COVERAGE_MAP_SIZE bytes (constructor invariant).
+        // Loop bound 0..COVERAGE_MAP_SIZE ensures ptr.add(i) is in bounds.
         unsafe {
             for i in 0..COVERAGE_MAP_SIZE {
                 count += (*self.ptr.add(i)).count_ones();
@@ -99,6 +105,8 @@ impl ExploredMap {
     /// Check if a timeline's bitmap contains any bits not yet in the explored map.
     pub fn has_new_bits(&self, other: &CoverageBitmap) -> bool {
         // Safety: both pointers are valid for COVERAGE_MAP_SIZE bytes
+        // (constructor invariants of ExploredMap and CoverageBitmap).
+        // Loop bound 0..COVERAGE_MAP_SIZE ensures all ptr.add(i) are in bounds.
         unsafe {
             for i in 0..COVERAGE_MAP_SIZE {
                 let explored = *self.ptr.add(i);

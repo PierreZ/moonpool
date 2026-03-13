@@ -216,6 +216,8 @@ fn assertion_split(slot_idx: usize, hash: u32) {
     // Mark coverage bitmap
     let bm_ptr = crate::context::COVERAGE_BITMAP_PTR.with(|c| c.get());
     if !bm_ptr.is_null() {
+        // Safety: bm_ptr is non-null (checked above) and points to
+        // COVERAGE_MAP_SIZE bytes of shared memory set during init().
         let bm = unsafe { crate::coverage::CoverageBitmap::new(bm_ptr) };
         bm.set_bit(hash as usize);
     }
@@ -223,9 +225,12 @@ fn assertion_split(slot_idx: usize, hash: u32) {
     // Mark explored map
     let vm_ptr = crate::context::EXPLORED_MAP_PTR.with(|c| c.get());
     if !vm_ptr.is_null() {
+        // Safety: vm_ptr is non-null (checked above) and points to
+        // COVERAGE_MAP_SIZE bytes of shared memory set during init().
         let vm = unsafe { crate::coverage::ExploredMap::new(vm_ptr) };
         let bm_ptr2 = crate::context::COVERAGE_BITMAP_PTR.with(|c| c.get());
         if !bm_ptr2.is_null() {
+            // Safety: same invariant as bm_ptr above.
             let bm = unsafe { crate::coverage::CoverageBitmap::new(bm_ptr2) };
             vm.merge_from(&bm);
         }
@@ -474,6 +479,12 @@ pub fn assertion_read_all() -> Vec<AssertionSlotSnapshot> {
         return Vec::new();
     }
 
+    // Safety: table_ptr was allocated during init() with ASSERTION_TABLE_MEM_SIZE bytes.
+    // - The first 4 bytes hold the slot count (u32), capped at MAX_ASSERTION_SLOTS.
+    // - base = table_ptr + 8 is the start of the AssertionSlot array.
+    // - Loop bound 0..count ensures base.add(i) stays within the allocated region.
+    // - AssertionSlot fields are read through a shared reference; tombstoned slots
+    //   (msg_hash == 0) are skipped.
     unsafe {
         let count = (*(table_ptr as *const u32)) as usize;
         let count = count.min(MAX_ASSERTION_SLOTS);
