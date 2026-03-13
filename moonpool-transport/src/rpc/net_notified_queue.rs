@@ -233,13 +233,25 @@ impl<T: DeserializeOwned + 'static, C: MessageCodec> MessageReceiver for NetNoti
             }
             Err(e) => {
                 assert_reachable!("queue: deserialization failed");
-                // Log error and drop the message
                 tracing::warn!(
                     endpoint = %self.endpoint.token,
                     error = %e,
-                    "failed to deserialize message"
+                    "failed to deserialize message, closing queue"
                 );
-                self.inner.borrow_mut().messages_dropped += 1;
+                let mut inner = self.inner.borrow_mut();
+                inner.messages_dropped += 1;
+                // Close the queue so callers can detect the failure
+                // via close_reason() instead of silently losing the message.
+                // Guard: preserve original close reason if already closed.
+                if !inner.closed {
+                    inner.closed = true;
+                    inner.close_reason = Some(ReplyError::Serialization {
+                        message: format!("{}", e),
+                    });
+                    for waker in inner.wakers.drain(..) {
+                        waker.wake();
+                    }
+                }
             }
         }
     }
@@ -380,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn test_receive_invalid_json_drops() {
+    fn test_receive_invalid_json_closes_queue() {
         let queue: NetNotifiedQueue<String, JsonCodec> =
             NetNotifiedQueue::new(test_endpoint(), JsonCodec);
 
@@ -391,6 +403,12 @@ mod tests {
         assert!(queue.is_empty());
         assert_eq!(queue.messages_received(), 0);
         assert_eq!(queue.messages_dropped(), 1);
+        // Queue should be closed with a Serialization error
+        assert!(queue.is_closed());
+        assert!(matches!(
+            queue.close_reason(),
+            Some(ReplyError::Serialization { .. })
+        ));
     }
 
     #[test]
