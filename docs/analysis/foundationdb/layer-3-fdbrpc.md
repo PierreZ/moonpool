@@ -646,7 +646,155 @@ ops (commits), `False` for idempotent ones (reads).
 
 ---
 
-## 12. Decision Flowchart
+## 12. The 5 Server-Side Idempotency Patterns
+
+Section 11 above describes **caller strategies** -- how the caller chooses a delivery mode and
+handles failures. This section describes the complementary concern: **how the server ensures
+correctness when it receives the same request more than once**. Every at-least-once RPC
+(`getReply`, `getReplyUnlessFailedFor`, `retryBrokenPromise`, broadcast patterns) needs one of
+these server-side patterns.
+
+### Pattern 1: Version-Is-The-Key
+
+The globally unique commit version assigned by the Master IS the dedup key. The `prevVersion →
+version` chain forms a total order; the server waits for `prevVersion` before processing
+`version`, so a duplicate delivery of the same version is either ignored or produces the same
+result.
+
+```
+CommitProxy → Master: GetCommitVersion(requestNum=42)
+Master → CommitProxy: {version=1000, prevVersion=999}
+CommitProxy → Resolver: Resolve(version=1000, prevVersion=999)  // waits for 999 first
+CommitProxy → TLog: Commit(version=1000)                         // waits for 999 first
+```
+
+**Where**: `TLogCommitRequest`, `ResolveTransactionBatchRequest`
+
+**Design insight**: When your system has a single sequencer, the sequence number itself is the
+idempotency key. No additional dedup state needed.
+
+### Pattern 2: Per-Caller Monotonic Request Numbers
+
+Each caller maintains a per-caller monotonic counter. The server tracks
+`mostRecentProcessedRequestNum` per caller and deduplicates:
+
+```cpp
+// masterserver.actor.cpp -- Master side
+if (requestNum <= mostRecentProcessedRequestNum) {
+    return cachedCommitVersion;  // already processed
+}
+if (requestNum > currentRequestNum + 1) {
+    return Never;  // future request -- wait
+}
+// process and cache result
+```
+
+**Where**: `GetCommitVersionRequest.requestNum` (CommitProxy → Master)
+
+**Design insight**: When the caller set is fixed and each caller issues sequential requests,
+a per-caller sequence number with server-side last-seen tracking is the simplest dedup.
+This is Pattern 2 in section 11 (generation numbers) seen from the server side.
+
+### Pattern 3: Explicit Idempotency Tokens
+
+Client-generated 16-255 byte random tokens, stored in the `\xff\x02/idmp/` keyspace alongside
+the commit version. On retry after `commit_unknown_result`:
+
+```
+1. Client generates IdempotencyId (16 random bytes)
+2. Client → CommitProxy: Commit(mutations, idempotencyId)
+3. Network failure -- client doesn't know if committed
+4. Client → CommitProxy: commitDummyTransaction()     // flush pipeline
+5. Client → StorageServer: scan \xff\x02/idmp/[readVersion, readVersion+MAX_LIFE] for id
+6. Found → return original versionstamp
+   Not found → throw transaction_too_old (safe to retry from scratch)
+```
+
+The `commitDummyTransaction` step is critical: it ensures the original commit is either fully
+committed or fully aborted before querying. Without it, you get false negatives (commit still
+in flight).
+
+Storage format batches up to 256 IDs per key to reduce write amplification:
+```
+Key:   \xff\x02/idmp/${commitVersion_BE_8bytes}${highBatchIndex_1byte}
+Value: ${protocolVersion}${timestamp_i64}(${idLen_1byte}${id}${lowBatchIndex_1byte})*
+```
+
+**Where**: `CommitTransactionRequest.idempotencyId` (Client → CommitProxy)
+
+**Key source**: `fdbclient/IdempotencyId.actor.cpp`, `design/idempotency_ids.md`
+
+**Design insight**: When the caller is untrusted/unbounded, caller-generated opaque tokens stored
+alongside the result enable post-hoc dedup queries. The common path (no failure) pays near-zero
+cost; only the rare failure path pays for the query.
+
+### Pattern 4: Naturally Idempotent (MVCC + Version Pinning)
+
+MVCC reads with a pinned version are inherently idempotent -- same inputs always produce
+the same outputs:
+
+```
+GetValue(key="foo", version=1000)  // always returns same result for same version
+```
+
+No dedup needed. Retries are always safe. This covers the **majority of RPCs by count**: all
+`StorageServer` reads, all metadata/metrics queries, all `loadBalance`-d operations.
+
+**Design insight**: Design read paths to be version-pinned. If every read includes the version
+it's reading at, retries are free.
+
+### Pattern 5: Monotonic / Convergent Operations
+
+Fire-and-forget messages where the operation is monotonic -- `server_state = max(server_state, incoming)`:
+
+```
+TLogPop(version=500)   // "I've consumed everything up to 500"
+TLogPop(version=500)   // duplicate -- no-op, already at 500
+TLogPop(version=400)   // out-of-order -- ignored, already past 400
+```
+
+**Where**: `TLogPopRequest`, `ChangeFeedPopRequest`, `ReportRawCommittedVersionRequest`
+
+**Design insight**: If the operation is "advance a watermark," duplicates and reordering
+become harmless with no tracking state.
+
+### How patterns compose on the commit path
+
+Each hop in the commit path uses a different pattern:
+
+```
+Client                CommitProxy           Master          Resolver        TLog
+  |                       |                   |               |              |
+  |--- CommitTxnReq ----->|                                                  |
+  |   [Pattern 3: idmpId] |                                                  |
+  |                       |--- GetCommitVer ->|                              |
+  |                       |  [Pattern 2: reqN] |                             |
+  |                       |<-- version=V -----|                              |
+  |                       |                                                  |
+  |                       |--- ResolveBatch ----------------->|              |
+  |                       | [Pattern 1: version chain]        |              |
+  |                       |<-- committed/conflict ------------|              |
+  |                       |                                                  |
+  |                       |--- TLogCommit ---------------------------------------->|
+  |                       | [Pattern 1: version chain]                       |
+  |                       |<-- persisted ------------------------------------------|
+  |                       |                                                  |
+  |<-- CommitID(V) -------|                                                  |
+```
+
+### Pattern selection table
+
+| Server-side pattern | When to use | Dedup state cost |
+|---------------------|-------------|-----------------|
+| 1. Version-is-the-key | System has a single sequencer | Zero (version IS the key) |
+| 2. Per-caller seqnum | Fixed, known caller set | O(callers) |
+| 3. Explicit tokens | Unbounded callers, side effects | O(tokens) with TTL cleanup |
+| 4. Natural idempotency | Reads, version-pinned queries | Zero |
+| 5. Monotonic/convergent | Watermarks, counters | Zero |
+
+---
+
+## 13. Decision Flowchart (Caller Strategy)
 
 ```
 Is losing the message acceptable?
@@ -672,7 +820,7 @@ Are there multiple equivalent servers?
 
 ---
 
-## 13. Rust Mapping Cheat Sheet
+## 14. Rust Mapping Cheat Sheet
 
 | C++ (fdbrpc) | Rust equivalent |
 |---|---|
@@ -709,3 +857,8 @@ Are there multiple equivalent servers?
 | Worker registration (Strategy 2) | `fdbserver/worker.actor.cpp:615-651` |
 | CC generation dedup (Strategy 2) | `fdbserver/ClusterController.actor.cpp:1290-1352` |
 | Commit idempotency (Strategy 4) | `fdbclient/NativeAPI.actor.cpp:6829-6871` |
+| Master requestNum dedup (Pattern 2) | `fdbserver/masterserver.actor.cpp` |
+| TLog version chain (Pattern 1) | `fdbserver/TLogServer.actor.cpp` (search `prevVersion`) |
+| IdempotencyId storage (Pattern 3) | `fdbclient/IdempotencyId.actor.cpp` |
+| IdempotencyId design doc | `design/idempotency_ids.md` |
+| Commit path walkthrough | `design/Commit/How a commit is done in FDB.md` |
