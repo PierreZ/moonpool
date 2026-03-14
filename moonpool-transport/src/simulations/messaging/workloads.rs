@@ -15,6 +15,7 @@ use crate::{
     ReplyPromise, TimeProvider, UID, send_request,
 };
 use async_trait::async_trait;
+use moonpool_core::SimulationError;
 use moonpool_sim::{Process, SimContext, SimulationResult, Workload, assert_sometimes};
 
 use super::invariants::{MessageInvariants, RpcInvariants};
@@ -74,7 +75,7 @@ impl Workload for LocalDeliveryWorkload {
         let transport = NetTransportBuilder::new(ctx.providers().clone())
             .local_address(local_addr.clone())
             .build()
-            .expect("build should succeed");
+            .map_err(|e| SimulationError::InvalidState(e.to_string()))?;
 
         // Create message queue and register with transport
         let token = UID::new(0x1234, 0x5678);
@@ -102,7 +103,9 @@ impl Workload for LocalDeliveryWorkload {
                     payload_size,
                 } => {
                     let msg = TestMessage::with_payload(seq_id, &my_id, true, payload_size);
-                    let payload = msg.to_bytes();
+                    let payload = msg
+                        .to_bytes()
+                        .map_err(|e| SimulationError::InvalidState(e.to_string()))?;
                     if transport.send_reliable(&endpoint, &payload).is_ok() {
                         invariants.borrow_mut().record_sent(seq_id, true);
                     }
@@ -112,7 +115,9 @@ impl Workload for LocalDeliveryWorkload {
                     payload_size,
                 } => {
                     let msg = TestMessage::with_payload(seq_id, &my_id, false, payload_size);
-                    let payload = msg.to_bytes();
+                    let payload = msg
+                        .to_bytes()
+                        .map_err(|e| SimulationError::InvalidState(e.to_string()))?;
                     if transport.send_unreliable(&endpoint, &payload).is_ok() {
                         invariants.borrow_mut().record_sent(seq_id, false);
                     }
@@ -225,7 +230,7 @@ impl Workload for RpcWorkload {
         let transport = NetTransportBuilder::new(ctx.providers().clone())
             .local_address(local_addr.clone())
             .build()
-            .expect("build should succeed");
+            .map_err(|e| SimulationError::InvalidState(e.to_string()))?;
 
         let server_token = UID::new(0xAABB, 0xCCDD);
         let request_stream =
@@ -415,14 +420,14 @@ impl Process for MultiNodeServerWorkload {
         } else {
             format!("{}:4500", my_id)
         };
-        let local_addr =
-            NetworkAddress::parse(&addr_with_port).expect("valid server address in topology");
+        let local_addr = NetworkAddress::parse(&addr_with_port)
+            .map_err(|e| SimulationError::InvalidState(e.to_string()))?;
 
         let transport = NetTransportBuilder::new(ctx.providers().clone())
             .local_address(local_addr.clone())
             .build_listening()
             .await
-            .expect("server listen failed");
+            .map_err(|e| SimulationError::InvalidState(e.to_string()))?;
 
         tracing::info!(addr = %local_addr, "Server listening");
         assert_sometimes!(true, "Server should start listening");
@@ -562,29 +567,31 @@ impl Workload for MultiNodeClientWorkload {
         } else {
             format!("{}:4501", my_id)
         };
-        let local_addr =
-            NetworkAddress::parse(&addr_with_port).expect("valid client address in topology");
+        let local_addr = NetworkAddress::parse(&addr_with_port)
+            .map_err(|e| SimulationError::InvalidState(e.to_string()))?;
 
         // Find server peer
         let server_addr_str = ctx
             .peer("server")
             .or_else(|| ctx.peers().first().map(|(_, ip)| ip.clone()))
-            .expect("server address in topology");
+            .ok_or_else(|| {
+                SimulationError::InvalidState("server address not found in topology".into())
+            })?;
 
         let server_addr_with_port = if server_addr_str.contains(':') {
             server_addr_str.clone()
         } else {
             format!("{}:4500", server_addr_str)
         };
-        let server_addr =
-            NetworkAddress::parse(&server_addr_with_port).expect("valid server address");
+        let server_addr = NetworkAddress::parse(&server_addr_with_port)
+            .map_err(|e| SimulationError::InvalidState(e.to_string()))?;
 
         tracing::info!(server = %server_addr, "Client connecting to server");
 
         let transport = NetTransportBuilder::new(ctx.providers().clone())
             .local_address(local_addr.clone())
             .build()
-            .expect("build should succeed");
+            .map_err(|e| SimulationError::InvalidState(e.to_string()))?;
 
         let server_token = UID::new(0xAABB, 0xCCDD);
         let server_endpoint = Endpoint::new(server_addr.clone(), server_token);
@@ -680,7 +687,7 @@ impl Workload for MultiMethodWorkload {
         let transport = NetTransportBuilder::new(ctx.providers().clone())
             .local_address(local_addr.clone())
             .build()
-            .expect("build should succeed");
+            .map_err(|e| SimulationError::InvalidState(e.to_string()))?;
 
         let (add_stream, add_token) = transport.register_handler_at::<CalcAddRequest, _>(
             calculator::CALC_INTERFACE,

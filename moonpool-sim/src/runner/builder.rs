@@ -8,6 +8,7 @@ use std::ops::{Range, RangeInclusive};
 use std::time::{Duration, Instant};
 use tracing::instrument;
 
+use crate::SimulationError;
 use crate::chaos::invariant_trait::Invariant;
 use crate::runner::fault_injector::{FaultInjector, PhaseConfig};
 use crate::runner::process::{Attrition, Process};
@@ -311,9 +312,10 @@ impl SimulationBuilder {
     /// Tags are distributed round-robin across process instances. Each tag
     /// dimension is distributed independently.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if called without a preceding `.processes()` call.
+    /// Returns `SimulationError::InvalidState` if called without a preceding
+    /// `.processes()` call.
     ///
     /// # Examples
     ///
@@ -323,17 +325,16 @@ impl SimulationBuilder {
     ///     .tags(&[
     ///         ("dc", &["east", "west", "eu"]),
     ///         ("rack", &["r1", "r2"]),
-    ///     ])
+    ///     ])?
     /// ```
-    pub fn tags(mut self, dimensions: &[(&str, &[&str])]) -> Self {
-        let entry = self
-            .process_entry
-            .as_mut()
-            .expect("tags() must be called after processes()");
+    pub fn tags(mut self, dimensions: &[(&str, &[&str])]) -> Result<Self, SimulationError> {
+        let entry = self.process_entry.as_mut().ok_or_else(|| {
+            SimulationError::InvalidState("tags() must be called after processes()".into())
+        })?;
         for (key, values) in dimensions {
             entry.tags.add(key, values);
         }
-        self
+        Ok(self)
     }
 
     /// Set built-in attrition for automatic process reboots during chaos phase.

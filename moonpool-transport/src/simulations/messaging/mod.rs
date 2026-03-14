@@ -54,8 +54,12 @@ impl TestMessage {
     }
 
     /// Serialize to JSON bytes for sending via NetTransport.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("TestMessage serialization should not fail")
+    ///
+    /// # Errors
+    ///
+    /// Returns `serde_json::Error` if serialization fails.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
     }
 }
 
@@ -192,7 +196,7 @@ mod serialization_tests {
     #[test]
     fn test_message_serialization_roundtrip() {
         let msg = TestMessage::with_payload(42, "client_1", true, 100);
-        let bytes = msg.to_bytes();
+        let bytes = msg.to_bytes().expect("should serialize");
         let decoded: TestMessage = serde_json::from_slice(&bytes).expect("should deserialize");
         assert_eq!(msg, decoded);
     }
@@ -200,7 +204,7 @@ mod serialization_tests {
     #[test]
     fn test_message_minimal() {
         let msg = TestMessage::new(0, "", false);
-        let bytes = msg.to_bytes();
+        let bytes = msg.to_bytes().expect("should serialize");
         let decoded: TestMessage = serde_json::from_slice(&bytes).expect("should deserialize");
         assert_eq!(msg, decoded);
     }
