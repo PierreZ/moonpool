@@ -55,7 +55,7 @@ Attrition {
 
 ## Using Attrition
 
-Attrition is configured on the simulation builder and requires phases to be set:
+Attrition is configured on the simulation builder and requires a chaos duration:
 
 ```rust
 SimulationBuilder::new()
@@ -68,16 +68,13 @@ SimulationBuilder::new()
         recovery_delay_ms: None,  // use defaults
         grace_period_ms: None,    // use defaults
     })
-    .phases(PhaseConfig {
-        chaos_duration: Duration::from_secs(60),
-        recovery_duration: Duration::from_secs(30),
-    })
+    .chaos_duration(Duration::from_secs(60))
     .workload(MyWorkload::new())
     .run()
     .await;
 ```
 
-The `.phases()` call is required because attrition runs only during the chaos phase. During the recovery phase, the attrition injector stops and the system heals. This two-phase structure lets you verify that the system converges to a correct state after faults stop.
+The `.chaos_duration()` call is required because attrition runs only during the chaos phase. After the chaos duration elapses, fault injectors stop and the system continues until all workloads complete. A settle phase then drains remaining events before checks run, surfacing cleanup bugs rather than hiding them behind an arbitrary timer.
 
 ## The max_dead Constraint
 

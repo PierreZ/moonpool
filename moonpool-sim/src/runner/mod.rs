@@ -27,7 +27,7 @@ pub mod workload;
 pub use builder::{ClientId, WorkloadCount};
 pub use builder::{IterationControl, SimulationBuilder};
 pub use context::SimContext;
-pub use fault_injector::{FaultContext, FaultInjector, PhaseConfig};
+pub use fault_injector::{FaultContext, FaultInjector};
 pub use process::{Attrition, Process, RebootKind};
 pub use report::{SimulationMetrics, SimulationReport};
 pub use tags::{ProcessTags, TagRegistry};

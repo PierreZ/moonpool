@@ -20,7 +20,7 @@ The builder pattern for configuring and running simulation experiments. Created 
 | `invariant(i)` | `impl Invariant` | Add an invariant checked after every simulation event |
 | `invariant_fn(name, f)` | `String`, closure | Add a closure-based invariant |
 | `fault(f)` | `impl FaultInjector` | Add a custom fault injector for the chaos phase |
-| `phases(config)` | `PhaseConfig` | Set chaos/recovery phase durations |
+| `chaos_duration(dur)` | `Duration` | Set the chaos phase duration (faults run concurrently with workloads) |
 | `set_iterations(n)` | `usize` | Run exactly N iterations (default: 1) |
 | `set_iteration_control(ctrl)` | `IterationControl` | Set the iteration control strategy |
 | `set_time_limit(dur)` | `Duration` | Run for a wall-clock time duration |
@@ -82,18 +82,9 @@ Strategy for assigning client IDs to workload instances.
 
 **Default**: `Fixed(0)` (sequential starting from 0, matching FoundationDB's `WorkloadContext.clientId`).
 
-## PhaseConfig
-
-Two-phase chaos/recovery configuration. Required for attrition and fault injectors to activate.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `chaos_duration` | `Duration` | Duration of the chaos phase (faults + workloads run concurrently) |
-| `recovery_duration` | `Duration` | Duration of the recovery phase (faults stopped, workloads continue) |
-
 ## Attrition
 
-Built-in configuration for automatic process reboots during the chaos phase. Requires `.phases()` to be set.
+Built-in configuration for automatic process reboots during the chaos phase. Requires `.chaos_duration()` to be set.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

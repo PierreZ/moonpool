@@ -12,7 +12,7 @@ use crate::chaos::invariant_trait::Invariant;
 use crate::chaos::state_handle::StateHandle;
 use crate::runner::builder::WorkloadClientInfo;
 use crate::runner::context::SimContext;
-use crate::runner::fault_injector::{FaultContext, FaultInjector, PhaseConfig};
+use crate::runner::fault_injector::{FaultContext, FaultInjector};
 use crate::runner::process::Process;
 use crate::runner::tags::{ProcessTags, TagRegistry};
 use crate::runner::topology::TopologyFactory;
@@ -262,12 +262,18 @@ type WorkloadResult = (Box<dyn Workload>, SimulationResult<()>);
 type InjectorResult = (Box<dyn FaultInjector>, SimulationResult<()>);
 
 impl WorkloadOrchestrator {
-    /// Execute all workloads using the new lifecycle: setup → run → check.
+    /// Execute all workloads using the unified lifecycle:
+    /// boot → setup → run (with optional chaos) → settle → check.
+    ///
+    /// Setup and check run inside the cooperative event loop so network
+    /// RPCs don't deadlock. When `chaos_duration` is set, fault injectors
+    /// run concurrently with workloads and stop when the duration elapses.
+    /// After all workloads complete, a settle phase drains remaining events.
     ///
     /// Returns workloads and fault injectors back to the caller for reuse across iterations.
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub(crate) async fn orchestrate_workloads(
-        mut workloads: Vec<Box<dyn Workload>>,
+        workloads: Vec<Box<dyn Workload>>,
         fault_injectors: Vec<Box<dyn FaultInjector>>,
         invariants: &[Box<dyn Invariant>],
         workload_info: &[(String, String)],
@@ -275,7 +281,7 @@ impl WorkloadOrchestrator {
         process_config: Option<ProcessConfig<'_>>,
         seed: u64,
         mut sim: crate::sim::SimWorld,
-        phase_config: Option<&PhaseConfig>,
+        chaos_duration: Option<Duration>,
         iteration_count: usize,
     ) -> Result<
         (
@@ -323,7 +329,7 @@ impl WorkloadOrchestrator {
         // Create SimProviders (Clone-able, shared across workload contexts)
         let providers = crate::SimProviders::new(sim.downgrade(), seed);
 
-        // === BOOT PROCESSES ===
+        // === 1. BOOT PROCESSES ===
         let mut process_handles: Vec<Option<tokio::task::JoinHandle<()>>> = Vec::new();
         let mut process_tokens: Vec<Option<tokio_util::sync::CancellationToken>> = Vec::new();
         if let Some(ref pc) = process_config {
@@ -373,7 +379,7 @@ impl WorkloadOrchestrator {
             None => ProcessManager::new_empty(),
         };
 
-        // === SETUP PHASE ===
+        // Build contexts for workloads
         let mut contexts = Vec::with_capacity(workloads.len());
         for (i, (_, ip)) in workload_info.iter().enumerate() {
             let WorkloadClientInfo {
@@ -394,326 +400,103 @@ impl WorkloadOrchestrator {
             contexts.push(ctx);
         }
 
-        for (workload, ctx) in workloads.iter_mut().zip(contexts.iter()) {
-            tracing::debug!("Setting up workload: {}", workload.name());
-            if let Err(e) = workload.setup(ctx).await {
-                tracing::error!("Workload '{}' setup failed: {}", workload.name(), e);
-                let mut results: Vec<SimulationResult<()>> = vec![Err(e)];
-                for _ in 1..workloads.len() {
-                    results.push(Ok(()));
-                }
-                process_manager.abort_all();
-                let sim_metrics = sim.extract_metrics();
-                return Ok((workloads, fault_injectors, results, sim_metrics));
-            }
-        }
-
-        // === RUN PHASE ===
-        let (workloads, fault_injectors, results) = if let Some(pc) = phase_config {
-            Self::run_with_phases(
-                workloads,
-                fault_injectors,
-                invariants,
-                &all_entities,
-                contexts,
-                &state,
-                seed,
-                &mut sim,
-                pc,
-                iteration_count,
-                &shutdown_signal,
-                &providers,
-                &mut process_manager,
-            )
-            .await?
-        } else {
-            Self::run_without_phases(
-                workloads,
-                fault_injectors,
-                invariants,
-                contexts,
-                &state,
-                seed,
-                &mut sim,
-                iteration_count,
-                &shutdown_signal,
-                &providers,
-                &mut process_manager,
-            )
-            .await?
-        };
-
-        // Kill all remaining processes
-        process_manager.abort_all();
-
-        // Drain remaining events
-        sim.run_until_empty();
-
-        // === CHECK PHASE ===
-        let mut check_contexts = Vec::with_capacity(workload_info.len());
-        for (i, (_, ip)) in workload_info.iter().enumerate() {
-            let WorkloadClientInfo {
-                client_id,
-                client_count,
-            } = client_info[i];
-            let topology = TopologyFactory::create_topology_with_processes(
-                ip,
-                client_id,
-                client_count,
-                &all_entities,
-                &process_ips,
-                ProcessTags::default(),
-                tag_registry.clone(),
-                shutdown_signal.clone(),
-            );
-            let ctx = SimContext::new(providers.clone(), topology, state.clone());
-            check_contexts.push(ctx);
-        }
-
-        let mut returned_workloads = workloads;
-        for (workload, ctx) in returned_workloads.iter_mut().zip(check_contexts.iter()) {
-            tracing::debug!("Running check for workload: {}", workload.name());
-            if let Err(e) = workload.check(ctx).await {
-                tracing::error!("Workload '{}' check failed: {}", workload.name(), e);
-            }
-        }
-
-        // Extract final simulation metrics
-        let sim_metrics = sim.extract_metrics();
-
-        // If this is a forked child, exit immediately to return control to parent.
-        if moonpool_explorer::explorer_is_child() {
-            let code =
-                if results.iter().all(|r| r.is_ok()) && !crate::chaos::has_always_violations() {
-                    0
-                } else {
-                    42
-                };
-            moonpool_explorer::exit_child(code);
-        }
-
-        Ok((returned_workloads, fault_injectors, results, sim_metrics))
-    }
-
-    /// Run workloads without phase config (first completion triggers shutdown).
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-    async fn run_without_phases(
-        workloads: Vec<Box<dyn Workload>>,
-        fault_injectors: Vec<Box<dyn FaultInjector>>,
-        invariants: &[Box<dyn Invariant>],
-        contexts: Vec<SimContext>,
-        state: &StateHandle,
-        seed: u64,
-        sim: &mut crate::sim::SimWorld,
-        iteration_count: usize,
-        shutdown_signal: &tokio_util::sync::CancellationToken,
-        providers: &crate::SimProviders,
-        process_manager: &mut ProcessManager<'_>,
-    ) -> Result<
-        (
-            Vec<Box<dyn Workload>>,
-            Vec<Box<dyn FaultInjector>>,
-            Vec<SimulationResult<()>>,
-        ),
-        (Vec<u64>, usize),
-    > {
-        tracing::debug!("Spawning {} workload(s) (no phase config)", workloads.len());
-
-        // Spawn all workload runs
-        let total = workloads.len();
-        let mut handles: Vec<Option<tokio::task::JoinHandle<WorkloadResult>>> =
-            Vec::with_capacity(total);
+        // === 2. SETUP PHASE (spawn_local + cooperative stepping) ===
+        let mut setup_handles = Vec::new();
         for (workload, ctx) in workloads.into_iter().zip(contexts.into_iter()) {
             let handle = tokio::task::spawn_local(async move {
                 let mut w = workload;
-                let result = w.run(&ctx).await;
-                (w, result)
+                let result = w.setup(&ctx).await;
+                (w, ctx, result)
             });
-            handles.push(Some(handle));
+            setup_handles.push(handle);
         }
 
-        let mut collected: Vec<Option<WorkloadResult>> = (0..total).map(|_| None).collect();
-        let mut loop_count: u64 = 0;
-        let mut deadlock_detector = DeadlockDetector::new(3);
-        let mut shutdown_triggered = false;
-
+        // Cooperative loop for setup
         loop {
-            let active_count = handles.iter().filter(|h| h.is_some()).count();
-            if active_count == 0 {
+            if setup_handles.iter().all(|h| h.is_finished()) {
                 break;
             }
-
-            loop_count += 1;
-            if loop_count.is_multiple_of(100) {
-                tracing::debug!(
-                    "Cooperative loop iteration {}, {} handles active, {} pending events",
-                    loop_count,
-                    active_count,
-                    sim.pending_event_count()
-                );
-            }
-
-            let initial_handle_count = active_count;
-            let initial_event_count = sim.pending_event_count();
-
-            // Process one simulation event
             if sim.pending_event_count() > 0 {
                 sim.step();
-                let current_time_ms = sim.current_time().as_millis() as u64;
-                Self::check_invariants(state, current_time_ms, invariants);
-
-                // Handle process restarts
-                // Handle process lifecycle events
-                match sim.last_processed_event() {
-                    Some(crate::sim::Event::ProcessGracefulShutdown {
-                        ip,
-                        grace_period_ms,
-                        recovery_delay_ms,
-                    }) => {
-                        assert_reachable!("event: ProcessGracefulShutdown");
-                        process_manager.signal_graceful_shutdown(ip);
-                        sim.schedule_event(
-                            crate::sim::Event::ProcessForceKill {
-                                ip,
-                                recovery_delay_ms,
-                            },
-                            Duration::from_millis(grace_period_ms),
-                        );
-                    }
-                    Some(crate::sim::Event::ProcessForceKill {
-                        ip,
-                        recovery_delay_ms,
-                    }) => {
-                        process_manager.abort_process(ip);
-                        sim.abort_all_connections_for_ip(ip);
-                        sim.schedule_process_restart(ip, Duration::from_millis(recovery_delay_ms));
-                    }
-                    Some(crate::sim::Event::ProcessRestart { ip }) => {
-                        assert_reachable!("event: ProcessRestart");
-                        process_manager.handle_restart(ip, providers, state, shutdown_signal);
-                    }
-                    _ => {}
-                }
+                Self::handle_process_events(
+                    &mut sim,
+                    &mut process_manager,
+                    &providers,
+                    &state,
+                    &shutdown_signal,
+                );
             }
-
-            // Collect finished handles
-            let mut any_finished = false;
-            for i in 0..handles.len() {
-                let finished = handles[i].as_ref().is_some_and(|h| h.is_finished());
-                if finished {
-                    let handle = handles[i].take().expect("just checked Some");
-                    match handle.await {
-                        Ok((workload, result)) => {
-                            tracing::debug!("Workload '{}' completed", workload.name());
-                            collected[i] = Some((workload, result));
-                        }
-                        Err(_) => {
-                            tracing::error!("Workload task panicked");
-                        }
-                    }
-                    any_finished = true;
-                }
-            }
-
-            // Trigger shutdown on first completion
-            if any_finished && !shutdown_triggered {
-                Self::trigger_shutdown(sim, shutdown_signal);
-                shutdown_triggered = true;
-            }
-
-            let current_active = handles.iter().filter(|h| h.is_some()).count();
-
-            // Deadlock detection: trigger shutdown first to give tasks a chance to exit,
-            // only fail on the second detection (genuine deadlock).
-            if deadlock_detector.check_deadlock(
-                current_active,
-                initial_handle_count,
-                sim.pending_event_count(),
-                initial_event_count,
-            ) {
-                if !shutdown_triggered {
-                    tracing::warn!(
-                        "No progress detected on iteration {} with seed {}: {} tasks remaining. Triggering shutdown to unblock workloads.",
-                        iteration_count,
-                        seed,
-                        current_active,
-                    );
-                    Self::trigger_shutdown(sim, shutdown_signal);
-                    shutdown_triggered = true;
-                    deadlock_detector.reset();
-                } else {
-                    tracing::error!(
-                        "DEADLOCK (without phase) detected on iteration {} with seed {}: {} tasks remaining after {} no-progress iterations",
-                        iteration_count,
-                        seed,
-                        current_active,
-                        deadlock_detector.no_progress_count()
-                    );
-                    return Err((vec![seed], 1));
-                }
-            }
-
-            // Yield to allow tasks to make progress
-            if current_active > 0 {
-                tokio::task::yield_now().await;
-            }
+            tokio::task::yield_now().await;
         }
 
-        // Build return values
-        let mut returned_workloads = Vec::with_capacity(total);
-        let mut results = Vec::with_capacity(total);
-
-        for item in collected {
-            match item {
-                Some((workload, result)) => {
-                    returned_workloads.push(workload);
-                    results.push(result);
+        // Collect setup results
+        let mut workloads = Vec::with_capacity(setup_handles.len());
+        let mut contexts = Vec::with_capacity(setup_handles.len());
+        let mut setup_failed = false;
+        let mut setup_results: Vec<SimulationResult<()>> = Vec::new();
+        for handle in setup_handles {
+            match handle.await {
+                Ok((w, ctx, result)) => {
+                    if let Err(ref e) = result {
+                        tracing::error!("Workload '{}' setup failed: {}", w.name(), e);
+                        setup_failed = true;
+                    }
+                    setup_results.push(result);
+                    workloads.push(w);
+                    contexts.push(ctx);
                 }
-                None => {
-                    results.push(Err(crate::SimulationError::InvalidState(
-                        "Task panicked".to_string(),
+                Err(_) => {
+                    tracing::error!("Setup task panicked");
+                    setup_failed = true;
+                    setup_results.push(Err(crate::SimulationError::InvalidState(
+                        "Setup task panicked".to_string(),
                     )));
                 }
             }
         }
 
-        Ok((returned_workloads, fault_injectors, results))
-    }
+        if setup_failed {
+            process_manager.abort_all();
+            let sim_metrics = sim.extract_metrics();
+            return Ok((workloads, fault_injectors, setup_results, sim_metrics));
+        }
 
-    /// Run workloads with two-phase chaos/recovery lifecycle.
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-    async fn run_with_phases(
-        workloads: Vec<Box<dyn Workload>>,
-        fault_injectors: Vec<Box<dyn FaultInjector>>,
-        invariants: &[Box<dyn Invariant>],
-        all_entities: &[(String, String)],
-        contexts: Vec<SimContext>,
-        state: &StateHandle,
-        seed: u64,
-        sim: &mut crate::sim::SimWorld,
-        phase_config: &PhaseConfig,
-        iteration_count: usize,
-        shutdown_signal: &tokio_util::sync::CancellationToken,
-        providers: &crate::SimProviders,
-        process_manager: &mut ProcessManager<'_>,
-    ) -> Result<
-        (
-            Vec<Box<dyn Workload>>,
-            Vec<Box<dyn FaultInjector>>,
-            Vec<SimulationResult<()>>,
-        ),
-        (Vec<u64>, usize),
-    > {
-        tracing::debug!(
-            "Running with phases: chaos={:?}, recovery={:?}",
-            phase_config.chaos_duration,
-            phase_config.recovery_duration
-        );
-
+        // === 3. START FAULT INJECTORS (if chaos_duration set) ===
         let chaos_shutdown = tokio_util::sync::CancellationToken::new();
         let all_ips: Vec<String> = all_entities.iter().map(|(_, ip)| ip.clone()).collect();
 
-        // Spawn all workload runs
+        let mut injector_handles: Vec<Option<tokio::task::JoinHandle<InjectorResult>>> = Vec::new();
+        let mut parked_injectors: Vec<Box<dyn FaultInjector>> = Vec::new();
+        if chaos_duration.is_some() {
+            for fi in fault_injectors.into_iter() {
+                let fault_sim = sim
+                    .downgrade()
+                    .upgrade()
+                    .map_err(|_| (vec![seed], 1usize))?;
+                let fault_ctx = FaultContext::new(
+                    fault_sim,
+                    all_ips.clone(),
+                    crate::runner::fault_injector::ProcessInfo {
+                        process_ips: process_manager.ips.clone(),
+                        tag_registry: process_manager.tag_registry.clone(),
+                        dead_count: process_manager.dead_count(),
+                    },
+                    crate::SimRandomProvider::new(seed),
+                    sim.time_provider(),
+                    chaos_shutdown.clone(),
+                );
+                let handle = tokio::task::spawn_local(async move {
+                    let mut injector = fi;
+                    let result = injector.inject(&fault_ctx).await;
+                    (injector, result)
+                });
+                injector_handles.push(Some(handle));
+            }
+        } else {
+            parked_injectors = fault_injectors;
+        }
+
+        // === 4. RUN PHASE (unified cooperative loop) ===
         let total_workloads = workloads.len();
         let mut workload_handles: Vec<Option<tokio::task::JoinHandle<WorkloadResult>>> =
             Vec::with_capacity(total_workloads);
@@ -726,45 +509,13 @@ impl WorkloadOrchestrator {
             workload_handles.push(Some(handle));
         }
 
-        // Spawn all fault injectors
-        let total_injectors = fault_injectors.len();
-        let mut injector_handles: Vec<Option<tokio::task::JoinHandle<InjectorResult>>> =
-            Vec::with_capacity(total_injectors);
-        for fi in fault_injectors.into_iter() {
-            // Create a SimWorld handle for the fault context (Rc clone via downgrade/upgrade)
-            let fault_sim = sim
-                .downgrade()
-                .upgrade()
-                .map_err(|_| (vec![seed], 1usize))?;
-            let fault_ctx = FaultContext::new(
-                fault_sim,
-                all_ips.clone(),
-                crate::runner::fault_injector::ProcessInfo {
-                    process_ips: process_manager.ips.clone(),
-                    tag_registry: process_manager.tag_registry.clone(),
-                    dead_count: process_manager.dead_count(),
-                },
-                crate::SimRandomProvider::new(seed),
-                sim.time_provider(),
-                chaos_shutdown.clone(),
-            );
-            let handle = tokio::task::spawn_local(async move {
-                let mut injector = fi;
-                let result = injector.inject(&fault_ctx).await;
-                (injector, result)
-            });
-            injector_handles.push(Some(handle));
-        }
-
-        // Event loop
         let chaos_start = sim.current_time();
-        let mut chaos_ended = false;
-        let mut recovery_ended = false;
+        let mut chaos_ended = chaos_duration.is_none(); // Already "ended" if no chaos configured
         let mut deadlock_detector = DeadlockDetector::new(3);
         let mut shutdown_triggered = false;
-
         let mut workload_collected: Vec<Option<WorkloadResult>> =
             (0..total_workloads).map(|_| None).collect();
+        let mut loop_count: u64 = 0;
 
         loop {
             let active_workloads = workload_handles.iter().filter(|h| h.is_some()).count();
@@ -772,71 +523,49 @@ impl WorkloadOrchestrator {
                 break;
             }
 
-            let elapsed = sim.current_time().saturating_sub(chaos_start);
+            loop_count += 1;
+            if loop_count.is_multiple_of(100) {
+                tracing::debug!(
+                    "Cooperative loop iteration {}, {} handles active, {} pending events",
+                    loop_count,
+                    active_workloads,
+                    sim.pending_event_count()
+                );
+            }
+
             let initial_handle_count = active_workloads;
             let initial_event_count = sim.pending_event_count();
 
-            // Phase transitions
-            if !chaos_ended && elapsed >= phase_config.chaos_duration {
-                tracing::debug!("Chaos phase ended, transitioning to recovery");
-                chaos_shutdown.cancel();
-                Self::heal_all_partitions(sim, &all_ips);
-                chaos_ended = true;
-                assert_reachable!("phase: chaos ended");
-            }
-
-            if !recovery_ended
-                && chaos_ended
-                && elapsed >= phase_config.chaos_duration + phase_config.recovery_duration
-            {
-                tracing::debug!("Recovery phase ended, triggering shutdown");
-                Self::trigger_shutdown(sim, shutdown_signal);
-                recovery_ended = true;
-                shutdown_triggered = true;
-                assert_reachable!("phase: recovery ended");
+            // Chaos phase transition
+            if !chaos_ended {
+                let elapsed = sim.current_time().saturating_sub(chaos_start);
+                if let Some(cd) = chaos_duration
+                    && elapsed >= cd
+                {
+                    tracing::debug!("Chaos phase ended after {:?}", elapsed);
+                    chaos_shutdown.cancel();
+                    Self::heal_all_partitions(&mut sim, &all_ips);
+                    chaos_ended = true;
+                    assert_reachable!("phase: chaos ended");
+                }
             }
 
             // Process one simulation event
             if sim.pending_event_count() > 0 {
                 sim.step();
                 let current_time_ms = sim.current_time().as_millis() as u64;
-                Self::check_invariants(state, current_time_ms, invariants);
-
-                // Handle process restarts
-                // Handle process lifecycle events
-                match sim.last_processed_event() {
-                    Some(crate::sim::Event::ProcessGracefulShutdown {
-                        ip,
-                        grace_period_ms,
-                        recovery_delay_ms,
-                    }) => {
-                        assert_reachable!("event: ProcessGracefulShutdown");
-                        process_manager.signal_graceful_shutdown(ip);
-                        sim.schedule_event(
-                            crate::sim::Event::ProcessForceKill {
-                                ip,
-                                recovery_delay_ms,
-                            },
-                            Duration::from_millis(grace_period_ms),
-                        );
-                    }
-                    Some(crate::sim::Event::ProcessForceKill {
-                        ip,
-                        recovery_delay_ms,
-                    }) => {
-                        process_manager.abort_process(ip);
-                        sim.abort_all_connections_for_ip(ip);
-                        sim.schedule_process_restart(ip, Duration::from_millis(recovery_delay_ms));
-                    }
-                    Some(crate::sim::Event::ProcessRestart { ip }) => {
-                        assert_reachable!("event: ProcessRestart");
-                        process_manager.handle_restart(ip, providers, state, shutdown_signal);
-                    }
-                    _ => {}
-                }
+                Self::check_invariants(&state, current_time_ms, invariants);
+                Self::handle_process_events(
+                    &mut sim,
+                    &mut process_manager,
+                    &providers,
+                    &state,
+                    &shutdown_signal,
+                );
             }
 
             // Collect finished workload handles
+            let mut any_finished = false;
             for i in 0..workload_handles.len() {
                 let finished = workload_handles[i]
                     .as_ref()
@@ -852,7 +581,14 @@ impl WorkloadOrchestrator {
                             tracing::error!("Workload task panicked");
                         }
                     }
+                    any_finished = true;
                 }
+            }
+
+            // Trigger shutdown on first workload completion
+            if any_finished && !shutdown_triggered {
+                Self::trigger_shutdown(&mut sim, &shutdown_signal);
+                shutdown_triggered = true;
             }
 
             // Collect finished injector handles
@@ -873,8 +609,7 @@ impl WorkloadOrchestrator {
 
             let current_active = workload_handles.iter().filter(|h| h.is_some()).count();
 
-            // Deadlock detection: trigger shutdown first to give tasks a chance to exit,
-            // only fail on the second detection (genuine deadlock).
+            // Deadlock detection
             if deadlock_detector.check_deadlock(
                 current_active,
                 initial_handle_count,
@@ -888,15 +623,16 @@ impl WorkloadOrchestrator {
                         seed,
                         current_active,
                     );
-                    Self::trigger_shutdown(sim, shutdown_signal);
+                    Self::trigger_shutdown(&mut sim, &shutdown_signal);
                     shutdown_triggered = true;
                     deadlock_detector.reset();
                 } else {
                     tracing::error!(
-                        "DEADLOCK detected on iteration {} with seed {}: {} tasks remaining",
+                        "DEADLOCK detected on iteration {} with seed {}: {} tasks remaining after {} no-progress iterations",
                         iteration_count,
                         seed,
-                        current_active
+                        current_active,
+                        deadlock_detector.no_progress_count()
                     );
                     return Err((vec![seed], 1));
                 }
@@ -909,7 +645,7 @@ impl WorkloadOrchestrator {
         }
 
         // Collect returned fault injectors
-        let mut returned_injectors = Vec::new();
+        let mut returned_injectors = parked_injectors;
         for handle_opt in injector_handles.iter_mut() {
             if let Some(handle) = handle_opt.take() {
                 if handle.is_finished() {
@@ -922,7 +658,7 @@ impl WorkloadOrchestrator {
             }
         }
 
-        // Build return values
+        // Build workload return values
         let mut returned_workloads = Vec::with_capacity(total_workloads);
         let mut results = Vec::with_capacity(total_workloads);
 
@@ -940,7 +676,154 @@ impl WorkloadOrchestrator {
             }
         }
 
-        Ok((returned_workloads, returned_injectors, results))
+        // === 5. ABORT ALL PROCESSES ===
+        process_manager.abort_all();
+
+        // === 6. SETTLE ===
+        // Synchronous drain: process all remaining events without yielding.
+        // No yield means no tasks can schedule new events, so the queue
+        // converges to empty. This matches the old run_until_empty() behavior
+        // but adds a safety timeout to surface genuine event cycles.
+        let settle_start = sim.current_time();
+        let settle_timeout = Duration::from_secs(300);
+
+        while sim.pending_event_count() > 0 {
+            let elapsed = sim.current_time().saturating_sub(settle_start);
+            if elapsed > settle_timeout {
+                tracing::error!(
+                    "Settle timeout: {} events still pending after {:?}",
+                    sim.pending_event_count(),
+                    elapsed
+                );
+                let sim_metrics = sim.extract_metrics();
+                return Ok((
+                    returned_workloads,
+                    returned_injectors,
+                    vec![Err(crate::SimulationError::SettleTimeout {
+                        pending_events: sim.pending_event_count(),
+                        elapsed,
+                    })],
+                    sim_metrics,
+                ));
+            }
+
+            sim.step();
+        }
+
+        // === 7. CHECK PHASE (spawn_local + cooperative stepping) ===
+        let mut check_contexts = Vec::with_capacity(workload_info.len());
+        for (i, (_, ip)) in workload_info.iter().enumerate() {
+            let WorkloadClientInfo {
+                client_id,
+                client_count,
+            } = client_info[i];
+            let topology = TopologyFactory::create_topology_with_processes(
+                ip,
+                client_id,
+                client_count,
+                &all_entities,
+                &process_ips,
+                ProcessTags::default(),
+                tag_registry.clone(),
+                shutdown_signal.clone(),
+            );
+            let ctx = SimContext::new(providers.clone(), topology, state.clone());
+            check_contexts.push(ctx);
+        }
+
+        let mut check_handles = Vec::new();
+        for (workload, ctx) in returned_workloads
+            .into_iter()
+            .zip(check_contexts.into_iter())
+        {
+            let handle = tokio::task::spawn_local(async move {
+                let mut w = workload;
+                let result = w.check(&ctx).await;
+                if let Err(ref e) = result {
+                    tracing::error!("Workload '{}' check failed: {}", w.name(), e);
+                }
+                w
+            });
+            check_handles.push(handle);
+        }
+
+        // Cooperative loop for check
+        loop {
+            if check_handles.iter().all(|h| h.is_finished()) {
+                break;
+            }
+            if sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+
+        // Collect check results
+        let mut final_workloads = Vec::with_capacity(check_handles.len());
+        for handle in check_handles {
+            match handle.await {
+                Ok(w) => final_workloads.push(w),
+                Err(_) => {
+                    tracing::error!("Check task panicked");
+                }
+            }
+        }
+
+        // Extract final simulation metrics
+        let sim_metrics = sim.extract_metrics();
+
+        // If this is a forked child, exit immediately to return control to parent.
+        if moonpool_explorer::explorer_is_child() {
+            let code =
+                if results.iter().all(|r| r.is_ok()) && !crate::chaos::has_always_violations() {
+                    0
+                } else {
+                    42
+                };
+            moonpool_explorer::exit_child(code);
+        }
+
+        Ok((final_workloads, returned_injectors, results, sim_metrics))
+    }
+
+    /// Handle process lifecycle events from the last simulation step.
+    fn handle_process_events(
+        sim: &mut crate::sim::SimWorld,
+        process_manager: &mut ProcessManager<'_>,
+        providers: &crate::SimProviders,
+        state: &StateHandle,
+        shutdown_signal: &tokio_util::sync::CancellationToken,
+    ) {
+        match sim.last_processed_event() {
+            Some(crate::sim::Event::ProcessGracefulShutdown {
+                ip,
+                grace_period_ms,
+                recovery_delay_ms,
+            }) => {
+                assert_reachable!("event: ProcessGracefulShutdown");
+                process_manager.signal_graceful_shutdown(ip);
+                sim.schedule_event(
+                    crate::sim::Event::ProcessForceKill {
+                        ip,
+                        recovery_delay_ms,
+                    },
+                    Duration::from_millis(grace_period_ms),
+                );
+            }
+            Some(crate::sim::Event::ProcessForceKill {
+                ip,
+                recovery_delay_ms,
+            }) => {
+                process_manager.abort_process(ip);
+                sim.abort_all_connections_for_ip(ip);
+                sim.schedule_process_restart(ip, Duration::from_millis(recovery_delay_ms));
+            }
+            Some(crate::sim::Event::ProcessRestart { ip }) => {
+                assert_reachable!("event: ProcessRestart");
+                process_manager.handle_restart(ip, providers, state, shutdown_signal);
+            }
+            _ => {}
+        }
     }
 
     /// Trigger shutdown signal and schedule wake events.

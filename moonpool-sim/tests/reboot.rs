@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Attrition, FaultContext, FaultInjector, NetworkProvider, PhaseConfig, Process, RebootKind,
-    SimContext, SimulationBuilder, SimulationResult, TcpListenerTrait, TimeProvider, Workload,
+    Attrition, FaultContext, FaultInjector, NetworkProvider, Process, RebootKind, SimContext,
+    SimulationBuilder, SimulationResult, TcpListenerTrait, TimeProvider, Workload,
 };
 
 // ============================================================================
@@ -167,16 +167,19 @@ impl FaultInjector for RebootOnceInjector {
     }
 }
 
-struct WaitForShutdownWorkload;
+/// Workload that runs for a fixed sim-time duration then returns.
+struct TimedWorkload(Duration);
 
 #[async_trait(?Send)]
-impl Workload for WaitForShutdownWorkload {
+impl Workload for TimedWorkload {
     fn name(&self) -> &str {
-        "waiter"
+        "timed"
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        ctx.shutdown().cancelled().await;
+        ctx.time().sleep(self.0).await.map_err(|e| {
+            moonpool_sim::SimulationError::InvalidState(format!("sleep failed: {}", e))
+        })?;
         Ok(())
     }
 }
@@ -185,12 +188,9 @@ impl Workload for WaitForShutdownWorkload {
 fn test_manual_reboot_via_fault_injector() {
     let report = SimulationBuilder::new()
         .processes(3, || Box::new(EchoProcess))
-        .workload(WaitForShutdownWorkload)
+        .workload(TimedWorkload(Duration::from_secs(15)))
         .fault(RebootOnceInjector)
-        .phases(PhaseConfig {
-            chaos_duration: Duration::from_secs(5),
-            recovery_duration: Duration::from_secs(5),
-        })
+        .chaos_duration(Duration::from_secs(5))
         .set_iterations(3)
         .set_debug_seeds(vec![42, 123, 999])
         .run();
@@ -209,7 +209,7 @@ fn test_manual_reboot_via_fault_injector() {
 fn test_builtin_attrition() {
     let report = SimulationBuilder::new()
         .processes(3, || Box::new(EchoProcess))
-        .workload(WaitForShutdownWorkload)
+        .workload(TimedWorkload(Duration::from_secs(25)))
         .attrition(Attrition {
             max_dead: 1,
             prob_graceful: 0.3,
@@ -218,10 +218,7 @@ fn test_builtin_attrition() {
             recovery_delay_ms: None,
             grace_period_ms: None,
         })
-        .phases(PhaseConfig {
-            chaos_duration: Duration::from_secs(10),
-            recovery_duration: Duration::from_secs(10),
-        })
+        .chaos_duration(Duration::from_secs(10))
         .set_iterations(3)
         .set_debug_seeds(vec![42, 123, 999])
         .run();
@@ -263,12 +260,9 @@ fn test_tag_based_reboot() {
         .processes(4, || Box::new(EchoProcess))
         .tags(&[("dc", &["east", "west"])])
         .expect("tags after processes")
-        .workload(WaitForShutdownWorkload)
+        .workload(TimedWorkload(Duration::from_secs(20)))
         .fault(RebootTaggedInjector)
-        .phases(PhaseConfig {
-            chaos_duration: Duration::from_secs(5),
-            recovery_duration: Duration::from_secs(10),
-        })
+        .chaos_duration(Duration::from_secs(5))
         .set_iterations(1)
         .set_debug_seeds(vec![42])
         .run();
@@ -312,7 +306,7 @@ fn test_process_reads_own_tags() {
         .processes(3, || Box::new(TagAwareProcess))
         .tags(&[("role", &["leader", "follower"])])
         .expect("tags after processes")
-        .workload(WaitForShutdownWorkload)
+        .workload(TimedWorkload(Duration::from_secs(1)))
         .set_iterations(1)
         .set_debug_seeds(vec![42])
         .run();
@@ -390,12 +384,9 @@ impl FaultInjector for GracefulRebootInjector {
 fn test_graceful_reboot_signals_shutdown_token() {
     let report = SimulationBuilder::new()
         .processes(3, || Box::new(GracefulProcess))
-        .workload(WaitForShutdownWorkload)
+        .workload(TimedWorkload(Duration::from_secs(25)))
         .fault(GracefulRebootInjector)
-        .phases(PhaseConfig {
-            chaos_duration: Duration::from_secs(10),
-            recovery_duration: Duration::from_secs(10),
-        })
+        .chaos_duration(Duration::from_secs(10))
         .set_iterations(3)
         .set_debug_seeds(vec![42, 123, 999])
         .run();
@@ -434,12 +425,9 @@ impl Process for StuckProcess {
 fn test_graceful_reboot_force_kills_stuck_process() {
     let report = SimulationBuilder::new()
         .processes(3, || Box::new(StuckProcess))
-        .workload(WaitForShutdownWorkload)
+        .workload(TimedWorkload(Duration::from_secs(25)))
         .fault(GracefulRebootInjector)
-        .phases(PhaseConfig {
-            chaos_duration: Duration::from_secs(10),
-            recovery_duration: Duration::from_secs(10),
-        })
+        .chaos_duration(Duration::from_secs(10))
         .set_iterations(3)
         .set_debug_seeds(vec![42, 123, 999])
         .run();
@@ -460,7 +448,7 @@ fn test_max_dead_limits_concurrent_kills_via_attrition() {
     // respects dead_count and won't kill more than 1 at a time
     let report = SimulationBuilder::new()
         .processes(5, || Box::new(EchoProcess))
-        .workload(WaitForShutdownWorkload)
+        .workload(TimedWorkload(Duration::from_secs(25)))
         .attrition(Attrition {
             max_dead: 1,
             prob_graceful: 0.0,
@@ -469,10 +457,7 @@ fn test_max_dead_limits_concurrent_kills_via_attrition() {
             recovery_delay_ms: Some(500..2000),
             grace_period_ms: None,
         })
-        .phases(PhaseConfig {
-            chaos_duration: Duration::from_secs(10),
-            recovery_duration: Duration::from_secs(10),
-        })
+        .chaos_duration(Duration::from_secs(10))
         .set_iterations(5)
         .set_debug_seeds(vec![42, 123, 999, 7, 314])
         .run();
