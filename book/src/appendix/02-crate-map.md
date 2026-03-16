@@ -88,7 +88,7 @@ Moonpool is organized as a workspace of eight crates. The dependency graph is de
 - `Process` -- trait for system-under-test server processes
 - `Workload` -- trait for test driver workloads
 - `Attrition` -- automatic process reboot configuration
-- `PhaseConfig` -- chaos/recovery phase durations
+- `FaultInjector` / `FaultContext` -- custom fault injection during chaos phase
 - `IterationControl` -- how many iterations to run
 - `SimulationReport` -- results, metrics, and assertion data
 - `Invariant` -- trait for cross-actor property validation

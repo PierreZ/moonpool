@@ -10,7 +10,7 @@ use tracing::instrument;
 
 use crate::SimulationError;
 use crate::chaos::invariant_trait::Invariant;
-use crate::runner::fault_injector::{FaultInjector, PhaseConfig};
+use crate::runner::fault_injector::FaultInjector;
 use crate::runner::process::{Attrition, Process};
 use crate::runner::tags::TagDistribution;
 use crate::runner::workload::Workload;
@@ -216,7 +216,7 @@ pub struct SimulationBuilder {
     use_random_config: bool,
     invariants: Vec<Box<dyn Invariant>>,
     fault_injectors: Vec<Box<dyn FaultInjector>>,
-    phase_config: Option<PhaseConfig>,
+    chaos_duration: Option<Duration>,
     exploration_config: Option<moonpool_explorer::ExplorationConfig>,
     replay_recipe: Option<super::report::BugRecipe>,
     before_iteration_hooks: Vec<Box<dyn FnMut()>>,
@@ -240,7 +240,7 @@ impl SimulationBuilder {
             use_random_config: false,
             invariants: Vec::new(),
             fault_injectors: Vec::new(),
-            phase_config: None,
+            chaos_duration: None,
             exploration_config: None,
             replay_recipe: None,
             before_iteration_hooks: Vec::new(),
@@ -342,8 +342,9 @@ impl SimulationBuilder {
     /// Attrition randomly kills and restarts server processes. It respects
     /// `max_dead` to limit the number of simultaneously dead processes.
     ///
-    /// **Requires** [`.phases()`](Self::phases) — attrition injectors only run during
-    /// the chaos phase. Without a phase config, the injector will not be spawned.
+    /// **Requires** [`.chaos_duration()`](Self::chaos_duration) — attrition injectors
+    /// only run during the chaos phase. Without a chaos duration, the injector
+    /// will not be spawned.
     ///
     /// For custom fault injection, use `.fault()` with a [`FaultInjector`] instead.
     pub fn attrition(mut self, config: Attrition) -> Self {
@@ -433,9 +434,14 @@ impl SimulationBuilder {
         self
     }
 
-    /// Set two-phase chaos/recovery configuration.
-    pub fn phases(mut self, config: PhaseConfig) -> Self {
-        self.phase_config = Some(config);
+    /// Set the chaos phase duration.
+    ///
+    /// When set, fault injectors run concurrently with workloads for this
+    /// duration. After it elapses, faults stop and the system continues
+    /// until all workloads complete. A settle phase then drains remaining
+    /// events before checks run.
+    pub fn chaos_duration(mut self, duration: Duration) -> Self {
+        self.chaos_duration = Some(duration);
         self
     }
 
@@ -758,7 +764,7 @@ impl SimulationBuilder {
 
             // Borrow self fields before the async block so we don't move self
             let invariants_ref = &self.invariants;
-            let phase_ref = self.phase_config.as_ref();
+            let chaos_duration = self.chaos_duration;
 
             // Execute workloads using orchestrator inside this iteration's runtime
             let orchestration_result = local_runtime.block_on(async move {
@@ -771,7 +777,7 @@ impl SimulationBuilder {
                     process_config,
                     seed,
                     sim,
-                    phase_ref,
+                    chaos_duration,
                     iteration_count,
                 )
                 .await

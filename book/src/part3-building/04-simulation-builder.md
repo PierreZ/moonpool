@@ -120,20 +120,17 @@ impl Invariant for ConservationLaw {
 
 Invariants read from the `StateHandle`, which workloads write to via `ctx.state().publish()`. This is how the test driver communicates its reference model to the invariant checker.
 
-## Chaos Phases and Attrition
+## Chaos and Attrition
 
-Real distributed systems do not just run cleanly. Servers crash, networks partition, and then things have to recover. Phases model this:
+Real distributed systems do not just run cleanly. Servers crash, networks partition, and then things have to recover. The builder models this with `chaos_duration`:
 
 ```rust
-use moonpool_sim::{PhaseConfig, Attrition};
+use moonpool_sim::Attrition;
 
 SimulationBuilder::new()
     .processes(3, || Box::new(KvServer))
     .workload(KvWorkload::new(200, keys))
-    .phases(PhaseConfig {
-        chaos_duration: Duration::from_secs(30),
-        recovery_duration: Duration::from_secs(10),
-    })
+    .chaos_duration(Duration::from_secs(30))
     .attrition(Attrition {
         max_dead: 1,
         prob_graceful: 0.3,
@@ -147,13 +144,15 @@ SimulationBuilder::new()
     .await;
 ```
 
-The simulation runs in two phases:
+The simulation lifecycle:
 
 1. **Chaos phase** (30 simulated seconds): Workloads run concurrently with fault injectors. Attrition randomly kills and restarts processes, respecting `max_dead` to avoid killing everything at once.
 
-2. **Recovery phase** (10 simulated seconds): Fault injectors stop. Workloads continue. The system should converge to a consistent state.
+2. **Workload completion**: After chaos ends, faults stop and the system continues until all workloads finish. Workloads should be finite (do N operations, or sleep for a sim-time duration, then return).
 
-After both phases, the `check()` methods run.
+3. **Settle**: The orchestrator drains remaining events. If the system does not settle within 30 seconds (sim time), the test fails with diagnostics, surfacing cleanup bugs like leaked tasks or unclosed connections.
+
+4. **Check**: The `check()` methods run inside the event loop, so network RPCs work normally.
 
 `max_dead: 1` means at most one process is down at any time. The probability weights control the mix of graceful shutdowns (shutdown token fired, grace period) versus instant crashes (no warning, connections abort).
 
@@ -177,10 +176,7 @@ let report = SimulationBuilder::new()
     .tags(&[("role", &["primary", "replica"])])
     .workload(KvWorkload::new(500, keys.clone()))
     .invariant(ConservationLaw)
-    .phases(PhaseConfig {
-        chaos_duration: Duration::from_secs(30),
-        recovery_duration: Duration::from_secs(10),
-    })
+    .chaos_duration(Duration::from_secs(30))
     .attrition(Attrition {
         max_dead: 1,
         prob_graceful: 0.3,

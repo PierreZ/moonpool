@@ -4,14 +4,14 @@
 //! that run during the chaos phase of a simulation. [`FaultContext`] provides access to
 //! `SimWorld` fault injection primitives.
 //!
-//! [`PhaseConfig`] controls the two-phase chaos/recovery lifecycle:
-//! - **Chaos phase**: Workloads + fault injectors run concurrently
-//! - **Recovery phase**: Fault injectors stopped, workloads continue, system heals
+//! When `chaos_duration` is configured on the builder, fault injectors run concurrently
+//! with workloads. At the chaos boundary, `ctx.chaos_shutdown()` is cancelled and the
+//! system settles before running workload checks.
 //!
 //! # Usage
 //!
 //! ```ignore
-//! use moonpool_sim::{FaultInjector, FaultContext, PhaseConfig, SimulationResult};
+//! use moonpool_sim::{FaultInjector, FaultContext, SimulationResult};
 //! use std::time::Duration;
 //!
 //! struct RandomPartition { probability: f64 }
@@ -271,9 +271,9 @@ impl FaultContext {
 
 /// A fault injector that introduces failures during the chaos phase.
 ///
-/// Fault injectors run concurrently with workloads during the chaos phase.
-/// When `PhaseConfig` is used, they are signaled to stop via
-/// `ctx.chaos_shutdown()` at the chaos→recovery boundary.
+/// Fault injectors run concurrently with workloads when `chaos_duration` is set.
+/// They are signaled to stop via `ctx.chaos_shutdown()` when the chaos duration
+/// elapses. After all workloads complete, the system settles before checks run.
 #[async_trait(?Send)]
 pub trait FaultInjector: 'static {
     /// Name of this fault injector for reporting.
@@ -283,21 +283,6 @@ pub trait FaultInjector: 'static {
     ///
     /// Should respect `ctx.chaos_shutdown()` to allow graceful termination.
     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()>;
-}
-
-/// Two-phase simulation configuration.
-///
-/// Controls the TigerBeetle VOPR-style chaos/recovery lifecycle:
-/// 1. **Chaos phase** (`chaos_duration`): Workloads + fault injectors run concurrently.
-///    Invariants are checked after every simulation event.
-/// 2. **Recovery phase** (`recovery_duration`): Fault injectors stopped, workloads
-///    continue, system heals. Verifies convergence after faults cease.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PhaseConfig {
-    /// Duration of the chaos phase (faults + workloads run concurrently).
-    pub chaos_duration: Duration,
-    /// Duration of the recovery phase (faults stopped, workloads continue).
-    pub recovery_duration: Duration,
 }
 
 /// Built-in fault injector that randomly reboots server processes.

@@ -14,6 +14,14 @@ pub enum SimulationError {
     /// An I/O error occurred during simulation.
     #[error("I/O error: {0}")]
     IoError(String),
+    /// The simulation did not settle within the timeout after shutdown.
+    #[error("Settle timeout: {pending_events} events still pending after {elapsed:?}")]
+    SettleTimeout {
+        /// Number of events still pending when timeout was reached.
+        pending_events: usize,
+        /// How long the settle phase ran before timing out.
+        elapsed: std::time::Duration,
+    },
 }
 
 /// A type alias for `Result<T, SimulationError>`.
