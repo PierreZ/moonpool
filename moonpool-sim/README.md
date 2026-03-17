@@ -14,7 +14,7 @@ Bugs hide in rare combinations of events. An API with just six variables creates
 
 **Same seed = identical execution.** Given the same seed, the system makes identical decisions every time. When a bug surfaces after millions of simulated operations, you can replay that exact sequence to debug it.
 
-**Time compression.** A single-threaded event loop advances simulated time when all actors block. Years of uptime can be simulated in seconds. A simulated day passes instantly when nothing is scheduled.
+**Time compression.** A single-threaded event loop advances simulated time when all tasks block. Years of uptime can be simulated in seconds. A simulated day passes instantly when nothing is scheduled.
 
 **Chaos injection.** The simulator deliberately biases execution toward rare code paths. Network delays, disconnects, partitions, bit flips, storage corruption—failures that might take months to occur in production happen continuously in simulation.
 

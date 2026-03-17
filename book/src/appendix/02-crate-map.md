@@ -8,7 +8,7 @@ Moonpool is organized as a workspace of eight crates. The dependency graph is de
 
 ```text
                         moonpool
-                  (facade + virtual actors)
+                     (facade crate)
                    /         |         \
                   /          |          \
   moonpool-transport    moonpool-sim    moonpool-core
@@ -38,16 +38,11 @@ Moonpool is organized as a workspace of eight crates. The dependency graph is de
 
 ### moonpool
 
-**Role**: Facade crate and virtual actors. Re-exports everything from the lower crates so users only need one dependency.
+**Role**: Facade crate. Re-exports everything from the lower crates so users only need one dependency.
 
-**Dependencies**: moonpool-core, moonpool-sim, moonpool-transport, async-trait, serde, serde_json, tokio, tracing
+**Dependencies**: moonpool-core, moonpool-sim, moonpool-transport
 
-**Key types**:
-- `ActorHost` -- hosts and routes messages to virtual actors
-- `ActorHandler` -- trait for actor message handling with lifecycle hooks
-- `ActorContext` -- per-dispatch context with providers and optional state store
-- `PersistentState<T>` -- typed wrapper for actor state persistence
-- Re-exports all types from moonpool-core, moonpool-sim, and moonpool-transport
+**Key types**: Re-exports all types from moonpool-core, moonpool-sim, and moonpool-transport.
 
 ---
 
@@ -91,7 +86,7 @@ Moonpool is organized as a workspace of eight crates. The dependency graph is de
 - `FaultInjector` / `FaultContext` -- custom fault injection during chaos phase
 - `IterationControl` -- how many iterations to run
 - `SimulationReport` -- results, metrics, and assertion data
-- `Invariant` -- trait for cross-actor property validation
+- `Invariant` -- trait for cross-system property validation
 
 **Assertion macros** (15 total): `assert_always!`, `assert_sometimes!`, `assert_reachable!`, `assert_unreachable!`, `assert_always_greater_than!`, `assert_sometimes_each!`, and more. See the [Assertion Reference](./01-assertion-reference.md) for the complete list.
 
@@ -120,19 +115,17 @@ Moonpool is organized as a workspace of eight crates. The dependency graph is de
 
 **Proc macros** (from moonpool-transport-derive):
 - `#[service]` -- generates service trait, server, client, and bound client types
-- `#[actor_impl]` -- generates actor message dispatch and lifecycle boilerplate
 
 ---
 
 ### moonpool-transport-derive
 
-**Role**: Procedural macros for service and actor definitions.
+**Role**: Procedural macros for RPC service definitions.
 
 **Dependencies**: proc-macro2, quote, syn (compile-time only, no runtime deps)
 
 **Provides**:
 - `#[service]` -- derive macro for RPC service definitions
-- `#[actor_impl]` -- derive macro for actor message dispatch
 
 This is a proc-macro crate and cannot export regular types or functions.
 

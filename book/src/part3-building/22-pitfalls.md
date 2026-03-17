@@ -4,20 +4,6 @@
 
 A reference list of mistakes we have seen (and made) when building simulations with Moonpool.
 
-## Do Not Call `stop().await` in Workloads
-
-The `ActorHost::stop()` method uses a `yield_now()` loop to wait for all actor tasks to finish. But the simulation orchestrator needs to `step()` events for those tasks to make progress. Calling `stop().await` from inside a workload creates a deadlock: the workload is waiting for tasks, and the orchestrator is waiting for the workload.
-
-**Fix**: Use `drop(host)` instead. The drop fires close handles, and the simulation's `run_until_empty()` processes the remaining events.
-
-```rust
-// Wrong: deadlocks in simulation
-host.stop().await;
-
-// Right: let the simulation drain events
-drop(self.node.take());
-```
-
 ## Storage Needs the Step Loop
 
 Network operations buffer data and return `Poll::Ready` immediately. Storage operations return `Poll::Pending` and wait for the simulation to process them. If you `await` a storage operation without stepping the simulation, your workload hangs forever.
@@ -67,7 +53,7 @@ The `tokio::task::LocalSet` runtime conflicts with Moonpool's simulation engine.
 
 Moonpool runs on a single thread. All types are `!Send`. If you derive `#[async_trait]` without the `(?Send)` bound, the compiler will require `Send` on your futures.
 
-**Fix**: Always use `#[async_trait(?Send)]` for networking traits and actor handlers.
+**Fix**: Always use `#[async_trait(?Send)]` for networking traits.
 
 ## Borrow Checker Fights in `world.rs`
 

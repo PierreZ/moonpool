@@ -52,6 +52,6 @@ Over the next five chapters, we will build up the complete exploration system pi
 
 Each chapter builds on the previous one. The concepts are layered: first the problem, then the basic mechanism, then increasingly sophisticated resource management. By the end, you will understand how moonpool turns a single simulation seed into a tree of thousands of timelines that systematically hunt for bugs hiding behind sequences of unlikely events.
 
-The `moonpool-explorer` crate that implements all of this is a leaf dependency with exactly one external dependency: `libc`. It has zero knowledge of actors, networks, or storage. It communicates with the simulation through two function pointers: one to read the RNG call count, and one to reseed the RNG. That minimal coupling is deliberate. The exploration engine is a general-purpose tool that works with any deterministic simulation, not just moonpool's.
+The `moonpool-explorer` crate that implements all of this is a leaf dependency with exactly one external dependency: `libc`. It has zero knowledge of processes, networks, or storage. It communicates with the simulation through two function pointers: one to read the RNG call count, and one to reseed the RNG. That minimal coupling is deliberate. The exploration engine is a general-purpose tool that works with any deterministic simulation, not just moonpool's.
 
 Let us start with the problem it solves.

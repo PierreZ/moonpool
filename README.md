@@ -9,9 +9,9 @@ Inspired by [FoundationDB's simulation testing](https://apple.github.io/foundati
 ## Architecture
 
 ```text
-moonpool                          Facade crate + virtual actors
+moonpool                          Facade crate, re-exports everything
 ├── moonpool-transport            RPC, peer connections, wire format
-│   └── moonpool-transport-derive #[service] and #[actor_impl] proc-macros
+│   └── moonpool-transport-derive #[service] proc-macro
 ├── moonpool-sim                  Simulation engine, chaos testing, assertions
 │   └── moonpool-explorer         Fork-based multiverse exploration
 └── moonpool-core                 Provider traits and core types
@@ -34,9 +34,8 @@ moonpool                          Facade crate + virtual actors
 - **Deterministic simulation** — Same seed = identical execution. Logical time skips idle periods. Years of uptime simulated in seconds.
 - **Chaos testing** — Network delays, disconnects, partitions, bit flips, partial writes, storage corruption. `buggify!` fires with 25% probability at fault injection points.
 - **Assertion suite** — 15 Antithesis-style assertion macros (`assert_always!`, `assert_sometimes!`, numeric comparisons, compound assertions). Multi-seed testing runs until all `sometimes` assertions fire.
-- **Virtual actors** — Orleans-style actors with turn-based concurrency, lifecycle hooks (`on_activate`/`on_deactivate`), persistent state with optimistic concurrency, and per-identity concurrent processing.
 - **Fork-based exploration** — When assertions discover new behavior, `fork()` explores alternate timelines with different RNG seeds. Adaptive energy budgets and coverage bitmaps guide exploration.
-- **`#[service]` macro** — Auto-generates RPC server/client boilerplate (`&self` methods) or virtual actor refs and dispatch (`&mut self` methods) from a single trait definition.
+- **`#[service]` macro** — Auto-generates RPC server/client boilerplate from a single trait definition.
 
 ## Quick Start
 

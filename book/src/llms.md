@@ -12,9 +12,8 @@ This page helps AI assistants navigate the Moonpool book. Each entry links to a 
 - **"How do I add chaos/faults?"** — [Chaos in Moonpool](./part3-building/07-chaos.md)
 - **"How do I use assertions?"** — [Assertions: Finding Bugs](./part3-building/12-assertions.md)
 - **"How does networking/RPC work?"** — [Simulating the Network](./part4-networking/01-simulating-network.md)
-- **"How do virtual actors work?"** — [Virtual Actors](./part5-building-on-top/01-virtual-actors.md)
-- **"How do I test an existing app (e.g. axum)?"** — [moonpool-sim Without the Actor System](./part4-integration/01-standalone-sim.md)
-- **"How does multiverse exploration work?"** — [Multiverse Exploration](./part5-building-on-top/06-exploration.md)
+- **"How do I test an existing app (e.g. axum)?"** — [Using moonpool-sim Standalone](./part4-integration/01-standalone-sim.md)
+- **"How does multiverse exploration work?"** — [Multiverse Exploration](./part5-building-on-top/01-exploration.md)
 - **"What assertions are available?"** — [Assertion Reference](./appendix/01-assertion-reference.md)
 - **"What configuration options exist?"** — [Configuration Reference](./appendix/03-configuration.md)
 
@@ -23,7 +22,7 @@ This page helps AI assistants navigate the Moonpool book. Each entry links to a 
 - [The Case for Simulation](./part1-why/01-case-for-simulation.md) — Why distributed systems need simulation; the gap between localhost and production; failure statistics
 - [Prevention vs Discovery](./part1-why/02-prevention-vs-discovery.md) — Two testing philosophies: regression (prevention) vs generative (discovery)
 - [From Mocks to Simulation](./part1-why/03-mocks-to-simulation.md) — Why mocks break at scale; the `#[cfg(test)]` trap; maintenance cost
-- [A Brief History](./part1-why/04-history.md) — FoundationDB simulator origins, TigerBeetle storage faults, Orleans actors, Antithesis assertions
+- [A Brief History](./part1-why/04-history.md) — FoundationDB simulator origins, TigerBeetle storage faults, Antithesis assertions
 - [Why Moonpool Exists](./part1-why/05-why-moonpool.md) — Synthesizing ideas from FDB, TigerBeetle, Orleans, Antithesis into one framework
 
 ## Part II: Foundations
@@ -66,7 +65,7 @@ This page helps AI assistants navigate the Moonpool book. Each entry links to a 
 
 ## Part IV: Simulating Existing Applications
 
-- [moonpool-sim Without the Actor System](./part4-integration/01-standalone-sim.md) — Standalone simulation engine for non-actor code (axum, Postgres, etc.)
+- [Using moonpool-sim Standalone](./part4-integration/01-standalone-sim.md) — Standalone simulation engine for existing code (axum, Postgres, etc.)
 - [Where to Draw the Line](./part4-integration/02-mock-boundaries.md) — Fakes vs test containers; binary failure limitations
 - [Wiring a Web Service](./part4-integration/03-wiring-a-web-service.md) — Worked example: axum service in simulation with Store trait fake, chaos, assertions
 - [What You're Testing (and What You're Not)](./part4-integration/04-scope-and-tradeoffs.md) — Tests handler logic and HTTP under chaos; doesn't test TLS, proxies, startup code
@@ -86,17 +85,12 @@ This page helps AI assistants navigate the Moonpool book. Each entry links to a 
 
 ## Part VI: Building on Top
 
-- [Virtual Actors](./part5-building-on-top/01-virtual-actors.md) — Orleans-inspired identity-based entities; lifecycle management
-- [Turn-Based Concurrency](./part5-building-on-top/02-turn-based-concurrency.md) — Per-identity serialization; different identities run in parallel
-- [ActorHandler and Lifecycle](./part5-building-on-top/03-actor-handler.md) — `actor_type()`, `dispatch()`, `on_activate()`, `on_deactivate()`, `deactivation_hint()`
-- [State Persistence](./part5-building-on-top/04-state-persistence.md) — ActorStateStore trait; ETags; PersistentState wrapper
-- [Placement and Directory](./part5-building-on-top/05-placement.md) — ActorDirectory maps ActorId to ActorAddress; lookup, register, unregister
-- [Multiverse Exploration](./part5-building-on-top/06-exploration.md) — Checkpoint-and-branch with fork(); timeline tree; exponential trial reduction
-- [The Exploration Problem](./part5-building-on-top/07-exploration-problem.md) — Sequential Luck Problem: N unlikely events need exponential trials without branching
-- [Fork at Discovery](./part5-building-on-top/08-fork-at-discovery.md) — Unix fork() copies process; reseed with FNV-1a; tree of timelines
-- [Coverage and Energy Budgets](./part5-building-on-top/09-coverage-energy.md) — Fixed-count splitting; global energy cap; prevents exponential blowup
-- [Adaptive Forking](./part5-building-on-top/10-adaptive-forking.md) — Batch-based exploration; productive marks earn more; barren marks cut early
-- [Multi-Seed Exploration](./part5-building-on-top/11-multi-seed.md) — Coverage-preserving seed transitions; selective reset; explored map carries forward
+- [Multiverse Exploration](./part5-building-on-top/01-exploration.md) — Checkpoint-and-branch with fork(); timeline tree; exponential trial reduction
+- [The Exploration Problem](./part5-building-on-top/02-exploration-problem.md) — Sequential Luck Problem: N unlikely events need exponential trials without branching
+- [Fork at Discovery](./part5-building-on-top/03-fork-at-discovery.md) — Unix fork() copies process; reseed with FNV-1a; tree of timelines
+- [Coverage and Energy Budgets](./part5-building-on-top/04-coverage-energy.md) — Fixed-count splitting; global energy cap; prevents exponential blowup
+- [Adaptive Forking](./part5-building-on-top/05-adaptive-forking.md) — Batch-based exploration; productive marks earn more; barren marks cut early
+- [Multi-Seed Exploration](./part5-building-on-top/06-multi-seed.md) — Coverage-preserving seed transitions; selective reset; explored map carries forward
 
 ## Appendix
 
@@ -104,4 +98,4 @@ This page helps AI assistants navigate the Moonpool book. Each entry links to a 
 - [Crate Map](./appendix/02-crate-map.md) — 8-crate workspace diagram and dependency hierarchy
 - [Configuration Reference](./appendix/03-configuration.md) — SimulationBuilder methods, ChaosConfiguration, AttritionConfiguration, exploration
 - [Fault Reference](./appendix/04-fault-reference.md) — Every fault by category with config fields and defaults
-- [Glossary](./appendix/05-glossary.md) — Alphabetical definitions: activation, actor, attrition, buggify, coverage bitmap, etc.
+- [Glossary](./appendix/05-glossary.md) — Alphabetical definitions: adaptive forking, always assertion, attrition, buggify, coverage bitmap, etc.

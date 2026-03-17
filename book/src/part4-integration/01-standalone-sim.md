@@ -1,11 +1,11 @@
-# moonpool-sim Without the Actor System
+# Using moonpool-sim Standalone
 <!-- toc -->
 
-moonpool, the crate, is an actor framework. Virtual actors, RPC, transport, `#[service]` macros, placement directories. Plenty of machinery for building distributed systems from scratch.
+moonpool, the crate, re-exports the full framework: transport, RPC, `#[service]` macros. Plenty of machinery for building distributed systems from scratch.
 
-But **moonpool-sim is a standalone simulation engine**. Provider traits, chaos injection, assertions, fork-based exploration. All of it works without importing a single actor type. No `Peer`, no `NetTransport`, no `#[service]`. Just deterministic simulation of your existing code.
+But **moonpool-sim is a standalone simulation engine**. Provider traits, chaos injection, assertions, fork-based exploration. All of it works without importing a single transport type. No `Peer`, no `NetTransport`, no `#[service]`. Just deterministic simulation of your existing code.
 
-Why does this matter? Because most teams aren't building distributed systems from scratch. They're running axum services behind a load balancer, talking to Postgres and Redis, shipping features. The actor system is irrelevant to them. The simulation engine is not.
+Why does this matter? Because most teams aren't building distributed systems from scratch. They're running axum services behind a load balancer, talking to Postgres and Redis, shipping features. The transport layer is irrelevant to them. The simulation engine is not.
 
 ## The Technical Foundation
 

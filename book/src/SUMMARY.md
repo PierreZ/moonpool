@@ -63,7 +63,7 @@
 
 # Part IV: Simulating Existing Applications
 
-- [moonpool-sim Without the Actor System](./part4-integration/01-standalone-sim.md)
+- [Using moonpool-sim Standalone](./part4-integration/01-standalone-sim.md)
   - [Where to Draw the Line](./part4-integration/02-mock-boundaries.md)
   - [Wiring a Web Service](./part4-integration/03-wiring-a-web-service.md)
   - [What You're Testing (and What You're Not)](./part4-integration/04-scope-and-tradeoffs.md)
@@ -87,17 +87,12 @@
 
 # Part VI: Building on Top
 
-- [Virtual Actors](./part5-building-on-top/01-virtual-actors.md)
-  - [Turn-Based Concurrency](./part5-building-on-top/02-turn-based-concurrency.md)
-  - [ActorHandler and Lifecycle](./part5-building-on-top/03-actor-handler.md)
-  - [State Persistence](./part5-building-on-top/04-state-persistence.md)
-  - [Placement and Directory](./part5-building-on-top/05-placement.md)
-- [Multiverse Exploration](./part5-building-on-top/06-exploration.md)
-  - [The Exploration Problem](./part5-building-on-top/07-exploration-problem.md)
-  - [Fork at Discovery](./part5-building-on-top/08-fork-at-discovery.md)
-  - [Coverage and Energy Budgets](./part5-building-on-top/09-coverage-energy.md)
-  - [Adaptive Forking](./part5-building-on-top/10-adaptive-forking.md)
-  - [Multi-Seed Exploration](./part5-building-on-top/11-multi-seed.md)
+- [Multiverse Exploration](./part5-building-on-top/01-exploration.md)
+  - [The Exploration Problem](./part5-building-on-top/02-exploration-problem.md)
+  - [Fork at Discovery](./part5-building-on-top/03-fork-at-discovery.md)
+  - [Coverage and Energy Budgets](./part5-building-on-top/04-coverage-energy.md)
+  - [Adaptive Forking](./part5-building-on-top/05-adaptive-forking.md)
+  - [Multi-Seed Exploration](./part5-building-on-top/06-multi-seed.md)
 
 ---
 

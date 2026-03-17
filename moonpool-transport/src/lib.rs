@@ -106,5 +106,4 @@ pub use rpc::{
 pub mod simulations;
 
 // Attribute macros
-pub use moonpool_transport_derive::actor_impl;
 pub use moonpool_transport_derive::service;

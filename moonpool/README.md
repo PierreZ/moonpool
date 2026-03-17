@@ -11,7 +11,7 @@ Inspired by [FoundationDB's simulation testing](https://apple.github.io/foundati
 ```text
 ┌─────────────────────────────────────────────────────────────┐
 │              moonpool (this crate)                          │
-│   Re-exports all functionality + virtual actors module      │
+│   Re-exports moonpool-core, moonpool-sim, moonpool-transport │
 ├──────────────────────────┬──────────────────────────────────┤
 │  moonpool-transport      │       moonpool-sim               │
 │  • Peer connections      │       • SimWorld runtime         │

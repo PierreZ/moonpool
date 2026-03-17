@@ -103,10 +103,10 @@ This runs after every single simulation event. If a transfer debits one account 
 
 - Conservation laws (money, messages, resources)
 - No-phantom properties (never receive something that was not sent)
-- Consistency across actors (leader election: at most one leader at any time)
+- Consistency across processes (leader election: at most one leader at any time)
 - Monotonicity properties (ballot numbers only increase)
 
-A useful rule of thumb: if the property involves state from more than one actor or workload, it is an invariant. If it is about one workload's local view, it is an assertion.
+A useful rule of thumb: if the property involves state from more than one process or workload, it is an invariant. If it is about one workload's local view, it is an assertion.
 
 ## Performance
 

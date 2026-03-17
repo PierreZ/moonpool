@@ -6,7 +6,7 @@ Now we know **why** checkpoint-and-branch matters. Let us see **how** it works i
 
 ## The Fork
 
-When a `sometimes` assertion succeeds for the first time (or a numeric watermark improves, or a frontier advances), the explorer calls `fork()`. The operating system creates a child process that is an exact copy of the parent: same memory, same simulation state, same actors, same network buffers, same pending timers. Everything.
+When a `sometimes` assertion succeeds for the first time (or a numeric watermark improves, or a frontier advances), the explorer calls `fork()`. The operating system creates a child process that is an exact copy of the parent: same memory, same simulation state, same processes, same network buffers, same pending timers. Everything.
 
 The child then **reseeds** its RNG with a deterministic new seed derived from the parent seed, the assertion name, and the child index:
 
@@ -53,7 +53,7 @@ Parent and child processes have separate address spaces, but they need to share 
 ```text
 Parent process memory:
 +----------------------------------------------------+
-|  Simulation state (actors, network, timers)        |  <- COW pages
+|  Simulation state (processes, network, timers)        |  <- COW pages
 |  RNG state (will be reseeded in child)             |  <- COW pages
 +----------------------------------------------------+
 |  MAP_SHARED memory:                                |  <- truly shared
@@ -155,6 +155,6 @@ Putting it all together, here is what happens when a simulation runs with explor
 4. After all children finish, the parent restores its bitmap and continues its own simulation
 5. At the end, the builder collects statistics and bug recipes from shared memory
 
-The child process does not know it was forked. From its perspective, the assertion fired, the simulation continued, and it eventually completed (or found a bug). The forking is invisible to the simulation code. This transparency is what makes exploration composable with the rest of the framework: no changes to processes, workloads, actors, or transport code.
+The child process does not know it was forked. From its perspective, the assertion fired, the simulation continued, and it eventually completed (or found a bug). The forking is invisible to the simulation code. This transparency is what makes exploration composable with the rest of the framework: no changes to processes, workloads, or transport code.
 
 In the next chapter, we will see why the "checks if it has energy budget remaining" step is critical. Without it, a single productive splitpoint could fork an exponentially growing tree that consumes all available memory and CPU.

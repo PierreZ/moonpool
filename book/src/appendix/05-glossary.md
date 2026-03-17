@@ -6,10 +6,6 @@ Terms are listed alphabetically. Cross-references are shown in **bold**.
 
 ---
 
-**Activation** -- The lifecycle event when an actor is first instantiated (or re-instantiated after **deactivation**). The `on_activate` hook runs before the actor handles its first message. Activation allocates resources and loads **persistent state**.
-
-**Actor** -- A virtual actor: a single-threaded, identity-keyed message processor. Each actor has a unique **identity** string and handles one message at a time. Actors are created on demand and can be deactivated when idle. Inspired by Orleans.
-
 **Adaptive forking** -- An exploration strategy where the number of **timelines** spawned at each **splitpoint** varies based on coverage yield. Productive **marks** that discover new coverage get more budget; **barren marks** return their energy to the **reallocation pool**. Configured via `AdaptiveConfig`.
 
 **Always assertion** -- An assertion that must hold every time it is evaluated. Violations are recorded but do not panic, following the **Antithesis principle**. Checked by `validate_assertion_contracts()` after the simulation completes. See `assert_always!` and `assert_always_or_unreachable!`.
@@ -26,8 +22,6 @@ Terms are listed alphabetically. Cross-references are shown in **bold**.
 
 **Coverage bitmap** -- A 1024-byte (8192-bit) bitfield that records which assertion paths a **timeline** touched. When an assertion fires, it sets a bit at position `hash(name) % 8192`. The **explored map** is the union of all coverage bitmaps across all timelines.
 
-**Deactivation** -- The lifecycle event when an actor is removed from memory. The `on_deactivate` hook runs before the actor is dropped. Three hints control timing: `KeepAlive` (stays resident until shutdown), `DeactivateOnIdle` (deactivates after each message dispatch), and `DeactivateAfterIdle(Duration)` (deactivates after a period of inactivity).
-
 **Determinism** -- The property that given the same **seed**, the simulation produces exactly the same execution. All randomness flows through the seeded RNG, and all I/O is simulated. This makes bugs reproducible: same seed, same bug, every time.
 
 **Endpoint** -- A `(IpAddr, Token)` pair that uniquely identifies a connection endpoint in the simulated network. The IP address identifies the node; the **token** identifies the specific listener or connection on that node.
@@ -42,15 +36,11 @@ Terms are listed alphabetically. Cross-references are shown in **bold**.
 
 **Frontier** -- For `assert_sometimes_all!`: the maximum number of named conditions that have been simultaneously true. When the frontier advances (more conditions true at once than ever before), a **splitpoint** is triggered. The frontier value is preserved across seeds in multi-seed exploration.
 
-**Identity** -- The unique string key that identifies a virtual **actor**. Messages addressed to the same identity are routed to the same actor instance. Each identity has its own **mailbox** and lifecycle.
-
-**Invariant** -- A property that must hold across the entire simulated system, checked after every simulation event. Invariants validate cross-**actor** or cross-**process** properties. Actors expose state via JSON through a `StateRegistry`; invariant functions read this state and panic on violation.
+**Invariant** -- A property that must hold across the entire simulated system, checked after every simulation event. Invariants validate cross-**process** properties via a `StateRegistry`; invariant functions read state and panic on violation.
 
 **Mark** -- An assertion site that can trigger **splitpoints** in the **explorer**. Each mark has a name, a shared-memory slot index, and (in **adaptive** mode) its own **energy** allowance. Marks are the unit of exploration budget management.
 
 **Multiverse** -- The tree of all **timelines** explored from one root **seed**. Each **splitpoint** creates new children with different seeds. The multiverse is fully deterministic: given the same root seed and configuration, the same tree is produced.
-
-**Placement** -- The mechanism that determines which node hosts a virtual **actor**. The default `Local` strategy activates actors on the node that first sends a message; `RoundRobin` distributes across cluster members. Custom `PlacementDirector` implementations can route actors based on **identity**, tags, or other criteria.
 
 **Process** -- The system under test. A server node that can be killed and restarted (rebooted). Each process gets fresh in-memory state on every boot; persistence is only through storage. Created by a factory function registered via `SimulationBuilder::processes()`. Analogous to FoundationDB's `fdbd`.
 
