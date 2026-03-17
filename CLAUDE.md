@@ -38,11 +38,11 @@ Types: `fix` (bugfix), `feat` (new feature), `build`, `chore`, `ci`, `docs`, `st
 
 ## Crate Architecture
 ```
-moonpool/                    - Facade crate + virtual actors, re-exports everything
+moonpool/                    - Facade crate, re-exports everything
 moonpool-core/               - Provider traits (Time, Task, Network, Random, Storage) and core types
 moonpool-sim/                - Simulation runtime, chaos testing, buggify, assertions
 moonpool-transport/          - Peer connections, wire format, FlowTransport, RPC
-moonpool-transport-derive/   - Proc-macro: #[service] and #[actor_impl]
+moonpool-transport-derive/   - Proc-macro: #[service]
 moonpool-explorer/           - Fork-based multiverse exploration, coverage, energy budgets
 xtask/                       - Cargo xtask automation (simulation runner)
 ```
@@ -150,7 +150,7 @@ Strategic placement: error handling, timeouts, retries, resource limits
 **FDB reference**: Process ≈ `fdbd`, Workload ≈ `tester.actor.cpp`
 
 ## Invariant System
-**When to use invariants**: Cross-actor properties, global system constraints, deterministic bug detection
-**When to use assertions**: Per-actor validation (`assert_always!` in actor code)
+**When to use invariants**: Cross-process properties, global system constraints, deterministic bug detection
+**When to use assertions**: Per-process validation (`assert_always!` in process code)
 **Performance**: Invariants run after every simulation event - design accordingly
-**Architecture**: Actors expose state via JSON → StateRegistry → InvariantCheck functions → panic on violation
+**Architecture**: Processes expose state via JSON → StateRegistry → InvariantCheck functions → panic on violation

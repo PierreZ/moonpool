@@ -7,8 +7,7 @@
 //!
 //! The `#[service(id = ...)]` macro generates all RPC boilerplate from a trait:
 //!
-//! - **`&self` methods** (RPC mode): `{Name}Server<C>`, `{Name}Client`, `Bound{Name}Client<P, C>`
-//! - **`&mut self` methods** (Actor mode): `{Name}Ref<P>`, `dispatch_{name}()`, `{name}_methods` module
+//! - `{Name}Server<C>`, `{Name}Client`, `Bound{Name}Client<P, C>`
 //!
 //! # Example
 //!
@@ -38,7 +37,7 @@ use crate::{Endpoint, UID};
 ///
 /// Uses FDB's adjustment pattern via `Endpoint::adjusted()`.
 ///
-/// Note: Method indices start at 1 (index 0 is reserved for virtual actor dispatch).
+/// Note: Method indices start at 1 (index 0 is reserved).
 ///
 /// # Example
 ///
@@ -53,7 +52,7 @@ pub fn method_endpoint(base: &Endpoint, method_index: u32) -> Endpoint {
 
 /// Generate UID for a specific interface method.
 ///
-/// Note: Method indices start at 1 (index 0 is reserved for virtual actor dispatch).
+/// Note: Method indices start at 1 (index 0 is reserved).
 ///
 /// # Example
 ///

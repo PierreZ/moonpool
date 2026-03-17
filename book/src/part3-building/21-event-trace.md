@@ -40,7 +40,7 @@ When an assertion fires, the question is: **what caused this?** The event trace 
 
 Start at the failure. Look at the last few events before the panic. Usually one of them is the trigger: a `DataDelivery` that delivered a stale message, a `Timer` that expired causing a timeout, a `ConnectionReady` that reconnected during a partition. Then ask what scheduled that event. Follow the chain back through the trace.
 
-For example, suppose your conservation law invariant fires after event #312. Look at event #312: it is a `DataDelivery` on connection 7. What was connection 7? The trace shows it was established at event #201 between the workload and a bank account actor. What did the delivery contain? A withdraw response. But the model expected a deposit. Now you have a lead.
+For example, suppose your conservation law invariant fires after event #312. Look at event #312: it is a `DataDelivery` on connection 7. What was connection 7? The trace shows it was established at event #201 between the workload and a KV server process. What did the delivery contain? A withdraw response. But the model expected a deposit. Now you have a lead.
 
 ## Using RNG Call Count
 

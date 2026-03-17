@@ -18,8 +18,6 @@ The answer already existed, scattered across several projects and decades of wor
 
 **TigerBeetle** extended the simulation philosophy to storage. Where FoundationDB focused on network faults (partitions, latency, connection drops), TigerBeetle modeled disk-level faults drawn from real hardware failure modes: torn writes, misdirected reads, phantom writes, read corruption, sync failures, uninitialized memory. A financial transactions database cannot afford to trust that disks behave according to spec.
 
-**Orleans** (and later its Rust-inspired successors) showed that virtual actors provide a natural programming model for distributed systems. Location-transparent addressing, automatic activation and deactivation, persistent state with optimistic concurrency. Actors give you a unit of state and computation that maps cleanly onto simulation: each actor is a self-contained entity whose interactions with the world go through well-defined interfaces.
-
 **Antithesis** generalized FoundationDB's assertion system into a declarative SDK. Instead of hand-coding what to explore, you declare properties: `Sometimes` (this condition should fire), `Always` (this invariant must hold), `SometimesAll` (drive exploration along a frontier). The platform figures out how to reach those states. Their work on NES games demonstrated that coverage-guided forking and adaptive exploration could beat complex state spaces with minimal domain knowledge.
 
 ## What moonpool synthesizes
@@ -29,8 +27,6 @@ Moonpool brings these ideas together in a single Rust framework.
 From FoundationDB: the **simulation engine**. Single-threaded deterministic execution. A seeded PRNG controlling all network timing, fault injection, and process scheduling. Simulated time that jumps forward when all tasks are blocked, compressing hours of cluster behavior into seconds. The same code runs against real networking or the simulated network, swapped at the provider level.
 
 From TigerBeetle: **storage fault injection**. Simulated disk operations that can corrupt reads, tear writes, fail syncs, and misdirect I/O. Not just network chaos but disk chaos, because real systems fail at both layers.
-
-From Orleans: **virtual actors** with lifecycle management. Activation, deactivation, persistent state, per-identity concurrent processing. A programming model that makes distributed state natural to express and natural to simulate.
 
 From Antithesis: the **assertion suite** and **fork-based exploration**. Always, sometimes, reachable, unreachable, numeric, and frontier assertions that live in shared memory. Coverage-guided forking that branches the simulation at interesting points, exploring multiple futures from a single state. Adaptive energy budgets that allocate exploration effort where coverage is still improving.
 
@@ -52,4 +48,4 @@ Second, **fork-based multiverse exploration**. When the simulation reaches an in
 
 This is not a gimmick. The **sequential luck problem** (finding a bug that requires getting lucky multiple times in sequence, where the probability is p^n) is the central bottleneck in simulation-based testing. Fork-based exploration attacks it directly: instead of hoping a single timeline stumbles through all the right doors, we branch at each door and explore both sides.
 
-Part V covers multiverse exploration in depth. For now, the key point is that moonpool is not just a simulation engine. It is a simulation engine with a built-in search strategy for the state spaces that matter most: the ones where bugs require sequences of unlikely events to surface.
+Part VI covers multiverse exploration in depth. For now, the key point is that moonpool is not just a simulation engine. It is a simulation engine with a built-in search strategy for the state spaces that matter most: the ones where bugs require sequences of unlikely events to surface.

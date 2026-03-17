@@ -37,7 +37,7 @@ Request and response types need `Serialize` and `Deserialize` derives because th
 
 ## Method Indexing
 
-Methods are assigned indices starting at 1 in declaration order. Index 0 is reserved for virtual actor dispatch (used by `&mut self` services).
+Methods are assigned indices starting at 1 in declaration order. Index 0 is reserved.
 
 For our Calculator:
 - `add` gets index 1, routed to `UID(0xCA1C_0000, 1)`
@@ -65,56 +65,6 @@ impl Calculator for CalculatorImpl {
 ```
 
 Note the `#[async_trait(?Send)]` attribute. All moonpool services are single-threaded (`!Send`), matching our deterministic execution model. The macro adds this attribute to the generated trait automatically, and you must repeat it on the `impl` block.
-
-## Actor Mode: &mut self
-
-For stateful actors, use `&mut self` receivers instead. The macro detects this and switches to actor mode:
-
-```rust
-#[service(id = 0xBA4E_4B00)]
-trait BankAccount {
-    async fn deposit(&mut self, req: DepositRequest) -> Result<BalanceResponse, RpcError>;
-    async fn withdraw(&mut self, req: WithdrawRequest) -> Result<BalanceResponse, RpcError>;
-    async fn get_balance(&mut self, req: GetBalanceRequest) -> Result<BalanceResponse, RpcError>;
-}
-```
-
-The generated trait methods receive an additional `ctx: &ActorContext<P, C>` parameter that provides access to providers and actor identity:
-
-```rust
-#[async_trait::async_trait(?Send)]
-impl BankAccount for BankAccountImpl {
-    async fn deposit<P: Providers, C: MessageCodec>(
-        &mut self,
-        ctx: &ActorContext<P, C>,
-        req: DepositRequest,
-    ) -> Result<BalanceResponse, RpcError> {
-        let new_balance = self.balance() + req.amount;
-        // ...
-        Ok(BalanceResponse { balance: new_balance })
-    }
-}
-```
-
-The `#[actor_impl(BankAccount)]` attribute on the `ActorHandler` impl then auto-generates the `actor_type()` and `dispatch()` methods, leaving you to provide only the lifecycle overrides you need:
-
-```rust
-#[actor_impl(BankAccount)]
-impl ActorHandler for BankAccountImpl {
-    fn deactivation_hint(&self) -> DeactivationHint {
-        DeactivationHint::DeactivateAfterIdle(Duration::from_secs(30))
-    }
-}
-```
-
-If you need no lifecycle customization at all, an empty impl block works:
-
-```rust
-#[actor_impl(BankAccount)]
-impl ActorHandler for BankAccountImpl {}
-```
-
-The macro fills in all the defaults.
 
 ## Serialization
 
