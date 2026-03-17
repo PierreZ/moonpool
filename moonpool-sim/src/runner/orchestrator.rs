@@ -189,7 +189,8 @@ impl<'a> ProcessManager<'a> {
     fn handle_restart(
         &mut self,
         ip: std::net::IpAddr,
-        providers: &crate::SimProviders,
+        sim: &crate::sim::WeakSimWorld,
+        seed: u64,
         state: &StateHandle,
         shutdown_signal: &tokio_util::sync::CancellationToken,
     ) {
@@ -225,7 +226,8 @@ impl<'a> ProcessManager<'a> {
             self.tag_registry.clone(),
             process_token,
         );
-        let ctx = SimContext::new(providers.clone(), topology, state.clone());
+        let providers = crate::SimProviders::new(sim.clone(), seed, ip);
+        let ctx = SimContext::new(providers, topology, state.clone());
         let ip_for_log = ip_str.clone();
         let handle = tokio::task::spawn_local(async move {
             if let Err(e) = process.run(&ctx).await {
@@ -326,9 +328,6 @@ impl WorkloadOrchestrator {
         // Create workload shutdown signal
         let shutdown_signal = tokio_util::sync::CancellationToken::new();
 
-        // Create SimProviders (Clone-able, shared across workload contexts)
-        let providers = crate::SimProviders::new(sim.downgrade(), seed);
-
         // === 1. BOOT PROCESSES ===
         let mut process_handles: Vec<Option<tokio::task::JoinHandle<()>>> = Vec::new();
         let mut process_tokens: Vec<Option<tokio_util::sync::CancellationToken>> = Vec::new();
@@ -353,7 +352,8 @@ impl WorkloadOrchestrator {
                     pc.tag_registry.clone(),
                     process_token.clone(),
                 );
-                let ctx = SimContext::new(providers.clone(), topology, state.clone());
+                let providers = crate::SimProviders::new(sim.downgrade(), seed, ip_addr);
+                let ctx = SimContext::new(providers, topology, state.clone());
                 let ip_for_log = ip.clone();
                 let handle = tokio::task::spawn_local(async move {
                     if let Err(e) = process.run(&ctx).await {
@@ -386,6 +386,7 @@ impl WorkloadOrchestrator {
                 client_id,
                 client_count,
             } = client_info[i];
+            let ip_addr: std::net::IpAddr = ip.parse().map_err(|_| (vec![seed], 1usize))?;
             let topology = TopologyFactory::create_topology_with_processes(
                 ip,
                 client_id,
@@ -396,7 +397,8 @@ impl WorkloadOrchestrator {
                 tag_registry.clone(),
                 shutdown_signal.clone(),
             );
-            let ctx = SimContext::new(providers.clone(), topology, state.clone());
+            let providers = crate::SimProviders::new(sim.downgrade(), seed, ip_addr);
+            let ctx = SimContext::new(providers, topology, state.clone());
             contexts.push(ctx);
         }
 
@@ -421,7 +423,7 @@ impl WorkloadOrchestrator {
                 Self::handle_process_events(
                     &mut sim,
                     &mut process_manager,
-                    &providers,
+                    seed,
                     &state,
                     &shutdown_signal,
                 );
@@ -558,7 +560,7 @@ impl WorkloadOrchestrator {
                 Self::handle_process_events(
                     &mut sim,
                     &mut process_manager,
-                    &providers,
+                    seed,
                     &state,
                     &shutdown_signal,
                 );
@@ -717,6 +719,7 @@ impl WorkloadOrchestrator {
                 client_id,
                 client_count,
             } = client_info[i];
+            let ip_addr: std::net::IpAddr = ip.parse().map_err(|_| (vec![seed], 1usize))?;
             let topology = TopologyFactory::create_topology_with_processes(
                 ip,
                 client_id,
@@ -727,7 +730,8 @@ impl WorkloadOrchestrator {
                 tag_registry.clone(),
                 shutdown_signal.clone(),
             );
-            let ctx = SimContext::new(providers.clone(), topology, state.clone());
+            let providers = crate::SimProviders::new(sim.downgrade(), seed, ip_addr);
+            let ctx = SimContext::new(providers, topology, state.clone());
             check_contexts.push(ctx);
         }
 
@@ -790,7 +794,7 @@ impl WorkloadOrchestrator {
     fn handle_process_events(
         sim: &mut crate::sim::SimWorld,
         process_manager: &mut ProcessManager<'_>,
-        providers: &crate::SimProviders,
+        seed: u64,
         state: &StateHandle,
         shutdown_signal: &tokio_util::sync::CancellationToken,
     ) {
@@ -820,7 +824,8 @@ impl WorkloadOrchestrator {
             }
             Some(crate::sim::Event::ProcessRestart { ip }) => {
                 assert_reachable!("event: ProcessRestart");
-                process_manager.handle_restart(ip, providers, state, shutdown_signal);
+                let weak_sim = sim.downgrade();
+                process_manager.handle_restart(ip, &weak_sim, seed, state, shutdown_signal);
             }
             _ => {}
         }

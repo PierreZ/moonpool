@@ -56,6 +56,8 @@ Terms are listed alphabetically. Cross-references are shown in **bold**.
 
 **Sometimes assertion** -- An assertion that should hold **at least once** across all iterations. Does not panic if false; instead, records statistics. On first success, triggers a **fork** in **exploration** mode. A coverage violation is reported if the condition is never true. See `assert_sometimes!`.
 
+**SimStorageProvider** -- The simulation implementation of `StorageProvider`. Constructed with an IP address (`SimStorageProvider::new(sim, ip)`) so all file operations are tagged with the owning **process**. Fault injection uses the per-process `StorageConfiguration` resolved by `StorageState::config_for(ip)`.
+
 **Splitpoint** -- A moment where the **explorer** decides to branch the **multiverse**. Occurs when a **sometimes** assertion succeeds for the first time, a numeric **watermark** improves, or a **frontier** advances. The RNG call count at the splitpoint, combined with the **seed**, identifies the exact program state.
 
 **Timeline** -- One complete simulation run. A **seed** plus a sequence of **splitpoints** uniquely identifies a timeline. The root timeline runs from the original seed; child timelines branch off at splitpoints with derived seeds.

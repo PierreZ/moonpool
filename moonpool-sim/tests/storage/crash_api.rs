@@ -6,7 +6,14 @@
 
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
+use std::net::IpAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+const TEST_IP_STR: &str = "127.0.0.1";
+
+fn test_ip() -> IpAddr {
+    TEST_IP_STR.parse().expect("valid IP")
+}
 
 /// Create a local tokio runtime for tests.
 fn local_runtime() -> tokio::runtime::LocalRuntime {
@@ -31,7 +38,7 @@ fn test_simulate_crash_api_basic() {
         let mut sim = fast_sim();
 
         // Create a file
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             let file = provider
                 .open("test.txt", OpenOptions::create_write())
@@ -49,11 +56,11 @@ fn test_simulate_crash_api_basic() {
         handle.await.expect("task panicked").expect("io error");
 
         // Call simulate_crash - should not panic
-        sim.simulate_crash(true);
+        sim.simulate_crash_for_process(test_ip(), true);
 
         // API should be callable multiple times
-        sim.simulate_crash(false);
-        sim.simulate_crash(true);
+        sim.simulate_crash_for_process(test_ip(), false);
+        sim.simulate_crash_for_process(test_ip(), true);
     });
 }
 
@@ -65,7 +72,7 @@ fn test_simulate_crash_synced_data_survives() {
         let data = b"This data is synced and should survive crash!";
 
         // Write and sync data
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             let mut file = provider
                 .open("synced.txt", OpenOptions::create_write())
@@ -85,10 +92,10 @@ fn test_simulate_crash_synced_data_survives() {
         handle.await.expect("task panicked").expect("io error");
 
         // Simulate crash
-        sim.simulate_crash(true);
+        sim.simulate_crash_for_process(test_ip(), true);
 
         // Read back - synced data should be intact
-        let provider2 = sim.storage_provider();
+        let provider2 = sim.storage_provider(test_ip());
         let handle2 = tokio::task::spawn_local(async move {
             let mut file = provider2
                 .open("synced.txt", OpenOptions::read_only())
@@ -123,7 +130,7 @@ fn test_simulate_crash_unsynced_data_behavior() {
         let original_data = b"This data is NOT synced";
 
         // Write data without syncing
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             let mut file = provider
                 .open("unsynced.txt", OpenOptions::create_write())
@@ -143,10 +150,10 @@ fn test_simulate_crash_unsynced_data_behavior() {
         handle.await.expect("task panicked").expect("io error");
 
         // Simulate crash with high corruption probability
-        sim.simulate_crash(true);
+        sim.simulate_crash_for_process(test_ip(), true);
 
         // Read back - data may be corrupted or lost
-        let provider2 = sim.storage_provider();
+        let provider2 = sim.storage_provider(test_ip());
         let handle2 = tokio::task::spawn_local(async move {
             let exists = provider2.exists("unsynced.txt").await?;
             if !exists {
@@ -195,7 +202,7 @@ fn test_simulate_crash_close_files_true() {
         let mut sim = fast_sim();
 
         // Create file
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             let file = provider
                 .open("close_test.txt", OpenOptions::create_write())
@@ -213,10 +220,10 @@ fn test_simulate_crash_close_files_true() {
         handle.await.expect("task panicked").expect("io error");
 
         // Crash with close_files=true
-        sim.simulate_crash(true);
+        sim.simulate_crash_for_process(test_ip(), true);
 
         // File should still be accessible for reopening
-        let provider2 = sim.storage_provider();
+        let provider2 = sim.storage_provider(test_ip());
         let handle2 = tokio::task::spawn_local(async move {
             let exists = provider2.exists("close_test.txt").await?;
             Ok::<_, std::io::Error>(exists)
@@ -241,7 +248,7 @@ fn test_simulate_crash_close_files_false() {
         let mut sim = fast_sim();
 
         // Create file
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             let file = provider
                 .open("no_close_test.txt", OpenOptions::create_write())
@@ -259,10 +266,10 @@ fn test_simulate_crash_close_files_false() {
         handle.await.expect("task panicked").expect("io error");
 
         // Crash with close_files=false
-        sim.simulate_crash(false);
+        sim.simulate_crash_for_process(test_ip(), false);
 
         // File should still be accessible
-        let provider2 = sim.storage_provider();
+        let provider2 = sim.storage_provider(test_ip());
         let handle2 = tokio::task::spawn_local(async move {
             let exists = provider2.exists("no_close_test.txt").await?;
             Ok::<_, std::io::Error>(exists)
@@ -287,7 +294,7 @@ fn test_simulate_crash_multiple_files() {
         let mut sim = fast_sim();
 
         // Create multiple files
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             for i in 0..5 {
                 let mut file = provider
@@ -310,10 +317,10 @@ fn test_simulate_crash_multiple_files() {
         handle.await.expect("task panicked").expect("io error");
 
         // Crash affects all files
-        sim.simulate_crash(true);
+        sim.simulate_crash_for_process(test_ip(), true);
 
         // All files should still exist (synced data survives)
-        let provider2 = sim.storage_provider();
+        let provider2 = sim.storage_provider(test_ip());
         let handle2 = tokio::task::spawn_local(async move {
             let mut count = 0;
             for i in 0..5 {
@@ -347,7 +354,7 @@ fn test_simulate_crash_during_write() {
         sim.set_storage_config(config);
 
         // Start a write operation
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             let mut file = provider
                 .open("mid_write.txt", OpenOptions::create_write())
@@ -367,10 +374,10 @@ fn test_simulate_crash_during_write() {
         handle.await.expect("task panicked").expect("io error");
 
         // Simulate crash "mid-write" (after write but before sync)
-        sim.simulate_crash(true);
+        sim.simulate_crash_for_process(test_ip(), true);
 
         // Verify behavior - data may be lost or corrupted
-        let provider2 = sim.storage_provider();
+        let provider2 = sim.storage_provider(test_ip());
         let handle2 = tokio::task::spawn_local(async move {
             let exists = provider2.exists("mid_write.txt").await?;
             Ok::<_, std::io::Error>(exists)
@@ -401,7 +408,7 @@ fn test_simulate_crash_zero_corruption_probability() {
         let data = b"Data with zero crash probability";
 
         // Write and sync
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             let mut file = provider
                 .open("zero_crash.txt", OpenOptions::create_write())
@@ -421,10 +428,10 @@ fn test_simulate_crash_zero_corruption_probability() {
         handle.await.expect("task panicked").expect("io error");
 
         // Crash with 0% corruption
-        sim.simulate_crash(true);
+        sim.simulate_crash_for_process(test_ip(), true);
 
         // Data should be perfectly intact
-        let provider2 = sim.storage_provider();
+        let provider2 = sim.storage_provider(test_ip());
         let handle2 = tokio::task::spawn_local(async move {
             let mut file = provider2
                 .open("zero_crash.txt", OpenOptions::read_only())
@@ -456,7 +463,7 @@ fn test_simulate_crash_repeated() {
         let mut sim = fast_sim();
 
         // Create file
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             let mut file = provider
                 .open("repeated.txt", OpenOptions::create_write())
@@ -477,11 +484,11 @@ fn test_simulate_crash_repeated() {
 
         // Multiple crashes should not panic or cause issues
         for i in 0..10 {
-            sim.simulate_crash(i % 2 == 0); // Alternate close_files
+            sim.simulate_crash_for_process(test_ip(), i % 2 == 0); // Alternate close_files
         }
 
         // File should still be accessible
-        let provider2 = sim.storage_provider();
+        let provider2 = sim.storage_provider(test_ip());
         let handle2 =
             tokio::task::spawn_local(async move { provider2.exists("repeated.txt").await });
 
@@ -504,11 +511,11 @@ fn test_simulate_crash_no_files() {
         let mut sim = fast_sim();
 
         // Crash with no files - should not panic
-        sim.simulate_crash(true);
-        sim.simulate_crash(false);
+        sim.simulate_crash_for_process(test_ip(), true);
+        sim.simulate_crash_for_process(test_ip(), false);
 
         // Can still create files after crash
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             let file = provider
                 .open("after_crash.txt", OpenOptions::create_write())

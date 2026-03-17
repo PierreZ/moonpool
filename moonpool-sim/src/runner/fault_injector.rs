@@ -215,6 +215,12 @@ impl FaultContext {
             RebootKind::Crash | RebootKind::CrashAndWipe => {
                 assert_reachable!("reboot: crash path");
                 self.sim.abort_all_connections_for_ip(ip_addr);
+                // Crash storage for this process
+                self.sim.simulate_crash_for_process(ip_addr, true);
+                // Wipe storage if CrashAndWipe
+                if kind == RebootKind::CrashAndWipe {
+                    self.sim.wipe_storage_for_process(ip_addr);
+                }
                 self.process_info
                     .dead_count
                     .set(self.process_info.dead_count.get() + 1);

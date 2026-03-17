@@ -61,7 +61,7 @@ Manual partition methods are also available on `SimWorld`: `partition_pair()`, `
 
 ## Storage Faults
 
-Configured via `StorageConfiguration`. All fault probabilities default to 0% and must be enabled explicitly or via `random_for_seed()`.
+Configured via `StorageConfiguration`. All fault probabilities default to 0% and must be enabled explicitly or via `random_for_seed()`. Storage faults are scoped per process: `StorageState` holds a global config plus optional per-process overrides in `per_process_configs`. Use `SimWorld::set_process_storage_config(ip, config)` to assign different fault profiles to individual processes.
 
 | Fault | Config Field | Default | Real-World Scenario |
 |-------|-------------|---------|---------------------|
@@ -72,6 +72,15 @@ Configured via `StorageConfiguration`. All fault probabilities default to 0% and
 | Misdirected read | `misdirect_read_probability` | 0% | Controller errors, wrong block read |
 | Phantom write | `phantom_write_probability` | 0% | Drive lies about durability |
 | Sync failure | `sync_failure_probability` | 0% | fsync fails, disk full |
+
+### Per-Process Storage Operations
+
+| Method | Parameters | Description |
+|--------|-----------|-------------|
+| `SimWorld::set_process_storage_config(ip, config)` | `IpAddr`, `StorageConfiguration` | Set per-process fault config (overrides global) |
+| `SimWorld::simulate_crash_for_process(ip, close_files)` | `IpAddr`, `bool` | Simulate power loss: torn writes, optional file close |
+| `SimWorld::wipe_storage_for_process(ip)` | `IpAddr` | Delete all storage owned by the process |
+| `SimWorld::storage_provider(ip)` | `IpAddr` | Create a `SimStorageProvider` scoped to this process |
 
 ### Storage Performance Simulation
 
@@ -93,7 +102,7 @@ Configured via [`Attrition`](../part3-building/attrition.md) (built-in) or custo
 |-------|-----------|----------|
 | Graceful reboot | `RebootKind::Graceful` | Signal shutdown token, wait grace period (default 2-5s), force kill, restart after recovery delay (default 1-10s) |
 | Crash reboot | `RebootKind::Crash` | Immediate task abort, all connections reset, restart after recovery delay |
-| Crash + wipe | `RebootKind::CrashAndWipe` | Crash behavior + delete all persistent storage (total data loss) |
+| Crash + wipe | `RebootKind::CrashAndWipe` | Crash behavior + immediate wipe of all persistent storage owned by the process (scoped by IP) |
 | Continuous attrition | `Attrition` config | Random reboots during chaos phase with weighted `prob_graceful`/`prob_crash`/`prob_wipe` and `max_dead` limit |
 
 ## Configuration Presets

@@ -5,7 +5,14 @@
 
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
+use std::net::IpAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+const TEST_IP_STR: &str = "127.0.0.1";
+
+fn test_ip() -> IpAddr {
+    TEST_IP_STR.parse().expect("valid IP")
+}
 
 /// Helper to run an async storage test with proper simulation stepping.
 async fn run_storage_test<F, Fut, T>(mut sim: SimWorld, f: F) -> T
@@ -14,7 +21,7 @@ where
     Fut: std::future::Future<Output = T> + 'static,
     T: 'static,
 {
-    let provider = sim.storage_provider();
+    let provider = sim.storage_provider(test_ip());
     let handle = tokio::task::spawn_local(f(provider));
 
     while !handle.is_finished() {
@@ -308,7 +315,7 @@ fn test_crash_torn_writes() {
         sim.set_storage_config(config);
 
         // Write data but don't sync, then simulate crash
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             let mut file = provider
                 .open("crash.txt", OpenOptions::create_write())
@@ -331,11 +338,11 @@ fn test_crash_torn_writes() {
         handle.await.expect("task panicked").expect("io error");
 
         // Simulate crash - this should apply torn write simulation
-        sim.simulate_crash(true);
+        sim.simulate_crash_for_process(test_ip(), true);
 
         // Verify the crash was processed
         // After crash, files are closed and pending writes may be corrupted
-        let provider2 = sim.storage_provider();
+        let provider2 = sim.storage_provider(test_ip());
         let handle2 = tokio::task::spawn_local(async move {
             // File should still exist but data may be corrupted
             let exists = provider2.exists("crash.txt").await?;
@@ -412,7 +419,7 @@ fn test_mixed_low_fault_probabilities() {
         let mut read_failures = 0;
 
         for i in 0..100 {
-            let provider = sim.storage_provider();
+            let provider = sim.storage_provider(test_ip());
             let filename = format!("mixed_{}.txt", i);
 
             // Try write
@@ -440,7 +447,7 @@ fn test_mixed_low_fault_probabilities() {
 
             // Try read (if write succeeded)
             if write_successes > read_successes + read_failures {
-                let provider2 = sim.storage_provider();
+                let provider2 = sim.storage_provider(test_ip());
                 let filename = format!("mixed_{}.txt", i);
                 let handle2 = tokio::task::spawn_local(async move {
                     let mut file = provider2.open(&filename, OpenOptions::read_only()).await?;
@@ -498,7 +505,7 @@ fn test_combined_fault_types() {
         let mut sim = SimWorld::new();
         sim.set_storage_config(config);
 
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
 
         // Run operations - expect various fault behaviors
         let handle = tokio::task::spawn_local(async move {
@@ -583,7 +590,7 @@ fn test_fault_determinism_same_seed() {
         let mut sim1 = SimWorld::new();
         sim1.set_storage_config(config.clone());
 
-        let provider = sim1.storage_provider();
+        let provider = sim1.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             let mut results = Vec::new();
             for i in 0..10 {
@@ -627,7 +634,7 @@ fn test_fault_determinism_same_seed() {
         let mut sim2 = SimWorld::new();
         sim2.set_storage_config(config);
 
-        let provider = sim2.storage_provider();
+        let provider = sim2.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             let mut results = Vec::new();
             for i in 0..10 {
@@ -687,7 +694,7 @@ fn test_fault_injection_produces_mixed_results() {
         let mut sim = SimWorld::new();
         sim.set_storage_config(config);
 
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             let mut corrupted_count = 0;
             let mut intact_count = 0;
@@ -765,7 +772,7 @@ fn test_corruption_content_deterministic() {
             let mut sim = SimWorld::new();
             sim.set_storage_config(config);
 
-            let provider = sim.storage_provider();
+            let provider = sim.storage_provider(test_ip());
             let handle = tokio::task::spawn_local(async move {
                 // Write known data
                 let mut file = provider
@@ -803,6 +810,595 @@ fn test_corruption_content_deterministic() {
         assert_eq!(
             corrupted1, corrupted2,
             "Corruption pattern should be deterministic with same seed"
+        );
+    });
+}
+
+// ============================================================================
+// Per-Process Storage Fault Isolation Tests
+// ============================================================================
+
+/// Test that per-process storage configs provide fault isolation between IPs.
+#[test]
+fn test_per_process_storage_config_isolation() {
+    local_runtime().block_on(async {
+        let ip1: IpAddr = "10.0.1.1".parse().expect("valid IP");
+        let ip2: IpAddr = "10.0.1.2".parse().expect("valid IP");
+
+        let mut sim = SimWorld::new();
+        // Base config with no faults
+        sim.set_storage_config(StorageConfiguration::fast_local());
+
+        // IP1: 100% read corruption
+        let mut config_ip1 = StorageConfiguration::fast_local();
+        config_ip1.read_fault_probability = 1.0;
+        sim.set_process_storage_config(ip1, config_ip1);
+
+        // IP2: 0% faults (clean reads)
+        let config_ip2 = StorageConfiguration::fast_local();
+        sim.set_process_storage_config(ip2, config_ip2);
+
+        let provider1 = sim.storage_provider(ip1);
+        let provider2 = sim.storage_provider(ip2);
+
+        let original = b"hello world!";
+
+        // Write known data through both providers (different paths per IP)
+        let handle = tokio::task::spawn_local(async move {
+            // Write via IP1
+            let mut file1 = provider1
+                .open("ip1_data.txt", OpenOptions::create_write())
+                .await?;
+            file1.write_all(original).await?;
+            file1.sync_all().await?;
+            drop(file1);
+
+            // Write via IP2
+            let mut file2 = provider2
+                .open("ip2_data.txt", OpenOptions::create_write())
+                .await?;
+            file2.write_all(original).await?;
+            file2.sync_all().await?;
+            drop(file2);
+
+            // Read via IP1 - should be corrupted
+            let mut file1 = provider1
+                .open("ip1_data.txt", OpenOptions::read_only())
+                .await?;
+            let mut buf1 = vec![0u8; original.len()];
+            file1.read_exact(&mut buf1).await?;
+
+            // Read via IP2 - should be intact
+            let mut file2 = provider2
+                .open("ip2_data.txt", OpenOptions::read_only())
+                .await?;
+            let mut buf2 = vec![0u8; original.len()];
+            file2.read_exact(&mut buf2).await?;
+
+            Ok::<_, std::io::Error>((buf1, buf2))
+        });
+
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let (buf1, buf2) = handle.await.expect("task panicked").expect("io error");
+
+        assert_ne!(
+            &buf1[..],
+            original.as_slice(),
+            "IP1 read should be corrupted (100% read fault)"
+        );
+        assert_eq!(
+            &buf2[..],
+            original.as_slice(),
+            "IP2 read should be intact (0% fault)"
+        );
+    });
+}
+
+/// Test that simulate_crash_for_process only affects the targeted process.
+#[test]
+fn test_simulate_crash_for_process_isolation() {
+    local_runtime().block_on(async {
+        let ip1: IpAddr = "10.0.1.1".parse().expect("valid IP");
+        let ip2: IpAddr = "10.0.1.2".parse().expect("valid IP");
+
+        let mut sim = fast_sim();
+
+        let provider1 = sim.storage_provider(ip1);
+        let provider2 = sim.storage_provider(ip2);
+
+        // Write and sync data through both providers (different paths per IP)
+        let handle = tokio::task::spawn_local(async move {
+            let mut file1 = provider1
+                .open("ip1_crash.txt", OpenOptions::create_write())
+                .await?;
+            file1.write_all(b"ip1 data").await?;
+            file1.sync_all().await?;
+            drop(file1);
+
+            let mut file2 = provider2
+                .open("ip2_crash.txt", OpenOptions::create_write())
+                .await?;
+            file2.write_all(b"ip2 data").await?;
+            file2.sync_all().await?;
+            drop(file2);
+
+            Ok::<_, std::io::Error>(())
+        });
+
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+        handle.await.expect("task panicked").expect("io error");
+
+        // Crash only IP1
+        sim.simulate_crash_for_process(ip1, true);
+
+        // IP2 should still be able to read its file
+        let provider2_after = sim.storage_provider(ip2);
+        let handle2 = tokio::task::spawn_local(async move {
+            let mut file = provider2_after
+                .open("ip2_crash.txt", OpenOptions::read_only())
+                .await?;
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf).await?;
+            Ok::<_, std::io::Error>(buf)
+        });
+
+        while !handle2.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let ip2_data = handle2.await.expect("task panicked").expect("io error");
+        assert_eq!(
+            &ip2_data[..],
+            b"ip2 data",
+            "IP2 file should be unaffected by IP1 crash"
+        );
+    });
+}
+
+/// Test that wipe_storage_for_process only deletes files for the targeted process.
+#[test]
+fn test_wipe_storage_for_process() {
+    local_runtime().block_on(async {
+        let ip1: IpAddr = "10.0.1.1".parse().expect("valid IP");
+        let ip2: IpAddr = "10.0.1.2".parse().expect("valid IP");
+
+        let mut sim = fast_sim();
+
+        let provider1 = sim.storage_provider(ip1);
+        let provider2 = sim.storage_provider(ip2);
+
+        // Write files through both providers (different paths per IP)
+        let handle = tokio::task::spawn_local(async move {
+            let mut file1 = provider1
+                .open("ip1_wipe.txt", OpenOptions::create_write())
+                .await?;
+            file1.write_all(b"ip1 data").await?;
+            file1.sync_all().await?;
+            drop(file1);
+
+            let mut file2 = provider2
+                .open("ip2_wipe.txt", OpenOptions::create_write())
+                .await?;
+            file2.write_all(b"ip2 data").await?;
+            file2.sync_all().await?;
+            drop(file2);
+
+            Ok::<_, std::io::Error>(())
+        });
+
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+        handle.await.expect("task panicked").expect("io error");
+
+        // Wipe only IP1's storage
+        sim.wipe_storage_for_process(ip1);
+
+        // Check IP1's file is gone
+        let provider1_after = sim.storage_provider(ip1);
+        let handle1 = tokio::task::spawn_local(async move {
+            let exists = provider1_after.exists("ip1_wipe.txt").await?;
+            Ok::<_, std::io::Error>(exists)
+        });
+
+        while !handle1.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let ip1_exists = handle1.await.expect("task panicked").expect("io error");
+        assert!(!ip1_exists, "IP1 file should be deleted after wipe");
+
+        // Check IP2's file still exists and is readable
+        let provider2_after = sim.storage_provider(ip2);
+        let handle2 = tokio::task::spawn_local(async move {
+            let exists = provider2_after.exists("ip2_wipe.txt").await?;
+            if exists {
+                let mut file = provider2_after
+                    .open("ip2_wipe.txt", OpenOptions::read_only())
+                    .await?;
+                let mut buf = Vec::new();
+                file.read_to_end(&mut buf).await?;
+                Ok::<_, std::io::Error>((true, buf))
+            } else {
+                Ok((false, Vec::new()))
+            }
+        });
+
+        while !handle2.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let (ip2_exists, ip2_data) = handle2.await.expect("task panicked").expect("io error");
+        assert!(ip2_exists, "IP2 file should still exist after IP1 wipe");
+        assert_eq!(
+            &ip2_data[..],
+            b"ip2 data",
+            "IP2 file data should be intact after IP1 wipe"
+        );
+    });
+}
+
+/// Test that per-process sync failure config is isolated between IPs.
+#[test]
+fn test_per_process_sync_failure_isolation() {
+    local_runtime().block_on(async {
+        let ip1: IpAddr = "10.0.1.1".parse().expect("valid IP");
+        let ip2: IpAddr = "10.0.1.2".parse().expect("valid IP");
+
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(StorageConfiguration::fast_local());
+
+        // IP1: 100% sync failure
+        let mut config_ip1 = StorageConfiguration::fast_local();
+        config_ip1.sync_failure_probability = 1.0;
+        sim.set_process_storage_config(ip1, config_ip1);
+
+        // IP2: 0% sync failure
+        sim.set_process_storage_config(ip2, StorageConfiguration::fast_local());
+
+        let provider1 = sim.storage_provider(ip1);
+        let provider2 = sim.storage_provider(ip2);
+
+        let handle = tokio::task::spawn_local(async move {
+            // IP1: sync should fail
+            let mut file1 = provider1
+                .open("ip1_sync.txt", OpenOptions::create_write())
+                .await?;
+            file1.write_all(b"data").await?;
+            let sync_result1 = file1.sync_all().await;
+
+            // IP2: sync should succeed
+            let mut file2 = provider2
+                .open("ip2_sync.txt", OpenOptions::create_write())
+                .await?;
+            file2.write_all(b"data").await?;
+            let sync_result2 = file2.sync_all().await;
+
+            Ok::<_, std::io::Error>((sync_result1, sync_result2))
+        });
+
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let (sync1, sync2) = handle.await.expect("task panicked").expect("io error");
+        assert!(
+            sync1.is_err(),
+            "IP1 sync should fail (100% sync_failure_probability)"
+        );
+        assert!(
+            sync2.is_ok(),
+            "IP2 sync should succeed (0% sync_failure_probability)"
+        );
+    });
+}
+
+/// Test that phantom write isolation works per process.
+///
+/// IP1 has 100% phantom writes (writes appear to succeed but don't persist).
+/// IP2 has 0% phantom writes. After crash, IP1's data is lost, IP2's survives.
+#[test]
+fn test_per_process_phantom_write_isolation() {
+    local_runtime().block_on(async {
+        let ip1: IpAddr = "10.0.1.1".parse().expect("valid IP");
+        let ip2: IpAddr = "10.0.1.2".parse().expect("valid IP");
+
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(StorageConfiguration::fast_local());
+
+        // IP1: 100% phantom writes
+        let mut config_ip1 = StorageConfiguration::fast_local();
+        config_ip1.phantom_write_probability = 1.0;
+        config_ip1.crash_fault_probability = 0.0;
+        sim.set_process_storage_config(ip1, config_ip1);
+
+        // IP2: no faults
+        sim.set_process_storage_config(ip2, StorageConfiguration::fast_local());
+
+        let provider1 = sim.storage_provider(ip1);
+        let provider2 = sim.storage_provider(ip2);
+
+        // Write and sync through both
+        let handle = tokio::task::spawn_local(async move {
+            let mut file1 = provider1
+                .open("ip1_phantom.txt", OpenOptions::create_write())
+                .await?;
+            file1.write_all(b"phantom data").await?;
+            file1.sync_all().await?;
+            drop(file1);
+
+            let mut file2 = provider2
+                .open("ip2_phantom.txt", OpenOptions::create_write())
+                .await?;
+            file2.write_all(b"real data").await?;
+            file2.sync_all().await?;
+            drop(file2);
+
+            Ok::<_, std::io::Error>(())
+        });
+
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+        handle.await.expect("task panicked").expect("io error");
+
+        // Crash both to reveal phantom writes
+        sim.simulate_crash_for_process(ip1, false);
+        sim.simulate_crash_for_process(ip2, false);
+
+        // Read back: IP1's phantom writes should be lost, IP2's real writes survive
+        let provider1 = sim.storage_provider(ip1);
+        let provider2 = sim.storage_provider(ip2);
+
+        let handle = tokio::task::spawn_local(async move {
+            let mut file1 = provider1
+                .open("ip1_phantom.txt", OpenOptions::read_only())
+                .await?;
+            let mut buf1 = Vec::new();
+            file1.read_to_end(&mut buf1).await?;
+
+            let mut file2 = provider2
+                .open("ip2_phantom.txt", OpenOptions::read_only())
+                .await?;
+            let mut buf2 = Vec::new();
+            file2.read_to_end(&mut buf2).await?;
+
+            Ok::<_, std::io::Error>((buf1, buf2))
+        });
+
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let (buf1, buf2) = handle.await.expect("task panicked").expect("io error");
+        // IP1: phantom writes mean data was never actually written
+        assert_ne!(
+            &buf1[..],
+            b"phantom data",
+            "IP1 phantom writes should not persist after crash"
+        );
+        // IP2: real writes should survive
+        assert_eq!(
+            &buf2[..],
+            b"real data",
+            "IP2 real writes should survive crash"
+        );
+    });
+}
+
+/// Test that global default config is used when no per-process config is set.
+#[test]
+fn test_default_config_fallback() {
+    local_runtime().block_on(async {
+        let ip: IpAddr = "10.0.1.1".parse().expect("valid IP");
+
+        let mut sim = SimWorld::new();
+
+        // Set global config with 100% read faults — do NOT set per-process config
+        let mut config = StorageConfiguration::fast_local();
+        config.read_fault_probability = 1.0;
+        sim.set_storage_config(config);
+
+        let provider = sim.storage_provider(ip);
+        let original = b"test data here";
+
+        let handle = tokio::task::spawn_local(async move {
+            let mut file = provider
+                .open("fallback.txt", OpenOptions::create_write())
+                .await?;
+            file.write_all(original).await?;
+            file.sync_all().await?;
+            drop(file);
+
+            let mut file = provider
+                .open("fallback.txt", OpenOptions::read_only())
+                .await?;
+            let mut buf = vec![0u8; original.len()];
+            file.read_exact(&mut buf).await?;
+
+            Ok::<_, std::io::Error>(buf)
+        });
+
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let buf = handle.await.expect("task panicked").expect("io error");
+        assert_ne!(
+            &buf[..],
+            original.as_slice(),
+            "Global fallback config should apply when no per-process config is set"
+        );
+    });
+}
+
+/// Test that wiped storage can be recreated by the same process.
+#[test]
+fn test_wipe_then_recreate() {
+    local_runtime().block_on(async {
+        let ip: IpAddr = "10.0.1.1".parse().expect("valid IP");
+
+        let mut sim = fast_sim();
+        let provider = sim.storage_provider(ip);
+
+        // Create and write a file
+        let handle = tokio::task::spawn_local(async move {
+            let mut file = provider
+                .open("recoverable.txt", OpenOptions::create_write())
+                .await?;
+            file.write_all(b"original").await?;
+            file.sync_all().await?;
+            drop(file);
+            Ok::<_, std::io::Error>(())
+        });
+
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+        handle.await.expect("task panicked").expect("io error");
+
+        // Wipe storage
+        sim.wipe_storage_for_process(ip);
+
+        // Recreate the file at the same path
+        let provider = sim.storage_provider(ip);
+        let handle = tokio::task::spawn_local(async move {
+            // File should not exist after wipe
+            let exists = provider.exists("recoverable.txt").await?;
+            assert!(!exists, "File should not exist after wipe");
+
+            // Create new file at same path
+            let mut file = provider
+                .open("recoverable.txt", OpenOptions::create_write())
+                .await?;
+            file.write_all(b"recreated").await?;
+            file.sync_all().await?;
+            drop(file);
+
+            // Read it back
+            let mut file = provider
+                .open("recoverable.txt", OpenOptions::read_only())
+                .await?;
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf).await?;
+
+            Ok::<_, std::io::Error>(buf)
+        });
+
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let buf = handle.await.expect("task panicked").expect("io error");
+        assert_eq!(
+            &buf[..],
+            b"recreated",
+            "Recreated file should contain new data"
+        );
+    });
+}
+
+/// Test that changing per-process config after files are open affects subsequent operations.
+#[test]
+fn test_dynamic_config_change() {
+    local_runtime().block_on(async {
+        let ip: IpAddr = "10.0.1.1".parse().expect("valid IP");
+
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(StorageConfiguration::fast_local());
+
+        // Start with clean config
+        sim.set_process_storage_config(ip, StorageConfiguration::fast_local());
+
+        let provider = sim.storage_provider(ip);
+        let original = b"dynamic test";
+
+        // Write data with clean config
+        let p = provider.clone();
+        let handle = tokio::task::spawn_local(async move {
+            let mut file = p.open("dynamic.txt", OpenOptions::create_write()).await?;
+            file.write_all(original).await?;
+            file.sync_all().await?;
+            drop(file);
+            Ok::<_, std::io::Error>(())
+        });
+
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+        handle.await.expect("task panicked").expect("io error");
+
+        // Now change config to 100% read faults — file is already created
+        let mut faulty_config = StorageConfiguration::fast_local();
+        faulty_config.read_fault_probability = 1.0;
+        sim.set_process_storage_config(ip, faulty_config);
+
+        // Read with the new faulty config — should see corruption
+        let handle = tokio::task::spawn_local(async move {
+            let mut file = provider
+                .open("dynamic.txt", OpenOptions::read_only())
+                .await?;
+            let mut buf = vec![0u8; original.len()];
+            file.read_exact(&mut buf).await?;
+            Ok::<_, std::io::Error>(buf)
+        });
+
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let buf = handle.await.expect("task panicked").expect("io error");
+        assert_ne!(
+            &buf[..],
+            original.as_slice(),
+            "Dynamically changed config should affect reads on existing files"
         );
     });
 }

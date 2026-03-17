@@ -6,7 +6,14 @@
 
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
+use std::net::IpAddr;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+const TEST_IP_STR: &str = "127.0.0.1";
+
+fn test_ip() -> IpAddr {
+    TEST_IP_STR.parse().expect("valid IP")
+}
 
 /// Create a local tokio runtime for tests.
 fn local_runtime() -> tokio::runtime::LocalRuntime {
@@ -30,7 +37,7 @@ fn test_multiple_files_open_simultaneously() {
     local_runtime().block_on(async {
         let mut sim = fast_sim();
 
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             // Open 5 files
             let mut files = Vec::new();
@@ -65,7 +72,7 @@ fn test_interleaved_writes() {
     local_runtime().block_on(async {
         let mut sim = fast_sim();
 
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             // Open two files
             let mut file_a = provider
@@ -124,7 +131,7 @@ fn test_write_one_read_another() {
     local_runtime().block_on(async {
         let mut sim = fast_sim();
 
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             // Create the source file first
             let mut source = provider
@@ -181,7 +188,7 @@ fn test_sequential_opens_same_file() {
     local_runtime().block_on(async {
         let mut sim = fast_sim();
 
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             // Write initial content
             let mut file = provider
@@ -228,7 +235,7 @@ fn test_file_independence() {
     local_runtime().block_on(async {
         let mut sim = fast_sim();
 
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             // Create three files with different content
             for i in 0..3 {
@@ -300,7 +307,7 @@ fn test_independent_file_positions() {
     local_runtime().block_on(async {
         let mut sim = fast_sim();
 
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             // Create two files with same content
             for name in &["pos_a.txt", "pos_b.txt"] {
@@ -346,7 +353,7 @@ fn test_many_files() {
     local_runtime().block_on(async {
         let mut sim = fast_sim();
 
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             let file_count = 20;
 
@@ -403,7 +410,7 @@ fn test_sequential_reads_same_file() {
     local_runtime().block_on(async {
         let mut sim = fast_sim();
 
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             // Create the file
             let mut file = provider

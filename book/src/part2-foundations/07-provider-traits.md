@@ -143,7 +143,7 @@ Storage is the newest provider, and the one with the richest fault model. `OpenO
 
 **Production**: `TokioStorageProvider` wraps `tokio::fs`.
 
-**Simulation**: In-memory filesystem with fault injection inspired by TigerBeetle and FoundationDB patterns: read/write corruption, crash and torn writes, misdirected reads/writes, sync failures, and IOPS/bandwidth timing simulation.
+**Simulation**: In-memory filesystem with fault injection inspired by TigerBeetle and FoundationDB patterns: read/write corruption, crash and torn writes, misdirected reads/writes, sync failures, and IOPS/bandwidth timing simulation. Each `SimStorageProvider` is scoped to a process IP (`SimStorageProvider::new(sim, ip)`), and files are tagged with `owner_ip` so fault injection uses the correct per-process configuration.
 
 ## The Providers Bundle
 
@@ -165,4 +165,4 @@ pub trait Providers: Clone + 'static {
 }
 ```
 
-`TokioProviders` bundles all five production implementations. `SimProviders` bundles all five simulation implementations. Your application code sees `P: Providers` and nothing else.
+`TokioProviders` bundles all five production implementations. `SimProviders` bundles all five simulation implementations and requires an IP address at construction (`SimProviders::new(sim, seed, ip)`) so that the storage provider is scoped to the correct process. Your application code sees `P: Providers` and nothing else.

@@ -6,7 +6,14 @@
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
 use std::io::SeekFrom;
+use std::net::IpAddr;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+const TEST_IP_STR: &str = "127.0.0.1";
+
+fn test_ip() -> IpAddr {
+    TEST_IP_STR.parse().expect("valid IP")
+}
 
 /// Helper to run an async storage test with proper simulation stepping.
 async fn run_storage_test<F, Fut, T>(mut sim: SimWorld, f: F) -> T
@@ -15,7 +22,7 @@ where
     Fut: std::future::Future<Output = T> + 'static,
     T: 'static,
 {
-    let provider = sim.storage_provider();
+    let provider = sim.storage_provider(test_ip());
     let handle = tokio::task::spawn_local(f(provider));
 
     while !handle.is_finished() {

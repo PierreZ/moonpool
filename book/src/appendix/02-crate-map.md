@@ -76,7 +76,7 @@ Moonpool is organized as a workspace of eight crates. The dependency graph is de
 **Dependencies**: moonpool-core, moonpool-explorer, async-trait, crc32c, futures, rand, rand_chacha, serde, serde_json, thiserror, tokio, tokio-util, tracing
 
 **Key types**:
-- `SimWorld` -- the simulated world containing network, time, and event queue
+- `SimWorld` -- the simulated world containing network, time, storage, and event queue
 - `SimulationBuilder` -- builder pattern for configuring experiments
 - `SimContext` -- per-workload context providing access to providers and topology
 - `NetworkConfiguration` / `ChaosConfiguration` -- network chaos parameters
