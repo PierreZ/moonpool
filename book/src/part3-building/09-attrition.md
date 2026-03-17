@@ -28,7 +28,7 @@ This models kernel panics, OOM kills, and hardware failures. There is no warning
 
 The worst case. Same as Crash, but all persistent storage for the process is also deleted. The process restarts as if it were a brand new node joining the cluster for the first time.
 
-This models total disk failures, accidental data deletion, or replacing a failed machine with a fresh one. Systems that rely on durable state for recovery must handle the case where that state is gone.
+This models total disk failures, accidental data deletion, or replacing a failed machine with a fresh one. The wipe is scoped to the crashed process's IP address, so other processes' storage is unaffected. Systems that rely on durable state for recovery must handle the case where that state is gone.
 
 ## The Attrition Configuration
 

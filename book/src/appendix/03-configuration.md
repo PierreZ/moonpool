@@ -105,7 +105,7 @@ The type of reboot chosen based on attrition probabilities:
 |---------|----------|
 | `Graceful` | Signal shutdown token, wait grace period, drain send buffers, then restart |
 | `Crash` | Immediate task cancel, all connections abort, no buffer drain |
-| `CrashAndWipe` | Same as Crash plus storage wipe (storage scoping is future work) |
+| `CrashAndWipe` | Same as Crash plus immediate storage wipe for the process (scoped by IP) |
 
 ## NetworkConfiguration
 

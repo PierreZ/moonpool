@@ -4,8 +4,10 @@
 //! `world.rs` to improve code organization. It handles file operations like
 //! open, read, write, sync, and provides fault injection for testing storage reliability.
 
+use std::net::IpAddr;
 use std::task::Waker;
 use std::time::Duration;
+use tracing::instrument;
 
 use crate::storage::StorageError;
 
@@ -72,7 +74,12 @@ pub(crate) fn handle_storage_event(
 
 /// Handle read operation completion.
 fn handle_read_complete(inner: &mut SimInner, file_id: FileId) {
-    let read_fault_probability = inner.storage.config.read_fault_probability;
+    let read_fault_probability = inner
+        .storage
+        .files
+        .get(&file_id)
+        .map(|f| inner.storage.config_for(f.owner_ip).read_fault_probability)
+        .unwrap_or(0.0);
 
     // Find and remove the oldest pending read operation
     let Some((op_seq, op)) = take_pending_op(inner, file_id, PendingOpType::Read) else {
@@ -114,7 +121,12 @@ fn handle_read_complete(inner: &mut SimInner, file_id: FileId) {
 /// - phantom_write_probability: write appears to succeed but isn't persisted
 /// - misdirect_write_probability: write lands at wrong location
 fn handle_write_complete(inner: &mut SimInner, file_id: FileId) {
-    let config = inner.storage.config.clone();
+    let config = inner
+        .storage
+        .files
+        .get(&file_id)
+        .map(|f| inner.storage.config_for(f.owner_ip).clone())
+        .unwrap_or_default();
 
     // Find and remove the oldest pending write operation
     let Some((op_seq, op)) = take_pending_op(inner, file_id, PendingOpType::Write) else {
@@ -196,7 +208,17 @@ fn handle_write_complete(inner: &mut SimInner, file_id: FileId) {
 ///
 /// Applies sync_failure_probability fault injection.
 fn handle_sync_complete(inner: &mut SimInner, file_id: FileId) {
-    let sync_failure_prob = inner.storage.config.sync_failure_probability;
+    let sync_failure_prob = inner
+        .storage
+        .files
+        .get(&file_id)
+        .map(|f| {
+            inner
+                .storage
+                .config_for(f.owner_ip)
+                .sync_failure_probability
+        })
+        .unwrap_or(0.0);
 
     // Find and remove the oldest pending sync operation
     let Some((op_seq, _)) = take_pending_op(inner, file_id, PendingOpType::Sync) else {
@@ -281,12 +303,14 @@ impl SimWorld {
     /// Open a file in the simulation.
     ///
     /// Creates a new file or opens an existing one based on the options.
+    /// Files are tagged with the `owner_ip` for per-process storage fault injection.
     /// Schedules an `OpenComplete` event and returns the file ID.
     pub(crate) fn open_file(
         &self,
         path: &str,
         options: moonpool_core::OpenOptions,
         initial_size: u64,
+        owner_ip: IpAddr,
     ) -> Result<FileId, StorageError> {
         use crate::storage::InMemoryStorage;
 
@@ -341,8 +365,13 @@ impl SimWorld {
         let seed = sim_random::<u64>();
         let storage = InMemoryStorage::new(initial_size, seed);
 
-        let file_state =
-            super::state::StorageFileState::new(file_id, path_str.clone(), options, storage);
+        let file_state = super::state::StorageFileState::new(
+            file_id,
+            path_str.clone(),
+            options,
+            storage,
+            owner_ip,
+        );
 
         inner.storage.files.insert(file_id, file_state);
         inner.storage.path_to_file.insert(path_str, file_id);
@@ -446,8 +475,10 @@ impl SimWorld {
             },
         );
 
-        // Calculate latency and schedule completion event
-        let latency = Self::calculate_storage_latency(&inner.storage.config, len, false);
+        // Calculate latency using per-process config
+        let owner_ip = file_state.owner_ip;
+        let config = inner.storage.config_for(owner_ip);
+        let latency = Self::calculate_storage_latency(config, len, false);
         let scheduled_time = inner.current_time + latency;
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
@@ -507,8 +538,10 @@ impl SimWorld {
             },
         );
 
-        // Calculate latency and schedule completion event
-        let latency = Self::calculate_storage_latency(&inner.storage.config, len, true);
+        // Calculate latency using per-process config
+        let owner_ip = file_state.owner_ip;
+        let config = inner.storage.config_for(owner_ip);
+        let latency = Self::calculate_storage_latency(config, len, true);
         let scheduled_time = inner.current_time + latency;
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
@@ -562,8 +595,10 @@ impl SimWorld {
             },
         );
 
-        // Use sync latency from config
-        let latency = crate::network::sample_duration(&inner.storage.config.sync_latency);
+        // Use sync latency from per-process config
+        let owner_ip = file_state.owner_ip;
+        let config = inner.storage.config_for(owner_ip);
+        let latency = crate::network::sample_duration(&config.sync_latency);
         let scheduled_time = inner.current_time + latency;
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
@@ -615,8 +650,10 @@ impl SimWorld {
             },
         );
 
-        // Use write latency for set_len
-        let latency = crate::network::sample_duration(&inner.storage.config.write_latency);
+        // Use write latency from per-process config
+        let owner_ip = file_state.owner_ip;
+        let config = inner.storage.config_for(owner_ip);
+        let latency = crate::network::sample_duration(&config.write_latency);
         let scheduled_time = inner.current_time + latency;
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
@@ -761,20 +798,29 @@ impl SimWorld {
         base + iops_overhead + transfer
     }
 
-    /// Simulate a crash affecting storage.
+    /// Simulate a crash affecting storage for a specific process.
     ///
-    /// This applies crash simulation to all open files:
-    /// 1. Calls `apply_crash()` on all `InMemoryStorage` instances
+    /// Only affects files owned by the given IP address:
+    /// 1. Calls `apply_crash()` on matching `InMemoryStorage` instances
     /// 2. Clears pending operations (lost in crash)
     /// 3. Optionally marks files as closed
     /// 4. Wakes all storage wakers (operations will fail)
-    pub fn simulate_crash(&self, close_files: bool) {
+    ///
+    /// Files owned by other IPs are unaffected.
+    #[instrument(skip(self))]
+    pub fn simulate_crash_for_process(&self, ip: IpAddr, close_files: bool) {
         let mut inner = self.inner.borrow_mut();
-        let crash_probability = inner.storage.config.crash_fault_probability;
+        let crash_probability = inner.storage.config_for(ip).crash_fault_probability;
 
         // Collect all wakers to wake in one pass (to avoid borrow conflict)
         let mut wakers_to_wake = Vec::new();
-        let file_ids: Vec<FileId> = inner.storage.files.keys().copied().collect();
+        let file_ids: Vec<FileId> = inner
+            .storage
+            .files
+            .iter()
+            .filter(|(_, f)| f.owner_ip == ip)
+            .map(|(id, _)| *id)
+            .collect();
 
         for file_id in &file_ids {
             if let Some(file_state) = inner.storage.files.get_mut(file_id) {
@@ -807,9 +853,68 @@ impl SimWorld {
         }
 
         tracing::info!(
-            "Storage crash simulated: {} files affected, close_files={}",
+            "Storage crash simulated for {}: {} files affected, close_files={}",
+            ip,
             file_ids.len(),
             close_files
         );
+    }
+
+    /// Wipe all storage for a specific process.
+    ///
+    /// Deletes all files owned by the given IP address. Used by `CrashAndWipe`
+    /// reboot to simulate total data loss. After wipe, the process can create
+    /// new files at the same paths.
+    ///
+    /// Files owned by other IPs are unaffected.
+    #[instrument(skip(self))]
+    pub fn wipe_storage_for_process(&self, ip: IpAddr) {
+        let mut inner = self.inner.borrow_mut();
+
+        // Collect files owned by this IP
+        let file_ids: Vec<(FileId, String)> = inner
+            .storage
+            .files
+            .iter()
+            .filter(|(_, f)| f.owner_ip == ip)
+            .map(|(id, f)| (*id, f.path.clone()))
+            .collect();
+
+        // Collect wakers to wake
+        let mut wakers_to_wake = Vec::new();
+
+        for (file_id, path) in &file_ids {
+            if let Some(file_state) = inner.storage.files.remove(file_id) {
+                for op_seq in file_state.pending_ops.keys() {
+                    wakers_to_wake.push((*file_id, *op_seq));
+                }
+            }
+            inner.storage.path_to_file.remove(path);
+            inner.storage.deleted_paths.insert(path.clone());
+        }
+
+        // Wake all collected wakers
+        for key in wakers_to_wake {
+            if let Some(waker) = inner.wakers.storage_wakers.remove(&key) {
+                waker.wake();
+            }
+        }
+
+        tracing::info!("Storage wiped for {}: {} files deleted", ip, file_ids.len(),);
+    }
+
+    /// Set storage configuration for a specific process.
+    ///
+    /// Files owned by this IP will use this configuration for fault injection
+    /// and latency calculations. Takes effect immediately, even for files
+    /// already open.
+    #[instrument(skip(self, config))]
+    pub fn set_process_storage_config(
+        &self,
+        ip: IpAddr,
+        config: crate::storage::StorageConfiguration,
+    ) {
+        let mut inner = self.inner.borrow_mut();
+        inner.storage.per_process_configs.insert(ip, config);
     }
 }

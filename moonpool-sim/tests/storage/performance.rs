@@ -6,8 +6,15 @@
 
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
+use std::net::IpAddr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+const TEST_IP_STR: &str = "127.0.0.1";
+
+fn test_ip() -> IpAddr {
+    TEST_IP_STR.parse().expect("valid IP")
+}
 
 /// Create a local tokio runtime for tests.
 fn local_runtime() -> tokio::runtime::LocalRuntime {
@@ -24,7 +31,7 @@ where
     F: FnOnce(moonpool_sim::SimStorageProvider) -> Fut,
     Fut: std::future::Future<Output = std::io::Result<()>> + 'static,
 {
-    let provider = sim.storage_provider();
+    let provider = sim.storage_provider(test_ip());
     let handle = tokio::task::spawn_local(f(provider));
 
     while !handle.is_finished() {
@@ -297,7 +304,7 @@ fn test_read_bandwidth_constraint() {
         sim.set_storage_config(config.clone());
 
         // First create the file
-        let provider = sim.storage_provider();
+        let provider = sim.storage_provider(test_ip());
         let handle = tokio::task::spawn_local(async move {
             let mut file = provider
                 .open("read_bw.txt", OpenOptions::create_write())
@@ -319,7 +326,7 @@ fn test_read_bandwidth_constraint() {
         let start_time = sim.current_time();
 
         // Now read 5KB - should take ~100ms at 50KB/s
-        let provider2 = sim.storage_provider();
+        let provider2 = sim.storage_provider(test_ip());
         let handle2 = tokio::task::spawn_local(async move {
             let mut file = provider2
                 .open("read_bw.txt", OpenOptions::read_only())

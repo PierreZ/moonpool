@@ -74,10 +74,8 @@ pub enum RebootKind {
     /// Instant kill + wipe all storage for this process.
     ///
     /// Same as [`Crash`](RebootKind::Crash) but also deletes all persistent
-    /// storage. Simulates total data loss or a new node joining the cluster.
-    ///
-    /// **Note**: Storage wipe is deferred to future work (storage not yet scoped
-    /// per IP). Currently behaves the same as `Crash`.
+    /// storage owned by this process's IP. Simulates total data loss or a
+    /// new node joining the cluster.
     CrashAndWipe,
 }
 

@@ -5,29 +5,34 @@ use crate::sim::WeakSimWorld;
 use async_trait::async_trait;
 use moonpool_core::{OpenOptions, StorageProvider};
 use std::io;
+use std::net::IpAddr;
 
 /// Simulated storage provider for deterministic testing.
 ///
-/// This provider wraps a `WeakSimWorld` and implements the `StorageProvider`
-/// trait to enable deterministic storage simulation with fault injection.
+/// Each provider is scoped to a specific process IP address. Files opened
+/// through this provider are tagged with the owner IP, enabling per-process
+/// fault injection and storage isolation.
 ///
 /// # Example
 ///
 /// ```ignore
 /// let sim = SimWorld::new();
-/// let provider = SimStorageProvider::new(sim.weak());
+/// let ip: IpAddr = "10.0.1.1".parse().unwrap();
+/// let provider = SimStorageProvider::new(sim.weak(), ip);
 ///
 /// let file = provider.open("test.txt", OpenOptions::create_write()).await?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct SimStorageProvider {
     sim: WeakSimWorld,
+    /// IP address of the process that owns files opened through this provider.
+    owner_ip: IpAddr,
 }
 
 impl SimStorageProvider {
-    /// Create a new simulated storage provider.
-    pub fn new(sim: WeakSimWorld) -> Self {
-        Self { sim }
+    /// Create a new simulated storage provider scoped to a process IP.
+    pub fn new(sim: WeakSimWorld, owner_ip: IpAddr) -> Self {
+        Self { sim, owner_ip }
     }
 }
 
@@ -41,7 +46,7 @@ impl StorageProvider for SimStorageProvider {
             .upgrade()
             .map_err(|_| io::Error::other("simulation shutdown"))?;
 
-        let file_id = sim.open_file(path, options, 0)?;
+        let file_id = sim.open_file(path, options, 0, self.owner_ip)?;
 
         Ok(SimStorageFile::new(self.sim.clone(), file_id))
     }

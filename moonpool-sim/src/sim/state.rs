@@ -4,7 +4,7 @@
 //! listeners, partitions, and clogs in the simulation environment.
 
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     net::IpAddr,
     time::Duration,
 };
@@ -362,11 +362,19 @@ pub struct StorageFileState {
     pub pending_ops: BTreeMap<u64, PendingStorageOp>,
     /// Next sequence number for operations on this file
     pub next_op_seq: u64,
+    /// IP address of the process that owns this file.
+    pub owner_ip: IpAddr,
 }
 
 impl StorageFileState {
     /// Create a new storage file state.
-    pub fn new(id: FileId, path: String, options: OpenOptions, storage: InMemoryStorage) -> Self {
+    pub fn new(
+        id: FileId,
+        path: String,
+        options: OpenOptions,
+        storage: InMemoryStorage,
+        owner_ip: IpAddr,
+    ) -> Self {
         Self {
             id,
             path,
@@ -376,6 +384,7 @@ impl StorageFileState {
             is_closed: false,
             pending_ops: BTreeMap::new(),
             next_op_seq: 0,
+            owner_ip,
         }
     }
 }
@@ -385,8 +394,13 @@ impl StorageFileState {
 pub struct StorageState {
     /// Counter for generating unique file IDs
     pub next_file_id: u64,
-    /// Storage configuration for latencies and fault injection
+    /// Default storage configuration (used when no per-process config is set)
     pub config: StorageConfiguration,
+    /// Per-process storage configurations, keyed by IP address.
+    ///
+    /// When a file's owner IP has an entry here, that config is used for
+    /// fault injection and latency calculations instead of the global default.
+    pub per_process_configs: HashMap<IpAddr, StorageConfiguration>,
     /// Active files indexed by their ID
     pub files: BTreeMap<FileId, StorageFileState>,
     /// Mapping from path to file ID for quick lookup
@@ -403,11 +417,19 @@ impl StorageState {
         Self {
             next_file_id: 0,
             config,
+            per_process_configs: HashMap::new(),
             files: BTreeMap::new(),
             path_to_file: BTreeMap::new(),
             deleted_paths: HashSet::new(),
             sync_failures: HashSet::new(),
         }
+    }
+
+    /// Resolve storage configuration for a given IP address.
+    ///
+    /// Returns the per-process config if one is set, otherwise the global default.
+    pub fn config_for(&self, ip: IpAddr) -> &StorageConfiguration {
+        self.per_process_configs.get(&ip).unwrap_or(&self.config)
     }
 }
 

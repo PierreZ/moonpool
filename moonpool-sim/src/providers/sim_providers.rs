@@ -1,5 +1,7 @@
 //! Simulation providers bundle implementation.
 
+use std::net::IpAddr;
+
 use moonpool_core::{Providers, TokioTaskProvider};
 
 use crate::network::SimNetworkProvider;
@@ -10,23 +12,22 @@ use super::{SimRandomProvider, SimTimeProvider};
 
 /// Simulation providers bundle for deterministic testing.
 ///
-/// This struct bundles all four simulation-based providers into a single
-/// instance that implements [`Providers`].
+/// This struct bundles all simulation-based providers into a single
+/// instance that implements [`Providers`]. Each bundle is scoped to a
+/// specific process IP for per-process storage fault injection.
 ///
 /// ## Usage
-///
-/// `SimProviders` is typically created by the simulation framework during
-/// workload setup, but can also be manually constructed:
 ///
 /// ```rust,ignore
 /// use moonpool_sim::{SimWorld, SimProviders, Providers};
 ///
 /// let sim = SimWorld::new();
-/// let providers = SimProviders::new(sim.downgrade(), 42);
+/// let ip: std::net::IpAddr = "10.0.1.1".parse().unwrap();
+/// let providers = SimProviders::new(sim.downgrade(), 42, ip);
 ///
 /// // Access individual providers
 /// let network = providers.network();
-/// let time = providers.time();
+/// let storage = providers.storage();
 /// ```
 ///
 /// ## Implementation Notes
@@ -35,7 +36,7 @@ use super::{SimRandomProvider, SimTimeProvider};
 /// - Uses `SimTimeProvider` for logical/simulated time
 /// - Uses `TokioTaskProvider` for task spawning (same as production)
 /// - Uses `SimRandomProvider` for seeded deterministic randomness
-/// - Uses `SimStorageProvider` for simulated file I/O with fault injection
+/// - Uses `SimStorageProvider` for simulated file I/O with per-process fault injection
 #[derive(Clone)]
 pub struct SimProviders {
     network: SimNetworkProvider,
@@ -46,19 +47,20 @@ pub struct SimProviders {
 }
 
 impl SimProviders {
-    /// Create a new simulation providers bundle.
+    /// Create a new simulation providers bundle scoped to a process IP.
     ///
     /// # Arguments
     ///
     /// * `sim` - Weak reference to the simulation world
     /// * `seed` - Seed for deterministic random number generation
-    pub fn new(sim: WeakSimWorld, seed: u64) -> Self {
+    /// * `ip` - IP address of the owning process (for per-process storage scoping)
+    pub fn new(sim: WeakSimWorld, seed: u64, ip: IpAddr) -> Self {
         Self {
             network: SimNetworkProvider::new(sim.clone()),
             time: SimTimeProvider::new(sim.clone()),
             task: TokioTaskProvider,
             random: SimRandomProvider::new(seed),
-            storage: SimStorageProvider::new(sim),
+            storage: SimStorageProvider::new(sim, ip),
         }
     }
 }

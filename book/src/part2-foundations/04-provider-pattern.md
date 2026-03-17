@@ -63,7 +63,7 @@ fn run_server<P: Providers>(providers: P) {
 }
 ```
 
-Two implementations exist: `TokioProviders` for production, and `SimProviders` (in moonpool-sim) for simulation. Your application code never imports either one directly. It only sees `P: Providers`.
+Two implementations exist: `TokioProviders` for production, and `SimProviders` (in moonpool-sim) for simulation. `SimProviders::new(sim, seed, ip)` takes an IP address so its storage provider is scoped to the correct process. Your application code never imports either one directly. It only sees `P: Providers`.
 
 ## One Line Changes Everything
 

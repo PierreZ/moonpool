@@ -99,6 +99,34 @@ The outer loop checks if the spawned task has finished. The inner loop processes
 
 This pattern is mechanical but important. Without it, storage operations will hang forever waiting for simulation events that never get processed.
 
+## Per-Process Storage Configuration
+
+Storage fault injection is scoped per process. Each process is identified by its IP address, and you can assign different `StorageConfiguration` to different processes. This models real-world heterogeneous hardware: one node with a flaky SSD, another with a healthy disk.
+
+The `StorageState` maintains a global configuration as the default, plus optional per-process overrides in `per_process_configs: HashMap<IpAddr, StorageConfiguration>`. When the simulation needs a config for a file operation, `StorageState::config_for(ip)` checks for a per-process override first, falling back to the global config.
+
+Set per-process configuration through `SimWorld`:
+
+```rust
+// Give process 10.0.1.2 a degraded disk
+let degraded = StorageConfiguration {
+    read_fault_probability: 0.01,  // 1% read corruption
+    write_fault_probability: 0.005,
+    ..StorageConfiguration::default()
+};
+sim.set_process_storage_config("10.0.1.2".parse().unwrap(), degraded);
+```
+
+Every file opened by a process is tagged with that process's IP (`StorageFileState::owner_ip`). Fault injection decisions (corruption probabilities, latency ranges, sync failures) use the config resolved for the file's owner, not a single global setting.
+
+## Crash and Wipe Operations
+
+Two `SimWorld` methods handle storage lifecycle during process failures:
+
+**`simulate_crash_for_process(ip, close_files)`** simulates a power loss for a specific process. Pending writes are subject to crash fault injection (torn writes), and open file handles are optionally closed. This replaces the old `simulate_crash()` which operated globally.
+
+**`wipe_storage_for_process(ip)`** deletes all persistent storage owned by the given process. This models total disk failure or replacing a machine. The `CrashAndWipe` reboot kind calls both: crash first, then wipe. The wipe happens immediately (not deferred).
+
 ## Configuration in Practice
 
 For chaos testing, use `StorageConfiguration::random_for_seed()`. This randomizes both performance parameters and fault probabilities based on the simulation seed:

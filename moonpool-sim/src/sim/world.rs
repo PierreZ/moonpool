@@ -359,14 +359,14 @@ impl SimWorld {
         crate::TokioTaskProvider
     }
 
-    /// Create a storage provider for this simulation.
-    pub fn storage_provider(&self) -> crate::storage::SimStorageProvider {
-        crate::storage::SimStorageProvider::new(self.downgrade())
+    /// Create a storage provider for this simulation scoped to a process IP.
+    pub fn storage_provider(&self, ip: std::net::IpAddr) -> crate::storage::SimStorageProvider {
+        crate::storage::SimStorageProvider::new(self.downgrade(), ip)
     }
 
-    /// Set storage configuration for this simulation.
+    /// Set the default storage configuration for this simulation.
     ///
-    /// Must be called before any storage operations are performed.
+    /// Used as fallback when no per-process config is set for a given IP.
     pub fn set_storage_config(&mut self, config: crate::storage::StorageConfiguration) {
         self.inner.borrow_mut().storage.config = config;
     }

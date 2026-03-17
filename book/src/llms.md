@@ -50,7 +50,7 @@ This page helps AI assistants navigate the Moonpool book. Each entry links to a 
 - [Buggify: Fault Injection](./part3-building/08-buggify.md) — Two-phase activation; testing error paths; FoundationDB-inspired
 - [Attrition: Process Reboots](./part3-building/09-attrition.md) — Graceful, crash, wipe reboot types; randomized kills; recovery delay
 - [Network Faults](./part3-building/10-network-faults.md) — Connection-level: latency, partition, drops, reordering, clogging
-- [Storage Faults](./part3-building/11-storage-faults.md) — TigerBeetle-inspired: corruption, misdirected I/O, phantom writes, sync failures
+- [Storage Faults](./part3-building/11-storage-faults.md) — TigerBeetle-inspired: corruption, misdirected I/O, phantom writes, sync failures; per-process storage config and crash/wipe scoped by IP
 - [Assertions: Finding Bugs](./part3-building/12-assertions.md) — Record and continue (Antithesis principle); cascade discovery
 - [Invariants vs Discovery vs Guidance](./part3-building/13-assertion-concepts.md) — Three assertion categories: invariants, sometimes, numeric
 - [Always and Sometimes](./part3-building/14-always-sometimes.md) — `assert_always!` (must hold) vs `assert_sometimes!` (exploration guidance)

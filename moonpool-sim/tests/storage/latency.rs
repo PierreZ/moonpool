@@ -5,8 +5,15 @@
 
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
+use std::net::IpAddr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+const TEST_IP_STR: &str = "127.0.0.1";
+
+fn test_ip() -> IpAddr {
+    TEST_IP_STR.parse().expect("valid IP")
+}
 
 /// Run a storage test and return the simulation time elapsed.
 async fn run_and_measure_time<F, Fut>(mut sim: SimWorld, f: F) -> Duration
@@ -14,7 +21,7 @@ where
     F: FnOnce(moonpool_sim::SimStorageProvider) -> Fut,
     Fut: std::future::Future<Output = std::io::Result<()>> + 'static,
 {
-    let provider = sim.storage_provider();
+    let provider = sim.storage_provider(test_ip());
     let handle = tokio::task::spawn_local(f(provider));
 
     while !handle.is_finished() {
@@ -241,7 +248,7 @@ fn test_read_latency_scales_with_size() {
             sim.set_storage_config(config.clone());
 
             // Pre-create file
-            let provider = sim.storage_provider();
+            let provider = sim.storage_provider(test_ip());
             let handle = tokio::task::spawn_local(async move {
                 let mut file = provider
                     .open("read_scale.txt", OpenOptions::create_write())
@@ -261,7 +268,7 @@ fn test_read_latency_scales_with_size() {
 
             let start_time = sim.current_time();
 
-            let provider2 = sim.storage_provider();
+            let provider2 = sim.storage_provider(test_ip());
             let handle2 = tokio::task::spawn_local(async move {
                 let mut file = provider2
                     .open("read_scale.txt", OpenOptions::read_only())
