@@ -4,6 +4,8 @@
 
 Consolidated quick-reference of every fault moonpool-sim can inject, organized by category. For detailed explanations and examples, see [Network Faults](../part3-building/network-faults.md), [Storage Faults](../part3-building/storage-faults.md), and [Attrition: Process Reboots](../part3-building/attrition.md).
 
+Every fault listed below is automatically emitted to the `"sim:faults"` [event timeline](../part3-building/18-event-timelines.md) as a `SimFaultEvent`. Invariants can read these to correlate application behavior with infrastructure faults.
+
 All defaults below refer to the values in `ChaosConfiguration::default()` and `StorageConfiguration::default()`. When using `random_for_seed()`, these values are randomized per seed within documented ranges.
 
 ## Network Faults

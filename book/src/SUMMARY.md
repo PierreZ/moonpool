@@ -1,7 +1,7 @@
 # Summary
 
 [Welcome](./welcome.md)
-[For AI Assistants](./llms.md)
+[Index](./index.md)
 
 # Foreword
 
@@ -53,11 +53,12 @@
   - [Numeric Assertions](./part3-building/15-numeric-assertions.md)
   - [Compound Assertions](./part3-building/16-compound-assertions.md)
 - [System Invariants](./part3-building/17-invariants.md)
-- [Designing Workloads That Find Bugs](./part3-building/18-designing-workloads.md)
-- [Debugging a Failing Seed](./part3-building/19-debugging.md)
-  - [Reproducing with FixedCount](./part3-building/20-reproducing.md)
-  - [Reading the Event Trace](./part3-building/21-event-trace.md)
-  - [Common Pitfalls](./part3-building/22-pitfalls.md)
+- [Event Timelines](./part3-building/18-event-timelines.md)
+- [Designing Workloads That Find Bugs](./part3-building/19-designing-workloads.md)
+- [Debugging a Failing Seed](./part3-building/20-debugging.md)
+  - [Reproducing with FixedCount](./part3-building/21-reproducing.md)
+  - [Reading the Event Trace](./part3-building/22-event-trace.md)
+  - [Common Pitfalls](./part3-building/23-pitfalls.md)
 
 ---
 
