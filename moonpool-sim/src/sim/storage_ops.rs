@@ -11,6 +11,8 @@ use tracing::instrument;
 
 use crate::storage::StorageError;
 
+use crate::chaos::fault_events::SimFaultEvent;
+
 use super::{
     events::{Event, ScheduledEvent, StorageOperation},
     rng::{sim_random, sim_random_range},
@@ -90,6 +92,7 @@ fn handle_read_complete(inner: &mut SimInner, file_id: FileId) {
     let (offset, len) = (op.offset, op.len);
 
     // Apply read fault injection - mark sectors as faulted based on probability
+    let mut read_faulted = false;
     if read_fault_probability > 0.0
         && let Some(file_state) = inner.storage.files.get_mut(&file_id)
     {
@@ -99,12 +102,22 @@ fn handle_read_complete(inner: &mut SimInner, file_id: FileId) {
         for sector in start_sector..end_sector {
             if sim_random::<f64>() < read_fault_probability {
                 file_state.storage.set_fault(sector);
+                read_faulted = true;
                 tracing::info!(
                     "Read fault injected for file {:?}, sector {}",
                     file_id,
                     sector
                 );
             }
+        }
+    }
+    if read_faulted {
+        let ip = inner.storage.files.get(&file_id).map(|f| f.owner_ip);
+        if let Some(ip) = ip {
+            inner.emit_fault(SimFaultEvent::StorageReadFault {
+                ip: ip.to_string(),
+                file_id: file_id.0,
+            });
         }
     }
 
@@ -128,6 +141,8 @@ fn handle_write_complete(inner: &mut SimInner, file_id: FileId) {
         .map(|f| inner.storage.config_for(f.owner_ip).clone())
         .unwrap_or_default();
 
+    let owner_ip = inner.storage.files.get(&file_id).map(|f| f.owner_ip);
+
     // Find and remove the oldest pending write operation
     let Some((op_seq, op)) = take_pending_op(inner, file_id, PendingOpType::Write) else {
         tracing::warn!("WriteComplete for unknown file {:?}", file_id);
@@ -137,6 +152,7 @@ fn handle_write_complete(inner: &mut SimInner, file_id: FileId) {
     let (offset, data_opt) = (op.offset, op.data);
 
     // Apply the write with potential fault injection
+    let mut write_fault_kind: Option<&str> = None;
     if let Some(data) = data_opt
         && let Some(file_state) = inner.storage.files.get_mut(&file_id)
     {
@@ -149,6 +165,7 @@ fn handle_write_complete(inner: &mut SimInner, file_id: FileId) {
                 data.len()
             );
             file_state.storage.record_phantom_write(offset, &data);
+            write_fault_kind = Some("phantom");
         }
         // Check for misdirected write
         else if sim_random::<f64>() < config.misdirect_write_probability {
@@ -172,6 +189,7 @@ fn handle_write_complete(inner: &mut SimInner, file_id: FileId) {
             {
                 tracing::warn!("Failed to apply misdirected write: {}", e);
             }
+            write_fault_kind = Some("misdirected");
         }
         // Normal write (not synced - may be lost on crash)
         else if let Err(e) = file_state.storage.write(offset, &data, false) {
@@ -186,6 +204,7 @@ fn handle_write_complete(inner: &mut SimInner, file_id: FileId) {
                 for sector in start_sector..end_sector {
                     if sim_random::<f64>() < config.write_fault_probability {
                         file_state.storage.set_fault(sector);
+                        write_fault_kind = Some("corruption");
                         tracing::info!(
                             "Write fault injected for file {:?}, sector {}",
                             file_id,
@@ -195,6 +214,13 @@ fn handle_write_complete(inner: &mut SimInner, file_id: FileId) {
                 }
             }
         }
+    }
+    if let (Some(kind), Some(ip)) = (write_fault_kind, owner_ip) {
+        inner.emit_fault(SimFaultEvent::StorageWriteFault {
+            ip: ip.to_string(),
+            file_id: file_id.0,
+            kind: kind.to_string(),
+        });
     }
 
     // Wake the waker for this operation
@@ -233,6 +259,13 @@ fn handle_sync_complete(inner: &mut SimInner, file_id: FileId) {
         inner.storage.sync_failures.insert((file_id, op_seq));
         // On sync failure, we don't call storage.sync()
         // Data remains in pending state and may be lost on crash
+        let ip = inner.storage.files.get(&file_id).map(|f| f.owner_ip);
+        if let Some(ip) = ip {
+            inner.emit_fault(SimFaultEvent::StorageSyncFault {
+                ip: ip.to_string(),
+                file_id: file_id.0,
+            });
+        }
     } else if let Some(file_state) = inner.storage.files.get_mut(&file_id) {
         // Successful sync - make all pending writes durable
         file_state.storage.sync();
@@ -852,6 +885,8 @@ impl SimWorld {
             }
         }
 
+        inner.emit_fault(SimFaultEvent::StorageCrash { ip: ip.to_string() });
+
         tracing::info!(
             "Storage crash simulated for {}: {} files affected, close_files={}",
             ip,
@@ -899,6 +934,8 @@ impl SimWorld {
                 waker.wake();
             }
         }
+
+        inner.emit_fault(SimFaultEvent::StorageWipe { ip: ip.to_string() });
 
         tracing::info!("Storage wiped for {}: {} files deleted", ip, file_ids.len(),);
     }

@@ -15,6 +15,8 @@ use tracing::instrument;
 
 use crate::{
     SimulationError, SimulationResult,
+    chaos::fault_events::{SIM_FAULT_TIMELINE, SimFaultEvent},
+    chaos::state_handle::StateHandle,
     network::{
         NetworkConfiguration, PartitionStrategy,
         sim::{ConnectionId, ListenerId, SimNetworkProvider},
@@ -63,6 +65,9 @@ pub(crate) struct SimInner {
 
     // Last event processed by step() — used by orchestrator to detect ProcessRestart
     pub(crate) last_processed_event: Option<Event>,
+
+    // Optional state handle for emitting fault events to the timeline
+    pub(crate) state: Option<StateHandle>,
 }
 
 impl SimInner {
@@ -80,6 +85,7 @@ impl SimInner {
             events_processed: 0,
             last_bit_flip_time: Duration::ZERO,
             last_processed_event: None,
+            state: None,
         }
     }
 
@@ -97,6 +103,15 @@ impl SimInner {
             events_processed: 0,
             last_bit_flip_time: Duration::ZERO,
             last_processed_event: None,
+            state: None,
+        }
+    }
+
+    /// Emit a fault event to the timeline, if state is attached.
+    pub(crate) fn emit_fault(&self, event: SimFaultEvent) {
+        if let Some(ref state) = self.state {
+            let time_ms = self.current_time.as_millis() as u64;
+            state.emit_raw(SIM_FAULT_TIMELINE, event, time_ms, "sim");
         }
     }
 
@@ -186,6 +201,14 @@ impl SimWorld {
         seed: u64,
     ) -> Self {
         Self::create(Some(network_config), seed)
+    }
+
+    /// Attach a state handle for fault event emission.
+    ///
+    /// Once set, the simulator emits [`SimFaultEvent`]s to the `"sim:faults"` timeline
+    /// whenever faults are injected.
+    pub fn set_state(&self, state: StateHandle) {
+        self.inner.borrow_mut().state = Some(state);
     }
 
     /// Processes the next scheduled event and advances time.
@@ -878,11 +901,13 @@ impl SimWorld {
                 {
                     conn.is_cut = false;
                     conn.cut_expiry = None;
+                    inner.emit_fault(SimFaultEvent::CutRestored { connection_id: id });
                     tracing::debug!("Connection {} restored via scheduled event", id);
                     Self::wake_all(&mut inner.wakers.cut_wakers, connection_id);
                 }
             }
             ConnectionStateChange::HalfOpenError => {
+                inner.emit_fault(SimFaultEvent::HalfOpenError { connection_id: id });
                 tracing::debug!("Connection {} half-open error time reached", id);
                 if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
                     waker.wake();
@@ -981,7 +1006,7 @@ impl SimWorld {
         let data_to_deliver = if is_stable {
             data
         } else {
-            Self::maybe_corrupt_data(inner, &data)
+            Self::maybe_corrupt_data(inner, connection_id, &data)
         };
 
         // Now get connection reference and deliver data
@@ -1072,7 +1097,11 @@ impl SimWorld {
     }
 
     /// Maybe corrupt data with bit flips based on chaos configuration.
-    fn maybe_corrupt_data(inner: &mut SimInner, data: &[u8]) -> Vec<u8> {
+    fn maybe_corrupt_data(
+        inner: &mut SimInner,
+        connection_id: ConnectionId,
+        data: &[u8],
+    ) -> Vec<u8> {
         if data.is_empty() {
             return data.to_vec();
         }
@@ -1114,6 +1143,11 @@ impl SimWorld {
             flip_count,
             flipped_positions.len()
         );
+
+        inner.emit_fault(SimFaultEvent::BitFlip {
+            connection_id: connection_id.0,
+            flip_count: flipped_positions.len(),
+        });
 
         corrupted_data
     }
@@ -1570,6 +1604,12 @@ impl SimWorld {
         if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
             conn.is_cut = true;
             conn.cut_expiry = Some(expires_at);
+
+            inner.emit_fault(SimFaultEvent::ConnectionCut {
+                connection_id: connection_id.0,
+                duration_ms: duration.as_millis() as u64,
+            });
+
             tracing::debug!("Connection {} cut until {:?}", connection_id.0, expires_at);
 
             // Schedule restoration event
@@ -2039,6 +2079,10 @@ impl SimWorld {
 
         inner.network.last_random_close_time = current_time;
 
+        inner.emit_fault(SimFaultEvent::RandomClose {
+            connection_id: connection_id.0,
+        });
+
         let paired_id = inner
             .network
             .connections
@@ -2149,6 +2193,10 @@ impl SimWorld {
             // Clear the paired connection to simulate peer being gone
             // Data sent will go nowhere
             conn.paired_connection = None;
+
+            inner.emit_fault(SimFaultEvent::PeerCrash {
+                connection_id: connection_id.0,
+            });
 
             tracing::info!(
                 "Connection {} now half-open, errors manifest at {:?}",
@@ -2262,6 +2310,11 @@ impl SimWorld {
         let scheduled_event = ScheduledEvent::new(expires_at, restore_event, sequence);
         inner.event_queue.schedule(scheduled_event);
 
+        inner.emit_fault(SimFaultEvent::PartitionCreated {
+            from: from_ip.to_string(),
+            to: to_ip.to_string(),
+        });
+
         tracing::debug!(
             "Partitioned {} -> {} until {:?}",
             from_ip,
@@ -2291,6 +2344,7 @@ impl SimWorld {
         let scheduled_event = ScheduledEvent::new(expires_at, clear_event, sequence);
         inner.event_queue.schedule(scheduled_event);
 
+        inner.emit_fault(SimFaultEvent::SendPartitionCreated { ip: ip.to_string() });
         tracing::debug!("Partitioned sends from {} until {:?}", ip, expires_at);
         Ok(())
     }
@@ -2315,6 +2369,7 @@ impl SimWorld {
         let scheduled_event = ScheduledEvent::new(expires_at, clear_event, sequence);
         inner.event_queue.schedule(scheduled_event);
 
+        inner.emit_fault(SimFaultEvent::RecvPartitionCreated { ip: ip.to_string() });
         tracing::debug!("Partitioned receives to {} until {:?}", ip, expires_at);
         Ok(())
     }
@@ -2327,6 +2382,10 @@ impl SimWorld {
     ) -> SimulationResult<()> {
         let mut inner = self.inner.borrow_mut();
         inner.network.ip_partitions.remove(&(from_ip, to_ip));
+        inner.emit_fault(SimFaultEvent::PartitionHealed {
+            from: from_ip.to_string(),
+            to: to_ip.to_string(),
+        });
         tracing::debug!("Restored partition {} -> {}", from_ip, to_ip);
         Ok(())
     }
@@ -2438,6 +2497,11 @@ impl SimWorld {
                     .network
                     .ip_partitions
                     .insert((to_ip, from_ip), PartitionState { expires_at });
+
+                inner.emit_fault(SimFaultEvent::PartitionCreated {
+                    from: from_ip.to_string(),
+                    to: to_ip.to_string(),
+                });
 
                 tracing::debug!(
                     "Partition triggered: {} <-> {} until {:?} (strategy: {:?})",
@@ -2671,5 +2735,84 @@ mod tests {
         assert_eq!(sim.current_time(), Duration::from_millis(100));
         assert!(!sim.step());
         assert_eq!(sim.current_time(), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn emit_fault_without_state_is_noop() {
+        let inner = SimInner::new();
+        assert!(inner.state.is_none());
+        // Should not panic
+        inner.emit_fault(SimFaultEvent::StorageCrash {
+            ip: "10.0.1.1".to_string(),
+        });
+    }
+
+    #[test]
+    fn emit_fault_with_state_writes_to_timeline() {
+        let mut inner = SimInner::new();
+        let state = StateHandle::new();
+        inner.state = Some(state.clone());
+        inner.current_time = Duration::from_millis(500);
+
+        inner.emit_fault(SimFaultEvent::StorageCrash {
+            ip: "10.0.1.1".to_string(),
+        });
+
+        let tl = state
+            .timeline::<SimFaultEvent>(SIM_FAULT_TIMELINE)
+            .expect("timeline should exist");
+        assert_eq!(tl.len(), 1);
+        let entry = tl.last().expect("should have entry");
+        assert_eq!(entry.time_ms, 500);
+        assert_eq!(entry.source, "sim");
+        assert!(matches!(entry.event, SimFaultEvent::StorageCrash { .. }));
+    }
+
+    #[test]
+    fn partition_pair_emits_fault_event() {
+        let sim = SimWorld::new();
+        let state = StateHandle::new();
+        sim.set_state(state.clone());
+
+        let from: std::net::IpAddr = "10.0.1.1".parse().expect("valid ip");
+        let to: std::net::IpAddr = "10.0.1.2".parse().expect("valid ip");
+        sim.partition_pair(from, to, Duration::from_secs(10))
+            .expect("partition should succeed");
+
+        let tl = state
+            .timeline::<SimFaultEvent>(SIM_FAULT_TIMELINE)
+            .expect("timeline should exist");
+        assert_eq!(tl.len(), 1);
+        assert!(matches!(
+            &tl.all()[0].event,
+            SimFaultEvent::PartitionCreated { from, to }
+            if from == "10.0.1.1" && to == "10.0.1.2"
+        ));
+    }
+
+    #[test]
+    fn restore_partition_emits_fault_event() {
+        let sim = SimWorld::new();
+        let state = StateHandle::new();
+        sim.set_state(state.clone());
+
+        let from: std::net::IpAddr = "10.0.1.1".parse().expect("valid ip");
+        let to: std::net::IpAddr = "10.0.1.2".parse().expect("valid ip");
+        sim.partition_pair(from, to, Duration::from_secs(10))
+            .expect("partition");
+        sim.restore_partition(from, to).expect("restore");
+
+        let tl = state
+            .timeline::<SimFaultEvent>(SIM_FAULT_TIMELINE)
+            .expect("timeline should exist");
+        assert_eq!(tl.len(), 2);
+        assert!(matches!(
+            &tl.all()[0].event,
+            SimFaultEvent::PartitionCreated { .. }
+        ));
+        assert!(matches!(
+            &tl.all()[1].event,
+            SimFaultEvent::PartitionHealed { .. }
+        ));
     }
 }

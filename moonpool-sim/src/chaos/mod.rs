@@ -129,6 +129,7 @@
 
 pub mod assertions;
 pub mod buggify;
+pub mod fault_events;
 pub mod invariant_trait;
 pub mod state_handle;
 
@@ -140,5 +141,6 @@ pub use assertions::{
     reset_assertion_results, validate_assertion_contracts,
 };
 pub use buggify::{buggify_init, buggify_internal, buggify_reset};
+pub use fault_events::{SIM_FAULT_TIMELINE, SimFaultEvent};
 pub use invariant_trait::{Invariant, invariant_fn};
 pub use state_handle::{StateHandle, Timeline, TimelineEntry};
