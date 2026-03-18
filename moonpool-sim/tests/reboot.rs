@@ -7,9 +7,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Attrition, FaultContext, FaultInjector, NetworkProvider, Process, RebootKind, SimContext,
-    SimulationBuilder, SimulationResult, TcpListenerTrait, TimeProvider, Workload,
+    Attrition, FaultContext, FaultInjector, Invariant, NetworkProvider, Process, RebootKind,
+    SIM_FAULT_TIMELINE, SimContext, SimFaultEvent, SimulationBuilder, SimulationResult,
+    StateHandle, TcpListenerTrait, TimeProvider, Workload, assert_always,
 };
+
+use std::cell::Cell;
 
 // ============================================================================
 // Test process: simple echo server that binds and waits for shutdown
@@ -441,6 +444,135 @@ fn test_graceful_reboot_force_kills_stuck_process() {
 // ============================================================================
 // Test: max_dead limits concurrent kills
 // ============================================================================
+
+// ============================================================================
+// Reboot timing invariant: validates grace period and event ordering
+// ============================================================================
+
+/// Invariant that validates process lifecycle timing from the fault timeline.
+///
+/// Checks after every simulation event:
+/// - GracefulShutdown → ForceKill: delta == grace_period_ms
+/// - ForceKill → Restart: delta > 0 (recovery delay is positive)
+/// - Events for same IP appear in correct order
+struct RebootTimingInvariant {
+    last_checked: Cell<usize>,
+}
+
+impl RebootTimingInvariant {
+    fn new() -> Self {
+        Self {
+            last_checked: Cell::new(0),
+        }
+    }
+}
+
+impl Invariant for RebootTimingInvariant {
+    fn name(&self) -> &str {
+        "reboot_timing"
+    }
+
+    fn check(&self, state: &StateHandle, _sim_time_ms: u64) {
+        let Some(tl) = state.timeline::<SimFaultEvent>(SIM_FAULT_TIMELINE) else {
+            return;
+        };
+        let entries = tl.all();
+        let len = entries.len();
+        if len == self.last_checked.get() {
+            return; // No new events
+        }
+        self.last_checked.set(len);
+
+        // Check grace period timing: GracefulShutdown → ForceKill for same IP
+        for (i, entry) in entries.iter().enumerate() {
+            if let SimFaultEvent::ProcessForceKill { ip } = &entry.event {
+                // Look backwards for matching GracefulShutdown
+                for j in (0..i).rev() {
+                    if let SimFaultEvent::ProcessGracefulShutdown {
+                        ip: gs_ip,
+                        grace_period_ms,
+                    } = &entries[j].event
+                    {
+                        if gs_ip == ip {
+                            let actual_delta = entry.time_ms - entries[j].time_ms;
+                            assert_always!(
+                                actual_delta == *grace_period_ms,
+                                format!(
+                                    "Grace period mismatch for {}: expected {}ms, got {}ms",
+                                    ip, grace_period_ms, actual_delta
+                                )
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check ordering: ForceKill → Restart for same IP
+        for (i, entry) in entries.iter().enumerate() {
+            if let SimFaultEvent::ProcessRestart { ip } = &entry.event {
+                for j in (0..i).rev() {
+                    if let SimFaultEvent::ProcessForceKill { ip: fk_ip } = &entries[j].event {
+                        if fk_ip == ip {
+                            assert_always!(
+                                entry.time_ms > entries[j].time_ms,
+                                format!(
+                                    "ProcessRestart at {}ms should be after ProcessForceKill at {}ms for {}",
+                                    entry.time_ms, entries[j].time_ms, ip
+                                )
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn test_graceful_reboot_timing_invariant() {
+    let report = SimulationBuilder::new()
+        .processes(3, || Box::new(GracefulProcess))
+        .workload(TimedWorkload(Duration::from_secs(25)))
+        .fault(GracefulRebootInjector)
+        .invariant(RebootTimingInvariant::new())
+        .chaos_duration(Duration::from_secs(10))
+        .set_iterations(3)
+        .set_debug_seeds(vec![42, 123, 999])
+        .run();
+
+    assert_eq!(
+        report.failed_runs, 0,
+        "graceful reboot timing invariant should pass"
+    );
+}
+
+#[test]
+fn test_attrition_timing_invariant() {
+    let report = SimulationBuilder::new()
+        .processes(3, || Box::new(EchoProcess))
+        .workload(TimedWorkload(Duration::from_secs(25)))
+        .attrition(Attrition {
+            max_dead: 1,
+            prob_graceful: 0.5,
+            prob_crash: 0.3,
+            prob_wipe: 0.2,
+            recovery_delay_ms: Some(500..2000),
+            grace_period_ms: Some(1000..3000),
+        })
+        .invariant(RebootTimingInvariant::new())
+        .chaos_duration(Duration::from_secs(10))
+        .set_iterations(5)
+        .set_debug_seeds(vec![42, 123, 999, 7, 314])
+        .run();
+
+    assert_eq!(
+        report.failed_runs, 0,
+        "attrition with timing invariant should pass"
+    );
+}
 
 #[test]
 fn test_max_dead_limits_concurrent_kills_via_attrition() {

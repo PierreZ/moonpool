@@ -10,6 +10,9 @@ use std::collections::{HashMap, HashSet};
 
 use moonpool_sim::{assert_always, assert_sometimes};
 
+// Re-export shared types from parent module
+pub use crate::simulations::{MsgEvent, TransportTimelineCheck};
+
 /// Tracks sent and received messages for invariant validation.
 #[derive(Debug, Default, Clone)]
 pub struct MessageInvariants {

@@ -1,4 +1,6 @@
-use moonpool_sim::{SimWorld, network::config::NetworkConfiguration};
+use moonpool_sim::{
+    SIM_FAULT_TIMELINE, SimFaultEvent, SimWorld, StateHandle, network::config::NetworkConfiguration,
+};
 use std::{net::IpAddr, time::Duration};
 
 /// Test basic partition functionality by directly testing the SimWorld API
@@ -134,4 +136,58 @@ fn test_partition_behavior() {
     // Restore partition
     sim.restore_partition(client_ip, server_ip).unwrap();
     assert!(!sim.is_partitioned(client_ip, server_ip).unwrap());
+}
+
+/// Test that fault events are emitted to the timeline during partition operations.
+#[test]
+fn test_partition_fault_timeline() {
+    let sim = SimWorld::new_with_network_config(NetworkConfiguration::fast_local());
+    let state = StateHandle::new();
+    sim.set_state(state.clone());
+
+    let a: IpAddr = "10.0.1.1".parse().unwrap();
+    let b: IpAddr = "10.0.1.2".parse().unwrap();
+
+    // Create and restore partition
+    sim.partition_pair(a, b, Duration::from_secs(10)).unwrap();
+    sim.restore_partition(a, b).unwrap();
+
+    // Also test directional partitions
+    sim.partition_send_from(a, Duration::from_secs(5)).unwrap();
+    sim.partition_recv_to(b, Duration::from_secs(5)).unwrap();
+
+    // Read the fault timeline
+    let tl = state
+        .timeline::<SimFaultEvent>(SIM_FAULT_TIMELINE)
+        .expect("fault timeline should exist after partition operations");
+
+    let entries = tl.all();
+    assert_eq!(entries.len(), 4, "should have 4 fault events");
+
+    // Verify event types in order
+    assert!(
+        matches!(&entries[0].event, SimFaultEvent::PartitionCreated { from, to } if from == "10.0.1.1" && to == "10.0.1.2")
+    );
+    assert!(matches!(
+        &entries[1].event,
+        SimFaultEvent::PartitionHealed { .. }
+    ));
+    assert!(matches!(
+        &entries[2].event,
+        SimFaultEvent::SendPartitionCreated { ip } if ip == "10.0.1.1"
+    ));
+    assert!(matches!(
+        &entries[3].event,
+        SimFaultEvent::RecvPartitionCreated { ip } if ip == "10.0.1.2"
+    ));
+
+    // Verify all events have source "sim"
+    for entry in entries.iter() {
+        assert_eq!(entry.source, "sim");
+    }
+
+    // Verify sequence numbers are monotonically increasing
+    for window in entries.windows(2) {
+        assert!(window[1].seq > window[0].seq);
+    }
 }
