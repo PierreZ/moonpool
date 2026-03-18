@@ -6,6 +6,7 @@
 use std::process;
 
 use moonpool_sim::{IterationControl, SimulationBuilder, SimulationReport};
+use moonpool_transport::simulations::TransportTimelineCheck;
 use moonpool_transport::simulations::messaging::operations::ClientOpWeights;
 use moonpool_transport::simulations::messaging::workloads::{
     LocalDeliveryConfig, LocalDeliveryWorkload, MultiMethodWorkload, MultiNodeClientConfig,
@@ -32,6 +33,7 @@ fn main() {
                 weights: ClientOpWeights::default(),
                 receive_timeout: std::time::Duration::from_secs(30),
             }))
+            .workload(TransportTimelineCheck)
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
     report.eprint();
@@ -47,6 +49,7 @@ fn main() {
         SimulationBuilder::new()
             .random_network()
             .workload(RpcWorkload::new(RpcWorkloadConfig::happy_path()))
+            .workload(TransportTimelineCheck)
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
     report.eprint();
@@ -62,6 +65,7 @@ fn main() {
         SimulationBuilder::new()
             .random_network()
             .workload(RpcWorkload::new(RpcWorkloadConfig::broken_promise_focused()))
+            .workload(TransportTimelineCheck)
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
     report.eprint();
@@ -83,6 +87,7 @@ fn main() {
             .workload(MultiNodeClientWorkload::new(
                 MultiNodeClientConfig::default(),
             ))
+            .workload(TransportTimelineCheck)
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
     report.eprint();
@@ -98,6 +103,7 @@ fn main() {
         SimulationBuilder::new()
             .random_network()
             .workload(MultiMethodWorkload::new(100))
+            .workload(TransportTimelineCheck)
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
     report.eprint();

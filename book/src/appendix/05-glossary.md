@@ -24,6 +24,8 @@ Terms are listed alphabetically. Cross-references are shown in **bold**.
 
 **Determinism** -- The property that given the same **seed**, the simulation produces exactly the same execution. All randomness flows through the seeded RNG, and all I/O is simulated. This makes bugs reproducible: same seed, same bug, every time.
 
+**Event timeline** -- An append-only typed log attached to `StateHandle`. Workloads emit events via `ctx.emit(key, event)`; invariants read them via `state.timeline::<T>(key)`. Each entry carries `time_ms`, `source` (IP), and a global `seq` number for cross-timeline ordering. Distinct from **timeline** (a simulation run in the explorer).
+
 **Endpoint** -- A `(IpAddr, Token)` pair that uniquely identifies a connection endpoint in the simulated network. The IP address identifies the node; the **token** identifies the specific listener or connection on that node.
 
 **Energy budget** -- A finite pool that limits how many **timelines** the **explorer** can spawn, preventing exponential blowup. In fixed-count mode, a single global counter. In **adaptive** mode, a 3-level system: global budget, per-**mark** budget, and **reallocation pool**.
@@ -31,6 +33,8 @@ Terms are listed alphabetically. Cross-references are shown in **bold**.
 **Explored map** -- The union (bitwise OR) of all **coverage bitmaps** across all **timelines**. Lives in `MAP_SHARED` memory so all forked processes can see it. Used to determine whether a new timeline discovered anything its siblings did not. Preserved across **seeds** in multi-seed exploration.
 
 **Explorer** -- The multiverse exploration framework (`moonpool-explorer` crate). Uses `fork()` to create **timeline** branches at **splitpoints**, exploring alternate executions with different randomness. Has zero knowledge of Moonpool internals -- communicates only through RNG function pointers.
+
+**Fault timeline** -- The well-known **event timeline** at key `"sim:faults"` (`SIM_FAULT_TIMELINE`). Automatically populated by the simulator with `SimFaultEvent` entries covering network, storage, and process lifecycle faults. Invariants use it to correlate application behavior with infrastructure events.
 
 **Fork** -- An OS-level `fork()` call that creates a child process sharing the parent's memory via copy-on-write. Each child continues the simulation with a new **seed**, creating an alternate **timeline**. Forks are triggered at **splitpoints**.
 

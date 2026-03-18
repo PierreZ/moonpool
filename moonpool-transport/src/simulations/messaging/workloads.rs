@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use moonpool_core::SimulationError;
 use moonpool_sim::{Process, SimContext, SimulationResult, Workload, assert_sometimes};
 
+use super::super::MsgEvent;
 use super::invariants::{MessageInvariants, RpcInvariants};
 use super::operations::{
     ClientOp, ClientOpWeights, RpcClientOp, RpcClientOpWeights, RpcServerOp, RpcServerOpWeights,
@@ -108,6 +109,14 @@ impl Workload for LocalDeliveryWorkload {
                         .map_err(|e| SimulationError::InvalidState(e.to_string()))?;
                     if transport.send_reliable(&endpoint, &payload).is_ok() {
                         invariants.borrow_mut().record_sent(seq_id, true);
+                        ctx.emit(
+                            "msg:sent",
+                            MsgEvent {
+                                seq_id,
+                                reliable: true,
+                                sender_id: my_id.clone(),
+                            },
+                        );
                     }
                 }
                 ClientOp::SendUnreliable {
@@ -120,6 +129,14 @@ impl Workload for LocalDeliveryWorkload {
                         .map_err(|e| SimulationError::InvalidState(e.to_string()))?;
                     if transport.send_unreliable(&endpoint, &payload).is_ok() {
                         invariants.borrow_mut().record_sent(seq_id, false);
+                        ctx.emit(
+                            "msg:sent",
+                            MsgEvent {
+                                seq_id,
+                                reliable: false,
+                                sender_id: my_id.clone(),
+                            },
+                        );
                     }
                 }
                 ClientOp::SmallDelay => {
@@ -129,6 +146,14 @@ impl Workload for LocalDeliveryWorkload {
 
             // Drain the queue and validate
             while let Some(msg) = queue.try_recv() {
+                ctx.emit(
+                    "msg:recv",
+                    MsgEvent {
+                        seq_id: msg.seq_id,
+                        reliable: msg.reliable,
+                        sender_id: my_id.clone(),
+                    },
+                );
                 let is_dup = invariants
                     .borrow_mut()
                     .record_received(msg.seq_id, msg.reliable);
@@ -140,6 +165,14 @@ impl Workload for LocalDeliveryWorkload {
 
         // Final drain and validation
         while let Some(msg) = queue.try_recv() {
+            ctx.emit(
+                "msg:recv",
+                MsgEvent {
+                    seq_id: msg.seq_id,
+                    reliable: msg.reliable,
+                    sender_id: my_id.clone(),
+                },
+            );
             invariants
                 .borrow_mut()
                 .record_received(msg.seq_id, msg.reliable);
@@ -264,6 +297,14 @@ impl Workload for RpcWorkload {
                         Ok(_future) => {
                             invariants.borrow_mut().record_request_sent(request_id);
                             pending_requests.push(request_id);
+                            ctx.emit(
+                                "msg:sent",
+                                MsgEvent {
+                                    seq_id: request_id,
+                                    reliable: true,
+                                    sender_id: my_id.clone(),
+                                },
+                            );
                             assert_sometimes!(true, "Should be able to send RPC requests");
                         }
                         Err(e) => {
@@ -304,6 +345,14 @@ impl Workload for RpcWorkload {
                         request_stream.try_recv_with_transport::<_, RpcTestResponse>(&transport)
                     {
                         assert_sometimes!(true, "Server should receive RPC requests");
+                        ctx.emit(
+                            "msg:recv",
+                            MsgEvent {
+                                seq_id: request.request_id,
+                                reliable: true,
+                                sender_id: my_id.clone(),
+                            },
+                        );
                         pending_server_requests.push((request.request_id, reply));
                     }
                 }
@@ -451,6 +500,14 @@ impl Process for MultiNodeServerWorkload {
                         request_stream.try_recv_with_transport::<_, RpcTestResponse>(&transport)
                     {
                         assert_sometimes!(true, "Server should receive RPC requests from network");
+                        ctx.emit(
+                            "msg:recv",
+                            MsgEvent {
+                                seq_id: request.request_id,
+                                reliable: true,
+                                sender_id: request.sender_id.clone(),
+                            },
+                        );
                         tracing::debug!(request_id = request.request_id, "Server received request");
                         pending_server_requests.push((request.request_id, reply));
                     }
@@ -620,6 +677,14 @@ impl Workload for MultiNodeClientWorkload {
                         Ok(_future) => {
                             invariants.borrow_mut().record_request_sent(request_id);
                             pending_requests.push(request_id);
+                            ctx.emit(
+                                "msg:sent",
+                                MsgEvent {
+                                    seq_id: request_id,
+                                    reliable: true,
+                                    sender_id: my_id.clone(),
+                                },
+                            );
                             assert_sometimes!(true, "Client should send RPC requests over network");
                             tracing::debug!(request_id, "Client sent request");
                         }

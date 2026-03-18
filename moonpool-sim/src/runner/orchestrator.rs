@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use crate::chaos::fault_events::{SIM_FAULT_TIMELINE, SimFaultEvent};
 use crate::chaos::invariant_trait::Invariant;
 use crate::chaos::state_handle::StateHandle;
 use crate::runner::builder::WorkloadClientInfo;
@@ -324,6 +325,7 @@ impl WorkloadOrchestrator {
 
         // Create shared state for cross-workload communication and invariant checking
         let state = StateHandle::new();
+        sim.set_state(state.clone());
 
         // Create workload shutdown signal
         let shutdown_signal = tokio_util::sync::CancellationToken::new();
@@ -798,6 +800,7 @@ impl WorkloadOrchestrator {
         state: &StateHandle,
         shutdown_signal: &tokio_util::sync::CancellationToken,
     ) {
+        let time_ms = sim.current_time().as_millis() as u64;
         match sim.last_processed_event() {
             Some(crate::sim::Event::ProcessGracefulShutdown {
                 ip,
@@ -805,6 +808,15 @@ impl WorkloadOrchestrator {
                 recovery_delay_ms,
             }) => {
                 assert_reachable!("event: ProcessGracefulShutdown");
+                state.emit_raw(
+                    SIM_FAULT_TIMELINE,
+                    SimFaultEvent::ProcessGracefulShutdown {
+                        ip: ip.to_string(),
+                        grace_period_ms,
+                    },
+                    time_ms,
+                    "sim",
+                );
                 process_manager.signal_graceful_shutdown(ip);
                 sim.schedule_event(
                     crate::sim::Event::ProcessForceKill {
@@ -818,12 +830,24 @@ impl WorkloadOrchestrator {
                 ip,
                 recovery_delay_ms,
             }) => {
+                state.emit_raw(
+                    SIM_FAULT_TIMELINE,
+                    SimFaultEvent::ProcessForceKill { ip: ip.to_string() },
+                    time_ms,
+                    "sim",
+                );
                 process_manager.abort_process(ip);
                 sim.abort_all_connections_for_ip(ip);
                 sim.schedule_process_restart(ip, Duration::from_millis(recovery_delay_ms));
             }
             Some(crate::sim::Event::ProcessRestart { ip }) => {
                 assert_reachable!("event: ProcessRestart");
+                state.emit_raw(
+                    SIM_FAULT_TIMELINE,
+                    SimFaultEvent::ProcessRestart { ip: ip.to_string() },
+                    time_ms,
+                    "sim",
+                );
                 let weak_sim = sim.downgrade();
                 process_manager.handle_restart(ip, &weak_sim, seed, state, shutdown_signal);
             }

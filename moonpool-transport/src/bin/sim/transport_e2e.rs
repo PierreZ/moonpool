@@ -7,6 +7,7 @@ use std::process;
 use std::time::Duration;
 
 use moonpool_sim::{IterationControl, SimulationBuilder, SimulationReport};
+use moonpool_transport::simulations::TransportTimelineCheck;
 use moonpool_transport::simulations::e2e::operations::OpWeights;
 use moonpool_transport::simulations::e2e::workloads::{
     ClientConfig, ClientWorkload, WireServerWorkload,
@@ -33,6 +34,7 @@ fn main() {
                 drain_phase: true,
                 drain_timeout: Duration::from_secs(30),
             }))
+            .workload(TransportTimelineCheck)
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
     report.eprint();
@@ -54,6 +56,7 @@ fn main() {
                 drain_phase: false,
                 drain_timeout: Duration::from_secs(5),
             }))
+            .workload(TransportTimelineCheck)
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
     report.eprint();
@@ -75,6 +78,7 @@ fn main() {
                 drain_phase: true,
                 drain_timeout: Duration::from_secs(30),
             }))
+            .workload(TransportTimelineCheck)
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
     report.eprint();
@@ -96,6 +100,7 @@ fn main() {
                 drain_phase: true,
                 drain_timeout: Duration::from_secs(30),
             }))
+            .workload(TransportTimelineCheck)
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
     report.eprint();
@@ -129,6 +134,7 @@ fn main() {
                 drain_phase: true,
                 drain_timeout: Duration::from_secs(30),
             }))
+            .workload(TransportTimelineCheck)
             .set_iteration_control(IterationControl::FixedCount(100)),
     );
     report.eprint();

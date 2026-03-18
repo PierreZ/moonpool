@@ -29,6 +29,13 @@ The book lives in `book/src/` with chapters organized into:
 - **Part VI (Building on Top)**: Virtual actors, multiverse exploration
 - **Appendix**: Reference tables, glossary, configuration
 
+## Adding or Renaming Chapters
+
+When adding, removing, or renaming chapters, update **all** of these:
+1. `book/src/SUMMARY.md` — the table of contents (controls navigation and build order)
+2. `book/src/index.md` — the sitemap with one-line summaries per chapter
+3. Any cross-references in other chapters that link to renamed/renumbered files
+
 ## Commands
 
 ```bash

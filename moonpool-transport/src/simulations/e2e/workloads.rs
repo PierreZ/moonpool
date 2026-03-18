@@ -18,6 +18,7 @@ use moonpool_sim::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use super::super::MsgEvent;
 use super::TestMessage;
 use super::invariants::MessageInvariants;
 use super::operations::{OpResult, OpWeights, execute_operation, generate_operation};
@@ -120,6 +121,14 @@ impl Workload for ClientWorkload {
                     reliable,
                 } => {
                     invariants.borrow_mut().record_sent(sequence_id, reliable);
+                    ctx.emit(
+                        "msg:sent",
+                        MsgEvent {
+                            seq_id: sequence_id,
+                            reliable,
+                            sender_id: my_id.clone(),
+                        },
+                    );
                     tracing::trace!(
                         "Client {}: sent {} message seq={}",
                         my_id,
@@ -304,6 +313,14 @@ impl Process for WireServerWorkload {
                                                     invariants.borrow_mut().record_received(
                                                         msg.sequence_id,
                                                         msg.sent_reliably,
+                                                    );
+                                                    ctx.emit(
+                                                        "msg:recv",
+                                                        MsgEvent {
+                                                            seq_id: msg.sequence_id,
+                                                            reliable: msg.sent_reliably,
+                                                            sender_id: msg.sender_id.clone(),
+                                                        },
                                                     );
 
                                                     tracing::trace!(
