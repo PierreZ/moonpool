@@ -141,4 +141,4 @@ pub use assertions::{
 };
 pub use buggify::{buggify_init, buggify_internal, buggify_reset};
 pub use invariant_trait::{Invariant, invariant_fn};
-pub use state_handle::StateHandle;
+pub use state_handle::{StateHandle, Timeline, TimelineEntry};

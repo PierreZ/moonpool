@@ -16,12 +16,14 @@
 //! }
 //! ```
 
-use crate::chaos::state_handle::StateHandle;
+use std::any::Any;
+
+use crate::chaos::state_handle::{StateHandle, Timeline};
 use crate::network::SimNetworkProvider;
 use crate::providers::{SimProviders, SimRandomProvider, SimTimeProvider};
 use crate::storage::SimStorageProvider;
 
-use moonpool_core::{Providers, TokioTaskProvider};
+use moonpool_core::{Providers, TimeProvider, TokioTaskProvider};
 
 use super::topology::WorkloadTopology;
 
@@ -124,5 +126,22 @@ impl SimContext {
     /// Get the shared state handle for cross-workload communication.
     pub fn state(&self) -> &StateHandle {
         &self.state
+    }
+
+    /// Emit an event to a named timeline.
+    ///
+    /// Automatically captures simulation time and this process's IP address.
+    pub fn emit<T: Any + 'static>(&self, key: &str, event: T) {
+        let time_ms = self.time().now().as_millis() as u64;
+        let source = self.my_ip();
+        self.state.emit_raw(key, event, time_ms, source);
+    }
+
+    /// Get a typed timeline by name.
+    ///
+    /// Returns `None` if no events have been emitted to this key,
+    /// or if the type doesn't match.
+    pub fn timeline<T: Any + 'static>(&self, key: &str) -> Option<Timeline<T>> {
+        self.state.timeline(key)
     }
 }
