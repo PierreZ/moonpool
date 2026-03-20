@@ -119,6 +119,7 @@ fn test_custom_latency_ranges() {
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
+            max_misdirect_overlays: 1,
         };
 
         let mut sim = SimWorld::new();
@@ -169,6 +170,7 @@ fn test_latency_formula() {
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
+            max_misdirect_overlays: 1,
         };
 
         let mut sim = SimWorld::new();
@@ -223,6 +225,7 @@ fn test_read_latency_scales_with_size() {
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
+            max_misdirect_overlays: 1,
         };
 
         // First, write test data
@@ -324,6 +327,7 @@ fn test_write_latency_scales_with_size() {
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
+            max_misdirect_overlays: 1,
         };
 
         let sizes = [100, 1000, 5000];

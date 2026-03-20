@@ -152,6 +152,22 @@ pub struct StorageConfiguration {
     /// Simulates fsync failures which can indicate serious storage issues.
     /// Tests error handling in durability-critical code paths.
     pub sync_failure_probability: f64,
+
+    // =========================================================================
+    // Overlay Configuration
+    // =========================================================================
+    /// Maximum number of concurrent misdirected writes tracked via overlays.
+    ///
+    /// Each misdirected write uses 2 overlay slots (one for the intended target
+    /// showing old data, one for the mistaken target showing new data). This
+    /// value controls how many misdirected writes can be simultaneously active.
+    ///
+    /// TigerBeetle uses 2 overlays (1 concurrent misdirection) as the default.
+    /// Higher values allow testing scenarios where multiple misdirections
+    /// accumulate before being detected.
+    ///
+    /// Default: 1 (2 overlay slots total)
+    pub max_misdirect_overlays: usize,
 }
 
 impl Default for StorageConfiguration {
@@ -172,6 +188,9 @@ impl Default for StorageConfiguration {
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
+
+            // Overlay configuration
+            max_misdirect_overlays: 1,
         }
     }
 }
@@ -210,6 +229,9 @@ impl StorageConfiguration {
             misdirect_read_probability: sim_random_range(0..10) as f64 / 100_000.0,
             phantom_write_probability: sim_random_range(0..20) as f64 / 100_000.0,
             sync_failure_probability: sim_random_range(0..50) as f64 / 100_000.0,
+
+            // Randomize overlay capacity: 1-3 concurrent misdirections
+            max_misdirect_overlays: sim_random_range(1..4) as usize,
         }
     }
 
@@ -234,6 +256,9 @@ impl StorageConfiguration {
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
+
+            // Minimal overlay capacity
+            max_misdirect_overlays: 1,
         }
     }
 }

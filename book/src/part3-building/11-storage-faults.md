@@ -38,6 +38,8 @@ A write lands at the wrong location. The application writes to offset A, but the
 
 **What it tests:** Per-record addressing verification. Systems that embed the expected offset in each record's header can detect misdirected writes. Systems that trust the filesystem to put data where it was told will read the wrong records.
 
+Moonpool tracks misdirected writes using an **overlay system** borrowed from TigerBeetle. Each misdirected write creates two overlays: one at the intended location (showing old data on reads) and one at the mistaken location (showing the new data). Pristine memory is always updated correctly, so clearing overlays restores the true state. The `max_misdirect_overlays` configuration controls how many concurrent misdirections can be active. When all overlay slots are full, additional misdirections are skipped and a normal write is performed instead. Rewriting a location that has an active overlay automatically cleans up the stale overlay, matching TigerBeetle's behavior.
+
 ### Misdirected Reads
 
 A read returns data from the wrong location. The application reads offset A, but gets the contents of offset B. Same root causes as misdirected writes, from the read side.

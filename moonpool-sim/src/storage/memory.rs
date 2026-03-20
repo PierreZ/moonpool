@@ -25,12 +25,15 @@ use std::io;
 /// align to sector boundaries may exhibit different behavior under faults.
 pub const SECTOR_SIZE: usize = 512;
 
-/// Maximum number of overlays for misdirected write simulation.
+/// Default number of concurrent misdirected writes tracked via overlays.
 ///
 /// TigerBeetle uses 2 overlays per misdirected write:
 /// 1. Original data at intended target (so reads see old data)
 /// 2. New data at mistaken target (so reads see wrong data there)
-const MAX_OVERLAYS: usize = 2;
+///
+/// Each concurrent misdirection requires 2 overlay slots.
+#[cfg(test)]
+const DEFAULT_MAX_MISDIRECTIONS: usize = 1;
 
 /// A simple bitset for tracking sector states.
 ///
@@ -167,7 +170,7 @@ struct PendingWrite {
 /// ```ignore
 /// use moonpool_sim::storage::memory::{InMemoryStorage, SECTOR_SIZE};
 ///
-/// let mut storage = InMemoryStorage::new(4096, 42);
+/// let mut storage = InMemoryStorage::new(4096, 42, DEFAULT_MAX_MISDIRECTIONS);
 /// storage.write(0, b"Hello, World!", true)?;
 ///
 /// let mut buf = vec![0u8; 13];
@@ -182,8 +185,9 @@ pub struct InMemoryStorage {
     written: SectorBitSet,
     /// Which sectors have faults (corruption applied on read)
     faults: SectorBitSet,
-    /// Overlays for misdirected write simulation
-    overlays: [Option<WriteOverlay>; MAX_OVERLAYS],
+    /// Overlays for misdirected write simulation.
+    /// Each misdirected write uses 2 slots. Capacity = max_misdirections * 2.
+    overlays: Vec<Option<WriteOverlay>>,
     /// Pending writes that haven't been synced
     pending_writes: Vec<PendingWrite>,
     /// Total size of the storage in bytes
@@ -193,19 +197,21 @@ pub struct InMemoryStorage {
 }
 
 impl InMemoryStorage {
-    /// Create a new in-memory storage with the given size and seed.
+    /// Create a new in-memory storage with the given size, seed, and overlay capacity.
     ///
     /// # Arguments
     ///
     /// * `size` - Total size of the storage in bytes
     /// * `seed` - Seed for deterministic random generation (used for unwritten sector fill)
-    pub fn new(size: u64, seed: u64) -> Self {
+    /// * `max_misdirections` - Maximum concurrent misdirected writes (each uses 2 overlay slots)
+    pub fn new(size: u64, seed: u64, max_misdirections: usize) -> Self {
         let num_sectors = (size as usize).div_ceil(SECTOR_SIZE);
+        let overlay_capacity = max_misdirections * 2;
         Self {
             data: vec![0; size as usize],
             written: SectorBitSet::new(num_sectors),
             faults: SectorBitSet::new(num_sectors),
-            overlays: [const { None }; MAX_OVERLAYS],
+            overlays: vec![None; overlay_capacity],
             pending_writes: Vec::new(),
             size,
             seed,
@@ -432,6 +438,9 @@ impl InMemoryStorage {
 
         let offset_usize = offset as usize;
 
+        // Clean up stale overlays at this location (TigerBeetle pattern)
+        self.release_overlays_at(offset, data.len());
+
         // Mark sectors as written and clear faults
         let start_sector = offset_usize / SECTOR_SIZE;
         let end_sector = (offset_usize + data.len()).div_ceil(SECTOR_SIZE);
@@ -473,11 +482,21 @@ impl InMemoryStorage {
     /// 2. Overlay 2: mistaken target shows new data on read
     /// 3. Pristine memory is updated at intended target
     ///
+    /// Before applying, stale overlays at the intended offset are released
+    /// (TigerBeetle pattern: rewriting a location clears old misdirections).
+    /// If insufficient overlay slots are available, the misdirection is skipped
+    /// and a normal write is performed instead.
+    ///
     /// # Arguments
     ///
     /// * `intended_offset` - Where the write should have gone
     /// * `mistaken_offset` - Where the write actually went
     /// * `data` - The data that was written
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the misdirection was applied, `false` if it was
+    /// skipped due to insufficient overlay capacity (normal write performed).
     ///
     /// # Errors
     ///
@@ -487,7 +506,7 @@ impl InMemoryStorage {
         intended_offset: u64,
         mistaken_offset: u64,
         data: &[u8],
-    ) -> io::Result<()> {
+    ) -> io::Result<bool> {
         // Bounds checks (only for overflow)
         let intended_end = intended_offset
             .checked_add(data.len() as u64)
@@ -507,12 +526,29 @@ impl InMemoryStorage {
             self.resize(required_size);
         }
 
+        // Clean up stale overlays at the intended offset (TigerBeetle pattern)
+        self.release_overlays_at(intended_offset, data.len());
+
+        // Check if we have 2 free overlay slots
+        if self.overlays_available() < 2 {
+            tracing::debug!(
+                "Misdirection skipped: insufficient overlay capacity ({} available, need 2)",
+                self.overlays_available()
+            );
+            // Fall back to normal write
+            return self.write(intended_offset, data, false).map(|()| false);
+        }
+
         // Save old data at intended target
         let intended_usize = intended_offset as usize;
         let old_data = self.data[intended_usize..intended_usize + data.len()].to_vec();
 
+        // Find two free overlay slots
+        let slot1 = self.find_free_overlay_slot();
+        let slot2 = self.find_free_overlay_slot_after(slot1);
+
         // Overlay 1: intended target shows old data on read
-        self.overlays[0] = Some(WriteOverlay {
+        self.overlays[slot1] = Some(WriteOverlay {
             offset: intended_offset,
             size: data.len() as u32,
             data: old_data,
@@ -520,7 +556,7 @@ impl InMemoryStorage {
         });
 
         // Overlay 2: mistaken target shows new data on read
-        self.overlays[1] = Some(WriteOverlay {
+        self.overlays[slot2] = Some(WriteOverlay {
             offset: mistaken_offset,
             size: data.len() as u32,
             data: data.to_vec(),
@@ -539,7 +575,57 @@ impl InMemoryStorage {
             }
         }
 
-        Ok(())
+        Ok(true)
+    }
+
+    /// Return the number of available (free) overlay slots.
+    pub fn overlays_available(&self) -> usize {
+        self.overlays.iter().filter(|o| o.is_none()).count()
+    }
+
+    /// Find the first free overlay slot index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no free slot exists. Caller must check `overlays_available()` first.
+    fn find_free_overlay_slot(&self) -> usize {
+        self.overlays
+            .iter()
+            .position(|o| o.is_none())
+            .expect("no free overlay slot (caller should check overlays_available)")
+    }
+
+    /// Find the first free overlay slot index after `start`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no free slot exists after `start`.
+    fn find_free_overlay_slot_after(&self, start: usize) -> usize {
+        self.overlays[start + 1..]
+            .iter()
+            .position(|o| o.is_none())
+            .map(|i| start + 1 + i)
+            .expect("no free overlay slot after start (caller should check overlays_available)")
+    }
+
+    /// Release overlays whose offset overlaps with the given range.
+    ///
+    /// This follows TigerBeetle's pattern: when a location is rewritten,
+    /// old misdirection overlays at that location become stale and should
+    /// be removed.
+    fn release_overlays_at(&mut self, offset: u64, len: usize) {
+        let range_end = offset + len as u64;
+        for slot in &mut self.overlays {
+            let should_release = if let Some(o) = slot.as_ref() {
+                let overlay_end = o.offset + o.size as u64;
+                o.offset < range_end && overlay_end > offset
+            } else {
+                false
+            };
+            if should_release {
+                *slot = None;
+            }
+        }
     }
 
     /// Clear all active overlays.
@@ -681,7 +767,7 @@ mod tests {
 
     #[test]
     fn test_basic_write_read() {
-        let mut storage = InMemoryStorage::new(4096, 42);
+        let mut storage = InMemoryStorage::new(4096, 42, DEFAULT_MAX_MISDIRECTIONS);
 
         // Write data
         let data = b"Hello, World!";
@@ -696,8 +782,8 @@ mod tests {
 
     #[test]
     fn test_unwritten_sector_deterministic() {
-        let storage1 = InMemoryStorage::new(4096, 42);
-        let storage2 = InMemoryStorage::new(4096, 42);
+        let storage1 = InMemoryStorage::new(4096, 42, DEFAULT_MAX_MISDIRECTIONS);
+        let storage2 = InMemoryStorage::new(4096, 42, DEFAULT_MAX_MISDIRECTIONS);
 
         // Read from unwritten sector
         let mut buf1 = vec![0u8; SECTOR_SIZE];
@@ -710,7 +796,7 @@ mod tests {
         assert_eq!(buf1, buf2);
 
         // Different seed should produce different fill
-        let storage3 = InMemoryStorage::new(4096, 99);
+        let storage3 = InMemoryStorage::new(4096, 99, DEFAULT_MAX_MISDIRECTIONS);
         let mut buf3 = vec![0u8; SECTOR_SIZE];
         storage3.read(0, &mut buf3).expect("read3 failed");
 
@@ -719,7 +805,7 @@ mod tests {
 
     #[test]
     fn test_fault_corruption() {
-        let mut storage = InMemoryStorage::new(4096, 42);
+        let mut storage = InMemoryStorage::new(4096, 42, DEFAULT_MAX_MISDIRECTIONS);
 
         // Write data
         let data = vec![0xAA; SECTOR_SIZE];
@@ -749,7 +835,7 @@ mod tests {
 
     #[test]
     fn test_corruption_determinism() {
-        let mut storage = InMemoryStorage::new(4096, 42);
+        let mut storage = InMemoryStorage::new(4096, 42, DEFAULT_MAX_MISDIRECTIONS);
 
         // Write data
         let data = vec![0xAA; SECTOR_SIZE];
@@ -768,7 +854,7 @@ mod tests {
 
     #[test]
     fn test_misdirected_write() {
-        let mut storage = InMemoryStorage::new(4096, 42);
+        let mut storage = InMemoryStorage::new(4096, 42, DEFAULT_MAX_MISDIRECTIONS);
 
         // Write initial data at both locations
         let original_intended = vec![0x11; SECTOR_SIZE];
@@ -782,9 +868,10 @@ mod tests {
 
         // Apply misdirected write: intended=0, mistaken=SECTOR_SIZE
         let new_data = vec![0xFF; SECTOR_SIZE];
-        storage
+        let applied = storage
             .apply_misdirected_write(0, SECTOR_SIZE as u64, &new_data)
             .expect("misdirect failed");
+        assert!(applied, "misdirection should have been applied");
 
         // Read from intended location - should see old data (overlay)
         let mut buf_intended = vec![0u8; SECTOR_SIZE];
@@ -806,7 +893,7 @@ mod tests {
 
     #[test]
     fn test_phantom_write_lost_on_crash() {
-        let mut storage = InMemoryStorage::new(4096, 42);
+        let mut storage = InMemoryStorage::new(4096, 42, DEFAULT_MAX_MISDIRECTIONS);
 
         // Write real data
         let real_data = vec![0x11; SECTOR_SIZE];
@@ -831,7 +918,7 @@ mod tests {
 
     #[test]
     fn test_crash_faults_pending_writes() {
-        let mut storage = InMemoryStorage::new(4096, 42);
+        let mut storage = InMemoryStorage::new(4096, 42, DEFAULT_MAX_MISDIRECTIONS);
 
         // Write data without sync
         let data = vec![0xAA; SECTOR_SIZE];
@@ -851,7 +938,7 @@ mod tests {
 
     #[test]
     fn test_sync_clears_pending() {
-        let mut storage = InMemoryStorage::new(4096, 42);
+        let mut storage = InMemoryStorage::new(4096, 42, DEFAULT_MAX_MISDIRECTIONS);
 
         // Write data without sync
         let data = vec![0xAA; SECTOR_SIZE];
@@ -897,7 +984,7 @@ mod tests {
 
     #[test]
     fn test_read_past_end() {
-        let storage = InMemoryStorage::new(1024, 42);
+        let storage = InMemoryStorage::new(1024, 42, DEFAULT_MAX_MISDIRECTIONS);
 
         let mut buf = vec![0u8; 100];
         let result = storage.read(1000, &mut buf);
@@ -907,7 +994,7 @@ mod tests {
 
     #[test]
     fn test_write_past_end_auto_extends() {
-        let mut storage = InMemoryStorage::new(1024, 42);
+        let mut storage = InMemoryStorage::new(1024, 42, DEFAULT_MAX_MISDIRECTIONS);
 
         // Writing past end should auto-extend the storage (like real file systems)
         let data = vec![0xAB; 100];
@@ -924,7 +1011,7 @@ mod tests {
 
     #[test]
     fn test_read_misdirected() {
-        let mut storage = InMemoryStorage::new(4096, 42);
+        let mut storage = InMemoryStorage::new(4096, 42, DEFAULT_MAX_MISDIRECTIONS);
 
         // Write distinct data at different locations
         let data0 = vec![0x11; SECTOR_SIZE];
@@ -949,7 +1036,7 @@ mod tests {
 
     #[test]
     fn test_partial_sector_read() {
-        let mut storage = InMemoryStorage::new(4096, 42);
+        let mut storage = InMemoryStorage::new(4096, 42, DEFAULT_MAX_MISDIRECTIONS);
 
         // Write a full sector with repeating pattern
         let data: Vec<u8> = (0..SECTOR_SIZE).map(|i| (i % 256) as u8).collect();
@@ -964,7 +1051,7 @@ mod tests {
 
     #[test]
     fn test_multi_sector_read() {
-        let mut storage = InMemoryStorage::new(4096, 42);
+        let mut storage = InMemoryStorage::new(4096, 42, DEFAULT_MAX_MISDIRECTIONS);
 
         // Write across multiple sectors
         let data = vec![0xAB; SECTOR_SIZE * 3];
@@ -975,5 +1062,125 @@ mod tests {
         storage.read(0, &mut buf).expect("read failed");
 
         assert_eq!(buf, data);
+    }
+
+    #[test]
+    fn test_overlay_cleanup_on_rewrite() {
+        let mut storage = InMemoryStorage::new(4096, 42, DEFAULT_MAX_MISDIRECTIONS);
+
+        // Write initial data at both locations
+        let original = vec![0x11; SECTOR_SIZE];
+        storage.write(0, &original, true).expect("write1 failed");
+        storage
+            .write(SECTOR_SIZE as u64, &vec![0x22; SECTOR_SIZE], true)
+            .expect("write2 failed");
+
+        // Apply misdirected write
+        let misdirected_data = vec![0xFF; SECTOR_SIZE];
+        let applied = storage
+            .apply_misdirected_write(0, SECTOR_SIZE as u64, &misdirected_data)
+            .expect("misdirect failed");
+        assert!(applied);
+        assert_eq!(storage.overlays_available(), 0);
+
+        // Rewrite the intended location - stale overlays should be cleaned up
+        let new_data = vec![0xAA; SECTOR_SIZE];
+        storage.write(0, &new_data, true).expect("rewrite failed");
+
+        // Overlay at offset 0 (intended) should be released; overlay at SECTOR_SIZE (mistaken) too
+        // because write at offset 0 overlaps with the overlay at offset 0
+        // The mistaken overlay at SECTOR_SIZE is NOT at offset 0, so it persists
+        // unless the rewrite range overlaps it
+        // In this case, write is at [0..512], intended overlay is at [0..512] -> released
+        // mistaken overlay is at [512..1024] -> NOT released
+        assert_eq!(storage.overlays_available(), 1);
+
+        // Read the rewritten location - should see new data (overlay released)
+        let mut buf = vec![0u8; SECTOR_SIZE];
+        storage.read(0, &mut buf).expect("read failed");
+        assert_eq!(buf, new_data);
+    }
+
+    #[test]
+    fn test_overlay_capacity_limit() {
+        // Create storage with capacity for only 1 concurrent misdirection (2 overlay slots)
+        let mut storage = InMemoryStorage::new(4096, 42, 1);
+
+        // Write initial data
+        for i in 0..4 {
+            let data = vec![(i + 1) as u8; SECTOR_SIZE];
+            storage
+                .write(i as u64 * SECTOR_SIZE as u64, &data, true)
+                .expect("write failed");
+        }
+
+        // First misdirection should succeed (uses 2 slots)
+        let data1 = vec![0xAA; SECTOR_SIZE];
+        let applied1 = storage
+            .apply_misdirected_write(0, 2 * SECTOR_SIZE as u64, &data1)
+            .expect("misdirect1 failed");
+        assert!(applied1);
+        assert_eq!(storage.overlays_available(), 0);
+
+        // Second misdirection at a DIFFERENT location should fall back to normal write
+        let data2 = vec![0xBB; SECTOR_SIZE];
+        let applied2 = storage
+            .apply_misdirected_write(SECTOR_SIZE as u64, 3 * SECTOR_SIZE as u64, &data2)
+            .expect("misdirect2 failed");
+        assert!(
+            !applied2,
+            "should fall back when no overlay slots available"
+        );
+    }
+
+    #[test]
+    fn test_multiple_concurrent_misdirections() {
+        // Create storage with capacity for 2 concurrent misdirections (4 overlay slots)
+        let mut storage = InMemoryStorage::new(4096 * 2, 42, 2);
+
+        // Write initial data across 8 sectors
+        for i in 0..8 {
+            let data = vec![(i + 1) as u8; SECTOR_SIZE];
+            storage
+                .write(i as u64 * SECTOR_SIZE as u64, &data, true)
+                .expect("write failed");
+        }
+
+        // First misdirection: sector 0 -> sector 4
+        let data1 = vec![0xAA; SECTOR_SIZE];
+        let applied1 = storage
+            .apply_misdirected_write(0, 4 * SECTOR_SIZE as u64, &data1)
+            .expect("misdirect1 failed");
+        assert!(applied1);
+        assert_eq!(storage.overlays_available(), 2);
+
+        // Second misdirection: sector 1 -> sector 5
+        let data2 = vec![0xBB; SECTOR_SIZE];
+        let applied2 = storage
+            .apply_misdirected_write(SECTOR_SIZE as u64, 5 * SECTOR_SIZE as u64, &data2)
+            .expect("misdirect2 failed");
+        assert!(applied2);
+        assert_eq!(storage.overlays_available(), 0);
+
+        // Both misdirections should be active - read from intended locations shows old data
+        let mut buf = vec![0u8; SECTOR_SIZE];
+        storage.read(0, &mut buf).expect("read failed");
+        assert_eq!(buf, vec![0x01; SECTOR_SIZE]); // old data at sector 0
+
+        storage
+            .read(SECTOR_SIZE as u64, &mut buf)
+            .expect("read failed");
+        assert_eq!(buf, vec![0x02; SECTOR_SIZE]); // old data at sector 1
+
+        // Read from mistaken locations shows new data
+        storage
+            .read(4 * SECTOR_SIZE as u64, &mut buf)
+            .expect("read failed");
+        assert_eq!(buf, data1); // new data at sector 4
+
+        storage
+            .read(5 * SECTOR_SIZE as u64, &mut buf)
+            .expect("read failed");
+        assert_eq!(buf, data2); // new data at sector 5
     }
 }

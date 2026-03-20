@@ -167,29 +167,47 @@ fn handle_write_complete(inner: &mut SimInner, file_id: FileId) {
             file_state.storage.record_phantom_write(offset, &data);
             write_fault_kind = Some("phantom");
         }
-        // Check for misdirected write
-        else if sim_random::<f64>() < config.misdirect_write_probability {
-            // Pick a random different offset
+        // Check for misdirected write (requires overlay capacity)
+        else if sim_random::<f64>() < config.misdirect_write_probability
+            && file_state.storage.overlays_available() >= 2
+        {
+            // Pick a random different offset, ensuring it differs from intended
             let max_offset = file_state.storage.size().saturating_sub(data.len() as u64);
-            let mistaken_offset = if max_offset > 0 {
+            let mut mistaken_offset = if max_offset > 1 {
                 sim_random_range(0..max_offset)
             } else {
                 0
             };
-            tracing::info!(
-                "Misdirected write injected for file {:?}: intended={}, actual={}",
-                file_id,
-                offset,
-                mistaken_offset
-            );
-            if let Err(e) =
-                file_state
+            // Ensure mistaken offset differs from intended offset
+            if mistaken_offset == offset && max_offset > 0 {
+                mistaken_offset =
+                    (mistaken_offset + crate::storage::SECTOR_SIZE as u64) % max_offset;
+            }
+            if mistaken_offset != offset {
+                tracing::info!(
+                    "Misdirected write injected for file {:?}: intended={}, actual={}",
+                    file_id,
+                    offset,
+                    mistaken_offset
+                );
+                match file_state
                     .storage
                     .apply_misdirected_write(offset, mistaken_offset, &data)
-            {
-                tracing::warn!("Failed to apply misdirected write: {}", e);
+                {
+                    Ok(true) => write_fault_kind = Some("misdirected"),
+                    Ok(false) => {
+                        tracing::debug!(
+                            "Misdirection skipped for file {:?} (overlay capacity)",
+                            file_id
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to apply misdirected write: {}", e);
+                    }
+                }
+            } else if let Err(e) = file_state.storage.write(offset, &data, false) {
+                tracing::warn!("Write failed for file {:?}: {}", file_id, e);
             }
-            write_fault_kind = Some("misdirected");
         }
         // Normal write (not synced - may be lost on crash)
         else if let Err(e) = file_state.storage.write(offset, &data, false) {
@@ -362,11 +380,18 @@ impl SimWorld {
 
         // If file already exists and we're opening it, return existing file ID
         if let Some(&existing_id) = inner.storage.path_to_file.get(&path_str) {
+            // Read config values before mutable borrow of files
+            let max_misdirections = inner
+                .storage
+                .files
+                .get(&existing_id)
+                .map(|f| inner.storage.config_for(f.owner_ip).max_misdirect_overlays)
+                .unwrap_or(1);
             if let Some(file_state) = inner.storage.files.get_mut(&existing_id) {
                 // If truncate is set, reset the storage
                 if options.truncate {
                     let seed = sim_random::<u64>();
-                    file_state.storage = InMemoryStorage::new(0, seed);
+                    file_state.storage = InMemoryStorage::new(0, seed, max_misdirections);
                     file_state.position = 0;
                 } else if options.append {
                     // For append mode, seek to end
@@ -396,7 +421,8 @@ impl SimWorld {
 
         // Create in-memory storage with deterministic seed
         let seed = sim_random::<u64>();
-        let storage = InMemoryStorage::new(initial_size, seed);
+        let max_misdirections = inner.storage.config_for(owner_ip).max_misdirect_overlays;
+        let storage = InMemoryStorage::new(initial_size, seed, max_misdirections);
 
         let file_state = super::state::StorageFileState::new(
             file_id,
