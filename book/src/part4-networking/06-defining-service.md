@@ -70,4 +70,4 @@ Note the `#[async_trait(?Send)]` attribute. All moonpool services are single-thr
 
 The `#[service]` macro is codec-agnostic. The generated server and client are generic over `C: MessageCodec`. In practice, `JsonCodec` is the standard choice, but you can provide any codec that implements the `MessageCodec` trait.
 
-Client types serialize only the base endpoint (address + base UID). Method endpoints are derived at runtime using `UID::new(interface_id, method_index)`, so adding methods does not change the serialized client representation.
+The generated `CalculatorClient` serializes cleanly because each `ServiceEndpoint` stores just the destination address and method UID. Adding methods at the end does not change the serialized representation of existing endpoints.

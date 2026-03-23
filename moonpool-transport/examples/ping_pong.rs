@@ -1,7 +1,7 @@
 //! Ping-Pong Example: Real TCP RPC using Moonpool's `#[service]` macro.
 //!
 //! This example demonstrates moonpool's RPC over **real TCP sockets**
-//! using the ergonomic `#[service]` macro and bound client pattern.
+//! using the `#[service]` macro and `ServiceEndpoint` delivery modes.
 //!
 //! Run as two separate processes:
 //!
@@ -16,11 +16,11 @@
 //! # Architecture
 //!
 //! The example shows:
-//! - `#[service]` macro for generating Server, Client, and BoundClient types
+//! - `#[service]` macro generating Server and Client types
 //! - `NetTransportBuilder` for clean transport setup
-//! - `.bind()` pattern for Orleans-style ergonomic client calls
+//! - `ServiceEndpoint` fields with delivery mode methods
 //! - Server: listening, receiving typed requests, sending responses
-//! - Client: direct trait method calls that feel like local function calls
+//! - Client: choosing delivery mode per call (get_reply, try_get_reply, send)
 
 use std::env;
 use std::time::Duration;
@@ -68,8 +68,7 @@ struct PingResponse {
 ///
 /// The `#[service]` macro generates:
 /// - `PingPongServer<C>` with `RequestStream` field (ping)
-/// - `PingPongClient` with `bind()` method
-/// - `BoundPingPongClient<N, T, TP, C>` implementing the `PingPong` trait
+/// - `PingPongClient` with `ServiceEndpoint` field (ping)
 #[service(id = 0x5049_4E47)]
 trait PingPong {
     async fn ping(&self, req: PingRequest) -> Result<PingResponse, RpcError>;
@@ -82,16 +81,9 @@ trait PingPong {
 async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Ping-Pong Server ===\n");
 
-    // Create providers bundle for real networking
     let providers = TokioProviders::new();
-
-    // Parse server address
     let local_addr = NetworkAddress::parse(SERVER_ADDR)?;
 
-    // ========================================================================
-    // NetTransportBuilder handles Rc wrapping, set_weak_self(), and listen()
-    // No more runtime panics from forgetting set_weak_self()!
-    // ========================================================================
     let transport = NetTransportBuilder::new(providers)
         .local_address(local_addr)
         .build_listening()
@@ -99,9 +91,6 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Server listening on {}\n", SERVER_ADDR);
 
-    // ========================================================================
-    // Single line registers the handler using the interface macro
-    // ========================================================================
     let ping_server = PingPongServer::init(&transport, JsonCodec);
 
     println!(
@@ -111,12 +100,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("Waiting for ping requests...\n");
 
-    // Server loop - handle requests
     loop {
-        // ====================================================================
-        // recv_with_transport eliminates the closure callback pattern
-        // The transport reference is passed directly instead of captured
-        // ====================================================================
         if let Some((request, reply)) = ping_server
             .ping
             .recv_with_transport::<_, PingResponse>(&transport)
@@ -124,7 +108,6 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
         {
             println!("Received ping seq={}: {:?}", request.seq, request.message);
 
-            // Create and send response
             let response = PingResponse {
                 seq: request.seq,
                 echo: format!("pong: {}", request.message),
@@ -133,7 +116,6 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
             reply.send(response.clone());
             println!("Sent pong seq={}: {:?}\n", response.seq, response.echo);
         } else {
-            // Stream closed
             println!("Request stream closed, shutting down.");
             break;
         }
@@ -149,18 +131,12 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Ping-Pong Client ===\n");
 
-    // Create providers bundle for real networking
     let providers = TokioProviders::new();
     let time = providers.time().clone();
 
-    // Parse addresses
     let local_addr = NetworkAddress::parse(CLIENT_ADDR)?;
     let server_addr = NetworkAddress::parse(SERVER_ADDR)?;
 
-    // ========================================================================
-    // Client also uses build_listening() because it needs to receive responses
-    // The builder makes this requirement clear in the method name
-    // ========================================================================
     let transport = NetTransportBuilder::new(providers)
         .local_address(local_addr)
         .build_listening()
@@ -168,18 +144,16 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Connecting to server at {}\n", SERVER_ADDR);
 
-    // ========================================================================
-    // NEW: Ergonomic bound client - implements PingPong trait!
-    // ========================================================================
-    let ping_client = PingPongClient::new(server_addr).bind(transport.clone(), JsonCodec);
+    // Client is a plain struct with ServiceEndpoint fields.
+    // Codec is passed once at construction.
+    let ping_client = PingPongClient::new(server_addr, JsonCodec);
 
     println!(
         "Using interface ID: 0x{:X} with {} method(s)\n",
-        PingPongClient::INTERFACE_ID,
-        PingPongClient::METHOD_COUNT
+        PingPongClient::<JsonCodec>::INTERFACE_ID,
+        PingPongClient::<JsonCodec>::METHOD_COUNT
     );
 
-    // Send ping requests
     let num_pings = 5;
     let mut success_count = 0;
 
@@ -191,13 +165,13 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
 
         println!("Sending ping seq={}: {:?}", seq, request.message);
 
-        // ====================================================================
-        // NEW: Clean trait method call with .await
-        // No more manual send_request or type annotations!
-        // Note: timeout returns Result<T, TimeError>, inner T is Result<Response, RpcError>
-        // ====================================================================
+        // Delivery mode is a call-site decision.
+        // Here we use get_reply (at-least-once, reliable):
         match time
-            .timeout(Duration::from_secs(5), ping_client.ping(request))
+            .timeout(
+                Duration::from_secs(5),
+                ping_client.ping.get_reply(&transport, request),
+            )
             .await
         {
             Ok(Ok(response)) => {
@@ -212,7 +186,6 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Small delay between requests
         let _ = time.sleep(Duration::from_millis(100)).await;
     }
 
@@ -230,11 +203,9 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
 // ============================================================================
 
 fn main() {
-    // Parse command line args
     let args: Vec<String> = env::args().collect();
     let mode = args.get(1).map(|s| s.as_str()).unwrap_or("help");
 
-    // Create LocalRuntime (required for spawn_local used by TokioTaskProvider)
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
@@ -262,9 +233,8 @@ fn main() {
             println!("Ping-Pong Example: Real TCP RPC with Moonpool\n");
             println!("This example demonstrates the #[service] macro:\n");
             println!("  - PingPongServer<C> with RequestStream field");
-            println!("  - PingPongClient with .bind() for creating BoundPingPongClient");
-            println!("  - BoundPingPongClient implements PingPong trait for ergonomic calls");
-            println!("  - Clean syntax: ping_client.ping(request).await?\n");
+            println!("  - PingPongClient with ServiceEndpoint field");
+            println!("  - Delivery modes: .get_reply(), .try_get_reply(), .send()\n");
             println!("Usage:");
             println!("  cargo run --example ping_pong -- server   # Start the server");
             println!("  cargo run --example ping_pong -- client   # Run the client\n");

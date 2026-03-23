@@ -19,8 +19,7 @@ trait Calculator {
 From this single trait definition, the macro generates:
 
 - **`CalculatorServer<C>`** with a `RequestStream` per method and an `init()` method that registers all endpoints with the transport
-- **`CalculatorClient`** with endpoint accessors and a `bind()` method
-- **`BoundCalculatorClient<P, C>`** that implements the `Calculator` trait, so you can call `client.add(req).await?` directly
+- **`CalculatorClient`** with `ServiceEndpoint` fields for each method, giving you full control over delivery mode at every call site
 - The trait itself, wrapped with `#[async_trait(?Send)]`
 
 ## The Service ID
@@ -51,13 +50,9 @@ CalculatorServer<C>
   └── serve(transport, handler, providers) -> ServerHandle
 
 CalculatorClient
-  ├── new(address) -> Self
-  ├── bind(transport, codec) -> BoundCalculatorClient
-  └── add_endpoint() / sub_endpoint()
-
-BoundCalculatorClient<P, C>
-  ├── add(req) -> Result<AddResponse, RpcError>  // sends via transport
-  └── sub(req) -> Result<SubResponse, RpcError>
+  ├── new(address, codec) -> Self
+  ├── add: ServiceEndpoint<AddRequest, AddResponse, C>
+  └── sub: ServiceEndpoint<SubRequest, SubResponse, C>
 ```
 
 The `serve()` method is particularly useful: it consumes the server, spawns a background task per method that loops on `recv_with_transport`, and returns a `ServerHandle` that stops everything when dropped.

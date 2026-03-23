@@ -17,8 +17,7 @@
 //!
 //! This generates:
 //! - `CalculatorServer<C>` with `RequestStream` fields, `init()`, and `serve()`
-//! - `CalculatorClient` with endpoint accessors and `bind()` method
-//! - `BoundCalculatorClient<P, C>` implementing the `Calculator` trait
+//! - `CalculatorClient` with `ServiceEndpoint` fields for each method
 //! - The trait itself with `#[async_trait(?Send)]`
 
 use proc_macro::TokenStream;
@@ -30,7 +29,7 @@ use syn::{
 
 /// Attribute macro for defining RPC service interfaces.
 ///
-/// Generates server, client, and bound client types from a trait definition.
+/// Generates server and client types from a trait definition.
 /// All methods must use `&self` receivers.
 ///
 /// # Attributes
@@ -103,7 +102,6 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
     let name = &item.ident;
     let server_name = format_ident!("{}Server", name);
     let client_name = format_ident!("{}Client", name);
-    let bound_client_name = format_ident!("Bound{}Client", name);
 
     // Parse trait methods
     let mut method_infos: Vec<MethodInfo> = Vec::new();
@@ -155,50 +153,34 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
 
     let server_field_names: Vec<_> = method_infos.iter().map(|m| &m.name).collect();
 
-    // Generate client endpoint methods (for manual usage)
-    let client_endpoint_methods = method_infos.iter().map(|m| {
+    // Generate client fields — typed ServiceEndpoint per method
+    let client_fields = method_infos.iter().map(|m| {
         let name = &m.name;
-        let endpoint_name = format_ident!("{}_endpoint", m.name);
-        let idx = m.index;
-        quote! {
-            /// Get endpoint for this method (for manual send_request usage).
-            pub fn #endpoint_name(&self) -> moonpool_transport::Endpoint {
-                moonpool_transport::Endpoint::new(
-                    self.base.address.clone(),
-                    moonpool_transport::UID::new(Self::INTERFACE_ID, #idx as u64)
-                )
-            }
-
-            #[doc(hidden)]
-            #[deprecated(note = "use bind() for ergonomic calls, or method_endpoint() for manual usage")]
-            pub fn #name(&self) -> moonpool_transport::Endpoint {
-                self.#endpoint_name()
-            }
-        }
-    });
-
-    // Generate bound client trait implementation methods
-    let bound_client_methods = method_infos.iter().map(|m| {
-        let name = &m.name;
-        let idx = m.index;
         let req_type = &m.req_type;
         let resp_type = &m.resp_type;
         quote! {
-            async fn #name(&self, req: #req_type) -> Result<#resp_type, moonpool_transport::RpcError> {
-                let endpoint = moonpool_transport::Endpoint::new(
-                    self.base.address.clone(),
-                    moonpool_transport::UID::new(Self::INTERFACE_ID, #idx as u64)
-                );
-                let future = moonpool_transport::send_request(
-                    &self.transport,
-                    &endpoint,
-                    req,
-                    self.codec.clone()
-                )?;
-                Ok(future.await?)
-            }
+            /// Typed endpoint for this method. Call delivery methods directly:
+            /// `.get_reply()`, `.try_get_reply()`, `.send()`, `.get_reply_unless_failed_for()`.
+            pub #name: moonpool_transport::ServiceEndpoint<#req_type, #resp_type, C>
         }
     });
+
+    // Generate client field constructors
+    let client_field_inits = method_infos.iter().map(|m| {
+        let name = &m.name;
+        let idx = m.index;
+        quote! {
+            #name: moonpool_transport::ServiceEndpoint::new(
+                moonpool_transport::Endpoint::new(
+                    address.clone(),
+                    moonpool_transport::UID::new(Self::INTERFACE_ID, #idx as u64),
+                ),
+                codec.clone(),
+            )
+        }
+    });
+
+    let first_field_name = &method_infos[0].name;
 
     // Generate the trait with async_trait attribute
     let trait_vis = &item.vis;
@@ -235,7 +217,10 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
                         {
                             match h.#method_name(req).await {
                                 Ok(resp) => reply.send(resp),
-                                Err(_) => {}
+                                Err(e) => {
+                                    tracing::warn!(error = %e, method = #task_name, "handler error");
+                                    reply.send_error(moonpool_transport::ReplyError::BrokenPromise);
+                                }
                             }
                         }
                     });
@@ -308,123 +293,53 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
             }
         }
 
-        /// Client-side interface with Endpoints.
+        /// Client-side interface with typed [`ServiceEndpoint`](moonpool_transport::ServiceEndpoint)
+        /// fields.
         ///
-        /// Generated by `#[service]`.
-        /// Only the base endpoint is serialized; method endpoints are derived.
+        /// Generated by `#[service]`. Each field provides delivery mode methods
+        /// directly: `.get_reply()`, `.try_get_reply()`, `.send()`,
+        /// `.get_reply_unless_failed_for()`.
         ///
-        /// Use `bind()` to create a bound client that implements the trait.
-        #[derive(Clone)]
-        pub struct #client_name {
-            base: moonpool_transport::Endpoint,
+        /// FDB equivalent: interface structs like `StorageServerInterface`.
+        ///
+        /// # Example
+        ///
+        /// ```rust,ignore
+        /// let calc = CalculatorClient::new(server_addr, JsonCodec);
+        ///
+        /// // Choose delivery mode at call site:
+        /// let resp = calc.add.get_reply(&transport, req).await?;
+        /// let resp = calc.add.try_get_reply(&transport, req).await?;
+        /// calc.add.send(&transport, req)?;
+        /// ```
+        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+        #[serde(bound(
+            serialize = "",
+            deserialize = "C: moonpool_transport::MessageCodec + Default",
+        ))]
+        pub struct #client_name<C: moonpool_transport::MessageCodec> {
+            #(#client_fields,)*
         }
 
-        impl #client_name {
+        impl<C: moonpool_transport::MessageCodec + Clone> #client_name<C> {
             /// Interface identifier.
             pub const INTERFACE_ID: u64 = #interface_id;
 
             /// Number of methods in this interface.
             pub const METHOD_COUNT: u32 = #method_count;
 
-            /// Create a new client interface from a network address.
-            pub fn new(address: moonpool_transport::NetworkAddress) -> Self {
+            /// Create a new client interface from a network address and codec.
+            pub fn new(address: moonpool_transport::NetworkAddress, codec: C) -> Self {
                 Self {
-                    base: moonpool_transport::Endpoint::new(address, moonpool_transport::UID::new(Self::INTERFACE_ID, 0)),
+                    #(#client_field_inits,)*
                 }
             }
 
-            /// Create a client interface from an existing endpoint.
-            pub fn from_endpoint(base: moonpool_transport::Endpoint) -> Self {
-                Self { base }
-            }
-
-            /// Get the base endpoint (method 0).
-            pub fn base_endpoint(&self) -> &moonpool_transport::Endpoint {
-                &self.base
-            }
-
-            /// Bind this client to a transport and codec for making RPC calls.
-            ///
-            /// The bound client implements the interface trait, allowing
-            /// direct method calls like `bound_client.method(req).await?`.
-            ///
-            /// # Example
-            ///
-            /// ```rust,ignore
-            /// let client = CalculatorClient::new(server_addr);
-            /// let bound = client.bind(transport.clone(), JsonCodec);
-            /// let result = bound.add(AddRequest { a: 1, b: 2 }).await?;
-            /// ```
-            pub fn bind<P, C>(
-                &self,
-                transport: std::rc::Rc<moonpool_transport::NetTransport<P>>,
-                codec: C,
-            ) -> #bound_client_name<P, C>
-            where
-                P: moonpool_transport::Providers,
-                C: moonpool_transport::MessageCodec + Clone,
-            {
-                #bound_client_name {
-                    base: self.base.clone(),
-                    transport,
-                    codec,
-                }
-            }
-
-            #(#client_endpoint_methods)*
-        }
-
-        impl serde::Serialize for #client_name {
-            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                self.base.serialize(serializer)
-            }
-        }
-
-        impl<'de> serde::Deserialize<'de> for #client_name {
-            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                let base = moonpool_transport::Endpoint::deserialize(deserializer)?;
-                Ok(Self { base })
-            }
-        }
-
-        /// Bound client that implements the interface trait.
-        ///
-        /// Generated by `#[service]`.
-        /// Created by calling `bind()` on the client.
-        pub struct #bound_client_name<P, C>
-        where
-            P: moonpool_transport::Providers,
-            C: moonpool_transport::MessageCodec + Clone,
-        {
-            base: moonpool_transport::Endpoint,
-            transport: std::rc::Rc<moonpool_transport::NetTransport<P>>,
-            codec: C,
-        }
-
-        impl<P, C> #bound_client_name<P, C>
-        where
-            P: moonpool_transport::Providers,
-            C: moonpool_transport::MessageCodec + Clone,
-        {
-            /// Interface identifier.
-            pub const INTERFACE_ID: u64 = #interface_id;
-
-            /// Number of methods in this interface.
-            pub const METHOD_COUNT: u32 = #method_count;
-
-            /// Get the server address this client is bound to.
+            /// Get the address this client points to.
             pub fn address(&self) -> &moonpool_transport::NetworkAddress {
-                &self.base.address
+                // All fields share the same address; use the first one.
+                &self.#first_field_name.endpoint().address
             }
-        }
-
-        #[async_trait::async_trait(?Send)]
-        impl<P, C> #name for #bound_client_name<P, C>
-        where
-            P: moonpool_transport::Providers,
-            C: moonpool_transport::MessageCodec + Clone,
-        {
-            #(#bound_client_methods)*
         }
     };
 

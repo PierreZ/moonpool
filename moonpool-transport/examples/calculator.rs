@@ -5,10 +5,9 @@
 //!
 //! # Key Features
 //!
-//! - `#[service(id = ...)]` generates `CalculatorServer`, `CalculatorClient`, and `BoundCalculatorClient`
-//! - Trait-based interface definition (idiomatic Rust)
-//! - Orleans-style ergonomic client calls via `.bind()`
-//! - Only base endpoint is serialized (FDB pattern)
+//! - `#[service(id = ...)]` generates `CalculatorServer` and `CalculatorClient`
+//! - Client has `ServiceEndpoint` fields with delivery mode methods
+//! - Each call site chooses its delivery mode (FDB pattern)
 //!
 //! # Run
 //!
@@ -85,15 +84,14 @@ struct DivResponse {
 }
 
 // ============================================================================
-// Interface Definition - Generated Server and Client Types
+// Interface Definition
 // ============================================================================
 
 /// Calculator interface definition.
 ///
 /// The `#[service]` macro generates:
 /// - `CalculatorServer<C>` with `RequestStream` fields (add, sub, mul, div)
-/// - `CalculatorClient` with `bind()` method for creating bound clients
-/// - `BoundCalculatorClient<N, T, TP, C>` implementing the `Calculator` trait
+/// - `CalculatorClient` with `ServiceEndpoint` fields (add, sub, mul, div)
 #[service(id = 0xCA1C_0000)]
 trait Calculator {
     async fn add(&self, req: AddRequest) -> Result<AddResponse, RpcError>;
@@ -109,12 +107,9 @@ trait Calculator {
 async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Calculator Server ===\n");
 
-    // Create providers bundle
     let providers = TokioProviders::new();
-
     let local_addr = NetworkAddress::parse(SERVER_ADDR)?;
 
-    // Build transport
     let transport = NetTransportBuilder::new(providers)
         .local_address(local_addr)
         .build_listening()
@@ -122,9 +117,6 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Server listening on {}\n", SERVER_ADDR);
 
-    // ========================================================================
-    // Single line registers all 4 handlers
-    // ========================================================================
     let calc = CalculatorServer::init(&transport, JsonCodec);
 
     println!(
@@ -178,14 +170,12 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Calculator Client ===\n");
 
-    // Create providers bundle
     let providers = TokioProviders::new();
     let time = providers.time().clone();
 
     let local_addr = NetworkAddress::parse(CLIENT_ADDR)?;
     let server_addr = NetworkAddress::parse(SERVER_ADDR)?;
 
-    // Build transport
     let transport = NetTransportBuilder::new(providers)
         .local_address(local_addr)
         .build_listening()
@@ -193,126 +183,101 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Client started, connecting to server at {}\n", SERVER_ADDR);
 
-    // ========================================================================
-    // NEW: Ergonomic bound client - implements Calculator trait!
-    // ========================================================================
-    let calc = CalculatorClient::new(server_addr).bind(transport.clone(), JsonCodec);
+    // Client is a plain struct with ServiceEndpoint fields.
+    // Codec is passed once at construction; delivery methods don't need it.
+    let calc = CalculatorClient::new(server_addr, JsonCodec);
 
     println!(
         "Using interface ID: 0x{:X} with {} methods\n",
-        CalculatorClient::INTERFACE_ID,
-        CalculatorClient::METHOD_COUNT
+        CalculatorClient::<JsonCodec>::INTERFACE_ID,
+        CalculatorClient::<JsonCodec>::METHOD_COUNT
     );
 
-    // Test calculations - now with clean trait method calls!
-    let tests = [
-        ("10 + 5", Op::Add(10, 5)),
-        ("20 - 7", Op::Sub(20, 7)),
-        ("6 * 8", Op::Mul(6, 8)),
-        ("100 / 4", Op::Div(100, 4)),
-        ("42 / 0", Op::Div(42, 0)), // Division by zero test
-    ];
+    // ========================================================================
+    // Delivery mode is a call-site decision (FDB pattern)
+    // ========================================================================
 
-    let mut success_count = 0;
-
-    for (desc, op) in tests.iter() {
-        println!("Sending: {}", desc);
-
-        // NEW: Clean trait method calls with .await?
-        // Note: timeout returns Result<T, TimeError>, inner T is Result<Response, RpcError>
-        let result = match op {
-            Op::Add(a, b) => {
-                match time
-                    .timeout(
-                        Duration::from_secs(5),
-                        calc.add(AddRequest { a: *a, b: *b }),
-                    )
-                    .await
-                {
-                    Ok(Ok(resp)) => Some(format!("{}", resp.result)),
-                    _ => None,
-                }
-            }
-            Op::Sub(a, b) => {
-                match time
-                    .timeout(
-                        Duration::from_secs(5),
-                        calc.sub(SubRequest { a: *a, b: *b }),
-                    )
-                    .await
-                {
-                    Ok(Ok(resp)) => Some(format!("{}", resp.result)),
-                    _ => None,
-                }
-            }
-            Op::Mul(a, b) => {
-                match time
-                    .timeout(
-                        Duration::from_secs(5),
-                        calc.mul(MulRequest { a: *a, b: *b }),
-                    )
-                    .await
-                {
-                    Ok(Ok(resp)) => Some(format!("{}", resp.result)),
-                    _ => None,
-                }
-            }
-            Op::Div(a, b) => {
-                match time
-                    .timeout(
-                        Duration::from_secs(5),
-                        calc.div(DivRequest { a: *a, b: *b }),
-                    )
-                    .await
-                {
-                    Ok(Ok(resp)) => Some(
-                        resp.result
-                            .map(|r| r.to_string())
-                            .unwrap_or_else(|| "ERROR (division by zero)".to_string()),
-                    ),
-                    _ => None,
-                }
-            }
-        };
-
-        match result {
-            Some(r) => {
-                println!("  Result: {}\n", r);
-                success_count += 1;
-            }
-            None => {
-                println!("  ERROR: Request failed or timed out\n");
-            }
-        }
-
-        // Small delay between requests
-        let _ = time.sleep(Duration::from_millis(100)).await;
+    // 1. get_reply: at-least-once, reliable delivery (default for most RPCs)
+    println!("--- get_reply (at-least-once) ---");
+    match time
+        .timeout(
+            Duration::from_secs(5),
+            calc.add.get_reply(&transport, AddRequest { a: 10, b: 5 }),
+        )
+        .await
+    {
+        Ok(Ok(resp)) => println!("  10 + 5 = {}\n", resp.result),
+        other => println!("  Failed: {:?}\n", other),
     }
 
-    println!("=== Results ===");
-    println!(
-        "{}/{} operations completed successfully!",
-        success_count,
-        tests.len()
-    );
+    // 2. try_get_reply: at-most-once, races reply vs disconnect
+    println!("--- try_get_reply (at-most-once) ---");
+    match calc
+        .sub
+        .try_get_reply(&transport, SubRequest { a: 20, b: 7 })
+        .await
+    {
+        Ok(resp) => println!("  20 - 7 = {}\n", resp.result),
+        Err(e) if e.is_maybe_delivered() => {
+            println!("  MaybeDelivered — read state before retry\n")
+        }
+        Err(e) => println!("  Error: {:?}\n", e),
+    }
 
-    // Demonstrate serialization (only base endpoint is serialized)
-    println!("\n=== Serialization Demo ===");
-    let unbound = CalculatorClient::new(NetworkAddress::parse(SERVER_ADDR)?);
+    // 3. get_reply again for mul
+    println!("--- get_reply ---");
+    match time
+        .timeout(
+            Duration::from_secs(5),
+            calc.mul.get_reply(&transport, MulRequest { a: 6, b: 8 }),
+        )
+        .await
+    {
+        Ok(Ok(resp)) => println!("  6 * 8 = {}\n", resp.result),
+        other => println!("  Failed: {:?}\n", other),
+    }
+
+    // 4. Division (normal + division by zero)
+    println!("--- division ---");
+    match time
+        .timeout(
+            Duration::from_secs(5),
+            calc.div.get_reply(&transport, DivRequest { a: 100, b: 4 }),
+        )
+        .await
+    {
+        Ok(Ok(resp)) => println!(
+            "  100 / 4 = {}\n",
+            resp.result
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "ERROR".to_string())
+        ),
+        other => println!("  Failed: {:?}\n", other),
+    }
+
+    match time
+        .timeout(
+            Duration::from_secs(5),
+            calc.div.get_reply(&transport, DivRequest { a: 42, b: 0 }),
+        )
+        .await
+    {
+        Ok(Ok(resp)) => println!(
+            "  42 / 0 = {}\n",
+            resp.result
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "ERROR (division by zero)".to_string())
+        ),
+        other => println!("  Failed: {:?}\n", other),
+    }
+
+    // Demonstrate serialization (client is just a struct of ServiceEndpoints)
+    println!("=== Serialization Demo ===");
+    let unbound = CalculatorClient::new(NetworkAddress::parse(SERVER_ADDR)?, JsonCodec);
     let json = serde_json::to_string_pretty(&unbound)?;
-    println!(
-        "Serialized CalculatorClient (only base endpoint):\n{}",
-        json
-    );
+    println!("Serialized CalculatorClient:\n{}", json);
 
     Ok(())
-}
-
-enum Op {
-    Add(i64, i64),
-    Sub(i64, i64),
-    Mul(i64, i64),
-    Div(i64, i64),
 }
 
 // ============================================================================
@@ -349,13 +314,10 @@ fn main() {
         _ => {
             println!("Calculator Example: FDB-style Interface Pattern\n");
             println!("This example demonstrates the #[service] macro:\n");
-            println!(
-                "  - Single interface definition generates Server, Client, and BoundClient types"
-            );
             println!("  - CalculatorServer<C> with RequestStream fields");
-            println!("  - CalculatorClient with .bind() for creating BoundCalculatorClient");
-            println!("  - BoundCalculatorClient implements Calculator trait for ergonomic calls");
-            println!("  - Only base endpoint is serialized (FDB pattern)\n");
+            println!("  - CalculatorClient with ServiceEndpoint fields");
+            println!("  - Delivery modes chosen per call: get_reply, try_get_reply, send");
+            println!("  - FDB pattern: calc.add.get_reply(&transport, req, codec).await?\n");
             println!("Usage:");
             println!("  cargo run --example calculator -- server   # Start the server");
             println!("  cargo run --example calculator -- client   # Run the client\n");
