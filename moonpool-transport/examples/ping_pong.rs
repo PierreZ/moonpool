@@ -144,13 +144,14 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Connecting to server at {}\n", SERVER_ADDR);
 
-    // Client is a plain struct with ServiceEndpoint fields
-    let ping_client = PingPongClient::new(server_addr);
+    // Client is a plain struct with ServiceEndpoint fields.
+    // Codec is passed once at construction.
+    let ping_client = PingPongClient::new(server_addr, JsonCodec);
 
     println!(
         "Using interface ID: 0x{:X} with {} method(s)\n",
-        PingPongClient::INTERFACE_ID,
-        PingPongClient::METHOD_COUNT
+        PingPongClient::<JsonCodec>::INTERFACE_ID,
+        PingPongClient::<JsonCodec>::METHOD_COUNT
     );
 
     let num_pings = 5;
@@ -169,7 +170,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
         match time
             .timeout(
                 Duration::from_secs(5),
-                ping_client.ping.get_reply(&transport, request, JsonCodec),
+                ping_client.ping.get_reply(&transport, request),
             )
             .await
         {

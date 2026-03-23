@@ -50,9 +50,9 @@ CalculatorServer<C>
   └── serve(transport, handler, providers) -> ServerHandle
 
 CalculatorClient
-  ├── new(address) -> Self
-  ├── add: ServiceEndpoint<AddRequest, AddResponse>
-  └── sub: ServiceEndpoint<SubRequest, SubResponse>
+  ├── new(address, codec) -> Self
+  ├── add: ServiceEndpoint<AddRequest, AddResponse, C>
+  └── sub: ServiceEndpoint<SubRequest, SubResponse, C>
 ```
 
 The `serve()` method is particularly useful: it consumes the server, spawns a background task per method that loops on `recv_with_transport`, and returns a `ServerHandle` that stops everything when dropped.

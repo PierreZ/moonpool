@@ -9,10 +9,12 @@
 //! # Example
 //!
 //! ```rust,ignore
+//! let calc = CalculatorClient::new(server_addr, JsonCodec);
+//!
 //! // Each delivery mode is a call-site decision:
-//! let resp = calc.add.get_reply(&transport, req, JsonCodec).await?;
-//! let resp = calc.add.try_get_reply(&transport, req, JsonCodec).await?;
-//! calc.add.send(&transport, req, JsonCodec)?;
+//! let resp = calc.add.get_reply(&transport, req).await?;
+//! let resp = calc.add.try_get_reply(&transport, req).await?;
+//! calc.add.send(&transport, req)?;
 //! ```
 
 use std::marker::PhantomData;
@@ -31,12 +33,13 @@ use crate::{Endpoint, MessageCodec, Providers};
 
 /// Client-side typed endpoint for making RPC calls.
 ///
-/// Wraps an [`Endpoint`] with request/response type information, providing
-/// delivery mode methods directly on the handle. This is the primary API
-/// for making RPC calls in moonpool.
+/// Wraps an [`Endpoint`] with request/response type information and a codec,
+/// providing delivery mode methods directly on the handle. This is the primary
+/// API for making RPC calls in moonpool.
 ///
 /// The `#[service]` macro generates client structs with `ServiceEndpoint`
-/// fields — one per method in the interface.
+/// fields — one per method in the interface. The codec is passed once at
+/// client construction and embedded in each endpoint.
 ///
 /// # Delivery Modes
 ///
@@ -49,8 +52,9 @@ use crate::{Endpoint, MessageCodec, Providers};
 ///
 /// # FDB Reference
 /// `RequestStream<T>` (fdbrpc.h:726-948)
-pub struct ServiceEndpoint<Req, Resp> {
+pub struct ServiceEndpoint<Req, Resp, C: MessageCodec> {
     endpoint: Endpoint,
+    codec: C,
     // fn(Req) -> Resp makes the type covariant in Resp and contravariant in Req,
     // matching the logical flow: we send Req and receive Resp.
     _phantom: PhantomData<fn(Req) -> Resp>,
@@ -58,7 +62,9 @@ pub struct ServiceEndpoint<Req, Resp> {
 
 // Manual trait impls because PhantomData<fn(Req) -> Resp> doesn't auto-derive.
 
-impl<Req, Resp> std::fmt::Debug for ServiceEndpoint<Req, Resp> {
+impl<Req, Resp, C: MessageCodec + std::fmt::Debug> std::fmt::Debug
+    for ServiceEndpoint<Req, Resp, C>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServiceEndpoint")
             .field("endpoint", &self.endpoint)
@@ -66,33 +72,36 @@ impl<Req, Resp> std::fmt::Debug for ServiceEndpoint<Req, Resp> {
     }
 }
 
-impl<Req, Resp> Clone for ServiceEndpoint<Req, Resp> {
+impl<Req, Resp, C: MessageCodec + Clone> Clone for ServiceEndpoint<Req, Resp, C> {
     fn clone(&self) -> Self {
         Self {
             endpoint: self.endpoint.clone(),
+            codec: self.codec.clone(),
             _phantom: PhantomData,
         }
     }
 }
 
-impl<Req, Resp> Serialize for ServiceEndpoint<Req, Resp> {
+impl<Req, Resp, C: MessageCodec> Serialize for ServiceEndpoint<Req, Resp, C> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Only serialize the endpoint; codec is runtime configuration.
         self.endpoint.serialize(serializer)
     }
 }
 
-impl<'de, Req, Resp> Deserialize<'de> for ServiceEndpoint<Req, Resp> {
+impl<'de, Req, Resp, C: MessageCodec + Default> Deserialize<'de> for ServiceEndpoint<Req, Resp, C> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let endpoint = Endpoint::deserialize(deserializer)?;
-        Ok(Self::new(endpoint))
+        Ok(Self::new(endpoint, C::default()))
     }
 }
 
-impl<Req, Resp> ServiceEndpoint<Req, Resp> {
-    /// Create a new service endpoint from a raw endpoint.
-    pub fn new(endpoint: Endpoint) -> Self {
+impl<Req, Resp, C: MessageCodec> ServiceEndpoint<Req, Resp, C> {
+    /// Create a new service endpoint from a raw endpoint and codec.
+    pub fn new(endpoint: Endpoint, codec: C) -> Self {
         Self {
             endpoint,
+            codec,
             _phantom: PhantomData,
         }
     }
@@ -103,10 +112,11 @@ impl<Req, Resp> ServiceEndpoint<Req, Resp> {
     }
 }
 
-impl<Req, Resp> ServiceEndpoint<Req, Resp>
+impl<Req, Resp, C> ServiceEndpoint<Req, Resp, C>
 where
     Req: Serialize,
     Resp: DeserializeOwned + 'static,
+    C: MessageCodec + Clone,
 {
     /// Fire-and-forget delivery: send request unreliably with no reply.
     ///
@@ -123,17 +133,12 @@ where
     ///
     /// Returns `RpcError::Messaging` if serialization or the send itself fails.
     #[instrument(skip_all)]
-    pub fn send<P, C>(
+    pub fn send<P: Providers>(
         &self,
         transport: &NetTransport<P>,
         req: Req,
-        codec: C,
-    ) -> Result<(), RpcError>
-    where
-        P: Providers,
-        C: MessageCodec,
-    {
-        delivery::send(transport, &self.endpoint, req, codec).map_err(RpcError::from)
+    ) -> Result<(), RpcError> {
+        delivery::send(transport, &self.endpoint, req, self.codec.clone()).map_err(RpcError::from)
     }
 
     /// At-most-once delivery: send unreliably, race reply against disconnect.
@@ -153,17 +158,12 @@ where
     /// Returns `MaybeDelivered` on disconnect. Other `ReplyError` variants
     /// for serialization, timeouts, etc.
     #[instrument(skip_all)]
-    pub async fn try_get_reply<P, C>(
+    pub async fn try_get_reply<P: Providers>(
         &self,
         transport: &NetTransport<P>,
         req: Req,
-        codec: C,
-    ) -> Result<Resp, RpcError>
-    where
-        P: Providers,
-        C: MessageCodec,
-    {
-        delivery::try_get_reply(transport, &self.endpoint, req, codec)
+    ) -> Result<Resp, RpcError> {
+        delivery::try_get_reply(transport, &self.endpoint, req, self.codec.clone())
             .await
             .map_err(RpcError::from)
     }
@@ -182,17 +182,12 @@ where
     ///
     /// Returns `RpcError` if the request cannot be sent or the reply fails.
     #[instrument(skip_all)]
-    pub async fn get_reply<P, C>(
+    pub async fn get_reply<P: Providers>(
         &self,
         transport: &NetTransport<P>,
         req: Req,
-        codec: C,
-    ) -> Result<Resp, RpcError>
-    where
-        P: Providers,
-        C: MessageCodec,
-    {
-        let future = delivery::get_reply(transport, &self.endpoint, req, codec)?;
+    ) -> Result<Resp, RpcError> {
+        let future = delivery::get_reply(transport, &self.endpoint, req, self.codec.clone())?;
         Ok(future.await?)
     }
 
@@ -214,22 +209,17 @@ where
     /// Returns `MaybeDelivered` if the endpoint is failed for longer than
     /// `sustained_failure_duration`.
     #[instrument(skip_all)]
-    pub async fn get_reply_unless_failed_for<P, C>(
+    pub async fn get_reply_unless_failed_for<P: Providers>(
         &self,
         transport: &NetTransport<P>,
         req: Req,
-        codec: C,
         sustained_failure_duration: Duration,
-    ) -> Result<Resp, RpcError>
-    where
-        P: Providers,
-        C: MessageCodec,
-    {
+    ) -> Result<Resp, RpcError> {
         delivery::get_reply_unless_failed_for(
             transport,
             &self.endpoint,
             req,
-            codec,
+            self.codec.clone(),
             sustained_failure_duration,
         )
         .await
@@ -248,17 +238,12 @@ where
     ///
     /// Returns `MessagingError` if the request cannot be sent.
     #[instrument(skip_all)]
-    pub fn send_request<P, C>(
+    pub fn send_request<P: Providers>(
         &self,
         transport: &NetTransport<P>,
         req: Req,
-        codec: C,
-    ) -> Result<ReplyFuture<Resp, C>, MessagingError>
-    where
-        P: Providers,
-        C: MessageCodec,
-    {
-        delivery::get_reply(transport, &self.endpoint, req, codec)
+    ) -> Result<ReplyFuture<Resp, C>, MessagingError> {
+        delivery::get_reply(transport, &self.endpoint, req, self.codec.clone())
     }
 }
 
@@ -418,20 +403,24 @@ mod tests {
 
     #[test]
     fn test_service_endpoint_debug_clone() {
-        let ep: ServiceEndpoint<TestRequest, TestResponse> =
-            ServiceEndpoint::new(Endpoint::new(test_address(), UID::new(0xCA1C_0000, 1)));
+        let ep: ServiceEndpoint<TestRequest, TestResponse, JsonCodec> = ServiceEndpoint::new(
+            Endpoint::new(test_address(), UID::new(0xCA1C_0000, 1)),
+            JsonCodec,
+        );
 
         let cloned = ep.clone();
-        assert_eq!(format!("{:?}", ep), format!("{:?}", cloned),);
+        assert_eq!(format!("{:?}", ep), format!("{:?}", cloned));
     }
 
     #[test]
     fn test_service_endpoint_serde_roundtrip() {
-        let ep: ServiceEndpoint<TestRequest, TestResponse> =
-            ServiceEndpoint::new(Endpoint::new(test_address(), UID::new(0xCA1C_0000, 1)));
+        let ep: ServiceEndpoint<TestRequest, TestResponse, JsonCodec> = ServiceEndpoint::new(
+            Endpoint::new(test_address(), UID::new(0xCA1C_0000, 1)),
+            JsonCodec,
+        );
 
         let json = serde_json::to_string(&ep).expect("serialize");
-        let decoded: ServiceEndpoint<TestRequest, TestResponse> =
+        let decoded: ServiceEndpoint<TestRequest, TestResponse, JsonCodec> =
             serde_json::from_str(&json).expect("deserialize");
 
         assert_eq!(ep.endpoint().token, decoded.endpoint().token);
@@ -449,9 +438,10 @@ mod tests {
             Rc::new(NetNotifiedQueue::new(server_endpoint.clone(), JsonCodec));
         transport.register(server_token, server_queue.clone());
 
-        let ep: ServiceEndpoint<TestRequest, TestResponse> = ServiceEndpoint::new(server_endpoint);
+        let ep: ServiceEndpoint<TestRequest, TestResponse, JsonCodec> =
+            ServiceEndpoint::new(server_endpoint, JsonCodec);
 
-        ep.send(&transport, TestRequest { value: 42 }, JsonCodec)
+        ep.send(&transport, TestRequest { value: 42 })
             .expect("send should succeed");
 
         let envelope = server_queue.try_recv().expect("should receive envelope");
@@ -462,13 +452,13 @@ mod tests {
     async fn test_try_get_reply_already_failed() {
         let transport = create_test_transport();
 
-        let ep: ServiceEndpoint<TestRequest, TestResponse> =
-            ServiceEndpoint::new(Endpoint::new(test_address(), UID::new(0x1234, 0x5678)));
+        let ep: ServiceEndpoint<TestRequest, TestResponse, JsonCodec> = ServiceEndpoint::new(
+            Endpoint::new(test_address(), UID::new(0x1234, 0x5678)),
+            JsonCodec,
+        );
 
         // Address unknown → Failed by default → immediate MaybeDelivered
-        let result = ep
-            .try_get_reply(&transport, TestRequest { value: 1 }, JsonCodec)
-            .await;
+        let result = ep.try_get_reply(&transport, TestRequest { value: 1 }).await;
 
         let err = result.expect_err("should be MaybeDelivered");
         assert!(err.is_maybe_delivered());
@@ -494,12 +484,12 @@ mod tests {
                 .failure_monitor()
                 .set_status("10.0.0.1:4500", FailureStatus::Available);
 
-            let ep: ServiceEndpoint<TestRequest, TestResponse> =
-                ServiceEndpoint::new(server_endpoint);
+            let ep: ServiceEndpoint<TestRequest, TestResponse, JsonCodec> =
+                ServiceEndpoint::new(server_endpoint, JsonCodec);
 
             let t = Rc::clone(&transport);
             let handle = tokio::task::spawn_local(async move {
-                ep.get_reply(&t, TestRequest { value: 99 }, JsonCodec).await
+                ep.get_reply(&t, TestRequest { value: 99 }).await
             });
 
             tokio::task::yield_now().await;
@@ -528,10 +518,11 @@ mod tests {
             Rc::new(NetNotifiedQueue::new(server_endpoint.clone(), JsonCodec));
         transport.register(server_token, server_queue.clone());
 
-        let ep: ServiceEndpoint<TestRequest, TestResponse> = ServiceEndpoint::new(server_endpoint);
+        let ep: ServiceEndpoint<TestRequest, TestResponse, JsonCodec> =
+            ServiceEndpoint::new(server_endpoint, JsonCodec);
 
         let _future = ep
-            .send_request(&transport, TestRequest { value: 7 }, JsonCodec)
+            .send_request(&transport, TestRequest { value: 7 })
             .expect("send_request should succeed");
 
         let envelope = server_queue.try_recv().expect("should receive envelope");

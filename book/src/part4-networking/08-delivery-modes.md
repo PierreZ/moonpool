@@ -21,7 +21,7 @@ The simplest mode. Send the request unreliably with no reply registered:
 
 ```rust
 // Via ServiceEndpoint (generated client)
-heartbeat.send(&transport, HeartbeatRequest { node_id }, JsonCodec)?;
+heartbeat.send(&transport, HeartbeatRequest { node_id })?;
 
 // Via delivery module (manual endpoint)
 delivery::send(&transport, &endpoint, HeartbeatRequest { node_id }, JsonCodec)?;
@@ -37,7 +37,7 @@ Send unreliably, then race the reply against a disconnect signal from the `Failu
 
 ```rust
 // Via ServiceEndpoint
-let response = balance.try_get_reply(&transport, GetBalanceRequest { account_id }, JsonCodec).await?;
+let response = balance.try_get_reply(&transport, GetBalanceRequest { account_id }).await?;
 
 // Via delivery module
 let response = delivery::try_get_reply::<_, BalanceResponse, _, _>(
@@ -64,7 +64,7 @@ Send reliably. If the connection drops and reconnects, the transport retransmits
 
 ```rust
 // Via ServiceEndpoint
-let response = join.get_reply(&transport, JoinRequest { node_id }, JsonCodec).await?;
+let response = join.get_reply(&transport, JoinRequest { node_id }).await?;
 
 // Via delivery module (returns a ReplyFuture for manual control)
 let reply_future = delivery::get_reply::<_, JoinResponse, _, _>(
@@ -84,7 +84,7 @@ Like `get_reply`, but gives up if the endpoint has been continuously failed for 
 ```rust
 // Via ServiceEndpoint
 let response = register.get_reply_unless_failed_for(
-    &transport, RegisterRequest { /* ... */ }, JsonCodec, Duration::from_secs(10),
+    &transport, RegisterRequest { /* ... */ }, Duration::from_secs(10),
 ).await?;
 
 // Via delivery module
@@ -105,7 +105,7 @@ The `ReplyError::MaybeDelivered` variant is the most important design decision i
 When you receive `MaybeDelivered`, you know exactly one thing: the connection failed while the request was in flight. The request may have been fully processed, partially processed, or never received. The framework refuses to guess.
 
 ```rust
-match delivery::try_get_reply(&transport, &ep, req, JsonCodec).await {
+match delivery::try_get_reply(&transport, &ep, req, codec).await {
     Ok(response) => handle_success(response),
     Err(ReplyError::MaybeDelivered) => {
         // Read state to determine if the request was processed

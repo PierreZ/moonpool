@@ -184,13 +184,13 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     println!("Client started, connecting to server at {}\n", SERVER_ADDR);
 
     // Client is a plain struct with ServiceEndpoint fields.
-    // Each field has delivery mode methods: get_reply, try_get_reply, send, etc.
-    let calc = CalculatorClient::new(server_addr);
+    // Codec is passed once at construction; delivery methods don't need it.
+    let calc = CalculatorClient::new(server_addr, JsonCodec);
 
     println!(
         "Using interface ID: 0x{:X} with {} methods\n",
-        CalculatorClient::INTERFACE_ID,
-        CalculatorClient::METHOD_COUNT
+        CalculatorClient::<JsonCodec>::INTERFACE_ID,
+        CalculatorClient::<JsonCodec>::METHOD_COUNT
     );
 
     // ========================================================================
@@ -202,8 +202,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     match time
         .timeout(
             Duration::from_secs(5),
-            calc.add
-                .get_reply(&transport, AddRequest { a: 10, b: 5 }, JsonCodec),
+            calc.add.get_reply(&transport, AddRequest { a: 10, b: 5 }),
         )
         .await
     {
@@ -215,7 +214,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     println!("--- try_get_reply (at-most-once) ---");
     match calc
         .sub
-        .try_get_reply(&transport, SubRequest { a: 20, b: 7 }, JsonCodec)
+        .try_get_reply(&transport, SubRequest { a: 20, b: 7 })
         .await
     {
         Ok(resp) => println!("  20 - 7 = {}\n", resp.result),
@@ -230,8 +229,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     match time
         .timeout(
             Duration::from_secs(5),
-            calc.mul
-                .get_reply(&transport, MulRequest { a: 6, b: 8 }, JsonCodec),
+            calc.mul.get_reply(&transport, MulRequest { a: 6, b: 8 }),
         )
         .await
     {
@@ -244,8 +242,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     match time
         .timeout(
             Duration::from_secs(5),
-            calc.div
-                .get_reply(&transport, DivRequest { a: 100, b: 4 }, JsonCodec),
+            calc.div.get_reply(&transport, DivRequest { a: 100, b: 4 }),
         )
         .await
     {
@@ -261,8 +258,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     match time
         .timeout(
             Duration::from_secs(5),
-            calc.div
-                .get_reply(&transport, DivRequest { a: 42, b: 0 }, JsonCodec),
+            calc.div.get_reply(&transport, DivRequest { a: 42, b: 0 }),
         )
         .await
     {
@@ -277,7 +273,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
 
     // Demonstrate serialization (client is just a struct of ServiceEndpoints)
     println!("=== Serialization Demo ===");
-    let unbound = CalculatorClient::new(NetworkAddress::parse(SERVER_ADDR)?);
+    let unbound = CalculatorClient::new(NetworkAddress::parse(SERVER_ADDR)?, JsonCodec);
     let json = serde_json::to_string_pretty(&unbound)?;
     println!("Serialized CalculatorClient:\n{}", json);
 

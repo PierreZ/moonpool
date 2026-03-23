@@ -161,7 +161,7 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
         quote! {
             /// Typed endpoint for this method. Call delivery methods directly:
             /// `.get_reply()`, `.try_get_reply()`, `.send()`, `.get_reply_unless_failed_for()`.
-            pub #name: moonpool_transport::ServiceEndpoint<#req_type, #resp_type>
+            pub #name: moonpool_transport::ServiceEndpoint<#req_type, #resp_type, C>
         }
     });
 
@@ -174,7 +174,8 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
                 moonpool_transport::Endpoint::new(
                     address.clone(),
                     moonpool_transport::UID::new(Self::INTERFACE_ID, #idx as u64),
-                )
+                ),
+                codec.clone(),
             )
         }
     });
@@ -304,27 +305,31 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
         /// # Example
         ///
         /// ```rust,ignore
-        /// let calc = CalculatorClient::new(server_addr);
+        /// let calc = CalculatorClient::new(server_addr, JsonCodec);
         ///
         /// // Choose delivery mode at call site:
-        /// let resp = calc.add.get_reply(&transport, req, JsonCodec).await?;
-        /// let resp = calc.add.try_get_reply(&transport, req, JsonCodec).await?;
-        /// calc.add.send(&transport, req, JsonCodec)?;
+        /// let resp = calc.add.get_reply(&transport, req).await?;
+        /// let resp = calc.add.try_get_reply(&transport, req).await?;
+        /// calc.add.send(&transport, req)?;
         /// ```
         #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-        pub struct #client_name {
+        #[serde(bound(
+            serialize = "",
+            deserialize = "C: moonpool_transport::MessageCodec + Default",
+        ))]
+        pub struct #client_name<C: moonpool_transport::MessageCodec> {
             #(#client_fields,)*
         }
 
-        impl #client_name {
+        impl<C: moonpool_transport::MessageCodec + Clone> #client_name<C> {
             /// Interface identifier.
             pub const INTERFACE_ID: u64 = #interface_id;
 
             /// Number of methods in this interface.
             pub const METHOD_COUNT: u32 = #method_count;
 
-            /// Create a new client interface from a network address.
-            pub fn new(address: moonpool_transport::NetworkAddress) -> Self {
+            /// Create a new client interface from a network address and codec.
+            pub fn new(address: moonpool_transport::NetworkAddress, codec: C) -> Self {
                 Self {
                     #(#client_field_inits,)*
                 }
