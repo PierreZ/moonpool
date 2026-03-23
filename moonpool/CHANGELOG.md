@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.6.0] - 2026-03-23
+
+### 🐛 Bug Fixes
+
+- Replace Result<T, String> with domain error enums (C-GOOD-ERR) ([#58](https://github.com/PierreZ/moonpool/pull/58))
+- **moonpool**: Add missing Debug derives on public types (C-COMMON-TRAITS)
+- Rename get_ prefixed getters to follow C-GETTER convention
+
+### 🚜 Refactor
+
+- **moonpool**: Remove virtual actor system entirely
+
+
 ## [0.5.0] - 2026-03-09
 
 ### 🚀 Features
