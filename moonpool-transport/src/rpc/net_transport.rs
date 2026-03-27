@@ -225,6 +225,14 @@ impl<P: Providers> NetTransport<P> {
             .expect("weak_self not set - call set_weak_self() after wrapping in Rc")
     }
 
+    /// Get weak self-reference for cleanup callbacks (e.g., `ReplyFuture` drop).
+    ///
+    /// Returns `None`-valued `Weak` if `set_weak_self()` hasn't been called,
+    /// which is safe — cleanup will be a no-op.
+    pub(crate) fn weak_self_for_cleanup(&self) -> Weak<Self> {
+        self.weak_self.borrow().clone().unwrap_or_default()
+    }
+
     /// Create with custom peer configuration.
     pub fn with_peer_config(mut self, config: PeerConfig) -> Self {
         self.peer_config = config;

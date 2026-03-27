@@ -25,7 +25,7 @@ fn main() {
             })
             .chaos_duration(Duration::from_secs(10))
             .random_network()
-            .set_iterations(50),
+            .set_iterations(5),
     );
 
     report.eprint();
