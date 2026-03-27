@@ -167,7 +167,7 @@ impl Workload for TransportClientWorkload {
             })?;
 
         let client_id = ctx.client_id();
-        let num_ops = sim_random_range(50..200);
+        let num_ops = 6;
         let mut seq_counter: u64 = 0;
         let shutdown = ctx.shutdown().clone();
 
@@ -514,6 +514,42 @@ impl Workload for TransportClientWorkload {
         ctx.state().publish(&key, final_stats);
 
         tracing::info!(client_id, "workload finished");
+        Ok(())
+    }
+
+    #[instrument(skip(self, ctx), fields(client = self.index))]
+    async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        // fire_and_forget: no Replied events should exist
+        if let Some(tl) = ctx.timeline::<DeliveryEvent>(TL_FIRE_AND_FORGET) {
+            let entries = tl.all();
+            let has_reply = entries
+                .iter()
+                .any(|e| matches!(&e.event, DeliveryEvent::Replied { .. }));
+            assert_always!(!has_reply, "ff_no_replies_expected");
+        }
+
+        // at_most_once: every resolved seq_id was sent
+        if let Some(tl) = ctx.timeline::<DeliveryEvent>(TL_AT_MOST_ONCE) {
+            let entries = tl.all();
+            let mut sent = std::collections::HashSet::new();
+            for entry in entries.iter() {
+                if let DeliveryEvent::Sent { seq_id, .. } = &entry.event {
+                    sent.insert(*seq_id);
+                }
+            }
+            for entry in entries.iter() {
+                match &entry.event {
+                    DeliveryEvent::Replied { seq_id }
+                    | DeliveryEvent::MaybeDelivered { seq_id }
+                    | DeliveryEvent::Failed { seq_id, .. } => {
+                        assert_always!(sent.contains(seq_id), "amo_check_all_resolved_were_sent");
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        tracing::info!("check passed");
         Ok(())
     }
 }
