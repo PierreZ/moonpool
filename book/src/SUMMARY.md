@@ -59,6 +59,7 @@
   - [Reproducing with FixedCount](./part3-building/21-reproducing.md)
   - [Reading the Event Trace](./part3-building/22-event-trace.md)
   - [Common Pitfalls](./part3-building/23-pitfalls.md)
+- [Discovering Properties](./part3-building/24-discovering-properties.md)
 
 ---
 

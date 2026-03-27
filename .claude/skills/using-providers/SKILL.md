@@ -1,3 +1,10 @@
+---
+description: |
+  Moonpool provider traits: TimeProvider, TaskProvider, NetworkProvider, RandomProvider, StorageProvider.
+  TRIGGER when: replacing direct tokio calls with provider equivalents, choosing which provider trait to use, or writing code that needs time/task/network/random/storage in moonpool.
+  DO NOT TRIGGER when: not working on moonpool simulation code.
+---
+
 # Using Providers
 
 ## When to Use This Skill

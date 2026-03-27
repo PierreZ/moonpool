@@ -1,3 +1,10 @@
+---
+description: |
+  Implementing a moonpool Process (system under test): trait, factory pattern, reboots, tags, providers.
+  TRIGGER when: implementing the Process trait, creating a server/node for simulation, setting up process factories, or configuring process tags.
+  DO NOT TRIGGER when: not working on moonpool simulation code.
+---
+
 # Writing a Process
 
 ## When to Use This Skill

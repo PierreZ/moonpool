@@ -1,3 +1,10 @@
+---
+description: |
+  Debug failing moonpool simulation seeds: reproduce, trace events, find root cause, fix.
+  TRIGGER when: a simulation seed fails, investigating a test failure, reading event traces, or hunting non-determinism bugs.
+  DO NOT TRIGGER when: not debugging moonpool simulation failures.
+---
+
 # Debug a Seed
 
 ## When to Use This Skill

@@ -1,3 +1,10 @@
+---
+description: |
+  Implementing a moonpool Workload (test driver): trait, setup/run/check lifecycle, operation alphabet, reference models.
+  TRIGGER when: implementing the Workload trait, writing simulation test drivers, designing operation alphabets, or setting up reference models.
+  DO NOT TRIGGER when: not working on moonpool simulation code.
+---
+
 # Writing a Workload
 
 ## When to Use This Skill

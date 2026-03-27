@@ -63,6 +63,7 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 - [Reproducing with FixedCount](./part3-building/21-reproducing.md) — Pin seed with `set_debug_seeds()` + `set_iterations(1)`; exact replay
 - [Reading the Event Trace](./part3-building/22-event-trace.md) — Event queue ordering; `RUST_LOG=trace`; causal chain reconstruction
 - [Common Pitfalls](./part3-building/23-pitfalls.md) — Don't `stop().await` in workloads (deadlock); use `drop()` instead
+- [Discovering Properties](./part3-building/24-discovering-properties.md) — Systematic property discovery using attention focuses; finding where to place assertions and buggify
 
 ## Part IV: Simulating Existing Applications
 

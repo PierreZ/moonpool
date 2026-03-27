@@ -1,3 +1,10 @@
+---
+description: |
+  Moonpool fault injection: buggify!() and buggify_with_prob!() macros for chaos testing.
+  TRIGGER when: adding fault injection points, using buggify!() or buggify_with_prob!(), or deciding where to inject chaos in Process code.
+  DO NOT TRIGGER when: not working on moonpool simulation code.
+---
+
 # Using Buggify
 
 ## When to Use This Skill
