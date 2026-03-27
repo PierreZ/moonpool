@@ -660,6 +660,12 @@ impl SimulationBuilder {
                 hook();
             }
 
+            // Reset invariants for new seed (StateHandle is recreated each iteration,
+            // so invariant cursors and tracking state must be cleared)
+            for invariant in &mut self.invariants {
+                invariant.reset();
+            }
+
             // Prepare clean state for this iteration
             crate::sim::reset_sim_rng();
             crate::sim::set_sim_seed(seed);

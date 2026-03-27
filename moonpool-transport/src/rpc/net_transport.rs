@@ -37,7 +37,9 @@ use crate::{
     Endpoint, NetworkAddress, NetworkProvider, Peer, PeerConfig, Providers, TaskProvider,
     TcpListenerTrait, UID, WellKnownToken,
 };
-use moonpool_sim::{assert_always_less_than_or_equal_to, assert_reachable, assert_sometimes};
+use moonpool_sim::{
+    assert_always, assert_always_less_than_or_equal_to, assert_reachable, assert_sometimes,
+};
 use tokio::sync::watch;
 
 use super::endpoint_map::{EndpointMap, MessageReceiver};
@@ -320,6 +322,7 @@ impl<P: Providers> NetTransport<P> {
             return;
         }
 
+        assert_sometimes!(true, "pending_replies_closed_on_disconnect");
         tracing::debug!(
             "close_pending_replies: closing {} reply queues for {}",
             entries.len(),
@@ -586,8 +589,15 @@ impl<P: Providers> NetTransport<P> {
     ///
     /// Ok(()) if delivered, Err if endpoint not found.
     pub fn dispatch(&self, token: &UID, payload: &[u8]) -> Result<(), MessagingError> {
+        // Buggify: silently drop packet to simulate endpoint-level loss
+        if moonpool_sim::buggify_with_prob!(0.05) {
+            assert_reachable!("buggified_dispatch_drop");
+            return Ok(());
+        }
+
         let data = self.data.borrow();
         if let Some(receiver) = data.endpoints.get(token) {
+            assert_always!(token.is_valid(), "dispatch_valid_token");
             receiver.receive(payload);
             drop(data); // Release borrow before mutating stats
             self.data.borrow_mut().stats.packets_dispatched += 1;
@@ -1067,6 +1077,7 @@ fn connection_incoming<P: Providers>(
             .incoming_peers
             .insert(peer_addr.clone(), Rc::clone(&peer));
 
+        assert_sometimes!(true, "incoming_connection_accepted");
         tracing::debug!(
             "connection_incoming: created new incoming peer for {}",
             peer_addr

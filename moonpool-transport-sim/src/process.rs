@@ -82,6 +82,7 @@ impl Process for EchoServerProcess {
 
 /// Immediate echo: reply right away.
 fn handle_echo(req: &EchoRequest, reply: ReplyPromise<EchoResponse, JsonCodec>, server_ip: &str) {
+    assert_sometimes!(true, "echo_request_handled");
     reply.send(EchoResponse {
         seq_id: req.seq_id,
         client_id: req.client_id,
@@ -110,6 +111,7 @@ fn handle_echo_delayed(
             let _ = time
                 .sleep(std::time::Duration::from_millis(delay_ms as u64))
                 .await;
+            assert_sometimes!(true, "echo_delayed_request_handled");
             reply.send(response);
         });
 }

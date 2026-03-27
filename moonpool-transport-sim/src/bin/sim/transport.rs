@@ -6,8 +6,8 @@
 use std::process;
 use std::time::Duration;
 
+use moonpool_sim::SimulationBuilder;
 use moonpool_sim::runner::builder::{ProcessCount, WorkloadCount};
-use moonpool_sim::{AdaptiveConfig, ExplorationConfig, SimulationBuilder};
 
 use moonpool_transport_sim::invariants::DeliveryContractInvariant;
 use moonpool_transport_sim::process::EchoServerProcess;
@@ -27,19 +27,6 @@ fn main() {
             .invariant(DeliveryContractInvariant::new())
             .chaos_duration(Duration::from_secs(10))
             .random_network()
-            .enable_exploration(ExplorationConfig {
-                max_depth: 5,
-                timelines_per_split: 2,
-                global_energy: 500,
-                adaptive: Some(AdaptiveConfig {
-                    batch_size: 4,
-                    min_timelines: 4,
-                    max_timelines: 20,
-                    per_mark_energy: 50,
-                    warm_min_timelines: Some(2),
-                }),
-                parallelism: None,
-            })
             .set_iterations(1),
     );
 
@@ -50,15 +37,6 @@ fn main() {
             "FAILURE: success rate {:.1}%",
             report.success_rate() * 100.0
         );
-        process::exit(1);
-    }
-
-    if report
-        .exploration
-        .as_ref()
-        .is_some_and(|e| e.total_timelines == 0)
-    {
-        eprintln!("ERROR: no timelines explored");
         process::exit(1);
     }
 }

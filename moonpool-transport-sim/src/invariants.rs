@@ -93,6 +93,7 @@ impl DeliveryContractInvariant {
                 }
                 DeliveryEvent::MaybeDelivered { seq_id } => {
                     assert_always!(!resolved.contains(seq_id), "amo_at_most_one_resolution");
+                    assert_sometimes!(true, "amo_invariant_maybe_delivered_observed");
                     resolved.insert(*seq_id);
                 }
                 DeliveryEvent::Failed { seq_id, .. } => {
@@ -127,6 +128,7 @@ impl DeliveryContractInvariant {
                 }
                 DeliveryEvent::Replied { seq_id } => {
                     assert_always!(sent.contains(seq_id), "alo_no_phantom_reply");
+                    assert_sometimes!(true, "alo_invariant_reply_observed");
                     self.any_replies.set(true);
                 }
                 _ => {}
@@ -153,6 +155,7 @@ impl DeliveryContractInvariant {
         for entry in &new_entries {
             match &entry.event {
                 DeliveryEvent::TimedOut { seq_id, .. } => {
+                    assert_sometimes!(true, "timeout_invariant_timeout_observed");
                     timed_out.insert(*seq_id);
                 }
                 DeliveryEvent::Replied { seq_id } => {
@@ -198,5 +201,18 @@ impl Invariant for DeliveryContractInvariant {
         self.check_at_least_once(state);
         self.check_timeout(state);
         self.check_cross_mode(state);
+    }
+
+    fn reset(&mut self) {
+        self.cursor_amo.set(0);
+        self.cursor_alo.set(0);
+        self.cursor_to.set(0);
+        self.cursor_faults.set(0);
+        self.amo_sent.borrow_mut().clear();
+        self.amo_resolved.borrow_mut().clear();
+        self.alo_sent.borrow_mut().clear();
+        self.to_timed_out.borrow_mut().clear();
+        self.any_faults.set(false);
+        self.any_replies.set(false);
     }
 }

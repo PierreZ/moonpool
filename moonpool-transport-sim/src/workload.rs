@@ -167,7 +167,7 @@ impl Workload for TransportClientWorkload {
             })?;
 
         let client_id = ctx.client_id();
-        let num_ops = 6;
+        let num_ops = sim_random_range(3..20);
         let mut seq_counter: u64 = 0;
         let shutdown = ctx.shutdown().clone();
 
@@ -215,6 +215,7 @@ impl Workload for TransportClientWorkload {
 
                     match send(&transport, &endpoint, req, JsonCodec) {
                         Ok(()) => {
+                            assert_sometimes!(true, "fire_and_forget_sent_successfully");
                             stats.borrow_mut().fire_and_forget_sent += 1;
                         }
                         Err(e) => {
@@ -264,6 +265,7 @@ impl Workload for TransportClientWorkload {
                                 resp.seq_id == seq_id,
                                 "at_most_once_response_matches_request"
                             );
+                            assert_sometimes!(true, "at_most_once_reply_received");
                             ctx.emit(TL_AT_MOST_ONCE, DeliveryEvent::Replied { seq_id });
                             stats.borrow_mut().at_most_once_replied += 1;
                         }
@@ -331,6 +333,7 @@ impl Workload for TransportClientWorkload {
                                         resp.seq_id == seq_id,
                                         "at_least_once_response_matches_request"
                                     );
+                                    assert_sometimes!(true, "at_least_once_reply_received");
                                     ctx.emit(TL_AT_LEAST_ONCE, DeliveryEvent::Replied { seq_id });
                                     stats.borrow_mut().at_least_once_replied += 1;
                                 }
@@ -403,6 +406,7 @@ impl Workload for TransportClientWorkload {
                                 resp.seq_id == seq_id,
                                 "timeout_response_matches_request"
                             );
+                            assert_sometimes!(true, "timeout_reply_received");
                             ctx.emit(TL_TIMEOUT, DeliveryEvent::Replied { seq_id });
                             stats.borrow_mut().timeout_replied += 1;
                         }

@@ -29,7 +29,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::{Endpoint, MessageCodec};
-use moonpool_sim::assert_reachable;
+use moonpool_sim::{assert_reachable, assert_sometimes};
 use serde::Serialize;
 
 use super::reply_error::ReplyError;
@@ -111,6 +111,7 @@ impl<T: Serialize, C: MessageCodec> ReplyPromise<T, C> {
                 if let Some(sender) = inner.sender.take() {
                     sender(&inner.reply_endpoint, &payload);
                     assert_reachable!("reply_promise: sent");
+                    assert_sometimes!(true, "reply_promise_fulfilled");
                 }
             }
             Err(e) => {

@@ -497,6 +497,14 @@ impl<P: Providers> Peer<P> {
                 state.metrics.record_message_dropped();
             }
 
+            // Buggify: corrupt one byte to trigger checksum mismatch on receiver
+            let mut packet = packet;
+            if moonpool_sim::buggify_with_prob!(0.02) && !packet.is_empty() {
+                assert_reachable!("buggified_reliable_payload_corruption");
+                let idx = packet.len() / 2;
+                packet[idx] = packet[idx].wrapping_add(1);
+            }
+
             let first_unsent = state.are_queues_empty();
             state.reliable_queue.push_back(packet);
             state.metrics.record_message_queued();
@@ -839,6 +847,8 @@ async fn connection_task<P: Providers>(
                     if moonpool_sim::buggify_with_prob!(0.01) {
                         assert_reachable!("buggified_partial_queue_drain");
                         // Requeue the message and stop draining
+                        // current_queue_size is correct: pop_front doesn't touch metrics,
+                        // and push_front restores the queue to its pre-pop state.
                         let mut state = shared_state.borrow_mut();
                         if is_reliable {
                             state.reliable_queue.push_front(data);
@@ -1101,9 +1111,14 @@ fn handle_connection_failure<P: Providers>(
         if let Some((data, is_reliable)) = failed_send {
             if is_reliable {
                 assert_reachable!("reliable_message_requeued");
+                // Message was pop_front'd but write failed — put it back.
+                // current_queue_size is correct: pop_front doesn't decrement it,
+                // only record_message_dequeued (on successful write) does.
                 state.reliable_queue.push_front(data);
             } else {
                 state.metrics.record_message_dropped();
+                // Dequeue metric to match the pop_front that already happened
+                state.metrics.record_message_dequeued();
             }
         }
 
@@ -1122,7 +1137,20 @@ fn handle_connection_failure<P: Providers>(
                     state.metrics.record_message_dropped();
                 }
                 state.unreliable_queue.clear();
+                // Reconcile queue size: all unreliable user messages are gone,
+                // only reliable queue items remain tracked.
+                state.metrics.current_queue_size = state.reliable_queue.len();
             }
+        }
+
+        // After failure: unreliable cleared + reconciled (unless buggified skip),
+        // so metric should equal reliable queue length.
+        // Skip check when buggify skipped the clear (unreliable items still present).
+        if state.unreliable_queue.is_empty() {
+            assert_always!(
+                state.metrics.current_queue_size == state.reliable_queue.len(),
+                "queue_metrics_consistent_after_failure"
+            );
         }
 
         (state.disconnect_notify.clone(), state.destination.clone())
@@ -1264,6 +1292,8 @@ fn process_read_buffer<P: Providers>(
                             state.metrics.record_message_dropped();
                         }
                         state.unreliable_queue.clear();
+                        // Reconcile: unreliable user messages gone, only reliable remain tracked
+                        state.metrics.current_queue_size = state.reliable_queue.len();
                     }
 
                     (
@@ -1359,6 +1389,8 @@ async fn establish_connection<P: Providers>(
 
                     if failure_count > 0 {
                         assert_sometimes!(true, "peer_recovery_after_failure_sets_available");
+                    } else {
+                        assert_sometimes!(true, "peer_first_attempt_success");
                     }
 
                     assert_sometimes_all!(

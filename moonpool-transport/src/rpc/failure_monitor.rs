@@ -117,6 +117,7 @@ impl FailureMonitor {
         };
 
         if changed {
+            assert_sometimes!(true, "failure_monitor_status_changed");
             wake_all(&mut inner.endpoint_watchers, address);
         }
     }
@@ -159,6 +160,7 @@ impl FailureMonitor {
             MAX_FAILED_ENDPOINTS
         };
         if inner.failed_endpoints.len() >= max {
+            assert_sometimes!(true, "failure_monitor_eviction_triggered");
             tracing::warn!(
                 "FailureMonitor: evicting transient failed endpoints (cap {} reached, {} entries)",
                 max,
