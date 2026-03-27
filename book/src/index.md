@@ -23,7 +23,7 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 - [Prevention vs Discovery](./part1-why/02-prevention-vs-discovery.md) — Two testing philosophies: regression (prevention) vs generative (discovery)
 - [From Mocks to Simulation](./part1-why/03-mocks-to-simulation.md) — Why mocks break at scale; the `#[cfg(test)]` trap; maintenance cost
 - [A Brief History](./part1-why/04-history.md) — FoundationDB simulator origins, TigerBeetle storage faults, Antithesis assertions
-- [Why Moonpool Exists](./part1-why/05-why-moonpool.md) — Synthesizing ideas from FDB, TigerBeetle, Orleans, Antithesis into one framework
+- [Why Moonpool Exists](./part1-why/05-why-moonpool.md) — Synthesizing ideas from FDB, TigerBeetle, and Antithesis into one framework
 
 ## Part II: Foundations
 
@@ -63,6 +63,7 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 - [Reproducing with FixedCount](./part3-building/21-reproducing.md) — Pin seed with `set_debug_seeds()` + `set_iterations(1)`; exact replay
 - [Reading the Event Trace](./part3-building/22-event-trace.md) — Event queue ordering; `RUST_LOG=trace`; causal chain reconstruction
 - [Common Pitfalls](./part3-building/23-pitfalls.md) — Don't `stop().await` in workloads (deadlock); use `drop()` instead
+- [Discovering Properties](./part3-building/24-discovering-properties.md) — Systematic property discovery using attention focuses; finding where to place assertions and buggify
 
 ## Part IV: Simulating Existing Applications
 

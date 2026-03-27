@@ -160,4 +160,4 @@ The best workloads follow a pattern:
 5. **Validate final state** in `check()` using the reference model
 6. **Publish state** via `ctx.state()` for cross-workload invariant checking
 
-The banking workload in moonpool's own test suite demonstrates all of these. We will build something similar in the next part.
+The next part walks through building a complete simulation from scratch, demonstrating all of these patterns.

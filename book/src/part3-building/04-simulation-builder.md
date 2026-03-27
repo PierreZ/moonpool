@@ -90,22 +90,23 @@ Invariants run after **every simulation event**. They check cross-workload prope
 **Trait-based invariant**:
 
 ```rust
-struct ConservationLaw;
+struct AgreementInvariant;
 
-impl Invariant for ConservationLaw {
-    fn name(&self) -> &str { "conservation_law" }
+impl Invariant for AgreementInvariant {
+    fn name(&self) -> &str { "agreement" }
 
     fn check(&self, state: &StateHandle, _sim_time_ms: u64) {
-        if let Some(model) = state.get::<BankingModel>("banking_model") {
-            let total = model.total_balance();
-            let expected = model.total_deposited - model.total_withdrawn;
-            assert_always!(total == expected, "conservation violated");
+        if let Some(model) = state.get::<ConsensusModel>("consensus_model") {
+            for (slot, values) in &model.committed_values {
+                let unique: HashSet<_> = values.iter().collect();
+                assert_always!(unique.len() <= 1, "agreement violated");
+            }
         }
     }
 }
 
 // Register on builder:
-.invariant(ConservationLaw)
+.invariant(AgreementInvariant)
 ```
 
 **Closure-based invariant** for simpler cases:

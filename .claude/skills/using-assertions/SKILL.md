@@ -1,3 +1,10 @@
+---
+description: |
+  Moonpool assertion macros: assert_always!, assert_sometimes!, assert_reachable!, numeric and compound assertions.
+  TRIGGER when: writing or modifying assert_always!, assert_sometimes!, assert_reachable!, assert_unreachable!, or any moonpool assertion macro. Also when choosing between assertion types or adding coverage tracking.
+  DO NOT TRIGGER when: using standard Rust assert!/assert_eq! or non-moonpool testing.
+---
+
 # Using Assertions
 
 ## When to Use This Skill

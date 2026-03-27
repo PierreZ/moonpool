@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Fork-based multiverse exploration for moonpool simulation testing"
+documentation = "https://docs.rs/moonpool-explorer"
 
 [[bin]]
 name = "sim-adaptive-explore"

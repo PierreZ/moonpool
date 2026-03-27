@@ -74,6 +74,6 @@ Invariants read from `StateHandle`. If your workload modifies its model but forg
 **Fix**: Publish state after every mutation, not just at the end.
 
 ```rust
-self.model.deposit(&account, amount);
-ctx.state().publish("banking_model", self.model.clone());
+self.model.record_commit(slot, value);
+ctx.state().publish("consensus_model", self.model.clone());
 ```

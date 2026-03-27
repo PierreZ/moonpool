@@ -189,7 +189,7 @@ fn check_model_size(state: &StateHandle, _sim_time_ms: u64) {
 }
 ```
 
-This is how moonpool's banking simulation validates the conservation law: the workload publishes the reference model, and the invariant checks `sum(balances) == deposits - withdrawals` after every event.
+This is the publish-and-check pattern: the workload publishes its reference model, and invariants validate cross-workload properties after every event. The [invariants chapter](./17-invariants.md) covers this in depth.
 
 ## Patterns That Find Bugs
 
