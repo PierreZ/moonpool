@@ -6,6 +6,6 @@
 
 A guide to building and testing distributed systems with **moonpool**, a deterministic simulation framework for Rust.
 
-Moonpool brings together ideas from FoundationDB, TigerBeetle, Orleans, and Antithesis into a single library-level framework. Write your system once with provider traits, then run it against a simulated world that is deliberately worse than production. Same code, different wiring. No `#[cfg(test)]`. No mocks.
+Moonpool brings together ideas from FoundationDB, TigerBeetle, and Antithesis into a single library-level framework. Write your system once with provider traits, then run it against a simulated world that is deliberately worse than production. Same code, different wiring. No `#[cfg(test)]`. No mocks.
 
 This book covers the philosophy, the architecture, and the practical details of building simulation-tested distributed systems.

@@ -60,7 +60,7 @@ Generating interesting operations is half the problem. The other half is knowing
 
 **Reference models** maintain an in-memory expected state and compare after operations. We saw this in the [workload chapter](./03-writing-workload.md): a `BTreeMap` mirrors what the server should contain, updated on every write, compared on every read. Use `BTreeMap`, not `HashMap`. Deterministic iteration order makes failures reproducible.
 
-**Conservation laws** check quantities that must remain constant. Total money in a transfer system. Total record count across shards. Messages sent minus messages received. The [invariants chapter](./17-invariants.md) showed this with the banking conservation law.
+**Conservation laws** check quantities that must remain constant. Total record count across shards. Messages sent minus messages received. Committed values in a consensus protocol must agree across replicas. The [invariants chapter](./17-invariants.md) covers this pattern in depth.
 
 **Structural integrity** validates data structures after chaos. Traverse a linked list and verify no cycles. Walk a B-tree and check balance at every level. Count children and verify parent pointers. These catch corruption that reference models miss because they operate at a different abstraction level.
 

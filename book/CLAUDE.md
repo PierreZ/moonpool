@@ -26,7 +26,7 @@ The book lives in `book/src/` with chapters organized into:
 - **Part III (Building)**: First simulation, chaos, assertions, invariants, debugging
 - **Part IV (Integration)**: Standalone moonpool-sim, mock boundaries, axum example
 - **Part V (Networking)**: Transport layer, peers, RPC, #[service] macro
-- **Part VI (Building on Top)**: Virtual actors, multiverse exploration
+- **Part VI (Building on Top)**: Multiverse exploration
 - **Appendix**: Reference tables, glossary, configuration
 
 ## Adding or Renaming Chapters

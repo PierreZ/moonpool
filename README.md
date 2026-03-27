@@ -52,13 +52,8 @@ nix develop --command cargo doc --open
 
 ## Documentation
 
-Each crate has detailed rustdoc with architecture diagrams and usage examples:
-
-```bash
-cargo doc --open
-```
-
-- [API Documentation](https://docs.rs/moonpool)
+- [**The Sim Book**](https://pierrez.github.io/moonpool/) — User guide covering philosophy, architecture, and practical details
+- [API Documentation](https://docs.rs/moonpool) — Rustdoc with architecture diagrams and usage examples
 - [Repository](https://github.com/PierreZ/moonpool)
 
 ## License

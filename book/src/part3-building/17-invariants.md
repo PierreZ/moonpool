@@ -2,7 +2,7 @@
 
 <!-- toc -->
 
-Assertions live inside workloads. They validate local properties: "this balance should never go negative," "this response matched what we sent." But some correctness properties span the entire system. The conservation law in a banking system is a good example: the sum of all account balances must always equal total deposits minus total withdrawals. No single workload owns that property. We need something that watches the whole world.
+Assertions live inside workloads. They validate local properties: "this key should exist," "this response matched what we sent." But some correctness properties span the entire system. The conservation law in a consensus protocol is a good example: all committed values must agree across replicas, and no committed value can be lost. No single workload owns that property. We need something that watches the whole world.
 
 That is what invariants are for.
 
@@ -23,9 +23,9 @@ You register invariants on the builder:
 
 ```rust
 SimulationBuilder::new()
-    .workload(BankingWorkload::new(100, accounts))
-    .invariant(ConservationLaw)
-    .invariant(NonNegativeBalances)
+    .workload(ConsensusWorkload::new(3))
+    .invariant(AgreementInvariant)
+    .invariant(ValidityInvariant)
     .run()
     .await
 ```
@@ -34,11 +34,12 @@ For quick one-off checks, there is a closure shorthand:
 
 ```rust
 SimulationBuilder::new()
-    .invariant_fn("no_negative_balance", |state, _t| {
-        if let Some(model) = state.get::<BankingModel>("banking_model") {
-            for (account, balance) in &model.balances {
-                assert!(*balance >= 0, "account '{}' went negative: {}", account, balance);
-            }
+    .invariant_fn("single_leader", |state, _t| {
+        if let Some(model) = state.get::<ConsensusModel>("consensus_model") {
+            let leaders: Vec<_> = model.nodes.iter()
+                .filter(|(_, s)| s.role == Role::Leader)
+                .collect();
+            assert!(leaders.len() <= 1, "multiple leaders: {:?}", leaders);
         }
     })
 ```
@@ -51,49 +52,50 @@ Workloads publish their state after each operation:
 
 ```rust
 // Inside the workload's run() method
-self.model.deposit(&account, amount);
-ctx.state().publish("banking_model", self.model.clone());
+self.model.record_commit(slot, value);
+ctx.state().publish("consensus_model", self.model.clone());
 ```
 
 Invariants read it back:
 
 ```rust
-if let Some(model) = state.get::<BankingModel>("banking_model") {
+if let Some(model) = state.get::<ConsensusModel>("consensus_model") {
     // validate...
 }
 ```
 
 The `if let Some` guard is important. Early in the simulation, before the workload has published anything, the key will not exist. Invariants should silently skip when their data is not yet available.
 
-## A Real Example: The Conservation Law
+## A Real Example: The Agreement Invariant
 
-Here is the conservation law invariant from Moonpool's banking simulation. It is the kind of property that catches subtle bugs: off-by-one in transfers, double-counting in deposits, missing updates in withdrawals.
+Consider a consensus protocol where multiple nodes must agree on committed values. The agreement invariant checks that no two nodes have committed different values for the same slot. This is the kind of property that catches subtle bugs: a leader change that replays a proposal, a vote that arrives after a new ballot, a crash during the accept phase.
 
 ```rust
-pub struct ConservationLaw;
+pub struct AgreementInvariant;
 
-impl Invariant for ConservationLaw {
+impl Invariant for AgreementInvariant {
     fn name(&self) -> &str {
-        "conservation_law"
+        "agreement"
     }
 
     fn check(&self, state: &StateHandle, _sim_time_ms: u64) {
-        if let Some(model) = state.get::<BankingModel>(BANKING_MODEL_KEY) {
-            let total = model.total_balance();
-            let expected = model.total_deposited - model.total_withdrawn;
-            assert_always!(
-                total == expected,
-                format!(
-                    "conservation law violated: sum(balances)={} != deposited({}) - withdrawn({})",
-                    total, model.total_deposited, model.total_withdrawn
-                )
-            );
+        if let Some(model) = state.get::<ConsensusModel>("consensus_model") {
+            for (slot, values) in &model.committed_values {
+                let unique: HashSet<_> = values.iter().collect();
+                assert_always!(
+                    unique.len() <= 1,
+                    format!(
+                        "agreement violated at slot {}: nodes committed different values {:?}",
+                        slot, values
+                    )
+                );
+            }
         }
     }
 }
 ```
 
-This runs after every single simulation event. If a transfer debits one account but crashes before crediting another, and the model does not account for it, this invariant fires immediately.
+This runs after every single simulation event. If a leader change causes two nodes to commit different values for the same slot, this invariant fires immediately.
 
 ## When to Use Invariants vs Assertions
 
@@ -101,7 +103,7 @@ This runs after every single simulation event. If a transfer debits one account 
 
 **Invariants** validate global, cross-workload properties from an omniscient perspective. They see the full system state and check that it is consistent. Use them for:
 
-- Conservation laws (money, messages, resources)
+- Conservation laws (messages, resources, committed values)
 - No-phantom properties (never receive something that was not sent)
 - Consistency across processes (leader election: at most one leader at any time)
 - Monotonicity properties (ballot numbers only increase)
