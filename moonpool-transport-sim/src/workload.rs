@@ -89,6 +89,7 @@ enum Op {
     SendAtLeastOnce,
     SendWithTimeout,
     SendToWrongEndpoint,
+    ReliableBurst,
     SmallDelay,
     CheckMetrics,
 }
@@ -97,11 +98,12 @@ enum Op {
 fn random_op() -> Op {
     let roll = sim_random_range(0..100);
     match roll {
-        0..15 => Op::SendFireAndForget,
-        15..35 => Op::SendAtMostOnce,
-        35..60 => Op::SendAtLeastOnce,
-        60..75 => Op::SendWithTimeout,
-        75..80 => Op::SendToWrongEndpoint,
+        0..12 => Op::SendFireAndForget,
+        12..30 => Op::SendAtMostOnce,
+        30..52 => Op::SendAtLeastOnce,
+        52..67 => Op::SendWithTimeout,
+        67..72 => Op::SendToWrongEndpoint,
+        72..80 => Op::ReliableBurst,
         80..90 => Op::SmallDelay,
         _ => Op::CheckMetrics,
     }
@@ -454,6 +456,33 @@ impl Workload for TransportClientWorkload {
                             stats.borrow_mut().endpoint_not_found += 1;
                         }
                     }
+                }
+
+                Op::ReliableBurst => {
+                    // Fire many reliable sends without awaiting replies to fill the queue.
+                    // This exercises the queue overflow / near-capacity path.
+                    let server = random_server(&servers).to_string();
+                    let server_addr = parse_sim_addr(&server)?;
+                    let endpoint = Endpoint::new(server_addr, echo_method_uid(METHOD_ECHO));
+
+                    let burst_size = sim_random_range(50..500);
+                    for burst_i in 0..burst_size {
+                        let burst_seq =
+                            (client_id as u64) * 1_000_000 + seq_counter + burst_i as u64 + 1;
+                        let req = EchoRequest {
+                            seq_id: burst_seq,
+                            client_id,
+                            mode: DeliveryMode::AtLeastOnce,
+                            method: METHOD_ECHO,
+                        };
+                        // Fire-and-forget via reliable queue — don't await reply
+                        let _ = get_reply::<_, EchoResponse, _, _>(
+                            &transport, &endpoint, req, JsonCodec,
+                        );
+                    }
+                    seq_counter += burst_size as u64;
+                    stats.borrow_mut().at_least_once_sent += burst_size as u64;
+                    assert_sometimes!(true, "reliable_burst_sent");
                 }
 
                 Op::SmallDelay => {
