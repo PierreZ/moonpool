@@ -20,8 +20,8 @@ use crate::{
     serialize_packet, try_deserialize_packet,
 };
 use moonpool_sim::{
-    assert_always_less_than_or_equal_to, assert_reachable, assert_sometimes, assert_sometimes_all,
-    assert_sometimes_each, assert_sometimes_greater_than,
+    assert_always, assert_always_less_than_or_equal_to, assert_reachable, assert_sometimes,
+    assert_sometimes_all, assert_sometimes_each, assert_sometimes_greater_than,
 };
 
 // =============================================================================
@@ -663,6 +663,11 @@ impl<P: Providers> Peer<P> {
         state.unreliable_queue.clear();
         state.metrics.is_connected = false;
         state.metrics.current_queue_size = 0;
+        assert_always!(
+            state.reliable_queue.is_empty() && state.unreliable_queue.is_empty(),
+            "queues_empty_after_close"
+        );
+        assert_reachable!("peer_close_completed");
     }
 }
 
@@ -765,6 +770,7 @@ async fn connection_task<P: Providers>(
 
                 // Ensure we have a connection
                 if current_connection.is_none() {
+                    assert_sometimes!(true, "message_queued_while_disconnected");
                     match on_connection_loss {
                         ConnectionLossBehavior::Reconnect => {
                             tracing::debug!("connection_task: no connection, establishing new connection");
@@ -777,6 +783,7 @@ async fn connection_task<P: Providers>(
                                         let mut state = shared_state.borrow_mut();
                                         state.connection = Some(());
                                         state.metrics.is_connected = true;
+                                        assert_always!(state.metrics.is_connected, "metrics_is_connected_after_connect");
                                         state.destination.clone()
                                     };
                                     // Notify failure monitor: address is available
@@ -788,6 +795,7 @@ async fn connection_task<P: Providers>(
                                         let now = shared_state.borrow().time.now();
                                         tracker.reset();
                                         tracker.last_ping_cycle = Some(now);
+                                        assert_reachable!("ping_tracker_reset_on_reconnect");
                                     }
                                 }
                                 Err(e) => {
@@ -826,6 +834,21 @@ async fn connection_task<P: Providers>(
                         tracing::debug!("connection_task: all queues empty, breaking");
                         break; // All queues empty
                     };
+
+                    // Buggify: partial queue drain — send some messages, leave rest queued
+                    if moonpool_sim::buggify_with_prob!(0.01) {
+                        assert_reachable!("buggified_partial_queue_drain");
+                        // Requeue the message and stop draining
+                        let mut state = shared_state.borrow_mut();
+                        if is_reliable {
+                            state.reliable_queue.push_front(data);
+                        } else {
+                            state.unreliable_queue.push_front(data);
+                        }
+                        drop(state);
+                        data_to_send.notify_one();
+                        break;
+                    }
 
                     tracing::debug!("connection_task: attempting to send {} bytes (reliable={})",
                         data.len(), is_reliable);
@@ -903,6 +926,7 @@ async fn connection_task<P: Providers>(
                             tracker.reset();
                         }
                         if on_connection_loss == ConnectionLossBehavior::Exit {
+                            assert_sometimes!(true, "incoming_peer_connection_lost");
                             break;
                         }
                         data_to_send.notify_one();
@@ -991,6 +1015,10 @@ async fn connection_task<P: Providers>(
                         }
                         PingAction::Tolerate => {
                             assert_reachable!("ping_timeout_tolerated");
+                            assert_always!(
+                                tracker.ping_sent_at.is_none() || tracker.timeout_count > 0,
+                                "ping_resent_only_after_timeout"
+                            );
                             shared_state
                                 .borrow_mut()
                                 .metrics
@@ -1064,6 +1092,10 @@ fn handle_connection_failure<P: Providers>(
         let mut state = shared_state.borrow_mut();
         state.connection = None;
         state.metrics.is_connected = false;
+        assert_always!(
+            !state.metrics.is_connected,
+            "metrics_not_connected_after_failure"
+        );
 
         // Handle the failed send if provided
         if let Some((data, is_reliable)) = failed_send {
@@ -1078,14 +1110,19 @@ fn handle_connection_failure<P: Providers>(
         // Discard all remaining unreliable packets (FDB pattern: discardUnreliablePackets)
         let unreliable_count = state.unreliable_queue.len();
         if unreliable_count > 0 {
-            tracing::debug!(
-                "connection_task: discarding {} unreliable packets on failure",
-                unreliable_count
-            );
-            for _ in 0..unreliable_count {
-                state.metrics.record_message_dropped();
+            if moonpool_sim::buggify_with_prob!(0.001) {
+                // Skip clearing unreliable queue to test downstream handling
+                assert_reachable!("buggified_skip_unreliable_clear");
+            } else {
+                tracing::debug!(
+                    "connection_task: discarding {} unreliable packets on failure",
+                    unreliable_count
+                );
+                for _ in 0..unreliable_count {
+                    state.metrics.record_message_dropped();
+                }
+                state.unreliable_queue.clear();
             }
-            state.unreliable_queue.clear();
         }
 
         (state.disconnect_notify.clone(), state.destination.clone())
@@ -1293,8 +1330,11 @@ async fn establish_connection<P: Providers>(
         };
 
         // Apply backoff if needed (no RefCell borrow held)
-        if should_backoff && time.sleep(delay).await.is_err() {
-            return Err(PeerError::ConnectionFailed);
+        if should_backoff {
+            assert_sometimes!(true, "reconnect_with_backoff_after_failure");
+            if time.sleep(delay).await.is_err() {
+                return Err(PeerError::ConnectionFailed);
+            }
         }
 
         // Record attempt
@@ -1318,7 +1358,7 @@ async fn establish_connection<P: Providers>(
                     let failure_count = state.reconnect_state.failure_count;
 
                     if failure_count > 0 {
-                        assert_reachable!("reconnect_after_previous_failures");
+                        assert_sometimes!(true, "peer_recovery_after_failure_sets_available");
                     }
 
                     assert_sometimes_all!(
@@ -1336,6 +1376,13 @@ async fn establish_connection<P: Providers>(
                     state.metrics.record_connection_success_at(now);
                     state.metrics.is_connected = true;
                 }
+                // Buggify: connection succeeds then immediately drops
+                if moonpool_sim::buggify_with_prob!(0.05) {
+                    assert_reachable!("buggified_fail_after_handshake");
+                    record_connection_failure(shared_state, config);
+                    continue;
+                }
+
                 return Ok(stream);
             }
             Ok(Err(_)) => {

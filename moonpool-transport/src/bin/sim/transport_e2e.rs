@@ -45,6 +45,9 @@ fn main() {
     eprintln!("PASSED\n");
 
     // --- Unreliable drops ---
+    // Higher iteration count: random_for_seed() can generate very low fault
+    // probabilities, so we need enough iterations for assert_sometimes!
+    // coverage targets (fault injection, unreliable message drops) to fire.
     eprintln!("=== Unreliable Drops ===");
     let report = run_simulation(
         SimulationBuilder::new()
@@ -57,7 +60,7 @@ fn main() {
                 drain_timeout: Duration::from_secs(5),
             }))
             .workload(TransportTimelineCheck)
-            .set_iteration_control(IterationControl::FixedCount(100)),
+            .set_iteration_control(IterationControl::FixedCount(500)),
     );
     report.eprint();
     if let Err(e) = report.check("unreliable_drops") {
@@ -79,7 +82,7 @@ fn main() {
                 drain_timeout: Duration::from_secs(30),
             }))
             .workload(TransportTimelineCheck)
-            .set_iteration_control(IterationControl::FixedCount(100)),
+            .set_iteration_control(IterationControl::FixedCount(500)),
     );
     report.eprint();
     if let Err(e) = report.check("mixed_queues") {
@@ -101,7 +104,7 @@ fn main() {
                 drain_timeout: Duration::from_secs(30),
             }))
             .workload(TransportTimelineCheck)
-            .set_iteration_control(IterationControl::FixedCount(100)),
+            .set_iteration_control(IterationControl::FixedCount(500)),
     );
     report.eprint();
     if let Err(e) = report.check("reconnection") {
@@ -135,7 +138,7 @@ fn main() {
                 drain_timeout: Duration::from_secs(30),
             }))
             .workload(TransportTimelineCheck)
-            .set_iteration_control(IterationControl::FixedCount(100)),
+            .set_iteration_control(IterationControl::FixedCount(500)),
     );
     report.eprint();
     if let Err(e) = report.check("multi_client") {

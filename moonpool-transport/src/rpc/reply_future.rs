@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use crate::{Endpoint, MessageCodec};
-use moonpool_sim::assert_sometimes;
+use moonpool_sim::{assert_reachable, assert_sometimes};
 use serde::de::DeserializeOwned;
 
 use super::net_notified_queue::NetNotifiedQueue;
@@ -86,6 +86,7 @@ impl<T: DeserializeOwned, C: MessageCodec> Future for ReplyFuture<T, C> {
 
 impl<T: DeserializeOwned, C: MessageCodec> Drop for ReplyFuture<T, C> {
     fn drop(&mut self) {
+        assert_reachable!("reply_future_dropped_queue_closed");
         self.queue.close();
     }
 }
