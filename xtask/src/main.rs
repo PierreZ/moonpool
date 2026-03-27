@@ -31,6 +31,10 @@ const SIM_BINARIES: &[SimBinary] = &[
         name: "sim-axum-web",
         sancov_crates: "moonpool_sim_examples",
     },
+    SimBinary {
+        name: "sim-transport",
+        sancov_crates: "moonpool_transport",
+    },
 ];
 
 fn main() {
