@@ -53,8 +53,7 @@ jobs:
           - maze-explore
           - dungeon-explore
           - adaptive-explore
-          - transport-e2e
-          - transport-messaging
+          - transport
           - axum-web
     steps:
       - uses: actions/checkout@v6
