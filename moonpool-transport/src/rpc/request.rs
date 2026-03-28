@@ -143,7 +143,17 @@ where
         );
     }
 
-    Ok(ReplyFuture::new(reply_queue, reply_endpoint))
+    // Attach cleanup callback to unregister the reply endpoint on drop.
+    // This prevents endpoint map leaks when the future is dropped without
+    // being awaited (e.g., fire-and-forget reliable sends in burst mode).
+    let weak_transport = transport.weak_self_for_cleanup();
+    let future = ReplyFuture::new(reply_queue, reply_endpoint).with_drop_cleanup(move || {
+        if let Some(t) = weak_transport.upgrade() {
+            t.unregister(&reply_token);
+        }
+    });
+
+    Ok(future)
 }
 
 #[cfg(test)]

@@ -40,6 +40,15 @@ pub trait Invariant: 'static {
     ///
     /// Should panic with a descriptive message if the invariant is violated.
     fn check(&self, state: &StateHandle, sim_time_ms: u64);
+
+    /// Reset internal state between simulation iterations.
+    ///
+    /// Called by the builder at the start of each seed. Override this to clear
+    /// cursors, tracking sets, and other accumulated state that is tied to a
+    /// specific `StateHandle` instance (which is recreated each seed).
+    ///
+    /// Default: no-op (stateless invariants don't need this).
+    fn reset(&mut self) {}
 }
 
 /// Type alias for invariant check closures.

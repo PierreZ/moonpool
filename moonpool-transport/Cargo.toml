@@ -39,10 +39,3 @@ path = "examples/ping_pong.rs"
 name = "calculator"
 path = "examples/calculator.rs"
 
-[[bin]]
-name = "sim-transport-e2e"
-path = "src/bin/sim/transport_e2e.rs"
-
-[[bin]]
-name = "sim-transport-messaging"
-path = "src/bin/sim/transport_messaging.rs"

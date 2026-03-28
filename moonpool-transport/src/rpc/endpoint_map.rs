@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::{UID, WELL_KNOWN_RESERVED_COUNT, WellKnownToken};
-use moonpool_sim::{assert_reachable, assert_sometimes};
+use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
 
 use crate::error::MessagingError;
 
@@ -121,6 +121,10 @@ impl EndpointMap {
     pub fn insert(&mut self, token: UID, receiver: Rc<dyn MessageReceiver>) {
         self.dynamic.insert(token, receiver);
         self.registration_count += 1;
+        assert_always!(
+            self.dynamic.contains_key(&token),
+            "endpoint_map_insert_then_get"
+        );
     }
 
     /// Look up a receiver by token.

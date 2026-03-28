@@ -37,7 +37,9 @@ use crate::{
     Endpoint, NetworkAddress, NetworkProvider, Peer, PeerConfig, Providers, TaskProvider,
     TcpListenerTrait, UID, WellKnownToken,
 };
-use moonpool_sim::assert_reachable;
+use moonpool_sim::{
+    assert_always, assert_always_less_than_or_equal_to, assert_reachable, assert_sometimes,
+};
 use tokio::sync::watch;
 
 use super::endpoint_map::{EndpointMap, MessageReceiver};
@@ -225,6 +227,14 @@ impl<P: Providers> NetTransport<P> {
             .expect("weak_self not set - call set_weak_self() after wrapping in Rc")
     }
 
+    /// Get weak self-reference for cleanup callbacks (e.g., `ReplyFuture` drop).
+    ///
+    /// Returns `None`-valued `Weak` if `set_weak_self()` hasn't been called,
+    /// which is safe — cleanup will be a no-op.
+    pub(crate) fn weak_self_for_cleanup(&self) -> Weak<Self> {
+        self.weak_self.borrow().clone().unwrap_or_default()
+    }
+
     /// Create with custom peer configuration.
     pub fn with_peer_config(mut self, config: PeerConfig) -> Self {
         self.peer_config = config;
@@ -283,12 +293,17 @@ impl<P: Providers> NetTransport<P> {
         token: UID,
         closer: Weak<dyn ReplyQueueCloser>,
     ) {
-        self.data
-            .borrow_mut()
-            .pending_replies
+        let mut data = self.data.borrow_mut();
+        data.pending_replies
             .entry(addr.to_string())
             .or_default()
             .push((token, closer));
+        let total_entries: usize = data.pending_replies.values().map(|v| v.len()).sum();
+        assert_always_less_than_or_equal_to!(
+            total_entries as u64,
+            10_000,
+            "pending_replies_bounded"
+        );
     }
 
     /// Close all pending reply queues for a disconnected address.
@@ -307,6 +322,7 @@ impl<P: Providers> NetTransport<P> {
             return;
         }
 
+        assert_sometimes!(true, "pending_replies_closed_on_disconnect");
         tracing::debug!(
             "close_pending_replies: closing {} reply queues for {}",
             entries.len(),
@@ -573,8 +589,15 @@ impl<P: Providers> NetTransport<P> {
     ///
     /// Ok(()) if delivered, Err if endpoint not found.
     pub fn dispatch(&self, token: &UID, payload: &[u8]) -> Result<(), MessagingError> {
+        // Buggify: silently drop packet to simulate endpoint-level loss
+        if moonpool_sim::buggify_with_prob!(0.05) {
+            assert_reachable!("buggified_dispatch_drop");
+            return Ok(());
+        }
+
         let data = self.data.borrow();
         if let Some(receiver) = data.endpoints.get(token) {
+            assert_always!(token.is_valid(), "dispatch_valid_token");
             receiver.receive(payload);
             drop(data); // Release borrow before mutating stats
             self.data.borrow_mut().stats.packets_dispatched += 1;
@@ -881,6 +904,7 @@ async fn connection_reader<P: Providers>(
                         "connection_reader: transport dropped, exiting for peer {}",
                         peer_addr
                     );
+                    assert_reachable!("connection_reader_transport_dropped");
                     break;
                 };
 
@@ -898,6 +922,7 @@ async fn connection_reader<P: Providers>(
             None => {
                 // Channel closed - peer disconnected or shutdown
                 tracing::debug!("connection_reader: peer {} receiver closed", peer_addr);
+                assert_sometimes!(true, "reply_queue_closed_maybe_delivered_on_disconnect");
                 // Close all pending reply queues for this peer with MaybeDelivered
                 if let Some(transport) = transport.upgrade() {
                     transport.close_pending_replies(&peer_addr, ReplyError::MaybeDelivered);
@@ -938,6 +963,7 @@ async fn listen_task<P: Providers>(
                 match result {
                     Ok(()) if *shutdown_rx.borrow() => {
                         tracing::debug!("listen_task: shutdown signal received, exiting for {}", listen_addr);
+                        assert_sometimes!(true, "listen_task_graceful_shutdown");
                         break;
                     }
                     Err(_) => {
@@ -1023,6 +1049,7 @@ fn connection_incoming<P: Providers>(
     let peer = {
         let data = transport.data.borrow();
         if data.incoming_peers.contains_key(&peer_addr) {
+            assert_reachable!("incoming_peer_replaced_stale");
             tracing::debug!(
                 "connection_incoming: replacing stale incoming peer for {}",
                 peer_addr
@@ -1050,6 +1077,7 @@ fn connection_incoming<P: Providers>(
             .incoming_peers
             .insert(peer_addr.clone(), Rc::clone(&peer));
 
+        assert_sometimes!(true, "incoming_connection_accepted");
         tracing::debug!(
             "connection_incoming: created new incoming peer for {}",
             peer_addr

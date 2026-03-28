@@ -12,11 +12,19 @@ use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use crate::{Endpoint, MessageCodec};
-use moonpool_sim::assert_sometimes;
+use moonpool_sim::{assert_reachable, assert_sometimes};
 use serde::de::DeserializeOwned;
 
 use super::net_notified_queue::NetNotifiedQueue;
 use super::reply_error::ReplyError;
+
+/// Future that resolves when a reply is received from the server.
+///
+/// Created by `send_request` and polls an internal queue for the response.
+/// The response is deserialized as `Result<T, ReplyError>` to handle both
+/// success and error cases.
+/// Callback to unregister the reply endpoint on drop.
+type DropCleanup = Box<dyn FnOnce()>;
 
 /// Future that resolves when a reply is received from the server.
 ///
@@ -29,12 +37,31 @@ pub struct ReplyFuture<T: DeserializeOwned, C: MessageCodec> {
 
     /// The endpoint this future is listening on.
     endpoint: Endpoint,
+
+    /// Optional cleanup callback to unregister the reply endpoint from the
+    /// transport's endpoint map on drop. Prevents endpoint map leaks when
+    /// the future is dropped without being awaited.
+    drop_cleanup: Option<DropCleanup>,
 }
 
 impl<T: DeserializeOwned, C: MessageCodec> ReplyFuture<T, C> {
     /// Create a new reply future with the given queue and endpoint.
     pub fn new(queue: Rc<NetNotifiedQueue<Result<T, ReplyError>, C>>, endpoint: Endpoint) -> Self {
-        Self { queue, endpoint }
+        Self {
+            queue,
+            endpoint,
+            drop_cleanup: None,
+        }
+    }
+
+    /// Attach a cleanup callback that runs when this future is dropped.
+    ///
+    /// Used by `prepare_and_send` to unregister the reply endpoint from
+    /// the transport's endpoint map, preventing leaks when the future is
+    /// dropped without being polled to completion.
+    pub fn with_drop_cleanup(mut self, cleanup: impl FnOnce() + 'static) -> Self {
+        self.drop_cleanup = Some(Box::new(cleanup));
+        self
     }
 
     /// Get the endpoint this future is listening on.
@@ -86,7 +113,11 @@ impl<T: DeserializeOwned, C: MessageCodec> Future for ReplyFuture<T, C> {
 
 impl<T: DeserializeOwned, C: MessageCodec> Drop for ReplyFuture<T, C> {
     fn drop(&mut self) {
+        assert_reachable!("reply_future_dropped_queue_closed");
         self.queue.close();
+        if let Some(cleanup) = self.drop_cleanup.take() {
+            cleanup();
+        }
     }
 }
 

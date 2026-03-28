@@ -99,7 +99,11 @@ impl Default for PeerConfig {
         Self {
             initial_reconnect_delay: Duration::from_millis(100),
             max_reconnect_delay: Duration::from_secs(30),
-            max_queue_size: 1000,
+            max_queue_size: if moonpool_sim::buggify_with_prob!(0.1) {
+                10
+            } else {
+                1000
+            },
             connection_timeout: Duration::from_secs(5),
             max_connection_failures: None, // Unlimited retries by default
             monitor: Some(MonitorConfig::default()),

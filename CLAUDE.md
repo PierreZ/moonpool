@@ -56,6 +56,8 @@ xtask/                       - Cargo xtask automation (simulation runner)
 **Infrastructure events**: Tests terminate early when only ConnectionRestore events remain
 **Invariant checking**: Cross-workload properties validated after every simulation event
 **Goal**: Find bugs, not regression testing
+**NEVER remove assertions that catch bugs** — if an assertion fails, fix the underlying bug. Assertions exist to find real issues; deleting a failing assertion hides the bug.
+**When an assertion catches a bug**: Stop, enter plan mode, and enable deep thinking. Read relevant reference code, trace the full data flow, and understand the root cause before attempting a fix. Do not rush.
 
 ## Storage Testing Patterns
 **Key difference from network**: Storage operations return `Poll::Pending` and require simulation stepping. Network operations buffer and return `Poll::Ready` immediately.

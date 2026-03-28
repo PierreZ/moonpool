@@ -26,6 +26,7 @@ use super::request::{send_request, send_request_unreliable};
 use super::request_stream::RequestEnvelope;
 use crate::error::MessagingError;
 use crate::{Endpoint, MessageCodec, Providers, TimeProvider, UID};
+use moonpool_sim::{assert_reachable, assert_sometimes};
 
 /// Fire-and-forget delivery: send request unreliably with no reply.
 ///
@@ -99,6 +100,7 @@ where
 
     // Fast path: already failed → MaybeDelivered immediately
     if fm.state(destination) == FailureStatus::Failed {
+        assert_sometimes!(true, "try_get_reply_fast_path_already_failed");
         return Err(ReplyError::MaybeDelivered);
     }
 
@@ -192,14 +194,20 @@ where
 
     tokio::select! {
         result = reply_future => match result {
-            Ok(resp) => Ok(resp),
+            Ok(resp) => {
+                assert_sometimes!(true, "get_reply_unless_failed_for_reply_wins_race");
+                Ok(resp)
+            }
             Err(ReplyError::BrokenPromise) => {
                 fm.endpoint_not_found(destination);
                 Err(ReplyError::MaybeDelivered)
             }
             Err(e) => Err(e),
         },
-        () = &mut failed_for => Err(ReplyError::MaybeDelivered),
+        () = &mut failed_for => {
+            assert_sometimes!(true, "get_reply_unless_failed_for_timeout_wins_race");
+            Err(ReplyError::MaybeDelivered)
+        }
     }
 }
 
@@ -215,7 +223,9 @@ async fn on_failed_for<T: TimeProvider>(
     time: &T,
 ) {
     fm.on_disconnect_or_failure(endpoint).await;
+    assert_reachable!("on_failed_for_disconnect_observed");
     let _ = time.sleep(duration).await;
+    assert_reachable!("on_failed_for_sleep_completed");
 }
 
 #[cfg(test)]
