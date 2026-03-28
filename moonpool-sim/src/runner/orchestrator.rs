@@ -979,6 +979,17 @@ impl IterationManager {
         self.iteration_count
     }
 
+    /// Get the known maximum number of iterations, or `None` for time-based control.
+    pub(crate) fn max_iterations(&self) -> Option<usize> {
+        match &self.control {
+            super::builder::IterationControl::FixedCount(count) => Some(*count),
+            super::builder::IterationControl::TimeLimit(_) => None,
+            super::builder::IterationControl::UntilConverged { max_iterations } => {
+                Some(*max_iterations)
+            }
+        }
+    }
+
     /// Get all seeds used so far.
     pub(crate) fn seeds_used(&self) -> &[u64] {
         &self.seeds[..self.iteration_count]

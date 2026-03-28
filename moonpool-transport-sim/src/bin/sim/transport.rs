@@ -15,7 +15,7 @@ use moonpool_transport_sim::workload::TransportClientWorkload;
 
 fn main() {
     let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
+        .with_max_level(tracing::Level::INFO)
         .try_init();
 
     let report = moonpool_sim::simulations::run_simulation(
@@ -27,7 +27,8 @@ fn main() {
             .invariant(DeliveryContractInvariant::new())
             .chaos_duration(Duration::from_secs(10))
             .random_network()
-            .set_iterations(1),
+            .set_iterations(20)
+            .seed_warning_timeout(Duration::from_secs(15)),
     );
 
     report.eprint();

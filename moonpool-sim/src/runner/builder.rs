@@ -220,6 +220,7 @@ pub struct SimulationBuilder {
     exploration_config: Option<moonpool_explorer::ExplorationConfig>,
     replay_recipe: Option<super::report::BugRecipe>,
     before_iteration_hooks: Vec<Box<dyn FnMut()>>,
+    seed_warning_timeout: Option<Duration>,
 }
 
 impl Default for SimulationBuilder {
@@ -244,6 +245,7 @@ impl SimulationBuilder {
             exploration_config: None,
             replay_recipe: None,
             before_iteration_hooks: Vec::new(),
+            seed_warning_timeout: None,
         }
     }
 
@@ -451,6 +453,15 @@ impl SimulationBuilder {
         self
     }
 
+    /// Set the wall-clock time threshold for warning about slow seeds.
+    ///
+    /// When a seed takes longer than this duration, a `tracing::warn!` is emitted.
+    /// If not set, no slow-seed warnings are produced.
+    pub fn seed_warning_timeout(mut self, timeout: Duration) -> Self {
+        self.seed_warning_timeout = Some(timeout);
+        self
+    }
+
     /// Set the iteration control strategy.
     pub fn set_iteration_control(mut self, control: IterationControl) -> Self {
         self.iteration_control = control;
@@ -600,6 +611,11 @@ impl SimulationBuilder {
         let mut iteration_manager =
             IterationManager::new(self.iteration_control.clone(), self.seeds.clone());
         let mut metrics_collector = MetricsCollector::new();
+
+        // Progress reporting: compute milestone interval (every ~10%)
+        let progress_milestone = iteration_manager
+            .max_iterations()
+            .map(|max| std::cmp::max(max / 10, 1));
 
         // Accumulators for multi-seed exploration stats
         let mut total_exploration_timelines: u64 = 0;
@@ -805,6 +821,38 @@ impl SimulationBuilder {
                         has_violations,
                         sim_metrics,
                     );
+
+                    // Progress: warn on slow seeds
+                    if let Some(threshold) = self.seed_warning_timeout
+                        && wall_time > threshold
+                    {
+                        tracing::warn!(
+                            seed,
+                            wall_time_ms = wall_time.as_millis() as u64,
+                            threshold_ms = threshold.as_millis() as u64,
+                            "seed took {:.2}s (threshold: {}s)",
+                            wall_time.as_secs_f64(),
+                            threshold.as_secs(),
+                        );
+                    }
+
+                    // Progress: milestone reporting
+                    if let Some(interval) = progress_milestone
+                        && iteration_count.is_multiple_of(interval)
+                    {
+                        let max = iteration_manager
+                            .max_iterations()
+                            .unwrap_or(iteration_count);
+                        let pct = (iteration_count as f64 / max as f64) * 100.0;
+                        tracing::info!(
+                            iteration = iteration_count,
+                            total = max,
+                            "[{}/{}] {:.0}% complete",
+                            iteration_count,
+                            max,
+                            pct,
+                        );
+                    }
                 }
                 Err((faulty_seeds_from_deadlock, failed_count)) => {
                     // Handle deadlock case - merge with existing state and return early
