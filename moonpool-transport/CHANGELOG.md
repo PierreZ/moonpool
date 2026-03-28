@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-03-28
+
+### 🚀 Features
+
+- **moonpool-transport**: Add 24 assertions, 2 buggify points, fix invariant reset and queue metrics
+- **moonpool-transport**: Add reliable burst op and buggify queue size
+- **moonpool-transport**: Add 18 assertions, 4 buggify points, fix failure monitor eviction
+- **moonpool-transport**: Replace BoundClient with ServiceEndpoint
+
+### 🐛 Bug Fixes
+
+- **moonpool-transport**: Fix queue_metrics_consistent_after_failure drift
+- **moonpool-transport**: Unregister reply endpoints on ReplyFuture drop
+- **moonpool-sim, moonpool-transport**: Replace expect()/unwrap() with Result in library code ([#56](https://github.com/PierreZ/moonpool/pull/56))
+- **moonpool-transport**: Close queue on deserialization failure instead of silent drop ([#61](https://github.com/PierreZ/moonpool/pull/61))
+- Replace Result<T, String> with domain error enums (C-GOOD-ERR) ([#58](https://github.com/PierreZ/moonpool/pull/58))
+
+### 🚜 Refactor
+
+- **moonpool-transport**: Remove simulation suite for ground-up rewrite
+- **moonpool-transport**: Embed codec in ServiceEndpoint
+- **moonpool**: Remove virtual actor system entirely
+
+### 🧪 Testing
+
+- **moonpool**: Add TransportTimelineCheck and per-message timeline events
+
+
 ## [0.5.0] - 2026-03-09
 
 ### 🚀 Features
