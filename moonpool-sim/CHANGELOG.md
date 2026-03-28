@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-03-28
+
+### 🚀 Features
+
+- **moonpool-sim**: Add progress milestones and slow seed warnings
+- **moonpool-transport**: Add 24 assertions, 2 buggify points, fix invariant reset and queue metrics
+- **moonpool-sim**: Emit fault events to timeline from all injection sites
+- **moonpool-sim**: Add event timeline API for temporal invariants
+- **moonpool-sim**: Per-process storage fault injection ([#70](https://github.com/PierreZ/moonpool/pull/70))
+
+### 🐛 Bug Fixes
+
+- **moonpool-sim, moonpool-transport**: Replace expect()/unwrap() with Result in library code ([#56](https://github.com/PierreZ/moonpool/pull/56))
+- Replace Result<T, String> with domain error enums (C-GOOD-ERR) ([#58](https://github.com/PierreZ/moonpool/pull/58))
+- **moonpool-sim**: Replace string-based error matching with StorageError type ([#63](https://github.com/PierreZ/moonpool/pull/63))
+- Rename get_ prefixed getters to follow C-GETTER convention
+
+### 🚜 Refactor
+
+- **moonpool**: Remove virtual actor system entirely
+- **moonpool-sim**: Rework workload lifecycle with event-loop integration ([#52](https://github.com/PierreZ/moonpool/pull/52))
+
+### 🧪 Testing
+
+- **moonpool**: Add TransportTimelineCheck and per-message timeline events
+
+
 ## [0.5.0] - 2026-03-09
 
 ### 🚀 Features
