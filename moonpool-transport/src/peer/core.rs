@@ -495,6 +495,7 @@ impl<P: Providers> Peer<P> {
                 && state.reliable_queue.pop_front().is_some()
             {
                 state.metrics.record_message_dropped();
+                state.metrics.record_message_dequeued();
             }
 
             // Buggify: corrupt one byte to trigger checksum mismatch on receiver
@@ -1137,14 +1138,16 @@ fn handle_connection_failure<P: Providers>(
                     state.metrics.record_message_dropped();
                 }
                 state.unreliable_queue.clear();
-                // Reconcile queue size: all unreliable user messages are gone,
-                // only reliable queue items remain tracked.
-                state.metrics.current_queue_size = state.reliable_queue.len();
             }
         }
 
-        // After failure: unreliable cleared + reconciled (unless buggified skip),
-        // so metric should equal reliable queue length.
+        // Always reconcile queue size after cleanup (unless buggify skipped clear).
+        // Defense-in-depth: ensures metric is authoritative even if other drift exists.
+        if state.unreliable_queue.is_empty() {
+            state.metrics.current_queue_size = state.reliable_queue.len();
+        }
+
+        // After failure: metric must match actual queue length.
         // Skip check when buggify skipped the clear (unreliable items still present).
         if state.unreliable_queue.is_empty() {
             assert_always!(
