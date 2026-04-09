@@ -21,9 +21,9 @@
 use std::rc::Rc;
 
 use moonpool_transport::{
-    Alternatives, AtMostOnce, Distance, FailureStatus, JsonCodec, NetTransportBuilder,
-    NetworkAddress, Providers, QueueModel, RpcError, TaskProvider, TokioProviders, load_balance,
-    service,
+    Alternatives, AtMostOnce, Distance, FailureStatus, JsonCodec, LoadBalanceConfig,
+    NetTransportBuilder, NetworkAddress, Providers, QueueModel, RpcError, TaskProvider,
+    TokioProviders, load_balance, service,
 };
 use serde::{Deserialize, Serialize};
 
@@ -149,6 +149,7 @@ async fn run_client(providers: &TokioProviders) -> Result<(), Box<dyn std::error
     let model = QueueModel::new();
 
     println!("\n=== Load-balanced read ===");
+    let config = LoadBalanceConfig::default();
     let resp = load_balance(
         &transport,
         &alts,
@@ -157,6 +158,7 @@ async fn run_client(providers: &TokioProviders) -> Result<(), Box<dyn std::error
         },
         AtMostOnce::False, // reads are idempotent
         &model,
+        &config,
     )
     .await?;
 

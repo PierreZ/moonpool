@@ -21,7 +21,7 @@ A read against a replicated key is a load-balance: any replica can answer, we wa
 
 ```rust
 use moonpool::rpc::{
-    Alternatives, AtMostOnce, Distance, QueueModel, load_balance,
+    Alternatives, AtMostOnce, Distance, LoadBalanceConfig, QueueModel, load_balance,
 };
 
 let alts = Alternatives::new(vec![
@@ -30,6 +30,7 @@ let alts = Alternatives::new(vec![
     (replica_c.read.clone(), Distance::Remote),
 ]);
 let model = QueueModel::new();
+let config = LoadBalanceConfig::default();
 
 let value = load_balance(
     &transport,
@@ -37,6 +38,7 @@ let value = load_balance(
     GetValueRequest { key: "user/42".into() },
     AtMostOnce::False, // reads are idempotent
     &model,
+    &config,
 ).await?;
 ```
 
@@ -48,7 +50,7 @@ Three things make this work.
 
 **`AtMostOnce` makes the idempotency contract explicit.** With `AtMostOnce::False` the load balancer issues `get_reply` (reliable) and treats `MaybeDelivered` as a retry trigger. With `AtMostOnce::True` it issues `try_get_reply` (unreliable) and propagates `MaybeDelivered` immediately, so a side-effecting request is never retried on a different alternative when its outcome is ambiguous. This is the central design lever from FDB's `LoadBalance.actor.h:572-625`: side effects must not silently double up.
 
-The retry loop cycles through alternatives in best-first order, marking each one tried. After a full cycle without success it backs off briefly and starts a fresh cycle, up to two cycles total before returning the most recent error. Production callers wrap the call in their own retry policy if they want indefinite retry.
+The retry loop cycles through alternatives in best-first order, marking each one tried. After a full cycle without success it sleeps for an exponentially-growing backoff (`backoff_start` doubled each cycle up to `backoff_max`) and starts a fresh cycle, up to `max_full_cycles` cycles total before returning the most recent error. The defaults — two cycles, 50ms start, 1s cap, 2× multiplier — match FDB's `FLOW_KNOBS->LOAD_BALANCE_*` shape, and every knob lives on `LoadBalanceConfig` so callers can tune per deployment. Production callers wrap the call in their own retry policy if they want indefinite retry.
 
 ### When to use a `QueueModel`
 

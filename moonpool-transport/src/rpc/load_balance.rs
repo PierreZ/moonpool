@@ -376,17 +376,70 @@ impl<'a, T: TimeProvider> Drop for ModelHolder<'a, T> {
     }
 }
 
-/// Backoff applied after every alternative has been tried and failed in a
-/// single cycle. Matches FDB's `LOAD_BALANCE_START_BACKOFF` constant in
-/// spirit (FDB caps at `LOAD_BALANCE_MAX_BACKOFF`; v1 uses a fixed value).
-const ALL_ALTERNATIVES_FAILED_DELAY: Duration = Duration::from_millis(50);
-
-/// Maximum number of full cycles through `alternatives` before giving up.
+/// Tunables for the [`load_balance`] retry loop.
 ///
-/// Each cycle visits every alternative at most once. After `MAX_FULL_CYCLES`
-/// cycles `load_balance` returns the most recent error rather than retrying
-/// indefinitely. The caller is expected to retry at a higher level if needed.
-const MAX_FULL_CYCLES: usize = 2;
+/// Mirrors the shape of FDB's `FLOW_KNOBS->LOAD_BALANCE_*` constants, scoped
+/// to a single call. One config can be shared across many concurrent calls.
+///
+/// # Invariants
+///
+/// - `max_full_cycles` should be at least `1`. A value of `0` collapses to
+///   "try each alternative once, then give up" (the short-circuit fires on
+///   the first cycle-exhausted branch).
+/// - `backoff_multiplier` should be `>= 1.0`. Values below 1 shrink the
+///   backoff each cycle and are almost certainly a bug.
+/// - `backoff_max >= backoff_start`.
+///
+/// The struct's fields are `pub` for direct mutation, matching the
+/// [`PeerConfig`](crate::PeerConfig) convention.
+#[derive(Clone, Debug)]
+pub struct LoadBalanceConfig {
+    /// Maximum number of full cycles through `alternatives` before giving up.
+    /// Each cycle visits every alternative at most once.
+    ///
+    /// FDB analog: `FLOW_KNOBS->LOAD_BALANCE_MAX_BACKOFF` (shape, not units).
+    pub max_full_cycles: usize,
+
+    /// Backoff applied after the first exhausted cycle.
+    ///
+    /// FDB analog: `FLOW_KNOBS->LOAD_BALANCE_START_BACKOFF`.
+    pub backoff_start: Duration,
+
+    /// Cap on the backoff between cycles. Exponential growth saturates here.
+    pub backoff_max: Duration,
+
+    /// Multiplier applied to the backoff after each exhausted cycle. Default
+    /// `2.0` — doubles each cycle until capped at `backoff_max`.
+    pub backoff_multiplier: f64,
+}
+
+impl Default for LoadBalanceConfig {
+    fn default() -> Self {
+        Self {
+            max_full_cycles: 2,
+            backoff_start: Duration::from_millis(50),
+            backoff_max: Duration::from_secs(1),
+            backoff_multiplier: 2.0,
+        }
+    }
+}
+
+/// Compute the backoff between cycle `cycle` and `cycle + 1`.
+///
+/// `cycle` is zero-indexed — `cycle_backoff(cfg, 0)` is the sleep before the
+/// second cycle starts, using `backoff_start` as the base. Saturates at
+/// `backoff_max` regardless of how large the exponential grows.
+///
+/// Arithmetic is done in `f64` seconds and clamped against `backoff_max`
+/// before being converted back to a `Duration`, so huge cycle counts or
+/// aggressive multipliers cannot overflow `Duration::mul_f64`.
+fn cycle_backoff(cfg: &LoadBalanceConfig, cycle: usize) -> Duration {
+    let factor = cfg.backoff_multiplier.powi(cycle as i32);
+    let start_secs = cfg.backoff_start.as_secs_f64();
+    let max_secs = cfg.backoff_max.as_secs_f64();
+    let scaled_secs = (start_secs * factor).min(max_secs);
+    Duration::from_secs_f64(scaled_secs)
+}
 
 /// Pick the best available alternative not yet tried in the current cycle.
 ///
@@ -476,9 +529,10 @@ fn pick_best_alternative<Req, Resp, C: MessageCodec>(
 ///    - Otherwise, the alternative is marked as tried-this-cycle and the
 ///      next iteration picks a different one.
 /// 6. After cycling through every alternative once, the function sleeps for
-///    [`ALL_ALTERNATIVES_FAILED_DELAY`] and starts a fresh cycle, up to
-///    [`MAX_FULL_CYCLES`] cycles total. After that the most recent error is
-///    returned to the caller.
+///    [`cycle_backoff`] (exponential growth from `config.backoff_start` up
+///    to `config.backoff_max`) and starts a fresh cycle, up to
+///    `config.max_full_cycles` cycles total. After that the most recent
+///    error is returned to the caller.
 ///
 /// # Errors
 ///
@@ -488,7 +542,7 @@ fn pick_best_alternative<Req, Resp, C: MessageCodec>(
 /// - [`RpcError::Messaging(MessagingError::InvalidState)`](MessagingError::InvalidState)
 ///   when `alternatives.is_empty()` — there is nothing to balance against.
 /// - The most recent underlying [`RpcError`] when every alternative has been
-///   tried [`MAX_FULL_CYCLES`] times without success.
+///   tried `config.max_full_cycles` times without success.
 #[instrument(skip_all, fields(n = alternatives.len()))]
 pub async fn load_balance<Req, Resp, P, C>(
     transport: &NetTransport<P>,
@@ -496,6 +550,7 @@ pub async fn load_balance<Req, Resp, P, C>(
     request: Req,
     at_most_once: AtMostOnce,
     model: &QueueModel,
+    config: &LoadBalanceConfig,
 ) -> Result<Resp, RpcError>
 where
     Req: Serialize + Clone,
@@ -522,7 +577,7 @@ where
 
         let Some(idx) = candidate else {
             // No viable alternative this cycle.
-            if cycle + 1 >= MAX_FULL_CYCLES {
+            if cycle + 1 >= config.max_full_cycles {
                 assert_sometimes!(true, "load_balance_giving_up_after_cycles");
                 return Err(last_error.unwrap_or_else(|| {
                     RpcError::Messaging(MessagingError::InvalidState {
@@ -531,11 +586,12 @@ where
                 }));
             }
             assert_sometimes!(true, "load_balance_all_alternatives_failed_backoff");
+            let delay = cycle_backoff(config, cycle);
             cycle += 1;
             tried.clear();
             // Best-effort backoff; ignore the time provider returning a
             // shutdown error.
-            let _ = time.sleep(ALL_ALTERNATIVES_FAILED_DELAY).await;
+            let _ = time.sleep(delay).await;
             continue;
         };
 
@@ -813,12 +869,49 @@ mod tests {
         assert!(later.abs() < 1e-3, "expected ~0, got {later}");
     }
 
+    // ---- LoadBalanceConfig / cycle_backoff tests ----
+
+    #[test]
+    fn load_balance_config_default_preserves_historical_constants() {
+        let c = LoadBalanceConfig::default();
+        assert_eq!(c.max_full_cycles, 2);
+        assert_eq!(c.backoff_start, Duration::from_millis(50));
+        assert_eq!(c.backoff_max, Duration::from_secs(1));
+        assert!((c.backoff_multiplier - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn cycle_backoff_doubles_until_capped() {
+        let c = LoadBalanceConfig {
+            max_full_cycles: 10,
+            backoff_start: Duration::from_millis(100),
+            backoff_max: Duration::from_millis(500),
+            backoff_multiplier: 2.0,
+        };
+        assert_eq!(cycle_backoff(&c, 0), Duration::from_millis(100));
+        assert_eq!(cycle_backoff(&c, 1), Duration::from_millis(200));
+        assert_eq!(cycle_backoff(&c, 2), Duration::from_millis(400));
+        // Would be 800 but capped at 500.
+        assert_eq!(cycle_backoff(&c, 3), Duration::from_millis(500));
+        assert_eq!(cycle_backoff(&c, 99), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn cycle_backoff_multiplier_one_is_constant() {
+        let c = LoadBalanceConfig {
+            backoff_multiplier: 1.0,
+            ..LoadBalanceConfig::default()
+        };
+        assert_eq!(cycle_backoff(&c, 0), c.backoff_start);
+        assert_eq!(cycle_backoff(&c, 5), c.backoff_start);
+    }
+
     // ---- load_balance integration tests ----
 
     mod lb_integration {
         use std::rc::Rc;
 
-        use super::super::{AtMostOnce, Distance, QueueModel, load_balance};
+        use super::super::{AtMostOnce, Distance, LoadBalanceConfig, QueueModel, load_balance};
         use super::Alternatives;
         use crate::rpc::ReplyError;
         use crate::rpc::test_support::{Echo, dispatch_reply, make_transport, register_servers};
@@ -835,8 +928,16 @@ mod tests {
                 let alts: Alternatives<Echo, Echo, crate::JsonCodec> =
                     Alternatives::new(std::iter::empty());
                 let model = QueueModel::new();
-                let result =
-                    load_balance(&transport, &alts, Echo(0), AtMostOnce::False, &model).await;
+                let config = LoadBalanceConfig::default();
+                let result = load_balance(
+                    &transport,
+                    &alts,
+                    Echo(0),
+                    AtMostOnce::False,
+                    &model,
+                    &config,
+                )
+                .await;
                 assert!(result.is_err());
             });
         }
@@ -867,6 +968,7 @@ mod tests {
                         Echo(7),
                         AtMostOnce::False,
                         &model_for_task,
+                        &LoadBalanceConfig::default(),
                     )
                     .await
                 });
@@ -920,6 +1022,7 @@ mod tests {
                         Echo(11),
                         AtMostOnce::False,
                         &model_for_task,
+                        &LoadBalanceConfig::default(),
                     )
                     .await
                 });
@@ -992,6 +1095,7 @@ mod tests {
                         Echo(13),
                         AtMostOnce::True,
                         &model_for_task,
+                        &LoadBalanceConfig::default(),
                     )
                     .await
                 });
