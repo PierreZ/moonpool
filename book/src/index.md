@@ -83,6 +83,7 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 - [Server, Client, and Endpoints](./part4-networking/07-server-client-endpoints.md) — Server setup, client connection, endpoint routing, RequestStream, ReplyPromise
 - [Delivery Modes](./part4-networking/08-delivery-modes.md) — Four guarantees: send, try_get_reply, get_reply, get_reply_unless_failed_for
 - [Failure Monitor](./part4-networking/09-failure-monitor.md) — Address-level and endpoint-level reachability tracking
+- [Load Balancing and Fan-Out](./part4-networking/11-load-balance-fan-out.md) — `load_balance()` with `QueueModel`, plus four fan-out shapes (all/quorum/race/partial)
 - [Designing Simulation-Friendly RPC](./part4-networking/10-designing-rpc.md) — Idempotent design, versioning, bounded retries, deduplication, causality
 
 ## Part VI: Building on Top

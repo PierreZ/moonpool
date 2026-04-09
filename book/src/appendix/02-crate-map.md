@@ -112,6 +112,8 @@ Moonpool is organized as a workspace of eight crates. The dependency graph is de
 - `RequestEnvelope` -- request + reply_to endpoint for bidirectional RPC
 - `MessagingError` -- transport-level error type
 - Delivery modes: `send`, `try_get_reply`, `get_reply`, `get_reply_unless_failed_for`
+- Load balancing: `Alternatives`, `Distance`, `AtMostOnce`, `QueueModel`, `ModelHolder`, `Smoother`, `load_balance()`
+- Fan-out: `fan_out_all`, `fan_out_quorum`, `fan_out_race`, `fan_out_all_partial`, `FanOutError`
 
 **Proc macros** (from moonpool-transport-derive):
 - `#[service]` -- generates service trait, server, client, and bound client types
