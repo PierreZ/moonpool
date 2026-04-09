@@ -152,6 +152,10 @@ where
     if endpoints.is_empty() {
         return Err(FanOutError::Empty);
     }
+    // A request for zero successes is satisfied before dispatching anything.
+    if required == 0 {
+        return Ok(Vec::new());
+    }
     let n = endpoints.len();
     if required > n {
         return Err(FanOutError::QuorumNotMet {
@@ -418,6 +422,20 @@ mod tests {
             }
             other => panic!("expected QuorumNotMet, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn fan_out_quorum_zero_required_returns_empty_ok() {
+        let transport = make_transport();
+        let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
+        let ep = Endpoint::new(addr, UID::new(1, 1));
+        let endpoints = vec![ServiceEndpoint::<Echo, Echo, JsonCodec>::new(ep, JsonCodec)];
+
+        let result = fan_out_quorum(&transport, &endpoints, Echo(0), 0).await;
+        assert!(
+            matches!(result, Ok(ref v) if v.is_empty()),
+            "got {result:?}"
+        );
     }
 
     #[test]
