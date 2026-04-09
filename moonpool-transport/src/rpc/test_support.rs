@@ -2,10 +2,9 @@
 //!
 //! Provides a minimal `Providers` implementation backed by stubbed network
 //! traits, plus helpers for registering server queues and dispatching canned
-//! replies. Lives behind `#[cfg(test)]` so it never ends up in the public
-//! crate.
+//! replies. The `#[cfg(test)] mod test_support;` declaration in `mod.rs`
+//! gates compilation, so this file never ends up in the public crate.
 
-#![cfg(test)]
 #![allow(dead_code)] // each consumer uses a different subset of helpers
 
 use std::net::{IpAddr, Ipv4Addr};
@@ -148,19 +147,20 @@ pub fn make_transport() -> NetTransport<MockProviders> {
     NetTransport::new(local, MockProviders::new())
 }
 
+/// Server-side queue type used by the shared test helpers.
+pub type TestQueue = Rc<NetNotifiedQueue<RequestEnvelope<Echo>, JsonCodec>>;
+
+/// Return type for [`register_servers`]: a pair of parallel vectors holding
+/// each server's queue and its matching client-side endpoint.
+pub type ServerSetup = (Vec<TestQueue>, Vec<ServiceEndpoint<Echo, Echo, JsonCodec>>);
+
 /// Register `tokens.len()` server queues on `transport` and return the
 /// queues alongside their typed `ServiceEndpoint`s.
 ///
 /// All endpoints share the same network address (`10.0.0.1:4500`) but
 /// distinct UIDs, which is enough for the dispatch tests since the queues
 /// are looked up by token.
-pub fn register_servers(
-    transport: &NetTransport<MockProviders>,
-    tokens: &[u64],
-) -> (
-    Vec<Rc<NetNotifiedQueue<RequestEnvelope<Echo>, JsonCodec>>>,
-    Vec<ServiceEndpoint<Echo, Echo, JsonCodec>>,
-) {
+pub fn register_servers(transport: &NetTransport<MockProviders>, tokens: &[u64]) -> ServerSetup {
     let mut queues = Vec::new();
     let mut endpoints = Vec::new();
     for &token in tokens {

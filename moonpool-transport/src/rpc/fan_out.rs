@@ -619,8 +619,8 @@ mod tests {
             let results = handle.await.expect("join task").expect("partial vec");
             assert_eq!(results.len(), 3);
             assert!(results[0].is_err());
-            assert_eq!(results[1].as_ref().unwrap(), &Echo(701));
-            assert_eq!(results[2].as_ref().unwrap(), &Echo(702));
+            assert_eq!(results[1].as_ref().ok(), Some(&Echo(701)));
+            assert_eq!(results[2].as_ref().ok(), Some(&Echo(702)));
         });
     }
 }
