@@ -15,40 +15,40 @@ let server = CalculatorServer::init(&transport, JsonCodec);
 // Or well-known tokens (deterministic, no discovery needed):
 let server = CalculatorServer::well_known(&transport, WLTOKEN_CALC, JsonCodec);
 
-let handle = server.serve(transport.clone(), Rc::new(CalculatorImpl), &providers);
+let handle = server.serve(Rc::new(CalculatorImpl), &providers);
 // Tasks run until handle is dropped or stop() is called
 ```
 
-`init()` allocates a random base token and registers all method endpoints with the transport's `EndpointMap`. Each method gets its own `RequestStream`, backed by a `NetNotifiedQueue` that receives incoming request envelopes.
+`init()` allocates a random base token and registers all method endpoints with the transport's `EndpointMap`. Each method gets its own `RequestStream`, backed by a `NetNotifiedQueue` that receives incoming request envelopes. The transport is bound at construction, so no `&transport` threading is needed in call sites.
 
-`serve()` consumes the server and spawns one task per method. Each task loops on `recv_with_transport`, dispatches to the handler, and sends the response back through the `ReplyPromise`. The returned `ServerHandle` holds close functions for each stream. Dropping it or calling `stop()` closes the streams, which causes the tasks to exit cleanly.
+`serve()` consumes the server and spawns one task per method. Each task loops on `recv()`, dispatches to the handler, and sends the response back through the `ReplyPromise`. The returned `ServerHandle` holds close functions for each stream. Dropping it or calling `stop()` closes the streams, which causes the tasks to exit cleanly.
 
 For more control, you can skip `serve()` and process each `RequestStream` manually:
 
 ```rust
 let server = CalculatorServer::init(&transport, JsonCodec);
 // Handle the `add` stream yourself
-while let Some((req, reply)) = server.add.recv_with_transport(&transport).await {
+while let Some((req, reply)) = server.add.recv().await {
     reply.send(AddResponse { result: req.a + req.b });
 }
 ```
 
 ## Connecting a Client
 
-Clients are constructed from a base token (obtained via discovery or well-known addressing):
+Clients are constructed from a base token (obtained via discovery or well-known addressing). The transport is bound at construction, so delivery methods require only the request payload:
 
 ```rust
 // From a well-known token (both sides know the constant):
-let calc = CalculatorClient::well_known(server_address, WLTOKEN_CALC, JsonCodec);
+let calc = CalculatorClient::well_known(server_address, WLTOKEN_CALC, JsonCodec, &transport);
 
 // From a discovered base token (received via serialization):
-let calc = CalculatorClient::from_base(server_address, base_token, JsonCodec);
+let calc = CalculatorClient::from_base(server_address, base_token, JsonCodec, &transport);
 ```
 
-Each `ServiceEndpoint` field carries the destination address, method UID, and codec. You pass only the transport at each call. This makes the delivery mode explicit: `get_reply` for at-least-once, `try_get_reply` for at-most-once, `send` for fire-and-forget. See [Delivery Modes](./08-delivery-modes.md) for the full set.
+Each `ServiceEndpoint` field carries the destination address, method UID, codec, and a reference to the transport. The delivery mode is explicit at the call site: `get_reply` for at-least-once, `try_get_reply` for at-most-once, `send` for fire-and-forget. See [Delivery Modes](./08-delivery-modes.md) for the full set.
 
 ```rust
-let resp = calc.add.get_reply(&transport, AddRequest { a: 1, b: 2 }).await?;
+let resp = calc.add.get_reply(AddRequest { a: 1, b: 2 }).await?;
 assert_eq!(resp.result, 3);
 ```
 
@@ -88,7 +88,7 @@ A well-known UID has `first == u64::MAX` and `second` equal to the token index. 
 
 ## RequestStream
 
-`RequestStream<Req, C>` is the server-side abstraction for receiving typed requests. Each stream wraps a `NetNotifiedQueue` that the transport pushes incoming packets into. When you call `recv()` or `recv_with_transport()`, it awaits the next `RequestEnvelope<Req>` from the queue and returns the deserialized request paired with a `ReplyPromise`.
+`RequestStream<Req, Resp, C, P>` is the server-side abstraction for receiving typed requests. Each stream wraps a `NetNotifiedQueue` that the transport pushes incoming packets into, plus a bound reference to the transport. When you call `recv()`, it awaits the next `RequestEnvelope<Req>` from the queue and returns the deserialized request paired with a `ReplyPromise`.
 
 The `RequestEnvelope` bundles the request payload with a `reply_to` endpoint, the address where the client is listening for the response:
 
@@ -107,7 +107,7 @@ These two types form the request-response correlation mechanism.
 
 ```rust
 // Server side
-let (req, reply) = stream.recv_with_transport(&transport).await?;
+let (req, reply) = stream.recv().await?;
 reply.send(AddResponse { result: req.a + req.b });
 ```
 

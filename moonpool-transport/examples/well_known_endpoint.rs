@@ -86,17 +86,13 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "Registered {} method(s) at well-known token {}\n",
-        PingPongServer::<JsonCodec>::METHOD_COUNT,
+        PingPongServer::<JsonCodec, TokioProviders>::METHOD_COUNT,
         WLTOKEN_PING_PONG
     );
     println!("Waiting for ping requests...\n");
 
     loop {
-        if let Some((request, reply)) = ping_server
-            .ping
-            .recv_with_transport::<_, PingResponse>(&transport)
-            .await
-        {
+        if let Some((request, reply)) = ping_server.ping.recv().await {
             println!("Received ping seq={}: {:?}", request.seq, request.message);
 
             let response = PingResponse {
@@ -136,12 +132,13 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     println!("Connecting to server at {}\n", SERVER_ADDR);
 
     // Client constructed from well-known token — no discovery needed.
-    let ping_client = PingPongClient::well_known(server_addr, WLTOKEN_PING_PONG, JsonCodec);
+    let ping_client =
+        PingPongClient::well_known(server_addr, WLTOKEN_PING_PONG, JsonCodec, &transport);
 
     println!(
         "Using well-known token {} with {} method(s)\n",
         WLTOKEN_PING_PONG,
-        PingPongClient::<JsonCodec>::METHOD_COUNT
+        PingPongClient::<JsonCodec, TokioProviders>::METHOD_COUNT
     );
 
     let num_pings = 5;
@@ -156,10 +153,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
         println!("Sending ping seq={}: {:?}", seq, request.message);
 
         match time
-            .timeout(
-                Duration::from_secs(5),
-                ping_client.ping.get_reply(&transport, request),
-            )
+            .timeout(Duration::from_secs(5), ping_client.ping.get_reply(request))
             .await
         {
             Ok(Ok(response)) => {

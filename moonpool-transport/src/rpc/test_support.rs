@@ -142,9 +142,12 @@ impl Providers for MockProviders {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Echo(pub u32);
 
-pub fn make_transport() -> NetTransport<MockProviders> {
+pub fn make_transport() -> Rc<NetTransport<MockProviders>> {
     let local = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
-    NetTransport::new(local, MockProviders::new())
+    crate::NetTransportBuilder::new(MockProviders::new())
+        .local_address(local)
+        .build()
+        .expect("build transport")
 }
 
 /// Server-side queue type used by the shared test helpers.
@@ -152,7 +155,10 @@ pub type TestQueue = Rc<NetNotifiedQueue<RequestEnvelope<Echo>, JsonCodec>>;
 
 /// Return type for [`register_servers`]: a pair of parallel vectors holding
 /// each server's queue and its matching client-side endpoint.
-pub type ServerSetup = (Vec<TestQueue>, Vec<ServiceEndpoint<Echo, Echo, JsonCodec>>);
+pub type ServerSetup = (
+    Vec<TestQueue>,
+    Vec<ServiceEndpoint<Echo, Echo, JsonCodec, MockProviders>>,
+);
 
 /// Register `tokens.len()` server queues on `transport` and return the
 /// queues alongside their typed `ServiceEndpoint`s.
@@ -160,7 +166,10 @@ pub type ServerSetup = (Vec<TestQueue>, Vec<ServiceEndpoint<Echo, Echo, JsonCode
 /// All endpoints share the same network address (`10.0.0.1:4500`) but
 /// distinct UIDs, which is enough for the dispatch tests since the queues
 /// are looked up by token.
-pub fn register_servers(transport: &NetTransport<MockProviders>, tokens: &[u64]) -> ServerSetup {
+pub fn register_servers(
+    transport: &Rc<NetTransport<MockProviders>>,
+    tokens: &[u64],
+) -> ServerSetup {
     let mut queues = Vec::new();
     let mut endpoints = Vec::new();
     for &token in tokens {
@@ -170,7 +179,7 @@ pub fn register_servers(transport: &NetTransport<MockProviders>, tokens: &[u64])
             Rc::new(NetNotifiedQueue::new(ep.clone(), JsonCodec));
         transport.register(UID::new(token, 1), q.clone());
         queues.push(q);
-        endpoints.push(ServiceEndpoint::<Echo, Echo, JsonCodec>::new(ep, JsonCodec));
+        endpoints.push(ServiceEndpoint::new(ep, JsonCodec, Rc::clone(transport)));
     }
     transport
         .failure_monitor()

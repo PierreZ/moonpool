@@ -43,6 +43,7 @@ use super::endpoint_map::{EndpointMap, MessageReceiver};
 use super::request_stream::RequestStream;
 use crate::MessageCodec;
 use crate::error::MessagingError;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 /// Type alias for shared peer reference.
@@ -347,36 +348,35 @@ impl<P: Providers> NetTransport<P> {
     /// - Creating a `RequestStream` for the request type
     /// - Registering the stream's queue with the transport
     ///
+    /// Register a typed handler and return a bound `RequestStream`.
+    ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// // Before (verbose):
-    /// let endpoint = Endpoint::new(local_addr.clone(), ping_token());
-    /// let stream: RequestStream<PingRequest, JsonCodec> =
-    ///     RequestStream::new(endpoint, JsonCodec);
-    /// transport.register(ping_token(), stream.queue() as Rc<dyn MessageReceiver>);
+    /// let stream = NetTransport::register_handler::<PingRequest, PingResponse, _>(
+    ///     &transport, ping_token(), JsonCodec,
+    /// );
     ///
-    /// // After (single call):
-    /// let stream = transport.register_handler::<PingRequest>(ping_token(), JsonCodec);
+    /// loop {
+    ///     if let Some((req, reply)) = stream.recv().await {
+    ///         reply.send(PingResponse { pong: req.ping });
+    ///     }
+    /// }
     /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `token` - Unique identifier for this handler
-    /// * `codec` - Codec for serializing/deserializing messages
-    ///
-    /// # Type Parameters
-    ///
-    /// * `Req` - The request type this handler will receive
-    /// * `C` - The codec type (e.g., `JsonCodec`)
-    pub fn register_handler<Req, C>(&self, token: UID, codec: C) -> RequestStream<Req, C>
+    pub fn register_handler<Req, Resp, C>(
+        transport: &Rc<Self>,
+        token: UID,
+        codec: C,
+    ) -> RequestStream<Req, Resp, C, P>
     where
         Req: DeserializeOwned + 'static,
+        Resp: Serialize,
         C: MessageCodec,
     {
-        let endpoint = Endpoint::new(self.local_address.clone(), token);
-        let stream = RequestStream::new(endpoint, codec);
-        self.data
+        let endpoint = Endpoint::new(transport.local_address.clone(), token);
+        let stream = RequestStream::new(endpoint, codec, Rc::clone(transport));
+        transport
+            .data
             .borrow_mut()
             .endpoints
             .insert(token, stream.queue() as Rc<dyn MessageReceiver>);
@@ -385,65 +385,36 @@ impl<P: Providers> NetTransport<P> {
 
     /// Register a handler for a multi-method interface.
     ///
-    /// Use this when an interface has multiple methods (like a Calculator with
-    /// add, subtract, multiply, divide). Each method gets its own handler.
-    ///
-    /// The token is computed deterministically from `interface_id` and `method_index`,
-    /// making it easy to create matching client endpoints.
+    /// The token is computed deterministically from `interface_id` and `method_index`.
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// // Calculator interface with multiple methods
-    /// const CALC_INTERFACE: u64 = 0xCA1C;
-    /// const METHOD_ADD: u64 = 0;
-    /// const METHOD_SUB: u64 = 1;
-    /// const METHOD_MUL: u64 = 2;
-    /// const METHOD_DIV: u64 = 3;
-    ///
-    /// let add_stream = transport.register_handler_at::<AddRequest>(
-    ///     CALC_INTERFACE, METHOD_ADD, JsonCodec
-    /// );
-    /// let sub_stream = transport.register_handler_at::<SubRequest>(
-    ///     CALC_INTERFACE, METHOD_SUB, JsonCodec
+    /// let (add_stream, _) = NetTransport::register_handler_at::<AddRequest, AddResponse, _>(
+    ///     &transport, CALC_INTERFACE, METHOD_ADD, JsonCodec,
     /// );
     ///
-    /// // Handle requests with tokio::select!
     /// loop {
     ///     tokio::select! {
-    ///         Some((req, reply)) = add_stream.recv_with_transport(&transport) => {
+    ///         Some((req, reply)) = add_stream.recv() => {
     ///             reply.send(AddResponse { result: req.a + req.b });
-    ///         }
-    ///         Some((req, reply)) = sub_stream.recv_with_transport(&transport) => {
-    ///             reply.send(SubResponse { result: req.a - req.b });
     ///         }
     ///     }
     /// }
     /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `interface_id` - Unique identifier for the interface
-    /// * `method_index` - Index of the method within the interface (0, 1, 2, ...)
-    /// * `codec` - Codec for serializing/deserializing messages
-    ///
-    /// # Returns
-    ///
-    /// A tuple containing:
-    /// - The `RequestStream` for receiving requests
-    /// - The token (`UID`) that clients should use to send requests to this handler
-    pub fn register_handler_at<Req, C>(
-        &self,
+    pub fn register_handler_at<Req, Resp, C>(
+        transport: &Rc<Self>,
         interface_id: u64,
         method_index: u64,
         codec: C,
-    ) -> (RequestStream<Req, C>, UID)
+    ) -> (RequestStream<Req, Resp, C, P>, UID)
     where
         Req: DeserializeOwned + 'static,
+        Resp: Serialize,
         C: MessageCodec,
     {
         let token = UID::new(interface_id, method_index);
-        let stream = self.register_handler(token, codec);
+        let stream = Self::register_handler(transport, token, codec);
         (stream, token)
     }
 
@@ -1422,13 +1393,20 @@ mod tests {
             value: i32,
         }
 
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        struct TestResponse {
+            value: i32,
+        }
+
         let transport = NetTransportBuilder::new(MockProviders::new())
             .local_address(test_address())
             .build()
             .expect("build should succeed");
 
         let token = UID::new(0xDEAD, 0xBEEF);
-        let stream = transport.register_handler::<TestRequest, _>(token, JsonCodec);
+        let stream = NetTransport::register_handler::<TestRequest, TestResponse, _>(
+            &transport, token, JsonCodec,
+        );
 
         // Handler should be registered
         assert_eq!(transport.endpoint_count(), 1);
@@ -1449,9 +1427,19 @@ mod tests {
         }
 
         #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        struct AddResponse {
+            result: i32,
+        }
+
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
         struct SubRequest {
             a: i32,
             b: i32,
+        }
+
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        struct SubResponse {
+            result: i32,
         }
 
         const CALC_INTERFACE: u64 = 0xCA1C;
@@ -1464,10 +1452,18 @@ mod tests {
             .expect("build should succeed");
 
         // Register multiple handlers for the same interface
-        let (add_stream, add_token) =
-            transport.register_handler_at::<AddRequest, _>(CALC_INTERFACE, METHOD_ADD, JsonCodec);
-        let (sub_stream, sub_token) =
-            transport.register_handler_at::<SubRequest, _>(CALC_INTERFACE, METHOD_SUB, JsonCodec);
+        let (add_stream, add_token) = NetTransport::register_handler_at::<AddRequest, AddResponse, _>(
+            &transport,
+            CALC_INTERFACE,
+            METHOD_ADD,
+            JsonCodec,
+        );
+        let (sub_stream, sub_token) = NetTransport::register_handler_at::<SubRequest, SubResponse, _>(
+            &transport,
+            CALC_INTERFACE,
+            METHOD_SUB,
+            JsonCodec,
+        );
 
         // Both handlers should be registered
         assert_eq!(transport.endpoint_count(), 2);

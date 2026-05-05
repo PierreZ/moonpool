@@ -120,7 +120,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "Registered {} methods with dynamic base token: {}\n",
-        CalculatorServer::<JsonCodec>::METHOD_COUNT,
+        CalculatorServer::<JsonCodec, TokioProviders>::METHOD_COUNT,
         base_token,
     );
 
@@ -146,25 +146,25 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     // Handle requests (only from the first server for this demo)
     loop {
         tokio::select! {
-            Some((req, reply)) = calc.add.recv_with_transport::<_, AddResponse>(&transport) => {
+            Some((req, reply)) = calc.add.recv() => {
                 let result = req.a + req.b;
                 println!("ADD: {} + {} = {}", req.a, req.b, result);
                 reply.send(AddResponse { result });
             }
 
-            Some((req, reply)) = calc.sub.recv_with_transport::<_, SubResponse>(&transport) => {
+            Some((req, reply)) = calc.sub.recv() => {
                 let result = req.a - req.b;
                 println!("SUB: {} - {} = {}", req.a, req.b, result);
                 reply.send(SubResponse { result });
             }
 
-            Some((req, reply)) = calc.mul.recv_with_transport::<_, MulResponse>(&transport) => {
+            Some((req, reply)) = calc.mul.recv() => {
                 let result = req.a * req.b;
                 println!("MUL: {} * {} = {}", req.a, req.b, result);
                 reply.send(MulResponse { result });
             }
 
-            Some((req, reply)) = calc.div.recv_with_transport::<_, DivResponse>(&transport) => {
+            Some((req, reply)) = calc.div.recv() => {
                 let result = if req.b != 0 {
                     Some(req.a / req.b)
                 } else {
@@ -202,7 +202,7 @@ async fn run_client(base_token_json: &str) -> Result<(), Box<dyn std::error::Err
     let base_token: UID = serde_json::from_str(base_token_json)?;
     println!("Using discovered base token: {}\n", base_token);
 
-    let calc = CalculatorClient::from_base(server_addr, base_token, JsonCodec);
+    let calc = CalculatorClient::from_base(server_addr, base_token, JsonCodec, &transport);
 
     println!("Client started, connecting to server at {}\n", SERVER_ADDR);
 
@@ -211,7 +211,7 @@ async fn run_client(base_token_json: &str) -> Result<(), Box<dyn std::error::Err
     match time
         .timeout(
             Duration::from_secs(5),
-            calc.add.get_reply(&transport, AddRequest { a: 10, b: 5 }),
+            calc.add.get_reply(AddRequest { a: 10, b: 5 }),
         )
         .await
     {
@@ -220,11 +220,7 @@ async fn run_client(base_token_json: &str) -> Result<(), Box<dyn std::error::Err
     }
 
     println!("--- try_get_reply (at-most-once) ---");
-    match calc
-        .sub
-        .try_get_reply(&transport, SubRequest { a: 20, b: 7 })
-        .await
-    {
+    match calc.sub.try_get_reply(SubRequest { a: 20, b: 7 }).await {
         Ok(resp) => println!("  20 - 7 = {}\n", resp.result),
         Err(e) if e.is_maybe_delivered() => {
             println!("  MaybeDelivered — read state before retry\n")
@@ -236,7 +232,7 @@ async fn run_client(base_token_json: &str) -> Result<(), Box<dyn std::error::Err
     match time
         .timeout(
             Duration::from_secs(5),
-            calc.mul.get_reply(&transport, MulRequest { a: 6, b: 8 }),
+            calc.mul.get_reply(MulRequest { a: 6, b: 8 }),
         )
         .await
     {
@@ -248,7 +244,7 @@ async fn run_client(base_token_json: &str) -> Result<(), Box<dyn std::error::Err
     match time
         .timeout(
             Duration::from_secs(5),
-            calc.div.get_reply(&transport, DivRequest { a: 100, b: 4 }),
+            calc.div.get_reply(DivRequest { a: 100, b: 4 }),
         )
         .await
     {
@@ -264,7 +260,7 @@ async fn run_client(base_token_json: &str) -> Result<(), Box<dyn std::error::Err
     match time
         .timeout(
             Duration::from_secs(5),
-            calc.div.get_reply(&transport, DivRequest { a: 42, b: 0 }),
+            calc.div.get_reply(DivRequest { a: 42, b: 0 }),
         )
         .await
     {

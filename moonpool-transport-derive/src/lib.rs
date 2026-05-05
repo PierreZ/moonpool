@@ -20,9 +20,8 @@
 //! ```
 //!
 //! This generates:
-//! - `CalculatorServer<C>` with `RequestStream` fields, `init()`, `init_at()`, and `serve()`
-//! - `CalculatorClient<C>` with `ServiceEndpoint` fields and `from_base()`
-//! - `impl ServiceDefinition for Calculator` for generic registration
+//! - `CalculatorServer<C, P>` with `RequestStream` fields, `init()`, `init_at()`, and `serve()`
+//! - `CalculatorClient<C, P>` with `ServiceEndpoint` fields and `from_base()`
 //! - The trait itself with `#[async_trait(?Send)]`
 
 use proc_macro::TokenStream;
@@ -129,11 +128,12 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
 
     let method_count = method_infos.len() as u32;
 
-    // Generate server fields
+    // Generate server fields — RequestStream<Req, Resp, C, P>
     let server_fields = method_infos.iter().map(|m| {
         let name = &m.name;
         let req_type = &m.req_type;
-        quote! { pub #name: moonpool_transport::RequestStream<#req_type, C> }
+        let resp_type = &m.resp_type;
+        quote! { pub #name: moonpool_transport::RequestStream<#req_type, #resp_type, C, P> }
     });
 
     // Generate server init_at — registers at base.adjusted(idx) per method
@@ -146,11 +146,11 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
             let is_last = i == method_infos.len() - 1;
             if is_last {
                 quote! {
-                    let #name = transport.register_handler(base_token.adjusted(#idx), codec);
+                    let #name = moonpool_transport::NetTransport::register_handler(transport, base_token.adjusted(#idx), codec);
                 }
             } else {
                 quote! {
-                    let #name = transport.register_handler(base_token.adjusted(#idx), codec.clone());
+                    let #name = moonpool_transport::NetTransport::register_handler(transport, base_token.adjusted(#idx), codec.clone());
                 }
             }
         })
@@ -164,24 +164,43 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
         let req_type = &m.req_type;
         let resp_type = &m.resp_type;
         quote! {
-            pub #name: moonpool_transport::ServiceEndpoint<#req_type, #resp_type, C>
+            pub #name: moonpool_transport::ServiceEndpoint<#req_type, #resp_type, C, P>
         }
     });
 
     // Generate client from_base field constructors
-    let client_from_base_inits = method_infos.iter().map(|m| {
-        let name = &m.name;
-        let idx = m.index;
-        quote! {
-            #name: moonpool_transport::ServiceEndpoint::new(
-                moonpool_transport::Endpoint::new(
-                    address.clone(),
-                    base_token.adjusted(#idx),
-                ),
-                codec.clone(),
-            )
-        }
-    });
+    let client_from_base_inits: Vec<_> = method_infos
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let name = &m.name;
+            let idx = m.index;
+            let is_last = i == method_infos.len() - 1;
+            if is_last {
+                quote! {
+                    #name: moonpool_transport::ServiceEndpoint::new(
+                        moonpool_transport::Endpoint::new(
+                            address.clone(),
+                            base_token.adjusted(#idx),
+                        ),
+                        codec,
+                        std::rc::Rc::clone(transport),
+                    )
+                }
+            } else {
+                quote! {
+                    #name: moonpool_transport::ServiceEndpoint::new(
+                        moonpool_transport::Endpoint::new(
+                            address.clone(),
+                            base_token.adjusted(#idx),
+                        ),
+                        codec.clone(),
+                        std::rc::Rc::clone(transport),
+                    )
+                }
+            }
+        })
+        .collect();
 
     let first_field_name = &method_infos[0].name;
 
@@ -206,18 +225,13 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
         .iter()
         .map(|m| {
             let method_name = &m.name;
-            let resp_type = &m.resp_type;
             let task_name = format!("{}_{}", trait_name_snake, m.name);
             quote! {
                 {
                     let stream = self.#method_name;
-                    let t = transport.clone();
                     let h = handler.clone();
                     providers.task().spawn_task(#task_name, async move {
-                        while let Some((req, reply)) = stream
-                            .recv_with_transport::<_, #resp_type>(&t)
-                            .await
-                        {
+                        while let Some((req, reply)) = stream.recv().await {
                             match h.#method_name(req).await {
                                 Ok(resp) => reply.send(resp),
                                 Err(e) => {
@@ -253,25 +267,48 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
     });
 
     let legacy_client_items = attr.id.map(|id| {
-        let client_new_inits = method_infos.iter().map(|m| {
-            let name = &m.name;
-            let idx = m.index;
-            quote! {
-                #name: moonpool_transport::ServiceEndpoint::new(
-                    moonpool_transport::Endpoint::new(
-                        address.clone(),
-                        moonpool_transport::UID::new(#id, 0).adjusted(#idx),
-                    ),
-                    codec.clone(),
-                )
-            }
-        });
+        let client_new_inits: Vec<_> = method_infos
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let name = &m.name;
+                let idx = m.index;
+                let is_last = i == method_infos.len() - 1;
+                if is_last {
+                    quote! {
+                        #name: moonpool_transport::ServiceEndpoint::new(
+                            moonpool_transport::Endpoint::new(
+                                address.clone(),
+                                moonpool_transport::UID::new(#id, 0).adjusted(#idx),
+                            ),
+                            codec,
+                            std::rc::Rc::clone(transport),
+                        )
+                    }
+                } else {
+                    quote! {
+                        #name: moonpool_transport::ServiceEndpoint::new(
+                            moonpool_transport::Endpoint::new(
+                                address.clone(),
+                                moonpool_transport::UID::new(#id, 0).adjusted(#idx),
+                            ),
+                            codec.clone(),
+                            std::rc::Rc::clone(transport),
+                        )
+                    }
+                }
+            })
+            .collect();
         quote! {
             /// Interface identifier (legacy static mode).
             pub const INTERFACE_ID: u64 = #id;
 
             /// Create a client with legacy static token addressing.
-            pub fn new(address: moonpool_transport::NetworkAddress, codec: C) -> Self {
+            pub fn new(
+                address: moonpool_transport::NetworkAddress,
+                codec: C,
+                transport: &std::rc::Rc<moonpool_transport::NetTransport<P>>,
+            ) -> Self {
                 Self {
                     #(#client_new_inits,)*
                 }
@@ -289,12 +326,12 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
         /// Server-side interface with RequestStreams.
         ///
         /// Generated by `#[service]`.
-        pub struct #server_name<C: moonpool_transport::MessageCodec> {
+        pub struct #server_name<C: moonpool_transport::MessageCodec, P: moonpool_transport::Providers> {
             #(#server_fields,)*
             base_token: moonpool_transport::UID,
         }
 
-        impl<C: moonpool_transport::MessageCodec + Clone> #server_name<C> {
+        impl<C: moonpool_transport::MessageCodec + Clone, P: moonpool_transport::Providers> #server_name<C, P> {
             #legacy_server_consts
 
             /// Number of methods in this interface.
@@ -303,28 +340,14 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
             /// Initialize the server interface, registering all handlers.
             ///
             /// Allocates a dynamic base token (or uses the legacy static ID if present).
-            pub fn init<P>(transport: &std::rc::Rc<moonpool_transport::NetTransport<P>>, codec: C) -> Self
-            where
-                P: moonpool_transport::Providers,
-            {
+            pub fn init(transport: &std::rc::Rc<moonpool_transport::NetTransport<P>>, codec: C) -> Self {
                 #init_body
             }
 
             /// Initialize at a specific base token.
             ///
             /// Methods are registered at `base_token.adjusted(1)`, `.adjusted(2)`, etc.
-            pub fn init_at<P>(transport: &std::rc::Rc<moonpool_transport::NetTransport<P>>, base_token: moonpool_transport::UID, codec: C) -> Self
-            where
-                P: moonpool_transport::Providers,
-            {
-                Self::init_at_raw(transport.as_ref(), base_token, codec)
-            }
-
-            /// Initialize at a specific base token (takes &NetTransport directly).
-            pub fn init_at_raw<P>(transport: &moonpool_transport::NetTransport<P>, base_token: moonpool_transport::UID, codec: C) -> Self
-            where
-                P: moonpool_transport::Providers,
-            {
+            pub fn init_at(transport: &std::rc::Rc<moonpool_transport::NetTransport<P>>, base_token: moonpool_transport::UID, codec: C) -> Self {
                 #(#server_init_at_fields)*
                 Self { #(#server_field_names,)* base_token }
             }
@@ -332,10 +355,7 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
             /// Initialize at a well-known token (deterministic addressing without discovery).
             ///
             /// Methods are registered at `UID::well_known(token_id).adjusted(1)`, etc.
-            pub fn well_known<P>(transport: &std::rc::Rc<moonpool_transport::NetTransport<P>>, token_id: u32, codec: C) -> Self
-            where
-                P: moonpool_transport::Providers,
-            {
+            pub fn well_known(transport: &std::rc::Rc<moonpool_transport::NetTransport<P>>, token_id: u32, codec: C) -> Self {
                 Self::init_at(transport, moonpool_transport::UID::well_known(token_id), codec)
             }
 
@@ -348,17 +368,15 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
 
             /// Consume this server and spawn handler tasks for all methods.
             ///
-            /// Each method gets its own task that loops on `recv_with_transport`
-            /// and dispatches to the handler. Returns a [`ServerHandle`](moonpool_transport::ServerHandle)
+            /// Each method gets its own task that loops on `recv()` and dispatches
+            /// to the handler. Returns a [`ServerHandle`](moonpool_transport::ServerHandle)
             /// that stops all tasks when dropped.
-            pub fn serve<P, H>(
+            pub fn serve<H>(
                 self,
-                transport: std::rc::Rc<moonpool_transport::NetTransport<P>>,
                 handler: std::rc::Rc<H>,
                 providers: &P,
             ) -> moonpool_transport::ServerHandle
             where
-                P: moonpool_transport::Providers,
                 H: #name + 'static,
             {
                 use moonpool_transport::TaskProvider as _;
@@ -375,16 +393,12 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
         /// Generated by `#[service]`. Each field provides delivery mode methods
         /// directly: `.get_reply()`, `.try_get_reply()`, `.send()`,
         /// `.get_reply_unless_failed_for()`.
-        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-        #[serde(bound(
-            serialize = "",
-            deserialize = "C: moonpool_transport::MessageCodec + Default",
-        ))]
-        pub struct #client_name<C: moonpool_transport::MessageCodec> {
+        #[derive(Debug, Clone)]
+        pub struct #client_name<C: moonpool_transport::MessageCodec, P: moonpool_transport::Providers> {
             #(#client_fields,)*
         }
 
-        impl<C: moonpool_transport::MessageCodec + Clone> #client_name<C> {
+        impl<C: moonpool_transport::MessageCodec + Clone, P: moonpool_transport::Providers> #client_name<C, P> {
             #legacy_client_items
 
             /// Number of methods in this interface.
@@ -393,7 +407,12 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
             /// Create a client from a base token (for well-known or discovered interfaces).
             ///
             /// Methods target `base_token.adjusted(1)`, `.adjusted(2)`, etc.
-            pub fn from_base(address: moonpool_transport::NetworkAddress, base_token: moonpool_transport::UID, codec: C) -> Self {
+            pub fn from_base(
+                address: moonpool_transport::NetworkAddress,
+                base_token: moonpool_transport::UID,
+                codec: C,
+                transport: &std::rc::Rc<moonpool_transport::NetTransport<P>>,
+            ) -> Self {
                 Self {
                     #(#client_from_base_inits,)*
                 }
@@ -402,8 +421,13 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
             /// Create a client from a well-known token (deterministic addressing).
             ///
             /// Methods target `UID::well_known(token_id).adjusted(1)`, etc.
-            pub fn well_known(address: moonpool_transport::NetworkAddress, token_id: u32, codec: C) -> Self {
-                Self::from_base(address, moonpool_transport::UID::well_known(token_id), codec)
+            pub fn well_known(
+                address: moonpool_transport::NetworkAddress,
+                token_id: u32,
+                codec: C,
+                transport: &std::rc::Rc<moonpool_transport::NetTransport<P>>,
+            ) -> Self {
+                Self::from_base(address, moonpool_transport::UID::well_known(token_id), codec, transport)
             }
 
             /// Get the address this client points to.

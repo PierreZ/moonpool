@@ -20,8 +20,8 @@ All four modes are available as methods on `ServiceEndpoint`, the type generated
 The simplest mode. Send the request unreliably with no reply registered:
 
 ```rust
-// Via ServiceEndpoint (generated client)
-heartbeat.send(&transport, HeartbeatRequest { node_id })?;
+// Via ServiceEndpoint (generated client — transport bound at construction)
+heartbeat.send(HeartbeatRequest { node_id })?;
 
 // Via delivery module (manual endpoint)
 delivery::send(&transport, &endpoint, HeartbeatRequest { node_id }, JsonCodec)?;
@@ -36,8 +36,8 @@ Use this for heartbeats, notifications, and any message where losing one is harm
 Send unreliably, then race the reply against a disconnect signal from the `FailureMonitor`:
 
 ```rust
-// Via ServiceEndpoint
-let response = balance.try_get_reply(&transport, GetBalanceRequest { account_id }).await?;
+// Via ServiceEndpoint (transport bound at construction)
+let response = balance.try_get_reply(GetBalanceRequest { account_id }).await?;
 
 // Via delivery module
 let response = delivery::try_get_reply::<_, BalanceResponse, _, _>(
@@ -63,8 +63,8 @@ The at-most-once guarantee means the server processes your request **zero or one
 Send reliably. If the connection drops and reconnects, the transport retransmits the request automatically:
 
 ```rust
-// Via ServiceEndpoint
-let response = join.get_reply(&transport, JoinRequest { node_id }).await?;
+// Via ServiceEndpoint (transport bound at construction)
+let response = join.get_reply(JoinRequest { node_id }).await?;
 
 // Via delivery module (returns a ReplyFuture for manual control)
 let reply_future = delivery::get_reply::<_, JoinResponse, _, _>(
@@ -82,9 +82,9 @@ This mode never gives up. If the remote process dies permanently, the `ReplyFutu
 Like `get_reply`, but gives up if the endpoint has been continuously failed for a specified duration:
 
 ```rust
-// Via ServiceEndpoint
+// Via ServiceEndpoint (transport bound at construction)
 let response = register.get_reply_unless_failed_for(
-    &transport, RegisterRequest { /* ... */ }, Duration::from_secs(10),
+    RegisterRequest { /* ... */ }, Duration::from_secs(10),
 ).await?;
 
 // Via delivery module

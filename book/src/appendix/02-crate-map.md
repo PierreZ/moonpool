@@ -108,7 +108,7 @@ Moonpool is organized as a workspace of eight crates. The dependency graph is de
 - `ReplyPromise` -- server-side response promise (auto-sends `BrokenPromise` on Drop)
 - `ReplyFuture` -- client-side response future (auto-closes queue on Drop)
 - `ReplyError` -- error enum including `MaybeDelivered`, `Timeout`, `BrokenPromise`
-- `RequestStream` -- server-side typed request receiver with `recv_with_transport()`
+- `RequestStream` -- server-side typed request receiver with bound transport (`recv()`)
 - `RequestEnvelope` -- request + reply_to endpoint for bidirectional RPC
 - `MessagingError` -- transport-level error type
 - Delivery modes: `send`, `try_get_reply`, `get_reply`, `get_reply_unless_failed_for`

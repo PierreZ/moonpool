@@ -138,8 +138,11 @@ fn test_address() -> NetworkAddress {
     NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500)
 }
 
-fn create_transport() -> NetTransport<MockProviders> {
-    NetTransport::new(test_address(), MockProviders::new())
+fn create_transport() -> Rc<NetTransport<MockProviders>> {
+    moonpool_transport::NetTransportBuilder::new(MockProviders::new())
+        .local_address(test_address())
+        .build()
+        .expect("build transport")
 }
 
 // Test message types
@@ -169,15 +172,15 @@ struct EchoResponse {
 /// Test basic ping-pong RPC flow
 #[tokio::test]
 async fn test_basic_ping_pong() {
-    let transport = Rc::new(create_transport());
+    let transport = create_transport();
 
     // Create server endpoint
     let server_token = UID::new(0x1234, 0x5678);
     let server_endpoint = Endpoint::new(test_address(), server_token);
 
     // Create request stream for server
-    let request_stream: RequestStream<PingRequest, JsonCodec> =
-        RequestStream::new(server_endpoint.clone(), JsonCodec);
+    let request_stream: RequestStream<PingRequest, PingResponse, JsonCodec, MockProviders> =
+        RequestStream::new(server_endpoint.clone(), JsonCodec, Rc::clone(&transport));
 
     // Register server queue with transport
     transport.register(server_token, request_stream.queue());
@@ -197,8 +200,7 @@ async fn test_basic_ping_pong() {
     // Server receives and responds
     let transport_clone = transport.clone();
     let (request, reply) = request_stream
-        .try_recv(move |endpoint, payload| {
-            // Send reply back via transport
+        .try_recv_with_sender(move |endpoint, payload| {
             transport_clone
                 .dispatch(&endpoint.token, payload)
                 .expect("dispatch should succeed");
@@ -228,13 +230,13 @@ async fn test_basic_ping_pong() {
 /// Test multiple sequential requests
 #[tokio::test]
 async fn test_multiple_requests() {
-    let transport = Rc::new(create_transport());
+    let transport = create_transport();
 
     let server_token = UID::new(0xAAAA, 0xBBBB);
     let server_endpoint = Endpoint::new(test_address(), server_token);
 
-    let request_stream: RequestStream<EchoRequest, JsonCodec> =
-        RequestStream::new(server_endpoint.clone(), JsonCodec);
+    let request_stream: RequestStream<EchoRequest, EchoResponse, JsonCodec, MockProviders> =
+        RequestStream::new(server_endpoint.clone(), JsonCodec, Rc::clone(&transport));
 
     transport.register(server_token, request_stream.queue());
 
@@ -255,7 +257,7 @@ async fn test_multiple_requests() {
         // Server handles request
         let transport_clone = transport.clone();
         let (request, reply) = request_stream
-            .try_recv(move |endpoint, payload| {
+            .try_recv_with_sender(move |endpoint, payload| {
                 transport_clone
                     .dispatch(&endpoint.token, payload)
                     .expect("dispatch should succeed");
@@ -278,13 +280,13 @@ async fn test_multiple_requests() {
 /// Test broken promise detection
 #[tokio::test]
 async fn test_broken_promise() {
-    let transport = Rc::new(create_transport());
+    let transport = create_transport();
 
     let server_token = UID::new(0xDEAD, 0xBEEF);
     let server_endpoint = Endpoint::new(test_address(), server_token);
 
-    let request_stream: RequestStream<PingRequest, JsonCodec> =
-        RequestStream::new(server_endpoint.clone(), JsonCodec);
+    let request_stream: RequestStream<PingRequest, PingResponse, JsonCodec, MockProviders> =
+        RequestStream::new(server_endpoint.clone(), JsonCodec, Rc::clone(&transport));
 
     transport.register(server_token, request_stream.queue());
 
@@ -304,7 +306,7 @@ async fn test_broken_promise() {
     {
         let transport_clone = transport.clone();
         let (_request, reply) = request_stream
-            .try_recv::<_, PingResponse>(move |endpoint, payload| {
+            .try_recv_with_sender(move |endpoint, payload| {
                 transport_clone
                     .dispatch(&endpoint.token, payload)
                     .expect("dispatch should succeed");
@@ -323,13 +325,13 @@ async fn test_broken_promise() {
 /// Test server sending explicit error
 #[tokio::test]
 async fn test_explicit_error_response() {
-    let transport = Rc::new(create_transport());
+    let transport = create_transport();
 
     let server_token = UID::new(0x1111, 0x2222);
     let server_endpoint = Endpoint::new(test_address(), server_token);
 
-    let request_stream: RequestStream<PingRequest, JsonCodec> =
-        RequestStream::new(server_endpoint.clone(), JsonCodec);
+    let request_stream: RequestStream<PingRequest, PingResponse, JsonCodec, MockProviders> =
+        RequestStream::new(server_endpoint.clone(), JsonCodec, Rc::clone(&transport));
 
     transport.register(server_token, request_stream.queue());
 
@@ -348,7 +350,7 @@ async fn test_explicit_error_response() {
     // Server receives and sends error
     let transport_clone = transport.clone();
     let (_request, reply) = request_stream
-        .try_recv::<_, PingResponse>(move |endpoint, payload| {
+        .try_recv_with_sender(move |endpoint, payload| {
             transport_clone
                 .dispatch(&endpoint.token, payload)
                 .expect("dispatch should succeed");
@@ -420,7 +422,7 @@ fn test_endpoint_not_found_local_delivery() {
 /// parse the 16-byte payload → reconstruct endpoint → call fm.endpoint_not_found().
 #[test]
 fn test_endpoint_not_found_notifies_failure_monitor() {
-    let transport = Rc::new(create_transport());
+    let transport = create_transport();
     let fm = transport.failure_monitor();
 
     let server_addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 5000);

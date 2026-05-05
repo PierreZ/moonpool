@@ -18,8 +18,8 @@ trait Calculator {
 
 From this single trait definition, the macro generates:
 
-- **`CalculatorServer<C>`** with a `RequestStream` per method, `init()` for dynamic token allocation, `well_known()` for deterministic addressing, and `serve()` for automatic dispatch
-- **`CalculatorClient<C>`** with `ServiceEndpoint` fields for each method, constructed via `from_base()` or `well_known()`
+- **`CalculatorServer<C, P>`** with a `RequestStream` per method, `init()` for dynamic token allocation, `well_known()` for deterministic addressing, and `serve()` for automatic dispatch
+- **`CalculatorClient<C, P>`** with `ServiceEndpoint` fields for each method, constructed via `from_base()` or `well_known()`
 - The trait itself, wrapped with `#[async_trait(?Send)]`
 
 ## Two Tiers of Endpoint Addressing
@@ -38,7 +38,7 @@ let base_token = server.base_token(); // random, unique per instance
 Clients discover the interface via serialization (service registry, out-of-band message, etc.):
 
 ```rust
-let client = CalculatorClient::from_base(server_addr, base_token, JsonCodec);
+let client = CalculatorClient::from_base(server_addr, base_token, JsonCodec, &transport);
 ```
 
 ### Well-known (opt-in)
@@ -52,7 +52,7 @@ const WLTOKEN_PING: u32 = 4;
 let server = PingPongServer::well_known(&transport, WLTOKEN_PING, JsonCodec);
 
 // Client (no discovery needed)
-let client = PingPongClient::well_known(server_addr, WLTOKEN_PING, JsonCodec);
+let client = PingPongClient::well_known(server_addr, WLTOKEN_PING, JsonCodec, &transport);
 ```
 
 Well-known tokens use `UID::well_known(token_id)` as the base, with method endpoints derived via `base.adjusted(1)`, `.adjusted(2)`, etc.
@@ -66,21 +66,21 @@ Calculator (trait)
   ├── add(&self, AddRequest) -> Result<AddResponse, RpcError>
   └── sub(&self, SubRequest) -> Result<SubResponse, RpcError>
 
-CalculatorServer<C>
-  ├── add: RequestStream<AddRequest, C>    // at base.adjusted(1)
-  ├── sub: RequestStream<SubRequest, C>    // at base.adjusted(2)
-  ├── init(transport, codec) -> Self       // dynamic tokens
-  ├── well_known(transport, token, codec)  // deterministic tokens
-  ├── init_at(transport, base, codec)      // explicit base token
-  ├── base_token() -> UID                  // for client discovery
-  └── serve(transport, handler, providers) -> ServerHandle
+CalculatorServer<C, P>
+  ├── add: RequestStream<AddRequest, AddResponse, C, P>  // at base.adjusted(1)
+  ├── sub: RequestStream<SubRequest, SubResponse, C, P>  // at base.adjusted(2)
+  ├── init(transport, codec) -> Self            // dynamic tokens
+  ├── well_known(transport, token, codec)       // deterministic tokens
+  ├── init_at(transport, base, codec)           // explicit base token
+  ├── base_token() -> UID                       // for client discovery
+  └── serve(handler, providers) -> ServerHandle
 
-CalculatorClient<C>
-  ├── from_base(address, base_token, codec) -> Self
-  ├── well_known(address, token_id, codec) -> Self
-  ├── add: ServiceEndpoint<AddRequest, AddResponse, C>
-  └── sub: ServiceEndpoint<SubRequest, SubResponse, C>
+CalculatorClient<C, P>
+  ├── from_base(address, base_token, codec, transport) -> Self
+  ├── well_known(address, token_id, codec, transport) -> Self
+  ├── add: ServiceEndpoint<AddRequest, AddResponse, C, P>
+  └── sub: ServiceEndpoint<SubRequest, SubResponse, C, P>
 ```
 
-The `serve()` method is particularly useful: it consumes the server, spawns a background task per method that loops on `recv_with_transport`, and returns a `ServerHandle` that stops everything when dropped.
+The `serve()` method is particularly useful: it consumes the server, spawns a background task per method that loops on `recv()`, and returns a `ServerHandle` that stops everything when dropped. The transport is bound at server construction, so `serve()` only needs the handler and providers.
 

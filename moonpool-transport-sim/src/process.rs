@@ -8,7 +8,8 @@ use tracing::instrument;
 
 use moonpool_sim::{Process, SimContext, SimulationResult, assert_sometimes, buggify};
 use moonpool_transport::{
-    JsonCodec, NetTransportBuilder, Providers, ReplyPromise, TaskProvider, TimeProvider,
+    JsonCodec, NetTransport, NetTransportBuilder, Providers, ReplyPromise, TaskProvider,
+    TimeProvider,
 };
 
 use crate::service::{
@@ -43,14 +44,20 @@ impl Process for EchoServerProcess {
             })?;
 
         // Register handlers for all 3 methods
-        let (echo_stream, _) =
-            transport.register_handler_at::<EchoRequest, _>(ECHO_INTERFACE, METHOD_ECHO, JsonCodec);
-        let (delayed_stream, _) = transport.register_handler_at::<EchoRequest, _>(
+        let (echo_stream, _) = NetTransport::register_handler_at::<EchoRequest, EchoResponse, _>(
+            &transport,
+            ECHO_INTERFACE,
+            METHOD_ECHO,
+            JsonCodec,
+        );
+        let (delayed_stream, _) = NetTransport::register_handler_at::<EchoRequest, EchoResponse, _>(
+            &transport,
             ECHO_INTERFACE,
             METHOD_ECHO_DELAYED,
             JsonCodec,
         );
-        let (fail_stream, _) = transport.register_handler_at::<EchoRequest, _>(
+        let (fail_stream, _) = NetTransport::register_handler_at::<EchoRequest, EchoResponse, _>(
+            &transport,
             ECHO_INTERFACE,
             METHOD_ECHO_OR_FAIL,
             JsonCodec,
@@ -62,13 +69,13 @@ impl Process for EchoServerProcess {
         let shutdown = ctx.shutdown().clone();
         loop {
             tokio::select! {
-                Some((req, reply)) = echo_stream.recv_with_transport::<_, EchoResponse>(&transport) => {
+                Some((req, reply)) = echo_stream.recv() => {
                     handle_echo(&req, reply, my_ip);
                 }
-                Some((req, reply)) = delayed_stream.recv_with_transport::<_, EchoResponse>(&transport) => {
+                Some((req, reply)) = delayed_stream.recv() => {
                     handle_echo_delayed(&req, reply, my_ip, ctx);
                 }
-                Some((req, reply)) = fail_stream.recv_with_transport::<_, EchoResponse>(&transport) => {
+                Some((req, reply)) = fail_stream.recv() => {
                     handle_echo_or_fail(&req, reply, my_ip);
                 }
                 _ = shutdown.cancelled() => {
