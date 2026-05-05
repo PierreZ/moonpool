@@ -96,7 +96,7 @@ Moonpool is organized as a workspace of eight crates. The dependency graph is de
 
 **Role**: Peer connections, wire format, FlowTransport-style networking, and RPC. Modeled after FoundationDB's FlowTransport.
 
-**Dependencies**: moonpool-core, moonpool-sim, moonpool-transport-derive, async-trait, crc32c, futures, serde, serde_json, thiserror, tokio, tokio-util, tracing
+**Dependencies**: moonpool-core, moonpool-transport-derive, async-trait, crc32c, futures, serde, serde_json, thiserror, tokio, tokio-util, tracing
 
 **Key types**:
 - `Peer` -- manages a connection to a remote endpoint with automatic reconnection

@@ -22,7 +22,7 @@ Make moonpool's RPC ergonomics match FDB's fdbrpc. After this round: define an i
 ## Progress
 
 - [x] Task 0 — Remove load-balance and fan-out
-- [ ] Task 1 — Remove simulation code from transport
+- [x] Task 1 — Remove simulation code from transport
 - [ ] Task 2 — Allocate endpoint tokens dynamically
 - [ ] Task 3 — Hold transport inside interface
 - [ ] Task 4 — Erase codec generic

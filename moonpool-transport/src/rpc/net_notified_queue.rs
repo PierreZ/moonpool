@@ -32,7 +32,6 @@ use std::task::{Context, Poll, Waker};
 use serde::de::DeserializeOwned;
 
 use crate::{Endpoint, MessageCodec, NetworkAddress, UID};
-use moonpool_sim::assert_reachable;
 
 use super::endpoint_map::MessageReceiver;
 use super::reply_error::ReplyError;
@@ -217,22 +216,16 @@ impl<T: DeserializeOwned + 'static, C: MessageCodec> MessageReceiver for NetNoti
         // Deserialize the message using the codec
         match self.codec.decode::<T>(payload) {
             Ok(message) => {
-                assert_reachable!("queue: message deserialized");
                 let mut inner = self.inner.borrow_mut();
                 inner.queue.push_back(message);
                 inner.messages_received += 1;
 
                 // Wake all waiters
-                let had_waiters = !inner.wakers.is_empty();
                 for waker in inner.wakers.drain(..) {
                     waker.wake();
                 }
-                if had_waiters {
-                    assert_reachable!("queue: wakers notified");
-                }
             }
             Err(e) => {
-                assert_reachable!("queue: deserialization failed");
                 tracing::warn!(
                     endpoint = %self.endpoint.token,
                     error = %e,
@@ -270,18 +263,15 @@ impl<T, C: MessageCodec> Future for RecvFuture<'_, T, C> {
 
         // Try to get a message
         if let Some(message) = inner.queue.pop_front() {
-            assert_reachable!("queue: immediate message");
             return Poll::Ready(Some(message));
         }
 
         // If closed and empty, return None
         if inner.closed {
-            assert_reachable!("queue: closed and empty");
             return Poll::Ready(None);
         }
 
         // Register waker and wait
-        assert_reachable!("queue: recv waiting");
         inner.wakers.push(cx.waker().clone());
         Poll::Pending
     }

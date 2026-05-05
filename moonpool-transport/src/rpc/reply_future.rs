@@ -12,7 +12,6 @@ use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use crate::{Endpoint, MessageCodec};
-use moonpool_sim::{assert_reachable, assert_sometimes};
 use serde::de::DeserializeOwned;
 
 use super::net_notified_queue::NetNotifiedQueue;
@@ -76,13 +75,11 @@ impl<T: DeserializeOwned, C: MessageCodec> Future for ReplyFuture<T, C> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // Try to receive from the queue (non-blocking)
         if let Some(result) = self.queue.try_recv() {
-            assert_sometimes!(true, "Reply received from server");
             return Poll::Ready(result);
         }
 
         // Check if queue is closed (connection failed or peer disconnected)
         if self.queue.is_closed() {
-            assert_sometimes!(true, "Reply queue closed before response");
             let reason = self
                 .queue
                 .close_reason()
@@ -94,12 +91,8 @@ impl<T: DeserializeOwned, C: MessageCodec> Future for ReplyFuture<T, C> {
         // We create a recv future each time to register the waker
         let mut recv_future = Box::pin(self.queue.recv());
         match recv_future.as_mut().poll(cx) {
-            Poll::Ready(Some(result)) => {
-                assert_sometimes!(true, "Reply received from server");
-                Poll::Ready(result)
-            }
+            Poll::Ready(Some(result)) => Poll::Ready(result),
             Poll::Ready(None) => {
-                assert_sometimes!(true, "Reply queue closed before response");
                 let reason = self
                     .queue
                     .close_reason()
@@ -113,7 +106,6 @@ impl<T: DeserializeOwned, C: MessageCodec> Future for ReplyFuture<T, C> {
 
 impl<T: DeserializeOwned, C: MessageCodec> Drop for ReplyFuture<T, C> {
     fn drop(&mut self) {
-        assert_reachable!("reply_future_dropped_queue_closed");
         self.queue.close();
         if let Some(cleanup) = self.drop_cleanup.take() {
             cleanup();

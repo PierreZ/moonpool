@@ -19,7 +19,6 @@ use std::rc::Rc;
 use std::task::{Poll, Waker};
 
 use crate::Endpoint;
-use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
 
 /// Maximum number of permanently failed endpoints before clearing the map.
 ///
@@ -117,7 +116,6 @@ impl FailureMonitor {
         };
 
         if changed {
-            assert_sometimes!(true, "failure_monitor_status_changed");
             wake_all(&mut inner.endpoint_watchers, address);
         }
     }
@@ -152,18 +150,11 @@ impl FailureMonitor {
 
         let mut inner = self.inner.borrow_mut();
 
-        // Cap to prevent memory leaks in long-running simulations
-        let max = if moonpool_sim::buggify_with_prob!(0.01) {
-            assert_reachable!("buggified_low_failed_endpoint_cap");
-            10
-        } else {
-            MAX_FAILED_ENDPOINTS
-        };
-        if inner.failed_endpoints.len() >= max {
-            assert_sometimes!(true, "failure_monitor_eviction_triggered");
+        // Cap to prevent memory leaks
+        if inner.failed_endpoints.len() >= MAX_FAILED_ENDPOINTS {
             tracing::warn!(
                 "FailureMonitor: evicting transient failed endpoints (cap {} reached, {} entries)",
-                max,
+                MAX_FAILED_ENDPOINTS,
                 inner.failed_endpoints.len()
             );
             // Preserve permanently failed endpoints, clear transient ones
@@ -177,13 +168,6 @@ impl FailureMonitor {
             for (k, v) in permanent {
                 inner.failed_endpoints.insert(k, v);
             }
-            assert_always!(
-                inner
-                    .failed_endpoints
-                    .values()
-                    .all(|r| matches!(r, FailedReason::NotFound)),
-                "failed_endpoints_preserves_permanent_after_eviction"
-            );
         }
 
         inner
@@ -278,7 +262,6 @@ impl FailureMonitor {
             }
 
             // Slow path: register waker
-            assert_sometimes!(true, "failure_monitor_waker_registered_slow_path");
             drop(inner);
             let mut inner = fm.inner.borrow_mut();
             inner

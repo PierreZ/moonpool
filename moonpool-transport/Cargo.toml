@@ -15,7 +15,6 @@ rustc-args = ["--cfg", "tokio_unstable"]
 
 [dependencies]
 moonpool-core = { path = "../moonpool-core", version = "0.6.0" }
-moonpool-sim = { path = "../moonpool-sim", version = "0.6.0" }
 moonpool-transport-derive = { path = "../moonpool-transport-derive", version = "0.6.0" }
 
 async-trait = "0.1"

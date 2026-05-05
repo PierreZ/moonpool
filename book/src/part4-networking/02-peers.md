@@ -79,11 +79,4 @@ See [Failure Monitor](./09-failure-monitor.md) for the full consumer API and [De
 
 ## Under Simulation
 
-In simulation, peers experience chaos:
-
-- Random connection closes (0.001% probability)
-- Connection failures (50% probabilistic during buggify)
-- Partial writes
-- Half-open connection simulation
-
-The peer does not know it is running in simulation. It sees the same `connect()` failures and `read()` errors that would occur with a flaky real network. Its reconnection logic, backoff timing, and queue management are all exercised against these faults using the same code paths that run in production.
+Deterministic simulation with fault injection for the transport layer will be reintroduced in a future revision against the new transport API.

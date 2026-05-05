@@ -37,16 +37,6 @@ Without backoff, simulation tests that inject network failures produce degenerat
 
 With backoff, the chaos engine can sever connections freely. Peers back off, the event queue stays manageable, and when connections restore, peers reconnect in a staggered pattern that avoids thundering herd effects.
 
-You can use `assert_sometimes_each!` to track backoff depth across simulation runs, ensuring you exercise multiple levels of the exponential curve:
-
-```rust
-// Example: track that different backoff depths are reached
-assert_sometimes_each!(
-    "backoff_depth",
-    [("attempt", failure_count)]
-);
-```
-
 ## Profile Presets
 
 Different network environments need different backoff tuning. `PeerConfig` provides presets:
@@ -57,4 +47,4 @@ Different network environments need different backoff tuning. `PeerConfig` provi
 | Local | 10ms | 1s | 100 | 500ms | 10 |
 | WAN | 500ms | 60s | 5000 | 30s | Unlimited |
 
-For simulation tests, the default profile works well. The chaos engine can buggify the actual delays through the `TimeProvider`, stretching or shortening them to explore timing-sensitive code paths.
+For simulation tests, the default profile works well. The `TimeProvider` abstraction allows stretching or shortening delays to explore timing-sensitive code paths.
