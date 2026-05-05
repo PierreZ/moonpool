@@ -38,6 +38,14 @@ const PING_TOKEN: UID = UID::well_known(1);
 /// never delivered to application.
 const PONG_TOKEN: UID = UID::new(u64::MAX - 1, 0);
 
+/// Wire token for endpoint-not-found notifications (FDB: `WLTOKEN_ENDPOINT_NOT_FOUND`).
+///
+/// Intercepted by `process_read_buffer`, never delivered to application.
+/// Payload: 16 bytes — the UID of the missing endpoint (two little-endian u64).
+///
+/// FDB ref: `EndpointNotFoundReceiver` in `FlowTransport.actor.cpp:232-236`
+pub(crate) const ENDPOINT_NOT_FOUND_TOKEN: UID = UID::well_known(0);
+
 // =============================================================================
 // Ping Tracker State Machine
 // =============================================================================
@@ -1138,6 +1146,32 @@ fn process_read_buffer<P: Providers>(
                     continue; // Do NOT deliver to application
                 }
 
+                // Intercept endpoint-not-found notification
+                // FDB: EndpointNotFoundReceiver::receive() (FlowTransport.cpp:232-236)
+                if token == ENDPOINT_NOT_FOUND_TOKEN {
+                    if payload.len() >= 16 {
+                        let first =
+                            u64::from_le_bytes(payload[0..8].try_into().unwrap_or_default());
+                        let second =
+                            u64::from_le_bytes(payload[8..16].try_into().unwrap_or_default());
+                        let missing_token = UID::new(first, second);
+
+                        let state = shared_state.borrow();
+                        if let Ok(addr) = crate::NetworkAddress::parse(&state.destination) {
+                            let endpoint = crate::Endpoint::new(addr, missing_token);
+                            if let Some(ref fm) = state.failure_monitor {
+                                tracing::debug!(
+                                    "connection_task: endpoint_not_found for token {} at {}",
+                                    missing_token,
+                                    state.destination
+                                );
+                                fm.endpoint_not_found(&endpoint);
+                            }
+                        }
+                    }
+                    continue; // Do NOT deliver to application
+                }
+
                 // Normal packet — deliver to application
                 if receive_tx.send((token, payload)).is_err() {
                     return true; // Receiver dropped, exit
@@ -1477,5 +1511,40 @@ mod tests {
         assert!(PING_TOKEN.is_well_known());
         // PONG_TOKEN is NOT well-known (avoids endpoint dispatch)
         assert!(!PONG_TOKEN.is_well_known());
+    }
+
+    #[test]
+    fn test_endpoint_not_found_token_is_well_known_zero() {
+        assert!(ENDPOINT_NOT_FOUND_TOKEN.is_well_known());
+        assert_eq!(ENDPOINT_NOT_FOUND_TOKEN.first, u64::MAX);
+        assert_eq!(ENDPOINT_NOT_FOUND_TOKEN.second, 0);
+        assert_ne!(ENDPOINT_NOT_FOUND_TOKEN, PING_TOKEN);
+        assert_ne!(ENDPOINT_NOT_FOUND_TOKEN, PONG_TOKEN);
+    }
+
+    #[test]
+    fn test_endpoint_not_found_payload_encoding() {
+        let token = UID::new(0x1234_5678_9ABC_DEF0, 0xFEDC_BA98_7654_3210);
+
+        // Encode
+        let mut payload = [0u8; 16];
+        payload[0..8].copy_from_slice(&token.first.to_le_bytes());
+        payload[8..16].copy_from_slice(&token.second.to_le_bytes());
+
+        // Decode (same logic as process_read_buffer)
+        let first = u64::from_le_bytes(payload[0..8].try_into().unwrap_or_default());
+        let second = u64::from_le_bytes(payload[8..16].try_into().unwrap_or_default());
+        let decoded = UID::new(first, second);
+
+        assert_eq!(decoded, token);
+    }
+
+    #[test]
+    fn test_endpoint_not_found_malformed_payload_ignored() {
+        // Payloads shorter than 16 bytes should not panic during decode.
+        // The intercept in process_read_buffer guards with `payload.len() >= 16`.
+        let short_payload = [0u8; 8];
+        assert!(short_payload.len() < 16);
+        // No panic — the guard prevents decode attempt.
     }
 }

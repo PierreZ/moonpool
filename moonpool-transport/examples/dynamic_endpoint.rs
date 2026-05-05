@@ -133,19 +133,13 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     assert_ne!(calc.base_token(), calc2.base_token());
 
     // Print the base token for the client to use
-    println!("=== CLIENT CONNECTION INFO ===");
+    let token_json = serde_json::to_string(&base_token)?;
+    println!("=== COPY-PASTE THIS TO START THE CLIENT ===\n");
     println!(
-        "Run client with: cargo run --example dynamic_endpoint -- client '{}'\n",
-        serde_json::to_string(&base_token)?
+        "  cargo run --example dynamic_endpoint -- client '{}'\n",
+        token_json
     );
-
-    // Also show the from_base client construction
-    let client_view =
-        CalculatorClient::from_base(transport.local_address().clone(), base_token, JsonCodec);
-    println!(
-        "Serialized client interface:\n{}\n",
-        serde_json::to_string_pretty(&client_view)?
-    );
+    println!("=============================================\n");
 
     println!("Waiting for requests...\n");
 

@@ -10,9 +10,10 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::rc::Rc;
 
 use moonpool_transport::{
-    Endpoint, JsonCodec, NetTransport, NetworkAddress, NetworkProvider, Providers, ReplyError,
-    ReplyFuture, RequestEnvelope, RequestStream, TokioRandomProvider, TokioStorageProvider,
-    TokioTaskProvider, TokioTimeProvider, UID, send_request,
+    Endpoint, FailureMonitor, FailureStatus, JsonCodec, MessagingError, NetTransport,
+    NetworkAddress, NetworkProvider, Providers, ReplyError, ReplyFuture, RequestEnvelope,
+    RequestStream, TokioRandomProvider, TokioStorageProvider, TokioTaskProvider, TokioTimeProvider,
+    UID, send_request,
 };
 use serde::{Deserialize, Serialize};
 
@@ -378,4 +379,97 @@ fn test_request_envelope_roundtrip() {
     assert_eq!(decoded.request.seq, 123);
     assert_eq!(decoded.request.payload, "test payload");
     assert_eq!(decoded.reply_to.token, envelope.reply_to.token);
+}
+
+/// Test that local delivery to non-existent endpoint returns EndpointNotFound synchronously.
+#[test]
+fn test_endpoint_not_found_local_delivery() {
+    let transport = create_transport();
+
+    // Token that nobody registered
+    let missing_token = UID::new(0xDEAD, 0xBEEF);
+    let missing_endpoint = Endpoint::new(test_address(), missing_token);
+
+    // send_request goes through deliver_local (same address) → EndpointNotFound
+    let result = send_request::<PingRequest, PingResponse, _, _>(
+        &transport,
+        &missing_endpoint,
+        PingRequest {
+            seq: 1,
+            payload: "hello".to_string(),
+        },
+        JsonCodec,
+    );
+
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => panic!("expected EndpointNotFound error"),
+    };
+    match err {
+        MessagingError::EndpointNotFound { token } => {
+            assert_eq!(token, missing_token);
+        }
+        other => panic!("expected EndpointNotFound, got {:?}", other),
+    }
+}
+
+/// Test that dispatching an endpoint-not-found notification correctly marks
+/// the endpoint as permanently failed in the failure monitor.
+///
+/// Simulates what happens when the client-side peer receives the notification:
+/// parse the 16-byte payload → reconstruct endpoint → call fm.endpoint_not_found().
+#[test]
+fn test_endpoint_not_found_notifies_failure_monitor() {
+    let transport = Rc::new(create_transport());
+    let fm = transport.failure_monitor();
+
+    let server_addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 5000);
+    let missing_token = UID::new(0xCAFE, 0xBABE);
+    let endpoint = Endpoint::new(server_addr.clone(), missing_token);
+
+    // Mark as available first so we can observe the transition
+    fm.set_status(&server_addr.to_string(), FailureStatus::Available);
+    assert_eq!(fm.state(&endpoint), FailureStatus::Available);
+
+    // Simulate receiving the notification: construct endpoint and call endpoint_not_found
+    fm.endpoint_not_found(&endpoint);
+
+    // Endpoint should now be permanently failed
+    assert_eq!(fm.state(&endpoint), FailureStatus::Failed);
+}
+
+/// Test that well-known tokens are NOT notified (prevents feedback loops).
+#[test]
+fn test_endpoint_not_found_skips_well_known_tokens() {
+    let fm = Rc::new(FailureMonitor::new());
+
+    let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
+    let well_known_token = UID::well_known(42);
+    let endpoint = Endpoint::new(addr, well_known_token);
+
+    fm.set_status("10.0.0.1:4500", FailureStatus::Available);
+
+    // endpoint_not_found should skip well-known tokens
+    fm.endpoint_not_found(&endpoint);
+
+    // Should still be available (not marked as failed)
+    assert_eq!(fm.state(&endpoint), FailureStatus::Available);
+}
+
+/// Test the notification wire format: 16 bytes = two LE u64 encoding a UID.
+#[test]
+fn test_endpoint_not_found_wire_format_roundtrip() {
+    let original = UID::new(0x1234_5678_9ABC_DEF0, 0xFEDC_BA98_7654_3210);
+
+    // Encode
+    let mut payload = [0u8; 16];
+    payload[0..8].copy_from_slice(&original.first.to_le_bytes());
+    payload[8..16].copy_from_slice(&original.second.to_le_bytes());
+
+    // Decode
+    let first = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let second = u64::from_le_bytes(payload[8..16].try_into().unwrap());
+    let decoded = UID::new(first, second);
+
+    assert_eq!(decoded, original);
 }

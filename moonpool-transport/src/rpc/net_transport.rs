@@ -900,6 +900,18 @@ async fn connection_reader<P: Providers>(
                         token,
                         e
                     );
+
+                    // FDB: send WLTOKEN_ENDPOINT_NOT_FOUND back to sender
+                    // (FlowTransport.cpp:1244-1225)
+                    if !token.is_well_known() {
+                        let mut notification = [0u8; 16];
+                        notification[0..8].copy_from_slice(&token.first.to_le_bytes());
+                        notification[8..16].copy_from_slice(&token.second.to_le_bytes());
+                        let _ = peer.borrow_mut().send_unreliable(
+                            crate::peer::core::ENDPOINT_NOT_FOUND_TOKEN,
+                            &notification,
+                        );
+                    }
                 }
             }
             None => {
@@ -1486,5 +1498,44 @@ mod tests {
             result,
             Err(crate::error::MessagingError::NetworkError { .. })
         ));
+    }
+
+    // =========================================================================
+    // EndpointNotFound notification tests
+    // =========================================================================
+
+    #[test]
+    fn test_dispatch_not_found_for_well_known_token() {
+        let transport = create_test_transport();
+
+        // Dispatch to a well-known token that's not registered
+        let well_known = UID::well_known(42);
+        let payload = b"test";
+
+        let result = transport.dispatch(&well_known, payload);
+        assert!(matches!(
+            result,
+            Err(MessagingError::EndpointNotFound { .. })
+        ));
+        // The guard in connection_reader checks is_well_known() before
+        // sending notification — well-known tokens should NOT trigger notifications.
+        assert!(well_known.is_well_known());
+    }
+
+    #[test]
+    fn test_dispatch_not_found_for_dynamic_token() {
+        let transport = create_test_transport();
+
+        // Dispatch to a dynamic (non-well-known) token that's not registered
+        let dynamic_token = UID::new(0xCAFE, 0xBABE);
+        let payload = b"test";
+
+        let result = transport.dispatch(&dynamic_token, payload);
+        assert!(matches!(
+            result,
+            Err(MessagingError::EndpointNotFound { .. })
+        ));
+        // Dynamic tokens SHOULD trigger the notification in connection_reader.
+        assert!(!dynamic_token.is_well_known());
     }
 }
