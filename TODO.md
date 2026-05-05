@@ -19,6 +19,20 @@ Make moonpool's RPC ergonomics match FDB's fdbrpc. After this round: define an i
 - Do not batch tasks or "while I'm in here" refactors.
 - Tasks ordered by dependency.
 
+## Progress
+
+- [x] Task 0 — Remove load-balance and fan-out
+- [ ] Task 1 — Remove simulation code from transport
+- [ ] Task 2 — Allocate endpoint tokens dynamically
+- [ ] Task 3 — Hold transport inside interface
+- [ ] Task 4 — Erase codec generic
+- [ ] Task 5 — Unify Server and Client
+- [ ] Task 6 — Serializable interfaces
+- [ ] Task 7 — Verify broken_promise (verify-only)
+- [ ] Task 8 — Verify delivery modes (verify-only)
+- [ ] Task 9 — Promote on_failed_for
+- [ ] Final book audit
+
 ## Cross-Cutting Invariants
 
 1. `ServiceEndpoint<Req, Resp>` must remain cheap-clone and placeable in collections.

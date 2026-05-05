@@ -15,9 +15,7 @@
 mod delivery;
 mod endpoint_map;
 mod failure_monitor;
-mod fan_out;
 mod interface;
-mod load_balance;
 mod net_notified_queue;
 mod net_transport;
 mod reply_error;
@@ -35,11 +33,7 @@ mod test_support;
 pub use delivery::{get_reply, get_reply_unless_failed_for, send, try_get_reply};
 pub use endpoint_map::{EndpointMap, MessageReceiver};
 pub use failure_monitor::{FailedReason, FailureMonitor, FailureStatus};
-pub use fan_out::{FanOutError, fan_out_all, fan_out_all_partial, fan_out_quorum, fan_out_race};
 pub use interface::{method_endpoint, method_uid};
-pub use load_balance::{
-    Alternatives, AtMostOnce, Distance, LoadBalanceConfig, ModelHolder, QueueModel, load_balance,
-};
 pub use net_notified_queue::{NetNotifiedQueue, RecvFuture, SharedNetNotifiedQueue};
 pub use net_transport::{NetTransport, NetTransportBuilder};
 pub use reply_error::ReplyError;

@@ -39,23 +39,4 @@ path = "examples/ping_pong.rs"
 name = "calculator"
 path = "examples/calculator.rs"
 
-[[example]]
-name = "load_balanced_reads"
-path = "examples/load_balanced_reads.rs"
-
-[[example]]
-name = "fan_out_all_demo"
-path = "examples/fan_out_all_demo.rs"
-
-[[example]]
-name = "fan_out_quorum_demo"
-path = "examples/fan_out_quorum_demo.rs"
-
-[[example]]
-name = "fan_out_race_demo"
-path = "examples/fan_out_race_demo.rs"
-
-[[example]]
-name = "fan_out_all_partial_demo"
-path = "examples/fan_out_all_partial_demo.rs"
 

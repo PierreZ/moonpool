@@ -1,8 +1,7 @@
 //! Exponential moving average (EMA) smoother for latency / queue-depth tracking.
 //!
-//! Direct port of FoundationDB's `fdbrpc/include/fdbrpc/Smoother.h`. Used by
-//! [`crate::rpc::QueueModel`] to track smoothed in-flight request counts and
-//! latency per endpoint.
+//! Direct port of FoundationDB's `fdbrpc/include/fdbrpc/Smoother.h`.
+//! Useful for tracking smoothed in-flight request counts and latency per endpoint.
 //!
 //! # Semantics
 //!

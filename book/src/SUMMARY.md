@@ -83,7 +83,6 @@
   - [Server, Client, and Endpoints](./part4-networking/07-server-client-endpoints.md)
 - [Delivery Modes](./part4-networking/08-delivery-modes.md)
 - [Failure Monitor](./part4-networking/09-failure-monitor.md)
-- [Load Balancing and Fan-Out](./part4-networking/11-load-balance-fan-out.md)
 - [Designing Simulation-Friendly RPC](./part4-networking/10-designing-rpc.md)
 
 ---
