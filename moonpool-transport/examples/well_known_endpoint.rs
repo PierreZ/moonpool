@@ -1,26 +1,24 @@
-//! Ping-Pong Example: Real TCP RPC using Moonpool's `#[service]` macro.
+//! Well-Known Endpoint Example: Deterministic token addressing.
 //!
-//! This example demonstrates moonpool's RPC over **real TCP sockets**
-//! using the `#[service]` macro and `ServiceEndpoint` delivery modes.
+//! This example demonstrates moonpool's well-known endpoint pattern where
+//! both server and client derive tokens from a compile-time constant —
+//! no service discovery needed.
 //!
 //! Run as two separate processes:
 //!
 //! ```bash
 //! # Terminal 1 - Start the server
-//! cargo run --example ping_pong -- server
+//! cargo run --example well_known_endpoint -- server
 //!
 //! # Terminal 2 - Run the client
-//! cargo run --example ping_pong -- client
+//! cargo run --example well_known_endpoint -- client
 //! ```
 //!
 //! # Architecture
 //!
-//! The example shows:
-//! - `#[service]` macro generating Server and Client types
-//! - `NetTransportBuilder` for clean transport setup
-//! - `ServiceEndpoint` fields with delivery mode methods
-//! - Server: listening, receiving typed requests, sending responses
-//! - Client: choosing delivery mode per call (get_reply, try_get_reply, send)
+//! - `#[service]` macro generates Server and Client types
+//! - `transport.serve_well_known::<PingPong>(token_id, codec)` registers at deterministic token
+//! - `NetTransport::client_well_known::<PingPong>(addr, token_id, codec)` connects without discovery
 
 use std::env;
 use std::time::Duration;
@@ -38,25 +36,23 @@ use serde::{Deserialize, Serialize};
 const SERVER_ADDR: &str = "127.0.0.1:4500";
 const CLIENT_ADDR: &str = "127.0.0.1:4501";
 
+/// Well-known token for the PingPong service.
+/// Starts at FirstAvailable (3) + 1 to avoid collisions with system tokens.
+const WLTOKEN_PING_PONG: u32 = 4;
+
 // ============================================================================
 // Message Types
 // ============================================================================
 
-/// Request message for ping-pong RPC.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct PingRequest {
-    /// Sequence number for tracking.
     seq: u32,
-    /// Payload message.
     message: String,
 }
 
-/// Response message for ping-pong RPC.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct PingResponse {
-    /// Echoed sequence number.
     seq: u32,
-    /// Echoed message with "pong:" prefix.
     echo: String,
 }
 
@@ -64,12 +60,7 @@ struct PingResponse {
 // Interface Definition
 // ============================================================================
 
-/// PingPong interface definition.
-///
-/// The `#[service]` macro generates:
-/// - `PingPongServer<C>` with `RequestStream` field (ping)
-/// - `PingPongClient` with `ServiceEndpoint` field (ping)
-#[service(id = 0x5049_4E47)]
+#[service]
 trait PingPong {
     async fn ping(&self, req: PingRequest) -> Result<PingResponse, RpcError>;
 }
@@ -79,7 +70,7 @@ trait PingPong {
 // ============================================================================
 
 async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Ping-Pong Server ===\n");
+    println!("=== Well-Known Endpoint Server ===\n");
 
     let providers = TokioProviders::new();
     let local_addr = NetworkAddress::parse(SERVER_ADDR)?;
@@ -91,12 +82,12 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Server listening on {}\n", SERVER_ADDR);
 
-    let ping_server = PingPongServer::init(&transport, JsonCodec);
+    let ping_server = PingPongServer::well_known(&transport, WLTOKEN_PING_PONG, JsonCodec);
 
     println!(
-        "Registered {} method(s) (interface ID: 0x{:X})\n",
+        "Registered {} method(s) at well-known token {}\n",
         PingPongServer::<JsonCodec>::METHOD_COUNT,
-        PingPongServer::<JsonCodec>::INTERFACE_ID
+        WLTOKEN_PING_PONG
     );
     println!("Waiting for ping requests...\n");
 
@@ -129,7 +120,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 // ============================================================================
 
 async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Ping-Pong Client ===\n");
+    println!("=== Well-Known Endpoint Client ===\n");
 
     let providers = TokioProviders::new();
     let time = providers.time().clone();
@@ -144,13 +135,12 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Connecting to server at {}\n", SERVER_ADDR);
 
-    // Client is a plain struct with ServiceEndpoint fields.
-    // Codec is passed once at construction.
-    let ping_client = PingPongClient::new(server_addr, JsonCodec);
+    // Client constructed from well-known token — no discovery needed.
+    let ping_client = PingPongClient::well_known(server_addr, WLTOKEN_PING_PONG, JsonCodec);
 
     println!(
-        "Using interface ID: 0x{:X} with {} method(s)\n",
-        PingPongClient::<JsonCodec>::INTERFACE_ID,
+        "Using well-known token {} with {} method(s)\n",
+        WLTOKEN_PING_PONG,
         PingPongClient::<JsonCodec>::METHOD_COUNT
     );
 
@@ -165,8 +155,6 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
 
         println!("Sending ping seq={}: {:?}", seq, request.message);
 
-        // Delivery mode is a call-site decision.
-        // Here we use get_reply (at-least-once, reliable):
         match time
             .timeout(
                 Duration::from_secs(5),
@@ -230,14 +218,14 @@ fn main() {
             });
         }
         _ => {
-            println!("Ping-Pong Example: Real TCP RPC with Moonpool\n");
-            println!("This example demonstrates the #[service] macro:\n");
-            println!("  - PingPongServer<C> with RequestStream field");
-            println!("  - PingPongClient with ServiceEndpoint field");
-            println!("  - Delivery modes: .get_reply(), .try_get_reply(), .send()\n");
+            println!("Well-Known Endpoint Example\n");
+            println!("Demonstrates deterministic token addressing (no discovery):\n");
+            println!("  - Server: transport.serve_well_known::<PingPong>(token, codec)");
+            println!("  - Client: NetTransport::client_well_known::<PingPong>(addr, token, codec)");
+            println!("  - Both derive method tokens from the same well-known base\n");
             println!("Usage:");
-            println!("  cargo run --example ping_pong -- server   # Start the server");
-            println!("  cargo run --example ping_pong -- client   # Run the client\n");
+            println!("  cargo run --example well_known_endpoint -- server");
+            println!("  cargo run --example well_known_endpoint -- client\n");
             println!("Run server first in one terminal, then client in another.");
         }
     }

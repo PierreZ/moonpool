@@ -6,7 +6,7 @@ The `#[service]` macro generates a complete RPC infrastructure from a trait defi
 
 ## The Trait Definition
 
-A service starts as a Rust trait with `#[service(id = ...)]`:
+A service starts as a Rust trait with `#[service]`:
 
 ```rust
 use moonpool::{service, RpcError};
@@ -24,7 +24,7 @@ struct MulRequest { a: i32, b: i32 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MulResponse { result: i32 }
 
-#[service(id = 0xCA1C_0000)]
+#[service]
 trait Calculator {
     async fn add(&self, req: AddRequest) -> Result<AddResponse, RpcError>;
     async fn multiply(&self, req: MulRequest) -> Result<MulResponse, RpcError>;
@@ -37,11 +37,11 @@ Request and response types need `Serialize` and `Deserialize` derives because th
 
 ## Method Indexing
 
-Methods are assigned indices starting at 1 in declaration order. Index 0 is reserved.
+Methods are assigned indices starting at 1 in declaration order. Index 0 is the base token identity.
 
-For our Calculator:
-- `add` gets index 1, routed to `UID(0xCA1C_0000, 1)`
-- `multiply` gets index 2, routed to `UID(0xCA1C_0000, 2)`
+For our Calculator with a base token `B`:
+- `add` gets index 1, routed to `B.adjusted(1)`
+- `multiply` gets index 2, routed to `B.adjusted(2)`
 
 These indices are stable as long as you do not reorder methods. Adding new methods at the end is safe. Reordering or removing methods changes the wire protocol and breaks compatibility with existing clients.
 

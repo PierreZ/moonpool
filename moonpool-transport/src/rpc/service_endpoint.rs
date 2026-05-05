@@ -9,7 +9,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! let calc = CalculatorClient::new(server_addr, JsonCodec);
+//! let calc = CalculatorClient::from_base(server_addr, base_token, JsonCodec);
 //!
 //! // Each delivery mode is a call-site decision:
 //! let resp = calc.add.get_reply(&transport, req).await?;

@@ -199,6 +199,18 @@ impl<P: Providers> NetTransport<P> {
         &self.providers
     }
 
+    /// Allocate a random base token for a dynamic interface.
+    ///
+    /// Each method in the interface uses `base.adjusted(method_index)`.
+    /// Method indices start at 1 (0 is the base identity).
+    pub fn allocate_interface_token(&self) -> UID {
+        use crate::RandomProvider as _;
+        UID::new(
+            self.providers.random().random::<u64>(),
+            self.providers.random().random::<u64>(),
+        )
+    }
+
     /// Set the weak self-reference for background task spawning.
     ///
     /// Required for multi-node operation where `connection_reader` tasks need

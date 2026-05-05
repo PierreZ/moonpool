@@ -31,11 +31,11 @@ tracing-subscriber = "0.3"
 [dev-dependencies]
 
 [[example]]
-name = "ping_pong"
-path = "examples/ping_pong.rs"
+name = "well_known_endpoint"
+path = "examples/well_known_endpoint.rs"
 
 [[example]]
-name = "calculator"
-path = "examples/calculator.rs"
+name = "dynamic_endpoint"
+path = "examples/dynamic_endpoint.rs"
 
 

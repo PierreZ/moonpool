@@ -5,25 +5,29 @@
 //!
 //! # Overview
 //!
-//! The `#[service(id = ...)]` macro generates all RPC boilerplate from a trait:
+//! The `#[service]` macro generates all RPC boilerplate from a trait:
 //!
-//! - `{Name}Server<C>`, `{Name}Client`, `Bound{Name}Client<P, C>`
+//! - `{Name}Server<C>` — server-side with `RequestStream` fields
+//! - `{Name}Client<C>` — client-side with `ServiceEndpoint` fields
 //!
 //! # Example
 //!
 //! ```rust,ignore
-//! #[service(id = 0xCA1C_0000)]
+//! #[service]
 //! trait Calculator {
 //!     async fn add(&self, req: AddRequest) -> Result<AddResponse, RpcError>;
 //!     async fn sub(&self, req: SubRequest) -> Result<SubResponse, RpcError>;
 //! }
 //!
-//! // Server
+//! // Server (dynamic tokens):
 //! let calc = CalculatorServer::init(&transport, JsonCodec);
 //!
-//! // Client
-//! let client = CalculatorClient::new(server_addr).bind(&transport, JsonCodec);
-//! let resp = client.add(request).await?;
+//! // Server (well-known tokens):
+//! let calc = CalculatorServer::well_known(&transport, MY_TOKEN, JsonCodec);
+//!
+//! // Client (from base token or well-known):
+//! let client = CalculatorClient::from_base(server_addr, base_token, JsonCodec);
+//! let client = CalculatorClient::well_known(server_addr, MY_TOKEN, JsonCodec);
 //! ```
 //!
 //! # Serialization

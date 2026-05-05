@@ -9,12 +9,17 @@ The `#[service]` macro generates the types. Now we need to understand how to **w
 The generated `Server` type provides two patterns. The simple path uses `serve()`, which spawns background tasks and returns a handle:
 
 ```rust
+// Dynamic tokens (each instance gets unique random base):
 let server = CalculatorServer::init(&transport, JsonCodec);
+
+// Or well-known tokens (deterministic, no discovery needed):
+let server = CalculatorServer::well_known(&transport, WLTOKEN_CALC, JsonCodec);
+
 let handle = server.serve(transport.clone(), Rc::new(CalculatorImpl), &providers);
 // Tasks run until handle is dropped or stop() is called
 ```
 
-`init()` registers all method endpoints with the transport's `EndpointMap`. Each method gets its own `RequestStream`, backed by a `NetNotifiedQueue` that receives incoming request envelopes.
+`init()` allocates a random base token and registers all method endpoints with the transport's `EndpointMap`. Each method gets its own `RequestStream`, backed by a `NetNotifiedQueue` that receives incoming request envelopes.
 
 `serve()` consumes the server and spawns one task per method. Each task loops on `recv_with_transport`, dispatches to the handler, and sends the response back through the `ReplyPromise`. The returned `ServerHandle` holds close functions for each stream. Dropping it or calling `stop()` closes the streams, which causes the tasks to exit cleanly.
 
@@ -30,17 +35,22 @@ while let Some((req, reply)) = server.add.recv_with_transport(&transport).await 
 
 ## Connecting a Client
 
-The client side is even simpler. Create a `Client` with the server's address, then call methods on its `ServiceEndpoint` fields:
+Clients are constructed from a base token (obtained via discovery or well-known addressing):
 
 ```rust
-let calc = CalculatorClient::new(server_address, JsonCodec);
+// From a well-known token (both sides know the constant):
+let calc = CalculatorClient::well_known(server_address, WLTOKEN_CALC, JsonCodec);
 
-// Each field is a ServiceEndpoint — you choose the delivery mode at the call site
+// From a discovered base token (received via serialization):
+let calc = CalculatorClient::from_base(server_address, base_token, JsonCodec);
+```
+
+Each `ServiceEndpoint` field carries the destination address, method UID, and codec. You pass only the transport at each call. This makes the delivery mode explicit: `get_reply` for at-least-once, `try_get_reply` for at-most-once, `send` for fire-and-forget. See [Delivery Modes](./08-delivery-modes.md) for the full set.
+
+```rust
 let resp = calc.add.get_reply(&transport, AddRequest { a: 1, b: 2 }).await?;
 assert_eq!(resp.result, 3);
 ```
-
-There is no `bind()` step and no bound client type. The `ServiceEndpoint` carries the destination address, method UID, and codec, and you pass only the transport at each call. This makes the delivery mode explicit: `get_reply` for at-least-once, `try_get_reply` for at-most-once, `send` for fire-and-forget. See [Delivery Modes](./08-delivery-modes.md) for the full set.
 
 Under the hood, `get_reply` creates a temporary `ReplyFuture` registered at a unique endpoint, then the response arrives as a packet routed to that endpoint.
 
@@ -57,8 +67,8 @@ It uses a **hybrid lookup** strategy:
 // Well-known: O(1) array lookup
 map.insert_well_known(WellKnownToken::Ping, receiver)?;
 
-// Dynamic: BTreeMap lookup
-map.insert(UID::new(0xCA1C_0000, 1), receiver);
+// Dynamic: BTreeMap lookup (service methods, reply endpoints)
+map.insert(base_token.adjusted(1), receiver);
 ```
 
 Well-known endpoints cannot be removed. Dynamic endpoints can be registered and deregistered as services come and go.
@@ -128,7 +138,7 @@ Here is the complete flow for a single RPC call:
 
 1. **Client** calls `calc.add.get_reply(&transport, req)`, which calls `send_request`
 2. `send_request` creates a `ReplyFuture` at a unique temporary endpoint and registers it in the `EndpointMap`
-3. The request is serialized as a `RequestEnvelope` with the temporary endpoint as `reply_to`, then sent to the server's method endpoint (`UID(0xCA1C_0000, 1)`)
+3. The request is serialized as a `RequestEnvelope` with the temporary endpoint as `reply_to`, then sent to the server's method endpoint (`base.adjusted(1)`)
 4. **Transport** routes the packet to the server's `RequestStream` via the `EndpointMap`
 5. **Server** receives `(AddRequest, ReplyPromise)` from the stream
 6. Server calls `reply.send(AddResponse { ... })`, which serializes and sends to the `reply_to` endpoint
