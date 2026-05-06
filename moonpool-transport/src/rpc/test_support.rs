@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::rpc::failure_monitor::FailureStatus;
 use crate::rpc::net_notified_queue::NetNotifiedQueue;
 use crate::rpc::request_stream::RequestEnvelope;
+use crate::rpc::transport_handle::TransportHandle;
 use crate::rpc::{NetTransport, ReplyError, ServiceEndpoint};
 use crate::{
     Endpoint, JsonCodec, NetworkAddress, NetworkProvider, Providers, TokioRandomProvider,
@@ -151,35 +152,29 @@ pub fn make_transport() -> Rc<NetTransport<MockProviders>> {
 }
 
 /// Server-side queue type used by the shared test helpers.
-pub type TestQueue = Rc<NetNotifiedQueue<RequestEnvelope<Echo>, JsonCodec>>;
+pub type TestQueue = Rc<NetNotifiedQueue<RequestEnvelope<Echo>>>;
 
 /// Return type for [`register_servers`]: a pair of parallel vectors holding
 /// each server's queue and its matching client-side endpoint.
-pub type ServerSetup = (
-    Vec<TestQueue>,
-    Vec<ServiceEndpoint<Echo, Echo, JsonCodec, MockProviders>>,
-);
+pub type ServerSetup = (Vec<TestQueue>, Vec<ServiceEndpoint<Echo, Echo>>);
 
 /// Register `tokens.len()` server queues on `transport` and return the
 /// queues alongside their typed `ServiceEndpoint`s.
-///
-/// All endpoints share the same network address (`10.0.0.1:4500`) but
-/// distinct UIDs, which is enough for the dispatch tests since the queues
-/// are looked up by token.
 pub fn register_servers(
     transport: &Rc<NetTransport<MockProviders>>,
     tokens: &[u64],
 ) -> ServerSetup {
     let mut queues = Vec::new();
     let mut endpoints = Vec::new();
+    let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
     for &token in tokens {
         let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
         let ep = Endpoint::new(addr, UID::new(token, 1));
-        let q: Rc<NetNotifiedQueue<RequestEnvelope<Echo>, JsonCodec>> =
-            Rc::new(NetNotifiedQueue::new(ep.clone(), JsonCodec));
+        let q: Rc<NetNotifiedQueue<RequestEnvelope<Echo>>> =
+            Rc::new(NetNotifiedQueue::with_codec(ep.clone(), JsonCodec));
         transport.register(UID::new(token, 1), q.clone());
         queues.push(q);
-        endpoints.push(ServiceEndpoint::new(ep, JsonCodec, Rc::clone(transport)));
+        endpoints.push(ServiceEndpoint::new(ep, JsonCodec, Rc::clone(&handle)));
     }
     transport
         .failure_monitor()

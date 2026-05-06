@@ -35,6 +35,7 @@ use crate::{Endpoint, MessageCodec, NetworkAddress, UID};
 
 use super::endpoint_map::MessageReceiver;
 use super::reply_error::ReplyError;
+use super::transport_handle::DecodeFn;
 
 /// Type-safe message queue with async notification.
 ///
@@ -52,15 +53,15 @@ use super::reply_error::ReplyError;
 ///
 /// The type `T` is baked in at compile time. Only messages that deserialize
 /// to `T` will be accepted. Invalid messages log an error and are dropped.
-pub struct NetNotifiedQueue<T, C: MessageCodec> {
+pub struct NetNotifiedQueue<T> {
     /// Internal state wrapped in RefCell for interior mutability.
     inner: RefCell<NetNotifiedQueueInner<T>>,
 
     /// Endpoint associated with this queue.
     endpoint: Endpoint,
 
-    /// Codec for deserializing messages.
-    codec: C,
+    /// Type-erased decode function (captured from a concrete codec at construction).
+    decode_fn: DecodeFn<T>,
 }
 
 /// Internal state for the queue.
@@ -97,24 +98,28 @@ impl<T> Default for NetNotifiedQueueInner<T> {
     }
 }
 
-impl<T, C: MessageCodec> NetNotifiedQueue<T, C> {
-    /// Create a new queue with the given endpoint and codec.
-    pub fn new(endpoint: Endpoint, codec: C) -> Self {
+impl<T> NetNotifiedQueue<T> {
+    /// Create a new queue with a type-erased decode function.
+    pub fn new(endpoint: Endpoint, decode_fn: DecodeFn<T>) -> Self {
         Self {
             inner: RefCell::new(NetNotifiedQueueInner::default()),
             endpoint,
-            codec,
+            decode_fn,
         }
     }
 
+    /// Create a new queue from a concrete codec (convenience).
+    pub fn with_codec<C: MessageCodec>(endpoint: Endpoint, codec: C) -> Self
+    where
+        T: DeserializeOwned + 'static,
+    {
+        Self::new(endpoint, super::transport_handle::make_decode_fn(codec))
+    }
+
     /// Create a new queue with a dynamically allocated endpoint.
-    ///
-    /// Uses the provided address with a new random UID.
-    pub fn with_address(address: NetworkAddress, codec: C) -> Self {
-        // In real usage, UID should be generated via RandomProvider for determinism.
-        // For now, use a simple sequential ID.
+    pub fn with_address(address: NetworkAddress, decode_fn: DecodeFn<T>) -> Self {
         let token = UID::new(0, rand_simple_id());
-        Self::new(Endpoint::new(address, token), codec)
+        Self::new(Endpoint::new(address, token), decode_fn)
     }
 
     /// Get the endpoint for this queue.
@@ -202,19 +207,18 @@ impl<T, C: MessageCodec> NetNotifiedQueue<T, C> {
     }
 }
 
-impl<T: DeserializeOwned, C: MessageCodec> NetNotifiedQueue<T, C> {
+impl<T> NetNotifiedQueue<T> {
     /// Async receive - waits for a message.
     ///
     /// Returns `None` if the queue is closed and empty.
-    pub fn recv(&self) -> RecvFuture<'_, T, C> {
+    pub fn recv(&self) -> RecvFuture<'_, T> {
         RecvFuture { queue: self }
     }
 }
 
-impl<T: DeserializeOwned + 'static, C: MessageCodec> MessageReceiver for NetNotifiedQueue<T, C> {
+impl<T: 'static> MessageReceiver for NetNotifiedQueue<T> {
     fn receive(&self, payload: &[u8]) {
-        // Deserialize the message using the codec
-        match self.codec.decode::<T>(payload) {
+        match (self.decode_fn)(payload) {
             Ok(message) => {
                 let mut inner = self.inner.borrow_mut();
                 inner.queue.push_back(message);
@@ -251,11 +255,11 @@ impl<T: DeserializeOwned + 'static, C: MessageCodec> MessageReceiver for NetNoti
 }
 
 /// Future returned by `recv()`.
-pub struct RecvFuture<'a, T, C: MessageCodec> {
-    queue: &'a NetNotifiedQueue<T, C>,
+pub struct RecvFuture<'a, T> {
+    queue: &'a NetNotifiedQueue<T>,
 }
 
-impl<T, C: MessageCodec> Future for RecvFuture<'_, T, C> {
+impl<T> Future for RecvFuture<'_, T> {
     type Output = Option<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -277,32 +281,28 @@ impl<T, C: MessageCodec> Future for RecvFuture<'_, T, C> {
     }
 }
 
-/// Wrapper for Rc<NetNotifiedQueue<T, C>> that can be registered with EndpointMap.
-pub struct SharedNetNotifiedQueue<T: DeserializeOwned + 'static, C: MessageCodec>(
-    pub Rc<NetNotifiedQueue<T, C>>,
-);
+/// Wrapper for `Rc<NetNotifiedQueue<T>>` that can be registered with EndpointMap.
+pub struct SharedNetNotifiedQueue<T: 'static>(pub Rc<NetNotifiedQueue<T>>);
 
-impl<T: DeserializeOwned + 'static, C: MessageCodec> MessageReceiver
-    for SharedNetNotifiedQueue<T, C>
-{
+impl<T: 'static> MessageReceiver for SharedNetNotifiedQueue<T> {
     fn receive(&self, payload: &[u8]) {
         self.0.receive(payload)
     }
 }
 
-impl<T: DeserializeOwned + 'static, C: MessageCodec> SharedNetNotifiedQueue<T, C> {
+impl<T: 'static> SharedNetNotifiedQueue<T> {
     /// Create a new shared queue.
-    pub fn new(endpoint: Endpoint, codec: C) -> Self {
-        Self(Rc::new(NetNotifiedQueue::new(endpoint, codec)))
+    pub fn new(endpoint: Endpoint, decode_fn: DecodeFn<T>) -> Self {
+        Self(Rc::new(NetNotifiedQueue::new(endpoint, decode_fn)))
     }
 
     /// Get a reference to the inner queue.
-    pub fn inner(&self) -> &NetNotifiedQueue<T, C> {
+    pub fn inner(&self) -> &NetNotifiedQueue<T> {
         &self.0
     }
 
     /// Get a clone of the Rc for registration with EndpointMap.
-    pub fn as_receiver(&self) -> Rc<NetNotifiedQueue<T, C>> {
+    pub fn as_receiver(&self) -> Rc<NetNotifiedQueue<T>> {
         Rc::clone(&self.0)
     }
 }
@@ -313,12 +313,12 @@ impl<T: DeserializeOwned + 'static, C: MessageCodec> SharedNetNotifiedQueue<T, C
 /// without knowing the concrete response type `T`.
 ///
 /// FDB: endStreamOnDisconnect pattern (genericactors.actor.h:332)
-pub(crate) trait ReplyQueueCloser {
+pub trait ReplyQueueCloser {
     /// Close the queue and set the error reason.
     fn close_with_error(&self, reason: ReplyError);
 }
 
-impl<T, C: MessageCodec> ReplyQueueCloser for NetNotifiedQueue<Result<T, ReplyError>, C> {
+impl<T> ReplyQueueCloser for NetNotifiedQueue<Result<T, ReplyError>> {
     fn close_with_error(&self, reason: ReplyError) {
         self.close_with_reason(reason);
     }
@@ -346,8 +346,8 @@ mod tests {
 
     #[test]
     fn test_new_queue_is_empty() {
-        let queue: NetNotifiedQueue<String, JsonCodec> =
-            NetNotifiedQueue::new(test_endpoint(), JsonCodec);
+        let queue: NetNotifiedQueue<String> =
+            NetNotifiedQueue::with_codec(test_endpoint(), JsonCodec);
         assert!(queue.is_empty());
         assert_eq!(queue.len(), 0);
         assert_eq!(queue.messages_received(), 0);
@@ -355,8 +355,8 @@ mod tests {
 
     #[test]
     fn test_push_and_try_recv() {
-        let queue: NetNotifiedQueue<String, JsonCodec> =
-            NetNotifiedQueue::new(test_endpoint(), JsonCodec);
+        let queue: NetNotifiedQueue<String> =
+            NetNotifiedQueue::with_codec(test_endpoint(), JsonCodec);
 
         queue.push("hello".to_string());
         assert!(!queue.is_empty());
@@ -369,8 +369,8 @@ mod tests {
 
     #[test]
     fn test_receive_deserializes() {
-        let queue: NetNotifiedQueue<String, JsonCodec> =
-            NetNotifiedQueue::new(test_endpoint(), JsonCodec);
+        let queue: NetNotifiedQueue<String> =
+            NetNotifiedQueue::with_codec(test_endpoint(), JsonCodec);
 
         // Receive a JSON-encoded string
         let payload = b"\"hello world\"";
@@ -383,8 +383,8 @@ mod tests {
 
     #[test]
     fn test_receive_invalid_json_closes_queue() {
-        let queue: NetNotifiedQueue<String, JsonCodec> =
-            NetNotifiedQueue::new(test_endpoint(), JsonCodec);
+        let queue: NetNotifiedQueue<String> =
+            NetNotifiedQueue::with_codec(test_endpoint(), JsonCodec);
 
         // Receive invalid JSON
         let payload = b"not valid json";
@@ -403,8 +403,7 @@ mod tests {
 
     #[test]
     fn test_fifo_ordering() {
-        let queue: NetNotifiedQueue<i32, JsonCodec> =
-            NetNotifiedQueue::new(test_endpoint(), JsonCodec);
+        let queue: NetNotifiedQueue<i32> = NetNotifiedQueue::with_codec(test_endpoint(), JsonCodec);
 
         queue.push(1);
         queue.push(2);
@@ -418,8 +417,8 @@ mod tests {
 
     #[test]
     fn test_close_queue() {
-        let queue: NetNotifiedQueue<String, JsonCodec> =
-            NetNotifiedQueue::new(test_endpoint(), JsonCodec);
+        let queue: NetNotifiedQueue<String> =
+            NetNotifiedQueue::with_codec(test_endpoint(), JsonCodec);
 
         assert!(!queue.is_closed());
         queue.close();
@@ -429,8 +428,8 @@ mod tests {
     #[test]
     fn test_endpoint_accessor() {
         let endpoint = test_endpoint();
-        let queue: NetNotifiedQueue<String, JsonCodec> =
-            NetNotifiedQueue::new(endpoint.clone(), JsonCodec);
+        let queue: NetNotifiedQueue<String> =
+            NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec);
 
         assert_eq!(queue.endpoint().token, endpoint.token);
     }
@@ -443,8 +442,8 @@ mod tests {
 
     #[test]
     fn test_receive_complex_type() {
-        let queue: NetNotifiedQueue<TestMessage, JsonCodec> =
-            NetNotifiedQueue::new(test_endpoint(), JsonCodec);
+        let queue: NetNotifiedQueue<TestMessage> =
+            NetNotifiedQueue::with_codec(test_endpoint(), JsonCodec);
 
         let payload = br#"{"id": 42, "content": "hello"}"#;
         queue.receive(payload);
@@ -461,8 +460,10 @@ mod tests {
 
     #[test]
     fn test_shared_queue() {
-        let shared: SharedNetNotifiedQueue<String, JsonCodec> =
-            SharedNetNotifiedQueue::new(test_endpoint(), JsonCodec);
+        let shared: SharedNetNotifiedQueue<String> = SharedNetNotifiedQueue::new(
+            test_endpoint(),
+            crate::rpc::transport_handle::make_decode_fn(JsonCodec),
+        );
 
         // Receive through the shared wrapper
         shared.receive(b"\"shared message\"");
@@ -475,8 +476,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_recv_async() {
-        let queue: NetNotifiedQueue<String, JsonCodec> =
-            NetNotifiedQueue::new(test_endpoint(), JsonCodec);
+        let queue: NetNotifiedQueue<String> =
+            NetNotifiedQueue::with_codec(test_endpoint(), JsonCodec);
 
         // Push before recv - should complete immediately
         queue.push("async hello".to_string());
@@ -487,8 +488,8 @@ mod tests {
 
     #[test]
     fn test_close_with_reason() {
-        let queue: NetNotifiedQueue<Result<String, ReplyError>, JsonCodec> =
-            NetNotifiedQueue::new(test_endpoint(), JsonCodec);
+        let queue: NetNotifiedQueue<Result<String, ReplyError>> =
+            NetNotifiedQueue::with_codec(test_endpoint(), JsonCodec);
 
         assert!(queue.close_reason().is_none());
 
@@ -499,8 +500,8 @@ mod tests {
 
     #[test]
     fn test_close_without_reason() {
-        let queue: NetNotifiedQueue<String, JsonCodec> =
-            NetNotifiedQueue::new(test_endpoint(), JsonCodec);
+        let queue: NetNotifiedQueue<String> =
+            NetNotifiedQueue::with_codec(test_endpoint(), JsonCodec);
 
         queue.close();
         assert!(queue.is_closed());
@@ -509,8 +510,8 @@ mod tests {
 
     #[test]
     fn test_reply_queue_closer_trait() {
-        let queue: Rc<NetNotifiedQueue<Result<String, ReplyError>, JsonCodec>> =
-            Rc::new(NetNotifiedQueue::new(test_endpoint(), JsonCodec));
+        let queue: Rc<NetNotifiedQueue<Result<String, ReplyError>>> =
+            Rc::new(NetNotifiedQueue::with_codec(test_endpoint(), JsonCodec));
 
         // Use through trait object
         let closer: Rc<dyn ReplyQueueCloser> = queue.clone();
@@ -522,8 +523,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_recv_closed_empty() {
-        let queue: NetNotifiedQueue<String, JsonCodec> =
-            NetNotifiedQueue::new(test_endpoint(), JsonCodec);
+        let queue: NetNotifiedQueue<String> =
+            NetNotifiedQueue::with_codec(test_endpoint(), JsonCodec);
 
         queue.close();
 

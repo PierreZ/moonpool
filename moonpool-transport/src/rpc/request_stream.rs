@@ -20,13 +20,13 @@
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-use crate::{Endpoint, MessageCodec, Providers};
+use crate::Endpoint;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::net_notified_queue::NetNotifiedQueue;
-use super::net_transport::NetTransport;
 use super::reply_promise::ReplyPromise;
+use super::transport_handle::{EncodeFn, TransportHandle, make_encode_fn};
 
 /// Envelope wrapping a request with its reply endpoint.
 ///
@@ -46,32 +46,34 @@ pub struct RequestEnvelope<T> {
 /// The server uses this to receive incoming requests. Each received request
 /// comes with a `ReplyPromise` that must be fulfilled. The transport is bound
 /// at construction, so `recv()` requires no parameters.
-pub struct RequestStream<Req, Resp, C: MessageCodec, P: Providers> {
+pub struct RequestStream<Req, Resp> {
     /// Queue for incoming request envelopes.
-    queue: Rc<NetNotifiedQueue<RequestEnvelope<Req>, C>>,
-
-    /// Codec for serializing responses.
-    codec: C,
+    queue: Rc<NetNotifiedQueue<RequestEnvelope<Req>>>,
 
     /// Transport for sending replies.
-    transport: Rc<NetTransport<P>>,
+    transport: Rc<dyn TransportHandle>,
+
+    /// Type-erased encode function for replies.
+    encode_reply: EncodeFn<Result<Resp, super::reply_error::ReplyError>>,
 
     _phantom: PhantomData<Resp>,
 }
 
-impl<Req, Resp, C, P> RequestStream<Req, Resp, C, P>
+impl<Req, Resp> RequestStream<Req, Resp>
 where
     Req: DeserializeOwned + 'static,
-    Resp: Serialize,
-    C: MessageCodec,
-    P: Providers,
+    Resp: Serialize + 'static,
 {
     /// Create a new request stream with transport bound for replies.
-    pub fn new(endpoint: Endpoint, codec: C, transport: Rc<NetTransport<P>>) -> Self {
+    pub fn new<C: crate::MessageCodec>(
+        endpoint: Endpoint,
+        codec: C,
+        transport: Rc<dyn TransportHandle>,
+    ) -> Self {
         Self {
-            queue: Rc::new(NetNotifiedQueue::new(endpoint, codec.clone())),
-            codec,
+            queue: Rc::new(NetNotifiedQueue::with_codec(endpoint, codec.clone())),
             transport,
+            encode_reply: make_encode_fn(codec),
             _phantom: PhantomData,
         }
     }
@@ -86,7 +88,7 @@ where
     /// Get a reference to the internal queue for registration.
     ///
     /// This is used to register the stream with NetTransport.
-    pub fn queue(&self) -> Rc<NetNotifiedQueue<RequestEnvelope<Req>, C>> {
+    pub fn queue(&self) -> Rc<NetNotifiedQueue<RequestEnvelope<Req>>> {
         self.queue.clone()
     }
 
@@ -94,12 +96,12 @@ where
     ///
     /// Returns `None` if the stream is closed. The reply is sent via the
     /// transport bound at construction.
-    pub async fn recv(&self) -> Option<(Req, ReplyPromise<Resp, C>)> {
+    pub async fn recv(&self) -> Option<(Req, ReplyPromise<Resp>)> {
         let envelope = self.queue.recv().await?;
         let transport_clone = Rc::clone(&self.transport);
         let reply = ReplyPromise::new(
             envelope.reply_to,
-            self.codec.clone(),
+            self.encode_reply.clone(),
             move |endpoint, payload| {
                 let _ = transport_clone.send_reliable(endpoint, payload);
             },
@@ -110,12 +112,12 @@ where
     /// Try to receive a request without blocking.
     ///
     /// Returns `None` if no request is available.
-    pub fn try_recv(&self) -> Option<(Req, ReplyPromise<Resp, C>)> {
+    pub fn try_recv(&self) -> Option<(Req, ReplyPromise<Resp>)> {
         let envelope = self.queue.try_recv()?;
         let transport_clone = Rc::clone(&self.transport);
         let reply = ReplyPromise::new(
             envelope.reply_to,
-            self.codec.clone(),
+            self.encode_reply.clone(),
             move |endpoint, payload| {
                 let _ = transport_clone.send_reliable(endpoint, payload);
             },
@@ -126,22 +128,22 @@ where
     /// Receive the next request using a custom sender function.
     ///
     /// For testing or advanced use cases where replies should bypass the transport.
-    pub async fn recv_with_sender<F>(&self, sender: F) -> Option<(Req, ReplyPromise<Resp, C>)>
+    pub async fn recv_with_sender<F>(&self, sender: F) -> Option<(Req, ReplyPromise<Resp>)>
     where
         F: FnOnce(&Endpoint, &[u8]) + 'static,
     {
         let envelope = self.queue.recv().await?;
-        let reply = ReplyPromise::new(envelope.reply_to, self.codec.clone(), sender);
+        let reply = ReplyPromise::new(envelope.reply_to, self.encode_reply.clone(), sender);
         Some((envelope.request, reply))
     }
 
     /// Try to receive a request without blocking, using a custom sender function.
-    pub fn try_recv_with_sender<F>(&self, sender: F) -> Option<(Req, ReplyPromise<Resp, C>)>
+    pub fn try_recv_with_sender<F>(&self, sender: F) -> Option<(Req, ReplyPromise<Resp>)>
     where
         F: FnOnce(&Endpoint, &[u8]) + 'static,
     {
         let envelope = self.queue.try_recv()?;
-        let reply = ReplyPromise::new(envelope.reply_to, self.codec.clone(), sender);
+        let reply = ReplyPromise::new(envelope.reply_to, self.encode_reply.clone(), sender);
         Some((envelope.request, reply))
     }
 
@@ -177,14 +179,16 @@ mod tests {
 
     use super::*;
     use crate::MessageReceiver;
+    use crate::rpc::test_support::make_transport;
+    use crate::rpc::transport_handle::TransportHandle;
 
     fn test_endpoint() -> Endpoint {
-        let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4500);
+        let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
         Endpoint::new(addr, UID::new(1, 1))
     }
 
     fn reply_endpoint() -> Endpoint {
-        let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4501);
+        let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4501);
         Endpoint::new(addr, UID::new(2, 2))
     }
 
@@ -198,134 +202,11 @@ mod tests {
         seq: u32,
     }
 
-    use crate::{
-        NetTransportBuilder, Providers, TokioRandomProvider, TokioStorageProvider,
-        TokioTaskProvider, TokioTimeProvider,
-    };
-
-    // Simple mock network provider for testing
-    #[derive(Clone)]
-    struct MockNetworkProvider;
-
-    struct DummyStream;
-
-    impl tokio::io::AsyncRead for DummyStream {
-        fn poll_read(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-            _buf: &mut tokio::io::ReadBuf<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(Err(std::io::Error::other("dummy stream")))
-        }
+    fn make_handle() -> Rc<dyn TransportHandle> {
+        let transport = make_transport();
+        transport as Rc<dyn TransportHandle>
     }
 
-    impl tokio::io::AsyncWrite for DummyStream {
-        fn poll_write(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-            _buf: &[u8],
-        ) -> std::task::Poll<std::io::Result<usize>> {
-            std::task::Poll::Ready(Err(std::io::Error::other("dummy stream")))
-        }
-
-        fn poll_flush(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(Err(std::io::Error::other("dummy stream")))
-        }
-
-        fn poll_shutdown(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(Err(std::io::Error::other("dummy stream")))
-        }
-    }
-
-    struct DummyListener;
-
-    #[async_trait::async_trait(?Send)]
-    impl crate::TcpListenerTrait for DummyListener {
-        type TcpStream = DummyStream;
-
-        async fn accept(&self) -> std::io::Result<(Self::TcpStream, String)> {
-            Err(std::io::Error::other("dummy listener"))
-        }
-
-        fn local_addr(&self) -> std::io::Result<String> {
-            Err(std::io::Error::other("dummy listener"))
-        }
-    }
-
-    #[async_trait::async_trait(?Send)]
-    impl crate::NetworkProvider for MockNetworkProvider {
-        type TcpStream = DummyStream;
-        type TcpListener = DummyListener;
-
-        async fn bind(&self, _addr: &str) -> std::io::Result<Self::TcpListener> {
-            Err(std::io::Error::other("mock bind"))
-        }
-
-        async fn connect(&self, _addr: &str) -> std::io::Result<Self::TcpStream> {
-            Err(std::io::Error::other("mock connection"))
-        }
-    }
-
-    /// Mock providers bundle for testing
-    #[derive(Clone)]
-    struct MockProviders {
-        network: MockNetworkProvider,
-        time: TokioTimeProvider,
-        task: TokioTaskProvider,
-        random: TokioRandomProvider,
-        storage: TokioStorageProvider,
-    }
-
-    impl MockProviders {
-        fn new() -> Self {
-            Self {
-                network: MockNetworkProvider,
-                time: TokioTimeProvider::new(),
-                task: TokioTaskProvider,
-                random: TokioRandomProvider::new(),
-                storage: TokioStorageProvider::new(),
-            }
-        }
-    }
-
-    impl Providers for MockProviders {
-        type Network = MockNetworkProvider;
-        type Time = TokioTimeProvider;
-        type Task = TokioTaskProvider;
-        type Random = TokioRandomProvider;
-        type Storage = TokioStorageProvider;
-
-        fn network(&self) -> &Self::Network {
-            &self.network
-        }
-        fn time(&self) -> &Self::Time {
-            &self.time
-        }
-        fn task(&self) -> &Self::Task {
-            &self.task
-        }
-        fn random(&self) -> &Self::Random {
-            &self.random
-        }
-        fn storage(&self) -> &Self::Storage {
-            &self.storage
-        }
-    }
-
-    fn create_test_transport() -> Rc<crate::NetTransport<MockProviders>> {
-        NetTransportBuilder::new(MockProviders::new())
-            .local_address(test_endpoint().address.clone())
-            .build()
-            .expect("build should succeed")
-    }
-
-    // Create a local reply endpoint (same address as transport for local delivery)
     fn local_reply_endpoint() -> Endpoint {
         let addr = test_endpoint().address;
         Endpoint::new(addr, UID::new(0xFF, 0xFF))
@@ -333,10 +214,10 @@ mod tests {
 
     #[test]
     fn test_request_stream_endpoint() {
-        let transport = create_test_transport();
+        let handle = make_handle();
         let endpoint = test_endpoint();
-        let stream: RequestStream<PingRequest, PingResponse, JsonCodec, MockProviders> =
-            RequestStream::new(endpoint.clone(), JsonCodec, transport);
+        let stream: RequestStream<PingRequest, PingResponse> =
+            RequestStream::new(endpoint.clone(), JsonCodec, handle);
 
         assert_eq!(stream.endpoint().token, endpoint.token);
     }
@@ -358,9 +239,9 @@ mod tests {
 
     #[test]
     fn test_request_stream_try_recv_empty() {
-        let transport = create_test_transport();
-        let stream: RequestStream<PingRequest, PingResponse, JsonCodec, MockProviders> =
-            RequestStream::new(test_endpoint(), JsonCodec, transport);
+        let handle = make_handle();
+        let stream: RequestStream<PingRequest, PingResponse> =
+            RequestStream::new(test_endpoint(), JsonCodec, handle);
 
         let result = stream.try_recv();
         assert!(result.is_none());
@@ -369,11 +250,10 @@ mod tests {
 
     #[test]
     fn test_request_stream_try_recv() {
-        let transport = create_test_transport();
-        let stream: RequestStream<PingRequest, PingResponse, JsonCodec, MockProviders> =
-            RequestStream::new(test_endpoint(), JsonCodec, transport);
+        let handle = make_handle();
+        let stream: RequestStream<PingRequest, PingResponse> =
+            RequestStream::new(test_endpoint(), JsonCodec, handle);
 
-        // Simulate receiving a request
         let envelope = RequestEnvelope {
             request: PingRequest { seq: 123 },
             reply_to: reply_endpoint(),
@@ -384,7 +264,6 @@ mod tests {
         assert!(!stream.is_empty());
         assert_eq!(stream.len(), 1);
 
-        // Receive the request using custom sender
         let sent_data: Rc<RefCell<Option<Vec<u8>>>> = Rc::new(RefCell::new(None));
         let sent_clone = sent_data.clone();
 
@@ -393,23 +272,20 @@ mod tests {
         });
 
         assert!(result.is_some());
-        let (request, reply) = result.expect("should receive request");
+        let (request, reply): (PingRequest, ReplyPromise<PingResponse>) =
+            result.expect("should receive request");
         assert_eq!(request, PingRequest { seq: 123 });
 
-        // Send a reply
         reply.send(PingResponse { seq: 123 });
-
-        // Verify reply was sent
         assert!(sent_data.borrow().is_some());
     }
 
     #[tokio::test]
     async fn test_request_stream_recv_async() {
-        let transport = create_test_transport();
-        let stream: RequestStream<PingRequest, PingResponse, JsonCodec, MockProviders> =
-            RequestStream::new(test_endpoint(), JsonCodec, transport);
+        let handle = make_handle();
+        let stream: RequestStream<PingRequest, PingResponse> =
+            RequestStream::new(test_endpoint(), JsonCodec, handle);
 
-        // Simulate receiving a request
         let envelope = RequestEnvelope {
             request: PingRequest { seq: 456 },
             reply_to: reply_endpoint(),
@@ -417,19 +293,18 @@ mod tests {
         let payload = serde_json::to_vec(&envelope).expect("serialize");
         stream.queue().receive(&payload);
 
-        // Async receive with custom sender
         let result = stream.recv_with_sender(|_, _| {}).await;
-
         assert!(result.is_some());
-        let (request, _reply) = result.expect("should receive request");
+        let (request, _reply): (PingRequest, ReplyPromise<PingResponse>) =
+            result.expect("should receive request");
         assert_eq!(request, PingRequest { seq: 456 });
     }
 
     #[tokio::test]
     async fn test_request_stream_closed() {
-        let transport = create_test_transport();
-        let stream: RequestStream<PingRequest, PingResponse, JsonCodec, MockProviders> =
-            RequestStream::new(test_endpoint(), JsonCodec, transport);
+        let handle = make_handle();
+        let stream: RequestStream<PingRequest, PingResponse> =
+            RequestStream::new(test_endpoint(), JsonCodec, handle);
 
         assert!(!stream.is_closed());
         stream.close();
@@ -441,13 +316,13 @@ mod tests {
 
     #[test]
     fn test_try_recv_empty() {
-        let transport = create_test_transport();
+        let handle = make_handle();
 
         let token = UID::new(0xABCD, 0x1234);
-        let stream: RequestStream<PingRequest, PingResponse, JsonCodec, _> = RequestStream::new(
+        let stream: RequestStream<PingRequest, PingResponse> = RequestStream::new(
             Endpoint::new(test_endpoint().address.clone(), token),
             JsonCodec,
-            Rc::clone(&transport),
+            handle,
         );
 
         let result = stream.try_recv();
@@ -456,32 +331,29 @@ mod tests {
 
     #[test]
     fn test_try_recv_with_transport() {
-        let transport = create_test_transport();
+        let transport = make_transport();
 
-        // Register a dummy handler for broken promise errors (local delivery)
         let reply_token = local_reply_endpoint().token;
-        let reply_queue: Rc<
-            crate::NetNotifiedQueue<Result<PingResponse, crate::ReplyError>, JsonCodec>,
-        > = Rc::new(crate::NetNotifiedQueue::new(
-            local_reply_endpoint(),
-            JsonCodec,
-        ));
+        let reply_queue: Rc<crate::NetNotifiedQueue<Result<PingResponse, crate::ReplyError>>> =
+            Rc::new(crate::NetNotifiedQueue::with_codec(
+                local_reply_endpoint(),
+                JsonCodec,
+            ));
         transport.register(
             reply_token,
             Rc::clone(&reply_queue) as Rc<dyn crate::MessageReceiver>,
         );
 
         let token = UID::new(0xABCD, 0x1234);
-        let stream: RequestStream<PingRequest, PingResponse, JsonCodec, _> = RequestStream::new(
+        let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+        let stream: RequestStream<PingRequest, PingResponse> = RequestStream::new(
             Endpoint::new(test_endpoint().address.clone(), token),
             JsonCodec,
-            Rc::clone(&transport),
+            handle,
         );
 
-        // Register the stream's queue with transport for dispatch
         transport.register(token, stream.queue() as Rc<dyn crate::MessageReceiver>);
 
-        // Simulate receiving a request via the queue (with local reply endpoint)
         let envelope = RequestEnvelope {
             request: PingRequest { seq: 999 },
             reply_to: local_reply_endpoint(),
@@ -490,37 +362,35 @@ mod tests {
         stream.queue().receive(&payload);
 
         let result = stream.try_recv();
-
         assert!(result.is_some());
-        let (request, _reply) = result.expect("should receive request");
+        let (request, _reply): (PingRequest, ReplyPromise<PingResponse>) =
+            result.expect("should receive request");
         assert_eq!(request.seq, 999);
     }
 
     #[tokio::test]
     async fn test_recv_with_transport() {
-        let transport = create_test_transport();
+        let transport = make_transport();
 
-        // Register a dummy handler for broken promise errors (local delivery)
         let reply_token = local_reply_endpoint().token;
-        let reply_queue: Rc<
-            crate::NetNotifiedQueue<Result<PingResponse, crate::ReplyError>, JsonCodec>,
-        > = Rc::new(crate::NetNotifiedQueue::new(
-            local_reply_endpoint(),
-            JsonCodec,
-        ));
+        let reply_queue: Rc<crate::NetNotifiedQueue<Result<PingResponse, crate::ReplyError>>> =
+            Rc::new(crate::NetNotifiedQueue::with_codec(
+                local_reply_endpoint(),
+                JsonCodec,
+            ));
         transport.register(
             reply_token,
             Rc::clone(&reply_queue) as Rc<dyn crate::MessageReceiver>,
         );
 
         let token = UID::new(0xABCD, 0x1234);
-        let stream: RequestStream<PingRequest, PingResponse, JsonCodec, _> = RequestStream::new(
+        let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+        let stream: RequestStream<PingRequest, PingResponse> = RequestStream::new(
             Endpoint::new(test_endpoint().address.clone(), token),
             JsonCodec,
-            Rc::clone(&transport),
+            handle,
         );
 
-        // Simulate receiving a request via the queue (with local reply endpoint)
         let envelope = RequestEnvelope {
             request: PingRequest { seq: 888 },
             reply_to: local_reply_endpoint(),
@@ -529,40 +399,37 @@ mod tests {
         stream.queue().receive(&payload);
 
         let result = stream.recv().await;
-
         assert!(result.is_some());
-        let (request, _reply) = result.expect("should receive request");
+        let (request, _reply): (PingRequest, ReplyPromise<PingResponse>) =
+            result.expect("should receive request");
         assert_eq!(request.seq, 888);
     }
 
     #[test]
     fn test_recv_reply_sends() {
-        let transport = create_test_transport();
+        let transport = make_transport();
 
-        // Register a handler for the reply endpoint to track if response was sent
         let reply_token = local_reply_endpoint().token;
-        let reply_queue: Rc<
-            crate::NetNotifiedQueue<Result<PingResponse, crate::ReplyError>, JsonCodec>,
-        > = Rc::new(crate::NetNotifiedQueue::new(
-            local_reply_endpoint(),
-            JsonCodec,
-        ));
+        let reply_queue: Rc<crate::NetNotifiedQueue<Result<PingResponse, crate::ReplyError>>> =
+            Rc::new(crate::NetNotifiedQueue::with_codec(
+                local_reply_endpoint(),
+                JsonCodec,
+            ));
         transport.register(
             reply_token,
             Rc::clone(&reply_queue) as Rc<dyn crate::MessageReceiver>,
         );
 
         let token = UID::new(0xABCD, 0x1234);
-        let stream: RequestStream<PingRequest, PingResponse, JsonCodec, _> = RequestStream::new(
+        let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+        let stream: RequestStream<PingRequest, PingResponse> = RequestStream::new(
             Endpoint::new(test_endpoint().address.clone(), token),
             JsonCodec,
-            Rc::clone(&transport),
+            handle,
         );
 
-        // Register the stream's queue with transport
         transport.register(token, stream.queue() as Rc<dyn crate::MessageReceiver>);
 
-        // Simulate receiving a request
         let envelope = RequestEnvelope {
             request: PingRequest { seq: 777 },
             reply_to: local_reply_endpoint(),
@@ -570,15 +437,13 @@ mod tests {
         let payload = serde_json::to_vec(&envelope).expect("serialize");
         stream.queue().receive(&payload);
 
-        // Receive and send reply
         let result = stream.try_recv();
-        let (request, reply) = result.expect("should receive request");
+        let (request, reply): (PingRequest, ReplyPromise<PingResponse>) =
+            result.expect("should receive request");
         assert_eq!(request.seq, 777);
 
-        // Send response via ReplyPromise
         reply.send(PingResponse { seq: 777 });
 
-        // Verify response was dispatched to reply endpoint
         let received = reply_queue.try_recv();
         assert!(received.is_some());
         let response = received.expect("should receive response");

@@ -17,7 +17,7 @@ use moonpool_sim::{
 };
 use moonpool_transport::{
     Endpoint, JsonCodec, NetTransportBuilder, Providers, ReplyError, TimeProvider, UID, get_reply,
-    get_reply_unless_failed_for, send, try_get_reply,
+    get_reply_unless_failed_for, make_decode_fn, make_encode_fn, send, try_get_reply,
 };
 
 use crate::report::WorkloadStats;
@@ -173,6 +173,10 @@ impl Workload for TransportClientWorkload {
 
         let stats = Rc::new(RefCell::new(WorkloadStats::default()));
 
+        let encode =
+            make_encode_fn::<moonpool_transport::RequestEnvelope<EchoRequest>, _>(JsonCodec);
+        let decode = make_decode_fn::<Result<EchoResponse, ReplyError>, _>(JsonCodec);
+
         tracing::info!(
             client_id,
             num_ops,
@@ -213,7 +217,7 @@ impl Workload for TransportClientWorkload {
                         },
                     );
 
-                    match send(&transport, &endpoint, req, JsonCodec) {
+                    match send(&*transport, &endpoint, req, &encode) {
                         Ok(()) => {
                             assert_sometimes!(true, "fire_and_forget_sent_successfully");
                             stats.borrow_mut().fire_and_forget_sent += 1;
@@ -255,10 +259,7 @@ impl Workload for TransportClientWorkload {
 
                     stats.borrow_mut().at_most_once_sent += 1;
 
-                    match try_get_reply::<_, EchoResponse, _, _>(
-                        &transport, &endpoint, req, JsonCodec,
-                    )
-                    .await
+                    match try_get_reply(&*transport, &endpoint, req, &encode, decode.clone()).await
                     {
                         Ok(resp) => {
                             assert_always!(
@@ -311,8 +312,7 @@ impl Workload for TransportClientWorkload {
 
                     stats.borrow_mut().at_least_once_sent += 1;
 
-                    match get_reply::<_, EchoResponse, _, _>(&transport, &endpoint, req, JsonCodec)
-                    {
+                    match get_reply(&*transport, &endpoint, req, &encode, decode.clone()) {
                         Ok(reply_future) => {
                             let time = ctx.providers().time().clone();
                             let result: Option<Result<EchoResponse, ReplyError>> = tokio::select! {
@@ -392,11 +392,12 @@ impl Workload for TransportClientWorkload {
 
                     stats.borrow_mut().timeout_sent += 1;
 
-                    match get_reply_unless_failed_for::<_, EchoResponse, _, _>(
-                        &transport,
+                    match get_reply_unless_failed_for(
+                        &*transport,
                         &endpoint,
                         req,
-                        JsonCodec,
+                        &encode,
+                        decode.clone(),
                         timeout_dur,
                     )
                     .await
@@ -447,10 +448,7 @@ impl Workload for TransportClientWorkload {
                         method: 99,
                     };
 
-                    match try_get_reply::<_, EchoResponse, _, _>(
-                        &transport, &endpoint, req, JsonCodec,
-                    )
-                    .await
+                    match try_get_reply(&*transport, &endpoint, req, &encode, decode.clone()).await
                     {
                         Ok(_) => {
                             assert_always!(false, "wrong_endpoint_should_not_succeed");
@@ -480,9 +478,7 @@ impl Workload for TransportClientWorkload {
                             method: METHOD_ECHO,
                         };
                         // Fire-and-forget via reliable queue — don't await reply
-                        let _ = get_reply::<_, EchoResponse, _, _>(
-                            &transport, &endpoint, req, JsonCodec,
-                        );
+                        let _ = get_reply(&*transport, &endpoint, req, &encode, decode.clone());
                     }
                     seq_counter += burst_size as u64;
                     stats.borrow_mut().at_least_once_sent += burst_size as u64;

@@ -28,10 +28,11 @@ use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-use crate::{Endpoint, MessageCodec};
+use crate::Endpoint;
 use serde::Serialize;
 
 use super::reply_error::ReplyError;
+use super::transport_handle::EncodeFn;
 
 /// Type alias for the sender function in ReplyPromise.
 type ReplySender = Box<dyn FnOnce(&Endpoint, &[u8])>;
@@ -51,16 +52,16 @@ type ReplySender = Box<dyn FnOnce(&Endpoint, &[u8])>;
 ///
 /// Uses `Rc<RefCell<>>` internally - not thread-safe but efficient for
 /// single-threaded async runtimes.
-pub struct ReplyPromise<T: Serialize, C: MessageCodec> {
-    inner: Rc<RefCell<ReplyPromiseInner<T, C>>>,
+pub struct ReplyPromise<T: Serialize> {
+    inner: Rc<RefCell<ReplyPromiseInner<T>>>,
 }
 
-struct ReplyPromiseInner<T, C: MessageCodec> {
+struct ReplyPromiseInner<T> {
     /// Where to send the reply.
     reply_endpoint: Endpoint,
 
-    /// Codec for serialization.
-    codec: C,
+    /// Type-erased encode function (captures a concrete codec).
+    encode_fn: EncodeFn<Result<T, ReplyError>>,
 
     /// Sender function - sends serialized bytes to the endpoint.
     /// This is injected to decouple from NetTransport.
@@ -73,19 +74,23 @@ struct ReplyPromiseInner<T, C: MessageCodec> {
     _phantom: PhantomData<T>,
 }
 
-impl<T: Serialize, C: MessageCodec> ReplyPromise<T, C> {
+impl<T: Serialize> ReplyPromise<T> {
     /// Create a new reply promise.
     ///
     /// The `sender` function will be called to deliver the serialized response.
     /// This is typically provided by the transport layer.
-    pub fn new<F>(reply_endpoint: Endpoint, codec: C, sender: F) -> Self
+    pub fn new<F>(
+        reply_endpoint: Endpoint,
+        encode_fn: EncodeFn<Result<T, ReplyError>>,
+        sender: F,
+    ) -> Self
     where
         F: FnOnce(&Endpoint, &[u8]) + 'static,
     {
         Self {
             inner: Rc::new(RefCell::new(ReplyPromiseInner {
                 reply_endpoint,
-                codec,
+                encode_fn,
                 sender: Some(Box::new(sender)),
                 fulfilled: false,
                 _phantom: PhantomData,
@@ -105,7 +110,7 @@ impl<T: Serialize, C: MessageCodec> ReplyPromise<T, C> {
 
         // Serialize the response
         let result: Result<T, ReplyError> = Ok(value);
-        match inner.codec.encode(&result) {
+        match (inner.encode_fn)(&result) {
             Ok(payload) => {
                 if let Some(sender) = inner.sender.take() {
                     sender(&inner.reply_endpoint, &payload);
@@ -117,7 +122,7 @@ impl<T: Serialize, C: MessageCodec> ReplyPromise<T, C> {
                 let error_result: Result<T, ReplyError> = Err(ReplyError::Serialization {
                     message: e.to_string(),
                 });
-                if let Ok(error_payload) = inner.codec.encode(&error_result)
+                if let Ok(error_payload) = (inner.encode_fn)(&error_result)
                     && let Some(sender) = inner.sender.take()
                 {
                     sender(&inner.reply_endpoint, &error_payload);
@@ -138,7 +143,7 @@ impl<T: Serialize, C: MessageCodec> ReplyPromise<T, C> {
         }
 
         let result: Result<T, ReplyError> = Err(error);
-        if let Ok(payload) = inner.codec.encode(&result)
+        if let Ok(payload) = (inner.encode_fn)(&result)
             && let Some(sender) = inner.sender.take()
         {
             sender(&inner.reply_endpoint, &payload);
@@ -158,13 +163,13 @@ impl<T: Serialize, C: MessageCodec> ReplyPromise<T, C> {
     }
 }
 
-impl<T: Serialize, C: MessageCodec> Drop for ReplyPromise<T, C> {
+impl<T: Serialize> Drop for ReplyPromise<T> {
     fn drop(&mut self) {
         let mut inner = self.inner.borrow_mut();
         if !inner.fulfilled {
             // Send BrokenPromise error to client
             let result: Result<T, ReplyError> = Err(ReplyError::BrokenPromise);
-            if let Ok(payload) = inner.codec.encode(&result)
+            if let Ok(payload) = (inner.encode_fn)(&result)
                 && let Some(sender) = inner.sender.take()
             {
                 sender(&inner.reply_endpoint, &payload);
@@ -187,6 +192,7 @@ mod tests {
     use crate::{JsonCodec, NetworkAddress, UID};
     use serde::{Deserialize, Serialize};
 
+    use super::super::transport_handle::make_encode_fn;
     use super::*;
 
     fn test_endpoint() -> Endpoint {
@@ -199,15 +205,22 @@ mod tests {
         value: i32,
     }
 
+    fn test_encode_fn() -> EncodeFn<Result<TestResponse, ReplyError>> {
+        make_encode_fn(JsonCodec)
+    }
+
     #[test]
     fn test_reply_promise_send() {
         let sent_data: Rc<RefCell<Option<Vec<u8>>>> = Rc::new(RefCell::new(None));
         let sent_clone = sent_data.clone();
 
-        let promise: ReplyPromise<TestResponse, JsonCodec> =
-            ReplyPromise::new(test_endpoint(), JsonCodec, move |_endpoint, payload| {
+        let promise: ReplyPromise<TestResponse> = ReplyPromise::new(
+            test_endpoint(),
+            test_encode_fn(),
+            move |_endpoint, payload| {
                 *sent_clone.borrow_mut() = Some(payload.to_vec());
-            });
+            },
+        );
 
         assert!(!promise.is_fulfilled());
 
@@ -229,10 +242,13 @@ mod tests {
         let sent_data: Rc<RefCell<Option<Vec<u8>>>> = Rc::new(RefCell::new(None));
         let sent_clone = sent_data.clone();
 
-        let promise: ReplyPromise<TestResponse, JsonCodec> =
-            ReplyPromise::new(test_endpoint(), JsonCodec, move |_endpoint, payload| {
+        let promise: ReplyPromise<TestResponse> = ReplyPromise::new(
+            test_endpoint(),
+            test_encode_fn(),
+            move |_endpoint, payload| {
                 *sent_clone.borrow_mut() = Some(payload.to_vec());
-            });
+            },
+        );
 
         promise.send_error(ReplyError::Timeout);
 
@@ -251,10 +267,13 @@ mod tests {
         let sent_clone = sent_data.clone();
 
         {
-            let _promise: ReplyPromise<TestResponse, JsonCodec> =
-                ReplyPromise::new(test_endpoint(), JsonCodec, move |_endpoint, payload| {
+            let _promise: ReplyPromise<TestResponse> = ReplyPromise::new(
+                test_endpoint(),
+                test_encode_fn(),
+                move |_endpoint, payload| {
                     *sent_clone.borrow_mut() = Some(payload.to_vec());
-                });
+                },
+            );
             // Promise dropped without send
         }
 
@@ -274,10 +293,13 @@ mod tests {
         let count_clone = send_count.clone();
 
         {
-            let promise: ReplyPromise<TestResponse, JsonCodec> =
-                ReplyPromise::new(test_endpoint(), JsonCodec, move |_endpoint, _payload| {
+            let promise: ReplyPromise<TestResponse> = ReplyPromise::new(
+                test_endpoint(),
+                test_encode_fn(),
+                move |_endpoint, _payload| {
                     *count_clone.borrow_mut() += 1;
-                });
+                },
+            );
 
             promise.send(TestResponse { value: 1 });
             // Promise dropped after send
@@ -290,8 +312,8 @@ mod tests {
     #[test]
     fn test_reply_promise_endpoint() {
         let endpoint = test_endpoint();
-        let promise: ReplyPromise<TestResponse, JsonCodec> =
-            ReplyPromise::new(endpoint.clone(), JsonCodec, |_, _| {});
+        let promise: ReplyPromise<TestResponse> =
+            ReplyPromise::new(endpoint.clone(), test_encode_fn(), |_, _| {});
 
         assert_eq!(promise.endpoint().token, endpoint.token);
     }

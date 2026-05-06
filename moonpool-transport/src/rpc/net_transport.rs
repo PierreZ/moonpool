@@ -148,6 +148,10 @@ pub struct NetTransport<P: Providers> {
     /// Shutdown signal sender. When set to `true`, background tasks (listen_task) should exit.
     /// Uses watch channel so multiple receivers can observe the same signal.
     shutdown_tx: watch::Sender<bool>,
+
+    /// Weak reference as `dyn TransportHandle` for codec-erased types.
+    /// Set by the builder alongside `weak_self`.
+    weak_handle: RefCell<Option<std::rc::Weak<dyn super::transport_handle::TransportHandle>>>,
 }
 
 /// Statistics for the transport.
@@ -187,6 +191,7 @@ impl<P: Providers> NetTransport<P> {
             peer_config: PeerConfig::default(),
             weak_self: RefCell::new(None),
             shutdown_tx,
+            weak_handle: RefCell::new(None),
         }
     }
 
@@ -235,14 +240,6 @@ impl<P: Providers> NetTransport<P> {
             .borrow()
             .clone()
             .expect("weak_self not set - call set_weak_self() after wrapping in Rc")
-    }
-
-    /// Get weak self-reference for cleanup callbacks (e.g., `ReplyFuture` drop).
-    ///
-    /// Returns `None`-valued `Weak` if `set_weak_self()` hasn't been called,
-    /// which is safe — cleanup will be a no-op.
-    pub(crate) fn weak_self_for_cleanup(&self) -> Weak<Self> {
-        self.weak_self.borrow().clone().unwrap_or_default()
     }
 
     /// Create with custom peer configuration.
@@ -367,14 +364,16 @@ impl<P: Providers> NetTransport<P> {
         transport: &Rc<Self>,
         token: UID,
         codec: C,
-    ) -> RequestStream<Req, Resp, C, P>
+    ) -> RequestStream<Req, Resp>
     where
         Req: DeserializeOwned + 'static,
-        Resp: Serialize,
+        Resp: Serialize + 'static,
         C: MessageCodec,
     {
         let endpoint = Endpoint::new(transport.local_address.clone(), token);
-        let stream = RequestStream::new(endpoint, codec, Rc::clone(transport));
+        let handle: Rc<dyn super::transport_handle::TransportHandle> =
+            Rc::clone(transport) as Rc<dyn super::transport_handle::TransportHandle>;
+        let stream = RequestStream::new(endpoint, codec, handle);
         transport
             .data
             .borrow_mut()
@@ -407,10 +406,10 @@ impl<P: Providers> NetTransport<P> {
         interface_id: u64,
         method_index: u64,
         codec: C,
-    ) -> (RequestStream<Req, Resp, C, P>, UID)
+    ) -> (RequestStream<Req, Resp>, UID)
     where
         Req: DeserializeOwned + 'static,
-        Resp: Serialize,
+        Resp: Serialize + 'static,
         C: MessageCodec,
     {
         let token = UID::new(interface_id, method_index);
@@ -694,6 +693,106 @@ impl<P: Providers> Drop for NetTransport<P> {
 }
 
 // =============================================================================
+// TransportHandle implementation
+// =============================================================================
+
+impl<P: Providers> super::transport_handle::TransportHandle for NetTransport<P> {
+    fn send_unreliable(
+        &self,
+        endpoint: &crate::Endpoint,
+        payload: &[u8],
+    ) -> Result<(), crate::error::MessagingError> {
+        NetTransport::send_unreliable(self, endpoint, payload)
+    }
+
+    fn send_reliable(
+        &self,
+        endpoint: &crate::Endpoint,
+        payload: &[u8],
+    ) -> Result<(), crate::error::MessagingError> {
+        NetTransport::send_reliable(self, endpoint, payload)
+    }
+
+    fn register(
+        &self,
+        token: crate::UID,
+        receiver: Rc<dyn super::endpoint_map::MessageReceiver>,
+    ) -> crate::Endpoint {
+        NetTransport::register(self, token, receiver)
+    }
+
+    fn unregister(
+        &self,
+        token: &crate::UID,
+    ) -> Option<Rc<dyn super::endpoint_map::MessageReceiver>> {
+        NetTransport::unregister(self, token)
+    }
+
+    fn register_pending_reply(
+        &self,
+        addr: &str,
+        token: crate::UID,
+        closer: std::rc::Weak<dyn super::net_notified_queue::ReplyQueueCloser>,
+    ) {
+        NetTransport::register_pending_reply(self, addr, token, closer);
+    }
+
+    fn failure_monitor(&self) -> Rc<super::failure_monitor::FailureMonitor> {
+        NetTransport::failure_monitor(self)
+    }
+
+    fn local_address(&self) -> &crate::NetworkAddress {
+        NetTransport::local_address(self)
+    }
+
+    fn allocate_interface_token(&self) -> crate::UID {
+        NetTransport::allocate_interface_token(self)
+    }
+
+    fn random_uid(&self) -> crate::UID {
+        use crate::RandomProvider as _;
+        crate::UID::new(
+            self.providers.random().random::<u64>(),
+            self.providers.random().random::<u64>(),
+        )
+    }
+
+    fn is_local_address(&self, address: &crate::NetworkAddress) -> bool {
+        NetTransport::is_local_address(self, address)
+    }
+
+    fn weak_for_cleanup(&self) -> std::rc::Weak<dyn super::transport_handle::TransportHandle> {
+        self.weak_handle
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| std::rc::Weak::<Self>::new())
+    }
+
+    fn time_sleep(
+        &self,
+        duration: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>> {
+        use crate::TimeProvider as _;
+        let time = self.providers.time().clone();
+        Box::pin(async move {
+            let _ = time.sleep(duration).await;
+        })
+    }
+}
+
+impl<P: Providers> NetTransport<P> {
+    /// Set the weak handle reference for `dyn TransportHandle` usage.
+    ///
+    /// Called by the builder after wrapping in `Rc`.
+    pub(crate) fn set_weak_handle(
+        &self,
+        weak: std::rc::Weak<dyn super::transport_handle::TransportHandle>,
+    ) {
+        *self.weak_handle.borrow_mut() = Some(weak);
+    }
+}
+
+// =============================================================================
 // NetTransportBuilder
 // =============================================================================
 
@@ -795,6 +894,9 @@ impl<P: Providers> NetTransportBuilder<P> {
 
         let transport = Rc::new(transport);
         transport.set_weak_self(Rc::downgrade(&transport));
+        let handle: Rc<dyn super::transport_handle::TransportHandle> =
+            transport.clone() as Rc<dyn super::transport_handle::TransportHandle>;
+        transport.set_weak_handle(Rc::downgrade(&handle));
         Ok(transport)
     }
 
@@ -1204,7 +1306,7 @@ mod tests {
     fn test_register_well_known() {
         let transport = create_test_transport();
 
-        let queue: Rc<NetNotifiedQueue<String, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+        let queue: Rc<NetNotifiedQueue<String>> = Rc::new(NetNotifiedQueue::with_codec(
             Endpoint::new(test_address(), UID::new(1, 1)),
             JsonCodec,
         ));
@@ -1221,7 +1323,7 @@ mod tests {
         let transport = create_test_transport();
 
         let token = UID::new(0x1234, 0x5678);
-        let queue: Rc<NetNotifiedQueue<String, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+        let queue: Rc<NetNotifiedQueue<String>> = Rc::new(NetNotifiedQueue::with_codec(
             Endpoint::new(test_address(), token),
             JsonCodec,
         ));
@@ -1237,7 +1339,7 @@ mod tests {
         let transport = create_test_transport();
 
         let token = UID::new(0x1234, 0x5678);
-        let queue: Rc<NetNotifiedQueue<String, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+        let queue: Rc<NetNotifiedQueue<String>> = Rc::new(NetNotifiedQueue::with_codec(
             Endpoint::new(test_address(), token),
             JsonCodec,
         ));
@@ -1274,7 +1376,7 @@ mod tests {
         let transport = create_test_transport();
 
         let token = UID::new(0x1234, 0x5678);
-        let queue: Rc<NetNotifiedQueue<String, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+        let queue: Rc<NetNotifiedQueue<String>> = Rc::new(NetNotifiedQueue::with_codec(
             Endpoint::new(test_address(), token),
             JsonCodec,
         ));
@@ -1292,7 +1394,7 @@ mod tests {
         let transport = create_test_transport();
 
         let token = UID::new(0x1234, 0x5678);
-        let queue: Rc<NetNotifiedQueue<String, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+        let queue: Rc<NetNotifiedQueue<String>> = Rc::new(NetNotifiedQueue::with_codec(
             Endpoint::new(test_address(), token),
             JsonCodec,
         ));
@@ -1367,7 +1469,7 @@ mod tests {
             .expect("build should succeed");
 
         let token = UID::new(0x1234, 0x5678);
-        let queue: Rc<NetNotifiedQueue<String, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+        let queue: Rc<NetNotifiedQueue<String>> = Rc::new(NetNotifiedQueue::with_codec(
             Endpoint::new(test_address(), token),
             JsonCodec,
         ));

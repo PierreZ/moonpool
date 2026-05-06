@@ -86,7 +86,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "Registered {} method(s) at well-known token {}\n",
-        PingPongServer::<JsonCodec, TokioProviders>::METHOD_COUNT,
+        PingPongServer::METHOD_COUNT,
         WLTOKEN_PING_PONG
     );
     println!("Waiting for ping requests...\n");
@@ -138,7 +138,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "Using well-known token {} with {} method(s)\n",
         WLTOKEN_PING_PONG,
-        PingPongClient::<JsonCodec, TokioProviders>::METHOD_COUNT
+        PingPongClient::METHOD_COUNT
     );
 
     let num_pings = 5;

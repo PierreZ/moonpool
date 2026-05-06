@@ -120,7 +120,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "Registered {} methods with dynamic base token: {}\n",
-        CalculatorServer::<JsonCodec, TokioProviders>::METHOD_COUNT,
+        CalculatorServer::METHOD_COUNT,
         base_token,
     );
 

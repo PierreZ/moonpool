@@ -88,7 +88,7 @@ impl Process for EchoServerProcess {
 }
 
 /// Immediate echo: reply right away.
-fn handle_echo(req: &EchoRequest, reply: ReplyPromise<EchoResponse, JsonCodec>, server_ip: &str) {
+fn handle_echo(req: &EchoRequest, reply: ReplyPromise<EchoResponse>, server_ip: &str) {
     assert_sometimes!(true, "echo_request_handled");
     reply.send(EchoResponse {
         seq_id: req.seq_id,
@@ -100,7 +100,7 @@ fn handle_echo(req: &EchoRequest, reply: ReplyPromise<EchoResponse, JsonCodec>, 
 /// Delayed echo: schedule a response after a random simulated delay.
 fn handle_echo_delayed(
     req: &EchoRequest,
-    reply: ReplyPromise<EchoResponse, JsonCodec>,
+    reply: ReplyPromise<EchoResponse>,
     server_ip: &str,
     ctx: &SimContext,
 ) {
@@ -124,11 +124,7 @@ fn handle_echo_delayed(
 }
 
 /// Echo with buggify-controlled failure: sometimes drops the promise (BrokenPromise).
-fn handle_echo_or_fail(
-    req: &EchoRequest,
-    reply: ReplyPromise<EchoResponse, JsonCodec>,
-    server_ip: &str,
-) {
+fn handle_echo_or_fail(req: &EchoRequest, reply: ReplyPromise<EchoResponse>, server_ip: &str) {
     if buggify!() {
         assert_sometimes!(true, "echo_or_fail_buggify_dropped_promise");
         drop(reply);

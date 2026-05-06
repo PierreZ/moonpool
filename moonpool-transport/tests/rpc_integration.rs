@@ -13,7 +13,7 @@ use moonpool_transport::{
     Endpoint, FailureMonitor, FailureStatus, JsonCodec, MessagingError, NetTransport,
     NetworkAddress, NetworkProvider, Providers, ReplyError, ReplyFuture, RequestEnvelope,
     RequestStream, TokioRandomProvider, TokioStorageProvider, TokioTaskProvider, TokioTimeProvider,
-    UID, send_request,
+    TransportHandle, UID, make_decode_fn, make_encode_fn, send_request,
 };
 use serde::{Deserialize, Serialize};
 
@@ -179,21 +179,25 @@ async fn test_basic_ping_pong() {
     let server_endpoint = Endpoint::new(test_address(), server_token);
 
     // Create request stream for server
-    let request_stream: RequestStream<PingRequest, PingResponse, JsonCodec, MockProviders> =
-        RequestStream::new(server_endpoint.clone(), JsonCodec, Rc::clone(&transport));
+    let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+    let request_stream: RequestStream<PingRequest, PingResponse> =
+        RequestStream::new(server_endpoint.clone(), JsonCodec, Rc::clone(&handle));
 
     // Register server queue with transport
     transport.register(server_token, request_stream.queue());
 
     // Client sends request
-    let future: ReplyFuture<PingResponse, JsonCodec> = send_request(
-        &transport,
+    let encode = make_encode_fn::<RequestEnvelope<PingRequest>, _>(JsonCodec);
+    let decode = make_decode_fn::<Result<PingResponse, ReplyError>, _>(JsonCodec);
+    let future: ReplyFuture<PingResponse> = send_request(
+        &*transport,
         &server_endpoint,
         PingRequest {
             seq: 1,
             payload: "hello".to_string(),
         },
-        JsonCodec,
+        &encode,
+        decode,
     )
     .expect("send_request should succeed");
 
@@ -235,22 +239,27 @@ async fn test_multiple_requests() {
     let server_token = UID::new(0xAAAA, 0xBBBB);
     let server_endpoint = Endpoint::new(test_address(), server_token);
 
-    let request_stream: RequestStream<EchoRequest, EchoResponse, JsonCodec, MockProviders> =
-        RequestStream::new(server_endpoint.clone(), JsonCodec, Rc::clone(&transport));
+    let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+    let request_stream: RequestStream<EchoRequest, EchoResponse> =
+        RequestStream::new(server_endpoint.clone(), JsonCodec, Rc::clone(&handle));
 
     transport.register(server_token, request_stream.queue());
+
+    let encode = make_encode_fn::<RequestEnvelope<EchoRequest>, _>(JsonCodec);
+    let decode = make_decode_fn::<Result<EchoResponse, ReplyError>, _>(JsonCodec);
 
     // Send multiple requests
     for i in 0..5 {
         let message = format!("message_{}", i);
 
-        let future: ReplyFuture<EchoResponse, JsonCodec> = send_request(
-            &transport,
+        let future: ReplyFuture<EchoResponse> = send_request(
+            &*transport,
             &server_endpoint,
             EchoRequest {
                 message: message.clone(),
             },
-            JsonCodec,
+            &encode,
+            decode.clone(),
         )
         .expect("send_request should succeed");
 
@@ -285,20 +294,24 @@ async fn test_broken_promise() {
     let server_token = UID::new(0xDEAD, 0xBEEF);
     let server_endpoint = Endpoint::new(test_address(), server_token);
 
-    let request_stream: RequestStream<PingRequest, PingResponse, JsonCodec, MockProviders> =
-        RequestStream::new(server_endpoint.clone(), JsonCodec, Rc::clone(&transport));
+    let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+    let request_stream: RequestStream<PingRequest, PingResponse> =
+        RequestStream::new(server_endpoint.clone(), JsonCodec, Rc::clone(&handle));
 
     transport.register(server_token, request_stream.queue());
 
     // Client sends request
-    let future: ReplyFuture<PingResponse, JsonCodec> = send_request(
-        &transport,
+    let encode = make_encode_fn::<RequestEnvelope<PingRequest>, _>(JsonCodec);
+    let decode = make_decode_fn::<Result<PingResponse, ReplyError>, _>(JsonCodec);
+    let future: ReplyFuture<PingResponse> = send_request(
+        &*transport,
         &server_endpoint,
         PingRequest {
             seq: 999,
             payload: "test".to_string(),
         },
-        JsonCodec,
+        &encode,
+        decode,
     )
     .expect("send_request should succeed");
 
@@ -330,20 +343,24 @@ async fn test_explicit_error_response() {
     let server_token = UID::new(0x1111, 0x2222);
     let server_endpoint = Endpoint::new(test_address(), server_token);
 
-    let request_stream: RequestStream<PingRequest, PingResponse, JsonCodec, MockProviders> =
-        RequestStream::new(server_endpoint.clone(), JsonCodec, Rc::clone(&transport));
+    let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+    let request_stream: RequestStream<PingRequest, PingResponse> =
+        RequestStream::new(server_endpoint.clone(), JsonCodec, Rc::clone(&handle));
 
     transport.register(server_token, request_stream.queue());
 
     // Client sends request
-    let future: ReplyFuture<PingResponse, JsonCodec> = send_request(
-        &transport,
+    let encode = make_encode_fn::<RequestEnvelope<PingRequest>, _>(JsonCodec);
+    let decode = make_decode_fn::<Result<PingResponse, ReplyError>, _>(JsonCodec);
+    let future: ReplyFuture<PingResponse> = send_request(
+        &*transport,
         &server_endpoint,
         PingRequest {
             seq: 42,
             payload: "error_test".to_string(),
         },
-        JsonCodec,
+        &encode,
+        decode,
     )
     .expect("send_request should succeed");
 
@@ -393,14 +410,17 @@ fn test_endpoint_not_found_local_delivery() {
     let missing_endpoint = Endpoint::new(test_address(), missing_token);
 
     // send_request goes through deliver_local (same address) → EndpointNotFound
-    let result = send_request::<PingRequest, PingResponse, _, _>(
-        &transport,
+    let encode = make_encode_fn::<RequestEnvelope<PingRequest>, _>(JsonCodec);
+    let decode = make_decode_fn::<Result<PingResponse, ReplyError>, _>(JsonCodec);
+    let result = send_request(
+        &*transport,
         &missing_endpoint,
         PingRequest {
             seq: 1,
             payload: "hello".to_string(),
         },
-        JsonCodec,
+        &encode,
+        decode,
     );
 
     let err = match result {

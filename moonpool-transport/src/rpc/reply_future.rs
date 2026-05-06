@@ -11,7 +11,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
-use crate::{Endpoint, MessageCodec};
+use crate::Endpoint;
 use serde::de::DeserializeOwned;
 
 use super::net_notified_queue::NetNotifiedQueue;
@@ -30,9 +30,9 @@ type DropCleanup = Box<dyn FnOnce()>;
 /// Created by `send_request` and polls an internal queue for the response.
 /// The response is deserialized as `Result<T, ReplyError>` to handle both
 /// success and error cases.
-pub struct ReplyFuture<T: DeserializeOwned, C: MessageCodec> {
+pub struct ReplyFuture<T: DeserializeOwned> {
     /// Queue receiving the reply.
-    queue: Rc<NetNotifiedQueue<Result<T, ReplyError>, C>>,
+    queue: Rc<NetNotifiedQueue<Result<T, ReplyError>>>,
 
     /// The endpoint this future is listening on.
     endpoint: Endpoint,
@@ -43,9 +43,9 @@ pub struct ReplyFuture<T: DeserializeOwned, C: MessageCodec> {
     drop_cleanup: Option<DropCleanup>,
 }
 
-impl<T: DeserializeOwned, C: MessageCodec> ReplyFuture<T, C> {
+impl<T: DeserializeOwned> ReplyFuture<T> {
     /// Create a new reply future with the given queue and endpoint.
-    pub fn new(queue: Rc<NetNotifiedQueue<Result<T, ReplyError>, C>>, endpoint: Endpoint) -> Self {
+    pub fn new(queue: Rc<NetNotifiedQueue<Result<T, ReplyError>>>, endpoint: Endpoint) -> Self {
         Self {
             queue,
             endpoint,
@@ -69,7 +69,7 @@ impl<T: DeserializeOwned, C: MessageCodec> ReplyFuture<T, C> {
     }
 }
 
-impl<T: DeserializeOwned, C: MessageCodec> Future for ReplyFuture<T, C> {
+impl<T: DeserializeOwned> Future for ReplyFuture<T> {
     type Output = Result<T, ReplyError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -104,7 +104,7 @@ impl<T: DeserializeOwned, C: MessageCodec> Future for ReplyFuture<T, C> {
     }
 }
 
-impl<T: DeserializeOwned, C: MessageCodec> Drop for ReplyFuture<T, C> {
+impl<T: DeserializeOwned> Drop for ReplyFuture<T> {
     fn drop(&mut self) {
         self.queue.close();
         if let Some(cleanup) = self.drop_cleanup.take() {
@@ -136,8 +136,8 @@ mod tests {
     #[tokio::test]
     async fn test_reply_future_success() {
         let endpoint = test_endpoint();
-        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>, JsonCodec>> =
-            Rc::new(NetNotifiedQueue::new(endpoint.clone(), JsonCodec));
+        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
+            Rc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
 
         let future = ReplyFuture::new(queue.clone(), endpoint);
 
@@ -154,8 +154,8 @@ mod tests {
     #[tokio::test]
     async fn test_reply_future_error() {
         let endpoint = test_endpoint();
-        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>, JsonCodec>> =
-            Rc::new(NetNotifiedQueue::new(endpoint.clone(), JsonCodec));
+        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
+            Rc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
 
         let future = ReplyFuture::new(queue.clone(), endpoint);
 
@@ -171,8 +171,8 @@ mod tests {
     #[tokio::test]
     async fn test_reply_future_connection_failed() {
         let endpoint = test_endpoint();
-        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>, JsonCodec>> =
-            Rc::new(NetNotifiedQueue::new(endpoint.clone(), JsonCodec));
+        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
+            Rc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
 
         let future = ReplyFuture::new(queue.clone(), endpoint);
 
@@ -186,8 +186,8 @@ mod tests {
     #[tokio::test]
     async fn test_reply_future_maybe_delivered() {
         let endpoint = test_endpoint();
-        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>, JsonCodec>> =
-            Rc::new(NetNotifiedQueue::new(endpoint.clone(), JsonCodec));
+        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
+            Rc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
 
         let future = ReplyFuture::new(queue.clone(), endpoint);
 
@@ -201,8 +201,8 @@ mod tests {
     #[test]
     fn test_reply_future_endpoint() {
         let endpoint = test_endpoint();
-        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>, JsonCodec>> =
-            Rc::new(NetNotifiedQueue::new(endpoint.clone(), JsonCodec));
+        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
+            Rc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
 
         let future = ReplyFuture::new(queue, endpoint.clone());
         assert_eq!(future.endpoint().token, endpoint.token);

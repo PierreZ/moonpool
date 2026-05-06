@@ -29,12 +29,15 @@ mod service_endpoint;
 mod smoother;
 #[cfg(test)]
 mod test_support;
+mod transport_handle;
 
 pub use delivery::{get_reply, get_reply_unless_failed_for, send, try_get_reply};
 pub use endpoint_map::{EndpointMap, MessageReceiver};
 pub use failure_monitor::{FailedReason, FailureMonitor, FailureStatus};
 pub use interface::{method_endpoint, method_uid};
-pub use net_notified_queue::{NetNotifiedQueue, RecvFuture, SharedNetNotifiedQueue};
+pub use net_notified_queue::{
+    NetNotifiedQueue, RecvFuture, ReplyQueueCloser, SharedNetNotifiedQueue,
+};
 pub use net_transport::{NetTransport, NetTransportBuilder};
 pub use reply_error::ReplyError;
 pub use reply_future::ReplyFuture;
@@ -45,3 +48,4 @@ pub use rpc_error::RpcError;
 pub use server_handle::ServerHandle;
 pub use service_endpoint::ServiceEndpoint;
 pub use smoother::Smoother;
+pub use transport_handle::{DecodeFn, EncodeFn, TransportHandle, make_decode_fn, make_encode_fn};

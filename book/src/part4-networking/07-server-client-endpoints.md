@@ -88,7 +88,7 @@ A well-known UID has `first == u64::MAX` and `second` equal to the token index. 
 
 ## RequestStream
 
-`RequestStream<Req, Resp, C, P>` is the server-side abstraction for receiving typed requests. Each stream wraps a `NetNotifiedQueue` that the transport pushes incoming packets into, plus a bound reference to the transport. When you call `recv()`, it awaits the next `RequestEnvelope<Req>` from the queue and returns the deserialized request paired with a `ReplyPromise`.
+`RequestStream<Req, Resp>` is the server-side abstraction for receiving typed requests. Each stream wraps a `NetNotifiedQueue` that the transport pushes incoming packets into, plus a bound reference to the transport. When you call `recv()`, it awaits the next `RequestEnvelope<Req>` from the queue and returns the deserialized request paired with a `ReplyPromise`.
 
 The `RequestEnvelope` bundles the request payload with a `reply_to` endpoint, the address where the client is listening for the response:
 
@@ -103,7 +103,7 @@ struct RequestEnvelope<T> {
 
 These two types form the request-response correlation mechanism.
 
-**`ReplyPromise<T, C>`** lives on the server side. When the server finishes processing a request, it calls `reply.send(response)` to serialize and deliver the response to the client's `reply_to` endpoint. If the promise is dropped without being fulfilled, it automatically sends a `ReplyError::BrokenPromise` to the client so the client does not hang forever.
+**`ReplyPromise<T>`** lives on the server side. When the server finishes processing a request, it calls `reply.send(response)` to serialize and deliver the response to the client's `reply_to` endpoint. If the promise is dropped without being fulfilled, it automatically sends a `ReplyError::BrokenPromise` to the client so the client does not hang forever.
 
 ```rust
 // Server side
@@ -111,7 +111,7 @@ let (req, reply) = stream.recv().await?;
 reply.send(AddResponse { result: req.a + req.b });
 ```
 
-**`ReplyFuture<T, C>`** lives on the client side. It implements `Future` and resolves when the server's response arrives at the temporary endpoint that `send_request` registered. The future polls a `NetNotifiedQueue` for the response. If the queue is closed (connection failure), it resolves with the appropriate `ReplyError`.
+**`ReplyFuture<T>`** lives on the client side. It implements `Future` and resolves when the server's response arrives at the temporary endpoint that `send_request` registered. The future polls a `NetNotifiedQueue` for the response. If the queue is closed (connection failure), it resolves with the appropriate `ReplyError`.
 
 `ReplyFuture` implements `Drop` to close its queue when the future is cancelled or goes out of scope. This prevents leaked wakers and ensures the temporary endpoint is cleaned up even if the caller abandons the request. Without this, a killed process would leave orphaned reply queues that hang forever.
 

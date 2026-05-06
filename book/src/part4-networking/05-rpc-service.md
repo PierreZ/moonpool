@@ -18,8 +18,8 @@ trait Calculator {
 
 From this single trait definition, the macro generates:
 
-- **`CalculatorServer<C, P>`** with a `RequestStream` per method, `init()` for dynamic token allocation, `well_known()` for deterministic addressing, and `serve()` for automatic dispatch
-- **`CalculatorClient<C, P>`** with `ServiceEndpoint` fields for each method, constructed via `from_base()` or `well_known()`
+- **`CalculatorServer`** with a `RequestStream` per method, `init()` for dynamic token allocation, `well_known()` for deterministic addressing, and `serve()` for automatic dispatch
+- **`CalculatorClient`** with `ServiceEndpoint` fields for each method, constructed via `from_base()` or `well_known()`
 - The trait itself, wrapped with `#[async_trait(?Send)]`
 
 ## Two Tiers of Endpoint Addressing
@@ -66,20 +66,20 @@ Calculator (trait)
   ├── add(&self, AddRequest) -> Result<AddResponse, RpcError>
   └── sub(&self, SubRequest) -> Result<SubResponse, RpcError>
 
-CalculatorServer<C, P>
-  ├── add: RequestStream<AddRequest, AddResponse, C, P>  // at base.adjusted(1)
-  ├── sub: RequestStream<SubRequest, SubResponse, C, P>  // at base.adjusted(2)
+CalculatorServer
+  ├── add: RequestStream<AddRequest, AddResponse>         // at base.adjusted(1)
+  ├── sub: RequestStream<SubRequest, SubResponse>         // at base.adjusted(2)
   ├── init(transport, codec) -> Self            // dynamic tokens
   ├── well_known(transport, token, codec)       // deterministic tokens
   ├── init_at(transport, base, codec)           // explicit base token
   ├── base_token() -> UID                       // for client discovery
   └── serve(handler, providers) -> ServerHandle
 
-CalculatorClient<C, P>
+CalculatorClient
   ├── from_base(address, base_token, codec, transport) -> Self
   ├── well_known(address, token_id, codec, transport) -> Self
-  ├── add: ServiceEndpoint<AddRequest, AddResponse, C, P>
-  └── sub: ServiceEndpoint<SubRequest, SubResponse, C, P>
+  ├── add: ServiceEndpoint<AddRequest, AddResponse>
+  └── sub: ServiceEndpoint<SubRequest, SubResponse>
 ```
 
 The `serve()` method is particularly useful: it consumes the server, spawns a background task per method that loops on `recv()`, and returns a `ServerHandle` that stops everything when dropped. The transport is bound at server construction, so `serve()` only needs the handler and providers.
