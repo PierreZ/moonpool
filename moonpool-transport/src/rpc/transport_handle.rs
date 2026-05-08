@@ -72,6 +72,6 @@ pub trait TransportHandle {
     /// Get a weak reference for drop cleanup callbacks.
     fn weak_for_cleanup(&self) -> Weak<dyn TransportHandle>;
 
-    /// Sleep for a duration (object-safe wrapper around TimeProvider).
-    fn time_sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + '_>>;
+    /// Sleep for a duration (object-safe wrapper around `TimeProvider::sleep`).
+    fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + '_>>;
 }

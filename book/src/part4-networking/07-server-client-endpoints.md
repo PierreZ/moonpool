@@ -56,7 +56,7 @@ Under the hood, `get_reply` creates a temporary `ReplyFuture` registered at a un
 
 ## Mode Checking
 
-Every `InterfaceMethod` knows whether it's in local or remote mode. Calling server methods (`recv()`, `try_recv()`) on a remote-mode field, or client methods (`get_reply()`, `send()`) on a local-mode field, will panic. Use `is_remote()` on the interface struct (or `is_remote_endpoint()` on individual fields) to check:
+Every `InterfaceMethod` knows whether it's in local or remote mode. Calling server methods (`recv()`, `try_recv()`) on a remote-mode field, or client methods (`get_reply()`, `send()`) on a local-mode field, will panic. Use `is_remote()` on the interface struct or on individual fields to check:
 
 ```rust
 let calc = Calculator::init(&transport);

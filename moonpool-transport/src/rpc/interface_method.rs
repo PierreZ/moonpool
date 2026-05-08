@@ -32,7 +32,7 @@ use crate::error::MessagingError;
 ///
 /// Calling server methods (`recv`, `try_recv`, etc.) on a remote-mode handle,
 /// or client methods (`send`, `get_reply`, etc.) on a local-mode handle,
-/// will panic. Use [`is_remote_endpoint()`](Self::is_remote_endpoint) to check.
+/// will panic. Use [`is_remote()`](Self::is_remote) to check.
 pub struct InterfaceMethod<Req, Resp> {
     inner: InterfaceMethodInner<Req, Resp>,
 }
@@ -66,7 +66,7 @@ impl<Req, Resp> InterfaceMethod<Req, Resp> {
     }
 
     /// Returns `true` if this is a remote (client) endpoint.
-    pub fn is_remote_endpoint(&self) -> bool {
+    pub fn is_remote(&self) -> bool {
         matches!(self.inner, InterfaceMethodInner::Remote { .. })
     }
 
@@ -386,7 +386,7 @@ mod tests {
         let handle = make_handle();
         let stream = RequestStream::<TestReq, TestResp>::new(test_endpoint(), JsonCodec, handle);
         let method = InterfaceMethod::local(stream);
-        assert!(!method.is_remote_endpoint());
+        assert!(!method.is_remote());
     }
 
     #[test]
@@ -394,7 +394,7 @@ mod tests {
         let handle = make_handle();
         let ep = ServiceEndpoint::<TestReq, TestResp>::new(test_endpoint(), JsonCodec, handle);
         let method = InterfaceMethod::remote(ep);
-        assert!(method.is_remote_endpoint());
+        assert!(method.is_remote());
     }
 
     #[test]
@@ -439,7 +439,7 @@ mod tests {
         let stream = RequestStream::<TestReq, TestResp>::new(test_endpoint(), JsonCodec, handle);
         let method = InterfaceMethod::local(stream);
         let cloned = method.clone();
-        assert!(!cloned.is_remote_endpoint());
+        assert!(!cloned.is_remote());
         assert_eq!(cloned.endpoint().token, method.endpoint().token);
     }
 
@@ -449,7 +449,7 @@ mod tests {
         let ep = ServiceEndpoint::<TestReq, TestResp>::new(test_endpoint(), JsonCodec, handle);
         let method = InterfaceMethod::remote(ep);
         let cloned = method.clone();
-        assert!(cloned.is_remote_endpoint());
+        assert!(cloned.is_remote());
         assert_eq!(cloned.endpoint().token, method.endpoint().token);
     }
 }

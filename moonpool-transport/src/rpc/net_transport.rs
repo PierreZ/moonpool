@@ -775,7 +775,7 @@ impl<P: Providers, C: MessageCodec> super::transport_handle::TransportHandle
             .unwrap_or_else(|| std::rc::Weak::<Self>::new())
     }
 
-    fn time_sleep(
+    fn sleep(
         &self,
         duration: std::time::Duration,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>> {

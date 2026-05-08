@@ -6,6 +6,8 @@ The previous chapter showed an interface flowing as bytes between processes. Onc
 
 The answer turns on one tiny contract on `ReplyPromise`. Drop a promise without fulfilling it and the client gets `BrokenPromise`. That single rule is the foundation of FoundationDB's **WaitFailure** pattern, and it is why the moonpool transport surfaces process death without any heartbeat machinery at all.
 
+`BrokenPromise` is reserved for that liveness signal. When a handler returns an `Err` while the server is still alive and well, the wire carries `ReplyError::Application { message }` instead. The two errors travel through the same packet shape, but only `BrokenPromise` triggers the failure monitor's permanent-failure path on receipt. We rely on this distinction below.
+
 ## The Drop Contract
 
 `ReplyPromise<T>` is the server-side handle handed out alongside each request. The client created a `ReplyFuture` when it called `get_reply`, and that future is registered in the transport's endpoint map waiting for a reply packet. The promise carries the address it must reply to and a serialized encoder for `Result<T, ReplyError>`. The normal happy path is `reply.send(value)`. But what if nothing calls `send`?

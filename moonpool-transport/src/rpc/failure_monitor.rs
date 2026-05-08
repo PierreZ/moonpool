@@ -13,7 +13,7 @@
 //! `SimpleFailureMonitor` from `FailureMonitor.h:146`, `FailureMonitor.actor.cpp`
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -27,7 +27,7 @@ use crate::Endpoint;
 /// Type-erased sleep closure capturing a concrete [`TimeProvider`].
 ///
 /// Mirrors the pattern used by
-/// [`TransportHandle::time_sleep`](crate::rpc::transport_handle::TransportHandle::time_sleep)
+/// [`TransportHandle::sleep`](crate::rpc::transport_handle::TransportHandle::sleep)
 /// to keep [`FailureMonitor`] non-generic while still able to call into the
 /// active time provider (real or simulated).
 type SleepFn = Box<dyn Fn(Duration) -> Pin<Box<dyn Future<Output = ()>>>>;
@@ -47,16 +47,6 @@ pub enum FailureStatus {
     Available,
     /// Address is unreachable (default for unknown addresses).
     Failed,
-}
-
-/// Reason an endpoint was permanently marked as failed.
-///
-/// # FDB Reference
-/// `FailedReason` from `FailureMonitor.h:65-68`
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FailedReason {
-    /// The endpoint was not found on the remote machine.
-    NotFound,
 }
 
 /// Reactive failure monitor for address and endpoint tracking.
@@ -80,7 +70,7 @@ struct FailureMonitorInner {
     /// Address-level status. Missing entry = Failed (FDB default).
     address_status: BTreeMap<String, FailureStatus>,
     /// Permanently failed endpoints (e.g., endpoint not found on remote).
-    failed_endpoints: BTreeMap<Endpoint, FailedReason>,
+    failed_endpoints: BTreeSet<Endpoint>,
     /// Wakers waiting for endpoint state changes, keyed by address.
     /// Woken on: set_status change, notify_disconnect, endpoint_not_found.
     endpoint_watchers: BTreeMap<String, Vec<Waker>>,
@@ -98,7 +88,7 @@ impl FailureMonitor {
     /// The `time` provider is captured behind a type-erased sleep closure
     /// so [`FailureMonitor`] itself stays non-generic; this matches the
     /// pattern used by
-    /// [`TransportHandle::time_sleep`](crate::rpc::transport_handle::TransportHandle::time_sleep).
+    /// [`TransportHandle::sleep`](crate::rpc::transport_handle::TransportHandle::sleep).
     pub fn new<T: TimeProvider + 'static>(time: T) -> Self {
         let sleep_fn: SleepFn = Box::new(move |duration| {
             let time = time.clone();
@@ -109,7 +99,7 @@ impl FailureMonitor {
         Self {
             inner: RefCell::new(FailureMonitorInner {
                 address_status: BTreeMap::new(),
-                failed_endpoints: BTreeMap::new(),
+                failed_endpoints: BTreeSet::new(),
                 endpoint_watchers: BTreeMap::new(),
                 disconnect_watchers: BTreeMap::new(),
             }),
@@ -179,29 +169,21 @@ impl FailureMonitor {
 
         let mut inner = self.inner.borrow_mut();
 
-        // Cap to prevent memory leaks
-        if inner.failed_endpoints.len() >= MAX_FAILED_ENDPOINTS {
+        // Cap is informational: every entry here is a permanent NotFound, so
+        // there is nothing to evict. Drop the new addition with a warning when
+        // we hit the limit rather than thrashing the set.
+        if inner.failed_endpoints.len() >= MAX_FAILED_ENDPOINTS
+            && !inner.failed_endpoints.contains(endpoint)
+        {
             tracing::warn!(
-                "FailureMonitor: evicting transient failed endpoints (cap {} reached, {} entries)",
-                MAX_FAILED_ENDPOINTS,
-                inner.failed_endpoints.len()
+                cap = MAX_FAILED_ENDPOINTS,
+                ?endpoint,
+                "FailureMonitor: failed-endpoint set at cap, dropping new NotFound marker"
             );
-            // Preserve permanently failed endpoints, clear transient ones
-            let permanent: Vec<_> = inner
-                .failed_endpoints
-                .iter()
-                .filter(|(_, reason)| matches!(reason, FailedReason::NotFound))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            inner.failed_endpoints.clear();
-            for (k, v) in permanent {
-                inner.failed_endpoints.insert(k, v);
-            }
+            return;
         }
 
-        inner
-            .failed_endpoints
-            .insert(endpoint.clone(), FailedReason::NotFound);
+        inner.failed_endpoints.insert(endpoint.clone());
 
         let address = endpoint.address.to_string();
         wake_all(&mut inner.endpoint_watchers, &address);
@@ -222,7 +204,7 @@ impl FailureMonitor {
     pub fn state(&self, endpoint: &Endpoint) -> FailureStatus {
         let inner = self.inner.borrow();
 
-        if inner.failed_endpoints.contains_key(endpoint) {
+        if inner.failed_endpoints.contains(endpoint) {
             return FailureStatus::Failed;
         }
 
@@ -254,7 +236,7 @@ impl FailureMonitor {
     /// # FDB Reference
     /// `SimpleFailureMonitor::permanentlyFailed` (FailureMonitor.h:226-228)
     pub fn permanently_failed(&self, endpoint: &Endpoint) -> bool {
-        self.inner.borrow().failed_endpoints.contains_key(endpoint)
+        self.inner.borrow().failed_endpoints.contains(endpoint)
     }
 
     /// Returns a future that resolves when the endpoint's address disconnects
@@ -278,7 +260,7 @@ impl FailureMonitor {
             let inner = fm.inner.borrow();
 
             // Fast path: already failed
-            if inner.failed_endpoints.contains_key(&endpoint) {
+            if inner.failed_endpoints.contains(&endpoint) {
                 return Poll::Ready(());
             }
             if !inner
@@ -318,7 +300,7 @@ impl FailureMonitor {
             let inner = fm.inner.borrow();
 
             // Permanently failed → never resolves (FDB: onStateChanged returns Never)
-            if inner.failed_endpoints.contains_key(&endpoint) {
+            if inner.failed_endpoints.contains(&endpoint) {
                 return Poll::Pending;
             }
 
@@ -369,14 +351,20 @@ impl FailureMonitor {
         })
     }
 
-    /// Resolves once `endpoint` has been failed for at least `duration`.
+    /// Waits for failure to be detected, then sleeps `duration` before returning.
     ///
-    /// Detects failure once via
-    /// [`on_disconnect_or_failure`](Self::on_disconnect_or_failure), then sleeps
-    /// `duration` using the time provider captured at construction and returns.
-    /// Does **not** retry on recovery — matches what
+    /// Two-phase behaviour, **not** sustained-failure detection:
+    ///
+    /// 1. Block via [`on_disconnect_or_failure`](Self::on_disconnect_or_failure)
+    ///    until a failure is observed at least once.
+    /// 2. Sleep `duration` using the time provider captured at construction,
+    ///    regardless of whether the endpoint recovers in the meantime.
+    ///
+    /// The recovery case is intentionally ignored — callers like
     /// [`get_reply_unless_failed_for`](crate::rpc::delivery::get_reply_unless_failed_for)
-    /// currently relies on.
+    /// race this future against the reply future, so a recovered endpoint that
+    /// answers in time wins the race anyway. Treat this as a deadline timer
+    /// armed by the first observed failure, not a continuous health check.
     pub async fn on_failed_for(self: &Rc<Self>, endpoint: &Endpoint, duration: Duration) {
         self.on_disconnect_or_failure(endpoint).await;
         (self.sleep_fn)(duration).await;

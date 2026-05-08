@@ -5,6 +5,7 @@
 /// Created by the generated `serve()` method on `{Interface}Server` types.
 /// Closing the handle (via [`stop()`](Self::stop) or [`Drop`]) shuts down
 /// all serving tasks by closing the underlying request streams.
+#[must_use = "dropping the ServerHandle stops the server immediately"]
 pub struct ServerHandle {
     close_fns: Vec<Box<dyn Fn()>>,
 }

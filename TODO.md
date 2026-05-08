@@ -211,7 +211,7 @@ let iface = transport.serve::<Calculator>();                           // local 
 let iface = transport.client_well_known::<PingPong>(addr, token);     // remote mode (get_reply works)
 ```
 
-**Design:** Single field type per method with `is_remote_endpoint()` predicate. Server methods (`recv()`) work when local; client methods (`get_reply`) work when remote. Runtime check — panic or error if called in wrong mode.
+**Design:** Single field type per method with `is_remote()` predicate. Server methods (`recv()`) work when local; client methods (`get_reply`) work when remote. Runtime check — panic or error if called in wrong mode.
 
 **Files to modify:**
 - `moonpool-transport-derive/src/lib.rs` — emit one struct, merge Server/Client field types
