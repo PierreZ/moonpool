@@ -1157,7 +1157,7 @@ fn build_bucket_summaries(
     }
 
     let mut summaries: Vec<_> = sites.into_values().collect();
-    summaries.sort_by(|a, b| b.total_hits.cmp(&a.total_hits));
+    summaries.sort_by_key(|s| std::cmp::Reverse(s.total_hits));
     summaries
 }
 
