@@ -26,7 +26,7 @@ Make moonpool's RPC ergonomics match FDB's fdbrpc. After this round: define an i
 - [x] Task 2 — Allocate endpoint tokens dynamically
 - [x] Task 3 — Hold transport inside interface
 - [x] Task 4 — Erase codec generic
-- [ ] Task 5 — Unify Server and Client
+- [x] Task 5 — Unify Server and Client
 - [ ] Task 6 — Serializable interfaces
 - [ ] Task 7 — Verify broken_promise (verify-only)
 - [ ] Task 8 — Verify delivery modes (verify-only)

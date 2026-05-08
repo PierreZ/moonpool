@@ -59,6 +59,61 @@ pub struct RequestStream<Req, Resp> {
     _phantom: PhantomData<Resp>,
 }
 
+impl<Req, Resp> Clone for RequestStream<Req, Resp> {
+    fn clone(&self) -> Self {
+        Self {
+            queue: Rc::clone(&self.queue),
+            transport: Rc::clone(&self.transport),
+            encode_reply: self.encode_reply.clone(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<Req, Resp> std::fmt::Debug for RequestStream<Req, Resp> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestStream")
+            .field("endpoint", self.queue.endpoint())
+            .finish()
+    }
+}
+
+impl<Req, Resp> RequestStream<Req, Resp> {
+    /// Get the endpoint for this stream.
+    ///
+    /// Clients use this endpoint to send requests.
+    pub fn endpoint(&self) -> &Endpoint {
+        self.queue.endpoint()
+    }
+
+    /// Get a reference to the internal queue for registration.
+    ///
+    /// This is used to register the stream with NetTransport.
+    pub fn queue(&self) -> Rc<NetNotifiedQueue<RequestEnvelope<Req>>> {
+        self.queue.clone()
+    }
+
+    /// Check if the stream is empty.
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    /// Get the number of pending requests.
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// Close the stream.
+    pub fn close(&self) {
+        self.queue.close();
+    }
+
+    /// Check if the stream is closed.
+    pub fn is_closed(&self) -> bool {
+        self.queue.is_closed()
+    }
+}
+
 impl<Req, Resp> RequestStream<Req, Resp>
 where
     Req: DeserializeOwned + 'static,
@@ -76,20 +131,6 @@ where
             encode_reply: make_encode_fn(codec),
             _phantom: PhantomData,
         }
-    }
-
-    /// Get the endpoint for this stream.
-    ///
-    /// Clients use this endpoint to send requests.
-    pub fn endpoint(&self) -> &Endpoint {
-        self.queue.endpoint()
-    }
-
-    /// Get a reference to the internal queue for registration.
-    ///
-    /// This is used to register the stream with NetTransport.
-    pub fn queue(&self) -> Rc<NetNotifiedQueue<RequestEnvelope<Req>>> {
-        self.queue.clone()
     }
 
     /// Receive the next request with its reply promise.
@@ -145,26 +186,6 @@ where
         let envelope = self.queue.try_recv()?;
         let reply = ReplyPromise::new(envelope.reply_to, self.encode_reply.clone(), sender);
         Some((envelope.request, reply))
-    }
-
-    /// Check if the stream is empty.
-    pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-
-    /// Get the number of pending requests.
-    pub fn len(&self) -> usize {
-        self.queue.len()
-    }
-
-    /// Close the stream.
-    pub fn close(&self) {
-        self.queue.close();
-    }
-
-    /// Check if the stream is closed.
-    pub fn is_closed(&self) -> bool {
-        self.queue.is_closed()
     }
 }
 

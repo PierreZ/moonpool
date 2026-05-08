@@ -7,8 +7,8 @@
 //!
 //! The `#[service]` macro generates all RPC boilerplate from a trait:
 //!
-//! - `{Name}Server<C>` — server-side with `RequestStream` fields
-//! - `{Name}Client<C>` — client-side with `ServiceEndpoint` fields
+//! - `{Name}Handler` — the handler trait (renamed from the user's trait)
+//! - `{Name}` — unified struct with `InterfaceMethod` fields for both server and client use
 //!
 //! # Example
 //!
@@ -19,20 +19,20 @@
 //!     async fn sub(&self, req: SubRequest) -> Result<SubResponse, RpcError>;
 //! }
 //!
-//! // Server (dynamic tokens):
-//! let calc = CalculatorServer::init(&transport, JsonCodec);
+//! // Server (local mode, dynamic tokens):
+//! let calc = Calculator::init(&transport);
 //!
-//! // Server (well-known tokens):
-//! let calc = CalculatorServer::well_known(&transport, MY_TOKEN, JsonCodec);
+//! // Server (local mode, well-known tokens):
+//! let calc = Calculator::well_known(&transport, MY_TOKEN);
 //!
-//! // Client (from base token or well-known):
-//! let client = CalculatorClient::from_base(server_addr, base_token, JsonCodec);
-//! let client = CalculatorClient::well_known(server_addr, MY_TOKEN, JsonCodec);
+//! // Client (remote mode):
+//! let calc = Calculator::from_base(server_addr, base_token, &transport);
+//! let calc = Calculator::client_well_known(server_addr, MY_TOKEN, &transport);
 //! ```
 //!
 //! # Serialization
 //!
-//! Client interfaces serialize only the base endpoint. Method endpoints
+//! Interfaces serialize only the base endpoint. Method endpoints
 //! are derived using `Endpoint::adjusted()`, following FoundationDB's pattern.
 
 use crate::{Endpoint, UID};

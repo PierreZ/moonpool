@@ -16,9 +16,9 @@
 //!
 //! # Architecture
 //!
-//! - `#[service]` macro generates Server and Client types (no hardcoded ID)
-//! - Server: `CalculatorServer::init(&transport)` allocates random base token
-//! - Client: `CalculatorClient::from_base(addr, base_token, &transport)` reconstructs endpoints
+//! - `#[service]` macro generates a unified `Calculator` struct
+//! - Server: `Calculator::init(&transport)` allocates random base token
+//! - Client: `Calculator::from_base(addr, base_token, &transport)` reconstructs endpoints
 //! - Two Calculator servers in the same process get different tokens (no collisions)
 
 use std::env;
@@ -115,17 +115,17 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     println!("Server listening on {}\n", SERVER_ADDR);
 
     // Dynamic token allocation — each init() gets a unique base token.
-    let calc = CalculatorServer::init(&transport);
+    let calc = Calculator::init(&transport);
     let base_token = calc.base_token();
 
     println!(
         "Registered {} methods with dynamic base token: {}\n",
-        CalculatorServer::METHOD_COUNT,
+        Calculator::METHOD_COUNT,
         base_token,
     );
 
     // Demonstrate: two servers in the same process get different tokens
-    let calc2 = CalculatorServer::init(&transport);
+    let calc2 = Calculator::init(&transport);
     println!(
         "Second server base token: {} (different!)\n",
         calc2.base_token()
@@ -202,7 +202,7 @@ async fn run_client(base_token_json: &str) -> Result<(), Box<dyn std::error::Err
     let base_token: UID = serde_json::from_str(base_token_json)?;
     println!("Using discovered base token: {}\n", base_token);
 
-    let calc = CalculatorClient::from_base(server_addr, base_token, &transport);
+    let calc = Calculator::from_base(server_addr, base_token, &transport);
 
     println!("Client started, connecting to server at {}\n", SERVER_ADDR);
 
@@ -313,8 +313,8 @@ fn main() {
         _ => {
             println!("Dynamic Endpoint Example\n");
             println!("Demonstrates runtime-allocated tokens with discovery:\n");
-            println!("  - Server: CalculatorServer::init(&transport) → random base token");
-            println!("  - Client: CalculatorClient::from_base(addr, base_token, &transport)");
+            println!("  - Server: Calculator::init(&transport) → random base token");
+            println!("  - Client: Calculator::from_base(addr, base_token, &transport)");
             println!("  - Two servers in same process get different tokens (no collisions)\n");
             println!("Usage:");
             println!("  cargo run --example dynamic_endpoint -- server");

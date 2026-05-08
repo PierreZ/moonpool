@@ -18,9 +18,10 @@ trait Calculator {
 
 From this single trait definition, the macro generates:
 
-- **`CalculatorServer`** with a `RequestStream` per method, `init()` for dynamic token allocation, `well_known()` for deterministic addressing, and `serve()` for automatic dispatch
-- **`CalculatorClient`** with `ServiceEndpoint` fields for each method, constructed via `from_base()` or `well_known()`
-- The trait itself, wrapped with `#[async_trait(?Send)]`
+- **`CalculatorHandler`** trait (renamed from `Calculator`) with `#[async_trait(?Send)]`
+- **`Calculator`** struct with `InterfaceMethod` fields per method, usable in both server (local) and client (remote) modes
+
+The struct replaces what used to be separate `CalculatorServer` and `CalculatorClient` types. Construction determines the mode: server constructors create local-mode fields that can `recv()`, client constructors create remote-mode fields that can `get_reply()`.
 
 ## Two Tiers of Endpoint Addressing
 
@@ -31,14 +32,14 @@ Moonpool offers two ways to assign endpoint tokens, matching FoundationDB's dual
 Tokens are allocated at runtime using random UIDs. Each server instance gets a unique base token, so multiple instances of the same service coexist without collision.
 
 ```rust
-let server = CalculatorServer::init(&transport, JsonCodec);
+let server = Calculator::init(&transport);
 let base_token = server.base_token(); // random, unique per instance
 ```
 
 Clients discover the interface via serialization (service registry, out-of-band message, etc.):
 
 ```rust
-let client = CalculatorClient::from_base(server_addr, base_token, JsonCodec, &transport);
+let client = Calculator::from_base(server_addr, base_token, &transport);
 ```
 
 ### Well-known (opt-in)
@@ -48,11 +49,11 @@ For system services that need deterministic addressing without discovery, use we
 ```rust
 const WLTOKEN_PING: u32 = 4;
 
-// Server
-let server = PingPongServer::well_known(&transport, WLTOKEN_PING, JsonCodec);
+// Server (local mode)
+let server = PingPong::well_known(&transport, WLTOKEN_PING);
 
-// Client (no discovery needed)
-let client = PingPongClient::well_known(server_addr, WLTOKEN_PING, JsonCodec, &transport);
+// Client (remote mode, no discovery needed)
+let client = PingPong::client_well_known(server_addr, WLTOKEN_PING, &transport);
 ```
 
 Well-known tokens use `UID::well_known(token_id)` as the base, with method endpoints derived via `base.adjusted(1)`, `.adjusted(2)`, etc.
@@ -62,25 +63,22 @@ Well-known tokens use `UID::well_known(token_id)` as the base, with method endpo
 For a two-method `Calculator` service, the macro produces:
 
 ```text
-Calculator (trait)
+CalculatorHandler (trait, renamed from Calculator)
   ├── add(&self, AddRequest) -> Result<AddResponse, RpcError>
   └── sub(&self, SubRequest) -> Result<SubResponse, RpcError>
 
-CalculatorServer
-  ├── add: RequestStream<AddRequest, AddResponse>         // at base.adjusted(1)
-  ├── sub: RequestStream<SubRequest, SubResponse>         // at base.adjusted(2)
-  ├── init(transport, codec) -> Self            // dynamic tokens
-  ├── well_known(transport, token, codec)       // deterministic tokens
-  ├── init_at(transport, base, codec)           // explicit base token
-  ├── base_token() -> UID                       // for client discovery
+Calculator (struct)
+  ├── add: InterfaceMethod<AddRequest, AddResponse>   // at base.adjusted(1)
+  ├── sub: InterfaceMethod<SubRequest, SubResponse>   // at base.adjusted(2)
+  ├── init(transport) -> Self               // server, dynamic tokens
+  ├── well_known(transport, token) -> Self   // server, deterministic tokens
+  ├── init_at(transport, base) -> Self       // server, explicit base token
+  ├── from_base(addr, base, transport)       // client, discovered token
+  ├── client_well_known(addr, token, transport) // client, deterministic
+  ├── base_token() -> UID                   // for client discovery
+  ├── is_remote() -> bool                   // check mode
   └── serve(handler, providers) -> ServerHandle
-
-CalculatorClient
-  ├── from_base(address, base_token, codec, transport) -> Self
-  ├── well_known(address, token_id, codec, transport) -> Self
-  ├── add: ServiceEndpoint<AddRequest, AddResponse>
-  └── sub: ServiceEndpoint<SubRequest, SubResponse>
 ```
 
-The `serve()` method is particularly useful: it consumes the server, spawns a background task per method that loops on `recv()`, and returns a `ServerHandle` that stops everything when dropped. The transport is bound at server construction, so `serve()` only needs the handler and providers.
+The `serve()` method is particularly useful: it consumes the interface, spawns a background task per method that loops on `recv()`, and returns a `ServerHandle` that stops everything when dropped. The transport is bound at construction, so `serve()` only needs the handler and providers.
 

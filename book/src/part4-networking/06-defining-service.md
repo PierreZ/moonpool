@@ -70,4 +70,4 @@ Note the `#[async_trait(?Send)]` attribute. All moonpool services are single-thr
 
 The `#[service]` macro is codec-agnostic. The codec is a transport-level concern, set once when building the transport via `NetTransportBuilder::new(providers).codec(JsonCodec)`. The default is `JsonCodec`, so most code never mentions a codec at all. The generated server and client types carry no codec generic.
 
-The generated `CalculatorClient` serializes cleanly because each `ServiceEndpoint` stores just the destination address and method UID. Adding methods at the end does not change the serialized representation of existing endpoints.
+The generated `Calculator` struct serializes cleanly because each method endpoint stores just the destination address and method UID. Adding methods at the end does not change the serialized representation of existing endpoints.

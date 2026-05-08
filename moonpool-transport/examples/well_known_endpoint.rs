@@ -16,9 +16,9 @@
 //!
 //! # Architecture
 //!
-//! - `#[service]` macro generates Server and Client types
-//! - `PingPongServer::well_known(&transport, token_id)` registers at deterministic token
-//! - `PingPongClient::well_known(addr, token_id, &transport)` connects without discovery
+//! - `#[service]` macro generates a unified `PingPong` struct
+//! - `PingPong::well_known(&transport, token_id)` registers at deterministic token (server)
+//! - `PingPong::client_well_known(addr, token_id, &transport)` connects without discovery (client)
 
 use std::env;
 use std::time::Duration;
@@ -81,11 +81,11 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Server listening on {}\n", SERVER_ADDR);
 
-    let ping_server = PingPongServer::well_known(&transport, WLTOKEN_PING_PONG);
+    let ping_server = PingPong::well_known(&transport, WLTOKEN_PING_PONG);
 
     println!(
         "Registered {} method(s) at well-known token {}\n",
-        PingPongServer::METHOD_COUNT,
+        PingPong::METHOD_COUNT,
         WLTOKEN_PING_PONG
     );
     println!("Waiting for ping requests...\n");
@@ -131,12 +131,12 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     println!("Connecting to server at {}\n", SERVER_ADDR);
 
     // Client constructed from well-known token — no discovery needed.
-    let ping_client = PingPongClient::well_known(server_addr, WLTOKEN_PING_PONG, &transport);
+    let ping_client = PingPong::client_well_known(server_addr, WLTOKEN_PING_PONG, &transport);
 
     println!(
         "Using well-known token {} with {} method(s)\n",
         WLTOKEN_PING_PONG,
-        PingPongClient::METHOD_COUNT
+        PingPong::METHOD_COUNT
     );
 
     let num_pings = 5;
@@ -212,8 +212,8 @@ fn main() {
         _ => {
             println!("Well-Known Endpoint Example\n");
             println!("Demonstrates deterministic token addressing (no discovery):\n");
-            println!("  - Server: PingPongServer::well_known(&transport, token)");
-            println!("  - Client: PingPongClient::well_known(addr, token, &transport)");
+            println!("  - Server: PingPong::well_known(&transport, token)");
+            println!("  - Client: PingPong::client_well_known(addr, token, &transport)");
             println!("  - Both derive method tokens from the same well-known base\n");
             println!("Usage:");
             println!("  cargo run --example well_known_endpoint -- server");
