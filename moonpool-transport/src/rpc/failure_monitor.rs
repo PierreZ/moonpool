@@ -15,10 +15,22 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Poll, Waker};
+use std::time::Duration;
+
+use moonpool_core::TimeProvider;
 
 use crate::Endpoint;
+
+/// Type-erased sleep closure capturing a concrete [`TimeProvider`].
+///
+/// Mirrors the pattern used by
+/// [`TransportHandle::time_sleep`](crate::rpc::transport_handle::TransportHandle::time_sleep)
+/// to keep [`FailureMonitor`] non-generic while still able to call into the
+/// active time provider (real or simulated).
+type SleepFn = Box<dyn Fn(Duration) -> Pin<Box<dyn Future<Output = ()>>>>;
 
 /// Maximum number of permanently failed endpoints before clearing the map.
 ///
@@ -53,10 +65,15 @@ pub enum FailedReason {
 /// Consumers register wakers via `on_disconnect_or_failure` and similar methods;
 /// producers wake them via `set_status`, `notify_disconnect`, `endpoint_not_found`.
 ///
+/// Use [`on_failed_for`](Self::on_failed_for) to wait for a sustained failure
+/// duration before giving up — the canonical building block behind
+/// [`get_reply_unless_failed_for`](crate::rpc::delivery::get_reply_unless_failed_for).
+///
 /// # FDB Reference
 /// `SimpleFailureMonitor` from `FailureMonitor.h:146`, `FailureMonitor.actor.cpp`
 pub struct FailureMonitor {
     inner: RefCell<FailureMonitorInner>,
+    sleep_fn: SleepFn,
 }
 
 struct FailureMonitorInner {
@@ -77,7 +94,18 @@ impl FailureMonitor {
     ///
     /// All unknown addresses default to [`FailureStatus::Failed`] until
     /// a connection succeeds and calls [`set_status`](Self::set_status).
-    pub fn new() -> Self {
+    ///
+    /// The `time` provider is captured behind a type-erased sleep closure
+    /// so [`FailureMonitor`] itself stays non-generic; this matches the
+    /// pattern used by
+    /// [`TransportHandle::time_sleep`](crate::rpc::transport_handle::TransportHandle::time_sleep).
+    pub fn new<T: TimeProvider + 'static>(time: T) -> Self {
+        let sleep_fn: SleepFn = Box::new(move |duration| {
+            let time = time.clone();
+            Box::pin(async move {
+                let _ = time.sleep(duration).await;
+            })
+        });
         Self {
             inner: RefCell::new(FailureMonitorInner {
                 address_status: BTreeMap::new(),
@@ -85,6 +113,7 @@ impl FailureMonitor {
                 endpoint_watchers: BTreeMap::new(),
                 disconnect_watchers: BTreeMap::new(),
             }),
+            sleep_fn,
         }
     }
 
@@ -339,11 +368,18 @@ impl FailureMonitor {
             Poll::Pending
         })
     }
-}
 
-impl Default for FailureMonitor {
-    fn default() -> Self {
-        Self::new()
+    /// Resolves once `endpoint` has been failed for at least `duration`.
+    ///
+    /// Detects failure once via
+    /// [`on_disconnect_or_failure`](Self::on_disconnect_or_failure), then sleeps
+    /// `duration` using the time provider captured at construction and returns.
+    /// Does **not** retry on recovery — matches what
+    /// [`get_reply_unless_failed_for`](crate::rpc::delivery::get_reply_unless_failed_for)
+    /// currently relies on.
+    pub async fn on_failed_for(self: &Rc<Self>, endpoint: &Endpoint, duration: Duration) {
+        self.on_disconnect_or_failure(endpoint).await;
+        (self.sleep_fn)(duration).await;
     }
 }
 
@@ -370,6 +406,8 @@ fn wake_all(watchers: &mut BTreeMap<String, Vec<Waker>>, address: &str) {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
+    use moonpool_core::TokioTimeProvider;
+
     use super::*;
     use crate::{NetworkAddress, UID};
 
@@ -381,9 +419,13 @@ mod tests {
         Endpoint::new(test_addr(), UID::new(42, 1))
     }
 
+    fn make_fm() -> FailureMonitor {
+        FailureMonitor::new(TokioTimeProvider::new())
+    }
+
     #[test]
     fn test_unknown_address_is_failed() {
-        let fm = FailureMonitor::new();
+        let fm = make_fm();
         let ep = test_endpoint();
         assert_eq!(fm.state(&ep), FailureStatus::Failed);
         assert_eq!(fm.address_state("10.0.1.1:4500"), FailureStatus::Failed);
@@ -391,7 +433,7 @@ mod tests {
 
     #[test]
     fn test_set_status_available() {
-        let fm = FailureMonitor::new();
+        let fm = make_fm();
         let ep = test_endpoint();
         fm.set_status("10.0.1.1:4500", FailureStatus::Available);
         assert_eq!(fm.state(&ep), FailureStatus::Available);
@@ -400,7 +442,7 @@ mod tests {
 
     #[test]
     fn test_set_status_failed_removes_entry() {
-        let fm = FailureMonitor::new();
+        let fm = make_fm();
         fm.set_status("10.0.1.1:4500", FailureStatus::Available);
         fm.set_status("10.0.1.1:4500", FailureStatus::Failed);
         assert_eq!(fm.address_state("10.0.1.1:4500"), FailureStatus::Failed);
@@ -408,7 +450,7 @@ mod tests {
 
     #[test]
     fn test_endpoint_not_found_marks_permanent() {
-        let fm = FailureMonitor::new();
+        let fm = make_fm();
         let ep = test_endpoint();
         fm.set_status("10.0.1.1:4500", FailureStatus::Available);
         fm.endpoint_not_found(&ep);
@@ -418,7 +460,7 @@ mod tests {
 
     #[test]
     fn test_endpoint_not_found_skips_well_known() {
-        let fm = FailureMonitor::new();
+        let fm = make_fm();
         let ep = Endpoint::well_known(test_addr(), crate::WellKnownToken::Ping);
         fm.endpoint_not_found(&ep);
         assert!(!fm.permanently_failed(&ep));
@@ -426,7 +468,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_on_disconnect_or_failure_fast_path_unknown() {
-        let fm = Rc::new(FailureMonitor::new());
+        let fm = Rc::new(make_fm());
         let ep = test_endpoint();
         // Unknown address → already failed → should resolve immediately
         fm.on_disconnect_or_failure(&ep).await;
@@ -434,7 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_on_disconnect_or_failure_fast_path_permanent() {
-        let fm = Rc::new(FailureMonitor::new());
+        let fm = Rc::new(make_fm());
         let ep = test_endpoint();
         fm.set_status("10.0.1.1:4500", FailureStatus::Available);
         fm.endpoint_not_found(&ep);
@@ -449,7 +491,7 @@ mod tests {
             .build_local(tokio::runtime::LocalOptions::default())
             .expect("build runtime");
         rt.block_on(async {
-            let fm = Rc::new(FailureMonitor::new());
+            let fm = Rc::new(make_fm());
             let ep = test_endpoint();
             fm.set_status("10.0.1.1:4500", FailureStatus::Available);
 
@@ -475,7 +517,7 @@ mod tests {
             .build_local(tokio::runtime::LocalOptions::default())
             .expect("build runtime");
         rt.block_on(async {
-            let fm = Rc::new(FailureMonitor::new());
+            let fm = Rc::new(make_fm());
             fm.set_status("10.0.1.1:4500", FailureStatus::Available);
 
             let fm2 = Rc::clone(&fm);
@@ -493,16 +535,37 @@ mod tests {
 
     #[test]
     fn test_debug_impl() {
-        let fm = FailureMonitor::new();
+        let fm = make_fm();
         fm.set_status("10.0.1.1:4500", FailureStatus::Available);
         let debug = format!("{:?}", fm);
         assert!(debug.contains("FailureMonitor"));
         assert!(debug.contains("addresses_available: 1"));
     }
 
-    #[test]
-    fn test_default_impl() {
-        let fm = FailureMonitor::default();
-        assert_eq!(fm.address_state("any"), FailureStatus::Failed);
+    #[tokio::test]
+    async fn test_on_failed_for_resolves_after_sustained_failure() {
+        let fm = Rc::new(make_fm());
+        let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
+        let token = UID::new(0xAAAA, 0xBBBB);
+        let endpoint = Endpoint::new(addr.clone(), token);
+
+        // Mark address failed BEFORE awaiting on_failed_for so the disconnect
+        // detection step resolves immediately and we measure only the sleep.
+        fm.set_status(&addr.to_string(), FailureStatus::Failed);
+
+        let start = tokio::time::Instant::now();
+        fm.on_failed_for(&endpoint, Duration::from_millis(50)).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed >= Duration::from_millis(50),
+            "should sleep at least 50ms, got {:?}",
+            elapsed
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "should not exceed 500ms wall clock, got {:?}",
+            elapsed
+        );
     }
 }

@@ -463,7 +463,7 @@ fn test_endpoint_not_found_notifies_failure_monitor() {
 /// Test that well-known tokens are NOT notified (prevents feedback loops).
 #[test]
 fn test_endpoint_not_found_skips_well_known_tokens() {
-    let fm = Rc::new(FailureMonitor::new());
+    let fm = Rc::new(FailureMonitor::new(TokioTimeProvider::new()));
 
     let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
     let well_known_token = UID::well_known(42);

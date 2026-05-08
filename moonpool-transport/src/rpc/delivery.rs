@@ -193,7 +193,7 @@ where
         message: e.to_string(),
     })?;
 
-    let failed_for = on_failed_for(transport, destination, sustained_failure_duration);
+    let failed_for = fm.on_failed_for(destination, sustained_failure_duration);
     tokio::pin!(failed_for);
 
     tokio::select! {
@@ -209,19 +209,6 @@ where
             Err(ReplyError::MaybeDelivered)
         }
     }
-}
-
-/// Wait until endpoint has been failed for at least `duration`.
-///
-/// First waits for the disconnect/failure signal, then sleeps for
-/// the sustained duration. If the connection recovers during the sleep,
-/// the reliable retransmit will resolve the reply future first.
-async fn on_failed_for(transport: &dyn TransportHandle, endpoint: &Endpoint, duration: Duration) {
-    transport
-        .failure_monitor()
-        .on_disconnect_or_failure(endpoint)
-        .await;
-    transport.time_sleep(duration).await;
 }
 
 #[cfg(test)]

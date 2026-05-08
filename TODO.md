@@ -30,7 +30,7 @@ Make moonpool's RPC ergonomics match FDB's fdbrpc. After this round: define an i
 - [x] Task 6 — Serializable interfaces
 - [x] Task 7 — Verify broken_promise (verify-only)
 - [x] Task 8 — Verify delivery modes (verify-only)
-- [ ] Task 9 — Promote on_failed_for
+- [x] Task 9 — Promote on_failed_for
 - [ ] Final book audit
 
 ## Cross-Cutting Invariants

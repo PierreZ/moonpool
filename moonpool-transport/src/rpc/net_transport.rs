@@ -94,12 +94,12 @@ struct TransportData<P: Providers> {
 }
 
 impl<P: Providers> TransportData<P> {
-    fn new() -> Self {
+    fn new(providers: &P) -> Self {
         Self {
             endpoints: EndpointMap::new(),
             peers: BTreeMap::new(),
             incoming_peers: BTreeMap::new(),
-            failure_monitor: Rc::new(FailureMonitor::new()),
+            failure_monitor: Rc::new(FailureMonitor::new(providers.time().clone())),
             pending_replies: BTreeMap::new(),
             stats: TransportStats::default(),
         }
@@ -188,8 +188,9 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
     /// ```
     pub fn new(local_address: NetworkAddress, providers: P, codec: C) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
+        let data = TransportData::new(&providers);
         Self {
-            data: RefCell::new(TransportData::new()),
+            data: RefCell::new(data),
             local_address,
             providers,
             codec,
