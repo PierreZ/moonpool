@@ -10,10 +10,10 @@ The generated `Server` type provides two patterns. The simple path uses `serve()
 
 ```rust
 // Dynamic tokens (each instance gets unique random base):
-let server = CalculatorServer::init(&transport, JsonCodec);
+let server = CalculatorServer::init(&transport);
 
 // Or well-known tokens (deterministic, no discovery needed):
-let server = CalculatorServer::well_known(&transport, WLTOKEN_CALC, JsonCodec);
+let server = CalculatorServer::well_known(&transport, WLTOKEN_CALC);
 
 let handle = server.serve(Rc::new(CalculatorImpl), &providers);
 // Tasks run until handle is dropped or stop() is called
@@ -26,7 +26,7 @@ let handle = server.serve(Rc::new(CalculatorImpl), &providers);
 For more control, you can skip `serve()` and process each `RequestStream` manually:
 
 ```rust
-let server = CalculatorServer::init(&transport, JsonCodec);
+let server = CalculatorServer::init(&transport);
 // Handle the `add` stream yourself
 while let Some((req, reply)) = server.add.recv().await {
     reply.send(AddResponse { result: req.a + req.b });
@@ -39,13 +39,13 @@ Clients are constructed from a base token (obtained via discovery or well-known 
 
 ```rust
 // From a well-known token (both sides know the constant):
-let calc = CalculatorClient::well_known(server_address, WLTOKEN_CALC, JsonCodec, &transport);
+let calc = CalculatorClient::well_known(server_address, WLTOKEN_CALC, &transport);
 
 // From a discovered base token (received via serialization):
-let calc = CalculatorClient::from_base(server_address, base_token, JsonCodec, &transport);
+let calc = CalculatorClient::from_base(server_address, base_token, &transport);
 ```
 
-Each `ServiceEndpoint` field carries the destination address, method UID, codec, and a reference to the transport. The delivery mode is explicit at the call site: `get_reply` for at-least-once, `try_get_reply` for at-most-once, `send` for fire-and-forget. See [Delivery Modes](./08-delivery-modes.md) for the full set.
+Each `ServiceEndpoint` field carries the destination address, method UID, and a reference to the transport. The codec is a transport-level concern, set at builder time. The delivery mode is explicit at the call site: `get_reply` for at-least-once, `try_get_reply` for at-most-once, `send` for fire-and-forget. See [Delivery Modes](./08-delivery-modes.md) for the full set.
 
 ```rust
 let resp = calc.add.get_reply(AddRequest { a: 1, b: 2 }).await?;

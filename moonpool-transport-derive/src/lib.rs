@@ -16,12 +16,12 @@
 //! }
 //!
 //! // Well-known endpoints (opt-in, deterministic addressing):
-//! // Use transport.serve_well_known::<Calculator>(token_id, codec)
+//! // Use CalculatorServer::well_known(&transport, token_id)
 //! ```
 //!
 //! This generates:
-//! - `CalculatorServer<C, P>` with `RequestStream` fields, `init()`, `init_at()`, and `serve()`
-//! - `CalculatorClient<C, P>` with `ServiceEndpoint` fields and `from_base()`
+//! - `CalculatorServer` with `RequestStream` fields, `init()`, `init_at()`, and `serve()`
+//! - `CalculatorClient` with `ServiceEndpoint` fields and `from_base()`
 //! - The trait itself with `#[async_trait(?Send)]`
 
 use proc_macro::TokenStream;
@@ -139,19 +139,11 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
     // Generate server init_at — registers at base.adjusted(idx) per method
     let server_init_at_fields: Vec<_> = method_infos
         .iter()
-        .enumerate()
-        .map(|(i, m)| {
+        .map(|m| {
             let name = &m.name;
             let idx = m.index;
-            let is_last = i == method_infos.len() - 1;
-            if is_last {
-                quote! {
-                    let #name = moonpool_transport::NetTransport::register_handler(transport, base_token.adjusted(#idx), codec);
-                }
-            } else {
-                quote! {
-                    let #name = moonpool_transport::NetTransport::register_handler(transport, base_token.adjusted(#idx), codec.clone());
-                }
+            quote! {
+                let #name = moonpool_transport::NetTransport::register_handler(transport, base_token.adjusted(#idx));
             }
         })
         .collect();
@@ -201,6 +193,7 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
             }
         })
         .collect();
+    // ^ codec is obtained from `transport.codec().clone()` in from_base/well_known body
 
     let first_field_name = &method_infos[0].name;
 
@@ -249,12 +242,12 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
     // Generate init() — dynamic allocation when no id, legacy UID::new when id present
     let init_body = if let Some(id) = attr.id {
         quote! {
-            Self::init_at(transport, moonpool_transport::UID::new(#id, 0), codec)
+            Self::init_at(transport, moonpool_transport::UID::new(#id, 0))
         }
     } else {
         quote! {
             let base_token = transport.allocate_interface_token();
-            Self::init_at(transport, base_token, codec)
+            Self::init_at(transport, base_token)
         }
     };
 
@@ -304,13 +297,13 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
             pub const INTERFACE_ID: u64 = #id;
 
             /// Create a client with legacy static token addressing.
-            pub fn new<C: moonpool_transport::MessageCodec + Clone, P: moonpool_transport::Providers>(
+            pub fn new<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
                 address: moonpool_transport::NetworkAddress,
-                codec: C,
-                transport: &std::rc::Rc<moonpool_transport::NetTransport<P>>,
+                transport: &std::rc::Rc<moonpool_transport::NetTransport<P, C>>,
             ) -> Self {
                 let handle: std::rc::Rc<dyn moonpool_transport::TransportHandle> =
                     transport.clone() as std::rc::Rc<dyn moonpool_transport::TransportHandle>;
+                let codec = transport.codec().clone();
                 Self {
                     #(#client_new_inits,)*
                 }
@@ -342,9 +335,9 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
             /// Initialize the server interface, registering all handlers.
             ///
             /// Allocates a dynamic base token (or uses the legacy static ID if present).
-            pub fn init<C: moonpool_transport::MessageCodec + Clone, P: moonpool_transport::Providers>(
-                transport: &std::rc::Rc<moonpool_transport::NetTransport<P>>,
-                codec: C,
+            /// The codec is taken from the transport (set at builder time).
+            pub fn init<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
+                transport: &std::rc::Rc<moonpool_transport::NetTransport<P, C>>,
             ) -> Self {
                 #init_body
             }
@@ -352,10 +345,9 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
             /// Initialize at a specific base token.
             ///
             /// Methods are registered at `base_token.adjusted(1)`, `.adjusted(2)`, etc.
-            pub fn init_at<C: moonpool_transport::MessageCodec + Clone, P: moonpool_transport::Providers>(
-                transport: &std::rc::Rc<moonpool_transport::NetTransport<P>>,
+            pub fn init_at<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
+                transport: &std::rc::Rc<moonpool_transport::NetTransport<P, C>>,
                 base_token: moonpool_transport::UID,
-                codec: C,
             ) -> Self {
                 #(#server_init_at_fields)*
                 Self { #(#server_field_names,)* base_token }
@@ -364,12 +356,11 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
             /// Initialize at a well-known token (deterministic addressing without discovery).
             ///
             /// Methods are registered at `UID::well_known(token_id).adjusted(1)`, etc.
-            pub fn well_known<C: moonpool_transport::MessageCodec + Clone, P: moonpool_transport::Providers>(
-                transport: &std::rc::Rc<moonpool_transport::NetTransport<P>>,
+            pub fn well_known<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
+                transport: &std::rc::Rc<moonpool_transport::NetTransport<P, C>>,
                 token_id: u32,
-                codec: C,
             ) -> Self {
-                Self::init_at(transport, moonpool_transport::UID::well_known(token_id), codec)
+                Self::init_at(transport, moonpool_transport::UID::well_known(token_id))
             }
 
             /// Get the base token for this server instance.
@@ -420,14 +411,15 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
             /// Create a client from a base token (for well-known or discovered interfaces).
             ///
             /// Methods target `base_token.adjusted(1)`, `.adjusted(2)`, etc.
-            pub fn from_base<C: moonpool_transport::MessageCodec + Clone, P: moonpool_transport::Providers>(
+            /// The codec is taken from the transport (set at builder time).
+            pub fn from_base<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
                 address: moonpool_transport::NetworkAddress,
                 base_token: moonpool_transport::UID,
-                codec: C,
-                transport: &std::rc::Rc<moonpool_transport::NetTransport<P>>,
+                transport: &std::rc::Rc<moonpool_transport::NetTransport<P, C>>,
             ) -> Self {
                 let handle: std::rc::Rc<dyn moonpool_transport::TransportHandle> =
                     transport.clone() as std::rc::Rc<dyn moonpool_transport::TransportHandle>;
+                let codec = transport.codec().clone();
                 Self {
                     #(#client_from_base_inits,)*
                 }
@@ -436,13 +428,12 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
             /// Create a client from a well-known token (deterministic addressing).
             ///
             /// Methods target `UID::well_known(token_id).adjusted(1)`, etc.
-            pub fn well_known<C: moonpool_transport::MessageCodec + Clone, P: moonpool_transport::Providers>(
+            pub fn well_known<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
                 address: moonpool_transport::NetworkAddress,
                 token_id: u32,
-                codec: C,
-                transport: &std::rc::Rc<moonpool_transport::NetTransport<P>>,
+                transport: &std::rc::Rc<moonpool_transport::NetTransport<P, C>>,
             ) -> Self {
-                Self::from_base(address, moonpool_transport::UID::well_known(token_id), codec, transport)
+                Self::from_base(address, moonpool_transport::UID::well_known(token_id), transport)
             }
 
             /// Get the address this client points to.

@@ -127,7 +127,7 @@ impl<P: Providers> TransportData<P> {
 /// transport.set_weak_self(Rc::downgrade(&transport));
 /// transport.listen().await?; // Start accepting connections
 /// ```
-pub struct NetTransport<P: Providers> {
+pub struct NetTransport<P: Providers, C: MessageCodec = crate::JsonCodec> {
     /// Internal transport data (FDB: TransportData* self).
     data: RefCell<TransportData<P>>,
 
@@ -136,6 +136,9 @@ pub struct NetTransport<P: Providers> {
 
     /// Providers bundle for network, time, task, and random.
     providers: P,
+
+    /// Message codec for serialization/deserialization.
+    codec: C,
 
     /// Peer configuration.
     peer_config: PeerConfig,
@@ -167,13 +170,14 @@ struct TransportStats {
     peers_created: u64,
 }
 
-impl<P: Providers> NetTransport<P> {
+impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
     /// Create a new NetTransport.
     ///
     /// # Arguments
     ///
     /// * `local_address` - Address of this transport (for local delivery checks)
     /// * `providers` - Providers bundle for network, time, task, and random
+    /// * `codec` - Message codec for serialization/deserialization
     ///
     /// # Multi-Node Usage
     ///
@@ -182,17 +186,23 @@ impl<P: Providers> NetTransport<P> {
     /// let transport = Rc::new(NetTransport::new(...));
     /// transport.set_weak_self(Rc::downgrade(&transport));
     /// ```
-    pub fn new(local_address: NetworkAddress, providers: P) -> Self {
+    pub fn new(local_address: NetworkAddress, providers: P, codec: C) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
         Self {
             data: RefCell::new(TransportData::new()),
             local_address,
             providers,
+            codec,
             peer_config: PeerConfig::default(),
             weak_self: RefCell::new(None),
             shutdown_tx,
             weak_handle: RefCell::new(None),
         }
+    }
+
+    /// Get a reference to the transport's codec.
+    pub fn codec(&self) -> &C {
+        &self.codec
     }
 
     /// Get the random provider for generating unique IDs.
@@ -345,13 +355,13 @@ impl<P: Providers> NetTransport<P> {
     /// - Creating a `RequestStream` for the request type
     /// - Registering the stream's queue with the transport
     ///
-    /// Register a typed handler and return a bound `RequestStream`.
+    /// The codec is taken from the transport (set at builder time).
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// let stream = NetTransport::register_handler::<PingRequest, PingResponse, _>(
-    ///     &transport, ping_token(), JsonCodec,
+    /// let stream = NetTransport::register_handler::<PingRequest, PingResponse>(
+    ///     &transport, ping_token(),
     /// );
     ///
     /// loop {
@@ -360,20 +370,15 @@ impl<P: Providers> NetTransport<P> {
     ///     }
     /// }
     /// ```
-    pub fn register_handler<Req, Resp, C>(
-        transport: &Rc<Self>,
-        token: UID,
-        codec: C,
-    ) -> RequestStream<Req, Resp>
+    pub fn register_handler<Req, Resp>(transport: &Rc<Self>, token: UID) -> RequestStream<Req, Resp>
     where
         Req: DeserializeOwned + 'static,
         Resp: Serialize + 'static,
-        C: MessageCodec,
     {
         let endpoint = Endpoint::new(transport.local_address.clone(), token);
         let handle: Rc<dyn super::transport_handle::TransportHandle> =
             Rc::clone(transport) as Rc<dyn super::transport_handle::TransportHandle>;
-        let stream = RequestStream::new(endpoint, codec, handle);
+        let stream = RequestStream::new(endpoint, transport.codec.clone(), handle);
         transport
             .data
             .borrow_mut()
@@ -385,12 +390,13 @@ impl<P: Providers> NetTransport<P> {
     /// Register a handler for a multi-method interface.
     ///
     /// The token is computed deterministically from `interface_id` and `method_index`.
+    /// The codec is taken from the transport.
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// let (add_stream, _) = NetTransport::register_handler_at::<AddRequest, AddResponse, _>(
-    ///     &transport, CALC_INTERFACE, METHOD_ADD, JsonCodec,
+    /// let (add_stream, _) = NetTransport::register_handler_at::<AddRequest, AddResponse>(
+    ///     &transport, CALC_INTERFACE, METHOD_ADD,
     /// );
     ///
     /// loop {
@@ -401,19 +407,17 @@ impl<P: Providers> NetTransport<P> {
     ///     }
     /// }
     /// ```
-    pub fn register_handler_at<Req, Resp, C>(
+    pub fn register_handler_at<Req, Resp>(
         transport: &Rc<Self>,
         interface_id: u64,
         method_index: u64,
-        codec: C,
     ) -> (RequestStream<Req, Resp>, UID)
     where
         Req: DeserializeOwned + 'static,
         Resp: Serialize + 'static,
-        C: MessageCodec,
     {
         let token = UID::new(interface_id, method_index);
-        let stream = Self::register_handler(transport, token, codec);
+        let stream = Self::register_handler(transport, token);
         (stream, token)
     }
 
@@ -684,7 +688,7 @@ impl<P: Providers> NetTransport<P> {
 ///
 /// When NetTransport is dropped, we signal all background tasks (listen_task)
 /// to exit gracefully. This prevents tasks from being stuck on accept() forever.
-impl<P: Providers> Drop for NetTransport<P> {
+impl<P: Providers, C: MessageCodec> Drop for NetTransport<P, C> {
     fn drop(&mut self) {
         tracing::debug!("NetTransport: signaling shutdown to background tasks");
         // Signal shutdown - ignore error if no receivers
@@ -696,7 +700,9 @@ impl<P: Providers> Drop for NetTransport<P> {
 // TransportHandle implementation
 // =============================================================================
 
-impl<P: Providers> super::transport_handle::TransportHandle for NetTransport<P> {
+impl<P: Providers, C: MessageCodec> super::transport_handle::TransportHandle
+    for NetTransport<P, C>
+{
     fn send_unreliable(
         &self,
         endpoint: &crate::Endpoint,
@@ -780,7 +786,7 @@ impl<P: Providers> super::transport_handle::TransportHandle for NetTransport<P> 
     }
 }
 
-impl<P: Providers> NetTransport<P> {
+impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
     /// Set the weak handle reference for `dyn TransportHandle` usage.
     ///
     /// Called by the builder after wrapping in `Rc`.
@@ -831,14 +837,18 @@ impl<P: Providers> NetTransport<P> {
 ///
 /// - **`build()`**: For fire-and-forget messaging where you don't expect responses.
 ///   Also useful for testing where you control message flow manually.
-pub struct NetTransportBuilder<P: Providers> {
+pub struct NetTransportBuilder<P: Providers, C: MessageCodec = crate::JsonCodec> {
     providers: P,
+    codec: C,
     local_address: Option<NetworkAddress>,
     peer_config: Option<PeerConfig>,
 }
 
-impl<P: Providers> NetTransportBuilder<P> {
+impl<P: Providers> NetTransportBuilder<P, crate::JsonCodec> {
     /// Create a new builder with the providers bundle.
+    ///
+    /// Uses [`JsonCodec`](crate::JsonCodec) by default. Call [`.codec()`](Self::codec)
+    /// to use a different codec.
     ///
     /// # Arguments
     ///
@@ -846,8 +856,24 @@ impl<P: Providers> NetTransportBuilder<P> {
     pub fn new(providers: P) -> Self {
         Self {
             providers,
+            codec: crate::JsonCodec,
             local_address: None,
             peer_config: None,
+        }
+    }
+}
+
+impl<P: Providers, C: MessageCodec> NetTransportBuilder<P, C> {
+    /// Set the message codec for this transport.
+    ///
+    /// The codec is used for all serialization/deserialization in RPC handlers
+    /// and client endpoints created from this transport.
+    pub fn codec<NewC: MessageCodec>(self, codec: NewC) -> NetTransportBuilder<P, NewC> {
+        NetTransportBuilder {
+            providers: self.providers,
+            codec,
+            local_address: self.local_address,
+            peer_config: self.peer_config,
         }
     }
 
@@ -881,12 +907,12 @@ impl<P: Providers> NetTransportBuilder<P> {
     /// # Errors
     ///
     /// Returns `MessagingError::MissingLocalAddress` if `local_address()` was not called.
-    pub fn build(self) -> Result<Rc<NetTransport<P>>, MessagingError> {
+    pub fn build(self) -> Result<Rc<NetTransport<P, C>>, MessagingError> {
         let address = self
             .local_address
             .ok_or(MessagingError::MissingLocalAddress)?;
 
-        let mut transport = NetTransport::new(address, self.providers);
+        let mut transport = NetTransport::new(address, self.providers, self.codec);
 
         if let Some(config) = self.peer_config {
             transport = transport.with_peer_config(config);
@@ -912,7 +938,7 @@ impl<P: Providers> NetTransportBuilder<P> {
     ///
     /// Returns `MessagingError::MissingLocalAddress` if `local_address()` was not called,
     /// or a network error if binding to the local address fails.
-    pub async fn build_listening(self) -> Result<Rc<NetTransport<P>>, MessagingError> {
+    pub async fn build_listening(self) -> Result<Rc<NetTransport<P, C>>, MessagingError> {
         let transport = self.build()?;
         transport.listen().await?;
         Ok(transport)
@@ -931,8 +957,8 @@ impl<P: Providers> NetTransportBuilder<P> {
 ///
 /// The FDB version is more complex (handles ConnectPacket, protocol negotiation),
 /// but the core loop is: read packets → scanPackets → deliver.
-async fn connection_reader<P: Providers>(
-    transport: Weak<NetTransport<P>>,
+async fn connection_reader<P: Providers, C: MessageCodec>(
+    transport: Weak<NetTransport<P, C>>,
     peer: SharedPeer<P>,
     peer_addr: String,
 ) {
@@ -1011,8 +1037,8 @@ async fn connection_reader<P: Providers>(
 ///
 /// # FDB Reference
 /// From NetTransport.actor.cpp:1646-1676 listen
-async fn listen_task<P: Providers>(
-    transport: Weak<NetTransport<P>>,
+async fn listen_task<P: Providers, C: MessageCodec>(
+    transport: Weak<NetTransport<P, C>>,
     listener: <P::Network as NetworkProvider>::TcpListener,
     listen_addr: String,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -1095,11 +1121,11 @@ async fn listen_task<P: Providers>(
 ///
 /// FDB Pattern: Use Peer::new_incoming() with the accepted stream, not Peer::new().
 /// This uses the already-established connection rather than trying to connect back.
-fn connection_incoming<P: Providers>(
-    transport_weak: Weak<NetTransport<P>>,
+fn connection_incoming<P: Providers, C: MessageCodec>(
+    transport_weak: Weak<NetTransport<P, C>>,
     stream: <P::Network as NetworkProvider>::TcpStream,
     peer_addr: String,
-    transport: &NetTransport<P>,
+    transport: &NetTransport<P, C>,
 ) {
     tracing::debug!(
         "connection_incoming: handling connection from {}",
@@ -1290,7 +1316,7 @@ mod tests {
     }
 
     fn create_test_transport() -> NetTransport<MockProviders> {
-        NetTransport::new(test_address(), MockProviders::new())
+        NetTransport::new(test_address(), MockProviders::new(), JsonCodec)
     }
 
     #[test]
@@ -1506,9 +1532,7 @@ mod tests {
             .expect("build should succeed");
 
         let token = UID::new(0xDEAD, 0xBEEF);
-        let stream = NetTransport::register_handler::<TestRequest, TestResponse, _>(
-            &transport, token, JsonCodec,
-        );
+        let stream = NetTransport::register_handler::<TestRequest, TestResponse>(&transport, token);
 
         // Handler should be registered
         assert_eq!(transport.endpoint_count(), 1);
@@ -1554,17 +1578,15 @@ mod tests {
             .expect("build should succeed");
 
         // Register multiple handlers for the same interface
-        let (add_stream, add_token) = NetTransport::register_handler_at::<AddRequest, AddResponse, _>(
+        let (add_stream, add_token) = NetTransport::register_handler_at::<AddRequest, AddResponse>(
             &transport,
             CALC_INTERFACE,
             METHOD_ADD,
-            JsonCodec,
         );
-        let (sub_stream, sub_token) = NetTransport::register_handler_at::<SubRequest, SubResponse, _>(
+        let (sub_stream, sub_token) = NetTransport::register_handler_at::<SubRequest, SubResponse>(
             &transport,
             CALC_INTERFACE,
             METHOD_SUB,
-            JsonCodec,
         );
 
         // Both handlers should be registered

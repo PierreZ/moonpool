@@ -8,8 +8,7 @@ use tracing::instrument;
 
 use moonpool_sim::{Process, SimContext, SimulationResult, assert_sometimes, buggify};
 use moonpool_transport::{
-    JsonCodec, NetTransport, NetTransportBuilder, Providers, ReplyPromise, TaskProvider,
-    TimeProvider,
+    NetTransport, NetTransportBuilder, Providers, ReplyPromise, TaskProvider, TimeProvider,
 };
 
 use crate::service::{
@@ -44,23 +43,20 @@ impl Process for EchoServerProcess {
             })?;
 
         // Register handlers for all 3 methods
-        let (echo_stream, _) = NetTransport::register_handler_at::<EchoRequest, EchoResponse, _>(
+        let (echo_stream, _) = NetTransport::register_handler_at::<EchoRequest, EchoResponse>(
             &transport,
             ECHO_INTERFACE,
             METHOD_ECHO,
-            JsonCodec,
         );
-        let (delayed_stream, _) = NetTransport::register_handler_at::<EchoRequest, EchoResponse, _>(
+        let (delayed_stream, _) = NetTransport::register_handler_at::<EchoRequest, EchoResponse>(
             &transport,
             ECHO_INTERFACE,
             METHOD_ECHO_DELAYED,
-            JsonCodec,
         );
-        let (fail_stream, _) = NetTransport::register_handler_at::<EchoRequest, EchoResponse, _>(
+        let (fail_stream, _) = NetTransport::register_handler_at::<EchoRequest, EchoResponse>(
             &transport,
             ECHO_INTERFACE,
             METHOD_ECHO_OR_FAIL,
-            JsonCodec,
         );
 
         tracing::info!(%my_ip, "echo server started, 3 methods registered");
