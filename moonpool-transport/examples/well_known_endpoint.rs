@@ -2,7 +2,11 @@
 //!
 //! This example demonstrates moonpool's well-known endpoint pattern where
 //! both server and client derive tokens from a compile-time constant —
-//! no service discovery needed.
+//! no service discovery needed. It also exercises three of the four
+//! delivery modes: `get_reply` (the default at-least-once path),
+//! `get_reply_unless_failed_for` (failure-aware reply waiting), and
+//! `send` (fire-and-forget heartbeats, the natural fit for one-way
+//! traffic on well-known endpoints).
 //!
 //! Run as two separate processes:
 //!
@@ -55,6 +59,11 @@ struct PingResponse {
     echo: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct HeartbeatRequest {
+    seq: u32,
+}
+
 // ============================================================================
 // Interface Definition
 // ============================================================================
@@ -62,6 +71,7 @@ struct PingResponse {
 #[service]
 trait PingPong {
     async fn ping(&self, req: PingRequest) -> Result<PingResponse, RpcError>;
+    async fn heartbeat(&self, req: HeartbeatRequest) -> Result<(), RpcError>;
 }
 
 // ============================================================================
@@ -91,19 +101,41 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     println!("Waiting for ping requests...\n");
 
     loop {
-        if let Some((request, reply)) = ping_server.ping.recv().await {
-            println!("Received ping seq={}: {:?}", request.seq, request.message);
+        tokio::select! {
+            maybe_ping = ping_server.ping.recv() => {
+                match maybe_ping {
+                    Some((request, reply)) => {
+                        println!("Received ping seq={}: {:?}", request.seq, request.message);
 
-            let response = PingResponse {
-                seq: request.seq,
-                echo: format!("pong: {}", request.message),
-            };
+                        let response = PingResponse {
+                            seq: request.seq,
+                            echo: format!("pong: {}", request.message),
+                        };
 
-            reply.send(response.clone());
-            println!("Sent pong seq={}: {:?}\n", response.seq, response.echo);
-        } else {
-            println!("Request stream closed, shutting down.");
-            break;
+                        reply.send(response.clone());
+                        println!("Sent pong seq={}: {:?}\n", response.seq, response.echo);
+                    }
+                    None => {
+                        println!("Ping stream closed, shutting down.");
+                        break;
+                    }
+                }
+            }
+
+            maybe_hb = ping_server.heartbeat.recv() => {
+                match maybe_hb {
+                    Some((request, _reply)) => {
+                        // Fire-and-forget: client never awaits a reply.
+                        // Dropping `_reply` here is harmless because the client
+                        // used `send()` and never registered a `ReplyFuture`.
+                        println!("heartbeat seq={}", request.seq);
+                    }
+                    None => {
+                        println!("Heartbeat stream closed, shutting down.");
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -150,19 +182,17 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
 
         println!("Sending ping seq={}: {:?}", seq, request.message);
 
-        match time
-            .timeout(Duration::from_secs(5), ping_client.ping.get_reply(request))
+        match ping_client
+            .ping
+            .get_reply_unless_failed_for(request, Duration::from_secs(5))
             .await
         {
-            Ok(Ok(response)) => {
+            Ok(response) => {
                 println!("Received pong seq={}: {:?}\n", response.seq, response.echo);
                 success_count += 1;
             }
-            Ok(Err(e)) => {
-                println!("RPC error: {:?}\n", e);
-            }
             Err(e) => {
-                println!("Timeout or shutdown: {:?}\n", e);
+                println!("RPC error: {:?}\n", e);
             }
         }
 
@@ -174,6 +204,17 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
         "{}/{} pings completed successfully!",
         success_count, num_pings
     );
+
+    // Demonstrate fire-and-forget delivery (`send`). Heartbeats are the
+    // textbook one-way payload: the client emits liveness signals and never
+    // expects a reply. The dropped `ReplyPromise` on the server side is
+    // harmless because no `ReplyFuture` was ever registered.
+    println!("\n=== Heartbeats (fire-and-forget) ===");
+    for seq in 0..3 {
+        ping_client.heartbeat.send(HeartbeatRequest { seq })?;
+        println!("sent heartbeat {seq}");
+        let _ = time.sleep(Duration::from_millis(100)).await;
+    }
 
     Ok(())
 }

@@ -30,9 +30,7 @@
 use std::env;
 use std::time::Duration;
 
-use moonpool_transport::{
-    NetTransportBuilder, NetworkAddress, Providers, RpcError, TimeProvider, TokioProviders, service,
-};
+use moonpool_transport::{NetTransportBuilder, NetworkAddress, RpcError, TokioProviders, service};
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -193,7 +191,6 @@ async fn run_client(iface_json: &str) -> Result<(), Box<dyn std::error::Error>> 
     println!("=== Dynamic Endpoint Client ===\n");
 
     let providers = TokioProviders::new();
-    let time = providers.time().clone();
 
     let local_addr = NetworkAddress::parse(CLIENT_ADDR)?;
 
@@ -216,16 +213,14 @@ async fn run_client(iface_json: &str) -> Result<(), Box<dyn std::error::Error>> 
     println!("Client started, connecting to server at {}\n", SERVER_ADDR);
 
     // Delivery mode is a call-site decision (FDB pattern)
-    println!("--- get_reply (at-least-once) ---");
-    match time
-        .timeout(
-            Duration::from_secs(5),
-            calc.add.get_reply(AddRequest { a: 10, b: 5 }),
-        )
+    println!("--- get_reply_unless_failed_for (at-least-once) ---");
+    match calc
+        .add
+        .get_reply_unless_failed_for(AddRequest { a: 10, b: 5 }, Duration::from_secs(5))
         .await
     {
-        Ok(Ok(resp)) => println!("  10 + 5 = {}\n", resp.result),
-        other => println!("  Failed: {:?}\n", other),
+        Ok(resp) => println!("  10 + 5 = {}\n", resp.result),
+        Err(e) => println!("  Failed: {:?}\n", e),
     }
 
     println!("--- try_get_reply (at-most-once) ---");
@@ -237,49 +232,43 @@ async fn run_client(iface_json: &str) -> Result<(), Box<dyn std::error::Error>> 
         Err(e) => println!("  Error: {:?}\n", e),
     }
 
-    println!("--- get_reply ---");
-    match time
-        .timeout(
-            Duration::from_secs(5),
-            calc.mul.get_reply(MulRequest { a: 6, b: 8 }),
-        )
+    println!("--- get_reply_unless_failed_for ---");
+    match calc
+        .mul
+        .get_reply_unless_failed_for(MulRequest { a: 6, b: 8 }, Duration::from_secs(5))
         .await
     {
-        Ok(Ok(resp)) => println!("  6 * 8 = {}\n", resp.result),
-        other => println!("  Failed: {:?}\n", other),
+        Ok(resp) => println!("  6 * 8 = {}\n", resp.result),
+        Err(e) => println!("  Failed: {:?}\n", e),
     }
 
     println!("--- division ---");
-    match time
-        .timeout(
-            Duration::from_secs(5),
-            calc.div.get_reply(DivRequest { a: 100, b: 4 }),
-        )
+    match calc
+        .div
+        .get_reply_unless_failed_for(DivRequest { a: 100, b: 4 }, Duration::from_secs(5))
         .await
     {
-        Ok(Ok(resp)) => println!(
+        Ok(resp) => println!(
             "  100 / 4 = {}\n",
             resp.result
                 .map(|r| r.to_string())
                 .unwrap_or_else(|| "ERROR".to_string())
         ),
-        other => println!("  Failed: {:?}\n", other),
+        Err(e) => println!("  Failed: {:?}\n", e),
     }
 
-    match time
-        .timeout(
-            Duration::from_secs(5),
-            calc.div.get_reply(DivRequest { a: 42, b: 0 }),
-        )
+    match calc
+        .div
+        .get_reply_unless_failed_for(DivRequest { a: 42, b: 0 }, Duration::from_secs(5))
         .await
     {
-        Ok(Ok(resp)) => println!(
+        Ok(resp) => println!(
             "  42 / 0 = {}\n",
             resp.result
                 .map(|r| r.to_string())
                 .unwrap_or_else(|| "ERROR (division by zero)".to_string())
         ),
-        other => println!("  Failed: {:?}\n", other),
+        Err(e) => println!("  Failed: {:?}\n", e),
     }
 
     Ok(())
