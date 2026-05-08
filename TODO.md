@@ -31,7 +31,7 @@ Make moonpool's RPC ergonomics match FDB's fdbrpc. After this round: define an i
 - [x] Task 7 — Verify broken_promise (verify-only)
 - [x] Task 8 — Verify delivery modes (verify-only)
 - [x] Task 9 — Promote on_failed_for
-- [ ] Final book audit
+- [x] Final book audit
 
 ## Cross-Cutting Invariants
 
