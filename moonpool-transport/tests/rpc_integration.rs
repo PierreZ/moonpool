@@ -12,8 +12,8 @@ use std::rc::Rc;
 use moonpool_transport::{
     Endpoint, FailureMonitor, FailureStatus, JsonCodec, MessagingError, NetTransport,
     NetworkAddress, NetworkProvider, Providers, ReplyError, ReplyFuture, RequestEnvelope,
-    RequestStream, TokioRandomProvider, TokioStorageProvider, TokioTaskProvider, TokioTimeProvider,
-    TransportHandle, UID, make_decode_fn, make_encode_fn, send_request,
+    RequestStream, RpcError, TokioRandomProvider, TokioStorageProvider, TokioTaskProvider,
+    TokioTimeProvider, TransportHandle, UID, make_decode_fn, make_encode_fn, send_request, service,
 };
 use serde::{Deserialize, Serialize};
 
@@ -494,4 +494,108 @@ fn test_endpoint_not_found_wire_format_roundtrip() {
     let decoded = UID::new(first, second);
 
     assert_eq!(decoded, original);
+}
+
+// ============================================================================
+// Interface serialization round-trip (Task 6)
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct AddRequest {
+    a: i64,
+    b: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct AddResponse {
+    result: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct SubRequest {
+    a: i64,
+    b: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct SubResponse {
+    result: i64,
+}
+
+#[service]
+trait Calculator {
+    async fn add(&self, req: AddRequest) -> Result<AddResponse, RpcError>;
+    async fn sub(&self, req: SubRequest) -> Result<SubResponse, RpcError>;
+}
+
+/// Serialize a server interface, deserialize it via `deserialize_with`, and
+/// drive an RPC through the round-tripped client interface.
+#[tokio::test]
+async fn test_interface_round_trip_serialize() {
+    let transport = create_transport();
+
+    // Server-side: register Calculator at a dynamically-allocated base token.
+    let server_calc = Calculator::init(&transport);
+    assert!(!server_calc.is_remote());
+
+    // Serialize the whole interface (compact `{ address, base_token }` shape).
+    let bytes = serde_json::to_vec(&server_calc).expect("serialize interface");
+    let json = std::str::from_utf8(&bytes).expect("utf8");
+    assert!(json.contains("address"));
+    assert!(json.contains("base_token"));
+
+    // Reconstruct via deserialize_with — bind to the same transport for this
+    // in-process test (a real client would have its own transport).
+    let mut de = serde_json::Deserializer::from_slice(&bytes);
+    let client_calc = Calculator::deserialize_with(&transport, &mut de).expect("deserialize");
+
+    assert!(client_calc.is_remote());
+    assert_eq!(client_calc.base_token(), server_calc.base_token());
+    assert_eq!(client_calc.address(), server_calc.address());
+
+    // Drive an RPC through the round-tripped interface. The client sends
+    // through the remote-mode `add` field; the server replies through the
+    // local-mode `add` field on the original interface.
+    let future = client_calc
+        .add
+        .send_request(AddRequest { a: 2, b: 3 })
+        .expect("send_request");
+
+    let transport_clone = transport.clone();
+    let (req, reply) = server_calc
+        .add
+        .try_recv_with_sender(move |endpoint, payload| {
+            transport_clone
+                .dispatch(&endpoint.token, payload)
+                .expect("dispatch reply");
+        })
+        .expect("server should receive request");
+    assert_eq!(req, AddRequest { a: 2, b: 3 });
+    reply.send(AddResponse { result: 5 });
+
+    let response = future.await.expect("response");
+    assert_eq!(response, AddResponse { result: 5 });
+
+    // The second method (`sub`) must also be reachable through the
+    // deserialized interface — its endpoint is reconstructed at
+    // base_token.adjusted(2) by from_base.
+    let future = client_calc
+        .sub
+        .send_request(SubRequest { a: 10, b: 4 })
+        .expect("send_request sub");
+
+    let transport_clone = transport.clone();
+    let (req, reply) = server_calc
+        .sub
+        .try_recv_with_sender(move |endpoint, payload| {
+            transport_clone
+                .dispatch(&endpoint.token, payload)
+                .expect("dispatch reply");
+        })
+        .expect("server should receive sub request");
+    assert_eq!(req, SubRequest { a: 10, b: 4 });
+    reply.send(SubResponse { result: 6 });
+
+    let response = future.await.expect("response sub");
+    assert_eq!(response, SubResponse { result: 6 });
 }

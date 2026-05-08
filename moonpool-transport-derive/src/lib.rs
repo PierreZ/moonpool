@@ -432,6 +432,38 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
                 self.#first_field_name.is_remote_endpoint()
             }
 
+            /// Deserialize an interface from `deserializer` and bind it to `transport`.
+            ///
+            /// The wire format is `{ address, base_token }` (see the matching
+            /// [`Serialize`](serde::Serialize) impl). Each method's endpoint is
+            /// reconstructed via `base_token.adjusted(idx)` — the same offset
+            /// scheme used by [`from_base()`](Self::from_base).
+            ///
+            /// Standard [`Deserialize`](serde::Deserialize) cannot be used because
+            /// building each method's [`ServiceEndpoint`](moonpool_transport::ServiceEndpoint)
+            /// requires the concrete codec type carried by `transport`.
+            ///
+            /// # Errors
+            ///
+            /// Returns the deserializer's error if the wire format is invalid.
+            pub fn deserialize_with<'__de, __P, __C, __D>(
+                transport: &std::rc::Rc<moonpool_transport::NetTransport<__P, __C>>,
+                deserializer: __D,
+            ) -> Result<Self, __D::Error>
+            where
+                __P: moonpool_transport::Providers,
+                __C: moonpool_transport::MessageCodec,
+                __D: serde::Deserializer<'__de>,
+            {
+                #[derive(serde::Deserialize)]
+                struct __Wire {
+                    address: moonpool_transport::NetworkAddress,
+                    base_token: moonpool_transport::UID,
+                }
+                let wire = __Wire::deserialize(deserializer)?;
+                Ok(Self::from_base(wire.address, wire.base_token, transport))
+            }
+
             /// Consume this interface and spawn handler tasks for all methods.
             ///
             /// Each method gets its own task that loops on `recv()` and dispatches
@@ -458,6 +490,18 @@ fn interface_impl(attr: InterfaceAttr, item: ItemTrait) -> syn::Result<proc_macr
             }
         }
 
+        impl serde::Serialize for #name {
+            fn serialize<__S>(&self, serializer: __S) -> Result<__S::Ok, __S::Error>
+            where
+                __S: serde::Serializer,
+            {
+                use serde::ser::SerializeStruct as _;
+                let mut state = serializer.serialize_struct(stringify!(#name), 2)?;
+                state.serialize_field("address", self.address())?;
+                state.serialize_field("base_token", &self.base_token)?;
+                state.end()
+            }
+        }
     };
 
     Ok(expanded)

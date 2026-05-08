@@ -84,6 +84,7 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 - [Delivery Modes](./part4-networking/08-delivery-modes.md) — Four guarantees: send, try_get_reply, get_reply, get_reply_unless_failed_for
 - [Failure Monitor](./part4-networking/09-failure-monitor.md) — Address-level and endpoint-level reachability tracking
 - [Designing Simulation-Friendly RPC](./part4-networking/10-designing-rpc.md) — Idempotent design, versioning, bounded retries, deduplication, causality
+- [Interfaces Are Data](./part4-networking/11-interface-serialization.md) — Custom Serialize plus `deserialize_with`; FDB endpoint adjustment; address+base_token compact wire format
 
 ## Part VI: Building on Top
 

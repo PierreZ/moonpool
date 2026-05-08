@@ -1,8 +1,10 @@
-//! Dynamic Endpoint Example: Runtime-allocated tokens with serialization.
+//! Dynamic Endpoint Example: Runtime-allocated tokens with full-interface serialization.
 //!
-//! This example demonstrates moonpool's dynamic endpoint pattern where
-//! tokens are allocated at runtime, and clients discover the interface
-//! via serialization (simulating service discovery).
+//! This example demonstrates moonpool's "interfaces are data" pattern: the entire
+//! `Calculator` interface is serialized as a compact `{ address, base_token }` blob.
+//! The client reconstructs every method's endpoint via offset adjustment from the
+//! base token — see the FDB analysis at `docs/analysis/foundationdb/layer-3-fdbrpc.md`
+//! section 7.
 //!
 //! Run as two separate processes:
 //!
@@ -16,17 +18,20 @@
 //!
 //! # Architecture
 //!
-//! - `#[service]` macro generates a unified `Calculator` struct
-//! - Server: `Calculator::init(&transport)` allocates random base token
-//! - Client: `Calculator::from_base(addr, base_token, &transport)` reconstructs endpoints
-//! - Two Calculator servers in the same process get different tokens (no collisions)
+//! - `#[service]` macro generates a unified `Calculator` struct that implements
+//!   `Serialize` and exposes `Calculator::deserialize_with(&transport, deserializer)`.
+//! - Server: `Calculator::init(&transport)` allocates a random base token,
+//!   then `serde_json::to_string(&calc)` emits `{ address, base_token }`.
+//! - Client: `Calculator::deserialize_with(&transport, &mut Deserializer)` rebuilds
+//!   the unified struct in remote mode, with each method's endpoint at
+//!   `base_token.adjusted(idx)`.
+//! - Two `Calculator` servers in the same process get different tokens (no collisions).
 
 use std::env;
 use std::time::Duration;
 
 use moonpool_transport::{
-    NetTransportBuilder, NetworkAddress, Providers, RpcError, TimeProvider, TokioProviders, UID,
-    service,
+    NetTransportBuilder, NetworkAddress, Providers, RpcError, TimeProvider, TokioProviders, service,
 };
 use serde::{Deserialize, Serialize};
 
@@ -116,12 +121,11 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 
     // Dynamic token allocation — each init() gets a unique base token.
     let calc = Calculator::init(&transport);
-    let base_token = calc.base_token();
 
     println!(
         "Registered {} methods with dynamic base token: {}\n",
         Calculator::METHOD_COUNT,
-        base_token,
+        calc.base_token(),
     );
 
     // Demonstrate: two servers in the same process get different tokens
@@ -132,12 +136,13 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     );
     assert_ne!(calc.base_token(), calc2.base_token());
 
-    // Print the base token for the client to use
-    let token_json = serde_json::to_string(&base_token)?;
+    // Serialize the whole interface — the client reconstructs every method
+    // endpoint via offset adjustment from the base token.
+    let iface_json = serde_json::to_string(&calc)?;
     println!("=== COPY-PASTE THIS TO START THE CLIENT ===\n");
     println!(
         "  cargo run --example dynamic_endpoint -- client '{}'\n",
-        token_json
+        iface_json
     );
     println!("=============================================\n");
 
@@ -184,25 +189,29 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 // Client
 // ============================================================================
 
-async fn run_client(base_token_json: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_client(iface_json: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Dynamic Endpoint Client ===\n");
 
     let providers = TokioProviders::new();
     let time = providers.time().clone();
 
     let local_addr = NetworkAddress::parse(CLIENT_ADDR)?;
-    let server_addr = NetworkAddress::parse(SERVER_ADDR)?;
 
     let transport = NetTransportBuilder::new(providers)
         .local_address(local_addr)
         .build_listening()
         .await?;
 
-    // Reconstruct client from base token (simulating discovery)
-    let base_token: UID = serde_json::from_str(base_token_json)?;
-    println!("Using discovered base token: {}\n", base_token);
-
-    let calc = Calculator::from_base(server_addr, base_token, &transport);
+    // Reconstruct the whole interface from the JSON blob (simulating discovery).
+    // The address and base token come from the wire; deserialize_with binds
+    // each method endpoint to the local transport.
+    let mut de = serde_json::Deserializer::from_str(iface_json);
+    let calc = Calculator::deserialize_with(&transport, &mut de)?;
+    println!(
+        "Reconstructed interface: address={}, base_token={}\n",
+        calc.address(),
+        calc.base_token(),
+    );
 
     println!("Client started, connecting to server at {}\n", SERVER_ADDR);
 
@@ -300,11 +309,11 @@ fn main() {
             });
         }
         "client" => {
-            let token_json = args
+            let iface_json = args
                 .get(2)
-                .expect("Usage: dynamic_endpoint client '<base_token_json>'");
+                .expect("Usage: dynamic_endpoint client '<iface_json>'");
             runtime.block_on(async {
-                if let Err(e) = run_client(token_json).await {
+                if let Err(e) = run_client(iface_json).await {
                     eprintln!("Client error: {}", e);
                     std::process::exit(1);
                 }
@@ -312,14 +321,17 @@ fn main() {
         }
         _ => {
             println!("Dynamic Endpoint Example\n");
-            println!("Demonstrates runtime-allocated tokens with discovery:\n");
+            println!("Demonstrates runtime-allocated tokens with full-interface serialization:\n");
             println!("  - Server: Calculator::init(&transport) → random base token");
-            println!("  - Client: Calculator::from_base(addr, base_token, &transport)");
+            println!("           serde_json::to_string(&calc) → {{ address, base_token }} blob");
+            println!(
+                "  - Client: Calculator::deserialize_with(&transport, deserializer) → remote interface"
+            );
             println!("  - Two servers in same process get different tokens (no collisions)\n");
             println!("Usage:");
             println!("  cargo run --example dynamic_endpoint -- server");
-            println!("  cargo run --example dynamic_endpoint -- client '<base_token_json>'\n");
-            println!("Run server first, then copy the base token JSON to the client command.");
+            println!("  cargo run --example dynamic_endpoint -- client '<iface_json>'\n");
+            println!("Run server first, then copy the interface JSON to the client command.");
         }
     }
 }
