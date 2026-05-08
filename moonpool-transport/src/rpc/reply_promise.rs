@@ -41,7 +41,8 @@ type ReplySender = Box<dyn FnOnce(&Endpoint, &[u8])>;
 ///
 /// The server receives this along with each request and must fulfill it
 /// with either `send(value)` or `send_error(error)`. If dropped without
-/// fulfillment, sends [`ReplyError::BrokenPromise`] automatically.
+/// fulfillment, sends [`ReplyError::BrokenPromise`] automatically. See
+/// the `Drop` impl below for the exact serialization path.
 ///
 /// # Type Safety
 ///
@@ -52,6 +53,13 @@ type ReplySender = Box<dyn FnOnce(&Endpoint, &[u8])>;
 ///
 /// Uses `Rc<RefCell<>>` internally - not thread-safe but efficient for
 /// single-threaded async runtimes.
+///
+/// # See Also
+///
+/// [`ReplyFuture`] is the client-side counterpart that observes the
+/// `BrokenPromise` error when this promise is dropped without fulfillment.
+///
+/// [`ReplyFuture`]: super::reply_future::ReplyFuture
 pub struct ReplyPromise<T: Serialize> {
     inner: Rc<RefCell<ReplyPromiseInner<T>>>,
 }

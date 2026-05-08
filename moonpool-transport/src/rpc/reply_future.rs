@@ -17,11 +17,6 @@ use serde::de::DeserializeOwned;
 use super::net_notified_queue::NetNotifiedQueue;
 use super::reply_error::ReplyError;
 
-/// Future that resolves when a reply is received from the server.
-///
-/// Created by `send_request` and polls an internal queue for the response.
-/// The response is deserialized as `Result<T, ReplyError>` to handle both
-/// success and error cases.
 /// Callback to unregister the reply endpoint on drop.
 type DropCleanup = Box<dyn FnOnce()>;
 
@@ -30,6 +25,25 @@ type DropCleanup = Box<dyn FnOnce()>;
 /// Created by `send_request` and polls an internal queue for the response.
 /// The response is deserialized as `Result<T, ReplyError>` to handle both
 /// success and error cases.
+///
+/// # Broken Promise Surfacing
+///
+/// When the server holds the matching [`ReplyPromise`] but drops it without
+/// calling `send` or `send_error`, the promise's `Drop` impl serializes
+/// [`ReplyError::BrokenPromise`] and ships it back to this future. The future
+/// then resolves with `Err(ReplyError::BrokenPromise)`. This is how callers
+/// learn that a server-side actor died, panicked, or otherwise abandoned the
+/// request without an explicit reply. See [`ReplyPromise`]'s `Drop` impl in
+/// `moonpool-transport/src/rpc/reply_promise.rs` for the producer side.
+///
+/// The same channel is used by FoundationDB's **WaitFailure** pattern: a
+/// server holds a `ReplyPromise<()>` indefinitely as a liveness beacon, and
+/// when the server actor dies every promise it owned drops, surfacing
+/// `BrokenPromise` to every waiting client at once. See the book chapter
+/// "Drop Semantics and the WaitFailure Pattern" for a worked example.
+///
+/// [`ReplyPromise`]: super::reply_promise::ReplyPromise
+/// [`ReplyError::BrokenPromise`]: super::reply_error::ReplyError::BrokenPromise
 pub struct ReplyFuture<T: DeserializeOwned> {
     /// Queue receiving the reply.
     queue: Rc<NetNotifiedQueue<Result<T, ReplyError>>>,

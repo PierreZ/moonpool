@@ -85,6 +85,7 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 - [Failure Monitor](./part4-networking/09-failure-monitor.md) — Address-level and endpoint-level reachability tracking
 - [Designing Simulation-Friendly RPC](./part4-networking/10-designing-rpc.md) — Idempotent design, versioning, bounded retries, deduplication, causality
 - [Interfaces Are Data](./part4-networking/11-interface-serialization.md) — Custom Serialize plus `deserialize_with`; FDB endpoint adjustment; address+base_token compact wire format
+- [Drop Semantics and the WaitFailure Pattern](./part4-networking/12-drop-semantics.md) — `ReplyPromise` drop sends `BrokenPromise`; FDB WaitFailure liveness beacon; heartbeat-free death detection
 
 ## Part VI: Building on Top
 

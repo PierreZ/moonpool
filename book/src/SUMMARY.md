@@ -85,6 +85,7 @@
 - [Failure Monitor](./part4-networking/09-failure-monitor.md)
 - [Designing Simulation-Friendly RPC](./part4-networking/10-designing-rpc.md)
 - [Interfaces Are Data](./part4-networking/11-interface-serialization.md)
+- [Drop Semantics and the WaitFailure Pattern](./part4-networking/12-drop-semantics.md)
 
 ---
 
