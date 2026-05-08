@@ -59,16 +59,16 @@ The key test: if you send the message twice, is that worse than sending it zero 
 On `MaybeDelivered`, read the server's state to determine whether the previous request succeeded before deciding to retry:
 
 ```rust
-match delivery::try_get_reply(&transport, &ep, commit_req, codec).await {
+match coordinator.commit.try_get_reply(commit_req.clone()).await {
     Ok(response) => Ok(response),
-    Err(ReplyError::MaybeDelivered) => {
+    Err(e) if e.is_maybe_delivered() => {
         // Query the server: did my commit go through?
-        let status = check_commit_status(&transport, &ep, commit_id).await?;
+        let status = coordinator.check_commit_status.get_reply(commit_id).await?;
         match status {
             CommitStatus::Committed(version) => Ok(committed(version)),
             CommitStatus::NotFound => {
-                // Safe to retry — the original was never processed
-                delivery::try_get_reply(&transport, &ep, commit_req, codec).await
+                // Safe to retry, the original was never processed
+                coordinator.commit.try_get_reply(commit_req).await
             }
         }
     }
@@ -86,17 +86,14 @@ For endpoints that survive process restarts (coordinators, cluster controllers),
 
 ```rust
 loop {
-    match delivery::get_reply(&transport, &coordinator_ep, req.clone(), codec) {
-        Ok(future) => match future.await {
-            Ok(response) => return Ok(response),
-            Err(ReplyError::BrokenPromise) => {
-                // Coordinator restarted — same endpoint, retry
-                time.sleep(jittered_delay).await;
-                continue;
-            }
-            Err(e) => return Err(e),
-        },
-        Err(e) => return Err(e.into()),
+    match coordinator.recover.get_reply(req.clone()).await {
+        Ok(response) => return Ok(response),
+        Err(RpcError::Reply(ReplyError::BrokenPromise)) => {
+            // Coordinator restarted, same well-known endpoint, retry
+            time.sleep(jittered_delay).await;
+            continue;
+        }
+        Err(e) => return Err(e),
     }
 }
 ```

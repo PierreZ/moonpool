@@ -96,7 +96,7 @@ Moonpool is organized as a workspace of eight crates. The dependency graph is de
 
 **Role**: Peer connections, wire format, FlowTransport-style networking, and RPC. Modeled after FoundationDB's FlowTransport.
 
-**Dependencies**: moonpool-core, moonpool-sim, moonpool-transport-derive, async-trait, crc32c, futures, serde, serde_json, thiserror, tokio, tokio-util, tracing
+**Dependencies**: moonpool-core, moonpool-transport-derive, async-trait, crc32c, futures, serde, serde_json, thiserror, tokio, tokio-util, tracing
 
 **Key types**:
 - `Peer` -- manages a connection to a remote endpoint with automatic reconnection
@@ -108,12 +108,11 @@ Moonpool is organized as a workspace of eight crates. The dependency graph is de
 - `ReplyPromise` -- server-side response promise (auto-sends `BrokenPromise` on Drop)
 - `ReplyFuture` -- client-side response future (auto-closes queue on Drop)
 - `ReplyError` -- error enum including `MaybeDelivered`, `Timeout`, `BrokenPromise`
-- `RequestStream` -- server-side typed request receiver with `recv_with_transport()`
+- `RequestStream` -- server-side typed request receiver with bound transport (`recv()`)
 - `RequestEnvelope` -- request + reply_to endpoint for bidirectional RPC
 - `MessagingError` -- transport-level error type
 - Delivery modes: `send`, `try_get_reply`, `get_reply`, `get_reply_unless_failed_for`
-- Load balancing: `Alternatives`, `Distance`, `AtMostOnce`, `QueueModel`, `ModelHolder`, `Smoother`, `load_balance()`
-- Fan-out: `fan_out_all`, `fan_out_quorum`, `fan_out_race`, `fan_out_all_partial`, `FanOutError`
+- Smoothing: `Smoother` (EMA utility from FDB's Smoother.h)
 
 **Proc macros** (from moonpool-transport-derive):
 - `#[service]` -- generates service trait, server, client, and bound client types

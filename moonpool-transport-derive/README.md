@@ -7,7 +7,7 @@ Proc-macros for moonpool RPC interfaces.
 Generates all boilerplate from a trait definition.
 
 ```rust,ignore
-#[service(id = 0xCA1C_0000)]
+#[service]
 trait Calculator {
     async fn add(&self, req: AddRequest) -> Result<AddResponse, RpcError>;
     async fn sub(&self, req: SubRequest) -> Result<SubResponse, RpcError>;
@@ -15,9 +15,8 @@ trait Calculator {
 ```
 
 Generates:
-- `CalculatorServer<C>` with `RequestStream` fields, `init()`, and `serve()`
-- `CalculatorClient` with endpoint accessors and `bind()` method
-- `BoundCalculatorClient<P, C>` implementing the `Calculator` trait
+- `CalculatorHandler` trait (renamed from `Calculator`) with `#[async_trait(?Send)]`
+- `Calculator` struct with `InterfaceMethod` fields for both server and client use
 
 ## Documentation
 

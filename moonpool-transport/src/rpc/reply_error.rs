@@ -2,6 +2,7 @@
 //!
 //! These errors can occur during the lifecycle of a request:
 //! - Server drops the promise without responding ([`ReplyError::BrokenPromise`])
+//! - Server handler returns an error ([`ReplyError::Application`])
 //! - Network connection fails ([`ReplyError::ConnectionFailed`])
 //! - Request times out ([`ReplyError::Timeout`])
 //! - Serialization/deserialization fails ([`ReplyError::Serialization`])
@@ -12,27 +13,45 @@ use serde::{Deserialize, Serialize};
 ///
 /// These errors are serializable so they can be sent over the network
 /// (e.g., when a server sends a BrokenPromise error to the client).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[non_exhaustive]
 pub enum ReplyError {
     /// The server dropped the ReplyPromise without sending a response.
     ///
-    /// This typically indicates a bug in the server code - forgetting to
-    /// reply before the promise goes out of scope.
+    /// This signals server liveness loss: the actor that owned the promise
+    /// went away (panic, drop, runtime teardown) without calling `send` or
+    /// `send_error`. The client receiving this maps the endpoint to
+    /// permanently failed because the WaitFailure pattern relies on it.
+    #[error("server dropped promise without reply")]
     BrokenPromise,
+
+    /// The handler returned an error.
+    ///
+    /// Distinct from [`BrokenPromise`](Self::BrokenPromise): the server is
+    /// alive and chose to fail this request. Future requests to the same
+    /// endpoint should not be short-circuited.
+    #[error("handler error: {message}")]
+    Application {
+        /// Stringified handler error.
+        message: String,
+    },
 
     /// The network connection failed during the request.
     ///
     /// The request may or may not have been delivered to the server.
+    #[error("connection failed")]
     ConnectionFailed,
 
     /// The request timed out waiting for a response.
     ///
     /// The server may still be processing the request.
+    #[error("request timed out")]
     Timeout,
 
     /// Serialization or deserialization failed.
     ///
     /// Contains a description of what went wrong.
+    #[error("serialization error: {message}")]
     Serialization {
         /// Human-readable error message.
         message: String,
@@ -41,6 +60,7 @@ pub enum ReplyError {
     /// The endpoint was not found.
     ///
     /// The destination endpoint is not registered.
+    #[error("endpoint not found")]
     EndpointNotFound,
 
     /// The peer disconnected while the request was in flight.
@@ -49,23 +69,9 @@ pub enum ReplyError {
     /// Callers must handle this ambiguity (e.g., query state before retrying).
     ///
     /// FDB: request_maybe_delivered (error 1030)
+    #[error("peer disconnected, delivery uncertain")]
     MaybeDelivered,
 }
-
-impl std::fmt::Display for ReplyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ReplyError::BrokenPromise => write!(f, "server dropped promise without reply"),
-            ReplyError::ConnectionFailed => write!(f, "connection failed"),
-            ReplyError::Timeout => write!(f, "request timed out"),
-            ReplyError::Serialization { message } => write!(f, "serialization error: {}", message),
-            ReplyError::EndpointNotFound => write!(f, "endpoint not found"),
-            ReplyError::MaybeDelivered => write!(f, "peer disconnected, delivery uncertain"),
-        }
-    }
-}
-
-impl std::error::Error for ReplyError {}
 
 #[cfg(test)]
 mod tests {
@@ -76,6 +82,13 @@ mod tests {
         assert_eq!(
             ReplyError::BrokenPromise.to_string(),
             "server dropped promise without reply"
+        );
+        assert_eq!(
+            ReplyError::Application {
+                message: "user not found".to_string()
+            }
+            .to_string(),
+            "handler error: user not found"
         );
         assert_eq!(
             ReplyError::ConnectionFailed.to_string(),
@@ -103,6 +116,9 @@ mod tests {
     fn test_reply_error_serde_roundtrip() {
         let errors = vec![
             ReplyError::BrokenPromise,
+            ReplyError::Application {
+                message: "boom".to_string(),
+            },
             ReplyError::ConnectionFailed,
             ReplyError::Timeout,
             ReplyError::Serialization {

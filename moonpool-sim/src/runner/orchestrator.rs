@@ -406,7 +406,7 @@ impl WorkloadOrchestrator {
 
         // === 2. SETUP PHASE (spawn_local + cooperative stepping) ===
         let mut setup_handles = Vec::new();
-        for (workload, ctx) in workloads.into_iter().zip(contexts.into_iter()) {
+        for (workload, ctx) in workloads.into_iter().zip(contexts) {
             let handle = tokio::task::spawn_local(async move {
                 let mut w = workload;
                 let result = w.setup(&ctx).await;
@@ -504,7 +504,7 @@ impl WorkloadOrchestrator {
         let total_workloads = workloads.len();
         let mut workload_handles: Vec<Option<tokio::task::JoinHandle<WorkloadResult>>> =
             Vec::with_capacity(total_workloads);
-        for (workload, ctx) in workloads.into_iter().zip(contexts.into_iter()) {
+        for (workload, ctx) in workloads.into_iter().zip(contexts) {
             let handle = tokio::task::spawn_local(async move {
                 let mut w = workload;
                 let result = w.run(&ctx).await;
@@ -738,10 +738,7 @@ impl WorkloadOrchestrator {
         }
 
         let mut check_handles = Vec::new();
-        for (workload, ctx) in returned_workloads
-            .into_iter()
-            .zip(check_contexts.into_iter())
-        {
+        for (workload, ctx) in returned_workloads.into_iter().zip(check_contexts) {
             let handle = tokio::task::spawn_local(async move {
                 let mut w = workload;
                 let result = w.check(&ctx).await;

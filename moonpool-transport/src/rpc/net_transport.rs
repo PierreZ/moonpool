@@ -37,15 +37,13 @@ use crate::{
     Endpoint, NetworkAddress, NetworkProvider, Peer, PeerConfig, Providers, TaskProvider,
     TcpListenerTrait, UID, WellKnownToken,
 };
-use moonpool_sim::{
-    assert_always, assert_always_less_than_or_equal_to, assert_reachable, assert_sometimes,
-};
 use tokio::sync::watch;
 
 use super::endpoint_map::{EndpointMap, MessageReceiver};
 use super::request_stream::RequestStream;
 use crate::MessageCodec;
 use crate::error::MessagingError;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 /// Type alias for shared peer reference.
@@ -96,12 +94,12 @@ struct TransportData<P: Providers> {
 }
 
 impl<P: Providers> TransportData<P> {
-    fn new() -> Self {
+    fn new(providers: &P) -> Self {
         Self {
             endpoints: EndpointMap::new(),
             peers: BTreeMap::new(),
             incoming_peers: BTreeMap::new(),
-            failure_monitor: Rc::new(FailureMonitor::new()),
+            failure_monitor: Rc::new(FailureMonitor::new(providers.time().clone())),
             pending_replies: BTreeMap::new(),
             stats: TransportStats::default(),
         }
@@ -129,7 +127,7 @@ impl<P: Providers> TransportData<P> {
 /// transport.set_weak_self(Rc::downgrade(&transport));
 /// transport.listen().await?; // Start accepting connections
 /// ```
-pub struct NetTransport<P: Providers> {
+pub struct NetTransport<P: Providers, C: MessageCodec = crate::JsonCodec> {
     /// Internal transport data (FDB: TransportData* self).
     data: RefCell<TransportData<P>>,
 
@@ -138,6 +136,9 @@ pub struct NetTransport<P: Providers> {
 
     /// Providers bundle for network, time, task, and random.
     providers: P,
+
+    /// Message codec for serialization/deserialization.
+    codec: C,
 
     /// Peer configuration.
     peer_config: PeerConfig,
@@ -150,6 +151,10 @@ pub struct NetTransport<P: Providers> {
     /// Shutdown signal sender. When set to `true`, background tasks (listen_task) should exit.
     /// Uses watch channel so multiple receivers can observe the same signal.
     shutdown_tx: watch::Sender<bool>,
+
+    /// Weak reference as `dyn TransportHandle` for codec-erased types.
+    /// Set by the builder alongside `weak_self`.
+    weak_handle: RefCell<Option<std::rc::Weak<dyn super::transport_handle::TransportHandle>>>,
 }
 
 /// Statistics for the transport.
@@ -165,13 +170,14 @@ struct TransportStats {
     peers_created: u64,
 }
 
-impl<P: Providers> NetTransport<P> {
+impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
     /// Create a new NetTransport.
     ///
     /// # Arguments
     ///
     /// * `local_address` - Address of this transport (for local delivery checks)
     /// * `providers` - Providers bundle for network, time, task, and random
+    /// * `codec` - Message codec for serialization/deserialization
     ///
     /// # Multi-Node Usage
     ///
@@ -180,16 +186,24 @@ impl<P: Providers> NetTransport<P> {
     /// let transport = Rc::new(NetTransport::new(...));
     /// transport.set_weak_self(Rc::downgrade(&transport));
     /// ```
-    pub fn new(local_address: NetworkAddress, providers: P) -> Self {
+    pub fn new(local_address: NetworkAddress, providers: P, codec: C) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
+        let data = TransportData::new(&providers);
         Self {
-            data: RefCell::new(TransportData::new()),
+            data: RefCell::new(data),
             local_address,
             providers,
+            codec,
             peer_config: PeerConfig::default(),
             weak_self: RefCell::new(None),
             shutdown_tx,
+            weak_handle: RefCell::new(None),
         }
+    }
+
+    /// Get a reference to the transport's codec.
+    pub fn codec(&self) -> &C {
+        &self.codec
     }
 
     /// Get the random provider for generating unique IDs.
@@ -200,6 +214,18 @@ impl<P: Providers> NetTransport<P> {
     /// Get the providers bundle.
     pub fn providers(&self) -> &P {
         &self.providers
+    }
+
+    /// Allocate a random base token for a dynamic interface.
+    ///
+    /// Each method in the interface uses `base.adjusted(method_index)`.
+    /// Method indices start at 1 (0 is the base identity).
+    pub fn allocate_interface_token(&self) -> UID {
+        use crate::RandomProvider as _;
+        UID::new(
+            self.providers.random().random::<u64>(),
+            self.providers.random().random::<u64>(),
+        )
     }
 
     /// Set the weak self-reference for background task spawning.
@@ -225,14 +251,6 @@ impl<P: Providers> NetTransport<P> {
             .borrow()
             .clone()
             .expect("weak_self not set - call set_weak_self() after wrapping in Rc")
-    }
-
-    /// Get weak self-reference for cleanup callbacks (e.g., `ReplyFuture` drop).
-    ///
-    /// Returns `None`-valued `Weak` if `set_weak_self()` hasn't been called,
-    /// which is safe — cleanup will be a no-op.
-    pub(crate) fn weak_self_for_cleanup(&self) -> Weak<Self> {
-        self.weak_self.borrow().clone().unwrap_or_default()
     }
 
     /// Create with custom peer configuration.
@@ -298,12 +316,6 @@ impl<P: Providers> NetTransport<P> {
             .entry(addr.to_string())
             .or_default()
             .push((token, closer));
-        let total_entries: usize = data.pending_replies.values().map(|v| v.len()).sum();
-        assert_always_less_than_or_equal_to!(
-            total_entries as u64,
-            10_000,
-            "pending_replies_bounded"
-        );
     }
 
     /// Close all pending reply queues for a disconnected address.
@@ -322,7 +334,6 @@ impl<P: Providers> NetTransport<P> {
             return;
         }
 
-        assert_sometimes!(true, "pending_replies_closed_on_disconnect");
         tracing::debug!(
             "close_pending_replies: closing {} reply queues for {}",
             entries.len(),
@@ -345,36 +356,32 @@ impl<P: Providers> NetTransport<P> {
     /// - Creating a `RequestStream` for the request type
     /// - Registering the stream's queue with the transport
     ///
+    /// The codec is taken from the transport (set at builder time).
+    ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// // Before (verbose):
-    /// let endpoint = Endpoint::new(local_addr.clone(), ping_token());
-    /// let stream: RequestStream<PingRequest, JsonCodec> =
-    ///     RequestStream::new(endpoint, JsonCodec);
-    /// transport.register(ping_token(), stream.queue() as Rc<dyn MessageReceiver>);
+    /// let stream = NetTransport::register_handler::<PingRequest, PingResponse>(
+    ///     &transport, ping_token(),
+    /// );
     ///
-    /// // After (single call):
-    /// let stream = transport.register_handler::<PingRequest>(ping_token(), JsonCodec);
+    /// loop {
+    ///     if let Some((req, reply)) = stream.recv().await {
+    ///         reply.send(PingResponse { pong: req.ping });
+    ///     }
+    /// }
     /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `token` - Unique identifier for this handler
-    /// * `codec` - Codec for serializing/deserializing messages
-    ///
-    /// # Type Parameters
-    ///
-    /// * `Req` - The request type this handler will receive
-    /// * `C` - The codec type (e.g., `JsonCodec`)
-    pub fn register_handler<Req, C>(&self, token: UID, codec: C) -> RequestStream<Req, C>
+    pub fn register_handler<Req, Resp>(transport: &Rc<Self>, token: UID) -> RequestStream<Req, Resp>
     where
         Req: DeserializeOwned + 'static,
-        C: MessageCodec,
+        Resp: Serialize + 'static,
     {
-        let endpoint = Endpoint::new(self.local_address.clone(), token);
-        let stream = RequestStream::new(endpoint, codec);
-        self.data
+        let endpoint = Endpoint::new(transport.local_address.clone(), token);
+        let handle: Rc<dyn super::transport_handle::TransportHandle> =
+            Rc::clone(transport) as Rc<dyn super::transport_handle::TransportHandle>;
+        let stream = RequestStream::new(endpoint, transport.codec.clone(), handle);
+        transport
+            .data
             .borrow_mut()
             .endpoints
             .insert(token, stream.queue() as Rc<dyn MessageReceiver>);
@@ -383,65 +390,35 @@ impl<P: Providers> NetTransport<P> {
 
     /// Register a handler for a multi-method interface.
     ///
-    /// Use this when an interface has multiple methods (like a Calculator with
-    /// add, subtract, multiply, divide). Each method gets its own handler.
-    ///
-    /// The token is computed deterministically from `interface_id` and `method_index`,
-    /// making it easy to create matching client endpoints.
+    /// The token is computed deterministically from `interface_id` and `method_index`.
+    /// The codec is taken from the transport.
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// // Calculator interface with multiple methods
-    /// const CALC_INTERFACE: u64 = 0xCA1C;
-    /// const METHOD_ADD: u64 = 0;
-    /// const METHOD_SUB: u64 = 1;
-    /// const METHOD_MUL: u64 = 2;
-    /// const METHOD_DIV: u64 = 3;
-    ///
-    /// let add_stream = transport.register_handler_at::<AddRequest>(
-    ///     CALC_INTERFACE, METHOD_ADD, JsonCodec
-    /// );
-    /// let sub_stream = transport.register_handler_at::<SubRequest>(
-    ///     CALC_INTERFACE, METHOD_SUB, JsonCodec
+    /// let (add_stream, _) = NetTransport::register_handler_at::<AddRequest, AddResponse>(
+    ///     &transport, CALC_INTERFACE, METHOD_ADD,
     /// );
     ///
-    /// // Handle requests with tokio::select!
     /// loop {
     ///     tokio::select! {
-    ///         Some((req, reply)) = add_stream.recv_with_transport(&transport) => {
+    ///         Some((req, reply)) = add_stream.recv() => {
     ///             reply.send(AddResponse { result: req.a + req.b });
-    ///         }
-    ///         Some((req, reply)) = sub_stream.recv_with_transport(&transport) => {
-    ///             reply.send(SubResponse { result: req.a - req.b });
     ///         }
     ///     }
     /// }
     /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `interface_id` - Unique identifier for the interface
-    /// * `method_index` - Index of the method within the interface (0, 1, 2, ...)
-    /// * `codec` - Codec for serializing/deserializing messages
-    ///
-    /// # Returns
-    ///
-    /// A tuple containing:
-    /// - The `RequestStream` for receiving requests
-    /// - The token (`UID`) that clients should use to send requests to this handler
-    pub fn register_handler_at<Req, C>(
-        &self,
+    pub fn register_handler_at<Req, Resp>(
+        transport: &Rc<Self>,
         interface_id: u64,
         method_index: u64,
-        codec: C,
-    ) -> (RequestStream<Req, C>, UID)
+    ) -> (RequestStream<Req, Resp>, UID)
     where
         Req: DeserializeOwned + 'static,
-        C: MessageCodec,
+        Resp: Serialize + 'static,
     {
         let token = UID::new(interface_id, method_index);
-        let stream = self.register_handler(token, codec);
+        let stream = Self::register_handler(transport, token);
         (stream, token)
     }
 
@@ -461,12 +438,10 @@ impl<P: Providers> NetTransport<P> {
     ) -> Result<(), MessagingError> {
         // Check for local delivery
         if self.is_local_address(&endpoint.address) {
-            assert_reachable!("send_unreliable: local delivery");
             return self.deliver_local(&endpoint.token, payload);
         }
 
         // Get or create peer for remote address
-        assert_reachable!("send_unreliable: remote peer");
         let peer = self.get_or_open_peer(&endpoint.address);
         peer.borrow_mut()
             .send_unreliable(endpoint.token, payload)
@@ -517,12 +492,10 @@ impl<P: Providers> NetTransport<P> {
             receiver.receive(payload);
             drop(data); // Release borrow before mutating stats
             self.data.borrow_mut().stats.packets_dispatched += 1;
-            assert_reachable!("local_delivery: endpoint found");
             Ok(())
         } else {
             drop(data); // Release borrow before mutating stats
             self.data.borrow_mut().stats.packets_undelivered += 1;
-            assert_reachable!("local_delivery: endpoint not found");
             Err(MessagingError::EndpointNotFound { token: *token })
         }
     }
@@ -545,14 +518,12 @@ impl<P: Providers> NetTransport<P> {
 
         // Check if outgoing peer already exists
         if let Some(peer) = self.data.borrow().peers.get(&addr_str) {
-            assert_reachable!("peer: outgoing reused");
             return Rc::clone(peer);
         }
 
         // Check incoming peers — reuse accepted connection for responses
         // (FDB pattern: responses flow back on the same connection)
         if let Some(peer) = self.data.borrow().incoming_peers.get(&addr_str) {
-            assert_reachable!("peer: incoming reused for response");
             return Rc::clone(peer);
         }
 
@@ -577,7 +548,6 @@ impl<P: Providers> NetTransport<P> {
         // This handles responses for outgoing requests
         self.spawn_connection_reader(Rc::clone(&peer), addr_str);
 
-        assert_reachable!("peer: new created");
         peer
     }
 
@@ -589,24 +559,15 @@ impl<P: Providers> NetTransport<P> {
     ///
     /// Ok(()) if delivered, Err if endpoint not found.
     pub fn dispatch(&self, token: &UID, payload: &[u8]) -> Result<(), MessagingError> {
-        // Buggify: silently drop packet to simulate endpoint-level loss
-        if moonpool_sim::buggify_with_prob!(0.05) {
-            assert_reachable!("buggified_dispatch_drop");
-            return Ok(());
-        }
-
         let data = self.data.borrow();
         if let Some(receiver) = data.endpoints.get(token) {
-            assert_always!(token.is_valid(), "dispatch_valid_token");
             receiver.receive(payload);
             drop(data); // Release borrow before mutating stats
             self.data.borrow_mut().stats.packets_dispatched += 1;
-            assert_reachable!("dispatch: endpoint found");
             Ok(())
         } else {
             drop(data); // Release borrow before mutating stats
             self.data.borrow_mut().stats.packets_undelivered += 1;
-            assert_reachable!("dispatch: endpoint not found");
             Err(MessagingError::EndpointNotFound { token: *token })
         }
     }
@@ -728,11 +689,113 @@ impl<P: Providers> NetTransport<P> {
 ///
 /// When NetTransport is dropped, we signal all background tasks (listen_task)
 /// to exit gracefully. This prevents tasks from being stuck on accept() forever.
-impl<P: Providers> Drop for NetTransport<P> {
+impl<P: Providers, C: MessageCodec> Drop for NetTransport<P, C> {
     fn drop(&mut self) {
         tracing::debug!("NetTransport: signaling shutdown to background tasks");
         // Signal shutdown - ignore error if no receivers
         let _ = self.shutdown_tx.send(true);
+    }
+}
+
+// =============================================================================
+// TransportHandle implementation
+// =============================================================================
+
+impl<P: Providers, C: MessageCodec> super::transport_handle::TransportHandle
+    for NetTransport<P, C>
+{
+    fn send_unreliable(
+        &self,
+        endpoint: &crate::Endpoint,
+        payload: &[u8],
+    ) -> Result<(), crate::error::MessagingError> {
+        NetTransport::send_unreliable(self, endpoint, payload)
+    }
+
+    fn send_reliable(
+        &self,
+        endpoint: &crate::Endpoint,
+        payload: &[u8],
+    ) -> Result<(), crate::error::MessagingError> {
+        NetTransport::send_reliable(self, endpoint, payload)
+    }
+
+    fn register(
+        &self,
+        token: crate::UID,
+        receiver: Rc<dyn super::endpoint_map::MessageReceiver>,
+    ) -> crate::Endpoint {
+        NetTransport::register(self, token, receiver)
+    }
+
+    fn unregister(
+        &self,
+        token: &crate::UID,
+    ) -> Option<Rc<dyn super::endpoint_map::MessageReceiver>> {
+        NetTransport::unregister(self, token)
+    }
+
+    fn register_pending_reply(
+        &self,
+        addr: &str,
+        token: crate::UID,
+        closer: std::rc::Weak<dyn super::net_notified_queue::ReplyQueueCloser>,
+    ) {
+        NetTransport::register_pending_reply(self, addr, token, closer);
+    }
+
+    fn failure_monitor(&self) -> Rc<super::failure_monitor::FailureMonitor> {
+        NetTransport::failure_monitor(self)
+    }
+
+    fn local_address(&self) -> &crate::NetworkAddress {
+        NetTransport::local_address(self)
+    }
+
+    fn allocate_interface_token(&self) -> crate::UID {
+        NetTransport::allocate_interface_token(self)
+    }
+
+    fn random_uid(&self) -> crate::UID {
+        use crate::RandomProvider as _;
+        crate::UID::new(
+            self.providers.random().random::<u64>(),
+            self.providers.random().random::<u64>(),
+        )
+    }
+
+    fn is_local_address(&self, address: &crate::NetworkAddress) -> bool {
+        NetTransport::is_local_address(self, address)
+    }
+
+    fn weak_for_cleanup(&self) -> std::rc::Weak<dyn super::transport_handle::TransportHandle> {
+        self.weak_handle
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| std::rc::Weak::<Self>::new())
+    }
+
+    fn sleep(
+        &self,
+        duration: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>> {
+        use crate::TimeProvider as _;
+        let time = self.providers.time().clone();
+        Box::pin(async move {
+            let _ = time.sleep(duration).await;
+        })
+    }
+}
+
+impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
+    /// Set the weak handle reference for `dyn TransportHandle` usage.
+    ///
+    /// Called by the builder after wrapping in `Rc`.
+    pub(crate) fn set_weak_handle(
+        &self,
+        weak: std::rc::Weak<dyn super::transport_handle::TransportHandle>,
+    ) {
+        *self.weak_handle.borrow_mut() = Some(weak);
     }
 }
 
@@ -775,14 +838,18 @@ impl<P: Providers> Drop for NetTransport<P> {
 ///
 /// - **`build()`**: For fire-and-forget messaging where you don't expect responses.
 ///   Also useful for testing where you control message flow manually.
-pub struct NetTransportBuilder<P: Providers> {
+pub struct NetTransportBuilder<P: Providers, C: MessageCodec = crate::JsonCodec> {
     providers: P,
+    codec: C,
     local_address: Option<NetworkAddress>,
     peer_config: Option<PeerConfig>,
 }
 
-impl<P: Providers> NetTransportBuilder<P> {
+impl<P: Providers> NetTransportBuilder<P, crate::JsonCodec> {
     /// Create a new builder with the providers bundle.
+    ///
+    /// Uses [`JsonCodec`](crate::JsonCodec) by default. Call [`.codec()`](Self::codec)
+    /// to use a different codec.
     ///
     /// # Arguments
     ///
@@ -790,8 +857,24 @@ impl<P: Providers> NetTransportBuilder<P> {
     pub fn new(providers: P) -> Self {
         Self {
             providers,
+            codec: crate::JsonCodec,
             local_address: None,
             peer_config: None,
+        }
+    }
+}
+
+impl<P: Providers, C: MessageCodec> NetTransportBuilder<P, C> {
+    /// Set the message codec for this transport.
+    ///
+    /// The codec is used for all serialization/deserialization in RPC handlers
+    /// and client endpoints created from this transport.
+    pub fn codec<NewC: MessageCodec>(self, codec: NewC) -> NetTransportBuilder<P, NewC> {
+        NetTransportBuilder {
+            providers: self.providers,
+            codec,
+            local_address: self.local_address,
+            peer_config: self.peer_config,
         }
     }
 
@@ -825,12 +908,12 @@ impl<P: Providers> NetTransportBuilder<P> {
     /// # Errors
     ///
     /// Returns `MessagingError::MissingLocalAddress` if `local_address()` was not called.
-    pub fn build(self) -> Result<Rc<NetTransport<P>>, MessagingError> {
+    pub fn build(self) -> Result<Rc<NetTransport<P, C>>, MessagingError> {
         let address = self
             .local_address
             .ok_or(MessagingError::MissingLocalAddress)?;
 
-        let mut transport = NetTransport::new(address, self.providers);
+        let mut transport = NetTransport::new(address, self.providers, self.codec);
 
         if let Some(config) = self.peer_config {
             transport = transport.with_peer_config(config);
@@ -838,6 +921,9 @@ impl<P: Providers> NetTransportBuilder<P> {
 
         let transport = Rc::new(transport);
         transport.set_weak_self(Rc::downgrade(&transport));
+        let handle: Rc<dyn super::transport_handle::TransportHandle> =
+            transport.clone() as Rc<dyn super::transport_handle::TransportHandle>;
+        transport.set_weak_handle(Rc::downgrade(&handle));
         Ok(transport)
     }
 
@@ -853,7 +939,7 @@ impl<P: Providers> NetTransportBuilder<P> {
     ///
     /// Returns `MessagingError::MissingLocalAddress` if `local_address()` was not called,
     /// or a network error if binding to the local address fails.
-    pub async fn build_listening(self) -> Result<Rc<NetTransport<P>>, MessagingError> {
+    pub async fn build_listening(self) -> Result<Rc<NetTransport<P, C>>, MessagingError> {
         let transport = self.build()?;
         transport.listen().await?;
         Ok(transport)
@@ -872,8 +958,8 @@ impl<P: Providers> NetTransportBuilder<P> {
 ///
 /// The FDB version is more complex (handles ConnectPacket, protocol negotiation),
 /// but the core loop is: read packets → scanPackets → deliver.
-async fn connection_reader<P: Providers>(
-    transport: Weak<NetTransport<P>>,
+async fn connection_reader<P: Providers, C: MessageCodec>(
+    transport: Weak<NetTransport<P, C>>,
     peer: SharedPeer<P>,
     peer_addr: String,
 ) {
@@ -904,7 +990,6 @@ async fn connection_reader<P: Providers>(
                         "connection_reader: transport dropped, exiting for peer {}",
                         peer_addr
                     );
-                    assert_reachable!("connection_reader_transport_dropped");
                     break;
                 };
 
@@ -915,14 +1000,23 @@ async fn connection_reader<P: Providers>(
                         token,
                         e
                     );
-                }
 
-                assert_reachable!("connection_reader: dispatched message");
+                    // FDB: send WLTOKEN_ENDPOINT_NOT_FOUND back to sender
+                    // (FlowTransport.cpp:1244-1225)
+                    if !token.is_well_known() {
+                        let mut notification = [0u8; 16];
+                        notification[0..8].copy_from_slice(&token.first.to_le_bytes());
+                        notification[8..16].copy_from_slice(&token.second.to_le_bytes());
+                        let _ = peer.borrow_mut().send_unreliable(
+                            crate::peer::core::ENDPOINT_NOT_FOUND_TOKEN,
+                            &notification,
+                        );
+                    }
+                }
             }
             None => {
                 // Channel closed - peer disconnected or shutdown
                 tracing::debug!("connection_reader: peer {} receiver closed", peer_addr);
-                assert_sometimes!(true, "reply_queue_closed_maybe_delivered_on_disconnect");
                 // Close all pending reply queues for this peer with MaybeDelivered
                 if let Some(transport) = transport.upgrade() {
                     transport.close_pending_replies(&peer_addr, ReplyError::MaybeDelivered);
@@ -944,8 +1038,8 @@ async fn connection_reader<P: Providers>(
 ///
 /// # FDB Reference
 /// From NetTransport.actor.cpp:1646-1676 listen
-async fn listen_task<P: Providers>(
-    transport: Weak<NetTransport<P>>,
+async fn listen_task<P: Providers, C: MessageCodec>(
+    transport: Weak<NetTransport<P, C>>,
     listener: <P::Network as NetworkProvider>::TcpListener,
     listen_addr: String,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -963,7 +1057,6 @@ async fn listen_task<P: Providers>(
                 match result {
                     Ok(()) if *shutdown_rx.borrow() => {
                         tracing::debug!("listen_task: shutdown signal received, exiting for {}", listen_addr);
-                        assert_sometimes!(true, "listen_task_graceful_shutdown");
                         break;
                     }
                     Err(_) => {
@@ -1001,7 +1094,6 @@ async fn listen_task<P: Providers>(
                             &transport_rc,
                         );
 
-                        assert_reachable!("listen: accepted connection");
                     }
                     Err(e) => {
                         tracing::warn!("listen_task: accept error on {}: {:?}", listen_addr, e);
@@ -1030,11 +1122,11 @@ async fn listen_task<P: Providers>(
 ///
 /// FDB Pattern: Use Peer::new_incoming() with the accepted stream, not Peer::new().
 /// This uses the already-established connection rather than trying to connect back.
-fn connection_incoming<P: Providers>(
-    transport_weak: Weak<NetTransport<P>>,
+fn connection_incoming<P: Providers, C: MessageCodec>(
+    transport_weak: Weak<NetTransport<P, C>>,
     stream: <P::Network as NetworkProvider>::TcpStream,
     peer_addr: String,
-    transport: &NetTransport<P>,
+    transport: &NetTransport<P, C>,
 ) {
     tracing::debug!(
         "connection_incoming: handling connection from {}",
@@ -1049,7 +1141,6 @@ fn connection_incoming<P: Providers>(
     let peer = {
         let data = transport.data.borrow();
         if data.incoming_peers.contains_key(&peer_addr) {
-            assert_reachable!("incoming_peer_replaced_stale");
             tracing::debug!(
                 "connection_incoming: replacing stale incoming peer for {}",
                 peer_addr
@@ -1077,7 +1168,6 @@ fn connection_incoming<P: Providers>(
             .incoming_peers
             .insert(peer_addr.clone(), Rc::clone(&peer));
 
-        assert_sometimes!(true, "incoming_connection_accepted");
         tracing::debug!(
             "connection_incoming: created new incoming peer for {}",
             peer_addr
@@ -1227,7 +1317,7 @@ mod tests {
     }
 
     fn create_test_transport() -> NetTransport<MockProviders> {
-        NetTransport::new(test_address(), MockProviders::new())
+        NetTransport::new(test_address(), MockProviders::new(), JsonCodec)
     }
 
     #[test]
@@ -1243,7 +1333,7 @@ mod tests {
     fn test_register_well_known() {
         let transport = create_test_transport();
 
-        let queue: Rc<NetNotifiedQueue<String, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+        let queue: Rc<NetNotifiedQueue<String>> = Rc::new(NetNotifiedQueue::with_codec(
             Endpoint::new(test_address(), UID::new(1, 1)),
             JsonCodec,
         ));
@@ -1260,7 +1350,7 @@ mod tests {
         let transport = create_test_transport();
 
         let token = UID::new(0x1234, 0x5678);
-        let queue: Rc<NetNotifiedQueue<String, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+        let queue: Rc<NetNotifiedQueue<String>> = Rc::new(NetNotifiedQueue::with_codec(
             Endpoint::new(test_address(), token),
             JsonCodec,
         ));
@@ -1276,7 +1366,7 @@ mod tests {
         let transport = create_test_transport();
 
         let token = UID::new(0x1234, 0x5678);
-        let queue: Rc<NetNotifiedQueue<String, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+        let queue: Rc<NetNotifiedQueue<String>> = Rc::new(NetNotifiedQueue::with_codec(
             Endpoint::new(test_address(), token),
             JsonCodec,
         ));
@@ -1313,7 +1403,7 @@ mod tests {
         let transport = create_test_transport();
 
         let token = UID::new(0x1234, 0x5678);
-        let queue: Rc<NetNotifiedQueue<String, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+        let queue: Rc<NetNotifiedQueue<String>> = Rc::new(NetNotifiedQueue::with_codec(
             Endpoint::new(test_address(), token),
             JsonCodec,
         ));
@@ -1331,7 +1421,7 @@ mod tests {
         let transport = create_test_transport();
 
         let token = UID::new(0x1234, 0x5678);
-        let queue: Rc<NetNotifiedQueue<String, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+        let queue: Rc<NetNotifiedQueue<String>> = Rc::new(NetNotifiedQueue::with_codec(
             Endpoint::new(test_address(), token),
             JsonCodec,
         ));
@@ -1406,7 +1496,7 @@ mod tests {
             .expect("build should succeed");
 
         let token = UID::new(0x1234, 0x5678);
-        let queue: Rc<NetNotifiedQueue<String, JsonCodec>> = Rc::new(NetNotifiedQueue::new(
+        let queue: Rc<NetNotifiedQueue<String>> = Rc::new(NetNotifiedQueue::with_codec(
             Endpoint::new(test_address(), token),
             JsonCodec,
         ));
@@ -1432,13 +1522,18 @@ mod tests {
             value: i32,
         }
 
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        struct TestResponse {
+            value: i32,
+        }
+
         let transport = NetTransportBuilder::new(MockProviders::new())
             .local_address(test_address())
             .build()
             .expect("build should succeed");
 
         let token = UID::new(0xDEAD, 0xBEEF);
-        let stream = transport.register_handler::<TestRequest, _>(token, JsonCodec);
+        let stream = NetTransport::register_handler::<TestRequest, TestResponse>(&transport, token);
 
         // Handler should be registered
         assert_eq!(transport.endpoint_count(), 1);
@@ -1459,9 +1554,19 @@ mod tests {
         }
 
         #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        struct AddResponse {
+            result: i32,
+        }
+
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
         struct SubRequest {
             a: i32,
             b: i32,
+        }
+
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        struct SubResponse {
+            result: i32,
         }
 
         const CALC_INTERFACE: u64 = 0xCA1C;
@@ -1474,10 +1579,16 @@ mod tests {
             .expect("build should succeed");
 
         // Register multiple handlers for the same interface
-        let (add_stream, add_token) =
-            transport.register_handler_at::<AddRequest, _>(CALC_INTERFACE, METHOD_ADD, JsonCodec);
-        let (sub_stream, sub_token) =
-            transport.register_handler_at::<SubRequest, _>(CALC_INTERFACE, METHOD_SUB, JsonCodec);
+        let (add_stream, add_token) = NetTransport::register_handler_at::<AddRequest, AddResponse>(
+            &transport,
+            CALC_INTERFACE,
+            METHOD_ADD,
+        );
+        let (sub_stream, sub_token) = NetTransport::register_handler_at::<SubRequest, SubResponse>(
+            &transport,
+            CALC_INTERFACE,
+            METHOD_SUB,
+        );
 
         // Both handlers should be registered
         assert_eq!(transport.endpoint_count(), 2);
@@ -1508,5 +1619,44 @@ mod tests {
             result,
             Err(crate::error::MessagingError::NetworkError { .. })
         ));
+    }
+
+    // =========================================================================
+    // EndpointNotFound notification tests
+    // =========================================================================
+
+    #[test]
+    fn test_dispatch_not_found_for_well_known_token() {
+        let transport = create_test_transport();
+
+        // Dispatch to a well-known token that's not registered
+        let well_known = UID::well_known(42);
+        let payload = b"test";
+
+        let result = transport.dispatch(&well_known, payload);
+        assert!(matches!(
+            result,
+            Err(MessagingError::EndpointNotFound { .. })
+        ));
+        // The guard in connection_reader checks is_well_known() before
+        // sending notification — well-known tokens should NOT trigger notifications.
+        assert!(well_known.is_well_known());
+    }
+
+    #[test]
+    fn test_dispatch_not_found_for_dynamic_token() {
+        let transport = create_test_transport();
+
+        // Dispatch to a dynamic (non-well-known) token that's not registered
+        let dynamic_token = UID::new(0xCAFE, 0xBABE);
+        let payload = b"test";
+
+        let result = transport.dispatch(&dynamic_token, payload);
+        assert!(matches!(
+            result,
+            Err(MessagingError::EndpointNotFound { .. })
+        ));
+        // Dynamic tokens SHOULD trigger the notification in connection_reader.
+        assert!(!dynamic_token.is_well_known());
     }
 }

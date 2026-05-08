@@ -19,14 +19,13 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::failure_monitor::FailureStatus;
-use super::net_transport::NetTransport;
 use super::reply_error::ReplyError;
 use super::reply_future::ReplyFuture;
 use super::request::{send_request, send_request_unreliable};
 use super::request_stream::RequestEnvelope;
+use super::transport_handle::{DecodeFn, EncodeFn, TransportHandle};
 use crate::error::MessagingError;
-use crate::{Endpoint, MessageCodec, Providers, TimeProvider, UID};
-use moonpool_sim::{assert_reachable, assert_sometimes};
+use crate::{Endpoint, UID};
 
 /// Fire-and-forget delivery: send request unreliably with no reply.
 ///
@@ -39,18 +38,15 @@ use moonpool_sim::{assert_reachable, assert_sometimes};
 /// # Errors
 ///
 /// Returns `MessagingError` if serialization or the send itself fails.
-pub fn send<Req, P, C>(
-    transport: &NetTransport<P>,
+pub fn send<Req>(
+    transport: &dyn TransportHandle,
     destination: &Endpoint,
     request: Req,
-    codec: C,
+    encode_envelope: &EncodeFn<RequestEnvelope<Req>>,
 ) -> Result<(), MessagingError>
 where
-    Req: Serialize,
-    P: Providers,
-    C: MessageCodec,
+    Req: Serialize + 'static,
 {
-    // Use a dummy reply endpoint — no queue registered, response silently dropped
     let reply_endpoint = Endpoint::new(transport.local_address().clone(), UID::default());
 
     let envelope = RequestEnvelope {
@@ -58,9 +54,8 @@ where
         reply_to: reply_endpoint,
     };
 
-    let payload = codec
-        .encode(&envelope)
-        .map_err(|e| MessagingError::SerializationFailed {
+    let payload =
+        (encode_envelope)(&envelope).map_err(|e| MessagingError::SerializationFailed {
             message: e.to_string(),
         })?;
 
@@ -84,32 +79,33 @@ where
 ///
 /// Returns `ReplyError::MaybeDelivered` on disconnect or if already failed.
 /// Returns other `ReplyError` variants for serialization errors, timeouts, etc.
-pub async fn try_get_reply<Req, Resp, P, C>(
-    transport: &NetTransport<P>,
+pub async fn try_get_reply<Req, Resp>(
+    transport: &dyn TransportHandle,
     destination: &Endpoint,
     request: Req,
-    codec: C,
+    encode_envelope: &EncodeFn<RequestEnvelope<Req>>,
+    decode_reply: DecodeFn<Result<Resp, ReplyError>>,
 ) -> Result<Resp, ReplyError>
 where
-    Req: Serialize,
+    Req: Serialize + 'static,
     Resp: DeserializeOwned + 'static,
-    P: Providers,
-    C: MessageCodec,
 {
     let fm = transport.failure_monitor();
 
-    // Fast path: already failed → MaybeDelivered immediately
     if fm.state(destination) == FailureStatus::Failed {
-        assert_sometimes!(true, "try_get_reply_fast_path_already_failed");
         return Err(ReplyError::MaybeDelivered);
     }
 
-    let reply_future =
-        send_request_unreliable(transport, destination, request, codec).map_err(|e| {
-            ReplyError::Serialization {
-                message: e.to_string(),
-            }
-        })?;
+    let reply_future = send_request_unreliable(
+        transport,
+        destination,
+        request,
+        encode_envelope,
+        decode_reply,
+    )
+    .map_err(|e| ReplyError::Serialization {
+        message: e.to_string(),
+    })?;
 
     let disconnect = fm.on_disconnect_or_failure(destination);
     tokio::pin!(disconnect);
@@ -139,19 +135,24 @@ where
 /// # Errors
 ///
 /// Returns `MessagingError` if the request cannot be sent.
-pub fn get_reply<Req, Resp, P, C>(
-    transport: &NetTransport<P>,
+pub fn get_reply<Req, Resp>(
+    transport: &dyn TransportHandle,
     destination: &Endpoint,
     request: Req,
-    codec: C,
-) -> Result<ReplyFuture<Resp, C>, MessagingError>
+    encode_envelope: &EncodeFn<RequestEnvelope<Req>>,
+    decode_reply: DecodeFn<Result<Resp, ReplyError>>,
+) -> Result<ReplyFuture<Resp>, MessagingError>
 where
-    Req: Serialize,
+    Req: Serialize + 'static,
     Resp: DeserializeOwned + 'static,
-    P: Providers,
-    C: MessageCodec,
 {
-    send_request(transport, destination, request, codec)
+    send_request(
+        transport,
+        destination,
+        request,
+        encode_envelope,
+        decode_reply,
+    )
 }
 
 /// At-least-once delivery with sustained failure timeout.
@@ -167,37 +168,37 @@ where
 ///
 /// Returns `ReplyError::MaybeDelivered` if the endpoint is failed for
 /// longer than `sustained_failure_duration`.
-pub async fn get_reply_unless_failed_for<Req, Resp, P, C>(
-    transport: &NetTransport<P>,
+pub async fn get_reply_unless_failed_for<Req, Resp>(
+    transport: &dyn TransportHandle,
     destination: &Endpoint,
     request: Req,
-    codec: C,
+    encode_envelope: &EncodeFn<RequestEnvelope<Req>>,
+    decode_reply: DecodeFn<Result<Resp, ReplyError>>,
     sustained_failure_duration: Duration,
 ) -> Result<Resp, ReplyError>
 where
-    Req: Serialize,
+    Req: Serialize + 'static,
     Resp: DeserializeOwned + 'static,
-    P: Providers,
-    C: MessageCodec,
 {
     let fm = transport.failure_monitor();
-    let time = transport.providers().time().clone();
 
-    let reply_future = send_request(transport, destination, request, codec).map_err(|e| {
-        ReplyError::Serialization {
-            message: e.to_string(),
-        }
+    let reply_future = send_request(
+        transport,
+        destination,
+        request,
+        encode_envelope,
+        decode_reply,
+    )
+    .map_err(|e| ReplyError::Serialization {
+        message: e.to_string(),
     })?;
 
-    let failed_for = on_failed_for(&fm, destination, sustained_failure_duration, &time);
+    let failed_for = fm.on_failed_for(destination, sustained_failure_duration);
     tokio::pin!(failed_for);
 
     tokio::select! {
         result = reply_future => match result {
-            Ok(resp) => {
-                assert_sometimes!(true, "get_reply_unless_failed_for_reply_wins_race");
-                Ok(resp)
-            }
+            Ok(resp) => Ok(resp),
             Err(ReplyError::BrokenPromise) => {
                 fm.endpoint_not_found(destination);
                 Err(ReplyError::MaybeDelivered)
@@ -205,27 +206,9 @@ where
             Err(e) => Err(e),
         },
         () = &mut failed_for => {
-            assert_sometimes!(true, "get_reply_unless_failed_for_timeout_wins_race");
             Err(ReplyError::MaybeDelivered)
         }
     }
-}
-
-/// Wait until endpoint has been failed for at least `duration`.
-///
-/// First waits for the disconnect/failure signal, then sleeps for
-/// the sustained duration. If the connection recovers during the sleep,
-/// the reliable retransmit will resolve the reply future first.
-async fn on_failed_for<T: TimeProvider>(
-    fm: &std::rc::Rc<super::failure_monitor::FailureMonitor>,
-    endpoint: &Endpoint,
-    duration: Duration,
-    time: &T,
-) {
-    fm.on_disconnect_or_failure(endpoint).await;
-    assert_reachable!("on_failed_for_disconnect_observed");
-    let _ = time.sleep(duration).await;
-    assert_reachable!("on_failed_for_sleep_completed");
 }
 
 #[cfg(test)]
@@ -239,134 +222,12 @@ mod tests {
     use crate::rpc::failure_monitor::FailureStatus;
     use crate::rpc::net_notified_queue::NetNotifiedQueue;
     use crate::rpc::request_stream::RequestEnvelope;
-    use crate::{
-        JsonCodec, NetworkAddress, NetworkProvider, Providers, TokioRandomProvider,
-        TokioStorageProvider, TokioTaskProvider, TokioTimeProvider, UID,
-    };
-
-    // ---- Test infrastructure (shared with request.rs tests) ----
-
-    #[derive(Clone)]
-    struct MockNetworkProvider;
-
-    struct DummyStream;
-
-    impl tokio::io::AsyncRead for DummyStream {
-        fn poll_read(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-            _buf: &mut tokio::io::ReadBuf<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(Err(std::io::Error::other("dummy")))
-        }
-    }
-
-    impl tokio::io::AsyncWrite for DummyStream {
-        fn poll_write(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-            _buf: &[u8],
-        ) -> std::task::Poll<std::io::Result<usize>> {
-            std::task::Poll::Ready(Err(std::io::Error::other("dummy")))
-        }
-
-        fn poll_flush(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(Err(std::io::Error::other("dummy")))
-        }
-
-        fn poll_shutdown(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(Err(std::io::Error::other("dummy")))
-        }
-    }
-
-    impl std::marker::Unpin for DummyStream {}
-
-    struct DummyListener;
-
-    #[async_trait::async_trait(?Send)]
-    impl crate::TcpListenerTrait for DummyListener {
-        type TcpStream = DummyStream;
-
-        async fn accept(&self) -> std::io::Result<(Self::TcpStream, String)> {
-            Err(std::io::Error::other("dummy"))
-        }
-
-        fn local_addr(&self) -> std::io::Result<String> {
-            Err(std::io::Error::other("dummy"))
-        }
-    }
-
-    #[async_trait::async_trait(?Send)]
-    impl NetworkProvider for MockNetworkProvider {
-        type TcpStream = DummyStream;
-        type TcpListener = DummyListener;
-
-        async fn bind(&self, _addr: &str) -> std::io::Result<Self::TcpListener> {
-            Err(std::io::Error::other("mock"))
-        }
-
-        async fn connect(&self, _addr: &str) -> std::io::Result<Self::TcpStream> {
-            Err(std::io::Error::other("mock"))
-        }
-    }
-
-    #[derive(Clone)]
-    struct MockProviders {
-        network: MockNetworkProvider,
-        time: TokioTimeProvider,
-        task: TokioTaskProvider,
-        random: TokioRandomProvider,
-        storage: TokioStorageProvider,
-    }
-
-    impl MockProviders {
-        fn new() -> Self {
-            Self {
-                network: MockNetworkProvider,
-                time: TokioTimeProvider::new(),
-                task: TokioTaskProvider,
-                random: TokioRandomProvider::new(),
-                storage: TokioStorageProvider::new(),
-            }
-        }
-    }
-
-    impl Providers for MockProviders {
-        type Network = MockNetworkProvider;
-        type Time = TokioTimeProvider;
-        type Task = TokioTaskProvider;
-        type Random = TokioRandomProvider;
-        type Storage = TokioStorageProvider;
-
-        fn network(&self) -> &Self::Network {
-            &self.network
-        }
-        fn time(&self) -> &Self::Time {
-            &self.time
-        }
-        fn task(&self) -> &Self::Task {
-            &self.task
-        }
-        fn random(&self) -> &Self::Random {
-            &self.random
-        }
-        fn storage(&self) -> &Self::Storage {
-            &self.storage
-        }
-    }
+    use crate::rpc::test_support::make_transport;
+    use crate::rpc::transport_handle::{make_decode_fn, make_encode_fn};
+    use crate::{JsonCodec, NetworkAddress, UID};
 
     fn test_address() -> NetworkAddress {
         NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500)
-    }
-
-    fn create_test_transport() -> NetTransport<MockProviders> {
-        NetTransport::new(test_address(), MockProviders::new())
     }
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -379,31 +240,38 @@ mod tests {
         value: u32,
     }
 
+    fn test_encode() -> EncodeFn<RequestEnvelope<TestRequest>> {
+        make_encode_fn(JsonCodec)
+    }
+
+    fn test_decode() -> DecodeFn<Result<TestResponse, ReplyError>> {
+        make_decode_fn(JsonCodec)
+    }
+
     // ---- send() tests ----
 
     #[test]
     fn test_send_fire_and_forget() {
-        let transport = create_test_transport();
+        let transport = make_transport();
 
         let server_token = UID::new(0x1234, 0x5678);
         let server_endpoint = Endpoint::new(test_address(), server_token);
 
-        let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<TestRequest>, JsonCodec>> =
-            Rc::new(NetNotifiedQueue::new(server_endpoint.clone(), JsonCodec));
+        let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<TestRequest>>> = Rc::new(
+            NetNotifiedQueue::with_codec(server_endpoint.clone(), JsonCodec),
+        );
         transport.register(server_token, server_queue.clone());
 
         send(
-            &transport,
+            &*transport,
             &server_endpoint,
             TestRequest { value: 42 },
-            JsonCodec,
+            &test_encode(),
         )
         .expect("send should succeed");
 
-        // Server received the envelope
         let envelope = server_queue.try_recv().expect("should receive envelope");
         assert_eq!(envelope.request, TestRequest { value: 42 });
-        // Reply endpoint uses UID::default (dummy — no listener)
         assert_eq!(envelope.reply_to.token, UID::default());
     }
 
@@ -411,15 +279,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_get_reply_already_failed() {
-        let transport = create_test_transport();
+        let transport = make_transport();
         let server_endpoint = Endpoint::new(test_address(), UID::new(0x1234, 0x5678));
 
-        // Address unknown → Failed by default → immediate MaybeDelivered
-        let result = try_get_reply::<_, TestResponse, _, _>(
-            &transport,
+        let result = try_get_reply(
+            &*transport,
             &server_endpoint,
             TestRequest { value: 1 },
-            JsonCodec,
+            &test_encode(),
+            test_decode(),
         )
         .await;
 
@@ -433,13 +301,14 @@ mod tests {
             .build_local(tokio::runtime::LocalOptions::default())
             .expect("build runtime");
         rt.block_on(async {
-            let transport = Rc::new(create_test_transport());
+            let transport = make_transport();
 
             let server_token = UID::new(0x1234, 0x5678);
             let server_endpoint = Endpoint::new(test_address(), server_token);
 
-            let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<TestRequest>, JsonCodec>> =
-                Rc::new(NetNotifiedQueue::new(server_endpoint.clone(), JsonCodec));
+            let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<TestRequest>>> = Rc::new(
+                NetNotifiedQueue::with_codec(server_endpoint.clone(), JsonCodec),
+            );
             transport.register(server_token, server_queue.clone());
 
             transport
@@ -447,20 +316,14 @@ mod tests {
                 .set_status("10.0.0.1:4500", FailureStatus::Available);
 
             let t = Rc::clone(&transport);
-            let ep = server_endpoint.clone();
+            let encode = test_encode();
             let handle = tokio::task::spawn_local(async move {
-                try_get_reply::<_, TestResponse, _, _>(
-                    &t,
-                    &ep,
-                    TestRequest { value: 99 },
-                    JsonCodec,
-                )
-                .await
+                let ep = Endpoint::new(test_address(), UID::new(0x1234, 0x5678));
+                try_get_reply(&*t, &ep, TestRequest { value: 99 }, &encode, test_decode()).await
             });
 
             tokio::task::yield_now().await;
 
-            // Server responds
             let envelope = server_queue.try_recv().expect("should receive request");
             let response: Result<TestResponse, ReplyError> = Ok(TestResponse { value: 99 });
             let response_payload = serde_json::to_vec(&response).expect("serialize response");
@@ -480,13 +343,14 @@ mod tests {
             .build_local(tokio::runtime::LocalOptions::default())
             .expect("build runtime");
         rt.block_on(async {
-            let transport = Rc::new(create_test_transport());
+            let transport = make_transport();
 
             let server_token = UID::new(0x1234, 0x5678);
             let server_endpoint = Endpoint::new(test_address(), server_token);
 
-            let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<TestRequest>, JsonCodec>> =
-                Rc::new(NetNotifiedQueue::new(server_endpoint.clone(), JsonCodec));
+            let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<TestRequest>>> = Rc::new(
+                NetNotifiedQueue::with_codec(server_endpoint.clone(), JsonCodec),
+            );
             transport.register(server_token, server_queue.clone());
 
             transport
@@ -494,16 +358,14 @@ mod tests {
                 .set_status("10.0.0.1:4500", FailureStatus::Available);
 
             let t = Rc::clone(&transport);
-            let ep = server_endpoint.clone();
+            let encode = test_encode();
             let handle = tokio::task::spawn_local(async move {
-                try_get_reply::<_, TestResponse, _, _>(&t, &ep, TestRequest { value: 1 }, JsonCodec)
-                    .await
+                let ep = Endpoint::new(test_address(), UID::new(0x1234, 0x5678));
+                try_get_reply(&*t, &ep, TestRequest { value: 1 }, &encode, test_decode()).await
             });
 
-            // Yield to let the future register its waker
             tokio::task::yield_now().await;
 
-            // Trigger disconnect → should resolve with MaybeDelivered
             let fm = transport.failure_monitor();
             fm.set_status("10.0.0.1:4500", FailureStatus::Failed);
             fm.notify_disconnect("10.0.0.1:4500");
@@ -517,20 +379,22 @@ mod tests {
 
     #[test]
     fn test_get_reply_delegates_to_send_request() {
-        let transport = create_test_transport();
+        let transport = make_transport();
 
         let server_token = UID::new(0x1234, 0x5678);
         let server_endpoint = Endpoint::new(test_address(), server_token);
 
-        let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<TestRequest>, JsonCodec>> =
-            Rc::new(NetNotifiedQueue::new(server_endpoint.clone(), JsonCodec));
+        let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<TestRequest>>> = Rc::new(
+            NetNotifiedQueue::with_codec(server_endpoint.clone(), JsonCodec),
+        );
         transport.register(server_token, server_queue.clone());
 
-        let _future: ReplyFuture<TestResponse, JsonCodec> = get_reply(
-            &transport,
+        let _future: ReplyFuture<TestResponse> = get_reply(
+            &*transport,
             &server_endpoint,
             TestRequest { value: 7 },
-            JsonCodec,
+            &test_encode(),
+            test_decode(),
         )
         .expect("get_reply should succeed");
 
@@ -548,13 +412,14 @@ mod tests {
             .build_local(tokio::runtime::LocalOptions::default())
             .expect("build runtime");
         rt.block_on(async {
-            let transport = Rc::new(create_test_transport());
+            let transport = make_transport();
 
             let server_token = UID::new(0x1234, 0x5678);
             let server_endpoint = Endpoint::new(test_address(), server_token);
 
-            let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<TestRequest>, JsonCodec>> =
-                Rc::new(NetNotifiedQueue::new(server_endpoint.clone(), JsonCodec));
+            let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<TestRequest>>> = Rc::new(
+                NetNotifiedQueue::with_codec(server_endpoint.clone(), JsonCodec),
+            );
             transport.register(server_token, server_queue.clone());
 
             transport
@@ -562,13 +427,15 @@ mod tests {
                 .set_status("10.0.0.1:4500", FailureStatus::Available);
 
             let t = Rc::clone(&transport);
-            let ep = server_endpoint.clone();
+            let encode = test_encode();
             let handle = tokio::task::spawn_local(async move {
-                get_reply_unless_failed_for::<_, TestResponse, _, _>(
-                    &t,
+                let ep = Endpoint::new(test_address(), UID::new(0x1234, 0x5678));
+                get_reply_unless_failed_for(
+                    &*t,
                     &ep,
                     TestRequest { value: 55 },
-                    JsonCodec,
+                    &encode,
+                    test_decode(),
                     Duration::from_secs(5),
                 )
                 .await
@@ -576,7 +443,6 @@ mod tests {
 
             tokio::task::yield_now().await;
 
-            // Server responds before timeout
             let envelope = server_queue.try_recv().expect("should receive request");
             let response: Result<TestResponse, ReplyError> = Ok(TestResponse { value: 55 });
             let response_payload = serde_json::to_vec(&response).expect("serialize");

@@ -10,9 +10,10 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::rc::Rc;
 
 use moonpool_transport::{
-    Endpoint, JsonCodec, NetTransport, NetworkAddress, NetworkProvider, Providers, ReplyError,
-    ReplyFuture, RequestEnvelope, RequestStream, TokioRandomProvider, TokioStorageProvider,
-    TokioTaskProvider, TokioTimeProvider, UID, send_request,
+    Endpoint, FailureMonitor, FailureStatus, JsonCodec, MessagingError, NetTransport,
+    NetworkAddress, NetworkProvider, Providers, ReplyError, ReplyFuture, RequestEnvelope,
+    RequestStream, RpcError, TokioRandomProvider, TokioStorageProvider, TokioTaskProvider,
+    TokioTimeProvider, TransportHandle, UID, make_decode_fn, make_encode_fn, send_request, service,
 };
 use serde::{Deserialize, Serialize};
 
@@ -137,8 +138,11 @@ fn test_address() -> NetworkAddress {
     NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500)
 }
 
-fn create_transport() -> NetTransport<MockProviders> {
-    NetTransport::new(test_address(), MockProviders::new())
+fn create_transport() -> Rc<NetTransport<MockProviders>> {
+    moonpool_transport::NetTransportBuilder::new(MockProviders::new())
+        .local_address(test_address())
+        .build()
+        .expect("build transport")
 }
 
 // Test message types
@@ -168,36 +172,39 @@ struct EchoResponse {
 /// Test basic ping-pong RPC flow
 #[tokio::test]
 async fn test_basic_ping_pong() {
-    let transport = Rc::new(create_transport());
+    let transport = create_transport();
 
     // Create server endpoint
     let server_token = UID::new(0x1234, 0x5678);
     let server_endpoint = Endpoint::new(test_address(), server_token);
 
     // Create request stream for server
-    let request_stream: RequestStream<PingRequest, JsonCodec> =
-        RequestStream::new(server_endpoint.clone(), JsonCodec);
+    let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+    let request_stream: RequestStream<PingRequest, PingResponse> =
+        RequestStream::new(server_endpoint.clone(), JsonCodec, Rc::clone(&handle));
 
     // Register server queue with transport
     transport.register(server_token, request_stream.queue());
 
     // Client sends request
-    let future: ReplyFuture<PingResponse, JsonCodec> = send_request(
-        &transport,
+    let encode = make_encode_fn::<RequestEnvelope<PingRequest>, _>(JsonCodec);
+    let decode = make_decode_fn::<Result<PingResponse, ReplyError>, _>(JsonCodec);
+    let future: ReplyFuture<PingResponse> = send_request(
+        &*transport,
         &server_endpoint,
         PingRequest {
             seq: 1,
             payload: "hello".to_string(),
         },
-        JsonCodec,
+        &encode,
+        decode,
     )
     .expect("send_request should succeed");
 
     // Server receives and responds
     let transport_clone = transport.clone();
     let (request, reply) = request_stream
-        .try_recv(move |endpoint, payload| {
-            // Send reply back via transport
+        .try_recv_with_sender(move |endpoint, payload| {
             transport_clone
                 .dispatch(&endpoint.token, payload)
                 .expect("dispatch should succeed");
@@ -227,34 +234,39 @@ async fn test_basic_ping_pong() {
 /// Test multiple sequential requests
 #[tokio::test]
 async fn test_multiple_requests() {
-    let transport = Rc::new(create_transport());
+    let transport = create_transport();
 
     let server_token = UID::new(0xAAAA, 0xBBBB);
     let server_endpoint = Endpoint::new(test_address(), server_token);
 
-    let request_stream: RequestStream<EchoRequest, JsonCodec> =
-        RequestStream::new(server_endpoint.clone(), JsonCodec);
+    let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+    let request_stream: RequestStream<EchoRequest, EchoResponse> =
+        RequestStream::new(server_endpoint.clone(), JsonCodec, Rc::clone(&handle));
 
     transport.register(server_token, request_stream.queue());
+
+    let encode = make_encode_fn::<RequestEnvelope<EchoRequest>, _>(JsonCodec);
+    let decode = make_decode_fn::<Result<EchoResponse, ReplyError>, _>(JsonCodec);
 
     // Send multiple requests
     for i in 0..5 {
         let message = format!("message_{}", i);
 
-        let future: ReplyFuture<EchoResponse, JsonCodec> = send_request(
-            &transport,
+        let future: ReplyFuture<EchoResponse> = send_request(
+            &*transport,
             &server_endpoint,
             EchoRequest {
                 message: message.clone(),
             },
-            JsonCodec,
+            &encode,
+            decode.clone(),
         )
         .expect("send_request should succeed");
 
         // Server handles request
         let transport_clone = transport.clone();
         let (request, reply) = request_stream
-            .try_recv(move |endpoint, payload| {
+            .try_recv_with_sender(move |endpoint, payload| {
                 transport_clone
                     .dispatch(&endpoint.token, payload)
                     .expect("dispatch should succeed");
@@ -277,25 +289,29 @@ async fn test_multiple_requests() {
 /// Test broken promise detection
 #[tokio::test]
 async fn test_broken_promise() {
-    let transport = Rc::new(create_transport());
+    let transport = create_transport();
 
     let server_token = UID::new(0xDEAD, 0xBEEF);
     let server_endpoint = Endpoint::new(test_address(), server_token);
 
-    let request_stream: RequestStream<PingRequest, JsonCodec> =
-        RequestStream::new(server_endpoint.clone(), JsonCodec);
+    let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+    let request_stream: RequestStream<PingRequest, PingResponse> =
+        RequestStream::new(server_endpoint.clone(), JsonCodec, Rc::clone(&handle));
 
     transport.register(server_token, request_stream.queue());
 
     // Client sends request
-    let future: ReplyFuture<PingResponse, JsonCodec> = send_request(
-        &transport,
+    let encode = make_encode_fn::<RequestEnvelope<PingRequest>, _>(JsonCodec);
+    let decode = make_decode_fn::<Result<PingResponse, ReplyError>, _>(JsonCodec);
+    let future: ReplyFuture<PingResponse> = send_request(
+        &*transport,
         &server_endpoint,
         PingRequest {
             seq: 999,
             payload: "test".to_string(),
         },
-        JsonCodec,
+        &encode,
+        decode,
     )
     .expect("send_request should succeed");
 
@@ -303,7 +319,7 @@ async fn test_broken_promise() {
     {
         let transport_clone = transport.clone();
         let (_request, reply) = request_stream
-            .try_recv::<_, PingResponse>(move |endpoint, payload| {
+            .try_recv_with_sender(move |endpoint, payload| {
                 transport_clone
                     .dispatch(&endpoint.token, payload)
                     .expect("dispatch should succeed");
@@ -322,32 +338,36 @@ async fn test_broken_promise() {
 /// Test server sending explicit error
 #[tokio::test]
 async fn test_explicit_error_response() {
-    let transport = Rc::new(create_transport());
+    let transport = create_transport();
 
     let server_token = UID::new(0x1111, 0x2222);
     let server_endpoint = Endpoint::new(test_address(), server_token);
 
-    let request_stream: RequestStream<PingRequest, JsonCodec> =
-        RequestStream::new(server_endpoint.clone(), JsonCodec);
+    let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+    let request_stream: RequestStream<PingRequest, PingResponse> =
+        RequestStream::new(server_endpoint.clone(), JsonCodec, Rc::clone(&handle));
 
     transport.register(server_token, request_stream.queue());
 
     // Client sends request
-    let future: ReplyFuture<PingResponse, JsonCodec> = send_request(
-        &transport,
+    let encode = make_encode_fn::<RequestEnvelope<PingRequest>, _>(JsonCodec);
+    let decode = make_decode_fn::<Result<PingResponse, ReplyError>, _>(JsonCodec);
+    let future: ReplyFuture<PingResponse> = send_request(
+        &*transport,
         &server_endpoint,
         PingRequest {
             seq: 42,
             payload: "error_test".to_string(),
         },
-        JsonCodec,
+        &encode,
+        decode,
     )
     .expect("send_request should succeed");
 
     // Server receives and sends error
     let transport_clone = transport.clone();
     let (_request, reply) = request_stream
-        .try_recv::<_, PingResponse>(move |endpoint, payload| {
+        .try_recv_with_sender(move |endpoint, payload| {
             transport_clone
                 .dispatch(&endpoint.token, payload)
                 .expect("dispatch should succeed");
@@ -378,4 +398,204 @@ fn test_request_envelope_roundtrip() {
     assert_eq!(decoded.request.seq, 123);
     assert_eq!(decoded.request.payload, "test payload");
     assert_eq!(decoded.reply_to.token, envelope.reply_to.token);
+}
+
+/// Test that local delivery to non-existent endpoint returns EndpointNotFound synchronously.
+#[test]
+fn test_endpoint_not_found_local_delivery() {
+    let transport = create_transport();
+
+    // Token that nobody registered
+    let missing_token = UID::new(0xDEAD, 0xBEEF);
+    let missing_endpoint = Endpoint::new(test_address(), missing_token);
+
+    // send_request goes through deliver_local (same address) → EndpointNotFound
+    let encode = make_encode_fn::<RequestEnvelope<PingRequest>, _>(JsonCodec);
+    let decode = make_decode_fn::<Result<PingResponse, ReplyError>, _>(JsonCodec);
+    let result = send_request(
+        &*transport,
+        &missing_endpoint,
+        PingRequest {
+            seq: 1,
+            payload: "hello".to_string(),
+        },
+        &encode,
+        decode,
+    );
+
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => panic!("expected EndpointNotFound error"),
+    };
+    match err {
+        MessagingError::EndpointNotFound { token } => {
+            assert_eq!(token, missing_token);
+        }
+        other => panic!("expected EndpointNotFound, got {:?}", other),
+    }
+}
+
+/// Test that dispatching an endpoint-not-found notification correctly marks
+/// the endpoint as permanently failed in the failure monitor.
+///
+/// Simulates what happens when the client-side peer receives the notification:
+/// parse the 16-byte payload → reconstruct endpoint → call fm.endpoint_not_found().
+#[test]
+fn test_endpoint_not_found_notifies_failure_monitor() {
+    let transport = create_transport();
+    let fm = transport.failure_monitor();
+
+    let server_addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 5000);
+    let missing_token = UID::new(0xCAFE, 0xBABE);
+    let endpoint = Endpoint::new(server_addr.clone(), missing_token);
+
+    // Mark as available first so we can observe the transition
+    fm.set_status(&server_addr.to_string(), FailureStatus::Available);
+    assert_eq!(fm.state(&endpoint), FailureStatus::Available);
+
+    // Simulate receiving the notification: construct endpoint and call endpoint_not_found
+    fm.endpoint_not_found(&endpoint);
+
+    // Endpoint should now be permanently failed
+    assert_eq!(fm.state(&endpoint), FailureStatus::Failed);
+}
+
+/// Test that well-known tokens are NOT notified (prevents feedback loops).
+#[test]
+fn test_endpoint_not_found_skips_well_known_tokens() {
+    let fm = Rc::new(FailureMonitor::new(TokioTimeProvider::new()));
+
+    let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
+    let well_known_token = UID::well_known(42);
+    let endpoint = Endpoint::new(addr, well_known_token);
+
+    fm.set_status("10.0.0.1:4500", FailureStatus::Available);
+
+    // endpoint_not_found should skip well-known tokens
+    fm.endpoint_not_found(&endpoint);
+
+    // Should still be available (not marked as failed)
+    assert_eq!(fm.state(&endpoint), FailureStatus::Available);
+}
+
+/// Test the notification wire format: 16 bytes = two LE u64 encoding a UID.
+#[test]
+fn test_endpoint_not_found_wire_format_roundtrip() {
+    let original = UID::new(0x1234_5678_9ABC_DEF0, 0xFEDC_BA98_7654_3210);
+
+    // Encode
+    let mut payload = [0u8; 16];
+    payload[0..8].copy_from_slice(&original.first.to_le_bytes());
+    payload[8..16].copy_from_slice(&original.second.to_le_bytes());
+
+    // Decode
+    let first = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let second = u64::from_le_bytes(payload[8..16].try_into().unwrap());
+    let decoded = UID::new(first, second);
+
+    assert_eq!(decoded, original);
+}
+
+// ============================================================================
+// Interface serialization round-trip (Task 6)
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct AddRequest {
+    a: i64,
+    b: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct AddResponse {
+    result: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct SubRequest {
+    a: i64,
+    b: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct SubResponse {
+    result: i64,
+}
+
+#[service]
+trait Calculator {
+    async fn add(&self, req: AddRequest) -> Result<AddResponse, RpcError>;
+    async fn sub(&self, req: SubRequest) -> Result<SubResponse, RpcError>;
+}
+
+/// Serialize a server interface, deserialize it via `deserialize_with`, and
+/// drive an RPC through the round-tripped client interface.
+#[tokio::test]
+async fn test_interface_round_trip_serialize() {
+    let transport = create_transport();
+
+    // Server-side: register Calculator at a dynamically-allocated base token.
+    let server_calc = Calculator::init(&transport);
+    assert!(!server_calc.is_remote());
+
+    // Serialize the whole interface (compact `{ address, base_token }` shape).
+    let bytes = serde_json::to_vec(&server_calc).expect("serialize interface");
+    let json = std::str::from_utf8(&bytes).expect("utf8");
+    assert!(json.contains("address"));
+    assert!(json.contains("base_token"));
+
+    // Reconstruct via deserialize_with — bind to the same transport for this
+    // in-process test (a real client would have its own transport).
+    let mut de = serde_json::Deserializer::from_slice(&bytes);
+    let client_calc = Calculator::deserialize_with(&transport, &mut de).expect("deserialize");
+
+    assert!(client_calc.is_remote());
+    assert_eq!(client_calc.base_token(), server_calc.base_token());
+    assert_eq!(client_calc.address(), server_calc.address());
+
+    // Drive an RPC through the round-tripped interface. The client sends
+    // through the remote-mode `add` field; the server replies through the
+    // local-mode `add` field on the original interface.
+    let future = client_calc
+        .add
+        .send_request(AddRequest { a: 2, b: 3 })
+        .expect("send_request");
+
+    let transport_clone = transport.clone();
+    let (req, reply) = server_calc
+        .add
+        .try_recv_with_sender(move |endpoint, payload| {
+            transport_clone
+                .dispatch(&endpoint.token, payload)
+                .expect("dispatch reply");
+        })
+        .expect("server should receive request");
+    assert_eq!(req, AddRequest { a: 2, b: 3 });
+    reply.send(AddResponse { result: 5 });
+
+    let response = future.await.expect("response");
+    assert_eq!(response, AddResponse { result: 5 });
+
+    // The second method (`sub`) must also be reachable through the
+    // deserialized interface — its endpoint is reconstructed at
+    // base_token.adjusted(2) by from_base.
+    let future = client_calc
+        .sub
+        .send_request(SubRequest { a: 10, b: 4 })
+        .expect("send_request sub");
+
+    let transport_clone = transport.clone();
+    let (req, reply) = server_calc
+        .sub
+        .try_recv_with_sender(move |endpoint, payload| {
+            transport_clone
+                .dispatch(&endpoint.token, payload)
+                .expect("dispatch reply");
+        })
+        .expect("server should receive sub request");
+    assert_eq!(req, SubRequest { a: 10, b: 4 });
+    reply.send(SubResponse { result: 6 });
+
+    let response = future.await.expect("response sub");
+    assert_eq!(response, SubResponse { result: 6 });
 }

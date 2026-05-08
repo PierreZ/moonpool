@@ -9,37 +9,38 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! let calc = CalculatorClient::new(server_addr, JsonCodec);
+//! let calc = Calculator::from_base(server_addr, base_token, &transport);
 //!
 //! // Each delivery mode is a call-site decision:
-//! let resp = calc.add.get_reply(&transport, req).await?;
-//! let resp = calc.add.try_get_reply(&transport, req).await?;
-//! calc.add.send(&transport, req)?;
+//! let resp = calc.add.get_reply(req).await?;
+//! let resp = calc.add.try_get_reply(req).await?;
+//! calc.add.send(req)?;
 //! ```
 
 use std::marker::PhantomData;
+use std::rc::Rc;
 use std::time::Duration;
 
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use super::delivery;
-use super::net_transport::NetTransport;
+use super::reply_error::ReplyError;
 use super::reply_future::ReplyFuture;
+use super::request_stream::RequestEnvelope;
 use super::rpc_error::RpcError;
+use super::transport_handle::{
+    DecodeFn, EncodeFn, TransportHandle, make_decode_fn, make_encode_fn,
+};
+use crate::Endpoint;
 use crate::error::MessagingError;
-use crate::{Endpoint, MessageCodec, Providers};
 
 /// Client-side typed endpoint for making RPC calls.
 ///
-/// Wraps an [`Endpoint`] with request/response type information and a codec,
-/// providing delivery mode methods directly on the handle. This is the primary
-/// API for making RPC calls in moonpool.
-///
-/// The `#[service]` macro generates client structs with `ServiceEndpoint`
-/// fields — one per method in the interface. The codec is passed once at
-/// client construction and embedded in each endpoint.
+/// Wraps an [`Endpoint`] with request/response type information and
+/// a bound transport. The transport and codec are captured at construction
+/// so delivery methods require only the request payload.
 ///
 /// # Delivery Modes
 ///
@@ -52,19 +53,15 @@ use crate::{Endpoint, MessageCodec, Providers};
 ///
 /// # FDB Reference
 /// `RequestStream<T>` (fdbrpc.h:726-948)
-pub struct ServiceEndpoint<Req, Resp, C: MessageCodec> {
+pub struct ServiceEndpoint<Req, Resp> {
     endpoint: Endpoint,
-    codec: C,
-    // fn(Req) -> Resp makes the type covariant in Resp and contravariant in Req,
-    // matching the logical flow: we send Req and receive Resp.
+    transport: Rc<dyn TransportHandle>,
+    encode_envelope: EncodeFn<RequestEnvelope<Req>>,
+    decode_reply: DecodeFn<Result<Resp, ReplyError>>,
     _phantom: PhantomData<fn(Req) -> Resp>,
 }
 
-// Manual trait impls because PhantomData<fn(Req) -> Resp> doesn't auto-derive.
-
-impl<Req, Resp, C: MessageCodec + std::fmt::Debug> std::fmt::Debug
-    for ServiceEndpoint<Req, Resp, C>
-{
+impl<Req, Resp> std::fmt::Debug for ServiceEndpoint<Req, Resp> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServiceEndpoint")
             .field("endpoint", &self.endpoint)
@@ -72,36 +69,40 @@ impl<Req, Resp, C: MessageCodec + std::fmt::Debug> std::fmt::Debug
     }
 }
 
-impl<Req, Resp, C: MessageCodec + Clone> Clone for ServiceEndpoint<Req, Resp, C> {
+impl<Req, Resp> Clone for ServiceEndpoint<Req, Resp> {
     fn clone(&self) -> Self {
         Self {
             endpoint: self.endpoint.clone(),
-            codec: self.codec.clone(),
+            transport: Rc::clone(&self.transport),
+            encode_envelope: self.encode_envelope.clone(),
+            decode_reply: self.decode_reply.clone(),
             _phantom: PhantomData,
         }
     }
 }
 
-impl<Req, Resp, C: MessageCodec> Serialize for ServiceEndpoint<Req, Resp, C> {
+impl<Req, Resp> serde::Serialize for ServiceEndpoint<Req, Resp> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Only serialize the endpoint; codec is runtime configuration.
         self.endpoint.serialize(serializer)
     }
 }
 
-impl<'de, Req, Resp, C: MessageCodec + Default> Deserialize<'de> for ServiceEndpoint<Req, Resp, C> {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let endpoint = Endpoint::deserialize(deserializer)?;
-        Ok(Self::new(endpoint, C::default()))
-    }
-}
-
-impl<Req, Resp, C: MessageCodec> ServiceEndpoint<Req, Resp, C> {
-    /// Create a new service endpoint from a raw endpoint and codec.
-    pub fn new(endpoint: Endpoint, codec: C) -> Self {
+impl<Req, Resp> ServiceEndpoint<Req, Resp> {
+    /// Create a new service endpoint from a raw endpoint, codec, and transport.
+    pub fn new<C: crate::MessageCodec>(
+        endpoint: Endpoint,
+        codec: C,
+        transport: Rc<dyn TransportHandle>,
+    ) -> Self
+    where
+        Req: Serialize + 'static,
+        Resp: DeserializeOwned + 'static,
+    {
         Self {
             endpoint,
-            codec,
+            transport,
+            encode_envelope: make_encode_fn(codec.clone()),
+            decode_reply: make_decode_fn(codec),
             _phantom: PhantomData,
         }
     }
@@ -112,19 +113,12 @@ impl<Req, Resp, C: MessageCodec> ServiceEndpoint<Req, Resp, C> {
     }
 }
 
-impl<Req, Resp, C> ServiceEndpoint<Req, Resp, C>
+impl<Req, Resp> ServiceEndpoint<Req, Resp>
 where
-    Req: Serialize,
+    Req: Serialize + 'static,
     Resp: DeserializeOwned + 'static,
-    C: MessageCodec + Clone,
 {
     /// Fire-and-forget delivery: send request unreliably with no reply.
-    ///
-    /// The request is sent once via unreliable transport. No reply endpoint
-    /// is registered, so any server response is silently discarded.
-    ///
-    /// Use for heartbeats, notifications, and messages where losing one
-    /// is harmless (the next one compensates).
     ///
     /// # FDB Reference
     /// `RequestStream::send` (fdbrpc.h:733-738)
@@ -133,47 +127,33 @@ where
     ///
     /// Returns `RpcError::Messaging` if serialization or the send itself fails.
     #[instrument(skip_all)]
-    pub fn send<P: Providers>(
-        &self,
-        transport: &NetTransport<P>,
-        req: Req,
-    ) -> Result<(), RpcError> {
-        delivery::send(transport, &self.endpoint, req, self.codec.clone()).map_err(RpcError::from)
+    pub fn send(&self, req: Req) -> Result<(), RpcError> {
+        delivery::send(&*self.transport, &self.endpoint, req, &self.encode_envelope)
+            .map_err(RpcError::from)
     }
 
     /// At-most-once delivery: send unreliably, race reply against disconnect.
-    ///
-    /// Returns `Ok(response)` if the server replies before disconnect, or
-    /// `Err(RpcError::Reply(MaybeDelivered))` if the connection fails while
-    /// the request is in flight.
-    ///
-    /// Callers must handle ambiguity — typically via read-before-retry or
-    /// idempotent requests.
     ///
     /// # FDB Reference
     /// `RequestStream::tryGetReply` (fdbrpc.h:784-826)
     ///
     /// # Errors
     ///
-    /// Returns `MaybeDelivered` on disconnect. Other `ReplyError` variants
-    /// for serialization, timeouts, etc.
+    /// Returns `MaybeDelivered` on disconnect.
     #[instrument(skip_all)]
-    pub async fn try_get_reply<P: Providers>(
-        &self,
-        transport: &NetTransport<P>,
-        req: Req,
-    ) -> Result<Resp, RpcError> {
-        delivery::try_get_reply(transport, &self.endpoint, req, self.codec.clone())
-            .await
-            .map_err(RpcError::from)
+    pub async fn try_get_reply(&self, req: Req) -> Result<Resp, RpcError> {
+        delivery::try_get_reply(
+            &*self.transport,
+            &self.endpoint,
+            req,
+            &self.encode_envelope,
+            self.decode_reply.clone(),
+        )
+        .await
+        .map_err(RpcError::from)
     }
 
     /// At-least-once delivery: send reliably, retransmit on reconnect.
-    ///
-    /// The request is queued for reliable delivery and will be retransmitted
-    /// if the connection drops and reconnects. The server may receive the
-    /// same request multiple times — handlers must be idempotent or use
-    /// generation numbers for deduplication.
     ///
     /// # FDB Reference
     /// `RequestStream::getReply` (fdbrpc.h:752-762)
@@ -182,24 +162,18 @@ where
     ///
     /// Returns `RpcError` if the request cannot be sent or the reply fails.
     #[instrument(skip_all)]
-    pub async fn get_reply<P: Providers>(
-        &self,
-        transport: &NetTransport<P>,
-        req: Req,
-    ) -> Result<Resp, RpcError> {
-        let future = delivery::get_reply(transport, &self.endpoint, req, self.codec.clone())?;
+    pub async fn get_reply(&self, req: Req) -> Result<Resp, RpcError> {
+        let future = delivery::get_reply(
+            &*self.transport,
+            &self.endpoint,
+            req,
+            &self.encode_envelope,
+            self.decode_reply.clone(),
+        )?;
         Ok(future.await?)
     }
 
     /// At-least-once delivery with sustained failure timeout.
-    ///
-    /// Like [`get_reply`](Self::get_reply) but gives up if the endpoint has
-    /// been continuously failed for `sustained_failure_duration`. Returns
-    /// `MaybeDelivered` on timeout.
-    ///
-    /// Use for singleton RPCs (registration, recruitment) where you want
-    /// reliable delivery but can't wait forever if the destination is
-    /// permanently gone.
     ///
     /// # FDB Reference
     /// `RequestStream::getReplyUnlessFailedFor` (fdbrpc.h:870-895)
@@ -209,17 +183,17 @@ where
     /// Returns `MaybeDelivered` if the endpoint is failed for longer than
     /// `sustained_failure_duration`.
     #[instrument(skip_all)]
-    pub async fn get_reply_unless_failed_for<P: Providers>(
+    pub async fn get_reply_unless_failed_for(
         &self,
-        transport: &NetTransport<P>,
         req: Req,
         sustained_failure_duration: Duration,
     ) -> Result<Resp, RpcError> {
         delivery::get_reply_unless_failed_for(
-            transport,
+            &*self.transport,
             &self.endpoint,
             req,
-            self.codec.clone(),
+            &self.encode_envelope,
+            self.decode_reply.clone(),
             sustained_failure_duration,
         )
         .await
@@ -228,22 +202,18 @@ where
 
     /// Send a typed request and return a raw [`ReplyFuture`] for the response.
     ///
-    /// This is the low-level API for cases where you need direct access to
-    /// the reply future (e.g., for use in `tokio::select!`).
-    ///
-    /// For most use cases, prefer [`get_reply`](Self::get_reply) or
-    /// [`try_get_reply`](Self::try_get_reply).
-    ///
     /// # Errors
     ///
     /// Returns `MessagingError` if the request cannot be sent.
     #[instrument(skip_all)]
-    pub fn send_request<P: Providers>(
-        &self,
-        transport: &NetTransport<P>,
-        req: Req,
-    ) -> Result<ReplyFuture<Resp, C>, MessagingError> {
-        delivery::get_reply(transport, &self.endpoint, req, self.codec.clone())
+    pub fn send_request(&self, req: Req) -> Result<ReplyFuture<Resp>, MessagingError> {
+        delivery::get_reply(
+            &*self.transport,
+            &self.endpoint,
+            req,
+            &self.encode_envelope,
+            self.decode_reply.clone(),
+        )
     }
 }
 
@@ -257,275 +227,89 @@ mod tests {
     use super::*;
     use crate::rpc::failure_monitor::FailureStatus;
     use crate::rpc::net_notified_queue::NetNotifiedQueue;
-    use crate::rpc::reply_error::ReplyError;
     use crate::rpc::request_stream::RequestEnvelope;
-    use crate::{
-        JsonCodec, NetworkAddress, NetworkProvider, Providers, TokioRandomProvider,
-        TokioStorageProvider, TokioTaskProvider, TokioTimeProvider, UID,
-    };
+    use crate::rpc::test_support::make_transport;
+    use crate::{JsonCodec, MessageCodec, NetworkAddress, UID};
 
-    // ---- Test infrastructure ----
-
-    #[derive(Clone)]
-    struct MockNetworkProvider;
-
-    struct DummyStream;
-
-    impl tokio::io::AsyncRead for DummyStream {
-        fn poll_read(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-            _buf: &mut tokio::io::ReadBuf<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(Err(std::io::Error::other("dummy")))
-        }
-    }
-
-    impl tokio::io::AsyncWrite for DummyStream {
-        fn poll_write(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-            _buf: &[u8],
-        ) -> std::task::Poll<std::io::Result<usize>> {
-            std::task::Poll::Ready(Err(std::io::Error::other("dummy")))
-        }
-
-        fn poll_flush(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(Err(std::io::Error::other("dummy")))
-        }
-
-        fn poll_shutdown(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(Err(std::io::Error::other("dummy")))
-        }
-    }
-
-    impl std::marker::Unpin for DummyStream {}
-
-    struct DummyListener;
-
-    #[async_trait::async_trait(?Send)]
-    impl crate::TcpListenerTrait for DummyListener {
-        type TcpStream = DummyStream;
-
-        async fn accept(&self) -> std::io::Result<(Self::TcpStream, String)> {
-            Err(std::io::Error::other("dummy"))
-        }
-
-        fn local_addr(&self) -> std::io::Result<String> {
-            Err(std::io::Error::other("dummy"))
-        }
-    }
-
-    #[async_trait::async_trait(?Send)]
-    impl NetworkProvider for MockNetworkProvider {
-        type TcpStream = DummyStream;
-        type TcpListener = DummyListener;
-
-        async fn bind(&self, _addr: &str) -> std::io::Result<Self::TcpListener> {
-            Err(std::io::Error::other("mock"))
-        }
-
-        async fn connect(&self, _addr: &str) -> std::io::Result<Self::TcpStream> {
-            Err(std::io::Error::other("mock"))
-        }
-    }
-
-    #[derive(Clone)]
-    struct MockProviders {
-        network: MockNetworkProvider,
-        time: TokioTimeProvider,
-        task: TokioTaskProvider,
-        random: TokioRandomProvider,
-        storage: TokioStorageProvider,
-    }
-
-    impl MockProviders {
-        fn new() -> Self {
-            Self {
-                network: MockNetworkProvider,
-                time: TokioTimeProvider::new(),
-                task: TokioTaskProvider,
-                random: TokioRandomProvider::new(),
-                storage: TokioStorageProvider::new(),
-            }
-        }
-    }
-
-    impl Providers for MockProviders {
-        type Network = MockNetworkProvider;
-        type Time = TokioTimeProvider;
-        type Task = TokioTaskProvider;
-        type Random = TokioRandomProvider;
-        type Storage = TokioStorageProvider;
-
-        fn network(&self) -> &Self::Network {
-            &self.network
-        }
-        fn time(&self) -> &Self::Time {
-            &self.time
-        }
-        fn task(&self) -> &Self::Task {
-            &self.task
-        }
-        fn random(&self) -> &Self::Random {
-            &self.random
-        }
-        fn storage(&self) -> &Self::Storage {
-            &self.storage
-        }
-    }
-
-    fn test_address() -> NetworkAddress {
-        NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500)
-    }
-
-    fn create_test_transport() -> NetTransport<MockProviders> {
-        NetTransport::new(test_address(), MockProviders::new())
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct PingRequest {
+        seq: u32,
     }
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-    struct TestRequest {
-        value: u32,
-    }
-
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-    struct TestResponse {
-        value: u32,
-    }
-
-    // ---- Tests ----
-
-    #[test]
-    fn test_service_endpoint_debug_clone() {
-        let ep: ServiceEndpoint<TestRequest, TestResponse, JsonCodec> = ServiceEndpoint::new(
-            Endpoint::new(test_address(), UID::new(0xCA1C_0000, 1)),
-            JsonCodec,
-        );
-
-        let cloned = ep.clone();
-        assert_eq!(format!("{:?}", ep), format!("{:?}", cloned));
-    }
-
-    #[test]
-    fn test_service_endpoint_serde_roundtrip() {
-        let ep: ServiceEndpoint<TestRequest, TestResponse, JsonCodec> = ServiceEndpoint::new(
-            Endpoint::new(test_address(), UID::new(0xCA1C_0000, 1)),
-            JsonCodec,
-        );
-
-        let json = serde_json::to_string(&ep).expect("serialize");
-        let decoded: ServiceEndpoint<TestRequest, TestResponse, JsonCodec> =
-            serde_json::from_str(&json).expect("deserialize");
-
-        assert_eq!(ep.endpoint().token, decoded.endpoint().token);
-        assert_eq!(ep.endpoint().address, decoded.endpoint().address);
+    struct PingResponse {
+        seq: u32,
     }
 
     #[test]
     fn test_send_fire_and_forget() {
-        let transport = create_test_transport();
+        let transport = make_transport();
+        let addr = transport.local_address().clone();
+        let token = UID::new(0x1234, 0x0001);
+        let endpoint = Endpoint::new(addr, token);
 
-        let server_token = UID::new(0x1234, 0x5678);
-        let server_endpoint = Endpoint::new(test_address(), server_token);
+        let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+        let ep: ServiceEndpoint<PingRequest, PingResponse> =
+            ServiceEndpoint::new(endpoint, JsonCodec, handle);
 
-        let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<TestRequest>, JsonCodec>> =
-            Rc::new(NetNotifiedQueue::new(server_endpoint.clone(), JsonCodec));
-        transport.register(server_token, server_queue.clone());
-
-        let ep: ServiceEndpoint<TestRequest, TestResponse, JsonCodec> =
-            ServiceEndpoint::new(server_endpoint, JsonCodec);
-
-        ep.send(&transport, TestRequest { value: 42 })
-            .expect("send should succeed");
-
-        let envelope = server_queue.try_recv().expect("should receive envelope");
-        assert_eq!(envelope.request, TestRequest { value: 42 });
+        let result = ep.send(PingRequest { seq: 1 });
+        assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_try_get_reply_already_failed() {
-        let transport = create_test_transport();
+        let transport = make_transport();
+        let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5001);
+        let token = UID::new(0x5678, 0x0001);
+        let endpoint = Endpoint::new(addr.clone(), token);
 
-        let ep: ServiceEndpoint<TestRequest, TestResponse, JsonCodec> = ServiceEndpoint::new(
-            Endpoint::new(test_address(), UID::new(0x1234, 0x5678)),
-            JsonCodec,
+        transport
+            .failure_monitor()
+            .set_status(&addr.to_string(), FailureStatus::Failed);
+
+        let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+        let ep: ServiceEndpoint<PingRequest, PingResponse> =
+            ServiceEndpoint::new(endpoint, JsonCodec, handle);
+
+        let result = ep.try_get_reply(PingRequest { seq: 2 }).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_reply_creates_future() {
+        let transport = make_transport();
+        let server_addr = transport.local_address().clone();
+        let token = UID::new(0x9ABC, 0x0001);
+        let server_endpoint = Endpoint::new(server_addr.clone(), token);
+
+        let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<PingRequest>>> = Rc::new(
+            NetNotifiedQueue::with_codec(server_endpoint.clone(), JsonCodec),
+        );
+        transport.register(
+            token,
+            Rc::clone(&server_queue) as Rc<dyn crate::MessageReceiver>,
         );
 
-        // Address unknown → Failed by default → immediate MaybeDelivered
-        let result = ep.try_get_reply(&transport, TestRequest { value: 1 }).await;
+        let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+        let ep: ServiceEndpoint<PingRequest, PingResponse> =
+            ServiceEndpoint::new(server_endpoint, JsonCodec, handle);
 
-        let err = result.expect_err("should be MaybeDelivered");
-        assert!(err.is_maybe_delivered());
-    }
+        let future = ep.send_request(PingRequest { seq: 3 });
+        assert!(future.is_ok());
 
-    #[test]
-    fn test_get_reply_creates_future() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build_local(tokio::runtime::LocalOptions::default())
-            .expect("build runtime");
-        rt.block_on(async {
-            let transport = Rc::new(create_test_transport());
+        let received = server_queue.try_recv();
+        assert!(received.is_some());
+        let envelope = received.expect("request envelope");
+        assert_eq!(envelope.request.seq, 3);
 
-            let server_token = UID::new(0x1234, 0x5678);
-            let server_endpoint = Endpoint::new(test_address(), server_token);
+        let reply_endpoint = envelope.reply_to;
+        let response: Result<PingResponse, ReplyError> = Ok(PingResponse { seq: 3 });
+        let payload = JsonCodec.encode(&response).expect("encode");
+        transport
+            .dispatch(&reply_endpoint.token, &payload)
+            .expect("dispatch");
 
-            let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<TestRequest>, JsonCodec>> =
-                Rc::new(NetNotifiedQueue::new(server_endpoint.clone(), JsonCodec));
-            transport.register(server_token, server_queue.clone());
-
-            transport
-                .failure_monitor()
-                .set_status("10.0.0.1:4500", FailureStatus::Available);
-
-            let ep: ServiceEndpoint<TestRequest, TestResponse, JsonCodec> =
-                ServiceEndpoint::new(server_endpoint, JsonCodec);
-
-            let t = Rc::clone(&transport);
-            let handle = tokio::task::spawn_local(async move {
-                ep.get_reply(&t, TestRequest { value: 99 }).await
-            });
-
-            tokio::task::yield_now().await;
-
-            // Server responds
-            let envelope = server_queue.try_recv().expect("should receive request");
-            let response: Result<TestResponse, ReplyError> = Ok(TestResponse { value: 99 });
-            let response_payload = serde_json::to_vec(&response).expect("serialize response");
-            transport
-                .dispatch(&envelope.reply_to.token, &response_payload)
-                .expect("dispatch should succeed");
-
-            let result = handle.await.expect("task should complete");
-            assert_eq!(result.expect("should succeed"), TestResponse { value: 99 });
-        });
-    }
-
-    #[test]
-    fn test_send_request_raw_future() {
-        let transport = create_test_transport();
-
-        let server_token = UID::new(0x1234, 0x5678);
-        let server_endpoint = Endpoint::new(test_address(), server_token);
-
-        let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<TestRequest>, JsonCodec>> =
-            Rc::new(NetNotifiedQueue::new(server_endpoint.clone(), JsonCodec));
-        transport.register(server_token, server_queue.clone());
-
-        let ep: ServiceEndpoint<TestRequest, TestResponse, JsonCodec> =
-            ServiceEndpoint::new(server_endpoint, JsonCodec);
-
-        let _future = ep
-            .send_request(&transport, TestRequest { value: 7 })
-            .expect("send_request should succeed");
-
-        let envelope = server_queue.try_recv().expect("should receive envelope");
-        assert_eq!(envelope.request, TestRequest { value: 7 });
+        let result = future.expect("future").await;
+        assert_eq!(result.expect("response"), PingResponse { seq: 3 });
     }
 }

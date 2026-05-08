@@ -337,17 +337,13 @@ impl Process for GracefulProcess {
         loop {
             tokio::select! {
                 result = listener.accept() => {
-                    match result {
-                        Ok((mut stream, _)) => {
-                            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                            let mut buf = [0u8; 64];
-                            if let Ok(n) = stream.read(&mut buf).await {
-                                if n > 0 {
-                                    let _ = stream.write_all(&buf[..n]).await;
-                                }
-                            }
+                    if let Ok((mut stream, _)) = result {
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        let mut buf = [0u8; 64];
+                        if let Ok(n) = stream.read(&mut buf).await
+                            && n > 0 {
+                            let _ = stream.write_all(&buf[..n]).await;
                         }
-                        Err(_) => {}
                     }
                 }
                 _ = ctx.shutdown().cancelled() => {
@@ -492,18 +488,17 @@ impl Invariant for RebootTimingInvariant {
                         ip: gs_ip,
                         grace_period_ms,
                     } = &entries[j].event
+                        && gs_ip == ip
                     {
-                        if gs_ip == ip {
-                            let actual_delta = entry.time_ms - entries[j].time_ms;
-                            assert_always!(
-                                actual_delta == *grace_period_ms,
-                                format!(
-                                    "Grace period mismatch for {}: expected {}ms, got {}ms",
-                                    ip, grace_period_ms, actual_delta
-                                )
-                            );
-                            break;
-                        }
+                        let actual_delta = entry.time_ms - entries[j].time_ms;
+                        assert_always!(
+                            actual_delta == *grace_period_ms,
+                            format!(
+                                "Grace period mismatch for {}: expected {}ms, got {}ms",
+                                ip, grace_period_ms, actual_delta
+                            )
+                        );
+                        break;
                     }
                 }
             }
@@ -513,17 +508,17 @@ impl Invariant for RebootTimingInvariant {
         for (i, entry) in entries.iter().enumerate() {
             if let SimFaultEvent::ProcessRestart { ip } = &entry.event {
                 for j in (0..i).rev() {
-                    if let SimFaultEvent::ProcessForceKill { ip: fk_ip } = &entries[j].event {
-                        if fk_ip == ip {
-                            assert_always!(
-                                entry.time_ms > entries[j].time_ms,
-                                format!(
-                                    "ProcessRestart at {}ms should be after ProcessForceKill at {}ms for {}",
-                                    entry.time_ms, entries[j].time_ms, ip
-                                )
-                            );
-                            break;
-                        }
+                    if let SimFaultEvent::ProcessForceKill { ip: fk_ip } = &entries[j].event
+                        && fk_ip == ip
+                    {
+                        assert_always!(
+                            entry.time_ms > entries[j].time_ms,
+                            format!(
+                                "ProcessRestart at {}ms should be after ProcessForceKill at {}ms for {}",
+                                entry.time_ms, entries[j].time_ms, ip
+                            )
+                        );
+                        break;
                     }
                 }
             }

@@ -79,12 +79,14 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 - [Backoff and Reconnection](./part4-networking/03-backoff.md) — Exponential backoff (FDB pattern); prevents storms; 100ms initial, 30s max
 - [Wire Format](./part4-networking/04-wire-format.md) — Packet layout: length, checksum, token, payload; CRC32 validation
 - [RPC with #\[service\]](./part4-networking/05-rpc-service.md) — Proc macro: write trait, get client/server/endpoints generated
-- [Defining a Service](./part4-networking/06-defining-service.md) — `#[service(id = ...)]` trait, request/response types, serialization
+- [Defining a Service](./part4-networking/06-defining-service.md) — `#[service]` trait, request/response types, serialization, dynamic vs well-known tokens
 - [Server, Client, and Endpoints](./part4-networking/07-server-client-endpoints.md) — Server setup, client connection, endpoint routing, RequestStream, ReplyPromise
 - [Delivery Modes](./part4-networking/08-delivery-modes.md) — Four guarantees: send, try_get_reply, get_reply, get_reply_unless_failed_for
 - [Failure Monitor](./part4-networking/09-failure-monitor.md) — Address-level and endpoint-level reachability tracking
-- [Load Balancing and Fan-Out](./part4-networking/11-load-balance-fan-out.md) — `load_balance()` with `QueueModel`, plus four fan-out shapes (all/quorum/race/partial)
 - [Designing Simulation-Friendly RPC](./part4-networking/10-designing-rpc.md) — Idempotent design, versioning, bounded retries, deduplication, causality
+- [Interfaces Are Data](./part4-networking/11-interface-serialization.md) — Custom Serialize plus `deserialize_with`; FDB endpoint adjustment; address+base_token compact wire format
+- [Drop Semantics and the WaitFailure Pattern](./part4-networking/12-drop-semantics.md) — `ReplyPromise` drop sends `BrokenPromise`; FDB WaitFailure liveness beacon; heartbeat-free death detection
+- [What's Next](./part4-networking/13-whats-next.md) — Forward note on load balancing, fan-out, and transport-layer simulation returning in future revisions
 
 ## Part VI: Building on Top
 

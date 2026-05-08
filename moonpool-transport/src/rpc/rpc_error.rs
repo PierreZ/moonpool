@@ -22,19 +22,22 @@ use crate::rpc::ReplyError;
 /// This error type wraps both send-side errors (`MessagingError`) and
 /// receive-side errors (`ReplyError`) to provide a single error type
 /// for bound client trait methods.
-#[derive(Debug)]
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
 pub enum RpcError {
     /// Error occurred while sending the request.
     ///
     /// This includes serialization failures, network errors, and
     /// transport-level issues.
-    Messaging(MessagingError),
+    #[error("messaging error")]
+    Messaging(#[from] MessagingError),
 
     /// Error occurred while waiting for or processing the response.
     ///
     /// This includes broken promises, connection failures, timeouts,
     /// and deserialization errors.
-    Reply(ReplyError),
+    #[error("reply error")]
+    Reply(#[from] ReplyError),
 }
 
 impl RpcError {
@@ -42,36 +45,6 @@ impl RpcError {
     /// have been delivered (FDB error 1030: request_maybe_delivered).
     pub fn is_maybe_delivered(&self) -> bool {
         matches!(self, RpcError::Reply(ReplyError::MaybeDelivered))
-    }
-}
-
-impl std::fmt::Display for RpcError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RpcError::Messaging(e) => write!(f, "messaging error: {}", e),
-            RpcError::Reply(e) => write!(f, "reply error: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for RpcError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            RpcError::Messaging(e) => Some(e),
-            RpcError::Reply(e) => Some(e),
-        }
-    }
-}
-
-impl From<MessagingError> for RpcError {
-    fn from(err: MessagingError) -> Self {
-        RpcError::Messaging(err)
-    }
-}
-
-impl From<ReplyError> for RpcError {
-    fn from(err: ReplyError) -> Self {
-        RpcError::Reply(err)
     }
 }
 

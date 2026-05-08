@@ -720,20 +720,20 @@ mod tests {
         assert_eq!(COUNT_CLASS_LOOKUP[1], 1);
         assert_eq!(COUNT_CLASS_LOOKUP[2], 2);
         assert_eq!(COUNT_CLASS_LOOKUP[3], 4);
-        for i in 4..=7 {
-            assert_eq!(COUNT_CLASS_LOOKUP[i], 8, "bucket mismatch at {i}");
+        for (i, &val) in COUNT_CLASS_LOOKUP.iter().enumerate().skip(4).take(4) {
+            assert_eq!(val, 8, "bucket mismatch at {i}");
         }
-        for i in 8..=15 {
-            assert_eq!(COUNT_CLASS_LOOKUP[i], 16, "bucket mismatch at {i}");
+        for (i, &val) in COUNT_CLASS_LOOKUP.iter().enumerate().skip(8).take(8) {
+            assert_eq!(val, 16, "bucket mismatch at {i}");
         }
-        for i in 16..=31 {
-            assert_eq!(COUNT_CLASS_LOOKUP[i], 32, "bucket mismatch at {i}");
+        for (i, &val) in COUNT_CLASS_LOOKUP.iter().enumerate().skip(16).take(16) {
+            assert_eq!(val, 32, "bucket mismatch at {i}");
         }
-        for i in 32..=127 {
-            assert_eq!(COUNT_CLASS_LOOKUP[i], 64, "bucket mismatch at {i}");
+        for (i, &val) in COUNT_CLASS_LOOKUP.iter().enumerate().skip(32).take(96) {
+            assert_eq!(val, 64, "bucket mismatch at {i}");
         }
-        for i in 128..=255 {
-            assert_eq!(COUNT_CLASS_LOOKUP[i], 128, "bucket mismatch at {i}");
+        for (i, &val) in COUNT_CLASS_LOOKUP.iter().enumerate().skip(128) {
+            assert_eq!(val, 128, "bucket mismatch at {i}");
         }
     }
 

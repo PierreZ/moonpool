@@ -11,18 +11,12 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
-use crate::{Endpoint, MessageCodec};
-use moonpool_sim::{assert_reachable, assert_sometimes};
+use crate::Endpoint;
 use serde::de::DeserializeOwned;
 
 use super::net_notified_queue::NetNotifiedQueue;
 use super::reply_error::ReplyError;
 
-/// Future that resolves when a reply is received from the server.
-///
-/// Created by `send_request` and polls an internal queue for the response.
-/// The response is deserialized as `Result<T, ReplyError>` to handle both
-/// success and error cases.
 /// Callback to unregister the reply endpoint on drop.
 type DropCleanup = Box<dyn FnOnce()>;
 
@@ -31,9 +25,28 @@ type DropCleanup = Box<dyn FnOnce()>;
 /// Created by `send_request` and polls an internal queue for the response.
 /// The response is deserialized as `Result<T, ReplyError>` to handle both
 /// success and error cases.
-pub struct ReplyFuture<T: DeserializeOwned, C: MessageCodec> {
+///
+/// # Broken Promise Surfacing
+///
+/// When the server holds the matching [`ReplyPromise`] but drops it without
+/// calling `send` or `send_error`, the promise's `Drop` impl serializes
+/// [`ReplyError::BrokenPromise`] and ships it back to this future. The future
+/// then resolves with `Err(ReplyError::BrokenPromise)`. This is how callers
+/// learn that a server-side actor died, panicked, or otherwise abandoned the
+/// request without an explicit reply. See [`ReplyPromise`]'s `Drop` impl in
+/// `moonpool-transport/src/rpc/reply_promise.rs` for the producer side.
+///
+/// The same channel is used by FoundationDB's **WaitFailure** pattern: a
+/// server holds a `ReplyPromise<()>` indefinitely as a liveness beacon, and
+/// when the server actor dies every promise it owned drops, surfacing
+/// `BrokenPromise` to every waiting client at once. See the book chapter
+/// "Drop Semantics and the WaitFailure Pattern" for a worked example.
+///
+/// [`ReplyPromise`]: super::reply_promise::ReplyPromise
+/// [`ReplyError::BrokenPromise`]: super::reply_error::ReplyError::BrokenPromise
+pub struct ReplyFuture<T: DeserializeOwned> {
     /// Queue receiving the reply.
-    queue: Rc<NetNotifiedQueue<Result<T, ReplyError>, C>>,
+    queue: Rc<NetNotifiedQueue<Result<T, ReplyError>>>,
 
     /// The endpoint this future is listening on.
     endpoint: Endpoint,
@@ -44,9 +57,9 @@ pub struct ReplyFuture<T: DeserializeOwned, C: MessageCodec> {
     drop_cleanup: Option<DropCleanup>,
 }
 
-impl<T: DeserializeOwned, C: MessageCodec> ReplyFuture<T, C> {
+impl<T: DeserializeOwned> ReplyFuture<T> {
     /// Create a new reply future with the given queue and endpoint.
-    pub fn new(queue: Rc<NetNotifiedQueue<Result<T, ReplyError>, C>>, endpoint: Endpoint) -> Self {
+    pub fn new(queue: Rc<NetNotifiedQueue<Result<T, ReplyError>>>, endpoint: Endpoint) -> Self {
         Self {
             queue,
             endpoint,
@@ -70,19 +83,17 @@ impl<T: DeserializeOwned, C: MessageCodec> ReplyFuture<T, C> {
     }
 }
 
-impl<T: DeserializeOwned, C: MessageCodec> Future for ReplyFuture<T, C> {
+impl<T: DeserializeOwned> Future for ReplyFuture<T> {
     type Output = Result<T, ReplyError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // Try to receive from the queue (non-blocking)
         if let Some(result) = self.queue.try_recv() {
-            assert_sometimes!(true, "Reply received from server");
             return Poll::Ready(result);
         }
 
         // Check if queue is closed (connection failed or peer disconnected)
         if self.queue.is_closed() {
-            assert_sometimes!(true, "Reply queue closed before response");
             let reason = self
                 .queue
                 .close_reason()
@@ -94,12 +105,8 @@ impl<T: DeserializeOwned, C: MessageCodec> Future for ReplyFuture<T, C> {
         // We create a recv future each time to register the waker
         let mut recv_future = Box::pin(self.queue.recv());
         match recv_future.as_mut().poll(cx) {
-            Poll::Ready(Some(result)) => {
-                assert_sometimes!(true, "Reply received from server");
-                Poll::Ready(result)
-            }
+            Poll::Ready(Some(result)) => Poll::Ready(result),
             Poll::Ready(None) => {
-                assert_sometimes!(true, "Reply queue closed before response");
                 let reason = self
                     .queue
                     .close_reason()
@@ -111,9 +118,8 @@ impl<T: DeserializeOwned, C: MessageCodec> Future for ReplyFuture<T, C> {
     }
 }
 
-impl<T: DeserializeOwned, C: MessageCodec> Drop for ReplyFuture<T, C> {
+impl<T: DeserializeOwned> Drop for ReplyFuture<T> {
     fn drop(&mut self) {
-        assert_reachable!("reply_future_dropped_queue_closed");
         self.queue.close();
         if let Some(cleanup) = self.drop_cleanup.take() {
             cleanup();
@@ -144,8 +150,8 @@ mod tests {
     #[tokio::test]
     async fn test_reply_future_success() {
         let endpoint = test_endpoint();
-        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>, JsonCodec>> =
-            Rc::new(NetNotifiedQueue::new(endpoint.clone(), JsonCodec));
+        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
+            Rc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
 
         let future = ReplyFuture::new(queue.clone(), endpoint);
 
@@ -162,8 +168,8 @@ mod tests {
     #[tokio::test]
     async fn test_reply_future_error() {
         let endpoint = test_endpoint();
-        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>, JsonCodec>> =
-            Rc::new(NetNotifiedQueue::new(endpoint.clone(), JsonCodec));
+        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
+            Rc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
 
         let future = ReplyFuture::new(queue.clone(), endpoint);
 
@@ -179,8 +185,8 @@ mod tests {
     #[tokio::test]
     async fn test_reply_future_connection_failed() {
         let endpoint = test_endpoint();
-        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>, JsonCodec>> =
-            Rc::new(NetNotifiedQueue::new(endpoint.clone(), JsonCodec));
+        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
+            Rc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
 
         let future = ReplyFuture::new(queue.clone(), endpoint);
 
@@ -194,8 +200,8 @@ mod tests {
     #[tokio::test]
     async fn test_reply_future_maybe_delivered() {
         let endpoint = test_endpoint();
-        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>, JsonCodec>> =
-            Rc::new(NetNotifiedQueue::new(endpoint.clone(), JsonCodec));
+        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
+            Rc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
 
         let future = ReplyFuture::new(queue.clone(), endpoint);
 
@@ -209,8 +215,8 @@ mod tests {
     #[test]
     fn test_reply_future_endpoint() {
         let endpoint = test_endpoint();
-        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>, JsonCodec>> =
-            Rc::new(NetNotifiedQueue::new(endpoint.clone(), JsonCodec));
+        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
+            Rc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
 
         let future = ReplyFuture::new(queue, endpoint.clone());
         assert_eq!(future.endpoint().token, endpoint.token);

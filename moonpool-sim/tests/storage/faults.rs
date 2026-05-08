@@ -78,7 +78,7 @@ fn test_read_corruption_fault() {
             file.read_exact(&mut buf).await?;
 
             // Check if data was corrupted
-            let corrupted = &buf != original;
+            let corrupted = buf != original;
             Ok(corrupted)
         })
         .await;
@@ -119,7 +119,7 @@ fn test_write_corruption_fault() {
             file.read_exact(&mut buf).await?;
 
             // The data written may have been corrupted
-            let corrupted = &buf != original;
+            let corrupted = buf != original;
             Ok(corrupted)
         })
         .await;
@@ -267,7 +267,7 @@ fn test_phantom_write_fault() {
 
         // Either empty, all zeros, or not matching expected
         assert!(
-            data.is_empty() || all_zeros || &data != expected,
+            data.is_empty() || all_zeros || data != expected,
             "Phantom write should have lost the data"
         );
     });
@@ -535,10 +535,7 @@ fn test_combined_fault_types() {
                     }
                     .await
                 } else {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "write failed",
-                    ))
+                    Err(std::io::Error::other("write failed"))
                 };
 
                 results.push((write_result.is_ok(), read_result.is_ok()));

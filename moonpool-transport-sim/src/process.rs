@@ -8,7 +8,7 @@ use tracing::instrument;
 
 use moonpool_sim::{Process, SimContext, SimulationResult, assert_sometimes, buggify};
 use moonpool_transport::{
-    JsonCodec, NetTransportBuilder, Providers, ReplyPromise, TaskProvider, TimeProvider,
+    NetTransport, NetTransportBuilder, Providers, ReplyPromise, TaskProvider, TimeProvider,
 };
 
 use crate::service::{
@@ -43,17 +43,20 @@ impl Process for EchoServerProcess {
             })?;
 
         // Register handlers for all 3 methods
-        let (echo_stream, _) =
-            transport.register_handler_at::<EchoRequest, _>(ECHO_INTERFACE, METHOD_ECHO, JsonCodec);
-        let (delayed_stream, _) = transport.register_handler_at::<EchoRequest, _>(
+        let (echo_stream, _) = NetTransport::register_handler_at::<EchoRequest, EchoResponse>(
+            &transport,
+            ECHO_INTERFACE,
+            METHOD_ECHO,
+        );
+        let (delayed_stream, _) = NetTransport::register_handler_at::<EchoRequest, EchoResponse>(
+            &transport,
             ECHO_INTERFACE,
             METHOD_ECHO_DELAYED,
-            JsonCodec,
         );
-        let (fail_stream, _) = transport.register_handler_at::<EchoRequest, _>(
+        let (fail_stream, _) = NetTransport::register_handler_at::<EchoRequest, EchoResponse>(
+            &transport,
             ECHO_INTERFACE,
             METHOD_ECHO_OR_FAIL,
-            JsonCodec,
         );
 
         tracing::info!(%my_ip, "echo server started, 3 methods registered");
@@ -62,13 +65,13 @@ impl Process for EchoServerProcess {
         let shutdown = ctx.shutdown().clone();
         loop {
             tokio::select! {
-                Some((req, reply)) = echo_stream.recv_with_transport::<_, EchoResponse>(&transport) => {
+                Some((req, reply)) = echo_stream.recv() => {
                     handle_echo(&req, reply, my_ip);
                 }
-                Some((req, reply)) = delayed_stream.recv_with_transport::<_, EchoResponse>(&transport) => {
+                Some((req, reply)) = delayed_stream.recv() => {
                     handle_echo_delayed(&req, reply, my_ip, ctx);
                 }
-                Some((req, reply)) = fail_stream.recv_with_transport::<_, EchoResponse>(&transport) => {
+                Some((req, reply)) = fail_stream.recv() => {
                     handle_echo_or_fail(&req, reply, my_ip);
                 }
                 _ = shutdown.cancelled() => {
@@ -81,7 +84,7 @@ impl Process for EchoServerProcess {
 }
 
 /// Immediate echo: reply right away.
-fn handle_echo(req: &EchoRequest, reply: ReplyPromise<EchoResponse, JsonCodec>, server_ip: &str) {
+fn handle_echo(req: &EchoRequest, reply: ReplyPromise<EchoResponse>, server_ip: &str) {
     assert_sometimes!(true, "echo_request_handled");
     reply.send(EchoResponse {
         seq_id: req.seq_id,
@@ -93,7 +96,7 @@ fn handle_echo(req: &EchoRequest, reply: ReplyPromise<EchoResponse, JsonCodec>, 
 /// Delayed echo: schedule a response after a random simulated delay.
 fn handle_echo_delayed(
     req: &EchoRequest,
-    reply: ReplyPromise<EchoResponse, JsonCodec>,
+    reply: ReplyPromise<EchoResponse>,
     server_ip: &str,
     ctx: &SimContext,
 ) {
@@ -117,11 +120,7 @@ fn handle_echo_delayed(
 }
 
 /// Echo with buggify-controlled failure: sometimes drops the promise (BrokenPromise).
-fn handle_echo_or_fail(
-    req: &EchoRequest,
-    reply: ReplyPromise<EchoResponse, JsonCodec>,
-    server_ip: &str,
-) {
+fn handle_echo_or_fail(req: &EchoRequest, reply: ReplyPromise<EchoResponse>, server_ip: &str) {
     if buggify!() {
         assert_sometimes!(true, "echo_or_fail_buggify_dropped_promise");
         drop(reply);

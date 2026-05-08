@@ -1,31 +1,36 @@
-//! Calculator Example: Multi-method RPC interface using Moonpool.
+//! Dynamic Endpoint Example: Runtime-allocated tokens with full-interface serialization.
 //!
-//! This example demonstrates the `#[service]` attribute macro that generates
-//! server and client interface structs from a trait definition.
+//! This example demonstrates moonpool's "interfaces are data" pattern: the entire
+//! `Calculator` interface is serialized as a compact `{ address, base_token }` blob.
+//! The client reconstructs every method's endpoint via offset adjustment from the
+//! base token — see the FDB analysis at `docs/analysis/foundationdb/layer-3-fdbrpc.md`
+//! section 7.
 //!
-//! # Key Features
-//!
-//! - `#[service(id = ...)]` generates `CalculatorServer` and `CalculatorClient`
-//! - Client has `ServiceEndpoint` fields with delivery mode methods
-//! - Each call site chooses its delivery mode (FDB pattern)
-//!
-//! # Run
+//! Run as two separate processes:
 //!
 //! ```bash
-//! # Terminal 1 - Start the server
-//! cargo run --example calculator -- server
+//! # Terminal 1 - Start the server (prints serialized interface)
+//! cargo run --example dynamic_endpoint -- server
 //!
-//! # Terminal 2 - Run the client
-//! cargo run --example calculator -- client
+//! # Terminal 2 - Run the client (paste the serialized interface)
+//! cargo run --example dynamic_endpoint -- client '<json from server>'
 //! ```
+//!
+//! # Architecture
+//!
+//! - `#[service]` macro generates a unified `Calculator` struct that implements
+//!   `Serialize` and exposes `Calculator::deserialize_with(&transport, deserializer)`.
+//! - Server: `Calculator::init(&transport)` allocates a random base token,
+//!   then `serde_json::to_string(&calc)` emits `{ address, base_token }`.
+//! - Client: `Calculator::deserialize_with(&transport, &mut Deserializer)` rebuilds
+//!   the unified struct in remote mode, with each method's endpoint at
+//!   `base_token.adjusted(idx)`.
+//! - Two `Calculator` servers in the same process get different tokens (no collisions).
 
 use std::env;
 use std::time::Duration;
 
-use moonpool_transport::{
-    JsonCodec, NetTransportBuilder, NetworkAddress, Providers, RpcError, TimeProvider,
-    TokioProviders, service,
-};
+use moonpool_transport::{NetTransportBuilder, NetworkAddress, RpcError, TokioProviders, service};
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -80,19 +85,14 @@ struct DivRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DivResponse {
-    result: Option<i64>, // None if division by zero
+    result: Option<i64>,
 }
 
 // ============================================================================
-// Interface Definition
+// Interface Definition (no id = dynamic tokens)
 // ============================================================================
 
-/// Calculator interface definition.
-///
-/// The `#[service]` macro generates:
-/// - `CalculatorServer<C>` with `RequestStream` fields (add, sub, mul, div)
-/// - `CalculatorClient` with `ServiceEndpoint` fields (add, sub, mul, div)
-#[service(id = 0xCA1C_0000)]
+#[service]
 trait Calculator {
     async fn add(&self, req: AddRequest) -> Result<AddResponse, RpcError>;
     async fn sub(&self, req: SubRequest) -> Result<SubResponse, RpcError>;
@@ -105,7 +105,7 @@ trait Calculator {
 // ============================================================================
 
 async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Calculator Server ===\n");
+    println!("=== Dynamic Endpoint Server ===\n");
 
     let providers = TokioProviders::new();
     let local_addr = NetworkAddress::parse(SERVER_ADDR)?;
@@ -117,37 +117,57 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Server listening on {}\n", SERVER_ADDR);
 
-    let calc = CalculatorServer::init(&transport, JsonCodec);
+    // Dynamic token allocation — each init() gets a unique base token.
+    let calc = Calculator::init(&transport);
 
     println!(
-        "Registered {} calculator methods (interface ID: 0x{:X})\n",
-        CalculatorServer::<JsonCodec>::METHOD_COUNT,
-        CalculatorServer::<JsonCodec>::INTERFACE_ID
+        "Registered {} methods with dynamic base token: {}\n",
+        Calculator::METHOD_COUNT,
+        calc.base_token(),
     );
+
+    // Demonstrate: two servers in the same process get different tokens
+    let calc2 = Calculator::init(&transport);
+    println!(
+        "Second server base token: {} (different!)\n",
+        calc2.base_token()
+    );
+    assert_ne!(calc.base_token(), calc2.base_token());
+
+    // Serialize the whole interface — the client reconstructs every method
+    // endpoint via offset adjustment from the base token.
+    let iface_json = serde_json::to_string(&calc)?;
+    println!("=== COPY-PASTE THIS TO START THE CLIENT ===\n");
+    println!(
+        "  cargo run --example dynamic_endpoint -- client '{}'\n",
+        iface_json
+    );
+    println!("=============================================\n");
+
     println!("Waiting for requests...\n");
 
-    // Handle requests
+    // Handle requests (only from the first server for this demo)
     loop {
         tokio::select! {
-            Some((req, reply)) = calc.add.recv_with_transport::<_, AddResponse>(&transport) => {
+            Some((req, reply)) = calc.add.recv() => {
                 let result = req.a + req.b;
                 println!("ADD: {} + {} = {}", req.a, req.b, result);
                 reply.send(AddResponse { result });
             }
 
-            Some((req, reply)) = calc.sub.recv_with_transport::<_, SubResponse>(&transport) => {
+            Some((req, reply)) = calc.sub.recv() => {
                 let result = req.a - req.b;
                 println!("SUB: {} - {} = {}", req.a, req.b, result);
                 reply.send(SubResponse { result });
             }
 
-            Some((req, reply)) = calc.mul.recv_with_transport::<_, MulResponse>(&transport) => {
+            Some((req, reply)) = calc.mul.recv() => {
                 let result = req.a * req.b;
                 println!("MUL: {} * {} = {}", req.a, req.b, result);
                 reply.send(MulResponse { result });
             }
 
-            Some((req, reply)) = calc.div.recv_with_transport::<_, DivResponse>(&transport) => {
+            Some((req, reply)) = calc.div.recv() => {
                 let result = if req.b != 0 {
                     Some(req.a / req.b)
                 } else {
@@ -167,56 +187,44 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 // Client
 // ============================================================================
 
-async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Calculator Client ===\n");
+async fn run_client(iface_json: &str) -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== Dynamic Endpoint Client ===\n");
 
     let providers = TokioProviders::new();
-    let time = providers.time().clone();
 
     let local_addr = NetworkAddress::parse(CLIENT_ADDR)?;
-    let server_addr = NetworkAddress::parse(SERVER_ADDR)?;
 
     let transport = NetTransportBuilder::new(providers)
         .local_address(local_addr)
         .build_listening()
         .await?;
 
-    println!("Client started, connecting to server at {}\n", SERVER_ADDR);
-
-    // Client is a plain struct with ServiceEndpoint fields.
-    // Codec is passed once at construction; delivery methods don't need it.
-    let calc = CalculatorClient::new(server_addr, JsonCodec);
-
+    // Reconstruct the whole interface from the JSON blob (simulating discovery).
+    // The address and base token come from the wire; deserialize_with binds
+    // each method endpoint to the local transport.
+    let mut de = serde_json::Deserializer::from_str(iface_json);
+    let calc = Calculator::deserialize_with(&transport, &mut de)?;
     println!(
-        "Using interface ID: 0x{:X} with {} methods\n",
-        CalculatorClient::<JsonCodec>::INTERFACE_ID,
-        CalculatorClient::<JsonCodec>::METHOD_COUNT
+        "Reconstructed interface: address={}, base_token={}\n",
+        calc.address(),
+        calc.base_token(),
     );
 
-    // ========================================================================
-    // Delivery mode is a call-site decision (FDB pattern)
-    // ========================================================================
+    println!("Client started, connecting to server at {}\n", SERVER_ADDR);
 
-    // 1. get_reply: at-least-once, reliable delivery (default for most RPCs)
-    println!("--- get_reply (at-least-once) ---");
-    match time
-        .timeout(
-            Duration::from_secs(5),
-            calc.add.get_reply(&transport, AddRequest { a: 10, b: 5 }),
-        )
+    // Delivery mode is a call-site decision (FDB pattern)
+    println!("--- get_reply_unless_failed_for (at-least-once) ---");
+    match calc
+        .add
+        .get_reply_unless_failed_for(AddRequest { a: 10, b: 5 }, Duration::from_secs(5))
         .await
     {
-        Ok(Ok(resp)) => println!("  10 + 5 = {}\n", resp.result),
-        other => println!("  Failed: {:?}\n", other),
+        Ok(resp) => println!("  10 + 5 = {}\n", resp.result),
+        Err(e) => println!("  Failed: {:?}\n", e),
     }
 
-    // 2. try_get_reply: at-most-once, races reply vs disconnect
     println!("--- try_get_reply (at-most-once) ---");
-    match calc
-        .sub
-        .try_get_reply(&transport, SubRequest { a: 20, b: 7 })
-        .await
-    {
+    match calc.sub.try_get_reply(SubRequest { a: 20, b: 7 }).await {
         Ok(resp) => println!("  20 - 7 = {}\n", resp.result),
         Err(e) if e.is_maybe_delivered() => {
             println!("  MaybeDelivered — read state before retry\n")
@@ -224,58 +232,44 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => println!("  Error: {:?}\n", e),
     }
 
-    // 3. get_reply again for mul
-    println!("--- get_reply ---");
-    match time
-        .timeout(
-            Duration::from_secs(5),
-            calc.mul.get_reply(&transport, MulRequest { a: 6, b: 8 }),
-        )
+    println!("--- get_reply_unless_failed_for ---");
+    match calc
+        .mul
+        .get_reply_unless_failed_for(MulRequest { a: 6, b: 8 }, Duration::from_secs(5))
         .await
     {
-        Ok(Ok(resp)) => println!("  6 * 8 = {}\n", resp.result),
-        other => println!("  Failed: {:?}\n", other),
+        Ok(resp) => println!("  6 * 8 = {}\n", resp.result),
+        Err(e) => println!("  Failed: {:?}\n", e),
     }
 
-    // 4. Division (normal + division by zero)
     println!("--- division ---");
-    match time
-        .timeout(
-            Duration::from_secs(5),
-            calc.div.get_reply(&transport, DivRequest { a: 100, b: 4 }),
-        )
+    match calc
+        .div
+        .get_reply_unless_failed_for(DivRequest { a: 100, b: 4 }, Duration::from_secs(5))
         .await
     {
-        Ok(Ok(resp)) => println!(
+        Ok(resp) => println!(
             "  100 / 4 = {}\n",
             resp.result
                 .map(|r| r.to_string())
                 .unwrap_or_else(|| "ERROR".to_string())
         ),
-        other => println!("  Failed: {:?}\n", other),
+        Err(e) => println!("  Failed: {:?}\n", e),
     }
 
-    match time
-        .timeout(
-            Duration::from_secs(5),
-            calc.div.get_reply(&transport, DivRequest { a: 42, b: 0 }),
-        )
+    match calc
+        .div
+        .get_reply_unless_failed_for(DivRequest { a: 42, b: 0 }, Duration::from_secs(5))
         .await
     {
-        Ok(Ok(resp)) => println!(
+        Ok(resp) => println!(
             "  42 / 0 = {}\n",
             resp.result
                 .map(|r| r.to_string())
                 .unwrap_or_else(|| "ERROR (division by zero)".to_string())
         ),
-        other => println!("  Failed: {:?}\n", other),
+        Err(e) => println!("  Failed: {:?}\n", e),
     }
-
-    // Demonstrate serialization (client is just a struct of ServiceEndpoints)
-    println!("=== Serialization Demo ===");
-    let unbound = CalculatorClient::new(NetworkAddress::parse(SERVER_ADDR)?, JsonCodec);
-    let json = serde_json::to_string_pretty(&unbound)?;
-    println!("Serialized CalculatorClient:\n{}", json);
 
     Ok(())
 }
@@ -304,24 +298,29 @@ fn main() {
             });
         }
         "client" => {
+            let iface_json = args
+                .get(2)
+                .expect("Usage: dynamic_endpoint client '<iface_json>'");
             runtime.block_on(async {
-                if let Err(e) = run_client().await {
+                if let Err(e) = run_client(iface_json).await {
                     eprintln!("Client error: {}", e);
                     std::process::exit(1);
                 }
             });
         }
         _ => {
-            println!("Calculator Example: FDB-style Interface Pattern\n");
-            println!("This example demonstrates the #[service] macro:\n");
-            println!("  - CalculatorServer<C> with RequestStream fields");
-            println!("  - CalculatorClient with ServiceEndpoint fields");
-            println!("  - Delivery modes chosen per call: get_reply, try_get_reply, send");
-            println!("  - FDB pattern: calc.add.get_reply(&transport, req, codec).await?\n");
+            println!("Dynamic Endpoint Example\n");
+            println!("Demonstrates runtime-allocated tokens with full-interface serialization:\n");
+            println!("  - Server: Calculator::init(&transport) → random base token");
+            println!("           serde_json::to_string(&calc) → {{ address, base_token }} blob");
+            println!(
+                "  - Client: Calculator::deserialize_with(&transport, deserializer) → remote interface"
+            );
+            println!("  - Two servers in same process get different tokens (no collisions)\n");
             println!("Usage:");
-            println!("  cargo run --example calculator -- server   # Start the server");
-            println!("  cargo run --example calculator -- client   # Run the client\n");
-            println!("Run server first in one terminal, then client in another.");
+            println!("  cargo run --example dynamic_endpoint -- server");
+            println!("  cargo run --example dynamic_endpoint -- client '<iface_json>'\n");
+            println!("Run server first, then copy the interface JSON to the client command.");
         }
     }
 }

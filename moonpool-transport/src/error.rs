@@ -3,7 +3,8 @@
 use crate::UID;
 
 /// Errors that can occur in the messaging layer.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
 pub enum MessagingError {
     /// Endpoint not found for the given token.
     #[error("endpoint not found: {token}")]

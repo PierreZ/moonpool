@@ -96,12 +96,11 @@ pub use wire::{
 
 // RPC exports
 pub use rpc::{
-    Alternatives, AtMostOnce, Distance, EndpointMap, FailedReason, FailureMonitor, FailureStatus,
-    FanOutError, LoadBalanceConfig, MessageReceiver, ModelHolder, NetNotifiedQueue, NetTransport,
-    NetTransportBuilder, QueueModel, ReplyError, ReplyFuture, ReplyPromise, RequestEnvelope,
-    RequestStream, RpcError, ServerHandle, ServiceEndpoint, Smoother, fan_out_all,
-    fan_out_all_partial, fan_out_quorum, fan_out_race, get_reply, get_reply_unless_failed_for,
-    load_balance, method_endpoint, method_uid, send, send_request, try_get_reply,
+    DecodeFn, EncodeFn, EndpointMap, FailureMonitor, FailureStatus, InterfaceMethod,
+    MessageReceiver, NetNotifiedQueue, NetTransport, NetTransportBuilder, ReplyError, ReplyFuture,
+    ReplyPromise, RequestEnvelope, RequestStream, RpcError, ServerHandle, ServiceEndpoint,
+    Smoother, TransportHandle, get_reply, get_reply_unless_failed_for, make_decode_fn,
+    make_encode_fn, method_endpoint, method_uid, send, send_request, try_get_reply,
 };
 
 // Attribute macros

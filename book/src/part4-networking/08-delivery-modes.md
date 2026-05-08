@@ -13,36 +13,29 @@ The `#[service]` macro gives you a clean RPC interface, but it hides an importan
 | `get_reply` | At-least-once | Reliable | Retransmits on reconnect |
 | `get_reply_unless_failed_for` | At-least-once + timeout | Reliable | `MaybeDelivered` after duration |
 
-All four modes are available as methods on `ServiceEndpoint`, the type generated for each method in a `#[service]` client. You can also call the underlying functions in `moonpool::delivery` directly if you are working outside the `#[service]` macro. The difference between modes is in what guarantees they provide and how they handle failures.
+All four modes are available as methods on the `InterfaceMethod` field generated for each method in a `#[service]` interface. The unified `Calculator` or `PingPong` struct emitted by the macro carries one `InterfaceMethod<Req, Resp>` per method, and the four delivery functions sit directly on it. The difference between modes is in what guarantees they provide and how they handle failures.
 
 ## send: Fire-and-Forget
 
 The simplest mode. Send the request unreliably with no reply registered:
 
 ```rust
-// Via ServiceEndpoint (generated client)
-heartbeat.send(&transport, HeartbeatRequest { node_id })?;
-
-// Via delivery module (manual endpoint)
-delivery::send(&transport, &endpoint, HeartbeatRequest { node_id }, JsonCodec)?;
+// `heartbeat` is `iface.heartbeat`, an InterfaceMethod<HeartbeatRequest, ()>
+iface.heartbeat.send(HeartbeatRequest { node_id })?;
 ```
 
 No `ReplyFuture` is created. No endpoint is registered for a response. If the connection is down, the message is silently dropped. If the server responds, the response is discarded.
 
-Use this for heartbeats, notifications, and any message where losing one is harmless because the next one compensates.
+Use this for heartbeats, notifications, and any message where losing one is harmless because the next one compensates. The `well_known_endpoint` example demonstrates this with three heartbeats following a burst of replies.
 
 ## try_get_reply: At-Most-Once
 
 Send unreliably, then race the reply against a disconnect signal from the `FailureMonitor`:
 
 ```rust
-// Via ServiceEndpoint
-let response = balance.try_get_reply(&transport, GetBalanceRequest { account_id }).await?;
-
-// Via delivery module
-let response = delivery::try_get_reply::<_, BalanceResponse, _, _>(
-    &transport, &endpoint, GetBalanceRequest { account_id }, JsonCodec,
-).await?;
+let response = iface.balance
+    .try_get_reply(GetBalanceRequest { account_id })
+    .await?;
 ```
 
 Under the hood, this is a `tokio::select!`:
@@ -63,40 +56,29 @@ The at-most-once guarantee means the server processes your request **zero or one
 Send reliably. If the connection drops and reconnects, the transport retransmits the request automatically:
 
 ```rust
-// Via ServiceEndpoint
-let response = join.get_reply(&transport, JoinRequest { node_id }).await?;
-
-// Via delivery module (returns a ReplyFuture for manual control)
-let reply_future = delivery::get_reply::<_, JoinResponse, _, _>(
-    &transport, &endpoint, JoinRequest { node_id }, JsonCodec,
-)?;
-let response = reply_future.await?;
+let response = iface.join.get_reply(JoinRequest { node_id }).await?;
 ```
 
 The request sits in the peer's reliable queue. If the TCP connection drops, the peer reconnects (with backoff), and the queued request is resent. The server **may receive the same request multiple times**. Your server must be prepared for duplicates.
 
-This mode never gives up. If the remote process dies permanently, the `ReplyFuture` hangs until the 30-second RPC timeout fires, returning `ReplyError::Timeout`.
+This mode never gives up on its own. If the remote process dies permanently, the `ReplyFuture` hangs until the 30-second RPC timeout fires, returning `ReplyError::Timeout`. When you need to bound waiting on the application side, do **not** wrap `get_reply` with `time.timeout`. Use `get_reply_unless_failed_for` instead. The `FailureMonitor` already tracks liveness for the entire transport, and bypassing it with a wall-clock timeout makes two independent components race over the same decision. The next section is the right tool.
 
 ## get_reply_unless_failed_for: At-Least-Once with Timeout
 
 Like `get_reply`, but gives up if the endpoint has been continuously failed for a specified duration:
 
 ```rust
-// Via ServiceEndpoint
-let response = register.get_reply_unless_failed_for(
-    &transport, RegisterRequest { /* ... */ }, Duration::from_secs(10),
-).await?;
-
-// Via delivery module
-let response = delivery::get_reply_unless_failed_for::<_, RegisterResponse, _, _>(
-    &transport, &endpoint, RegisterRequest { /* ... */ }, JsonCodec,
-    Duration::from_secs(10),
-).await?;
+let response = iface.register
+    .get_reply_unless_failed_for(
+        RegisterRequest { /* ... */ },
+        Duration::from_secs(10),
+    )
+    .await?;
 ```
 
 This combines reliable delivery with a failure timeout. First it waits for a disconnect signal from the `FailureMonitor`, then sleeps for the sustained failure duration. If the connection recovers during that sleep, the reliable retransmit resolves the reply future first and the timeout is cancelled.
 
-Use this for singleton RPCs (registration, recruitment) where you want reliable delivery but cannot wait forever if the destination is permanently gone.
+Use this for singleton RPCs (registration, recruitment) where you want reliable delivery but cannot wait forever if the destination is permanently gone. Because the timeout consults the `FailureMonitor`, the same liveness signal informs every RPC and every retry decision in the process. One source of truth, exactly as FDB does it.
 
 ## MaybeDelivered: Explicit Ambiguity
 
@@ -105,9 +87,9 @@ The `ReplyError::MaybeDelivered` variant is the most important design decision i
 When you receive `MaybeDelivered`, you know exactly one thing: the connection failed while the request was in flight. The request may have been fully processed, partially processed, or never received. The framework refuses to guess.
 
 ```rust
-match delivery::try_get_reply(&transport, &ep, req, codec).await {
+match iface.balance.try_get_reply(req).await {
     Ok(response) => handle_success(response),
-    Err(ReplyError::MaybeDelivered) => {
+    Err(e) if e.is_maybe_delivered() => {
         // Read state to determine if the request was processed
         // before deciding whether to retry
     }
@@ -126,6 +108,6 @@ This forces correct error handling at the application level. Simulation testing 
 | Single server, must deliver | `get_reply` | TLog rejoin, state sync |
 | Single server, failure timeout | `get_reply_unless_failed_for` | Registration, recruitment |
 
-The generated `#[service]` client exposes each method as a `ServiceEndpoint` field with all delivery modes available. You choose the mode at the call site, so the same client can use `get_reply` for critical writes and `try_get_reply` for best-effort reads. For raw `ReplyFuture` control (useful in `select!` blocks), use `send_request`.
+The generated `#[service]` interface exposes each method as an `InterfaceMethod` field with all four delivery modes available. You choose the mode at the call site, so the same client can use `get_reply` for critical writes and `try_get_reply` for best-effort reads. For raw `ReplyFuture` control (useful in `select!` blocks), use `send_request`.
 
 For strategies on handling `MaybeDelivered` correctly, including idempotent design, generation numbers, and read-before-retry, see [Designing Simulation-Friendly RPC](./10-designing-rpc.md).
