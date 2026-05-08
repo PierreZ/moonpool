@@ -389,7 +389,7 @@ fn test_tokio_provider_clone() {
 fn test_tokio_provider_default() {
     local_runtime().block_on(async move {
         // Test that TokioStorageProvider implements Default
-        let provider = TokioStorageProvider::default();
+        let provider = TokioStorageProvider;
 
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let file_path = temp_dir.path().join("default_test.txt");

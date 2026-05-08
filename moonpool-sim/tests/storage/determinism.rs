@@ -112,8 +112,10 @@ fn test_same_seed_same_corruption() {
         let mut results = Vec::new();
 
         // Configure with corruption enabled
-        let mut config = StorageConfiguration::default();
-        config.read_fault_probability = 0.5; // High probability for testing
+        let config = StorageConfiguration {
+            read_fault_probability: 0.5, // High probability for testing
+            ..Default::default()
+        };
 
         for _ in 0..3 {
             let mut sim = SimWorld::new_with_seed(seed);
@@ -211,8 +213,10 @@ fn test_deterministic_misdirection() {
         let mut results = Vec::new();
 
         // Configure with misdirection enabled
-        let mut config = StorageConfiguration::default();
-        config.misdirect_write_probability = 0.5; // High for testing
+        let config = StorageConfiguration {
+            misdirect_write_probability: 0.5, // High for testing
+            ..Default::default()
+        };
 
         for _ in 0..3 {
             let mut sim = SimWorld::new_with_seed(seed);

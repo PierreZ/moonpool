@@ -1209,7 +1209,7 @@ mod tests {
         async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
             // Deterministic: fail if first random number is even
             let random_num: u32 = ctx.random().random_range(0..100);
-            if random_num % 2 == 0 {
+            if random_num.is_multiple_of(2) {
                 return Err(crate::SimulationError::InvalidState(
                     "Test failure".to_string(),
                 ));
