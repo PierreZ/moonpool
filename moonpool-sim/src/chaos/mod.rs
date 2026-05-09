@@ -130,7 +130,6 @@
 pub mod assertions;
 pub mod buggify;
 pub mod fault_events;
-pub mod invariant_trait;
 pub mod state_handle;
 
 // Re-export main types at module level
@@ -142,5 +141,4 @@ pub use assertions::{
 };
 pub use buggify::{buggify_init, buggify_internal, buggify_reset};
 pub use fault_events::{SIM_FAULT_TIMELINE, SimFaultEvent};
-pub use invariant_trait::{Invariant, invariant_fn};
-pub use state_handle::{StateHandle, Timeline, TimelineEntry};
+pub use state_handle::StateHandle;

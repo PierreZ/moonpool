@@ -8,7 +8,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 
 use moonpool_sim::{
-    Invariant, SIM_FAULT_TIMELINE, SimFaultEvent, StateHandle, assert_always, assert_sometimes,
+    Invariant, SIM_FAULT_TIMELINE, SimFaultEvent, TimelineQuery, TimelineQueryExt, assert_always,
+    assert_sometimes,
 };
 
 use crate::workload::{DeliveryEvent, TL_AT_LEAST_ONCE, TL_AT_MOST_ONCE, TL_TIMEOUT};
@@ -64,18 +65,11 @@ impl DeliveryContractInvariant {
     }
 
     /// Check at-most-once timeline: no phantoms, at most one resolution per seq_id.
-    fn check_at_most_once(&self, state: &StateHandle) {
-        let Some(tl) = state.timeline::<DeliveryEvent>(TL_AT_MOST_ONCE) else {
-            return;
-        };
-        let len = tl.len();
-        let cursor = self.cursor_amo.get();
-        if len == cursor {
+    fn check_at_most_once(&self, q: &dyn TimelineQuery) {
+        let new_entries = q.since::<DeliveryEvent>(TL_AT_MOST_ONCE, &self.cursor_amo);
+        if new_entries.is_empty() {
             return;
         }
-
-        let new_entries = tl.since(cursor);
-        self.cursor_amo.set(len);
 
         let mut sent = self.amo_sent.borrow_mut();
         let mut resolved = self.amo_resolved.borrow_mut();
@@ -106,18 +100,11 @@ impl DeliveryContractInvariant {
     }
 
     /// Check at-least-once timeline: no phantom replies.
-    fn check_at_least_once(&self, state: &StateHandle) {
-        let Some(tl) = state.timeline::<DeliveryEvent>(TL_AT_LEAST_ONCE) else {
-            return;
-        };
-        let len = tl.len();
-        let cursor = self.cursor_alo.get();
-        if len == cursor {
+    fn check_at_least_once(&self, q: &dyn TimelineQuery) {
+        let new_entries = q.since::<DeliveryEvent>(TL_AT_LEAST_ONCE, &self.cursor_alo);
+        if new_entries.is_empty() {
             return;
         }
-
-        let new_entries = tl.since(cursor);
-        self.cursor_alo.set(len);
 
         let mut sent = self.alo_sent.borrow_mut();
 
@@ -137,18 +124,11 @@ impl DeliveryContractInvariant {
     }
 
     /// Check timeout timeline: no response after timeout declared.
-    fn check_timeout(&self, state: &StateHandle) {
-        let Some(tl) = state.timeline::<DeliveryEvent>(TL_TIMEOUT) else {
-            return;
-        };
-        let len = tl.len();
-        let cursor = self.cursor_to.get();
-        if len == cursor {
+    fn check_timeout(&self, q: &dyn TimelineQuery) {
+        let new_entries = q.since::<DeliveryEvent>(TL_TIMEOUT, &self.cursor_to);
+        if new_entries.is_empty() {
             return;
         }
-
-        let new_entries = tl.since(cursor);
-        self.cursor_to.set(len);
 
         let mut timed_out = self.to_timed_out.borrow_mut();
 
@@ -171,15 +151,10 @@ impl DeliveryContractInvariant {
     }
 
     /// Check cross-mode: faults injected AND messages still delivered.
-    fn check_cross_mode(&self, state: &StateHandle) {
+    fn check_cross_mode(&self, q: &dyn TimelineQuery) {
         if !self.any_faults.get() {
-            let Some(tl) = state.timeline::<SimFaultEvent>(SIM_FAULT_TIMELINE) else {
-                return;
-            };
-            let len = tl.len();
-            let cursor = self.cursor_faults.get();
-            if len > cursor {
-                self.cursor_faults.set(len);
+            let new_faults = q.since::<SimFaultEvent>(SIM_FAULT_TIMELINE, &self.cursor_faults);
+            if !new_faults.is_empty() {
                 self.any_faults.set(true);
             }
         }
@@ -196,11 +171,11 @@ impl Invariant for DeliveryContractInvariant {
         "delivery_contract"
     }
 
-    fn check(&self, state: &StateHandle, _sim_time_ms: u64) {
-        self.check_at_most_once(state);
-        self.check_at_least_once(state);
-        self.check_timeout(state);
-        self.check_cross_mode(state);
+    fn observe(&self, q: &dyn TimelineQuery, _sim_time_ms: u64) {
+        self.check_at_most_once(q);
+        self.check_at_least_once(q);
+        self.check_timeout(q);
+        self.check_cross_mode(q);
     }
 
     fn reset(&mut self) {

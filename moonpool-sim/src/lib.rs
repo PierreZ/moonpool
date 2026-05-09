@@ -161,6 +161,9 @@ pub mod providers;
 /// Network simulation and configuration.
 pub mod network;
 
+/// Production-friendly observability layer (replaces legacy Timeline + Invariant).
+pub mod observability;
+
 /// Storage simulation and configuration.
 pub mod storage;
 
@@ -188,10 +191,15 @@ pub use runner::{
 
 // Chaos module re-exports
 pub use chaos::{
-    AssertionStats, Invariant, SIM_FAULT_TIMELINE, SimFaultEvent, StateHandle, Timeline,
-    TimelineEntry, assertion_results, buggify_init, buggify_reset, has_always_violations,
-    invariant_fn, panic_on_assertion_violations, reset_always_violations, reset_assertion_results,
-    validate_assertion_contracts,
+    AssertionStats, SIM_FAULT_TIMELINE, SimFaultEvent, StateHandle, assertion_results,
+    buggify_init, buggify_reset, has_always_violations, panic_on_assertion_violations,
+    reset_always_violations, reset_assertion_results, validate_assertion_contracts,
+};
+
+// Observability module re-exports (new system replacing legacy Timeline + Invariant)
+pub use observability::{
+    CapturedEvent, InstallGuard, Invariant, SimulationLayer, SimulationLayerHandle, TimelineQuery,
+    TimelineQueryExt, TypedEntry, invariant_fn,
 };
 
 // Network exports

@@ -9,8 +9,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::chaos::fault_events::{SIM_FAULT_TIMELINE, SimFaultEvent};
-use crate::chaos::invariant_trait::Invariant;
 use crate::chaos::state_handle::StateHandle;
+use crate::observability::SimulationLayerHandle;
 use crate::runner::builder::WorkloadClientInfo;
 use crate::runner::context::SimContext;
 use crate::runner::fault_injector::{FaultContext, FaultInjector};
@@ -193,6 +193,7 @@ impl<'a> ProcessManager<'a> {
         sim: &crate::sim::WeakSimWorld,
         seed: u64,
         state: &StateHandle,
+        obs: &SimulationLayerHandle,
         shutdown_signal: &tokio_util::sync::CancellationToken,
     ) {
         let ip_str = ip.to_string();
@@ -228,7 +229,7 @@ impl<'a> ProcessManager<'a> {
             process_token,
         );
         let providers = crate::SimProviders::new(sim.clone(), seed, ip);
-        let ctx = SimContext::new(providers, topology, state.clone());
+        let ctx = SimContext::new(providers, topology, state.clone(), obs.clone());
         let ip_for_log = ip_str.clone();
         let handle = tokio::task::spawn_local(async move {
             if let Err(e) = process.run(&ctx).await {
@@ -278,7 +279,7 @@ impl WorkloadOrchestrator {
     pub(crate) async fn orchestrate_workloads(
         workloads: Vec<Box<dyn Workload>>,
         fault_injectors: Vec<Box<dyn FaultInjector>>,
-        invariants: &[Box<dyn Invariant>],
+        obs: SimulationLayerHandle,
         workload_info: &[(String, String)],
         client_info: &[WorkloadClientInfo],
         process_config: Option<ProcessConfig<'_>>,
@@ -323,9 +324,9 @@ impl WorkloadOrchestrator {
             .cloned()
             .collect();
 
-        // Create shared state for cross-workload communication and invariant checking
+        // Create shared state for cross-workload publish/get communication.
+        // Event timelines and invariants are handled by `obs` (SimulationLayer).
         let state = StateHandle::new();
-        sim.set_state(state.clone());
 
         // Create workload shutdown signal
         let shutdown_signal = tokio_util::sync::CancellationToken::new();
@@ -355,7 +356,7 @@ impl WorkloadOrchestrator {
                     process_token.clone(),
                 );
                 let providers = crate::SimProviders::new(sim.downgrade(), seed, ip_addr);
-                let ctx = SimContext::new(providers, topology, state.clone());
+                let ctx = SimContext::new(providers, topology, state.clone(), obs.clone());
                 let ip_for_log = ip.clone();
                 let handle = tokio::task::spawn_local(async move {
                     if let Err(e) = process.run(&ctx).await {
@@ -400,7 +401,7 @@ impl WorkloadOrchestrator {
                 shutdown_signal.clone(),
             );
             let providers = crate::SimProviders::new(sim.downgrade(), seed, ip_addr);
-            let ctx = SimContext::new(providers, topology, state.clone());
+            let ctx = SimContext::new(providers, topology, state.clone(), obs.clone());
             contexts.push(ctx);
         }
 
@@ -427,6 +428,7 @@ impl WorkloadOrchestrator {
                     &mut process_manager,
                     seed,
                     &state,
+                    &obs,
                     &shutdown_signal,
                 );
             }
@@ -554,16 +556,16 @@ impl WorkloadOrchestrator {
                 }
             }
 
-            // Process one simulation event
+            // Process one simulation event. Invariants run automatically inside
+            // SimulationLayer::on_event whenever an event is captured.
             if sim.pending_event_count() > 0 {
                 sim.step();
-                let current_time_ms = sim.current_time().as_millis() as u64;
-                Self::check_invariants(&state, current_time_ms, invariants);
                 Self::handle_process_events(
                     &mut sim,
                     &mut process_manager,
                     seed,
                     &state,
+                    &obs,
                     &shutdown_signal,
                 );
             }
@@ -733,7 +735,7 @@ impl WorkloadOrchestrator {
                 shutdown_signal.clone(),
             );
             let providers = crate::SimProviders::new(sim.downgrade(), seed, ip_addr);
-            let ctx = SimContext::new(providers, topology, state.clone());
+            let ctx = SimContext::new(providers, topology, state.clone(), obs.clone());
             check_contexts.push(ctx);
         }
 
@@ -795,6 +797,7 @@ impl WorkloadOrchestrator {
         process_manager: &mut ProcessManager<'_>,
         seed: u64,
         state: &StateHandle,
+        obs: &SimulationLayerHandle,
         shutdown_signal: &tokio_util::sync::CancellationToken,
     ) {
         let time_ms = sim.current_time().as_millis() as u64;
@@ -805,14 +808,14 @@ impl WorkloadOrchestrator {
                 recovery_delay_ms,
             }) => {
                 assert_reachable!("event: ProcessGracefulShutdown");
-                state.emit_raw(
+                crate::sim_emit!(
                     SIM_FAULT_TIMELINE,
+                    time_ms,
+                    "sim",
                     SimFaultEvent::ProcessGracefulShutdown {
                         ip: ip.to_string(),
                         grace_period_ms,
-                    },
-                    time_ms,
-                    "sim",
+                    }
                 );
                 process_manager.signal_graceful_shutdown(ip);
                 sim.schedule_event(
@@ -827,11 +830,11 @@ impl WorkloadOrchestrator {
                 ip,
                 recovery_delay_ms,
             }) => {
-                state.emit_raw(
+                crate::sim_emit!(
                     SIM_FAULT_TIMELINE,
-                    SimFaultEvent::ProcessForceKill { ip: ip.to_string() },
                     time_ms,
                     "sim",
+                    SimFaultEvent::ProcessForceKill { ip: ip.to_string() }
                 );
                 process_manager.abort_process(ip);
                 sim.abort_all_connections_for_ip(ip);
@@ -839,14 +842,14 @@ impl WorkloadOrchestrator {
             }
             Some(crate::sim::Event::ProcessRestart { ip }) => {
                 assert_reachable!("event: ProcessRestart");
-                state.emit_raw(
+                crate::sim_emit!(
                     SIM_FAULT_TIMELINE,
-                    SimFaultEvent::ProcessRestart { ip: ip.to_string() },
                     time_ms,
                     "sim",
+                    SimFaultEvent::ProcessRestart { ip: ip.to_string() }
                 );
                 let weak_sim = sim.downgrade();
-                process_manager.handle_restart(ip, &weak_sim, seed, state, shutdown_signal);
+                process_manager.handle_restart(ip, &weak_sim, seed, state, obs, shutdown_signal);
             }
             _ => {}
         }
@@ -869,17 +872,6 @@ impl WorkloadOrchestrator {
                 },
                 Duration::from_nanos(i),
             );
-        }
-    }
-
-    /// Check all registered invariants against current state.
-    fn check_invariants(state: &StateHandle, sim_time_ms: u64, invariants: &[Box<dyn Invariant>]) {
-        if invariants.is_empty() {
-            return;
-        }
-
-        for invariant in invariants {
-            invariant.check(state, sim_time_ms);
         }
     }
 

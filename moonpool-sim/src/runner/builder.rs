@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use tracing::instrument;
 
 use crate::SimulationError;
-use crate::chaos::invariant_trait::Invariant;
+use crate::observability::{Invariant, SimulationLayer, TimelineQuery};
 use crate::runner::fault_injector::FaultInjector;
 use crate::runner::process::{Attrition, Process};
 use crate::runner::tags::TagDistribution;
@@ -214,7 +214,7 @@ pub struct SimulationBuilder {
     attrition: Option<Attrition>,
     seeds: Vec<u64>,
     use_random_config: bool,
-    invariants: Vec<Box<dyn Invariant>>,
+    invariants: Vec<Box<dyn Invariant + Send>>,
     fault_injectors: Vec<Box<dyn FaultInjector>>,
     chaos_duration: Option<Duration>,
     exploration_config: Option<moonpool_explorer::ExplorationConfig>,
@@ -415,7 +415,7 @@ impl SimulationBuilder {
     }
 
     /// Add an invariant to be checked after every simulation event.
-    pub fn invariant(mut self, i: impl Invariant) -> Self {
+    pub fn invariant<I: Invariant>(mut self, i: I) -> Self {
         self.invariants.push(Box::new(i));
         self
     }
@@ -424,9 +424,10 @@ impl SimulationBuilder {
     pub fn invariant_fn(
         mut self,
         name: impl Into<String>,
-        f: impl Fn(&crate::chaos::StateHandle, u64) + 'static,
+        f: impl Fn(&dyn TimelineQuery, u64) + Send + 'static,
     ) -> Self {
-        self.invariants.push(crate::chaos::invariant_fn(name, f));
+        self.invariants
+            .push(crate::observability::invariant_fn(name, f));
         self
     }
 
@@ -630,6 +631,15 @@ impl SimulationBuilder {
         let mut prev_coverage_bits: u32 = 0;
         let mut converged = false;
 
+        // Install the observability layer once for the entire run. The guard
+        // is dropped when run() returns, restoring the previous subscriber.
+        // All registered invariants live on the layer handle.
+        let layer = SimulationLayer::new();
+        let (obs_handle, _obs_guard) = layer.install();
+        for inv in self.invariants.drain(..) {
+            obs_handle.register(inv);
+        }
+
         // Initialize assertion table (unconditional — works even without exploration)
         if let Err(e) = moonpool_explorer::init_assertions() {
             tracing::error!("Failed to initialize assertion table: {}", e);
@@ -676,11 +686,8 @@ impl SimulationBuilder {
                 hook();
             }
 
-            // Reset invariants for new seed (StateHandle is recreated each iteration,
-            // so invariant cursors and tracking state must be cleared)
-            for invariant in &mut self.invariants {
-                invariant.reset();
-            }
+            // Reset captured events and invariant state for the new seed.
+            obs_handle.reset_for_seed();
 
             // Prepare clean state for this iteration
             crate::sim::reset_sim_rng();
@@ -785,15 +792,15 @@ impl SimulationBuilder {
                 .expect("per-iteration runtime");
 
             // Borrow self fields before the async block so we don't move self
-            let invariants_ref = &self.invariants;
             let chaos_duration = self.chaos_duration;
+            let obs_handle_for_iter = obs_handle.clone();
 
             // Execute workloads using orchestrator inside this iteration's runtime
             let orchestration_result = local_runtime.block_on(async move {
                 WorkloadOrchestrator::orchestrate_workloads(
                     workloads,
                     fault_injectors,
-                    invariants_ref,
+                    obs_handle_for_iter,
                     &workload_info,
                     &client_info,
                     process_config,
