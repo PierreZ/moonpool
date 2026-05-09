@@ -25,11 +25,13 @@
 
 pub mod emit;
 pub mod event;
+pub mod fmt;
 pub mod invariant;
 pub mod layer;
 pub mod query;
 
 pub use event::{CapturedEvent, TypedEntry};
+pub use fmt::SimTime;
 pub use invariant::{Invariant, invariant_fn};
 pub use layer::{InstallGuard, SimulationLayer, SimulationLayerHandle};
 pub use query::{TimelineQuery, TimelineQueryExt};
@@ -133,6 +135,115 @@ mod tests {
         let entries = handle.timeline::<TestEvent>("k");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].seq, 0, "seq counter resets per seed");
+    }
+
+    #[test]
+    fn sim_emit_updates_layer_sim_time() {
+        let layer = SimulationLayer::new();
+        let (handle, _guard) = layer.install();
+
+        crate::sim_emit!("k", 12345, "src", TestEvent::Hello(1));
+        assert_eq!(handle.current_sim_time_ms(), 12345);
+
+        crate::sim_emit!("k", 99000, "src", TestEvent::Hello(2));
+        assert_eq!(handle.current_sim_time_ms(), 99000);
+    }
+
+    #[test]
+    fn handle_set_sim_time_for_non_emit_paths() {
+        // The orchestrator advances the layer's clock between events so
+        // unrelated `tracing::*!` calls also see the right sim time.
+        let layer = SimulationLayer::new();
+        let handle = layer.handle();
+        handle.set_sim_time_ms(42_000);
+        assert_eq!(handle.current_sim_time_ms(), 42_000);
+    }
+
+    #[test]
+    fn sim_time_format_writes_seconds_and_millis() {
+        use tracing_subscriber::fmt::format::Writer;
+        use tracing_subscriber::fmt::time::FormatTime;
+
+        let layer = SimulationLayer::new();
+        let handle = layer.handle();
+        handle.set_sim_time_ms(7042);
+
+        let st = SimTime::new(handle);
+        let mut buf = String::new();
+        let mut writer = Writer::new(&mut buf);
+        st.format_time(&mut writer)
+            .expect("writing to a String never fails");
+        assert_eq!(buf, "sim+    7.042s");
+    }
+
+    #[test]
+    fn fmt_layer_with_sim_time_prefixes_log_output() {
+        // End-to-end: register a real fmt::Layer with SimTime as its timer
+        // alongside SimulationLayer, then verify a `tracing::info!` is
+        // prefixed with the layer's current sim time.
+        use std::io;
+        use std::sync::Mutex;
+
+        use tracing_subscriber::Layer as _;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone, Default)]
+        struct VecWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl io::Write for VecWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("test writer poisoned")
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for VecWriter {
+            type Writer = VecWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let layer = SimulationLayer::new();
+        let handle = layer.handle();
+        handle.set_sim_time_ms(5_000);
+
+        let writer = VecWriter::default();
+        let buf = writer.0.clone();
+
+        // Order matters: SimulationLayer must precede fmt so its on_event
+        // updates `current_sim_time_ms` before fmt formats the event.
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(false)
+            .with_timer(SimTime::new(handle.clone()))
+            .with_filter(tracing_subscriber::filter::LevelFilter::INFO);
+        let subscriber = tracing_subscriber::registry().with(layer).with(fmt_layer);
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("hello at 5s");
+            // Advance the layer clock as the orchestrator would, then emit
+            // an unrelated tracing event — fmt should see the new sim time.
+            handle.set_sim_time_ms(12_345);
+            tracing::info!("hello at 12.345s");
+        });
+
+        let output =
+            String::from_utf8(buf.lock().expect("buf").clone()).expect("utf-8 fmt output");
+        assert!(
+            output.contains("sim+    5.000s"),
+            "expected sim+5s prefix; got: {output}"
+        );
+        assert!(
+            output.contains("sim+   12.345s"),
+            "expected sim+12.345s prefix after clock advance; got: {output}"
+        );
     }
 
     #[test]

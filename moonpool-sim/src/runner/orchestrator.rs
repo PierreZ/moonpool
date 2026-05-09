@@ -560,6 +560,9 @@ impl WorkloadOrchestrator {
             // SimulationLayer::on_event whenever an event is captured.
             if sim.pending_event_count() > 0 {
                 sim.step();
+                // Refresh the layer's clock so non-sim_emit `tracing::*!` calls
+                // emitted between events display the right sim timestamp.
+                obs.set_sim_time_ms(sim.current_time().as_millis() as u64);
                 Self::handle_process_events(
                     &mut sim,
                     &mut process_manager,

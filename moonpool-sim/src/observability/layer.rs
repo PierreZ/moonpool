@@ -185,9 +185,20 @@ impl SimulationLayerHandle {
             .unwrap_or(0)
     }
 
-    /// Latest captured sim time. Useful for invariants and reports.
-    pub fn last_sim_time_ms(&self) -> u64 {
+    /// Latest known simulation time in milliseconds.
+    ///
+    /// Updated automatically when an event is captured. The orchestrator also
+    /// calls [`Self::set_sim_time_ms`] after each `sim.step()` so unrelated
+    /// `tracing::*!` calls (with target other than `"moonpool::sim"`) emitted
+    /// between events still see the current time.
+    pub fn current_sim_time_ms(&self) -> u64 {
         self.events.lock().last_sim_time_ms
+    }
+
+    /// Override the latest known simulation time. Called by the orchestrator
+    /// to keep the layer's clock advancing between events.
+    pub fn set_sim_time_ms(&self, ms: u64) {
+        self.events.lock().last_sim_time_ms = ms;
     }
 }
 
