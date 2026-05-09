@@ -8,11 +8,11 @@
 //! - Can be disabled via configuration
 //! - Are handled gracefully by the peer layer with reconnection
 
+use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_sim::{
     NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait, buggify_init,
 };
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Test that random close is disabled when probability is 0.0
 #[test]

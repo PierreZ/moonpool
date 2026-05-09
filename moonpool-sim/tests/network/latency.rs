@@ -1,8 +1,8 @@
+use futures::io::AsyncWriteExt;
 use moonpool_sim::{
     ChaosConfiguration, NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait,
 };
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 
 // Simple networking test that measures bind + connect + accept latency
 async fn simple_network_test<P>(provider: P, addr: &str) -> std::io::Result<()>

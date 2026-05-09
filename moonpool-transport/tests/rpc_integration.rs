@@ -23,17 +23,17 @@ struct MockNetworkProvider;
 
 struct DummyStream;
 
-impl tokio::io::AsyncRead for DummyStream {
+impl futures::io::AsyncRead for DummyStream {
     fn poll_read(
         self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
-        _buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
+        _buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
         std::task::Poll::Ready(Err(std::io::Error::other("dummy")))
     }
 }
 
-impl tokio::io::AsyncWrite for DummyStream {
+impl futures::io::AsyncWrite for DummyStream {
     fn poll_write(
         self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
@@ -49,7 +49,7 @@ impl tokio::io::AsyncWrite for DummyStream {
         std::task::Poll::Ready(Err(std::io::Error::other("dummy")))
     }
 
-    fn poll_shutdown(
+    fn poll_close(
         self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {

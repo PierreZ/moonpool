@@ -1,5 +1,5 @@
+use futures::io::AsyncWriteExt;
 use moonpool_sim::{NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait};
-use tokio::io::AsyncWriteExt;
 
 #[test]
 fn test_basic_simulation_bind() {

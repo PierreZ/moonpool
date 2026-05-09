@@ -95,7 +95,9 @@ impl Process for WebProcess {
                 _ = ctx.shutdown().cancelled() => return Ok(()),
             };
 
-            let io = TokioIo::new(stream);
+            // SimTcpStream implements futures::io traits; .compat() bridges them
+            // back to tokio::io so TokioIo (and therefore hyper) accepts the stream.
+            let io = TokioIo::new(stream.compat());
             // TowerToHyperService bridges axum's tower::Service to hyper's Service
             let service = TowerToHyperService::new(app.clone());
 
@@ -115,7 +117,7 @@ impl Process for WebProcess {
 }
 ```
 
-Two things to note. First, we use `hyper::server::conn::http1::serve_connection`, **not** `axum::serve()`. `axum::serve` takes `tokio::net::TcpListener` directly, so it can't accept our simulated listener. `serve_connection` takes any `AsyncRead + AsyncWrite`, which `SimTcpStream` satisfies through the `TokioIo` adapter.
+Two things to note. First, we use `hyper::server::conn::http1::serve_connection`, **not** `axum::serve()`. `axum::serve` takes `tokio::net::TcpListener` directly, so it can't accept our simulated listener. `serve_connection` takes any tokio `AsyncRead + AsyncWrite`. `SimTcpStream` implements `futures::io::AsyncRead + AsyncWrite` (the runtime-agnostic traits), so we route it through `tokio_util::compat::Compat` via `.compat()` before handing it to `TokioIo`.
 
 Second, `spawn_local` instead of `spawn`. The future holds a `SimTcpStream` which is `!Send`. Axum handlers remain `Send` (axum enforces this at compile time). The two coexist because hyper polls handlers inline within the connection future. The handler never escapes to another thread. This is architecturally correct, not a workaround.
 

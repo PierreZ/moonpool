@@ -3,11 +3,11 @@
 //!
 //! Provides wire format with UID-based endpoint addressing.
 
+use futures::io::{AsyncReadExt, AsyncWriteExt};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
