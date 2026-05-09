@@ -11,6 +11,7 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use tokio_util::compat::FuturesAsyncReadCompatExt;
 
 use moonpool_sim::{
     NetworkProvider, Process, SimContext, SimulationBuilder, SimulationReport, SimulationResult,
@@ -91,7 +92,7 @@ impl Process for HyperServer {
             _ = ctx.shutdown().cancelled() => return Ok(()),
         };
 
-        let io = TokioIo::new(stream);
+        let io = TokioIo::new(stream.compat());
 
         tokio::select! {
             result = hyper::server::conn::http1::Builder::new()
@@ -131,7 +132,7 @@ impl Workload for HyperClient {
             _ = ctx.shutdown().cancelled() => return Ok(()),
         };
 
-        let io = TokioIo::new(stream);
+        let io = TokioIo::new(stream.compat());
 
         let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
             .await

@@ -39,7 +39,7 @@ impl Process for EchoProcess {
             match result {
                 Ok((mut stream, _)) => {
                     // Simple echo: read and write back
-                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    use futures::io::{AsyncReadExt, AsyncWriteExt};
                     let mut buf = [0u8; 64];
                     match stream.read(&mut buf).await {
                         Ok(n) if n > 0 => {
@@ -338,7 +338,7 @@ impl Process for GracefulProcess {
             tokio::select! {
                 result = listener.accept() => {
                     if let Ok((mut stream, _)) = result {
-                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        use futures::io::{AsyncReadExt, AsyncWriteExt};
                         let mut buf = [0u8; 64];
                         if let Ok(n) = stream.read(&mut buf).await
                             && n > 0 {

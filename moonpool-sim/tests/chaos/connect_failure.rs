@@ -271,7 +271,7 @@ fn test_connect_failure_deterministic() {
 /// Test connection failure doesn't affect already established connections
 #[test]
 fn test_connect_failure_existing_connections() {
-    use tokio::io::AsyncWriteExt;
+    use futures::io::AsyncWriteExt;
 
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()

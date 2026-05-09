@@ -41,8 +41,9 @@ impl Process for HyperServer {
             _ = ctx.shutdown().cancelled() => return Ok(()),
         };
 
-        // TokioIo bridges SimTcpStream into hyper's type system
-        let io = TokioIo::new(stream);
+        // SimTcpStream implements futures::io traits; .compat() bridges them
+        // back to tokio's IO traits, which is what TokioIo (and hyper) expects.
+        let io = TokioIo::new(stream.compat());
 
         hyper::server::conn::http1::Builder::new()
             .serve_connection(io, service_fn(handle_request))
@@ -53,9 +54,9 @@ impl Process for HyperServer {
 }
 ```
 
-The `TokioIo` adapter bridges any `AsyncRead + AsyncWrite` into hyper's internal I/O type. Because `SimTcpStream` satisfies those bounds, hyper never knows it's running over simulated networking. The HTTP parser, chunked encoding, keep-alive logic, content-length validation: all exercised for real.
+`SimTcpStream` implements `futures::io::AsyncRead + AsyncWrite` (the runtime-agnostic IO traits). Hyper expects `tokio::io` traits, so we route the stream through `tokio_util::compat::Compat` via `.compat()` (from `FuturesAsyncReadCompatExt`), then hand the result to `TokioIo`. From hyper's perspective nothing has changed: HTTP parser, chunked encoding, keep-alive logic, content-length validation — all exercised for real over simulated networking.
 
-The client side follows the same pattern. Connect via `ctx.network().connect()`, wrap in `TokioIo`, hand to `hyper::client::conn::http1::handshake`. Real HTTP/1.1 request-response cycles over a network that drops packets, injects latency, and kills connections.
+The client side follows the same pattern. Connect via `ctx.network().connect()`, `.compat()` the stream, wrap in `TokioIo`, hand to `hyper::client::conn::http1::handshake`. Real HTTP/1.1 request-response cycles over a network that drops packets, injects latency, and kills connections.
 
 ## The Send Constraint
 

@@ -1,5 +1,5 @@
+use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_sim::{NetworkProvider, TcpListenerTrait, TokioNetworkProvider};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 // Generic echo client that works with any NetworkProvider
 async fn echo_client<P>(provider: P, server_addr: &str, message: &str) -> std::io::Result<String>

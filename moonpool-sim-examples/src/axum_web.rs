@@ -3,8 +3,9 @@
 //! Demonstrates how to test an existing axum/hyper web service inside
 //! moonpool-sim's deterministic simulation with chaos injection.
 //!
-//! The key insight: `SimTcpStream` implements `tokio::io::AsyncRead + AsyncWrite`,
-//! so hyper (and therefore axum) works **unchanged** over simulated TCP.
+//! The key insight: `SimTcpStream` implements `futures::io::AsyncRead + AsyncWrite`,
+//! and `tokio_util::compat::Compat` bridges those to tokio's IO traits so hyper
+//! (and therefore axum) works **unchanged** over simulated TCP.
 //!
 //! # Architecture
 //!
@@ -29,6 +30,7 @@ use hyper::Request;
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use serde::{Deserialize, Serialize};
+use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tracing::instrument;
 
 use moonpool_sim::{
@@ -246,8 +248,9 @@ impl Process for WebProcess {
 
             tracing::info!(%addr, "accepted connection");
 
-            // TokioIo adapts SimTcpStream (AsyncRead+AsyncWrite) for hyper.
-            let io = TokioIo::new(stream);
+            // SimTcpStream implements futures::io traits; .compat() bridges them
+            // back to tokio::io so TokioIo (and therefore hyper) accepts the stream.
+            let io = TokioIo::new(stream.compat());
             // TowerToHyperService bridges axum's tower::Service to hyper's Service trait.
             let service = TowerToHyperService::new(app.clone());
 
@@ -334,7 +337,7 @@ impl WebWorkload {
         };
         tracing::info!(round, "connected, starting handshake");
 
-        let io = TokioIo::new(stream);
+        let io = TokioIo::new(stream.compat());
         let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
             .await
             .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("handshake: {e}")))?;
