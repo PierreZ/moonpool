@@ -144,7 +144,7 @@ Because fault events also flow through `tracing`, the same correlation works in 
 
 By default, `tracing_subscriber::fmt::layer()` prefixes every log line with wall-clock time. That is exactly wrong for simulation: a seed runs millions of simulated milliseconds inside a few real-time milliseconds, so every line gets the same wall-clock timestamp and reading the log feels like reading a stack trace with the line numbers ripped off.
 
-`SimTime` is a `FormatTime` impl that prints the layer's current simulation time instead:
+`SimTime` is a `FormatTime` impl that prints "current sim time in milliseconds" reported by a `Clock`. `Clock` is a narrow `Send + Sync` trait — implemented for `SimulationLayerHandle` out of the box, so the typical setup is one line:
 
 ```rust
 use moonpool_sim::{SimTime, SimulationLayer};
@@ -154,7 +154,7 @@ let sim_layer = SimulationLayer::new();
 let handle = sim_layer.handle();
 
 // SimulationLayer must precede fmt in the registry chain so its on_event
-// updates `current_sim_time_ms` *before* fmt formats the event.
+// updates the layer's sim time *before* fmt formats the event.
 let subscriber = tracing_subscriber::registry()
     .with(sim_layer)
     .with(
@@ -164,6 +164,8 @@ let subscriber = tracing_subscriber::registry()
 
 let _guard = tracing::subscriber::set_default(subscriber);
 ```
+
+`Clock` is the only thing `SimTime` depends on — implement it for a test stub or an alternate time source if you need one.
 
 Output:
 

@@ -31,7 +31,7 @@ pub mod layer;
 pub mod query;
 
 pub use event::{CapturedEvent, TypedEntry};
-pub use fmt::SimTime;
+pub use fmt::{Clock, SimTime};
 pub use invariant::{Invariant, invariant_fn};
 pub use layer::{InstallGuard, SimulationLayer, SimulationLayerHandle};
 pub use query::{TimelineQuery, TimelineQueryExt};
@@ -168,12 +168,34 @@ mod tests {
         let handle = layer.handle();
         handle.set_sim_time_ms(7042);
 
-        let st = SimTime::new(handle);
+        let st = SimTime::new(handle.clone());
         let mut buf = String::new();
         let mut writer = Writer::new(&mut buf);
         st.format_time(&mut writer)
             .expect("writing to a String never fails");
         assert_eq!(buf, "sim+    7.042s");
+    }
+
+    #[test]
+    fn clock_trait_can_be_implemented_for_a_stub() {
+        // Demonstrates that `Clock` is the formatter's only dependency on a
+        // time source — alternate impls (e.g. test stubs) work without a layer.
+        use tracing_subscriber::fmt::format::Writer;
+        use tracing_subscriber::fmt::time::FormatTime;
+
+        struct FixedClock(u64);
+        impl crate::observability::Clock for FixedClock {
+            fn now_ms(&self) -> u64 {
+                self.0
+            }
+        }
+
+        let st = SimTime::new(FixedClock(123_456));
+        let mut buf = String::new();
+        let mut writer = Writer::new(&mut buf);
+        st.format_time(&mut writer)
+            .expect("writing to a String never fails");
+        assert_eq!(buf, "sim+  123.456s");
     }
 
     #[test]
@@ -234,8 +256,7 @@ mod tests {
             tracing::info!("hello at 12.345s");
         });
 
-        let output =
-            String::from_utf8(buf.lock().expect("buf").clone()).expect("utf-8 fmt output");
+        let output = String::from_utf8(buf.lock().expect("buf").clone()).expect("utf-8 fmt output");
         assert!(
             output.contains("sim+    5.000s"),
             "expected sim+5s prefix; got: {output}"
