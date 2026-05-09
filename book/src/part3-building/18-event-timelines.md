@@ -140,6 +140,43 @@ The real power is **correlation**. When an application-level invariant fires, cr
 
 Because fault events also flow through `tracing`, the same correlation works in production: when an alert fires, search your log aggregator for the same `target = "moonpool::sim"` events around the alert window.
 
+## Simulation Time in Log Output
+
+By default, `tracing_subscriber::fmt::layer()` prefixes every log line with wall-clock time. That is exactly wrong for simulation: a seed runs millions of simulated milliseconds inside a few real-time milliseconds, so every line gets the same wall-clock timestamp and reading the log feels like reading a stack trace with the line numbers ripped off.
+
+`SimTime` is a `FormatTime` impl that prints the layer's current simulation time instead:
+
+```rust
+use moonpool_sim::{SimTime, SimulationLayer};
+use tracing_subscriber::layer::SubscriberExt;
+
+let sim_layer = SimulationLayer::new();
+let handle = sim_layer.handle();
+
+// SimulationLayer must precede fmt in the registry chain so its on_event
+// updates `current_sim_time_ms` *before* fmt formats the event.
+let subscriber = tracing_subscriber::registry()
+    .with(sim_layer)
+    .with(
+        tracing_subscriber::fmt::layer()
+            .with_timer(SimTime::new(handle.clone())),
+    );
+
+let _guard = tracing::subscriber::set_default(subscriber);
+```
+
+Output:
+
+```text
+sim+    1.234s  INFO moonpool::sim: key="delivery.at_most_once" payload=Replied { seq_id: 7 }
+sim+    1.235s  INFO myservice::handler: processing request id=42
+sim+    5.000s  WARN moonpool::sim: key="sim:faults" payload=PartitionCreated { ... }
+```
+
+The clock advances on two paths: every `ctx.emit()` updates it via the captured event, and the orchestrator advances it after each `sim.step()` so unrelated `tracing::info!` calls between events also see the right time. The handle is per-layer, so two parallel sims keep their clocks isolated.
+
+In production, no `SimulationLayer` is registered and the formatter falls back to its default zero — so use plain wall-clock `fmt::layer()` there, and only pull `SimTime` in for sim/test runs.
+
 ## Snapshots vs Timelines
 
 Use both. They solve different problems.
