@@ -56,8 +56,7 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 - [Always and Sometimes](./part3-building/14-always-sometimes.md) — `assert_always!` (must hold) vs `assert_sometimes!` (exploration guidance)
 - [Numeric Assertions](./part3-building/15-numeric-assertions.md) — `assert_always_less_than!`; watermark tracking; explorer optimizes bounds
 - [Compound Assertions](./part3-building/16-compound-assertions.md) — `assert_sometimes_all!` for simultaneous sub-goals; frontier tracking
-- [System Invariants](./part3-building/17-invariants.md) — Invariant trait runs after every event; cross-system properties; conservation laws
-- [Event Timelines](./part3-building/18-event-timelines.md) — Append-only typed timelines for temporal invariants; fault timeline auto-emitted by simulator
+- [Events and Invariants](./part3-building/17-events-and-invariants.md) — `ctx.emit` typed event timelines, the `Invariant` trait runs after every event, the auto-emitted fault timeline, `SimTime` formatter for sim-time log prefixes
 - [Designing Workloads That Find Bugs](./part3-building/19-designing-workloads.md) — Targeted adversarial design vs white noise; strategy matters
 - [Debugging a Failing Seed](./part3-building/20-debugging.md) — Five-step workflow: reproduce, isolate, understand, fix, verify
 - [Reproducing with FixedCount](./part3-building/21-reproducing.md) — Pin seed with `set_debug_seeds()` + `set_iterations(1)`; exact replay

@@ -67,13 +67,13 @@ When working on simulation internals, you may need to access a connection (`inne
 
 **Fix**: Use `BTreeMap` when iteration order matters, or collect into a `Vec` and sort before iterating.
 
-## Forgetting to Publish State for Invariants
+## Forgetting to Emit Events for Invariants
 
-Invariants read from `StateHandle`. If your workload modifies its model but forgets to call `ctx.state().publish(...)`, invariants see stale data and either miss bugs or report false violations.
+Invariants read events emitted via `ctx.emit(...)`. If your workload changes state but forgets to emit a corresponding event, invariants see an incomplete history and either miss bugs or report false violations.
 
-**Fix**: Publish state after every mutation, not just at the end.
+**Fix**: Emit a typed event for every state change you want invariants to observe. The same event also flows to production observability subscribers, so this serves a dual purpose.
 
 ```rust
 self.model.record_commit(slot, value);
-ctx.state().publish("consensus_model", self.model.clone());
+ctx.emit("commits", CommitEvent { slot, value });
 ```

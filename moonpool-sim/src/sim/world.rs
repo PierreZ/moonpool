@@ -16,7 +16,6 @@ use tracing::instrument;
 use crate::{
     SimulationError, SimulationResult,
     chaos::fault_events::{SIM_FAULT_TIMELINE, SimFaultEvent},
-    chaos::state_handle::StateHandle,
     network::{
         NetworkConfiguration, PartitionStrategy,
         sim::{ConnectionId, ListenerId, SimNetworkProvider},
@@ -65,9 +64,6 @@ pub(crate) struct SimInner {
 
     // Last event processed by step() — used by orchestrator to detect ProcessRestart
     pub(crate) last_processed_event: Option<Event>,
-
-    // Optional state handle for emitting fault events to the timeline
-    pub(crate) state: Option<StateHandle>,
 }
 
 impl SimInner {
@@ -85,7 +81,6 @@ impl SimInner {
             events_processed: 0,
             last_bit_flip_time: Duration::ZERO,
             last_processed_event: None,
-            state: None,
         }
     }
 
@@ -103,16 +98,18 @@ impl SimInner {
             events_processed: 0,
             last_bit_flip_time: Duration::ZERO,
             last_processed_event: None,
-            state: None,
         }
     }
 
-    /// Emit a fault event to the timeline, if state is attached.
+    /// Emit a fault event to the [`SIM_FAULT_TIMELINE`].
+    ///
+    /// Routes through `tracing::event!` at target `"moonpool::sim"`. The active
+    /// [`crate::observability::SimulationLayer`] (if any) captures the typed
+    /// payload; production subscribers see structured fields and a `Debug`
+    /// payload.
     pub(crate) fn emit_fault(&self, event: SimFaultEvent) {
-        if let Some(ref state) = self.state {
-            let time_ms = self.current_time.as_millis() as u64;
-            state.emit_raw(SIM_FAULT_TIMELINE, event, time_ms, "sim");
-        }
+        let time_ms = self.current_time.as_millis() as u64;
+        crate::sim_emit!(SIM_FAULT_TIMELINE, time_ms, "sim", event);
     }
 
     /// Calculate the number of bits to flip using a power-law distribution.
@@ -201,14 +198,6 @@ impl SimWorld {
         seed: u64,
     ) -> Self {
         Self::create(Some(network_config), seed)
-    }
-
-    /// Attach a state handle for fault event emission.
-    ///
-    /// Once set, the simulator emits [`SimFaultEvent`]s to the `"sim:faults"` timeline
-    /// whenever faults are injected.
-    pub fn set_state(&self, state: StateHandle) {
-        self.inner.borrow_mut().state = Some(state);
     }
 
     /// Processes the next scheduled event and advances time.
@@ -2738,31 +2727,29 @@ mod tests {
     }
 
     #[test]
-    fn emit_fault_without_state_is_noop() {
+    fn emit_fault_without_layer_is_noop() {
+        // No SimulationLayer installed — emit_fault should still not panic.
         let inner = SimInner::new();
-        assert!(inner.state.is_none());
-        // Should not panic
         inner.emit_fault(SimFaultEvent::StorageCrash {
             ip: "10.0.1.1".to_string(),
         });
     }
 
     #[test]
-    fn emit_fault_with_state_writes_to_timeline() {
-        let mut inner = SimInner::new();
-        let state = StateHandle::new();
-        inner.state = Some(state.clone());
-        inner.current_time = Duration::from_millis(500);
+    fn emit_fault_with_layer_writes_to_timeline() {
+        use crate::observability::SimulationLayer;
+        let layer = SimulationLayer::new();
+        let (handle, _guard) = layer.install();
 
+        let mut inner = SimInner::new();
+        inner.current_time = Duration::from_millis(500);
         inner.emit_fault(SimFaultEvent::StorageCrash {
             ip: "10.0.1.1".to_string(),
         });
 
-        let tl = state
-            .timeline::<SimFaultEvent>(SIM_FAULT_TIMELINE)
-            .expect("timeline should exist");
-        assert_eq!(tl.len(), 1);
-        let entry = tl.last().expect("should have entry");
+        let entries = handle.timeline::<SimFaultEvent>(SIM_FAULT_TIMELINE);
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
         assert_eq!(entry.time_ms, 500);
         assert_eq!(entry.source, "sim");
         assert!(matches!(entry.event, SimFaultEvent::StorageCrash { .. }));
@@ -2770,21 +2757,20 @@ mod tests {
 
     #[test]
     fn partition_pair_emits_fault_event() {
-        let sim = SimWorld::new();
-        let state = StateHandle::new();
-        sim.set_state(state.clone());
+        use crate::observability::SimulationLayer;
+        let layer = SimulationLayer::new();
+        let (handle, _guard) = layer.install();
 
+        let sim = SimWorld::new();
         let from: std::net::IpAddr = "10.0.1.1".parse().expect("valid ip");
         let to: std::net::IpAddr = "10.0.1.2".parse().expect("valid ip");
         sim.partition_pair(from, to, Duration::from_secs(10))
             .expect("partition should succeed");
 
-        let tl = state
-            .timeline::<SimFaultEvent>(SIM_FAULT_TIMELINE)
-            .expect("timeline should exist");
-        assert_eq!(tl.len(), 1);
+        let entries = handle.timeline::<SimFaultEvent>(SIM_FAULT_TIMELINE);
+        assert_eq!(entries.len(), 1);
         assert!(matches!(
-            &tl.all()[0].event,
+            &entries[0].event,
             SimFaultEvent::PartitionCreated { from, to }
             if from == "10.0.1.1" && to == "10.0.1.2"
         ));
@@ -2792,26 +2778,25 @@ mod tests {
 
     #[test]
     fn restore_partition_emits_fault_event() {
-        let sim = SimWorld::new();
-        let state = StateHandle::new();
-        sim.set_state(state.clone());
+        use crate::observability::SimulationLayer;
+        let layer = SimulationLayer::new();
+        let (handle, _guard) = layer.install();
 
+        let sim = SimWorld::new();
         let from: std::net::IpAddr = "10.0.1.1".parse().expect("valid ip");
         let to: std::net::IpAddr = "10.0.1.2".parse().expect("valid ip");
         sim.partition_pair(from, to, Duration::from_secs(10))
             .expect("partition");
         sim.restore_partition(from, to).expect("restore");
 
-        let tl = state
-            .timeline::<SimFaultEvent>(SIM_FAULT_TIMELINE)
-            .expect("timeline should exist");
-        assert_eq!(tl.len(), 2);
+        let entries = handle.timeline::<SimFaultEvent>(SIM_FAULT_TIMELINE);
+        assert_eq!(entries.len(), 2);
         assert!(matches!(
-            &tl.all()[0].event,
+            &entries[0].event,
             SimFaultEvent::PartitionCreated { .. }
         ));
         assert!(matches!(
-            &tl.all()[1].event,
+            &entries[1].event,
             SimFaultEvent::PartitionHealed { .. }
         ));
     }

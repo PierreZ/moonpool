@@ -7,14 +7,17 @@
 //! # Usage
 //!
 //! ```ignore
-//! use moonpool_sim::{Invariant, StateHandle, SimFaultEvent, SIM_FAULT_TIMELINE};
+//! use std::cell::Cell;
+//! use moonpool_sim::{Invariant, SimFaultEvent, SIM_FAULT_TIMELINE, TimelineQuery, TimelineQueryExt};
 //!
-//! fn check(state: &StateHandle, _sim_time_ms: u64) {
-//!     if let Some(faults) = state.timeline::<SimFaultEvent>(SIM_FAULT_TIMELINE) {
-//!         for entry in faults.all().iter() {
-//!             match &entry.event {
-//!                 SimFaultEvent::ProcessForceKill { ip } => { /* ... */ }
-//!                 _ => {}
+//! struct FaultCounter { cursor: Cell<usize> }
+//!
+//! impl Invariant for FaultCounter {
+//!     fn name(&self) -> &str { "fault_counter" }
+//!     fn observe(&self, q: &dyn TimelineQuery, _t: u64) {
+//!         for entry in q.since::<SimFaultEvent>(SIM_FAULT_TIMELINE, &self.cursor) {
+//!             if let SimFaultEvent::ProcessForceKill { ip } = &entry.event {
+//!                 // ...
 //!             }
 //!         }
 //!     }
@@ -26,7 +29,8 @@ pub const SIM_FAULT_TIMELINE: &str = "sim:faults";
 
 /// Fault events automatically emitted by the simulator.
 ///
-/// Read via `state.timeline::<SimFaultEvent>(SIM_FAULT_TIMELINE)` in invariants.
+/// Invariants read these via the [`crate::TimelineQuery`] / [`crate::TimelineQueryExt`]
+/// API: `q.since::<SimFaultEvent>(SIM_FAULT_TIMELINE, &cursor)`.
 #[derive(Debug, Clone)]
 pub enum SimFaultEvent {
     // -- Process lifecycle --

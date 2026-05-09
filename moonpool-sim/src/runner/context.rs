@@ -17,9 +17,11 @@
 //! ```
 
 use std::any::Any;
+use std::fmt::Debug;
 
-use crate::chaos::state_handle::{StateHandle, Timeline};
+use crate::chaos::state_handle::StateHandle;
 use crate::network::SimNetworkProvider;
+use crate::observability::{SimulationLayerHandle, TypedEntry};
 use crate::providers::{SimProviders, SimRandomProvider, SimTimeProvider};
 use crate::storage::SimStorageProvider;
 
@@ -35,15 +37,22 @@ pub struct SimContext {
     providers: SimProviders,
     topology: WorkloadTopology,
     state: StateHandle,
+    obs: SimulationLayerHandle,
 }
 
 impl SimContext {
     /// Create a new simulation context.
-    pub fn new(providers: SimProviders, topology: WorkloadTopology, state: StateHandle) -> Self {
+    pub fn new(
+        providers: SimProviders,
+        topology: WorkloadTopology,
+        state: StateHandle,
+        obs: SimulationLayerHandle,
+    ) -> Self {
         Self {
             providers,
             topology,
             state,
+            obs,
         }
     }
 
@@ -128,20 +137,35 @@ impl SimContext {
         &self.state
     }
 
-    /// Emit an event to a named timeline.
+    /// Emit a typed event to a named timeline.
     ///
-    /// Automatically captures simulation time and this process's IP address.
-    pub fn emit<T: Any + 'static>(&self, key: &str, event: T) {
+    /// Routes through `tracing::event!` at target `"moonpool::sim"`. With a
+    /// [`crate::observability::SimulationLayer`] installed (the standard sim
+    /// configuration), the layer captures the typed payload and runs invariants.
+    /// Without a layer (e.g. in production), the event still reaches subscribers
+    /// like `fmt` or OTel with its `Debug` payload.
+    ///
+    /// Captures simulation time and this process's IP address automatically.
+    pub fn emit<T>(&self, key: &'static str, event: T)
+    where
+        T: Any + Debug + Send + Sync + 'static,
+    {
         let time_ms = self.time().now().as_millis() as u64;
-        let source = self.my_ip();
-        self.state.emit_raw(key, event, time_ms, source);
+        let source = self.my_ip().to_string();
+        crate::sim_emit!(key, time_ms, source, event);
     }
 
-    /// Get a typed timeline by name.
+    /// Read all captured events under `key` as typed entries.
     ///
-    /// Returns `None` if no events have been emitted to this key,
-    /// or if the type doesn't match.
-    pub fn timeline<T: Any + 'static>(&self, key: &str) -> Option<Timeline<T>> {
-        self.state.timeline(key)
+    /// Returns an empty vector if no [`crate::observability::SimulationLayer`]
+    /// is installed, no events were captured, or none of them match `T`.
+    pub fn timeline<T: Any + Clone + 'static>(&self, key: &'static str) -> Vec<TypedEntry<T>> {
+        self.obs.timeline(key)
+    }
+
+    /// Get a clonable handle to the observability layer, for advanced
+    /// post-simulation inspection.
+    pub fn observability(&self) -> &SimulationLayerHandle {
+        &self.obs
     }
 }

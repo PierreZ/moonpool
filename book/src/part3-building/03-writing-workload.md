@@ -179,17 +179,19 @@ ctx.state().publish("kv_model", self.model.clone());
 An invariant function (registered on the builder) can then read this state:
 
 ```rust
-fn check_model_size(state: &StateHandle, _sim_time_ms: u64) {
-    if let Some(model) = state.get::<HashMap<String, Vec<u8>>>("kv_model") {
+fn check_model_size(q: &dyn TimelineQuery, _sim_time_ms: u64) {
+    // Snapshot the latest size events; assert_always if any exceeds bounds.
+    let entries = q.snapshot::<usize>("kv_model_size");
+    if let Some(latest) = entries.last() {
         assert_always!(
-            model.len() <= 100,
+            latest.event <= 100,
             "model grew beyond expected bounds"
         );
     }
 }
 ```
 
-This is the publish-and-check pattern: the workload publishes its reference model, and invariants validate cross-workload properties after every event. The [invariants chapter](./17-invariants.md) covers this in depth.
+This is the publish-and-check pattern: the workload publishes its reference model, and invariants validate cross-workload properties after every event. The [events and invariants chapter](./17-events-and-invariants.md) covers this in depth.
 
 ## Patterns That Find Bugs
 

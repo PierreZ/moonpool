@@ -24,7 +24,7 @@ Terms are listed alphabetically. Cross-references are shown in **bold**.
 
 **Determinism** -- The property that given the same **seed**, the simulation produces exactly the same execution. All randomness flows through the seeded RNG, and all I/O is simulated. This makes bugs reproducible: same seed, same bug, every time.
 
-**Event timeline** -- An append-only typed log attached to `StateHandle`. Workloads emit events via `ctx.emit(key, event)`; invariants read them via `state.timeline::<T>(key)`. Each entry carries `time_ms`, `source` (IP), and a global `seq` number for cross-timeline ordering. Distinct from **timeline** (a simulation run in the explorer).
+**Event timeline** -- An append-only typed log captured by `SimulationLayer`. Workloads emit events via `ctx.emit(key, event)` which routes through `tracing::event!` at target `"moonpool::sim"`. The same emission feeds production subscribers (fmt, OpenTelemetry) and the simulation layer's typed capture. Invariants read via the `TimelineQuery` trait: `q.since::<T>(key, &cursor)` for incremental scans, `q.snapshot::<T>(key)` for full re-scans. Each entry carries `time_ms`, `source` (IP or `"sim"`), and a global monotonic `seq`. Distinct from **timeline** (a simulation run in the explorer).
 
 **Endpoint** -- A `(IpAddr, Token)` pair that uniquely identifies a connection endpoint in the simulated network. The IP address identifies the node; the **token** identifies the specific listener or connection on that node.
 
@@ -34,7 +34,7 @@ Terms are listed alphabetically. Cross-references are shown in **bold**.
 
 **Explorer** -- The multiverse exploration framework (`moonpool-explorer` crate). Uses `fork()` to create **timeline** branches at **splitpoints**, exploring alternate executions with different randomness. Has zero knowledge of Moonpool internals -- communicates only through RNG function pointers.
 
-**Fault timeline** -- The well-known **event timeline** at key `"sim:faults"` (`SIM_FAULT_TIMELINE`). Automatically populated by the simulator with `SimFaultEvent` entries covering network, storage, and process lifecycle faults. Invariants use it to correlate application behavior with infrastructure events.
+**Fault timeline** -- The well-known **event timeline** at key `"sim:faults"` (`SIM_FAULT_TIMELINE`). Automatically populated by the simulator with `SimFaultEvent` entries covering network, storage, and process lifecycle faults. Invariants use it to correlate application behavior with infrastructure events. Because the same fault events flow through `tracing`, production observability tools see them too.
 
 **Fork** -- An OS-level `fork()` call that creates a child process sharing the parent's memory via copy-on-write. Each child continues the simulation with a new **seed**, creating an alternate **timeline**. Forks are triggered at **splitpoints**.
 

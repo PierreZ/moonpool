@@ -1,5 +1,6 @@
 use moonpool_sim::{
-    SIM_FAULT_TIMELINE, SimFaultEvent, SimWorld, StateHandle, network::config::NetworkConfiguration,
+    SIM_FAULT_TIMELINE, SimFaultEvent, SimWorld, SimulationLayer,
+    network::config::NetworkConfiguration,
 };
 use std::{net::IpAddr, time::Duration};
 
@@ -141,9 +142,10 @@ fn test_partition_behavior() {
 /// Test that fault events are emitted to the timeline during partition operations.
 #[test]
 fn test_partition_fault_timeline() {
+    let layer = SimulationLayer::new();
+    let (handle, _guard) = layer.install();
+
     let sim = SimWorld::new_with_network_config(NetworkConfiguration::fast_local());
-    let state = StateHandle::new();
-    sim.set_state(state.clone());
 
     let a: IpAddr = "10.0.1.1".parse().unwrap();
     let b: IpAddr = "10.0.1.2".parse().unwrap();
@@ -156,12 +158,8 @@ fn test_partition_fault_timeline() {
     sim.partition_send_from(a, Duration::from_secs(5)).unwrap();
     sim.partition_recv_to(b, Duration::from_secs(5)).unwrap();
 
-    // Read the fault timeline
-    let tl = state
-        .timeline::<SimFaultEvent>(SIM_FAULT_TIMELINE)
-        .expect("fault timeline should exist after partition operations");
-
-    let entries = tl.all();
+    // Read the fault timeline from the captured layer
+    let entries = handle.timeline::<SimFaultEvent>(SIM_FAULT_TIMELINE);
     assert_eq!(entries.len(), 4, "should have 4 fault events");
 
     // Verify event types in order
