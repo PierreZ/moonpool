@@ -929,6 +929,9 @@ impl IterationManager {
             super::builder::IterationControl::UntilConverged { max_iterations } => {
                 self.iteration_count < *max_iterations
             }
+            super::builder::IterationControl::CoveragePlateau { max_iterations, .. } => {
+                self.iteration_count < *max_iterations
+            }
         }
     }
 
@@ -960,6 +963,8 @@ impl IterationManager {
                 super::builder::IterationControl::UntilConverged { max_iterations } => {
                     *max_iterations
                 }
+                super::builder::IterationControl::CoveragePlateau { max_iterations, .. } =>
+                    *max_iterations,
             }
         );
 
@@ -977,6 +982,9 @@ impl IterationManager {
             super::builder::IterationControl::FixedCount(count) => Some(*count),
             super::builder::IterationControl::TimeLimit(_) => None,
             super::builder::IterationControl::UntilConverged { max_iterations } => {
+                Some(*max_iterations)
+            }
+            super::builder::IterationControl::CoveragePlateau { max_iterations, .. } => {
                 Some(*max_iterations)
             }
         }
