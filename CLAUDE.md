@@ -3,7 +3,20 @@
 ## Environment & Commands
 **Nix shell required**: `nix develop --command <cargo-command>`
 
-**Remote environments** (`CLAUDE_CODE_REMOTE=true`): nix is not preinstalled. Install it first via `DeterminateSystems/nix-installer` (or equivalent) so the validation commands below run with the same toolchain as CI. Without nix, `cargo nextest`, the `cargo` toolchain pinned by the flake, and the simulation binaries are unavailable, and local results will not match CI.
+**Remote environments** (`CLAUDE_CODE_REMOTE=true`, e.g. Claude Code on the
+web): nix is not preinstalled. Install it via the Ubuntu package — the
+DeterminateSystems installer's CDN is blocked from these sandboxes:
+
+```
+sudo apt-get install -y nix-bin
+mkdir -p ~/.config/nix && echo 'experimental-features = nix-command flakes' > ~/.config/nix/nix.conf
+```
+
+(`nix-bin` ships nix 2.18, which doesn't enable flakes by default — the
+nix.conf line turns them on so `nix develop` works against this repo's
+flake.) Without nix, `cargo nextest`, the cargo toolchain pinned by the
+flake, and the simulation binaries are unavailable, and local results will
+not match CI.
 
 **Validation**: All must pass before completing work:
 - `nix develop --command cargo fmt`
