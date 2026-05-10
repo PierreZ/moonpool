@@ -53,6 +53,19 @@ pub enum IterationControl {
         /// Maximum number of seeds before stopping regardless.
         max_iterations: usize,
     },
+    /// Stop after `plateau_seeds` consecutive seeds have added no new
+    /// `assert_sometimes!` / `assert_reachable!` coverage. Works with or
+    /// without [`SimulationBuilder::enable_exploration`]: the underlying
+    /// assertion table is initialised unconditionally.
+    CoveragePlateau {
+        /// Number of consecutive seeds without coverage growth required to stop.
+        plateau_seeds: usize,
+        /// If true, additionally require every observed sometimes/reachable
+        /// assertion to have fired at least once before stopping.
+        require_all_sometimes: bool,
+        /// Maximum number of seeds before stopping regardless (safety cap).
+        max_iterations: usize,
+    },
 }
 
 /// How many instances of a workload to spawn per iteration.
@@ -485,6 +498,38 @@ impl SimulationBuilder {
         self
     }
 
+    /// Run until `assert_sometimes!` / `assert_reachable!` coverage has not
+    /// grown for `plateau_seeds` consecutive seeds.
+    ///
+    /// Works with or without [`SimulationBuilder::enable_exploration`].
+    /// `max_iterations` is a safety cap to prevent infinite loops when the
+    /// plateau is never reached.
+    pub fn until_coverage_plateau(mut self, plateau_seeds: usize, max_iterations: usize) -> Self {
+        self.iteration_control = IterationControl::CoveragePlateau {
+            plateau_seeds,
+            require_all_sometimes: false,
+            max_iterations,
+        };
+        self
+    }
+
+    /// Like [`Self::until_coverage_plateau`] but also lets the caller require
+    /// every observed sometimes/reachable assertion to have fired before the
+    /// plateau is allowed to terminate the run.
+    pub fn until_coverage_plateau_with(
+        mut self,
+        plateau_seeds: usize,
+        require_all_sometimes: bool,
+        max_iterations: usize,
+    ) -> Self {
+        self.iteration_control = IterationControl::CoveragePlateau {
+            plateau_seeds,
+            require_all_sometimes,
+            max_iterations,
+        };
+        self
+    }
+
     /// Register a callback invoked at the start of each simulation iteration.
     ///
     /// Use this to reset shared state (directories, membership, stores) that
@@ -625,11 +670,15 @@ impl SimulationBuilder {
         let mut bug_recipes: Vec<super::report::BugRecipe> = Vec::new();
         let mut per_seed_timelines: Vec<u64> = Vec::new();
 
-        // Convergence tracking (used only with UntilConverged)
+        // Convergence tracking (used by UntilConverged and CoveragePlateau)
         let mut reached_sometimes: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         let mut prev_coverage_bits: u32 = 0;
         let mut converged = false;
+
+        // Plateau tracking (used only with CoveragePlateau)
+        let mut plateau_count: usize = 0;
+        let mut prev_reached_count: usize = 0;
 
         // Install the observability layer once for the entire run. The guard
         // is dropped when run() returns, restoring the previous subscriber.
@@ -902,11 +951,13 @@ impl SimulationBuilder {
             }
 
             // Accumulate which Sometimes/Reachable assertions have been reached
-            // (must read before next prepare_next_seed resets pass_count)
-            if matches!(
+            // (must read before next prepare_next_seed resets pass_count).
+            // Used by both UntilConverged and CoveragePlateau stop conditions.
+            let needs_assertion_scan = matches!(
                 self.iteration_control,
-                IterationControl::UntilConverged { .. }
-            ) {
+                IterationControl::UntilConverged { .. } | IterationControl::CoveragePlateau { .. }
+            );
+            if needs_assertion_scan {
                 let slots = moonpool_explorer::assertion_read_all();
                 for slot in &slots {
                     if let Some(kind) = moonpool_explorer::AssertKind::from_u8(slot.kind)
@@ -930,47 +981,88 @@ impl SimulationBuilder {
                     }
                 }
 
-                // Check convergence from seed 2 onward (need baseline for coverage delta)
-                if iteration_count >= 2 {
-                    // Count unique message strings (not raw slots) to handle
-                    // any residual duplicate slots from the fork allocation race.
-                    let all_sometimes_count = slots
-                        .iter()
-                        .filter(|s| {
-                            moonpool_explorer::AssertKind::from_u8(s.kind)
-                                .map(|k| {
-                                    matches!(
-                                        k,
-                                        moonpool_explorer::AssertKind::Sometimes
-                                            | moonpool_explorer::AssertKind::Reachable
-                                    )
-                                })
-                                .unwrap_or(false)
-                        })
-                        .map(|s| s.msg.clone())
-                        .collect::<std::collections::HashSet<_>>()
-                        .len();
-                    let all_reached =
-                        all_sometimes_count > 0 && reached_sometimes.len() >= all_sometimes_count;
+                // Count unique message strings (not raw slots) to handle
+                // any residual duplicate slots from the fork allocation race.
+                let all_sometimes_count = slots
+                    .iter()
+                    .filter(|s| {
+                        moonpool_explorer::AssertKind::from_u8(s.kind)
+                            .map(|k| {
+                                matches!(
+                                    k,
+                                    moonpool_explorer::AssertKind::Sometimes
+                                        | moonpool_explorer::AssertKind::Reachable
+                                )
+                            })
+                            .unwrap_or(false)
+                    })
+                    .map(|s| s.msg.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                    .len();
 
-                    let current_bits = moonpool_explorer::explored_map_bits_set().unwrap_or(0);
-                    let no_new_coverage = current_bits == prev_coverage_bits;
+                if let IterationControl::UntilConverged { .. } = self.iteration_control {
+                    // Check convergence from seed 2 onward (need baseline for coverage delta)
+                    if iteration_count >= 2 {
+                        let all_reached = all_sometimes_count > 0
+                            && reached_sometimes.len() >= all_sometimes_count;
+
+                        let current_bits = moonpool_explorer::explored_map_bits_set().unwrap_or(0);
+                        let no_new_coverage = current_bits == prev_coverage_bits;
+
+                        tracing::warn!(
+                            "convergence: seed={} reached={}/{} coverage={}->{} delta={}",
+                            iteration_count,
+                            reached_sometimes.len(),
+                            all_sometimes_count,
+                            prev_coverage_bits,
+                            current_bits,
+                            current_bits.saturating_sub(prev_coverage_bits),
+                        );
+
+                        if all_reached && no_new_coverage {
+                            tracing::info!(
+                                "Converged after {} seeds: all {} sometimes reached, no new coverage",
+                                iteration_count,
+                                all_sometimes_count
+                            );
+                            converged = true;
+                        }
+                    }
+                } else if let IterationControl::CoveragePlateau {
+                    plateau_seeds,
+                    require_all_sometimes,
+                    ..
+                } = self.iteration_control
+                {
+                    let current_count = reached_sometimes.len();
+                    if iteration_count == 1 {
+                        prev_reached_count = current_count;
+                    } else if current_count == prev_reached_count {
+                        plateau_count += 1;
+                    } else {
+                        plateau_count = 0;
+                        prev_reached_count = current_count;
+                    }
+
+                    let all_reached = !require_all_sometimes
+                        || (all_sometimes_count > 0
+                            && reached_sometimes.len() >= all_sometimes_count);
 
                     tracing::warn!(
-                        "convergence: seed={} reached={}/{} coverage={}->{} delta={}",
+                        "plateau: seed={} reached={}/{} consecutive_no_growth={}/{}",
                         iteration_count,
-                        reached_sometimes.len(),
+                        current_count,
                         all_sometimes_count,
-                        prev_coverage_bits,
-                        current_bits,
-                        current_bits.saturating_sub(prev_coverage_bits),
+                        plateau_count,
+                        plateau_seeds,
                     );
 
-                    if all_reached && no_new_coverage {
+                    if plateau_count >= plateau_seeds && all_reached {
                         tracing::info!(
-                            "Converged after {} seeds: all {} sometimes reached, no new coverage",
+                            "Coverage plateau after {} seeds: {} consecutive without growth, {} sometimes reached",
                             iteration_count,
-                            all_sometimes_count
+                            plateau_count,
+                            current_count
                         );
                         converged = true;
                     }
@@ -1047,10 +1139,11 @@ impl SimulationBuilder {
 
         let iteration_count = iteration_manager.current_iteration();
 
-        // Detect convergence timeout: UntilConverged was used but we didn't converge
+        // Detect convergence timeout: a convergence-style stop condition was
+        // used but the safety cap was hit before we converged / plateaued.
         let convergence_timeout = matches!(
             self.iteration_control,
-            IterationControl::UntilConverged { .. }
+            IterationControl::UntilConverged { .. } | IterationControl::CoveragePlateau { .. }
         ) && !converged;
 
         // Final buggify reset to ensure no impact on subsequent code

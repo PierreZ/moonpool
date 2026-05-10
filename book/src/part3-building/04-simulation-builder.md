@@ -49,6 +49,12 @@ One iteration is not enough. Different seeds produce different scheduling orders
 .set_time_limit(Duration::from_secs(60))
 ```
 
+**Coverage plateau** stops once `assert_sometimes!` and `assert_reachable!` coverage has not grown for a configurable number of consecutive seeds. Useful when you want chaos to run as long as it keeps finding new behaviour and stop automatically once it does not:
+
+```rust
+.until_coverage_plateau(50, 5_000)  // 50 plateau seeds, 5_000 safety cap
+```
+
 Each iteration gets a different seed, producing a different execution. The seeds are deterministic and derived from the iteration manager, so the same configuration always explores the same seeds.
 
 ## Seed Control

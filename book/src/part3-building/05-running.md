@@ -140,6 +140,27 @@ The debugging workflow:
 5. **Fix** the root cause in the Process code
 6. **Verify** by running the full iteration suite again
 
+## Stop Conditions
+
+How long should a chaos run last? Moonpool exposes four answers via `IterationControl`, each suited to a different question.
+
+**`FixedCount(n)`** is the workhorse for CI. You commit to running exactly `n` seeds, the duration is bounded, and the report is reproducible across machines. Reach for this when budgets are predictable.
+
+**`TimeLimit(d)`** is the answer when "as much chaos as we have time for" is the right framing. Long-running soak runs and overnight loops use this. The seed count is unbounded but the wall clock is.
+
+**`UntilConverged { max_iterations }`** stops when every `assert_sometimes!` has fired at least once **and** the explorer's coverage bitmap stopped growing on the latest seed. It requires `.enable_exploration()` because it reads the fork-aware coverage map. Use it when you have configured exploration and want the run to end as soon as it has nothing left to discover.
+
+**`CoveragePlateau { plateau_seeds, require_all_sometimes, max_iterations }`** is the more general plateau detector. It tracks the set of `assert_sometimes!` / `assert_reachable!` messages that have ever fired and stops once that set has not grown for `plateau_seeds` consecutive seeds. The signal lives in moonpool-sim, so this works **with or without** fork-based exploration. Set `require_all_sometimes=true` if you want to refuse to stop until every observed sometimes assertion has fired at least once.
+
+```rust
+SimulationBuilder::new()
+    .workload(KvWorkload::new(200, keys))
+    .until_coverage_plateau(50, 5_000)
+    .run();
+```
+
+Both `UntilConverged` and `CoveragePlateau` set `report.convergence_timeout = true` when the safety cap is hit before the run converges, so CI can fail loudly instead of silently treating "we ran out of seeds" as success.
+
 ## cargo nextest vs cargo xtask sim
 
 Moonpool has two ways to run tests:
