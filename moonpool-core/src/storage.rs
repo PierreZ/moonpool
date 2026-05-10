@@ -4,11 +4,12 @@
 //! between real Tokio file I/O and simulated storage for testing.
 
 use async_trait::async_trait;
+use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use std::io;
 use std::io::SeekFrom;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
+use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
 /// Options for opening a file.
 ///
@@ -162,7 +163,9 @@ impl StorageProvider for TokioStorageProvider {
             .append(options.append)
             .open(path)
             .await?;
-        Ok(TokioStorageFile { inner: file })
+        Ok(TokioStorageFile {
+            inner: file.compat(),
+        })
     }
 
     async fn exists(&self, path: &str) -> io::Result<bool> {
@@ -183,28 +186,35 @@ impl StorageProvider for TokioStorageProvider {
 }
 
 /// Wrapper for Tokio File to implement our trait.
+///
+/// Holds the underlying `tokio::fs::File` inside `tokio_util::compat::Compat`
+/// so the futures::io trait impls come through automatically. The four custom
+/// methods on [`StorageFile`] reach the inner [`tokio::fs::File`] via
+/// [`Compat::get_ref`] / [`Compat::get_mut`] to call tokio-specific APIs
+/// (`sync_all`, `sync_data`, `metadata`, `set_len`) that `Compat` itself
+/// does not expose.
 #[derive(Debug)]
 pub struct TokioStorageFile {
-    inner: tokio::fs::File,
+    inner: Compat<tokio::fs::File>,
 }
 
 #[async_trait(?Send)]
 impl StorageFile for TokioStorageFile {
     async fn sync_all(&self) -> io::Result<()> {
-        self.inner.sync_all().await
+        self.inner.get_ref().sync_all().await
     }
 
     async fn sync_data(&self) -> io::Result<()> {
-        self.inner.sync_data().await
+        self.inner.get_ref().sync_data().await
     }
 
     async fn size(&self) -> io::Result<u64> {
-        let metadata = self.inner.metadata().await?;
+        let metadata = self.inner.get_ref().metadata().await?;
         Ok(metadata.len())
     }
 
     async fn set_len(&self, size: u64) -> io::Result<()> {
-        self.inner.set_len(size).await
+        self.inner.get_ref().set_len(size).await
     }
 }
 
@@ -212,8 +222,8 @@ impl AsyncRead for TokioStorageFile {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.inner).poll_read(cx, buf)
     }
 }
@@ -231,17 +241,17 @@ impl AsyncWrite for TokioStorageFile {
         Pin::new(&mut self.inner).poll_flush(cx)
     }
 
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_close(cx)
     }
 }
 
 impl AsyncSeek for TokioStorageFile {
-    fn start_seek(mut self: Pin<&mut Self>, position: SeekFrom) -> io::Result<()> {
-        Pin::new(&mut self.inner).start_seek(position)
-    }
-
-    fn poll_complete(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<u64>> {
-        Pin::new(&mut self.inner).poll_complete(cx)
+    fn poll_seek(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        pos: SeekFrom,
+    ) -> Poll<io::Result<u64>> {
+        Pin::new(&mut self.inner).poll_seek(cx, pos)
     }
 }
