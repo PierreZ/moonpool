@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use futures::io::{AsyncRead, AsyncWrite};
 use std::io;
+#[cfg(feature = "tokio-providers")]
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
 /// Provider trait for creating network connections and listeners.
@@ -44,9 +45,11 @@ pub trait TcpListenerTrait {
 /// Wraps `tokio::net::TcpStream` with `tokio_util::compat::Compat` so it
 /// implements the runtime-agnostic `futures::io::AsyncRead + AsyncWrite` traits
 /// required by [`NetworkProvider`].
+#[cfg(feature = "tokio-providers")]
 #[derive(Debug, Clone)]
 pub struct TokioNetworkProvider;
 
+#[cfg(feature = "tokio-providers")]
 impl TokioNetworkProvider {
     /// Create a new Tokio network provider.
     pub fn new() -> Self {
@@ -54,12 +57,14 @@ impl TokioNetworkProvider {
     }
 }
 
+#[cfg(feature = "tokio-providers")]
 impl Default for TokioNetworkProvider {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "tokio-providers")]
 #[async_trait(?Send)]
 impl NetworkProvider for TokioNetworkProvider {
     type TcpStream = Compat<tokio::net::TcpStream>;
@@ -76,11 +81,13 @@ impl NetworkProvider for TokioNetworkProvider {
 }
 
 /// Wrapper for Tokio TcpListener to implement our trait.
+#[cfg(feature = "tokio-providers")]
 #[derive(Debug)]
 pub struct TokioTcpListener {
     inner: tokio::net::TcpListener,
 }
 
+#[cfg(feature = "tokio-providers")]
 #[async_trait(?Send)]
 impl TcpListenerTrait for TokioTcpListener {
     type TcpStream = Compat<tokio::net::TcpStream>;

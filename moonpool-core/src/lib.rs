@@ -75,14 +75,24 @@ pub use codec::{CodecError, JsonCodec, MessageCodec};
 pub use error::{SimulationError, SimulationResult};
 
 // Provider trait exports
-pub use network::{NetworkProvider, TcpListenerTrait, TokioNetworkProvider, TokioTcpListener};
-pub use providers::{Providers, TokioProviders};
-pub use random::{RandomProvider, TokioRandomProvider};
-pub use storage::{
-    OpenOptions, StorageFile, StorageProvider, TokioStorageFile, TokioStorageProvider,
-};
-pub use task::{TaskProvider, TokioTaskProvider};
-pub use time::{TimeError, TimeProvider, TokioTimeProvider};
+pub use network::{NetworkProvider, TcpListenerTrait};
+#[cfg(feature = "tokio-providers")]
+pub use network::{TokioNetworkProvider, TokioTcpListener};
+pub use providers::Providers;
+#[cfg(feature = "tokio-providers")]
+pub use providers::TokioProviders;
+pub use random::RandomProvider;
+#[cfg(feature = "tokio-providers")]
+pub use random::TokioRandomProvider;
+pub use storage::{OpenOptions, StorageFile, StorageProvider};
+#[cfg(feature = "tokio-providers")]
+pub use storage::{TokioStorageFile, TokioStorageProvider};
+pub use task::{JoinError, TaskProvider};
+#[cfg(feature = "tokio-providers")]
+pub use task::{TokioJoinHandle, TokioTaskProvider};
+#[cfg(feature = "tokio-providers")]
+pub use time::TokioTimeProvider;
+pub use time::{TimeError, TimeProvider};
 
 // Core type exports
 pub use node_address::NodeAddress;

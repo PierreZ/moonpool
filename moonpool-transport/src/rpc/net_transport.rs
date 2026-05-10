@@ -624,10 +624,10 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
         }
 
         let transport_weak = self.weak_self();
-        self.providers.task().spawn_task(
+        drop(self.providers.task().spawn_task(
             "connection_reader",
             connection_reader(transport_weak, peer, peer_addr),
-        );
+        ));
     }
 
     // =========================================================================
@@ -676,10 +676,10 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
         // Pass shutdown receiver so the task can exit when transport is dropped
         let transport_weak = self.weak_self();
         let shutdown_rx = self.shutdown_tx.subscribe();
-        self.providers.task().spawn_task(
+        drop(self.providers.task().spawn_task(
             "listen",
             listen_task(transport_weak, listener, addr_str, shutdown_rx),
-        );
+        ));
 
         Ok(())
     }
@@ -1176,10 +1176,10 @@ fn connection_incoming<P: Providers, C: MessageCodec>(
     };
 
     // Spawn connection_reader to handle incoming packets
-    transport.providers.task().spawn_task(
+    drop(transport.providers.task().spawn_task(
         "connection_reader",
         connection_reader(transport_weak, peer, peer_addr),
-    );
+    ));
 }
 
 #[cfg(test)]

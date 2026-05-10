@@ -32,8 +32,9 @@
 //! let time_now = providers.time().now();
 //! ```
 
+use crate::{NetworkProvider, RandomProvider, StorageProvider, TaskProvider, TimeProvider};
+#[cfg(feature = "tokio-providers")]
 use crate::{
-    NetworkProvider, RandomProvider, StorageProvider, TaskProvider, TimeProvider,
     TokioNetworkProvider, TokioRandomProvider, TokioStorageProvider, TokioTaskProvider,
     TokioTimeProvider,
 };
@@ -104,6 +105,7 @@ pub trait Providers: Clone + 'static {
 /// let task = providers.task();
 /// let random = providers.random();
 /// ```
+#[cfg(feature = "tokio-providers")]
 #[derive(Clone)]
 pub struct TokioProviders {
     network: TokioNetworkProvider,
@@ -113,6 +115,7 @@ pub struct TokioProviders {
     storage: TokioStorageProvider,
 }
 
+#[cfg(feature = "tokio-providers")]
 impl TokioProviders {
     /// Create a new production providers bundle.
     ///
@@ -129,12 +132,14 @@ impl TokioProviders {
     }
 }
 
+#[cfg(feature = "tokio-providers")]
 impl Default for TokioProviders {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "tokio-providers")]
 impl Providers for TokioProviders {
     type Network = TokioNetworkProvider;
     type Time = TokioTimeProvider;

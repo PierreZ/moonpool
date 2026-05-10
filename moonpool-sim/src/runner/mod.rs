@@ -9,7 +9,6 @@
 //! - `report` - SimulationMetrics and SimulationReport types
 //! - `topology` - WorkloadTopology and workload configuration
 //! - `orchestrator` - Internal workload orchestration
-//! - `tokio` - TokioRunner for real-world execution
 
 pub mod builder;
 pub mod context;
@@ -19,7 +18,6 @@ pub(crate) mod orchestrator;
 pub mod process;
 pub mod report;
 pub mod tags;
-pub mod tokio;
 pub mod topology;
 pub mod workload;
 
@@ -31,6 +29,5 @@ pub use fault_injector::{FaultContext, FaultInjector};
 pub use process::{Attrition, Process, RebootKind};
 pub use report::{SimulationMetrics, SimulationReport};
 pub use tags::{ProcessTags, TagRegistry};
-pub use tokio::{TokioReport, TokioRunner};
 pub use topology::WorkloadTopology;
 pub use workload::Workload;
