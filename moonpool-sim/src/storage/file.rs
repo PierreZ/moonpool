@@ -3,24 +3,15 @@
 use crate::sim::WeakSimWorld;
 use crate::sim::state::FileId;
 use async_trait::async_trait;
+use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use moonpool_core::StorageFile;
 use std::cell::Cell;
 use std::io::{self, SeekFrom};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 
 use super::futures::{SetLenFuture, SyncFuture};
 use super::sim_shutdown_error;
-
-/// State for an in-progress seek operation.
-#[derive(Debug, Clone, Copy)]
-enum SeekState {
-    /// No seek in progress.
-    Idle,
-    /// Seek requested, waiting to complete.
-    Seeking(u64),
-}
 
 /// Simulated storage file for deterministic testing.
 ///
@@ -48,8 +39,6 @@ pub struct SimStorageFile {
     pending_read: Cell<Option<(u64, u64, usize)>>,
     /// Pending write operation: (op_seq, bytes_written)
     pending_write: Cell<Option<(u64, usize)>>,
-    /// Current seek state
-    seek_state: Cell<SeekState>,
 }
 
 impl SimStorageFile {
@@ -60,7 +49,6 @@ impl SimStorageFile {
             file_id,
             pending_read: Cell::new(None),
             pending_write: Cell::new(None),
-            seek_state: Cell::new(SeekState::Idle),
         }
     }
 
@@ -96,8 +84,8 @@ impl AsyncRead for SimStorageFile {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
         let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Check for pending read operation
@@ -108,22 +96,20 @@ impl AsyncRead for SimStorageFile {
                 self.pending_read.set(None);
 
                 // Calculate how many bytes to actually read
-                let bytes_to_read = buf.remaining().min(len);
+                let bytes_to_read = buf.len().min(len);
                 if bytes_to_read == 0 {
-                    return Poll::Ready(Ok(()));
+                    return Poll::Ready(Ok(0));
                 }
 
                 // Read from file at the stored offset
-                let mut temp_buf = vec![0u8; bytes_to_read];
-                let bytes_read = sim.read_from_file(self.file_id, offset, &mut temp_buf)?;
+                let bytes_read =
+                    sim.read_from_file(self.file_id, offset, &mut buf[..bytes_to_read])?;
 
                 // Update file position
                 let new_position = offset + bytes_read as u64;
                 sim.set_file_position(self.file_id, new_position)?;
 
-                // Copy to output buffer
-                buf.put_slice(&temp_buf[..bytes_read]);
-                return Poll::Ready(Ok(()));
+                return Poll::Ready(Ok(bytes_read));
             }
 
             // Operation not complete, register waker and wait
@@ -141,15 +127,15 @@ impl AsyncRead for SimStorageFile {
 
         // Check for EOF
         if position >= file_size {
-            return Poll::Ready(Ok(())); // EOF - 0 bytes read
+            return Poll::Ready(Ok(0)); // EOF - 0 bytes read
         }
 
         // Calculate bytes to read (don't read past EOF)
         let remaining_in_file = (file_size - position) as usize;
-        let len = buf.remaining().min(remaining_in_file);
+        let len = buf.len().min(remaining_in_file);
 
         if len == 0 {
-            return Poll::Ready(Ok(()));
+            return Poll::Ready(Ok(0));
         }
 
         // Schedule the read operation
@@ -219,23 +205,25 @@ impl AsyncWrite for SimStorageFile {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // Shutdown is a no-op - file cleanup handled via Drop if needed
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // Close is a no-op - file cleanup handled via Drop if needed
         Poll::Ready(Ok(()))
     }
 }
 
 impl AsyncSeek for SimStorageFile {
-    fn start_seek(self: Pin<&mut Self>, position: SeekFrom) -> io::Result<()> {
+    fn poll_seek(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        pos: SeekFrom,
+    ) -> Poll<io::Result<u64>> {
         let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
-        // Calculate target position
         let current_position = sim.file_position(self.file_id)?;
-
         let file_size = sim.file_size(self.file_id)?;
 
-        let target = match position {
-            SeekFrom::Start(pos) => pos,
+        let target = match pos {
+            SeekFrom::Start(p) => p,
             SeekFrom::End(offset) => {
                 if offset >= 0 {
                     file_size.saturating_add(offset as u64)
@@ -252,26 +240,7 @@ impl AsyncSeek for SimStorageFile {
             }
         };
 
-        // Store the seek state
-        self.seek_state.set(SeekState::Seeking(target));
-        Ok(())
-    }
-
-    fn poll_complete(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<u64>> {
-        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
-
-        match self.seek_state.get() {
-            SeekState::Idle => {
-                // No seek in progress, return current position
-                let position = sim.file_position(self.file_id)?;
-                Poll::Ready(Ok(position))
-            }
-            SeekState::Seeking(target) => {
-                // Complete the seek by setting the position
-                sim.set_file_position(self.file_id, target)?;
-                self.seek_state.set(SeekState::Idle);
-                Poll::Ready(Ok(target))
-            }
-        }
+        sim.set_file_position(self.file_id, target)?;
+        Poll::Ready(Ok(target))
     }
 }

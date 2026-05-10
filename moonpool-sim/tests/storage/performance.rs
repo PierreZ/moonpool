@@ -4,11 +4,11 @@
 //! IOPS limits and bandwidth constraints following the latency formula:
 //! `total_latency = base_latency + 1/iops + size/bandwidth`
 
+use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
 use std::net::IpAddr;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const TEST_IP_STR: &str = "127.0.0.1";
 

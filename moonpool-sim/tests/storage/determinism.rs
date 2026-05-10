@@ -3,11 +3,11 @@
 //! These tests verify that the storage simulation produces deterministic
 //! behavior when run with the same seed.
 
+use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
 use std::net::IpAddr;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const TEST_IP_STR: &str = "127.0.0.1";
 

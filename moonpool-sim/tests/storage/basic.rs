@@ -3,11 +3,11 @@
 //! Tests fundamental storage operations: read, write, seek, size, truncate, sync,
 //! and file management (create, delete, rename).
 
+use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
 use std::io::SeekFrom;
 use std::net::IpAddr;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 const TEST_IP_STR: &str = "127.0.0.1";
 

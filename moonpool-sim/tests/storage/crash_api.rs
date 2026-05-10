@@ -4,10 +4,10 @@
 //! following the same pattern as `network/partition.rs` tests
 //! for `sim.partition_pair()`.
 
+use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
 use std::net::IpAddr;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const TEST_IP_STR: &str = "127.0.0.1";
 

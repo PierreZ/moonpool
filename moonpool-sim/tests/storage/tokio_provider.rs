@@ -4,10 +4,10 @@
 //! actual filesystem operations, following the same pattern as network/traits.rs
 //! for TokioNetworkProvider.
 
+use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider, TokioStorageProvider};
 use std::io::SeekFrom;
 use tempfile::TempDir;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 /// Helper to create a local runtime for tests.
 fn local_runtime() -> tokio::runtime::LocalRuntime {

@@ -4,10 +4,10 @@
 //! without interference, similar to how network tests verify multiple
 //! connections work independently.
 
+use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
 use std::net::IpAddr;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 const TEST_IP_STR: &str = "127.0.0.1";
 
