@@ -199,7 +199,7 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
                 {
                     let method = self.#method_name;
                     let h = handler.clone();
-                    providers.task().spawn_task(#task_name, async move {
+                    ::std::mem::drop(providers.task().spawn_task(#task_name, async move {
                         while let Some((req, reply)) = method.recv().await {
                             match h.#method_name(req).await {
                                 Ok(resp) => reply.send(resp),
@@ -211,7 +211,7 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
                                 }
                             }
                         }
-                    });
+                    }));
                 }
             }
         })

@@ -70,12 +70,14 @@ pub trait TimeProvider: Clone {
 }
 
 /// Real time provider using Tokio's time facilities.
+#[cfg(feature = "tokio-providers")]
 #[derive(Debug, Clone)]
 pub struct TokioTimeProvider {
     /// Start time for calculating elapsed duration
     start_time: std::time::Instant,
 }
 
+#[cfg(feature = "tokio-providers")]
 impl TokioTimeProvider {
     /// Create a new Tokio time provider.
     pub fn new() -> Self {
@@ -85,12 +87,14 @@ impl TokioTimeProvider {
     }
 }
 
+#[cfg(feature = "tokio-providers")]
 impl Default for TokioTimeProvider {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "tokio-providers")]
 #[async_trait(?Send)]
 impl TimeProvider for TokioTimeProvider {
     async fn sleep(&self, duration: Duration) -> Result<(), TimeError> {

@@ -9,7 +9,6 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::Duration;
 use tokio::sync::{Notify, mpsc};
-use tokio::task::JoinHandle;
 
 use super::config::{MonitorConfig, PeerConfig};
 use super::error::{PeerError, PeerResult};
@@ -228,7 +227,7 @@ pub struct Peer<P: Providers> {
     data_to_send: Rc<Notify>,
 
     /// Background actor handles
-    writer_handle: Option<JoinHandle<()>>,
+    writer_handle: Option<<P::Task as TaskProvider>::JoinHandle>,
 
     /// Receive channel for incoming packets (token + payload).
     /// Can be taken via `take_receiver()` for external ownership.

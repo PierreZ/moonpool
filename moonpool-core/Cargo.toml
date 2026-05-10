@@ -13,15 +13,19 @@ readme = "README.md"
 rustdoc-args = ["--cfg", "tokio_unstable"]
 rustc-args = ["--cfg", "tokio_unstable"]
 
+[features]
+default = ["tokio-providers"]
+tokio-providers = ["dep:tokio", "dep:tokio-util", "rand/thread_rng"]
+
 [dependencies]
 async-trait = "0.1"
 futures = "0.3"
-rand = "0.10"
+rand = { version = "0.10", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2.0"
-tokio = { version = "1", features = ["fs", "io-util", "net", "rt", "time", "tracing"] }
-tokio-util = { version = "0.7", features = ["compat"] }
+tokio = { version = "1", features = ["fs", "io-util", "net", "rt", "time", "tracing"], optional = true }
+tokio-util = { version = "0.7", features = ["compat"], optional = true }
 tracing = "0.1"
 
 [dev-dependencies]

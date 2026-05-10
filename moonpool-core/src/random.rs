@@ -5,7 +5,9 @@
 //! like TimeProvider, NetworkProvider, and TaskProvider.
 
 use rand::distr::{Distribution, StandardUniform, uniform::SampleUniform};
+#[cfg(feature = "tokio-providers")]
 use rand::prelude::*;
+#[cfg(feature = "tokio-providers")]
 use std::cell::RefCell;
 use std::ops::Range;
 
@@ -55,9 +57,11 @@ pub trait RandomProvider: Clone {
 /// let value: u64 = random.random();
 /// let in_range = random.random_range(1..100);
 /// ```
+#[cfg(feature = "tokio-providers")]
 #[derive(Clone, Default)]
 pub struct TokioRandomProvider;
 
+#[cfg(feature = "tokio-providers")]
 impl TokioRandomProvider {
     /// Create a new production random provider.
     pub fn new() -> Self {
@@ -66,10 +70,12 @@ impl TokioRandomProvider {
 }
 
 // Thread-local RNG for TokioRandomProvider
+#[cfg(feature = "tokio-providers")]
 thread_local! {
     static RNG: RefCell<rand::rngs::ThreadRng> = RefCell::new(rand::rng());
 }
 
+#[cfg(feature = "tokio-providers")]
 impl RandomProvider for TokioRandomProvider {
     fn random<T>(&self) -> T
     where

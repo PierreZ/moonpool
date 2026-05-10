@@ -108,15 +108,17 @@ fn handle_echo_delayed(
 
     let time = ctx.providers().time().clone();
     let delay_ms = moonpool_sim::sim_random_range(1..100);
-    ctx.providers()
-        .task()
-        .spawn_task("echo_delayed_reply", async move {
-            let _ = time
-                .sleep(std::time::Duration::from_millis(delay_ms as u64))
-                .await;
-            assert_sometimes!(true, "echo_delayed_request_handled");
-            reply.send(response);
-        });
+    drop(
+        ctx.providers()
+            .task()
+            .spawn_task("echo_delayed_reply", async move {
+                let _ = time
+                    .sleep(std::time::Duration::from_millis(delay_ms as u64))
+                    .await;
+                assert_sometimes!(true, "echo_delayed_request_handled");
+                reply.send(response);
+            }),
+    );
 }
 
 /// Echo with buggify-controlled failure: sometimes drops the promise (BrokenPromise).
