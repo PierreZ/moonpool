@@ -3,6 +3,8 @@
 ## Environment & Commands
 **Nix shell required**: `nix develop --command <cargo-command>`
 
+**Remote environments** (`CLAUDE_CODE_REMOTE=true`): nix is not preinstalled. Install it first via `DeterminateSystems/nix-installer` (or equivalent) so the validation commands below run with the same toolchain as CI. Without nix, `cargo nextest`, the `cargo` toolchain pinned by the flake, and the simulation binaries are unavailable, and local results will not match CI.
+
 **Validation**: All must pass before completing work:
 - `nix develop --command cargo fmt`
 - `nix develop --command cargo clippy`
