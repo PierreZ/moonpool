@@ -118,16 +118,16 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     println!("Server listening on {}\n", SERVER_ADDR);
 
     // Dynamic token allocation — each init() gets a unique base token.
-    let calc = Calculator::init(&transport);
+    let calc = LocalCalculator::init(&transport);
 
     println!(
         "Registered {} methods with dynamic base token: {}\n",
-        Calculator::METHOD_COUNT,
+        LocalCalculator::METHOD_COUNT,
         calc.base_token(),
     );
 
     // Demonstrate: two servers in the same process get different tokens
-    let calc2 = Calculator::init(&transport);
+    let calc2 = LocalCalculator::init(&transport);
     println!(
         "Second server base token: {} (different!)\n",
         calc2.base_token()
@@ -311,7 +311,7 @@ fn main() {
         _ => {
             println!("Dynamic Endpoint Example\n");
             println!("Demonstrates runtime-allocated tokens with full-interface serialization:\n");
-            println!("  - Server: Calculator::init(&transport) → random base token");
+            println!("  - Server: LocalCalculator::init(&transport) → random base token");
             println!("           serde_json::to_string(&calc) → {{ address, base_token }} blob");
             println!(
                 "  - Client: Calculator::deserialize_with(&transport, deserializer) → remote interface"

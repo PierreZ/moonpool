@@ -91,11 +91,11 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Server listening on {}\n", SERVER_ADDR);
 
-    let ping_server = PingPong::well_known(&transport, WLTOKEN_PING_PONG);
+    let ping_server = LocalPingPong::well_known(&transport, WLTOKEN_PING_PONG);
 
     println!(
         "Registered {} method(s) at well-known token {}\n",
-        PingPong::METHOD_COUNT,
+        LocalPingPong::METHOD_COUNT,
         WLTOKEN_PING_PONG
     );
     println!("Waiting for ping requests...\n");
@@ -253,7 +253,7 @@ fn main() {
         _ => {
             println!("Well-Known Endpoint Example\n");
             println!("Demonstrates deterministic token addressing (no discovery):\n");
-            println!("  - Server: PingPong::well_known(&transport, token)");
+            println!("  - Server: LocalPingPong::well_known(&transport, token)");
             println!("  - Client: PingPong::client_well_known(addr, token, &transport)");
             println!("  - Both derive method tokens from the same well-known base\n");
             println!("Usage:");

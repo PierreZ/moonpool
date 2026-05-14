@@ -17,7 +17,8 @@
 //!
 //! // This generates:
 //! // - `CalculatorHandler` trait (renamed from `Calculator`)
-//! // - `Calculator` struct with `InterfaceMethod` fields for both server and client use
+//! // - `LocalCalculator` struct (server) with `LocalMethod` fields
+//! // - `Calculator` struct (client) with `RemoteMethod` fields
 //! ```
 
 use proc_macro::TokenStream;
@@ -29,12 +30,13 @@ use syn::{
 
 /// Attribute macro for defining RPC service interfaces.
 ///
-/// Generates a unified interface struct and handler trait from a trait definition.
+/// Generates two structs and a handler trait from a trait definition.
 /// All methods must use `&self` receivers.
 ///
-/// The original trait `Foo` is renamed to `FooHandler`, and a struct `Foo` is
-/// generated with [`InterfaceMethod`](moonpool_transport::InterfaceMethod) fields
-/// that work in both server (local) and client (remote) modes.
+/// The original trait `Foo` is renamed to `FooHandler`. A `LocalFoo` struct
+/// (server) is generated with [`LocalMethod`](moonpool_transport::LocalMethod)
+/// fields, and a `Foo` struct (client) is generated with
+/// [`RemoteMethod`](moonpool_transport::RemoteMethod) fields.
 ///
 /// # Example
 ///
@@ -44,7 +46,7 @@ use syn::{
 ///     async fn ping(&self, req: PingRequest) -> Result<PingResponse, RpcError>;
 /// }
 ///
-/// // Server: PingPong::well_known(&transport, token)
+/// // Server: LocalPingPong::well_known(&transport, token).serve(handler, &providers)
 /// // Client: PingPong::client_well_known(addr, token, &transport)
 /// ```
 #[proc_macro_attribute]
@@ -104,6 +106,7 @@ const METHOD_INDEX_OFFSET: u32 = 1;
 
 fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
     let name = &item.ident;
+    let local_name = format_ident!("Local{}", name);
     let handler_name = format_ident!("{}Handler", name);
 
     // Parse trait methods
@@ -126,22 +129,30 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
 
     let method_count = method_infos.len() as u32;
 
-    // Generate unified fields — InterfaceMethod<Req, Resp> per method
-    let struct_fields = method_infos.iter().map(|m| {
+    // Server-side struct fields — LocalMethod<Req, Resp> per method
+    let local_struct_fields = method_infos.iter().map(|m| {
         let name = &m.name;
         let req_type = &m.req_type;
         let resp_type = &m.resp_type;
-        quote! { pub #name: moonpool_transport::InterfaceMethod<#req_type, #resp_type> }
+        quote! { pub #name: moonpool_transport::LocalMethod<#req_type, #resp_type> }
     });
 
-    // Generate init_at — registers handlers and wraps in InterfaceMethod::local
+    // Client-side struct fields — RemoteMethod<Req, Resp> per method
+    let remote_struct_fields = method_infos.iter().map(|m| {
+        let name = &m.name;
+        let req_type = &m.req_type;
+        let resp_type = &m.resp_type;
+        quote! { pub #name: moonpool_transport::RemoteMethod<#req_type, #resp_type> }
+    });
+
+    // init_at — registers handlers and wraps in LocalMethod::new
     let init_at_fields: Vec<_> = method_infos
         .iter()
         .map(|m| {
             let name = &m.name;
             let idx = m.index;
             quote! {
-                let #name = moonpool_transport::InterfaceMethod::local(
+                let #name = moonpool_transport::LocalMethod::new(
                     moonpool_transport::NetTransport::register_handler(transport, base_token.adjusted(#idx))
                 );
             }
@@ -150,14 +161,14 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
 
     let field_names: Vec<_> = method_infos.iter().map(|m| &m.name).collect();
 
-    // Generate from_base field constructors — wraps in InterfaceMethod::remote
+    // from_base field constructors — wraps in RemoteMethod::new
     let from_base_inits: Vec<_> = method_infos
         .iter()
         .map(|m| {
             let name = &m.name;
             let idx = m.index;
             quote! {
-                #name: moonpool_transport::InterfaceMethod::remote(
+                #name: moonpool_transport::RemoteMethod::new(
                     moonpool_transport::ServiceEndpoint::new(
                         moonpool_transport::Endpoint::new(
                             address.clone(),
@@ -171,14 +182,12 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
         })
         .collect();
 
-    let first_field_name = &method_infos[0].name;
-
     // Generate the trait with async_trait attribute (renamed to {Name}Handler)
     let trait_vis = &item.vis;
     let trait_items = &item.items;
     let trait_name_snake = to_snake_case(&name.to_string());
 
-    // Generate serve() method blocks — one close handle + one spawned task per method
+    // serve() method blocks — one close handle + one spawned task per method
     let serve_close_handles: Vec<_> = method_infos
         .iter()
         .map(|m| {
@@ -224,31 +233,22 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
             #(#trait_items)*
         }
 
-        /// Unified service interface with [`InterfaceMethod`](moonpool_transport::InterfaceMethod)
+        /// Server-side service interface with [`LocalMethod`](moonpool_transport::LocalMethod)
         /// fields.
         ///
-        /// Generated by `#[service]`. Each field operates in either local (server)
-        /// or remote (client) mode depending on how the interface was constructed.
-        ///
-        /// - **Server constructors:** [`init()`](Self::init), [`init_at()`](Self::init_at),
-        ///   [`well_known()`](Self::well_known) — fields are local, `recv()` works.
-        /// - **Client constructors:** [`from_base()`](Self::from_base),
-        ///   [`client_well_known()`](Self::client_well_known) — fields are remote,
-        ///   `get_reply()` works.
+        /// Generated by `#[service]`. Construct via [`init()`](Self::init),
+        /// [`init_at()`](Self::init_at), or [`well_known()`](Self::well_known),
+        /// then call [`serve()`](Self::serve) to spawn handler tasks.
         #[derive(Debug, Clone)]
-        pub struct #name {
-            #(#struct_fields,)*
+        pub struct #local_name {
+            #(#local_struct_fields,)*
             base_token: moonpool_transport::UID,
             address: moonpool_transport::NetworkAddress,
         }
 
-        impl #name {
+        impl #local_name {
             /// Number of methods in this interface.
             pub const METHOD_COUNT: u32 = #method_count;
-
-            // ==============================================================
-            // Server constructors (local mode)
-            // ==============================================================
 
             /// Initialize the interface in server (local) mode.
             ///
@@ -286,9 +286,68 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
                 Self::init_at(transport, moonpool_transport::UID::well_known(token_id))
             }
 
-            // ==============================================================
-            // Client constructors (remote mode)
-            // ==============================================================
+            /// Get the base token for this interface instance.
+            ///
+            /// Serialize this for client discovery.
+            pub fn base_token(&self) -> moonpool_transport::UID {
+                self.base_token
+            }
+
+            /// Get the address this interface is registered at.
+            pub fn address(&self) -> &moonpool_transport::NetworkAddress {
+                &self.address
+            }
+
+            /// Consume this interface and spawn handler tasks for all methods.
+            ///
+            /// Each method gets its own task that loops on `recv()` and dispatches
+            /// to the handler. Returns a [`ServerHandle`](moonpool_transport::ServerHandle)
+            /// that stops all tasks when dropped.
+            pub fn serve<H, P: moonpool_transport::Providers>(
+                self,
+                handler: std::rc::Rc<H>,
+                providers: &P,
+            ) -> moonpool_transport::ServerHandle
+            where
+                H: #handler_name + 'static,
+            {
+                use moonpool_transport::TaskProvider as _;
+                let mut close_fns: Vec<Box<dyn Fn()>> = Vec::new();
+                #(#serve_close_handles)*
+                #(#serve_spawn_tasks)*
+                moonpool_transport::ServerHandle::new(close_fns)
+            }
+        }
+
+        impl serde::Serialize for #local_name {
+            fn serialize<__S>(&self, serializer: __S) -> Result<__S::Ok, __S::Error>
+            where
+                __S: serde::Serializer,
+            {
+                use serde::ser::SerializeStruct as _;
+                let mut state = serializer.serialize_struct(stringify!(#local_name), 2)?;
+                state.serialize_field("address", self.address())?;
+                state.serialize_field("base_token", &self.base_token)?;
+                state.end()
+            }
+        }
+
+        /// Client-side service interface with [`RemoteMethod`](moonpool_transport::RemoteMethod)
+        /// fields.
+        ///
+        /// Generated by `#[service]`. Construct via [`from_base()`](Self::from_base),
+        /// [`client_well_known()`](Self::client_well_known), or
+        /// [`deserialize_with()`](Self::deserialize_with).
+        #[derive(Debug, Clone)]
+        pub struct #name {
+            #(#remote_struct_fields,)*
+            base_token: moonpool_transport::UID,
+            address: moonpool_transport::NetworkAddress,
+        }
+
+        impl #name {
+            /// Number of methods in this interface.
+            pub const METHOD_COUNT: u32 = #method_count;
 
             /// Create a client (remote mode) from a base token.
             ///
@@ -322,34 +381,22 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
                 Self::from_base(address, moonpool_transport::UID::well_known(token_id), transport)
             }
 
-            // ==============================================================
-            // Shared methods
-            // ==============================================================
-
-            /// Get the base token for this interface instance.
-            ///
-            /// For server mode, serialize this for client discovery.
-            /// For client mode, this is the token received via discovery.
+            /// Get the base token for this client.
             pub fn base_token(&self) -> moonpool_transport::UID {
                 self.base_token
             }
 
-            /// Get the address this interface points to.
+            /// Get the address this client targets.
             pub fn address(&self) -> &moonpool_transport::NetworkAddress {
                 &self.address
-            }
-
-            /// Returns `true` if this interface is in remote (client) mode.
-            pub fn is_remote(&self) -> bool {
-                self.#first_field_name.is_remote()
             }
 
             /// Deserialize an interface from `deserializer` and bind it to `transport`.
             ///
             /// The wire format is `{ address, base_token }` (see the matching
-            /// [`Serialize`](serde::Serialize) impl). Each method's endpoint is
-            /// reconstructed via `base_token.adjusted(idx)` — the same offset
-            /// scheme used by [`from_base()`](Self::from_base).
+            /// [`Serialize`](serde::Serialize) impl on the local struct). Each
+            /// method's endpoint is reconstructed via `base_token.adjusted(idx)` —
+            /// the same offset scheme used by [`from_base()`](Self::from_base).
             ///
             /// Standard [`Deserialize`](serde::Deserialize) cannot be used because
             /// building each method's [`ServiceEndpoint`](moonpool_transport::ServiceEndpoint)
@@ -374,44 +421,6 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
                 }
                 let wire = __Wire::deserialize(deserializer)?;
                 Ok(Self::from_base(wire.address, wire.base_token, transport))
-            }
-
-            /// Consume this interface and spawn handler tasks for all methods.
-            ///
-            /// Each method gets its own task that loops on `recv()` and dispatches
-            /// to the handler. Returns a [`ServerHandle`](moonpool_transport::ServerHandle)
-            /// that stops all tasks when dropped.
-            ///
-            /// # Panics
-            ///
-            /// Panics if called on a remote-mode interface.
-            pub fn serve<H, P: moonpool_transport::Providers>(
-                self,
-                handler: std::rc::Rc<H>,
-                providers: &P,
-            ) -> moonpool_transport::ServerHandle
-            where
-                H: #handler_name + 'static,
-            {
-                assert!(!self.is_remote(), "serve() requires a local-mode interface");
-                use moonpool_transport::TaskProvider as _;
-                let mut close_fns: Vec<Box<dyn Fn()>> = Vec::new();
-                #(#serve_close_handles)*
-                #(#serve_spawn_tasks)*
-                moonpool_transport::ServerHandle::new(close_fns)
-            }
-        }
-
-        impl serde::Serialize for #name {
-            fn serialize<__S>(&self, serializer: __S) -> Result<__S::Ok, __S::Error>
-            where
-                __S: serde::Serializer,
-            {
-                use serde::ser::SerializeStruct as _;
-                let mut state = serializer.serialize_struct(stringify!(#name), 2)?;
-                state.serialize_field("address", self.address())?;
-                state.serialize_field("base_token", &self.base_token)?;
-                state.end()
             }
         }
     };

@@ -535,8 +535,7 @@ async fn test_interface_round_trip_serialize() {
     let transport = create_transport();
 
     // Server-side: register Calculator at a dynamically-allocated base token.
-    let server_calc = Calculator::init(&transport);
-    assert!(!server_calc.is_remote());
+    let server_calc = LocalCalculator::init(&transport);
 
     // Serialize the whole interface (compact `{ address, base_token }` shape).
     let bytes = serde_json::to_vec(&server_calc).expect("serialize interface");
@@ -549,7 +548,6 @@ async fn test_interface_round_trip_serialize() {
     let mut de = serde_json::Deserializer::from_slice(&bytes);
     let client_calc = Calculator::deserialize_with(&transport, &mut de).expect("deserialize");
 
-    assert!(client_calc.is_remote());
     assert_eq!(client_calc.base_token(), server_calc.base_token());
     assert_eq!(client_calc.address(), server_calc.address());
 
