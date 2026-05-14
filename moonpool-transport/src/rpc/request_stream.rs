@@ -166,18 +166,6 @@ where
         Some((envelope.request, reply))
     }
 
-    /// Receive the next request using a custom sender function.
-    ///
-    /// For testing or advanced use cases where replies should bypass the transport.
-    pub async fn recv_with_sender<F>(&self, sender: F) -> Option<(Req, ReplyPromise<Resp>)>
-    where
-        F: FnOnce(&Endpoint, &[u8]) + 'static,
-    {
-        let envelope = self.queue.recv().await?;
-        let reply = ReplyPromise::new(envelope.reply_to, self.encode_reply.clone(), sender);
-        Some((envelope.request, reply))
-    }
-
     /// Try to receive a request without blocking, using a custom sender function.
     pub fn try_recv_with_sender<F>(&self, sender: F) -> Option<(Req, ReplyPromise<Resp>)>
     where
@@ -302,26 +290,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_request_stream_recv_async() {
-        let handle = make_handle();
-        let stream: RequestStream<PingRequest, PingResponse> =
-            RequestStream::new(test_endpoint(), JsonCodec, handle);
-
-        let envelope = RequestEnvelope {
-            request: PingRequest { seq: 456 },
-            reply_to: reply_endpoint(),
-        };
-        let payload = serde_json::to_vec(&envelope).expect("serialize");
-        stream.queue().receive(&payload);
-
-        let result = stream.recv_with_sender(|_, _| {}).await;
-        assert!(result.is_some());
-        let (request, _reply): (PingRequest, ReplyPromise<PingResponse>) =
-            result.expect("should receive request");
-        assert_eq!(request, PingRequest { seq: 456 });
-    }
-
-    #[tokio::test]
     async fn test_request_stream_closed() {
         let handle = make_handle();
         let stream: RequestStream<PingRequest, PingResponse> =
@@ -331,7 +299,7 @@ mod tests {
         stream.close();
         assert!(stream.is_closed());
 
-        let result = stream.recv_with_sender(|_, _| {}).await;
+        let result = stream.recv().await;
         assert!(result.is_none());
     }
 
