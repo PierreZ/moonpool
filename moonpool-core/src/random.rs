@@ -35,12 +35,21 @@ pub trait RandomProvider: Clone {
     /// Generate a random f64 between 0.0 and 1.0.
     ///
     /// This is a convenience method for generating ratios and percentages.
-    fn random_ratio(&self) -> f64;
+    fn random_ratio(&self) -> f64 {
+        self.random::<f64>()
+    }
 
     /// Generate a random bool with the given probability of being true.
     ///
     /// The probability should be between 0.0 and 1.0.
-    fn random_bool(&self, probability: f64) -> bool;
+    fn random_bool(&self, probability: f64) -> bool {
+        debug_assert!(
+            (0.0..=1.0).contains(&probability),
+            "Probability must be between 0.0 and 1.0, got {}",
+            probability
+        );
+        self.random_ratio() < probability
+    }
 }
 
 /// Production random provider using thread-local RNG.
@@ -89,13 +98,5 @@ impl RandomProvider for TokioRandomProvider {
         T: SampleUniform + PartialOrd,
     {
         RNG.with(|rng| rng.borrow_mut().random_range(range))
-    }
-
-    fn random_ratio(&self) -> f64 {
-        RNG.with(|rng| rng.borrow_mut().random())
-    }
-
-    fn random_bool(&self, probability: f64) -> bool {
-        self.random_ratio() < probability
     }
 }

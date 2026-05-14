@@ -53,19 +53,6 @@ impl RandomProvider for SimRandomProvider {
     {
         sim_random_range(range)
     }
-
-    fn random_ratio(&self) -> f64 {
-        sim_random::<f64>()
-    }
-
-    fn random_bool(&self, probability: f64) -> bool {
-        debug_assert!(
-            (0.0..=1.0).contains(&probability),
-            "Probability must be between 0.0 and 1.0, got {}",
-            probability
-        );
-        sim_random::<f64>() < probability
-    }
 }
 
 #[cfg(test)]
