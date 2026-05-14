@@ -34,44 +34,10 @@ fn use_color() -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Formatting helpers (reused from report.rs, extended)
+// Formatting helpers (shared with report.rs via runner::fmt)
 // ---------------------------------------------------------------------------
 
-/// Format a `u64` with comma separators.
-fn fmt_num(n: u64) -> String {
-    let s = n.to_string();
-    let mut result = String::with_capacity(s.len() + s.len() / 3);
-    for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            result.push(',');
-        }
-        result.push(c);
-    }
-    result.chars().rev().collect()
-}
-
-/// Format an `i64` with comma separators.
-fn fmt_i64(n: i64) -> String {
-    if n < 0 {
-        format!("-{}", fmt_num(n.unsigned_abs()))
-    } else {
-        fmt_num(n as u64)
-    }
-}
-
-/// Format a duration as a human-readable string.
-fn fmt_duration(d: std::time::Duration) -> String {
-    let total_ms = d.as_millis();
-    if total_ms < 1000 {
-        format!("{}ms", total_ms)
-    } else if total_ms < 60_000 {
-        format!("{:.2}s", d.as_secs_f64())
-    } else {
-        let mins = d.as_secs() / 60;
-        let secs = d.as_secs() % 60;
-        format!("{}m {:02}s", mins, secs)
-    }
-}
+use super::fmt::{fmt_duration, fmt_i64, fmt_num};
 
 /// Short label for an assertion kind.
 fn kind_label(kind: AssertKind) -> &'static str {
