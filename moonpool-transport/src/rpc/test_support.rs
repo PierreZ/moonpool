@@ -12,14 +12,10 @@ use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::rpc::failure_monitor::FailureStatus;
-use crate::rpc::net_notified_queue::NetNotifiedQueue;
-use crate::rpc::request_stream::RequestEnvelope;
-use crate::rpc::transport_handle::TransportHandle;
-use crate::rpc::{NetTransport, ReplyError, ServiceEndpoint};
+use crate::rpc::NetTransport;
 use crate::{
-    Endpoint, JsonCodec, NetworkAddress, NetworkProvider, Providers, TokioRandomProvider,
-    TokioStorageProvider, TokioTaskProvider, TokioTimeProvider, UID,
+    NetworkAddress, NetworkProvider, Providers, TokioRandomProvider, TokioStorageProvider,
+    TokioTaskProvider, TokioTimeProvider,
 };
 
 // ---- Stubbed network provider ----
@@ -149,47 +145,4 @@ pub fn make_transport() -> Rc<NetTransport<MockProviders>> {
         .local_address(local)
         .build()
         .expect("build transport")
-}
-
-/// Server-side queue type used by the shared test helpers.
-pub type TestQueue = Rc<NetNotifiedQueue<RequestEnvelope<Echo>>>;
-
-/// Return type for [`register_servers`]: a pair of parallel vectors holding
-/// each server's queue and its matching client-side endpoint.
-pub type ServerSetup = (Vec<TestQueue>, Vec<ServiceEndpoint<Echo, Echo>>);
-
-/// Register `tokens.len()` server queues on `transport` and return the
-/// queues alongside their typed `ServiceEndpoint`s.
-pub fn register_servers(
-    transport: &Rc<NetTransport<MockProviders>>,
-    tokens: &[u64],
-) -> ServerSetup {
-    let mut queues = Vec::new();
-    let mut endpoints = Vec::new();
-    let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
-    for &token in tokens {
-        let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
-        let ep = Endpoint::new(addr, UID::new(token, 1));
-        let q: Rc<NetNotifiedQueue<RequestEnvelope<Echo>>> =
-            Rc::new(NetNotifiedQueue::with_codec(ep.clone(), JsonCodec));
-        transport.register(UID::new(token, 1), q.clone());
-        queues.push(q);
-        endpoints.push(ServiceEndpoint::new(ep, JsonCodec, Rc::clone(&handle)));
-    }
-    transport
-        .failure_monitor()
-        .set_status("10.0.0.1:4500", FailureStatus::Available);
-    (queues, endpoints)
-}
-
-/// Dispatch a canned reply to the client that originated `envelope`.
-pub fn dispatch_reply(
-    transport: &NetTransport<MockProviders>,
-    envelope: &RequestEnvelope<Echo>,
-    result: Result<Echo, ReplyError>,
-) {
-    let payload = serde_json::to_vec(&result).expect("serialize reply");
-    transport
-        .dispatch(&envelope.reply_to.token, &payload)
-        .expect("dispatch reply");
 }
