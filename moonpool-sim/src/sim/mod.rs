@@ -12,6 +12,7 @@
 //! - `sleep` - Sleep future for simulation time
 //! - `rng` - Thread-local random number generation
 
+mod chaos_partition;
 pub mod events;
 pub mod rng;
 pub mod sleep;
