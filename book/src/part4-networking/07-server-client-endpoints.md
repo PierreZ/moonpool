@@ -10,23 +10,23 @@ The generated struct provides two patterns. The simple path uses `serve()`, whic
 
 ```rust
 // Dynamic tokens (each instance gets unique random base):
-let server = Calculator::init(&transport);
+let server = LocalCalculator::init(&transport);
 
 // Or well-known tokens (deterministic, no discovery needed):
-let server = Calculator::well_known(&transport, WLTOKEN_CALC);
+let server = LocalCalculator::well_known(&transport, WLTOKEN_CALC);
 
 let handle = server.serve(Rc::new(CalculatorImpl), &providers);
 // Tasks run until handle is dropped or stop() is called
 ```
 
-`init()` allocates a random base token and registers all method endpoints with the transport's `EndpointMap`. Each method gets its own `InterfaceMethod` in local mode, backed by a `RequestStream` with a `NetNotifiedQueue` that receives incoming request envelopes. The transport is bound at construction, so no `&transport` threading is needed in call sites.
+`init()` allocates a random base token and registers all method endpoints with the transport's `EndpointMap`. Each method gets its own `LocalMethod`, backed by a `RequestStream` with a `NetNotifiedQueue` that receives incoming request envelopes. The transport is bound at construction, so no `&transport` threading is needed in call sites.
 
 `serve()` consumes the interface and spawns one task per method. Each task loops on `recv()`, dispatches to the handler, and sends the response back through the `ReplyPromise`. The returned `ServerHandle` holds close functions for each stream. Dropping it or calling `stop()` closes the streams, which causes the tasks to exit cleanly.
 
 For more control, you can skip `serve()` and process each method manually:
 
 ```rust
-let server = Calculator::init(&transport);
+let server = LocalCalculator::init(&transport);
 // Handle the `add` method yourself
 while let Some((req, reply)) = server.add.recv().await {
     reply.send(AddResponse { result: req.a + req.b });
@@ -45,7 +45,7 @@ let calc = Calculator::client_well_known(server_address, WLTOKEN_CALC, &transpor
 let calc = Calculator::from_base(server_address, base_token, &transport);
 ```
 
-Each `InterfaceMethod` field in remote mode carries the destination address, method UID, and a reference to the transport. The codec is a transport-level concern, set at builder time. The delivery mode is explicit at the call site: `get_reply` for at-least-once, `try_get_reply` for at-most-once, `send` for fire-and-forget. See [Delivery Modes](./08-delivery-modes.md) for the full set.
+Each `RemoteMethod` field carries the destination address, method UID, and a reference to the transport. The codec is a transport-level concern, set at builder time. The delivery mode is explicit at the call site: `get_reply` for at-least-once, `try_get_reply` for at-most-once, `send` for fire-and-forget. See [Delivery Modes](./08-delivery-modes.md) for the full set.
 
 ```rust
 let resp = calc.add.get_reply(AddRequest { a: 1, b: 2 }).await?;
@@ -54,17 +54,9 @@ assert_eq!(resp.result, 3);
 
 Under the hood, `get_reply` creates a temporary `ReplyFuture` registered at a unique endpoint, then the response arrives as a packet routed to that endpoint.
 
-## Mode Checking
+## Type-Level Mode Separation
 
-Every `InterfaceMethod` knows whether it's in local or remote mode. Calling server methods (`recv()`, `try_recv()`) on a remote-mode field, or client methods (`get_reply()`, `send()`) on a local-mode field, will panic. Use `is_remote()` on the interface struct or on individual fields to check:
-
-```rust
-let calc = Calculator::init(&transport);
-assert!(!calc.is_remote());  // server mode
-
-let calc = Calculator::from_base(addr, token, &transport);
-assert!(calc.is_remote());   // client mode
-```
+Server and client are two different concrete types: `LocalCalculator` carries `LocalMethod` fields with `recv()` / `try_recv()`, while `Calculator` carries `RemoteMethod` fields with `get_reply()` / `send()`. Cross-mode mistakes are caught at compile time rather than panicking at runtime.
 
 ## EndpointMap: Token Routing
 
@@ -100,7 +92,7 @@ A well-known UID has `first == u64::MAX` and `second` equal to the token index. 
 
 ## RequestStream
 
-`RequestStream<Req, Resp>` is the server-side abstraction for receiving typed requests. In the unified interface, each local-mode `InterfaceMethod` wraps one. The stream contains a `NetNotifiedQueue` that the transport pushes incoming packets into, plus a bound reference to the transport. When you call `recv()`, it awaits the next `RequestEnvelope<Req>` from the queue and returns the deserialized request paired with a `ReplyPromise`.
+`RequestStream<Req, Resp>` is the server-side abstraction for receiving typed requests. Each `LocalMethod` wraps one. The stream contains a `NetNotifiedQueue` that the transport pushes incoming packets into, plus a bound reference to the transport. When you call `recv()`, it awaits the next `RequestEnvelope<Req>` from the queue and returns the deserialized request paired with a `ReplyPromise`.
 
 The `RequestEnvelope` bundles the request payload with a `reply_to` endpoint, the address where the client is listening for the response:
 

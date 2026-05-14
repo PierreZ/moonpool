@@ -13,14 +13,14 @@ The `#[service]` macro gives you a clean RPC interface, but it hides an importan
 | `get_reply` | At-least-once | Reliable | Retransmits on reconnect |
 | `get_reply_unless_failed_for` | At-least-once + timeout | Reliable | `MaybeDelivered` after duration |
 
-All four modes are available as methods on the `InterfaceMethod` field generated for each method in a `#[service]` interface. The unified `Calculator` or `PingPong` struct emitted by the macro carries one `InterfaceMethod<Req, Resp>` per method, and the four delivery functions sit directly on it. The difference between modes is in what guarantees they provide and how they handle failures.
+All four modes are available as methods on the `RemoteMethod` field generated for each method on the client struct emitted by `#[service]`. For `#[service] trait Calculator { ... }`, the `Calculator` client struct carries one `RemoteMethod<Req, Resp>` per method, and the four delivery functions sit directly on it. The difference between modes is in what guarantees they provide and how they handle failures.
 
 ## send: Fire-and-Forget
 
 The simplest mode. Send the request unreliably with no reply registered:
 
 ```rust
-// `heartbeat` is `iface.heartbeat`, an InterfaceMethod<HeartbeatRequest, ()>
+// `heartbeat` is `iface.heartbeat`, a RemoteMethod<HeartbeatRequest, ()>
 iface.heartbeat.send(HeartbeatRequest { node_id })?;
 ```
 
@@ -108,6 +108,6 @@ This forces correct error handling at the application level. Simulation testing 
 | Single server, must deliver | `get_reply` | TLog rejoin, state sync |
 | Single server, failure timeout | `get_reply_unless_failed_for` | Registration, recruitment |
 
-The generated `#[service]` interface exposes each method as an `InterfaceMethod` field with all four delivery modes available. You choose the mode at the call site, so the same client can use `get_reply` for critical writes and `try_get_reply` for best-effort reads. For raw `ReplyFuture` control (useful in `select!` blocks), use `send_request`.
+The generated client struct exposes each method as a `RemoteMethod` field with all four delivery modes available. You choose the mode at the call site, so the same client can use `get_reply` for critical writes and `try_get_reply` for best-effort reads. For raw `ReplyFuture` control (useful in `select!` blocks), use `send_request`.
 
 For strategies on handling `MaybeDelivered` correctly, including idempotent design, generation numbers, and read-before-retry, see [Designing Simulation-Friendly RPC](./10-designing-rpc.md).

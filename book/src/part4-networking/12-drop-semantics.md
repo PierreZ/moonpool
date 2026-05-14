@@ -67,7 +67,7 @@ trait Liveness {
 
 // Server side: hold every reply promise, never answer.
 async fn run_liveness_server(transport: Rc<NetTransport>) {
-    let server = Liveness::well_known(&transport, WLTOKEN_LIVENESS);
+    let server = LocalLiveness::well_known(&transport, WLTOKEN_LIVENESS);
     let mut held: Vec<ReplyPromise<()>> = Vec::new();
     loop {
         if let Some((_req, reply)) = server.watch.recv().await {
