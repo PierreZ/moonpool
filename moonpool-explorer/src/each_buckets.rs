@@ -68,15 +68,7 @@ impl EachBucket {
     }
 }
 
-/// FNV-1a hash of a message string to a stable u32.
-fn msg_hash(msg: &str) -> u32 {
-    let mut h: u32 = 0x811c9dc5;
-    for b in msg.bytes() {
-        h ^= b as u32;
-        h = h.wrapping_mul(0x01000193);
-    }
-    h
-}
+use crate::hash::msg_hash;
 
 /// Find an existing bucket or allocate a new one by (site_hash, bucket_hash).
 ///
@@ -115,9 +107,7 @@ unsafe fn find_or_alloc_each_bucket(
         }
 
         let bucket = base.add(new_idx);
-        let mut msg_buf = [0u8; EACH_MSG_LEN];
-        let n = msg.len().min(EACH_MSG_LEN - 1);
-        msg_buf[..n].copy_from_slice(&msg.as_bytes()[..n]);
+        let msg_buf = crate::hash::truncate_to_buf::<EACH_MSG_LEN>(msg);
 
         let mut key_values = [0i64; MAX_EACH_KEYS];
         let num_keys = keys.len().min(MAX_EACH_KEYS);

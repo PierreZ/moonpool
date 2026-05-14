@@ -120,15 +120,7 @@ impl AssertionSlot {
     }
 }
 
-/// FNV-1a hash of a message string to a stable u32.
-pub fn msg_hash(msg: &str) -> u32 {
-    let mut h: u32 = 0x811c9dc5;
-    for b in msg.bytes() {
-        h ^= b as u32;
-        h = h.wrapping_mul(0x01000193);
-    }
-    h
-}
+pub use crate::hash::msg_hash;
 
 /// Find an existing slot or allocate a new one by msg_hash.
 ///
@@ -188,9 +180,7 @@ unsafe fn find_or_alloc_slot(
         }
 
         // No duplicate found — write remaining slot fields (msg_hash already set).
-        let mut msg_buf = [0u8; SLOT_MSG_LEN];
-        let n = msg.len().min(SLOT_MSG_LEN - 1);
-        msg_buf[..n].copy_from_slice(&msg.as_bytes()[..n]);
+        let msg_buf = crate::hash::truncate_to_buf::<SLOT_MSG_LEN>(msg);
 
         (*slot).kind = kind as u8;
         (*slot).must_hit = must_hit;

@@ -563,6 +563,7 @@ pub mod context;
 pub mod coverage;
 pub mod each_buckets;
 pub mod energy;
+pub mod hash;
 pub mod replay;
 pub mod sancov;
 pub mod shared_mem;
@@ -573,12 +574,13 @@ pub mod split_loop;
 // Re-exports for the public API
 pub use assertion_slots::{
     ASSERTION_TABLE_MEM_SIZE, AssertCmp, AssertKind, AssertionSlot, AssertionSlotSnapshot,
-    assertion_bool, assertion_numeric, assertion_read_all, assertion_sometimes_all, msg_hash,
+    assertion_bool, assertion_numeric, assertion_read_all, assertion_sometimes_all,
 };
 pub use context::{assertion_table_ptr, explorer_is_child, set_rng_hooks};
 pub use each_buckets::{
     EachBucket, assertion_sometimes_each, each_bucket_read_all, unpack_quality,
 };
+pub use hash::msg_hash;
 pub use replay::{ParseTimelineError, format_timeline, parse_timeline};
 pub use sancov::{sancov_edge_count, sancov_edges_covered, sancov_is_available};
 pub use shared_stats::{ExplorationStats, bug_recipe, exploration_stats};
