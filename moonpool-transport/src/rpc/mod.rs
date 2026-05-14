@@ -15,7 +15,6 @@
 mod delivery;
 mod endpoint_map;
 mod failure_monitor;
-mod interface;
 mod interface_method;
 mod net_notified_queue;
 mod net_transport;
@@ -35,7 +34,6 @@ mod transport_handle;
 pub use delivery::{get_reply, get_reply_unless_failed_for, send, try_get_reply};
 pub use endpoint_map::{EndpointMap, MessageReceiver};
 pub use failure_monitor::{FailureMonitor, FailureStatus};
-pub use interface::{method_endpoint, method_uid};
 pub use interface_method::InterfaceMethod;
 pub use net_notified_queue::{
     NetNotifiedQueue, RecvFuture, ReplyQueueCloser, SharedNetNotifiedQueue,
