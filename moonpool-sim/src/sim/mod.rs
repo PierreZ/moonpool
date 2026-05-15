@@ -14,6 +14,7 @@
 
 mod chaos_clog;
 mod chaos_partition;
+mod connections;
 pub mod events;
 pub mod rng;
 pub mod sleep;
