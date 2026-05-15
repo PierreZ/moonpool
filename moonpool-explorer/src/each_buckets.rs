@@ -87,8 +87,7 @@ unsafe fn find_or_alloc_each_bucket(
     has_quality: u8,
 ) -> *mut EachBucket {
     unsafe {
-        let next_atomic = &*(ptr as *const AtomicU32);
-        let count = next_atomic.load(Ordering::Relaxed) as usize;
+        let count = crate::slot_table::load_slot_count(ptr, Ordering::Relaxed);
         let base = ptr.add(8) as *mut EachBucket;
 
         // Search existing buckets.
@@ -100,11 +99,11 @@ unsafe fn find_or_alloc_each_bucket(
         }
 
         // Allocate new bucket atomically.
-        let new_idx = next_atomic.fetch_add(1, Ordering::Relaxed) as usize;
-        if new_idx >= MAX_EACH_BUCKETS {
-            next_atomic.fetch_sub(1, Ordering::Relaxed);
-            return std::ptr::null_mut();
-        }
+        let new_idx =
+            match crate::slot_table::try_bump_alloc(ptr, MAX_EACH_BUCKETS, Ordering::Relaxed) {
+                Some(idx) => idx,
+                None => return std::ptr::null_mut(),
+            };
 
         let bucket = base.add(new_idx);
         let msg_buf = crate::hash::truncate_to_buf::<EACH_MSG_LEN>(msg);

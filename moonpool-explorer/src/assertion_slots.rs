@@ -139,8 +139,7 @@ unsafe fn find_or_alloc_slot(
     msg: &str,
 ) -> (*mut AssertionSlot, usize) {
     unsafe {
-        let next_atomic = &*(table_ptr as *const AtomicU32);
-        let count = next_atomic.load(Ordering::Acquire) as usize;
+        let count = crate::slot_table::load_slot_count(table_ptr, Ordering::Acquire);
         let base = table_ptr.add(8) as *mut AssertionSlot;
 
         // Search existing slots (atomic load to see concurrent writers).
@@ -153,11 +152,14 @@ unsafe fn find_or_alloc_slot(
         }
 
         // Allocate new slot atomically.
-        let new_idx = next_atomic.fetch_add(1, Ordering::AcqRel) as usize;
-        if new_idx >= MAX_ASSERTION_SLOTS {
-            next_atomic.fetch_sub(1, Ordering::AcqRel);
-            return (std::ptr::null_mut(), 0);
-        }
+        let new_idx = match crate::slot_table::try_bump_alloc(
+            table_ptr,
+            MAX_ASSERTION_SLOTS,
+            Ordering::AcqRel,
+        ) {
+            Some(idx) => idx,
+            None => return (std::ptr::null_mut(), 0),
+        };
 
         // Claim our slot by writing msg_hash atomically BEFORE re-scanning.
         // This makes our claim visible to any concurrent process doing
