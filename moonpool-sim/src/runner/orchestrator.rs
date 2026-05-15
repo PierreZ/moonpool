@@ -893,13 +893,20 @@ impl WorkloadOrchestrator {
     }
 }
 
-/// Manages iteration control, seed generation, and progress tracking.
+/// Manages iteration control, seed generation, progress tracking, and
+/// convergence detection across iterations.
 pub(crate) struct IterationManager {
     control: super::builder::IterationControl,
     seeds: Vec<u64>,
     base_seed: u64,
     iteration_count: usize,
     start_time: Instant,
+
+    // Convergence state shared between UntilConverged and CoveragePlateau.
+    reached_sometimes: std::collections::HashSet<String>,
+    prev_coverage_bits: u32,
+    prev_reached_count: usize,
+    plateau_count: usize,
 }
 
 impl IterationManager {
@@ -916,6 +923,143 @@ impl IterationManager {
             base_seed,
             iteration_count: 0,
             start_time: Instant::now(),
+            reached_sometimes: std::collections::HashSet::new(),
+            prev_coverage_bits: 0,
+            prev_reached_count: 0,
+            plateau_count: 0,
+        }
+    }
+
+    /// Update the "previously observed coverage bits" tracker.
+    ///
+    /// Called by the builder right after explorer state is reset for a
+    /// new seed, mirroring the baseline reset point.
+    pub(crate) fn set_prev_coverage_bits(&mut self, bits: u32) {
+        self.prev_coverage_bits = bits;
+    }
+
+    /// Read whether `assert_sometimes!`/`assert_reachable!` slots and
+    /// coverage indicate this iteration should be the last.
+    ///
+    /// Only meaningful for `UntilConverged` and `CoveragePlateau` control
+    /// strategies; returns `false` for the other modes.
+    pub(crate) fn record_seed_outcome(
+        &mut self,
+        slots: &[moonpool_explorer::AssertionSlotSnapshot],
+        current_coverage_bits: u32,
+    ) -> bool {
+        for slot in slots {
+            if let Some(kind) = moonpool_explorer::AssertKind::from_u8(slot.kind)
+                && matches!(
+                    kind,
+                    moonpool_explorer::AssertKind::Sometimes
+                        | moonpool_explorer::AssertKind::Reachable
+                )
+            {
+                if slot.pass_count > 0 {
+                    self.reached_sometimes.insert(slot.msg.clone());
+                } else if !self.reached_sometimes.contains(&slot.msg) {
+                    tracing::warn!(
+                        "UNREACHED slot: kind={:?} msg={:?} pass={} fail={}",
+                        kind,
+                        slot.msg,
+                        slot.pass_count,
+                        slot.fail_count
+                    );
+                }
+            }
+        }
+
+        // Count unique message strings (not raw slots) to tolerate duplicate
+        // slots from the fork allocation race.
+        let all_sometimes_count = slots
+            .iter()
+            .filter(|s| {
+                moonpool_explorer::AssertKind::from_u8(s.kind)
+                    .map(|k| {
+                        matches!(
+                            k,
+                            moonpool_explorer::AssertKind::Sometimes
+                                | moonpool_explorer::AssertKind::Reachable
+                        )
+                    })
+                    .unwrap_or(false)
+            })
+            .map(|s| s.msg.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+
+        let iteration_count = self.iteration_count;
+
+        match self.control {
+            super::builder::IterationControl::UntilConverged { .. } => {
+                if iteration_count < 2 {
+                    return false;
+                }
+                let all_reached =
+                    all_sometimes_count > 0 && self.reached_sometimes.len() >= all_sometimes_count;
+                let no_new_coverage = current_coverage_bits == self.prev_coverage_bits;
+
+                tracing::warn!(
+                    "convergence: seed={} reached={}/{} coverage={}->{} delta={}",
+                    iteration_count,
+                    self.reached_sometimes.len(),
+                    all_sometimes_count,
+                    self.prev_coverage_bits,
+                    current_coverage_bits,
+                    current_coverage_bits.saturating_sub(self.prev_coverage_bits),
+                );
+
+                if all_reached && no_new_coverage {
+                    tracing::info!(
+                        "Converged after {} seeds: all {} sometimes reached, no new coverage",
+                        iteration_count,
+                        all_sometimes_count
+                    );
+                    return true;
+                }
+                false
+            }
+            super::builder::IterationControl::CoveragePlateau {
+                plateau_seeds,
+                require_all_sometimes,
+                ..
+            } => {
+                let current_count = self.reached_sometimes.len();
+                if iteration_count == 1 {
+                    self.prev_reached_count = current_count;
+                } else if current_count == self.prev_reached_count {
+                    self.plateau_count += 1;
+                } else {
+                    self.plateau_count = 0;
+                    self.prev_reached_count = current_count;
+                }
+
+                let all_reached = !require_all_sometimes
+                    || (all_sometimes_count > 0
+                        && self.reached_sometimes.len() >= all_sometimes_count);
+
+                tracing::warn!(
+                    "plateau: seed={} reached={}/{} consecutive_no_growth={}/{}",
+                    iteration_count,
+                    current_count,
+                    all_sometimes_count,
+                    self.plateau_count,
+                    plateau_seeds,
+                );
+
+                if self.plateau_count >= plateau_seeds && all_reached {
+                    tracing::info!(
+                        "Coverage plateau after {} seeds: {} consecutive without growth, {} sometimes reached",
+                        iteration_count,
+                        self.plateau_count,
+                        current_count
+                    );
+                    return true;
+                }
+                false
+            }
+            _ => false,
         }
     }
 
