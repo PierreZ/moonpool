@@ -12,12 +12,9 @@ use moonpool_transport::{
 };
 
 use crate::service::{
-    EchoRequest, EchoResponse, METHOD_ECHO, METHOD_ECHO_DELAYED, METHOD_ECHO_OR_FAIL,
-    parse_sim_addr,
+    ECHO_INTERFACE, EchoRequest, EchoResponse, METHOD_ECHO, METHOD_ECHO_DELAYED,
+    METHOD_ECHO_OR_FAIL, parse_sim_addr,
 };
-
-/// Interface ID for the echo service (must match service.rs constant).
-const ECHO_INTERFACE: u64 = 0xECE0_0001;
 
 /// Echo server process. Created fresh on every boot via factory.
 pub struct EchoServerProcess;
