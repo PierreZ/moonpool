@@ -87,11 +87,6 @@ impl OpenOptions {
         Self::new().write(true).create(true).truncate(true)
     }
 
-    /// Create options for read and write access.
-    pub fn read_write() -> Self {
-        Self::new().read(true).write(true)
-    }
-
     /// Create options for creating a new file for writing (fails if exists).
     pub fn create_new_write() -> Self {
         Self::new().write(true).create_new(true)
