@@ -4,10 +4,6 @@
 //! Each floor has a hidden key behind a P=0.03 probability gate.
 //! Without exploration: P(reach floor 8) ~ (0.03)^7 ~ impossible.
 //! With exploration: fork amplification at each floor.
-//!
-//! Ported from:
-//! - Workload: `/home/pierrez/workspace/rust/Claude-fork-testing/maze-explorer/src/dungeon.rs`
-//! - Engine: `/home/pierrez/workspace/rust/Claude-fork-testing/dungeon/src/lib.rs`
 
 use async_trait::async_trait;
 use moonpool_sim::{SimContext, SimulationResult, Workload};
