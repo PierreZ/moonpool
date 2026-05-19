@@ -1,4 +1,4 @@
-//! Custom transport-specific simulation report.
+//! Per-workload statistics collected during simulation.
 
 /// Per-workload statistics collected during simulation.
 #[derive(Debug, Clone, Default)]

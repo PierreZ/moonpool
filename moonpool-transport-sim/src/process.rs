@@ -1,7 +1,4 @@
 //! Echo server process for transport simulation.
-//!
-//! Implements the `Process` trait: runs a multi-method echo service on top of
-//! `NetTransport`. Handles incoming RPC requests, echoing them back.
 
 use async_trait::async_trait;
 use tracing::instrument;
@@ -30,7 +27,6 @@ impl Process for EchoServerProcess {
         let my_ip = ctx.my_ip();
         let addr = parse_sim_addr(my_ip)?;
 
-        // Build transport with listener for incoming connections
         let transport = NetTransportBuilder::new(ctx.providers().clone())
             .local_address(addr)
             .build_listening()
@@ -39,7 +35,6 @@ impl Process for EchoServerProcess {
                 moonpool_sim::SimulationError::InvalidState(format!("transport build: {e}"))
             })?;
 
-        // Register handlers for all 3 methods
         let (echo_stream, _) = NetTransport::register_handler_at::<EchoRequest, EchoResponse>(
             &transport,
             ECHO_INTERFACE,
@@ -58,7 +53,6 @@ impl Process for EchoServerProcess {
 
         tracing::info!(%my_ip, "echo server started, 3 methods registered");
 
-        // Serve until shutdown
         let shutdown = ctx.shutdown().clone();
         loop {
             tokio::select! {
@@ -80,7 +74,6 @@ impl Process for EchoServerProcess {
     }
 }
 
-/// Immediate echo: reply right away.
 fn handle_echo(req: &EchoRequest, reply: ReplyPromise<EchoResponse>, server_ip: &str) {
     assert_sometimes!(true, "echo_request_handled");
     reply.send(EchoResponse {
@@ -90,7 +83,6 @@ fn handle_echo(req: &EchoRequest, reply: ReplyPromise<EchoResponse>, server_ip: 
     });
 }
 
-/// Delayed echo: schedule a response after a random simulated delay.
 fn handle_echo_delayed(
     req: &EchoRequest,
     reply: ReplyPromise<EchoResponse>,

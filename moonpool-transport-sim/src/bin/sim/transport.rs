@@ -1,7 +1,4 @@
-//! Binary target for transport simulation.
-//!
-//! Runs the echo server process with transport client workloads under chaos,
-//! exercising all 4 RPC delivery modes with fork-based exploration.
+//! Binary target for transport simulation: echo server + delivery-mode client workload.
 
 use std::process;
 use std::time::Duration;
