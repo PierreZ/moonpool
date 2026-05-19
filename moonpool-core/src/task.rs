@@ -96,13 +96,12 @@ impl TaskProvider for TokioTaskProvider {
         F: Future<Output = ()> + 'static,
     {
         let task_name = name.to_string();
-        let task_name_clone = task_name.clone();
         let inner = tokio::task::Builder::new()
             .name(&task_name)
             .spawn_local(async move {
-                tracing::trace!("Task {} starting", task_name_clone);
+                tracing::trace!("Task {} starting", task_name);
                 future.await;
-                tracing::trace!("Task {} completed", task_name_clone);
+                tracing::trace!("Task {} completed", task_name);
             })
             .expect("Failed to spawn task");
         TokioJoinHandle(inner)
