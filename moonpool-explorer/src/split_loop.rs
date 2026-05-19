@@ -200,11 +200,9 @@ fn reap_one(
         }
     }
 
-    // Check if child found a bug (exit code 42)
-    let exited_normally = libc::WIFEXITED(status);
-    if exited_normally && libc::WEXITSTATUS(status) == 42 {
+    if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 42 {
         if !stats_ptr.is_null() {
-            // Safety: stats_ptr is valid shared memory
+            // Safety: stats_ptr is valid shared memory.
             unsafe {
                 (*stats_ptr).bug_found.fetch_add(1, Ordering::Relaxed);
             }
@@ -213,7 +211,7 @@ fn reap_one(
     }
 
     if !stats_ptr.is_null() {
-        // Safety: stats_ptr is valid shared memory
+        // Safety: stats_ptr is valid shared memory.
         unsafe {
             (*stats_ptr).fork_points.fetch_add(1, Ordering::Relaxed);
         }
@@ -396,21 +394,18 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
                         &mut batch_has_new,
                     );
                 }
-                let slot = match free_slots.pop() {
-                    Some(s) => s,
-                    None => break,
-                };
+                let Some(slot) = free_slots.pop() else { break };
+                let slot_ptr = pool_slot(pool_base, slot);
 
-                // Clear child bitmap slot
-                // Safety: pool_base + slot offset is valid shared memory
+                // Safety: slot_ptr is valid shared memory of COVERAGE_MAP_SIZE bytes.
                 unsafe {
-                    std::ptr::write_bytes(pool_slot(pool_base, slot), 0, COVERAGE_MAP_SIZE);
-                    COVERAGE_BITMAP_PTR.with(|c| c.set(pool_slot(pool_base, slot)));
+                    std::ptr::write_bytes(slot_ptr, 0, COVERAGE_MAP_SIZE);
                 }
+                COVERAGE_BITMAP_PTR.with(|c| c.set(slot_ptr));
 
-                // Clear child sancov slot and redirect transfer pointer
                 if !sancov_pool_base.is_null() {
                     let sancov_len = crate::sancov::sancov_edge_count();
+                    // Safety: sancov_slot is within sancov_pool_base for sancov_len bytes.
                     unsafe {
                         let sancov_slot = crate::sancov::sancov_pool_slot(sancov_pool_base, slot);
                         std::ptr::write_bytes(sancov_slot, 0, sancov_len);
@@ -434,8 +429,8 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
                     }
                 }
             } else {
-                // Sequential path
                 if !bm_ptr.is_null() {
+                    // Safety: bm_ptr points to COVERAGE_MAP_SIZE bytes.
                     let bm = unsafe { CoverageBitmap::new(bm_ptr) };
                     bm.clear();
                 }
@@ -451,12 +446,11 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
                     }
                     child_pid => {
                         let mut status: libc::c_int = 0;
-                        // Safety: child_pid is valid
-                        unsafe {
-                            libc::waitpid(child_pid, &mut status, 0);
-                        }
+                        // Safety: child_pid is a valid child PID we just forked.
+                        unsafe { libc::waitpid(child_pid, &mut status, 0) };
 
                         if !bm_ptr.is_null() && !vm_ptr.is_null() {
+                            // Safety: both pointers are valid for COVERAGE_MAP_SIZE bytes.
                             let bm = unsafe { CoverageBitmap::new(bm_ptr) };
                             let vm = unsafe { ExploredMap::new(vm_ptr) };
                             if vm.has_new_bits(&bm) {
@@ -466,10 +460,9 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
                         }
                         batch_has_new |= crate::sancov::has_new_sancov_coverage();
 
-                        let exited_normally = libc::WIFEXITED(status);
-                        if exited_normally && libc::WEXITSTATUS(status) == 42 {
+                        if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 42 {
                             if !stats_ptr.is_null() {
-                                // Safety: stats_ptr is valid
+                                // Safety: stats_ptr is valid shared memory.
                                 unsafe {
                                     (*stats_ptr).bug_found.fetch_add(1, Ordering::Relaxed);
                                 }
@@ -478,7 +471,7 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
                         }
 
                         if !stats_ptr.is_null() {
-                            // Safety: stats_ptr is valid
+                            // Safety: stats_ptr is valid shared memory.
                             unsafe {
                                 (*stats_ptr).fork_points.fetch_add(1, Ordering::Relaxed);
                             }
@@ -653,20 +646,18 @@ pub fn split_on_discovery(mark_name: &str) {
                     &mut batch_has_new,
                 );
             }
-            let slot = match free_slots.pop() {
-                Some(s) => s,
-                None => break,
-            };
+            let Some(slot) = free_slots.pop() else { break };
+            let slot_ptr = pool_slot(pool_base, slot);
 
-            // Safety: pool slot is valid shared memory
+            // Safety: slot_ptr is valid shared memory of COVERAGE_MAP_SIZE bytes.
             unsafe {
-                std::ptr::write_bytes(pool_slot(pool_base, slot), 0, COVERAGE_MAP_SIZE);
-                COVERAGE_BITMAP_PTR.with(|c| c.set(pool_slot(pool_base, slot)));
+                std::ptr::write_bytes(slot_ptr, 0, COVERAGE_MAP_SIZE);
             }
+            COVERAGE_BITMAP_PTR.with(|c| c.set(slot_ptr));
 
-            // Clear child sancov slot and redirect transfer pointer
             if !sancov_pool_base.is_null() {
                 let sancov_len = crate::sancov::sancov_edge_count();
+                // Safety: sancov_slot is within sancov_pool_base for sancov_len bytes.
                 unsafe {
                     let sancov_slot = crate::sancov::sancov_pool_slot(sancov_pool_base, slot);
                     std::ptr::write_bytes(sancov_slot, 0, sancov_len);
@@ -690,8 +681,8 @@ pub fn split_on_discovery(mark_name: &str) {
                 }
             }
         } else {
-            // Sequential path
             if !bm_ptr.is_null() {
+                // Safety: bm_ptr points to COVERAGE_MAP_SIZE bytes.
                 let bm = unsafe { CoverageBitmap::new(bm_ptr) };
                 bm.clear();
             }
@@ -707,28 +698,26 @@ pub fn split_on_discovery(mark_name: &str) {
                 }
                 child_pid => {
                     let mut status: libc::c_int = 0;
-                    // Safety: child_pid is valid
-                    unsafe {
-                        libc::waitpid(child_pid, &mut status, 0);
-                    }
+                    // Safety: child_pid is a valid child PID we just forked.
+                    unsafe { libc::waitpid(child_pid, &mut status, 0) };
 
                     if !bm_ptr.is_null() && !vm_ptr.is_null() {
+                        // Safety: both pointers are valid for COVERAGE_MAP_SIZE bytes.
                         let bm = unsafe { CoverageBitmap::new(bm_ptr) };
                         let vm = unsafe { ExploredMap::new(vm_ptr) };
                         vm.merge_from(&bm);
                     }
                     batch_has_new |= crate::sancov::has_new_sancov_coverage();
 
-                    let exited_normally = libc::WIFEXITED(status);
-                    if exited_normally && libc::WEXITSTATUS(status) == 42 {
-                        // Safety: stats_ptr is valid
+                    if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 42 {
+                        // Safety: stats_ptr is valid shared memory.
                         unsafe {
                             (*stats_ptr).bug_found.fetch_add(1, Ordering::Relaxed);
                         }
                         save_bug_recipe(split_call_count, child_seed);
                     }
 
-                    // Safety: stats_ptr is valid
+                    // Safety: stats_ptr is valid shared memory.
                     unsafe {
                         (*stats_ptr).fork_points.fetch_add(1, Ordering::Relaxed);
                     }
