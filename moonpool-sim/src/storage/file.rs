@@ -51,11 +51,6 @@ impl SimStorageFile {
             pending_write: Cell::new(None),
         }
     }
-
-    /// Get the file ID.
-    pub fn file_id(&self) -> FileId {
-        self.file_id
-    }
 }
 
 #[async_trait(?Send)]

@@ -231,25 +231,6 @@ pub fn reset_assertion_results() {
     }
 }
 
-/// Panic if the report contains assertion violations.
-///
-/// Uses the pre-collected `assertion_violations` from the report rather than
-/// re-reading shared memory (which may already be freed by the time this is
-/// called).
-///
-/// # Panics
-///
-/// Panics if `report.assertion_violations` is non-empty.
-pub fn panic_on_assertion_violations(report: &crate::runner::SimulationReport) {
-    if !report.assertion_violations.is_empty() {
-        eprintln!("Assertion violations found:");
-        for violation in &report.assertion_violations {
-            eprintln!("  - {}", violation);
-        }
-        panic!("Unexpected assertion violations detected!");
-    }
-}
-
 /// Validate all assertion contracts based on their kind.
 ///
 /// Returns two vectors:

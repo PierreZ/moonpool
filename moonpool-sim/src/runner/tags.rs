@@ -93,11 +93,6 @@ impl ProcessTags {
         self.tags.get(key).is_some_and(|v| v == value)
     }
 
-    /// Get all tags as key-value pairs.
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.tags.iter().map(|(k, v)| (k.as_str(), v.as_str()))
-    }
-
     /// Check if this process has any tags.
     pub fn is_empty(&self) -> bool {
         self.tags.is_empty()

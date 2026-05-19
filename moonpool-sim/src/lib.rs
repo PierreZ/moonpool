@@ -192,8 +192,8 @@ pub use runner::{
 // Chaos module re-exports
 pub use chaos::{
     AssertionStats, SIM_FAULT_TIMELINE, SimFaultEvent, StateHandle, assertion_results,
-    buggify_init, buggify_reset, has_always_violations, panic_on_assertion_violations,
-    reset_always_violations, reset_assertion_results, validate_assertion_contracts,
+    buggify_init, buggify_reset, has_always_violations, reset_always_violations,
+    reset_assertion_results, validate_assertion_contracts,
 };
 
 // Observability module re-exports (new system replacing legacy Timeline + Invariant)

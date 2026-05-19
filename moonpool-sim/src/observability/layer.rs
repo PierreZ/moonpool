@@ -74,29 +74,8 @@ impl SimulationLayer {
         }
     }
 
-    /// Install this layer as the per-thread default subscriber, composed with
-    /// `additional` layers (e.g. `tracing_subscriber::fmt::layer()`).
-    ///
-    /// Returns `(handle, guard)` — the guard restores the previous subscriber
-    /// when dropped. The handle outlives the guard for post-run inspection.
-    pub fn install_with<L>(self, additional: L) -> (SimulationLayerHandle, InstallGuard)
-    where
-        L: Layer<tracing_subscriber::layer::Layered<SimulationLayer, tracing_subscriber::Registry>>
-            + Send
-            + Sync
-            + 'static,
-    {
-        let handle = self.handle();
-        increment_install_count();
-        let subscriber = tracing_subscriber::registry().with(self).with(additional);
-        let guard = tracing::subscriber::set_default(subscriber);
-        (handle, InstallGuard { _guard: guard })
-    }
-
     /// Install this layer as the per-thread default subscriber without any
     /// additional layers.
-    ///
-    /// Use [`Self::install_with`] to compose with `fmt`, OTel, or other layers.
     pub fn install(self) -> (SimulationLayerHandle, InstallGuard) {
         let handle = self.handle();
         increment_install_count();
@@ -173,16 +152,6 @@ impl SimulationLayerHandle {
             .iter()
             .filter_map(typed_from_captured::<T>)
             .collect()
-    }
-
-    /// Number of events captured under `key`.
-    pub fn timeline_len(&self, key: &'static str) -> usize {
-        self.events
-            .lock()
-            .by_key
-            .get(key)
-            .map(|v| v.len())
-            .unwrap_or(0)
     }
 
     /// Latest known simulation time in milliseconds.

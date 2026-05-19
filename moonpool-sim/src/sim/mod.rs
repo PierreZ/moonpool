@@ -26,9 +26,7 @@ pub use events::{
 };
 pub use rng::{
     clear_rng_breakpoints, current_sim_seed, reset_rng_call_count, reset_sim_rng, rng_call_count,
-    set_rng_breakpoints, set_sim_seed, sim_random, sim_random_f64, sim_random_range,
-    sim_random_range_or_default,
+    set_rng_breakpoints, set_sim_seed, sim_random, sim_random_range, sim_random_range_or_default,
 };
 pub use sleep::SleepFuture;
-pub use state::{FileId, PendingOpType, PendingStorageOp, StorageFileState, StorageState};
 pub use world::{SimWorld, WeakSimWorld};

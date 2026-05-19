@@ -39,16 +39,6 @@ impl WorkloadTopology {
             .map(|index| self.peer_ips[index].clone())
     }
 
-    /// Get all peers with a name prefix (useful for finding multiple clients, servers, etc.)
-    pub fn peers_with_prefix(&self, prefix: &str) -> Vec<(String, String)> {
-        self.peer_names
-            .iter()
-            .zip(self.peer_ips.iter())
-            .filter(|(name, _)| name.starts_with(prefix))
-            .map(|(name, ip)| (name.clone(), ip.clone()))
-            .collect()
-    }
-
     /// Get all server process IPs in the simulation.
     pub fn all_process_ips(&self) -> &[String] {
         &self.process_ips
