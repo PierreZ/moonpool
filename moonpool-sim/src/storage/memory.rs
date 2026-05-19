@@ -217,11 +217,6 @@ impl InMemoryStorage {
         self.size
     }
 
-    /// Get the number of sectors in this storage.
-    pub fn num_sectors(&self) -> usize {
-        self.written.len()
-    }
-
     /// Resize the storage to a new size.
     ///
     /// If the new size is larger, the storage is extended with zeros.
@@ -542,54 +537,6 @@ impl InMemoryStorage {
         Ok(())
     }
 
-    /// Clear all active overlays.
-    ///
-    /// Call this to reset the misdirection state.
-    pub fn clear_overlays(&mut self) {
-        for overlay in &mut self.overlays {
-            *overlay = None;
-        }
-    }
-
-    /// Read data from a misdirected location.
-    ///
-    /// Instead of reading from `offset`, reads from a different location
-    /// chosen deterministically based on the seed. The caller is responsible
-    /// for deciding when to call this vs regular `read()`.
-    ///
-    /// # Arguments
-    ///
-    /// * `offset` - The intended read offset (will read from somewhere else)
-    /// * `buf` - Buffer to read into
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the read would go past the end of storage.
-    pub fn read_misdirected(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        if buf.is_empty() {
-            return Ok(());
-        }
-
-        // Pick a random different offset using the original offset as seed
-        let mut rng = ChaCha8Rng::seed_from_u64(self.seed.wrapping_add(offset));
-
-        // Calculate valid range for misdirected read
-        let max_offset = self.size.saturating_sub(buf.len() as u64);
-        if max_offset == 0 {
-            // Buffer is larger than storage, just read from 0
-            return self.read(0, buf);
-        }
-
-        let mut misdirected_offset = rng.random_range(0..max_offset);
-
-        // Ensure we don't accidentally read from the intended location
-        if misdirected_offset == offset {
-            misdirected_offset = (misdirected_offset + SECTOR_SIZE as u64) % max_offset;
-        }
-
-        self.read(misdirected_offset, buf)
-    }
-
     /// Record a phantom write.
     ///
     /// A phantom write appears to succeed but the data is never actually
@@ -657,21 +604,9 @@ impl InMemoryStorage {
         }
     }
 
-    /// Manually clear a sector's fault.
-    pub fn clear_fault(&mut self, sector: usize) {
-        if sector < self.faults.len() {
-            self.faults.clear(sector);
-        }
-    }
-
     /// Check if a sector has a fault.
     pub fn has_fault(&self, sector: usize) -> bool {
         sector < self.faults.len() && self.faults.is_set(sector)
-    }
-
-    /// Check if a sector has been written.
-    pub fn is_written(&self, sector: usize) -> bool {
-        sector < self.written.len() && self.written.is_set(sector)
     }
 }
 
@@ -797,11 +732,6 @@ mod tests {
             .read(SECTOR_SIZE as u64, &mut buf_mistaken)
             .expect("read failed");
         assert_eq!(buf_mistaken, new_data);
-
-        // Clear overlays and verify pristine state
-        storage.clear_overlays();
-        storage.read(0, &mut buf_intended).expect("read failed");
-        assert_eq!(buf_intended, new_data); // Pristine was updated
     }
 
     #[test]
@@ -920,31 +850,6 @@ mod tests {
         let mut read_buf = vec![0u8; 100];
         storage.read(1000, &mut read_buf).expect("read failed");
         assert_eq!(read_buf, data);
-    }
-
-    #[test]
-    fn test_read_misdirected() {
-        let mut storage = InMemoryStorage::new(4096, 42);
-
-        // Write distinct data at different locations
-        let data0 = vec![0x11; SECTOR_SIZE];
-        let data1 = vec![0x22; SECTOR_SIZE];
-        let data2 = vec![0x33; SECTOR_SIZE];
-
-        storage.write(0, &data0, true).expect("write failed");
-        storage
-            .write(SECTOR_SIZE as u64, &data1, true)
-            .expect("write failed");
-        storage
-            .write(2 * SECTOR_SIZE as u64, &data2, true)
-            .expect("write failed");
-
-        // Misdirected read from offset 0 should return data from somewhere else
-        let mut buf = vec![0u8; SECTOR_SIZE];
-        storage.read_misdirected(0, &mut buf).expect("read failed");
-
-        // Should NOT be the data at offset 0
-        assert_ne!(buf, data0);
     }
 
     #[test]
