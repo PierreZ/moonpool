@@ -213,30 +213,20 @@ unsafe fn find_or_alloc_slot(
 /// Writes to coverage bitmap and explored map (if pointers are non-null),
 /// then calls `dispatch_split()` if exploration is active.
 fn assertion_split(slot_idx: usize, hash: u32) {
-    // Mark coverage bitmap
     let bm_ptr = crate::context::COVERAGE_BITMAP_PTR.with(|c| c.get());
+    let vm_ptr = crate::context::EXPLORED_MAP_PTR.with(|c| c.get());
+
     if !bm_ptr.is_null() {
-        // Safety: bm_ptr is non-null (checked above) and points to
-        // COVERAGE_MAP_SIZE bytes of shared memory set during init().
+        // Safety: bm_ptr points to COVERAGE_MAP_SIZE bytes of shared memory set during init().
         let bm = unsafe { crate::coverage::CoverageBitmap::new(bm_ptr) };
         bm.set_bit(hash as usize);
-    }
-
-    // Mark explored map
-    let vm_ptr = crate::context::EXPLORED_MAP_PTR.with(|c| c.get());
-    if !vm_ptr.is_null() {
-        // Safety: vm_ptr is non-null (checked above) and points to
-        // COVERAGE_MAP_SIZE bytes of shared memory set during init().
-        let vm = unsafe { crate::coverage::ExploredMap::new(vm_ptr) };
-        let bm_ptr2 = crate::context::COVERAGE_BITMAP_PTR.with(|c| c.get());
-        if !bm_ptr2.is_null() {
-            // Safety: same invariant as bm_ptr above.
-            let bm = unsafe { crate::coverage::CoverageBitmap::new(bm_ptr2) };
+        if !vm_ptr.is_null() {
+            // Safety: vm_ptr points to COVERAGE_MAP_SIZE bytes of shared memory set during init().
+            let vm = unsafe { crate::coverage::ExploredMap::new(vm_ptr) };
             vm.merge_from(&bm);
         }
     }
 
-    // Dispatch to fork loop if explorer is active
     if crate::context::explorer_is_active() {
         crate::split_loop::dispatch_split("", slot_idx % MAX_ASSERTION_SLOTS);
     }
