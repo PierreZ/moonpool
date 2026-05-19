@@ -1576,44 +1576,6 @@ impl SimWorld {
 
     // Connection Cut Methods (temporary network outage simulation)
 
-    /// Temporarily cut a connection for the specified duration.
-    ///
-    /// Unlike `close_connection`, a cut connection will be automatically restored
-    /// after the duration expires. This simulates temporary network outages where
-    /// the underlying connection remains but is temporarily unavailable.
-    ///
-    /// During a cut:
-    /// - `poll_read` returns `Poll::Pending` (waits for restore)
-    /// - `poll_write` returns `Poll::Pending` (waits for restore)
-    /// - Buffered data is preserved
-    pub fn cut_connection(&self, connection_id: ConnectionId, duration: Duration) {
-        let mut inner = self.inner.borrow_mut();
-        let expires_at = inner.current_time + duration;
-
-        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-            conn.is_cut = true;
-            conn.cut_expiry = Some(expires_at);
-
-            inner.emit_fault(SimFaultEvent::ConnectionCut {
-                connection_id: connection_id.0,
-                duration_ms: duration.as_millis() as u64,
-            });
-
-            tracing::debug!("Connection {} cut until {:?}", connection_id.0, expires_at);
-
-            // Schedule restoration event
-            let restore_event = Event::Connection {
-                id: connection_id.0,
-                state: ConnectionStateChange::CutRestore,
-            };
-            let sequence = inner.next_sequence;
-            inner.next_sequence += 1;
-            inner
-                .event_queue
-                .schedule(ScheduledEvent::new(expires_at, restore_event, sequence));
-        }
-    }
-
     /// Check if a connection is temporarily cut.
     ///
     /// A cut connection is temporarily unavailable but will be restored.
@@ -1630,24 +1592,6 @@ impl SimWorld {
                         .cut_expiry
                         .is_some_and(|expiry| inner.current_time < expiry)
             })
-    }
-
-    /// Restore a cut connection immediately.
-    ///
-    /// This cancels the cut state and wakes any tasks waiting for restoration.
-    pub fn restore_connection(&self, connection_id: ConnectionId) {
-        let mut inner = self.inner.borrow_mut();
-
-        if let Some(conn) = inner.network.connections.get_mut(&connection_id)
-            && conn.is_cut
-        {
-            conn.is_cut = false;
-            conn.cut_expiry = None;
-            tracing::debug!("Connection {} restored", connection_id.0);
-
-            // Wake any tasks waiting for restoration
-            Self::wake_all(&mut inner.wakers.cut_wakers, connection_id);
-        }
     }
 
     /// Register a waker for when a cut connection is restored.
@@ -1793,27 +1737,6 @@ impl SimWorld {
             .connections
             .get(&connection_id)
             .and_then(|conn| conn.recv_delay)
-    }
-
-    /// Set asymmetric delays for a connection.
-    /// If a delay is None, the global configuration is used instead.
-    pub fn set_asymmetric_delays(
-        &self,
-        connection_id: ConnectionId,
-        send_delay: Option<Duration>,
-        recv_delay: Option<Duration>,
-    ) {
-        let mut inner = self.inner.borrow_mut();
-        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-            conn.send_delay = send_delay;
-            conn.recv_delay = recv_delay;
-            tracing::debug!(
-                "Connection {} asymmetric delays set: send={:?}, recv={:?}",
-                connection_id.0,
-                send_delay,
-                recv_delay
-            );
-        }
     }
 
     /// Check if a connection is permanently closed
@@ -2160,51 +2083,6 @@ impl SimWorld {
 
     // Half-Open Connection Simulation Methods
 
-    /// Simulate a peer crash on a connection.
-    ///
-    /// This puts the connection in a half-open state where:
-    /// - The local side still thinks it's connected
-    /// - Writes succeed but data is silently discarded (peer is gone)
-    /// - Reads block waiting for data that will never come
-    /// - After `error_delay`, both read and write return ECONNRESET
-    ///
-    /// This simulates real-world scenarios where a remote peer crashes
-    /// or becomes unreachable, but the local TCP stack hasn't detected it yet.
-    pub fn simulate_peer_crash(&self, connection_id: ConnectionId, error_delay: Duration) {
-        let mut inner = self.inner.borrow_mut();
-        let current_time = inner.current_time;
-        let error_at = current_time + error_delay;
-
-        if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-            conn.is_half_open = true;
-            conn.half_open_error_at = Some(error_at);
-
-            // Clear the paired connection to simulate peer being gone
-            // Data sent will go nowhere
-            conn.paired_connection = None;
-
-            inner.emit_fault(SimFaultEvent::PeerCrash {
-                connection_id: connection_id.0,
-            });
-
-            tracing::info!(
-                "Connection {} now half-open, errors manifest at {:?}",
-                connection_id.0,
-                error_at
-            );
-        }
-
-        // Schedule an event to wake any waiting readers when error time arrives
-        let wake_event = Event::Connection {
-            id: connection_id.0,
-            state: ConnectionStateChange::HalfOpenError,
-        };
-        let sequence = inner.next_sequence;
-        inner.next_sequence += 1;
-        let scheduled_event = ScheduledEvent::new(error_at, wake_event, sequence);
-        inner.event_queue.schedule(scheduled_event);
-    }
-
     /// Check if a connection is in half-open state
     pub fn is_half_open(&self, connection_id: ConnectionId) -> bool {
         let inner = self.inner.borrow();
@@ -2261,16 +2139,6 @@ impl SimWorld {
                 tracing::debug!("Paired connection {} also marked as stable", paired_id.0);
             }
         }
-    }
-
-    /// Check if a connection is marked as stable.
-    pub fn is_connection_stable(&self, connection_id: ConnectionId) -> bool {
-        let inner = self.inner.borrow();
-        inner
-            .network
-            .connections
-            .get(&connection_id)
-            .is_some_and(|conn| conn.is_stable)
     }
 
     // Network Partition Control Methods
