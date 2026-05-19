@@ -218,7 +218,7 @@ pub enum NetworkAddressParseError {
 /// # Examples
 ///
 /// ```
-/// use moonpool_core::{Endpoint, NetworkAddress, UID, WellKnownToken};
+/// use moonpool_core::{Endpoint, NetworkAddress, WellKnownToken};
 /// use std::net::{IpAddr, Ipv4Addr};
 ///
 /// let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4500);
@@ -256,11 +256,6 @@ impl Endpoint {
             address: self.address.clone(),
             token: self.token.adjusted(index),
         }
-    }
-
-    /// Check if endpoint is valid (has valid token).
-    pub fn is_valid(&self) -> bool {
-        self.token.is_valid()
     }
 }
 
@@ -365,7 +360,7 @@ mod tests {
         let endpoint = Endpoint::well_known(addr, WellKnownToken::Ping);
 
         assert!(endpoint.token.is_well_known());
-        assert!(endpoint.is_valid());
+        assert!(endpoint.token.is_valid());
     }
 
     #[test]
