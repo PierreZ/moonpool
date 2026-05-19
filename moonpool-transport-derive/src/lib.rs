@@ -57,35 +57,17 @@ pub fn service(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Auto-detect mode from method receivers and delegate.
 fn service_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
-    let mut has_ref = false;
-    let mut has_mut_ref = false;
-
     for trait_item in &item.items {
         if let TraitItem::Fn(method) = trait_item
             && let Some(FnArg::Receiver(recv)) = method.sig.inputs.first()
+            && recv.mutability.is_some()
         {
-            if recv.mutability.is_some() {
-                has_mut_ref = true;
-            } else {
-                has_ref = true;
-            }
+            return Err(syn::Error::new_spanned(
+                &item.ident,
+                "`&mut self` methods (virtual actor mode) have been removed. Use `&self` for RPC services.",
+            ));
         }
-    }
-
-    if has_ref && has_mut_ref {
-        return Err(syn::Error::new_spanned(
-            &item.ident,
-            "all methods must use `&self` receivers",
-        ));
-    }
-
-    if has_mut_ref {
-        return Err(syn::Error::new_spanned(
-            &item.ident,
-            "`&mut self` methods (virtual actor mode) have been removed. Use `&self` for RPC services.",
-        ));
     }
 
     interface_impl(item)
