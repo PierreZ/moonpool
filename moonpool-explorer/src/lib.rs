@@ -680,12 +680,10 @@ pub fn reset_assertions() {
 /// Call this between seeds instead of [`reset_assertions`] when you want
 /// coverage-preserving multi-seed exploration.
 pub fn prepare_next_seed(per_seed_energy: i64) {
-    // 1. PRESERVE explored map — do nothing
-
-    // 2. Selectively reset assertion table slots:
-    //    PRESERVE: watermark, split_watermark, frontier (quality context),
-    //              pass_count, fail_count (cumulative — needed by validate_assertion_contracts)
-    //    RESET: split_triggered (per-seed, controls re-forking)
+    // pass_count/fail_count accumulate across seeds — needed by
+    // validate_assertion_contracts() to avoid false "was never reached" when
+    // a seed doesn't reach a guarded assertion. Forking uses split_triggered,
+    // not counts. Same rationale for each-bucket pass_count.
     let table_ptr = ASSERTION_TABLE.with(|c| c.get());
     if !table_ptr.is_null() {
         unsafe {
@@ -701,18 +699,10 @@ pub fn prepare_next_seed(per_seed_energy: i64) {
                     continue;
                 }
                 slot.split_triggered = 0;
-                // pass_count/fail_count accumulate across seeds — needed by
-                // validate_assertion_contracts() to avoid false "was never reached"
-                // when a seed doesn't reach a guarded assertion (e.g. invariants
-                // behind `if let Some(model)`).  Forking uses split_triggered,
-                // not counts.
             }
         }
     }
 
-    // 3. Selectively reset each-bucket slots:
-    //    PRESERVE: best_score (quality watermark), key_values, msg, pass_count
-    //    RESET: split_triggered (per-seed transient)
     let each_ptr = EACH_BUCKET_PTR.with(|c| c.get());
     if !each_ptr.is_null() {
         unsafe {
@@ -722,14 +712,12 @@ pub fn prepare_next_seed(per_seed_energy: i64) {
                 .min(each_buckets::MAX_EACH_BUCKETS as u32) as usize;
             let base = each_ptr.add(8) as *mut each_buckets::EachBucket;
             for i in 0..count {
-                let bucket = &mut *base.add(i);
-                bucket.split_triggered = 0;
-                // pass_count accumulates across seeds (same rationale as assertion slots)
+                (*base.add(i)).split_triggered = 0;
             }
         }
     }
 
-    // 4. Zero coverage bitmap (per-timeline, NOT the explored map)
+    // Per-timeline coverage bitmap (NOT the explored map, which is preserved).
     let bm_ptr = COVERAGE_BITMAP_PTR.with(|c| c.get());
     if !bm_ptr.is_null() {
         unsafe {
@@ -737,12 +725,10 @@ pub fn prepare_next_seed(per_seed_energy: i64) {
         }
     }
 
-    // 4b. Clear sancov transfer buffer and reset BSS counters.
-    //     History map is preserved (cumulative, like the explored map).
+    // Sancov history map is preserved (cumulative, like the explored map).
     sancov::clear_transfer_buffer();
     sancov::reset_bss_counters();
 
-    // 5. Reset energy budget with fresh per-seed energy
     let energy_ptr = ENERGY_BUDGET_PTR.with(|c| c.get());
     if !energy_ptr.is_null() {
         unsafe {
@@ -750,7 +736,6 @@ pub fn prepare_next_seed(per_seed_energy: i64) {
         }
     }
 
-    // 6. Reset shared stats
     let stats_ptr = SHARED_STATS.with(|c| c.get());
     if !stats_ptr.is_null() {
         unsafe {
@@ -758,7 +743,6 @@ pub fn prepare_next_seed(per_seed_energy: i64) {
         }
     }
 
-    // 7. Reset bug recipe
     let recipe_ptr = SHARED_RECIPE.with(|c| c.get());
     if !recipe_ptr.is_null() {
         unsafe {
@@ -766,7 +750,6 @@ pub fn prepare_next_seed(per_seed_energy: i64) {
         }
     }
 
-    // 8. Reset context for new seed, mark as warm start
     context::with_ctx_mut(|ctx| {
         ctx.is_child = false;
         ctx.depth = 0;
@@ -802,33 +785,26 @@ pub fn explored_map_bits_set() -> Option<u32> {
 ///
 /// Returns an error if shared memory allocation fails.
 pub fn init(config: ExplorationConfig) -> Result<(), std::io::Error> {
-    // Initialize assertion table first (idempotent)
     init_assertions()?;
-
-    // Initialize sancov shared memory (no-op if sancov unavailable)
     sancov::init_sancov_shared()?;
 
-    // Allocate exploration-specific shared memory regions
     let stats_ptr = shared_stats::init_shared_stats(config.global_energy)?;
     let recipe_ptr = shared_stats::init_shared_recipe()?;
     let explored_ptr = shared_mem::alloc_shared(coverage::COVERAGE_MAP_SIZE)?;
     let bitmap_ptr = shared_mem::alloc_shared(coverage::COVERAGE_MAP_SIZE)?;
 
-    // Allocate energy budget if adaptive mode is configured
     let energy_ptr = if let Some(ref adaptive) = config.adaptive {
         energy::init_energy_budget(config.global_energy, adaptive.per_mark_energy)?
     } else {
         std::ptr::null_mut()
     };
 
-    // Store pointers in thread-local context
     SHARED_STATS.with(|c| c.set(stats_ptr));
     SHARED_RECIPE.with(|c| c.set(recipe_ptr));
     EXPLORED_MAP_PTR.with(|c| c.set(explored_ptr));
     COVERAGE_BITMAP_PTR.with(|c| c.set(bitmap_ptr));
     ENERGY_BUDGET_PTR.with(|c| c.set(energy_ptr));
 
-    // Activate exploration context
     context::with_ctx_mut(|ctx| {
         ctx.active = true;
         ctx.is_child = false;
