@@ -44,26 +44,6 @@ impl Default for MonitorConfig {
     }
 }
 
-impl MonitorConfig {
-    /// Create a monitor config tuned for local/low-latency networks.
-    pub fn local_network() -> Self {
-        Self {
-            ping_interval: Duration::from_millis(500),
-            ping_timeout: Duration::from_secs(1),
-            max_tolerated_timeouts: 2,
-        }
-    }
-
-    /// Create a monitor config tuned for WAN/high-latency networks.
-    pub fn wan_network() -> Self {
-        Self {
-            ping_interval: Duration::from_secs(5),
-            ping_timeout: Duration::from_secs(10),
-            max_tolerated_timeouts: 5,
-        }
-    }
-}
-
 /// Configuration for peer behavior and reconnection parameters.
 #[derive(Clone, Debug)]
 pub struct PeerConfig {
@@ -103,56 +83,6 @@ impl Default for PeerConfig {
             connection_timeout: Duration::from_secs(5),
             max_connection_failures: None, // Unlimited retries by default
             monitor: Some(MonitorConfig::default()),
-        }
-    }
-}
-
-impl PeerConfig {
-    /// Create a new configuration with specified parameters.
-    pub fn new(
-        max_queue_size: usize,
-        connection_timeout: Duration,
-        initial_reconnect_delay: Duration,
-        max_reconnect_delay: Duration,
-        max_connection_failures: Option<u32>,
-    ) -> Self {
-        Self {
-            initial_reconnect_delay,
-            max_reconnect_delay,
-            max_queue_size,
-            connection_timeout,
-            max_connection_failures,
-            monitor: Some(MonitorConfig::default()),
-        }
-    }
-
-    /// Enable connection monitoring with the given configuration.
-    pub fn with_monitor(mut self, config: MonitorConfig) -> Self {
-        self.monitor = Some(config);
-        self
-    }
-
-    /// Create a configuration for low-latency local networking.
-    pub fn local_network() -> Self {
-        Self {
-            initial_reconnect_delay: Duration::from_millis(10),
-            max_reconnect_delay: Duration::from_secs(1),
-            max_queue_size: 100,
-            connection_timeout: Duration::from_millis(500),
-            max_connection_failures: Some(10),
-            monitor: Some(MonitorConfig::local_network()),
-        }
-    }
-
-    /// Create a configuration for high-latency WAN networking.
-    pub fn wan_network() -> Self {
-        Self {
-            initial_reconnect_delay: Duration::from_millis(500),
-            max_reconnect_delay: Duration::from_secs(60),
-            max_queue_size: 5000,
-            connection_timeout: Duration::from_secs(30),
-            max_connection_failures: None, // Unlimited retries for WAN
-            monitor: Some(MonitorConfig::wan_network()),
         }
     }
 }

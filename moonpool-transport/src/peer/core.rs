@@ -350,11 +350,6 @@ impl<P: Providers> Peer<P> {
         }
     }
 
-    /// Create a new peer with default configuration (no failure monitor).
-    pub fn new_with_defaults(providers: P, destination: String) -> Self {
-        Self::new(providers, destination, PeerConfig::default(), None)
-    }
-
     /// Create a new peer from an incoming (already-connected) stream.
     ///
     /// FDB Pattern: `Peer::onIncomingConnection()` (FlowTransport.actor.cpp:1123)
@@ -439,30 +434,9 @@ impl<P: Providers> Peer<P> {
         self.shared_state.borrow().disconnect_notify.clone()
     }
 
-    /// Get current queue size (reliable + unreliable).
-    pub fn queue_size(&self) -> usize {
-        let state = self.shared_state.borrow();
-        state.reliable_queue.len() + state.unreliable_queue.len()
-    }
-
-    /// Get reliable queue size.
-    pub fn reliable_queue_size(&self) -> usize {
-        self.shared_state.borrow().reliable_queue.len()
-    }
-
-    /// Get unreliable queue size.
-    pub fn unreliable_queue_size(&self) -> usize {
-        self.shared_state.borrow().unreliable_queue.len()
-    }
-
     /// Get peer metrics.
     pub fn metrics(&self) -> PeerMetrics {
         self.shared_state.borrow().metrics.clone()
-    }
-
-    /// Get destination address.
-    pub fn destination(&self) -> String {
-        self.shared_state.borrow().destination.clone()
     }
 
     /// Send packet reliably to the peer (queued, will retry on reconnect).
@@ -563,82 +537,12 @@ impl<P: Providers> Peer<P> {
 
     /// Take ownership of the receive channel.
     ///
-    /// This allows an external task to receive messages directly from the
-    /// channel without borrowing the Peer. Useful for avoiding RefCell
-    /// borrows across await points.
+    /// Allows an external task to receive messages directly without
+    /// borrowing the Peer (avoids RefCell across await points).
     ///
-    /// After calling this, `receive()` and `try_receive()` will return
-    /// `PeerError::ReceiverTaken`.
-    ///
-    /// # Returns
-    ///
-    /// `Some(receiver)` if the receiver hasn't been taken yet, `None` otherwise.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let mut peer = Peer::new(...);
-    /// let receiver = peer.take_receiver().expect("receiver not yet taken");
-    ///
-    /// // Now can await on receiver without borrowing peer
-    /// loop {
-    ///     match receiver.recv().await {
-    ///         Some((token, payload)) => { /* handle message */ }
-    ///         None => break, // Channel closed
-    ///     }
-    /// }
-    /// ```
+    /// Returns `Some(receiver)` if not yet taken, `None` otherwise.
     pub fn take_receiver(&mut self) -> Option<PeerReceiver> {
         self.receive_rx.take()
-    }
-
-    /// Check if the receiver has been taken.
-    pub fn receiver_taken(&self) -> bool {
-        self.receive_rx.is_none()
-    }
-
-    /// Receive packet from the peer.
-    ///
-    /// Returns the endpoint token and payload bytes.
-    /// Waits for data from the background reader actor.
-    ///
-    /// # Errors
-    ///
-    /// Returns `PeerError::ReceiverTaken` if `take_receiver()` was called.
-    /// Returns `PeerError::Disconnected` if the peer connection is closed.
-    pub async fn receive(&mut self) -> PeerResult<(UID, Vec<u8>)> {
-        match &mut self.receive_rx {
-            Some(rx) => rx.recv().await.ok_or(PeerError::Disconnected),
-            None => Err(PeerError::ReceiverTaken),
-        }
-    }
-
-    /// Try to receive packet from the peer without blocking.
-    ///
-    /// Returns immediately with (token, payload) if available.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err(PeerError::ReceiverTaken)` if `take_receiver()` was called.
-    /// Returns `Ok(None)` if no message is currently available.
-    pub fn try_receive(&mut self) -> PeerResult<Option<(UID, Vec<u8>)>> {
-        match &mut self.receive_rx {
-            Some(rx) => Ok(rx.try_recv().ok()),
-            None => Err(PeerError::ReceiverTaken),
-        }
-    }
-
-    /// Force reconnection by dropping current connection.
-    pub fn reconnect(&mut self) {
-        let mut state = self.shared_state.borrow_mut();
-        state.connection = None;
-        state.metrics.is_connected = false;
-        state
-            .reconnect_state
-            .reset(self.config.initial_reconnect_delay);
-
-        // Connection task will automatically attempt reconnection
-        self.data_to_send.notify_one();
     }
 
     /// Close the connection and clear send queues.

@@ -10,22 +10,6 @@ pub enum PeerError {
     #[error("Connection to peer failed")]
     ConnectionFailed,
 
-    /// Connection was lost during operation
-    #[error("Connection lost during operation")]
-    ConnectionLost,
-
-    /// Message queue is full
-    #[error("Message queue is full, cannot queue more messages")]
-    QueueFull,
-
-    /// Peer is disconnected and cannot perform operation
-    #[error("Peer is disconnected")]
-    Disconnected,
-
-    /// Connection timeout occurred
-    #[error("Connection timeout")]
-    Timeout,
-
     /// I/O operation failed
     #[error("I/O error: {0}")]
     Io(String),
@@ -33,10 +17,6 @@ pub enum PeerError {
     /// Invalid operation for current peer state
     #[error("Invalid operation: {0}")]
     InvalidOperation(String),
-
-    /// Receiver has been taken via take_receiver()
-    #[error("Receiver has been taken")]
-    ReceiverTaken,
 }
 
 impl From<io::Error> for PeerError {
