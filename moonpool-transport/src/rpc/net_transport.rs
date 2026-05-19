@@ -774,17 +774,6 @@ impl<P: Providers, C: MessageCodec> super::transport_handle::TransportHandle
             .clone()
             .unwrap_or_else(|| std::rc::Weak::<Self>::new())
     }
-
-    fn sleep(
-        &self,
-        duration: std::time::Duration,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>> {
-        use crate::TimeProvider as _;
-        let time = self.providers.time().clone();
-        Box::pin(async move {
-            let _ = time.sleep(duration).await;
-        })
-    }
 }
 
 impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
