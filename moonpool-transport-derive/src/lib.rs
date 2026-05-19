@@ -401,25 +401,17 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
     Ok(expanded)
 }
 
-/// Extract request and response types from method signature.
-///
-/// Expected signature: `async fn name(&self, req: ReqType) -> Result<RespType, RpcError>`
+/// Extract request and response types from `async fn name(&self, req: ReqType) -> Result<RespType, RpcError>`.
 fn extract_method_types(sig: &syn::Signature) -> syn::Result<(Type, Type)> {
-    // Skip &self, get the second argument
     let mut inputs = sig.inputs.iter();
 
-    // First should be &self
-    match inputs.next() {
-        Some(FnArg::Receiver(_)) => {}
-        _ => {
-            return Err(syn::Error::new_spanned(
-                sig,
-                "Interface method must have &self as first parameter",
-            ));
-        }
+    if !matches!(inputs.next(), Some(FnArg::Receiver(_))) {
+        return Err(syn::Error::new_spanned(
+            sig,
+            "Interface method must have &self as first parameter",
+        ));
     }
 
-    // Second should be the request parameter
     let req_type = match inputs.next() {
         Some(FnArg::Typed(pat_type)) => (*pat_type.ty).clone(),
         _ => {
@@ -430,7 +422,6 @@ fn extract_method_types(sig: &syn::Signature) -> syn::Result<(Type, Type)> {
         }
     };
 
-    // Extract response type from return type: Result<RespType, RpcError>
     let resp_type = match &sig.output {
         ReturnType::Type(_, ty) => extract_result_ok_type(ty)?,
         ReturnType::Default => {
