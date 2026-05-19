@@ -87,8 +87,7 @@ enum Op {
 }
 
 fn random_op() -> Op {
-    let roll = sim_random_range(0..100);
-    match roll {
+    match sim_random_range(0..100) {
         0..12 => Op::SendFireAndForget,
         12..30 => Op::SendAtMostOnce,
         30..52 => Op::SendAtLeastOnce,
@@ -168,7 +167,7 @@ impl Workload for TransportClientWorkload {
             "workload starting"
         );
 
-        for _op_idx in 0..num_ops {
+        for _ in 0..num_ops {
             if shutdown.is_cancelled() {
                 tracing::info!("shutdown received, stopping new operations");
                 break;
