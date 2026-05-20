@@ -603,11 +603,6 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
         data.endpoints.well_known_count() + data.endpoints.dynamic_count()
     }
 
-    /// Get number of incoming peers (from accepted connections).
-    pub fn incoming_peer_count(&self) -> usize {
-        self.data.borrow().incoming_peers.len()
-    }
-
     /// Spawn a connection_reader for a peer.
     ///
     /// FDB Pattern: connectionKeeper spawns connectionReader (line 843).
