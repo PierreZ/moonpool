@@ -212,21 +212,6 @@ impl FailureMonitor {
             .unwrap_or(FailureStatus::Failed) // Missing = Failed
     }
 
-    /// Get the current failure status of an address.
-    ///
-    /// Returns [`FailureStatus::Failed`] if the address is unknown.
-    ///
-    /// # FDB Reference
-    /// `SimpleFailureMonitor::getState(NetworkAddress)` (FailureMonitor.actor.cpp:208-214)
-    pub fn address_state(&self, address: &str) -> FailureStatus {
-        self.inner
-            .borrow()
-            .address_status
-            .get(address)
-            .copied()
-            .unwrap_or(FailureStatus::Failed)
-    }
-
     /// Check if an endpoint is permanently failed.
     ///
     /// # FDB Reference
@@ -374,7 +359,6 @@ mod tests {
         let fm = make_fm();
         let ep = test_endpoint();
         assert_eq!(fm.state(&ep), FailureStatus::Failed);
-        assert_eq!(fm.address_state("10.0.1.1:4500"), FailureStatus::Failed);
     }
 
     #[test]
@@ -383,15 +367,6 @@ mod tests {
         let ep = test_endpoint();
         fm.set_status("10.0.1.1:4500", FailureStatus::Available);
         assert_eq!(fm.state(&ep), FailureStatus::Available);
-        assert_eq!(fm.address_state("10.0.1.1:4500"), FailureStatus::Available);
-    }
-
-    #[test]
-    fn test_set_status_failed_removes_entry() {
-        let fm = make_fm();
-        fm.set_status("10.0.1.1:4500", FailureStatus::Available);
-        fm.set_status("10.0.1.1:4500", FailureStatus::Failed);
-        assert_eq!(fm.address_state("10.0.1.1:4500"), FailureStatus::Failed);
     }
 
     #[test]
