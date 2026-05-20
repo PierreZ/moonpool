@@ -4,10 +4,9 @@
 //! event processing, and network simulation state.
 
 use std::{
-    cell::RefCell,
     collections::{BTreeMap, HashSet, VecDeque},
     net::IpAddr,
-    rc::{Rc, Weak},
+    sync::{Arc, RwLock, Weak},
     task::Waker,
     time::Duration,
 };
@@ -142,7 +141,7 @@ impl SimInner {
 /// ownership model with handle-based access to avoid borrow checker conflicts.
 #[derive(Debug)]
 pub struct SimWorld {
-    pub(crate) inner: Rc<RefCell<SimInner>>,
+    pub(crate) inner: Arc<RwLock<SimInner>>,
 }
 
 impl SimWorld {
@@ -158,7 +157,7 @@ impl SimWorld {
         };
 
         Self {
-            inner: Rc::new(RefCell::new(inner)),
+            inner: Arc::new(RwLock::new(inner)),
         }
     }
 
@@ -206,7 +205,10 @@ impl SimWorld {
     /// `false` if this was the last event or if no events are available.
     #[instrument(skip(self))]
     pub fn step(&mut self) -> bool {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
 
         if let Some(scheduled_event) = inner.event_queue.pop_earliest() {
             // Advance logical time to event timestamp
@@ -243,10 +245,17 @@ impl SimWorld {
     pub fn run_until_empty(&mut self) {
         while self.step() {
             // Periodically check if we should stop early (every 50 events for performance)
-            if self.inner.borrow().events_processed.is_multiple_of(50) {
+            if self
+                .inner
+                .read()
+                .expect("RwLock poisoned: prior task panicked")
+                .events_processed
+                .is_multiple_of(50)
+            {
                 let has_workload_events = !self
                     .inner
-                    .borrow()
+                    .read()
+                    .expect("RwLock poisoned: prior task panicked")
                     .event_queue
                     .has_only_infrastructure_events();
                 if !has_workload_events {
@@ -261,7 +270,10 @@ impl SimWorld {
 
     /// Returns the current simulation time.
     pub fn current_time(&self) -> Duration {
-        self.inner.borrow().current_time
+        self.inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .current_time
     }
 
     /// Returns the exact simulation time (equivalent to FDB's now()).
@@ -269,7 +281,10 @@ impl SimWorld {
     /// This is the canonical simulation time used for scheduling events.
     /// Use this for precise time comparisons and scheduling.
     pub fn now(&self) -> Duration {
-        self.inner.borrow().current_time
+        self.inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .current_time
     }
 
     /// Returns the drifted timer time (equivalent to FDB's timer()).
@@ -287,7 +302,10 @@ impl SimWorld {
     ///
     /// FDB ref: sim2.actor.cpp:1058-1064
     pub fn timer(&self) -> Duration {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         let chaos = &inner.network.config.chaos;
 
         // If clock drift is disabled, return exact simulation time
@@ -317,7 +335,10 @@ impl SimWorld {
     /// Schedules an event to execute after the specified delay from the current time.
     #[instrument(skip(self))]
     pub fn schedule_event(&self, event: Event, delay: Duration) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         let scheduled_time = inner.current_time + delay;
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
@@ -328,7 +349,10 @@ impl SimWorld {
 
     /// Schedules an event to execute at the specified absolute time.
     pub fn schedule_event_at(&self, event: Event, time: Duration) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
 
@@ -342,18 +366,27 @@ impl SimWorld {
     /// it from being dropped, enabling handle-based access patterns.
     pub fn downgrade(&self) -> WeakSimWorld {
         WeakSimWorld {
-            inner: Rc::downgrade(&self.inner),
+            inner: Arc::downgrade(&self.inner),
         }
     }
 
     /// Returns `true` if there are events waiting to be processed.
     pub fn has_pending_events(&self) -> bool {
-        !self.inner.borrow().event_queue.is_empty()
+        !self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .event_queue
+            .is_empty()
     }
 
     /// Returns the number of events waiting to be processed.
     pub fn pending_event_count(&self) -> usize {
-        self.inner.borrow().event_queue.len()
+        self.inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .event_queue
+            .len()
     }
 
     /// Create a network provider for this simulation
@@ -380,7 +413,11 @@ impl SimWorld {
     ///
     /// Used as fallback when no per-process config is set for a given IP.
     pub fn set_storage_config(&mut self, config: crate::storage::StorageConfiguration) {
-        self.inner.borrow_mut().storage.config = config;
+        self.inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked")
+            .storage
+            .config = config;
     }
 
     /// Access network configuration for latency calculations using thread-local RNG.
@@ -394,13 +431,19 @@ impl SimWorld {
     where
         F: FnOnce(&NetworkConfiguration) -> R,
     {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         f(&inner.network.config)
     }
 
     /// Create a listener in the simulation (used by SimNetworkProvider)
     pub(crate) fn create_listener(&self) -> SimulationResult<ListenerId> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         let listener_id = ListenerId(inner.network.next_listener_id);
         inner.network.next_listener_id += 1;
 
@@ -418,7 +461,10 @@ impl SimWorld {
         connection_id: ConnectionId,
         buf: &mut [u8],
     ) -> SimulationResult<usize> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
 
         if let Some(connection) = inner.network.connections.get_mut(&connection_id) {
             let mut bytes_read = 0;
@@ -442,7 +488,10 @@ impl SimWorld {
         connection_id: ConnectionId,
         data: &[u8],
     ) -> SimulationResult<()> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
 
         if let Some(connection) = inner.network.connections.get_mut(&connection_id) {
             for &byte in data {
@@ -470,7 +519,10 @@ impl SimWorld {
             connection_id.0,
             data.len()
         );
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
 
         if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
             // Always add data to send buffer for TCP ordering
@@ -534,7 +586,10 @@ impl SimWorld {
         client_addr: String,
         server_addr: String,
     ) -> SimulationResult<(ConnectionId, ConnectionId)> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
 
         let client_id = ConnectionId(inner.network.next_connection_id);
         inner.network.next_connection_id += 1;
@@ -654,7 +709,10 @@ impl SimWorld {
         connection_id: ConnectionId,
         waker: Waker,
     ) -> SimulationResult<()> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         let is_replacement = inner.wakers.read_wakers.contains_key(&connection_id);
         inner.wakers.read_wakers.insert(connection_id, waker);
         tracing::debug!(
@@ -668,7 +726,10 @@ impl SimWorld {
 
     /// Register a waker for accept operations
     pub(crate) fn register_accept_waker(&self, addr: &str, waker: Waker) -> SimulationResult<()> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         // For simplicity, we'll use addr hash as listener ID for waker storage
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -686,7 +747,10 @@ impl SimWorld {
         addr: &str,
         connection_id: ConnectionId,
     ) -> SimulationResult<()> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         inner
             .network
             .pending_connections
@@ -708,7 +772,10 @@ impl SimWorld {
 
     /// Get a pending connection for accept() call
     pub(crate) fn pending_connection(&self, addr: &str) -> SimulationResult<Option<ConnectionId>> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         Ok(inner.network.pending_connections.remove(addr))
     }
 
@@ -721,7 +788,10 @@ impl SimWorld {
     /// The returned address may not be connectable for server-side connections,
     /// matching real TCP behavior where servers see client ephemeral ports.
     pub(crate) fn connection_peer_address(&self, connection_id: ConnectionId) -> Option<String> {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         inner
             .network
             .connections
@@ -749,7 +819,10 @@ impl SimWorld {
 
     /// Apply buggified delay to a duration if chaos is enabled.
     fn apply_buggified_delay(&self, duration: Duration) -> Duration {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         let chaos = &inner.network.config.chaos;
 
         if !chaos.buggified_delay_enabled || chaos.buggified_delay_max == Duration::ZERO {
@@ -773,7 +846,10 @@ impl SimWorld {
 
     /// Generate a unique task ID for sleep operations.
     fn generate_task_id(&self) -> u64 {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         let task_id = inner.next_task_id;
         inner.next_task_id += 1;
         task_id
@@ -790,13 +866,19 @@ impl SimWorld {
 
     /// Check if a task has been awakened.
     pub(crate) fn is_task_awake(&self, task_id: u64) -> SimulationResult<bool> {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         Ok(inner.awakened_tasks.contains(&task_id))
     }
 
     /// Register a waker for a task.
     pub(crate) fn register_task_waker(&self, task_id: u64, waker: Waker) -> SimulationResult<()> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         inner.wakers.task_wakers.insert(task_id, waker);
         Ok(())
     }
@@ -1345,7 +1427,10 @@ impl SimWorld {
     /// are aborted (RST semantics — peer sees ECONNRESET).
     pub fn abort_all_connections_for_ip(&self, ip: std::net::IpAddr) {
         let connection_ids: Vec<ConnectionId> = {
-            let inner = self.inner.borrow();
+            let inner = self
+                .inner
+                .read()
+                .expect("RwLock poisoned: prior task panicked");
             inner
                 .network
                 .connections
@@ -1391,12 +1476,19 @@ impl SimWorld {
     /// This is used by the orchestrator to detect `ProcessRestart` events
     /// and handle them (respawn the process).
     pub fn last_processed_event(&self) -> Option<Event> {
-        self.inner.borrow().last_processed_event.clone()
+        self.inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .last_processed_event
+            .clone()
     }
 
     /// Extract simulation metrics (simulated time, events processed).
     pub fn extract_metrics(&self) -> crate::runner::SimulationMetrics {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
 
         crate::runner::SimulationMetrics {
             wall_time: std::time::Duration::ZERO,
@@ -1409,7 +1501,10 @@ impl SimWorld {
 
     /// Check if a write should be clogged based on probability
     pub fn should_clog_write(&self, connection_id: ConnectionId) -> bool {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         let config = &inner.network.config;
 
         // Skip stable connections (FDB: stableConnection exempt from chaos)
@@ -1433,7 +1528,10 @@ impl SimWorld {
 
     /// Clog a connection's write operations
     pub fn clog_write(&self, connection_id: ConnectionId) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         let config = &inner.network.config;
 
         let clog_duration = crate::network::sample_duration(&config.chaos.clog_duration);
@@ -1457,7 +1555,10 @@ impl SimWorld {
 
     /// Check if a connection's writes are currently clogged
     pub fn is_write_clogged(&self, connection_id: ConnectionId) -> bool {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
 
         if let Some(clog_state) = inner.network.connection_clogs.get(&connection_id) {
             inner.current_time < clog_state.expires_at
@@ -1468,7 +1569,10 @@ impl SimWorld {
 
     /// Register a waker for when write clog clears
     pub fn register_clog_waker(&self, connection_id: ConnectionId, waker: Waker) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         inner
             .wakers
             .clog_wakers
@@ -1481,7 +1585,10 @@ impl SimWorld {
 
     /// Check if a read should be clogged based on probability
     pub fn should_clog_read(&self, connection_id: ConnectionId) -> bool {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         let config = &inner.network.config;
 
         // Skip stable connections (FDB: stableConnection exempt from chaos)
@@ -1505,7 +1612,10 @@ impl SimWorld {
 
     /// Clog a connection's read operations
     pub fn clog_read(&self, connection_id: ConnectionId) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         let config = &inner.network.config;
 
         let clog_duration = crate::network::sample_duration(&config.chaos.clog_duration);
@@ -1529,7 +1639,10 @@ impl SimWorld {
 
     /// Check if a connection's reads are currently clogged
     pub fn is_read_clogged(&self, connection_id: ConnectionId) -> bool {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
 
         if let Some(clog_state) = inner.network.read_clogs.get(&connection_id) {
             inner.current_time < clog_state.expires_at
@@ -1540,7 +1653,10 @@ impl SimWorld {
 
     /// Register a waker for when read clog clears
     pub fn register_read_clog_waker(&self, connection_id: ConnectionId, waker: Waker) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         inner
             .wakers
             .read_clog_wakers
@@ -1551,7 +1667,10 @@ impl SimWorld {
 
     /// Clear expired clogs and wake pending tasks
     pub fn clear_expired_clogs(&self) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         let now = inner.current_time;
         let expired: Vec<ConnectionId> = inner
             .network
@@ -1573,7 +1692,10 @@ impl SimWorld {
     /// A cut connection is temporarily unavailable but will be restored.
     /// This is different from `is_connection_closed` which indicates permanent closure.
     pub fn is_connection_cut(&self, connection_id: ConnectionId) -> bool {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         inner
             .network
             .connections
@@ -1588,7 +1710,10 @@ impl SimWorld {
 
     /// Register a waker for when a cut connection is restored.
     pub fn register_cut_waker(&self, connection_id: ConnectionId, waker: Waker) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         inner
             .wakers
             .cut_wakers
@@ -1601,7 +1726,10 @@ impl SimWorld {
 
     /// Get the send buffer capacity for a connection.
     pub fn send_buffer_capacity(&self, connection_id: ConnectionId) -> usize {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         inner
             .network
             .connections
@@ -1612,7 +1740,10 @@ impl SimWorld {
 
     /// Get the current send buffer usage for a connection.
     pub fn send_buffer_used(&self, connection_id: ConnectionId) -> usize {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         inner
             .network
             .connections
@@ -1630,7 +1761,10 @@ impl SimWorld {
 
     /// Register a waker for when send buffer space becomes available.
     pub fn register_send_buffer_waker(&self, connection_id: ConnectionId, waker: Waker) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         inner
             .wakers
             .send_buffer_wakers
@@ -1644,7 +1778,10 @@ impl SimWorld {
     /// Get the base latency for a connection pair.
     /// Returns the latency if already set, otherwise None.
     pub fn pair_latency(&self, src: IpAddr, dst: IpAddr) -> Option<Duration> {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         inner.network.pair_latencies.get(&(src, dst)).copied()
     }
 
@@ -1656,7 +1793,10 @@ impl SimWorld {
         dst: IpAddr,
         latency: Duration,
     ) -> Duration {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         *inner
             .network
             .pair_latencies
@@ -1675,7 +1815,10 @@ impl SimWorld {
     /// Get the base latency for a connection based on its IP pair.
     /// If not set, samples from config and sets it.
     pub fn connection_base_latency(&self, connection_id: ConnectionId) -> Duration {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         let (local_ip, remote_ip) = inner
             .network
             .connections
@@ -1705,7 +1848,10 @@ impl SimWorld {
     /// Get the send delay for a connection.
     /// Returns the per-connection override if set, otherwise None.
     pub fn send_delay(&self, connection_id: ConnectionId) -> Option<Duration> {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         inner
             .network
             .connections
@@ -1716,7 +1862,10 @@ impl SimWorld {
     /// Get the receive delay for a connection.
     /// Returns the per-connection override if set, otherwise None.
     pub fn recv_delay(&self, connection_id: ConnectionId) -> Option<Duration> {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         inner
             .network
             .connections
@@ -1726,7 +1875,10 @@ impl SimWorld {
 
     /// Check if a connection is permanently closed
     pub fn is_connection_closed(&self, connection_id: ConnectionId) -> bool {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         inner
             .network
             .connections
@@ -1750,7 +1902,10 @@ impl SimWorld {
 
     /// Get the close reason for a connection.
     pub fn close_reason(&self, connection_id: ConnectionId) -> CloseReason {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         inner
             .network
             .connections
@@ -1774,7 +1929,10 @@ impl SimWorld {
     /// and in-flight data. A `FinDelivery` event is scheduled after the last
     /// `DataDelivery` to signal EOF to the peer.
     fn close_connection_graceful(&self, connection_id: ConnectionId) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
 
         // Extract connection info
         let conn_info = inner.network.connections.get(&connection_id).map(|conn| {
@@ -1847,7 +2005,10 @@ impl SimWorld {
     /// Immediately sets `is_closed` on both endpoints. The peer will receive
     /// ECONNRESET on both read and write operations.
     fn close_connection_aborted(&self, connection_id: ConnectionId) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
 
         let paired_connection_id = inner
             .network
@@ -1906,7 +2067,10 @@ impl SimWorld {
         close_send: bool,
         close_recv: bool,
     ) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
 
         let paired_id = inner
             .network
@@ -1947,7 +2111,10 @@ impl SimWorld {
 
     /// Roll random close chaos injection (FDB rollRandomClose pattern)
     pub fn roll_random_close(&self, connection_id: ConnectionId) -> Option<bool> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         let config = &inner.network.config;
 
         // Skip stable connections (FDB: stableConnection exempt from chaos)
@@ -2035,7 +2202,10 @@ impl SimWorld {
 
     /// Check if a connection's send side is closed
     pub fn is_send_closed(&self, connection_id: ConnectionId) -> bool {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         inner
             .network
             .connections
@@ -2045,7 +2215,10 @@ impl SimWorld {
 
     /// Check if a connection's receive side is closed
     pub fn is_recv_closed(&self, connection_id: ConnectionId) -> bool {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         inner
             .network
             .connections
@@ -2058,7 +2231,10 @@ impl SimWorld {
     /// When true, `poll_read` should return EOF after draining the receive buffer.
     /// Distinct from `is_recv_closed` which is used for chaos/asymmetric closure.
     pub fn is_remote_fin_received(&self, connection_id: ConnectionId) -> bool {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         inner
             .network
             .connections
@@ -2070,7 +2246,10 @@ impl SimWorld {
 
     /// Check if a connection is in half-open state
     pub fn is_half_open(&self, connection_id: ConnectionId) -> bool {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         inner
             .network
             .connections
@@ -2080,7 +2259,10 @@ impl SimWorld {
 
     /// Check if a half-open connection should return errors now
     pub fn should_half_open_error(&self, connection_id: ConnectionId) -> bool {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         let current_time = inner.current_time;
         inner
             .network
@@ -2111,7 +2293,10 @@ impl SimWorld {
     /// Use this for parent-child process connections or supervision channels
     /// that should remain reliable even during chaos testing.
     pub fn mark_connection_stable(&self, connection_id: ConnectionId) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
             conn.is_stable = true;
             tracing::debug!("Connection {} marked as stable", connection_id.0);
@@ -2135,7 +2320,10 @@ impl SimWorld {
         to_ip: std::net::IpAddr,
         duration: Duration,
     ) -> SimulationResult<()> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         let expires_at = inner.current_time + duration;
 
         inner
@@ -2172,7 +2360,10 @@ impl SimWorld {
         ip: std::net::IpAddr,
         duration: Duration,
     ) -> SimulationResult<()> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         let expires_at = inner.current_time + duration;
 
         inner.network.send_partitions.insert(ip, expires_at);
@@ -2197,7 +2388,10 @@ impl SimWorld {
         ip: std::net::IpAddr,
         duration: Duration,
     ) -> SimulationResult<()> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         let expires_at = inner.current_time + duration;
 
         inner.network.recv_partitions.insert(ip, expires_at);
@@ -2222,7 +2416,10 @@ impl SimWorld {
         from_ip: std::net::IpAddr,
         to_ip: std::net::IpAddr,
     ) -> SimulationResult<()> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         inner.network.ip_partitions.remove(&(from_ip, to_ip));
         inner.emit_fault(SimFaultEvent::PartitionHealed {
             from: from_ip.to_string(),
@@ -2238,7 +2435,10 @@ impl SimWorld {
         from_ip: std::net::IpAddr,
         to_ip: std::net::IpAddr,
     ) -> SimulationResult<bool> {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         Ok(inner
             .network
             .is_partitioned(from_ip, to_ip, inner.current_time))
@@ -2379,7 +2579,7 @@ impl Default for SimWorld {
 /// a strong reference that would prevent cleanup.
 #[derive(Debug)]
 pub struct WeakSimWorld {
-    pub(crate) inner: Weak<RefCell<SimInner>>,
+    pub(crate) inner: Weak<RwLock<SimInner>>,
 }
 
 /// Macro to generate WeakSimWorld forwarding methods that wrap SimWorld results.

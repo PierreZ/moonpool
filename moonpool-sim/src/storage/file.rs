@@ -2,12 +2,11 @@
 
 use crate::sim::WeakSimWorld;
 use crate::sim::state::FileId;
-use async_trait::async_trait;
 use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use moonpool_core::StorageFile;
-use std::cell::Cell;
 use std::io::{self, SeekFrom};
 use std::pin::Pin;
+use std::sync::Mutex;
 use std::task::{Context, Poll};
 
 use super::futures::{SetLenFuture, SyncFuture};
@@ -20,10 +19,9 @@ use super::sim_shutdown_error;
 ///
 /// ## State Tracking
 ///
-/// The file tracks pending operations using `Cell`-based state:
+/// The file tracks pending operations under a `Mutex`:
 /// - `pending_read`: Active read operation (op_seq, offset, len)
 /// - `pending_write`: Active write operation (op_seq, bytes_written)
-/// - `seek_state`: Current seek state
 ///
 /// ## Polling Pattern
 ///
@@ -36,9 +34,9 @@ pub struct SimStorageFile {
     sim: WeakSimWorld,
     file_id: FileId,
     /// Pending read operation: (op_seq, offset, len)
-    pending_read: Cell<Option<(u64, u64, usize)>>,
+    pending_read: Mutex<Option<(u64, u64, usize)>>,
     /// Pending write operation: (op_seq, bytes_written)
-    pending_write: Cell<Option<(u64, usize)>>,
+    pending_write: Mutex<Option<(u64, usize)>>,
 }
 
 impl SimStorageFile {
@@ -47,31 +45,34 @@ impl SimStorageFile {
         Self {
             sim,
             file_id,
-            pending_read: Cell::new(None),
-            pending_write: Cell::new(None),
+            pending_read: Mutex::new(None),
+            pending_write: Mutex::new(None),
         }
     }
 }
 
-#[async_trait(?Send)]
 impl StorageFile for SimStorageFile {
-    async fn sync_all(&self) -> io::Result<()> {
-        SyncFuture::new(self.sim.clone(), self.file_id).await
+    fn sync_all(&self) -> impl std::future::Future<Output = io::Result<()>> + Send {
+        SyncFuture::new(self.sim.clone(), self.file_id)
     }
 
-    async fn sync_data(&self) -> io::Result<()> {
+    fn sync_data(&self) -> impl std::future::Future<Output = io::Result<()>> + Send {
         // Simulation treats sync_all and sync_data identically
-        SyncFuture::new(self.sim.clone(), self.file_id).await
+        SyncFuture::new(self.sim.clone(), self.file_id)
     }
 
-    async fn size(&self) -> io::Result<u64> {
-        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
-        sim.file_size(self.file_id)
-            .map_err(|e| io::Error::other(e.to_string()))
+    fn size(&self) -> impl std::future::Future<Output = io::Result<u64>> + Send {
+        let sim = self.sim.clone();
+        let file_id = self.file_id;
+        async move {
+            let sim = sim.upgrade().map_err(|_| sim_shutdown_error())?;
+            sim.file_size(file_id)
+                .map_err(|e| io::Error::other(e.to_string()))
+        }
     }
 
-    async fn set_len(&self, size: u64) -> io::Result<()> {
-        SetLenFuture::new(self.sim.clone(), self.file_id, size).await
+    fn set_len(&self, size: u64) -> impl std::future::Future<Output = io::Result<()>> + Send {
+        SetLenFuture::new(self.sim.clone(), self.file_id, size)
     }
 }
 
@@ -84,11 +85,18 @@ impl AsyncRead for SimStorageFile {
         let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Check for pending read operation
-        if let Some((op_seq, offset, len)) = self.pending_read.get() {
+        let pending = *self
+            .pending_read
+            .lock()
+            .expect("Mutex poisoned: prior task panicked");
+        if let Some((op_seq, offset, len)) = pending {
             // Check if operation is complete
             if sim.is_storage_op_complete(self.file_id, op_seq) {
                 // Clear pending state
-                self.pending_read.set(None);
+                *self
+                    .pending_read
+                    .lock()
+                    .expect("Mutex poisoned: prior task panicked") = None;
 
                 // Calculate how many bytes to actually read
                 let bytes_to_read = buf.len().min(len);
@@ -137,7 +145,10 @@ impl AsyncRead for SimStorageFile {
         let op_seq = sim.schedule_read(self.file_id, position, len)?;
 
         // Store pending state
-        self.pending_read.set(Some((op_seq, position, len)));
+        *self
+            .pending_read
+            .lock()
+            .expect("Mutex poisoned: prior task panicked") = Some((op_seq, position, len));
 
         // Register waker
         sim.register_storage_waker(self.file_id, op_seq, cx.waker().clone());
@@ -155,11 +166,18 @@ impl AsyncWrite for SimStorageFile {
         let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Check for pending write operation
-        if let Some((op_seq, bytes_written)) = self.pending_write.get() {
+        let pending = *self
+            .pending_write
+            .lock()
+            .expect("Mutex poisoned: prior task panicked");
+        if let Some((op_seq, bytes_written)) = pending {
             // Check if operation is complete
             if sim.is_storage_op_complete(self.file_id, op_seq) {
                 // Clear pending state
-                self.pending_write.set(None);
+                *self
+                    .pending_write
+                    .lock()
+                    .expect("Mutex poisoned: prior task panicked") = None;
 
                 // Update file position
                 let position = sim.file_position(self.file_id)?;
@@ -187,7 +205,10 @@ impl AsyncWrite for SimStorageFile {
         let op_seq = sim.schedule_write(self.file_id, position, buf.to_vec())?;
 
         // Store pending state
-        self.pending_write.set(Some((op_seq, buf.len())));
+        *self
+            .pending_write
+            .lock()
+            .expect("Mutex poisoned: prior task panicked") = Some((op_seq, buf.len()));
 
         // Register waker
         sim.register_storage_waker(self.file_id, op_seq, cx.waker().clone());

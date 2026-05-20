@@ -1,6 +1,5 @@
 //! Simulation time provider implementation.
 
-use async_trait::async_trait;
 use std::time::Duration;
 
 use moonpool_core::{TimeError, TimeProvider};
@@ -20,12 +19,17 @@ impl SimTimeProvider {
     }
 }
 
-#[async_trait(?Send)]
 impl TimeProvider for SimTimeProvider {
-    async fn sleep(&self, duration: Duration) -> Result<(), TimeError> {
-        let sleep_future = self.sim.sleep(duration).map_err(|_| TimeError::Shutdown)?;
-        let _ = sleep_future.await;
-        Ok(())
+    fn sleep(
+        &self,
+        duration: Duration,
+    ) -> impl std::future::Future<Output = Result<(), TimeError>> + Send {
+        let sim = self.sim.clone();
+        async move {
+            let sleep_future = sim.sleep(duration).map_err(|_| TimeError::Shutdown)?;
+            let _ = sleep_future.await;
+            Ok(())
+        }
     }
 
     fn now(&self) -> Duration {
@@ -39,17 +43,25 @@ impl TimeProvider for SimTimeProvider {
         self.sim.timer().unwrap_or(Duration::ZERO)
     }
 
-    async fn timeout<F, T>(&self, duration: Duration, future: F) -> Result<T, TimeError>
+    fn timeout<F, T>(
+        &self,
+        duration: Duration,
+        future: F,
+    ) -> impl std::future::Future<Output = Result<T, TimeError>> + Send
     where
-        F: std::future::Future<Output = T>,
+        F: std::future::Future<Output = T> + Send,
+        T: Send,
     {
-        let sleep_future = self.sim.sleep(duration).map_err(|_| TimeError::Shutdown)?;
+        let sim = self.sim.clone();
+        async move {
+            let sleep_future = sim.sleep(duration).map_err(|_| TimeError::Shutdown)?;
 
-        // Race the future against the timeout using tokio::select!
-        // Both futures respect simulation time through the event system
-        tokio::select! {
-            result = future => Ok(result),
-            _ = sleep_future => Err(TimeError::Elapsed),
+            // Race the future against the timeout using tokio::select!
+            // Both futures respect simulation time through the event system
+            tokio::select! {
+                result = future => Ok(result),
+                _ = sleep_future => Err(TimeError::Elapsed),
+            }
         }
     }
 }

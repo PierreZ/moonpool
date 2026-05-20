@@ -1,9 +1,10 @@
 //! Type-safe shared state for cross-workload mutable values.
 //!
-//! `StateHandle` provides a `Rc<RefCell<HashMap>>`-backed store using
-//! `Box<dyn Any>` so workloads can publish and consume typed values across
-//! tasks within a simulation iteration. It is **not** an event log — for
-//! event timelines and invariants see the [`crate::observability`] module.
+//! `StateHandle` provides an `Arc<RwLock<HashMap>>`-backed store using
+//! `Box<dyn Any + Send + Sync>` so workloads can publish and consume typed
+//! values across tasks within a simulation iteration. It is **not** an event
+//! log — for event timelines and invariants see the
+//! [`crate::observability`] module.
 //!
 //! # Usage
 //!
@@ -17,18 +18,17 @@
 //! ```
 
 use std::any::Any;
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::{Arc, RwLock};
 
 /// Shared state handle for cross-workload publish/get communication.
 ///
 /// Provides type-safe publish/get semantics using `std::any::Any` for type
-/// erasure. Clone is cheap (Rc-based) — all clones share the same underlying
+/// erasure. Clone is cheap (Arc-based) — all clones share the same underlying
 /// storage.
 #[derive(Clone, Default)]
 pub struct StateHandle {
-    inner: Rc<RefCell<HashMap<String, Box<dyn Any>>>>,
+    inner: Arc<RwLock<HashMap<String, Box<dyn Any + Send + Sync>>>>,
 }
 
 impl StateHandle {
@@ -38,18 +38,20 @@ impl StateHandle {
     }
 
     /// Publish a value under a key, replacing any existing value.
-    pub fn publish<T: Any + 'static>(&self, key: &str, value: T) {
+    pub fn publish<T: Any + Send + Sync + 'static>(&self, key: &str, value: T) {
         self.inner
-            .borrow_mut()
+            .write()
+            .expect("RwLock poisoned: prior task panicked")
             .insert(key.to_string(), Box::new(value));
     }
 
     /// Get a cloned copy of the value under a key, if it exists and matches the type.
     ///
     /// Returns `None` if the key doesn't exist or the type doesn't match.
-    pub fn get<T: Any + Clone + 'static>(&self, key: &str) -> Option<T> {
+    pub fn get<T: Any + Clone + Send + Sync + 'static>(&self, key: &str) -> Option<T> {
         self.inner
-            .borrow()
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
             .get(key)
             .and_then(|v| v.downcast_ref::<T>())
             .cloned()
@@ -57,13 +59,20 @@ impl StateHandle {
 
     /// Check whether a key exists in the state.
     pub fn contains(&self, key: &str) -> bool {
-        self.inner.borrow().contains_key(key)
+        self.inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .contains_key(key)
     }
 }
 
 impl std::fmt::Debug for StateHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let state_count = self.inner.borrow().len();
+        let state_count = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .len();
         f.debug_struct("StateHandle")
             .field("state_keys", &state_count)
             .finish()

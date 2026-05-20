@@ -3,9 +3,9 @@
 //! This module provides utilities for orchestrating workload execution
 //! and managing simulation iterations.
 
-use std::cell::Cell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::chaos::fault_events::{SIM_FAULT_TIMELINE, SimFaultEvent};
@@ -98,7 +98,7 @@ struct ProcessManager<'a> {
     tag_registry: TagRegistry,
     all_entities: Vec<(String, String)>,
     /// Count of currently dead (killed but not yet restarted) processes.
-    dead_count: Rc<Cell<usize>>,
+    dead_count: Arc<AtomicUsize>,
 }
 
 impl<'a> ProcessManager<'a> {
@@ -111,7 +111,7 @@ impl<'a> ProcessManager<'a> {
             ips: Vec::new(),
             tag_registry: TagRegistry::default(),
             all_entities: Vec::new(),
-            dead_count: Rc::new(Cell::new(0)),
+            dead_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -131,12 +131,12 @@ impl<'a> ProcessManager<'a> {
             ips,
             tag_registry,
             all_entities,
-            dead_count: Rc::new(Cell::new(0)),
+            dead_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     /// Get a shared reference to the dead process counter.
-    fn dead_count(&self) -> Rc<Cell<usize>> {
+    fn dead_count(&self) -> Arc<AtomicUsize> {
         self.dead_count.clone()
     }
 
@@ -157,9 +157,9 @@ impl<'a> ProcessManager<'a> {
         };
         if let Some(token) = &self.process_tokens[idx] {
             token.cancel();
-            self.dead_count.set(self.dead_count.get() + 1);
+            self.dead_count.fetch_add(1, Ordering::Relaxed);
             assert_always_less_than_or_equal_to!(
-                self.dead_count.get(),
+                self.dead_count.load(Ordering::Relaxed),
                 self.ips.len(),
                 "dead_count <= process_count"
             );
@@ -231,16 +231,16 @@ impl<'a> ProcessManager<'a> {
         let providers = crate::SimProviders::new(sim.clone(), seed, ip);
         let ctx = SimContext::new(providers, topology, state.clone(), obs.clone());
         let ip_for_log = ip_str.clone();
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             if let Err(e) = process.run(&ctx).await {
                 tracing::debug!("Restarted process at {} exited: {}", ip_for_log, e);
             }
         });
         self.handles[idx] = Some(handle);
         // Process is alive again
-        let current = self.dead_count.get();
+        let current = self.dead_count.load(Ordering::Relaxed);
         if current > 0 {
-            self.dead_count.set(current - 1);
+            self.dead_count.fetch_sub(1, Ordering::Relaxed);
         }
         assert_reachable!("process_manager: process restarted");
         tracing::info!("Process at {} restarted (index {})", ip_str, idx);
@@ -358,7 +358,7 @@ impl WorkloadOrchestrator {
                 let providers = crate::SimProviders::new(sim.downgrade(), seed, ip_addr);
                 let ctx = SimContext::new(providers, topology, state.clone(), obs.clone());
                 let ip_for_log = ip.clone();
-                let handle = tokio::task::spawn_local(async move {
+                let handle = tokio::spawn(async move {
                     if let Err(e) = process.run(&ctx).await {
                         tracing::debug!("Process at {} exited: {}", ip_for_log, e);
                     }
@@ -408,7 +408,7 @@ impl WorkloadOrchestrator {
         // === 2. SETUP PHASE (spawn_local + cooperative stepping) ===
         let mut setup_handles = Vec::new();
         for (workload, ctx) in workloads.into_iter().zip(contexts) {
-            let handle = tokio::task::spawn_local(async move {
+            let handle = tokio::spawn(async move {
                 let mut w = workload;
                 let result = w.setup(&ctx).await;
                 (w, ctx, result)
@@ -490,7 +490,7 @@ impl WorkloadOrchestrator {
                     sim.time_provider(),
                     chaos_shutdown.clone(),
                 );
-                let handle = tokio::task::spawn_local(async move {
+                let handle = tokio::spawn(async move {
                     let mut injector = fi;
                     let result = injector.inject(&fault_ctx).await;
                     (injector, result)
@@ -506,7 +506,7 @@ impl WorkloadOrchestrator {
         let mut workload_handles: Vec<Option<tokio::task::JoinHandle<WorkloadResult>>> =
             Vec::with_capacity(total_workloads);
         for (workload, ctx) in workloads.into_iter().zip(contexts) {
-            let handle = tokio::task::spawn_local(async move {
+            let handle = tokio::spawn(async move {
                 let mut w = workload;
                 let result = w.run(&ctx).await;
                 (w, result)
@@ -743,7 +743,7 @@ impl WorkloadOrchestrator {
 
         let mut check_handles = Vec::new();
         for (workload, ctx) in returned_workloads.into_iter().zip(check_contexts) {
-            let handle = tokio::task::spawn_local(async move {
+            let handle = tokio::spawn(async move {
                 let mut w = workload;
                 let result = w.check(&ctx).await;
                 if let Err(ref e) = result {

@@ -329,7 +329,10 @@ impl SimWorld {
     where
         F: FnOnce(&crate::storage::StorageConfiguration) -> R,
     {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         f(&inner.storage.config)
     }
 
@@ -347,7 +350,10 @@ impl SimWorld {
     ) -> Result<FileId, StorageError> {
         use crate::storage::InMemoryStorage;
 
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         let path_str = path.to_string();
 
         // Check create_new semantics - fail if file exists
@@ -428,7 +434,10 @@ impl SimWorld {
 
     /// Check if a file exists at the given path.
     pub(crate) fn file_exists(&self, path: &str) -> bool {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         let path_str = path.to_string();
         inner.storage.path_to_file.contains_key(&path_str)
             && !inner.storage.deleted_paths.contains(&path_str)
@@ -436,7 +445,10 @@ impl SimWorld {
 
     /// Delete a file at the given path.
     pub(crate) fn delete_file(&self, path: &str) -> Result<(), StorageError> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         let path_str = path.to_string();
 
         if let Some(file_id) = inner.storage.path_to_file.remove(&path_str) {
@@ -455,7 +467,10 @@ impl SimWorld {
 
     /// Rename a file from one path to another.
     pub(crate) fn rename_file(&self, from: &str, to: &str) -> Result<(), StorageError> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         let from_str = from.to_string();
         let to_str = to.to_string();
 
@@ -482,7 +497,10 @@ impl SimWorld {
         offset: u64,
         len: usize,
     ) -> Result<u64, StorageError> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
 
         let file_state = inner
             .storage
@@ -544,7 +562,10 @@ impl SimWorld {
         offset: u64,
         data: Vec<u8>,
     ) -> Result<u64, StorageError> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
 
         let file_state = inner
             .storage
@@ -602,7 +623,10 @@ impl SimWorld {
     ///
     /// Returns an operation sequence number that can be used to check completion.
     pub(crate) fn schedule_sync(&self, file_id: FileId) -> Result<u64, StorageError> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
 
         let file_state = inner
             .storage
@@ -657,7 +681,10 @@ impl SimWorld {
         file_id: FileId,
         new_len: u64,
     ) -> Result<u64, StorageError> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
 
         let file_state = inner
             .storage
@@ -711,7 +738,10 @@ impl SimWorld {
 
     /// Check if a storage operation is complete.
     pub(crate) fn is_storage_op_complete(&self, file_id: FileId, op_seq: u64) -> bool {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         if let Some(file_state) = inner.storage.files.get(&file_id) {
             // Operation is complete when it's no longer in pending_ops
             !file_state.pending_ops.contains_key(&op_seq)
@@ -725,13 +755,19 @@ impl SimWorld {
     ///
     /// Returns true if the sync failed due to fault injection.
     pub(crate) fn take_sync_failure(&self, file_id: FileId, op_seq: u64) -> bool {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         inner.storage.sync_failures.remove(&(file_id, op_seq))
     }
 
     /// Register a waker for a storage operation.
     pub(crate) fn register_storage_waker(&self, file_id: FileId, op_seq: u64, waker: Waker) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         inner.wakers.storage_wakers.insert((file_id, op_seq), waker);
     }
 
@@ -744,7 +780,10 @@ impl SimWorld {
         offset: u64,
         buf: &mut [u8],
     ) -> Result<usize, StorageError> {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
 
         let file_state = inner
             .storage
@@ -771,7 +810,10 @@ impl SimWorld {
 
     /// Get the current file position.
     pub(crate) fn file_position(&self, file_id: FileId) -> Result<u64, StorageError> {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         inner
             .storage
             .files
@@ -786,7 +828,10 @@ impl SimWorld {
         file_id: FileId,
         position: u64,
     ) -> Result<(), StorageError> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         if let Some(file_state) = inner.storage.files.get_mut(&file_id) {
             file_state.position = position;
             Ok(())
@@ -797,7 +842,10 @@ impl SimWorld {
 
     /// Get the size of a file.
     pub(crate) fn file_size(&self, file_id: FileId) -> Result<u64, StorageError> {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         inner
             .storage
             .files
@@ -842,7 +890,10 @@ impl SimWorld {
     /// Files owned by other IPs are unaffected.
     #[instrument(skip(self))]
     pub fn simulate_crash_for_process(&self, ip: IpAddr, close_files: bool) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         let crash_probability = inner.storage.config_for(ip).crash_fault_probability;
 
         // Collect all wakers to wake in one pass (to avoid borrow conflict)
@@ -904,7 +955,10 @@ impl SimWorld {
     /// Files owned by other IPs are unaffected.
     #[instrument(skip(self))]
     pub fn wipe_storage_for_process(&self, ip: IpAddr) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
 
         // Collect files owned by this IP
         let file_ids: Vec<(FileId, String)> = inner
@@ -951,7 +1005,10 @@ impl SimWorld {
         ip: IpAddr,
         config: crate::storage::StorageConfiguration,
     ) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         inner.storage.per_process_configs.insert(ip, config);
     }
 }

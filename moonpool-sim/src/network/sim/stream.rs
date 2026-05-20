@@ -2,7 +2,6 @@ use super::types::ConnectionId;
 use crate::TcpListenerTrait;
 use crate::sim::state::CloseReason;
 use crate::{Event, WeakSimWorld};
-use async_trait::async_trait;
 use futures::io::{AsyncRead, AsyncWrite};
 use std::{
     future::Future,
@@ -541,17 +540,17 @@ impl SimTcpListener {
     }
 }
 
-#[async_trait(?Send)]
 impl TcpListenerTrait for SimTcpListener {
     type TcpStream = SimTcpStream;
 
     #[instrument(skip(self))]
-    async fn accept(&self) -> io::Result<(Self::TcpStream, String)> {
+    fn accept(
+        &self,
+    ) -> impl std::future::Future<Output = io::Result<(Self::TcpStream, String)>> + Send {
         AcceptFuture {
             sim: self.sim.clone(),
             local_addr: self.local_addr.clone(),
         }
-        .await
     }
 
     fn local_addr(&self) -> io::Result<String> {
