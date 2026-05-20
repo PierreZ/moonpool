@@ -60,6 +60,7 @@ pub fn reset_always_violations() {
 }
 
 /// Check whether any always-type assertion was violated during this iteration.
+#[must_use]
 pub fn has_always_violations() -> bool {
     ALWAYS_VIOLATION_COUNT.with(|c| c.get() > 0)
 }
@@ -79,6 +80,7 @@ pub struct AssertionStats {
 
 impl AssertionStats {
     /// Create new assertion statistics starting at zero.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             total_checks: 0,
@@ -89,17 +91,20 @@ impl AssertionStats {
     /// Calculate the success rate as a percentage (0.0 to 100.0).
     ///
     /// Returns 0.0 if no checks have been performed yet.
+    #[must_use]
     pub fn success_rate(&self) -> f64 {
         if self.total_checks == 0 {
             0.0
         } else {
-            (self.successes as f64 / self.total_checks as f64) * 100.0
+            let successes_u32 = u32::try_from(self.successes).unwrap_or(u32::MAX);
+            let total_u32 = u32::try_from(self.total_checks).unwrap_or(u32::MAX);
+            (f64::from(successes_u32) / f64::from(total_u32)) * 100.0
         }
     }
 
     /// Record a new assertion check with the given result.
     ///
-    /// Increments total_checks and successes (if the result was true).
+    /// Increments `total_checks` and successes (if the result was true).
     pub fn record(&mut self, success: bool) {
         self.total_checks += 1;
         if success {
@@ -122,10 +127,24 @@ impl Default for AssertionStats {
 ///
 /// Used by assertion macros to produce human-readable context on failure.
 /// Output format: `key1=val1, key2=val2, ...`
+/// Saturating conversion to `i64` for numeric assertion macros.
+///
+/// Accepts any integer type that implements [`TryInto<i64>`]. Falls back to
+/// `i64::MAX` when the value is out of range. Mirrors the historical
+/// `as i64` cast used in numeric assertion macros without triggering
+/// `clippy::cast_*` lints at expansion sites.
+pub fn to_i64_saturating<T>(value: T) -> i64
+where
+    T: TryInto<i64>,
+{
+    value.try_into().unwrap_or(i64::MAX)
+}
+
+/// Format a list of named values for assertion failure messages.
 pub fn format_details(pairs: &[(&str, &dyn std::fmt::Display)]) -> String {
     pairs
         .iter()
-        .map(|(k, v)| format!("{}={}", k, v))
+        .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -171,7 +190,7 @@ pub fn on_assertion_sometimes_all(msg: impl AsRef<str>, named_bools: &[(&str, bo
 
 /// Notify the exploration framework of a per-value bucketed assertion.
 ///
-/// This delegates to moonpool-explorer's EachBucket infrastructure for
+/// This delegates to moonpool-explorer's `EachBucket` infrastructure for
 /// fork-based exploration with identity keys and quality watermarks.
 pub fn on_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&str, i64)]) {
     moonpool_explorer::assertion_sometimes_each(msg, keys, quality);
@@ -185,12 +204,14 @@ pub fn on_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&str, i64)
 ///
 /// Reads from shared memory assertion slots. Returns a snapshot of assertion
 /// results for reporting and validation.
+#[must_use]
 pub fn assertion_results() -> HashMap<String, AssertionStats> {
     let slots = moonpool_explorer::assertion_read_all();
     let mut results = HashMap::new();
 
     for slot in &slots {
-        let total = slot.pass_count.saturating_add(slot.fail_count) as usize;
+        let total =
+            usize::try_from(slot.pass_count.saturating_add(slot.fail_count)).unwrap_or(usize::MAX);
         if total == 0 {
             continue;
         }
@@ -198,7 +219,7 @@ pub fn assertion_results() -> HashMap<String, AssertionStats> {
             slot.msg.clone(),
             AssertionStats {
                 total_checks: total,
-                successes: slot.pass_count as usize,
+                successes: usize::try_from(slot.pass_count).unwrap_or(usize::MAX),
             },
         );
     }
@@ -234,11 +255,12 @@ pub fn reset_assertion_results() {
 /// Validate all assertion contracts based on their kind.
 ///
 /// Returns two vectors:
-/// - **always_violations**: Definite bugs — always-type assertions that failed,
+/// - **`always_violations`**: Definite bugs — always-type assertions that failed,
 ///   or unreachable code that was reached.  Safe to check with any iteration count.
-/// - **coverage_violations**: Statistical — sometimes-type assertions that were
+/// - **`coverage_violations`**: Statistical — sometimes-type assertions that were
 ///   never satisfied, or reachable code that was never reached.  Only meaningful
 ///   with enough iterations for statistical coverage.
+#[must_use]
 pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
     let mut always_violations = Vec::new();
     let mut coverage_violations = Vec::new();
@@ -481,8 +503,8 @@ macro_rules! assert_unreachable {
 macro_rules! assert_always_greater_than {
     ($val:expr, $thresh:expr, $message:expr) => {
         let __msg = $message;
-        let __v = $val as i64;
-        let __t = $thresh as i64;
+        let __v = $crate::chaos::assertions::to_i64_saturating($val);
+        let __t = $crate::chaos::assertions::to_i64_saturating($thresh);
         $crate::chaos::assertions::on_assertion_numeric(
             &__msg,
             __v,
@@ -497,8 +519,8 @@ macro_rules! assert_always_greater_than {
     };
     ($val:expr, $thresh:expr, $message:expr, { $($key:expr => $dval:expr),+ $(,)? }) => {
         let __msg = $message;
-        let __v = $val as i64;
-        let __t = $thresh as i64;
+        let __v = $crate::chaos::assertions::to_i64_saturating($val);
+        let __t = $crate::chaos::assertions::to_i64_saturating($thresh);
         $crate::chaos::assertions::on_assertion_numeric(
             &__msg,
             __v,
@@ -528,8 +550,8 @@ macro_rules! assert_always_greater_than {
 macro_rules! assert_always_greater_than_or_equal_to {
     ($val:expr, $thresh:expr, $message:expr) => {
         let __msg = $message;
-        let __v = $val as i64;
-        let __t = $thresh as i64;
+        let __v = $crate::chaos::assertions::to_i64_saturating($val);
+        let __t = $crate::chaos::assertions::to_i64_saturating($thresh);
         $crate::chaos::assertions::on_assertion_numeric(
             &__msg,
             __v,
@@ -544,8 +566,8 @@ macro_rules! assert_always_greater_than_or_equal_to {
     };
     ($val:expr, $thresh:expr, $message:expr, { $($key:expr => $dval:expr),+ $(,)? }) => {
         let __msg = $message;
-        let __v = $val as i64;
-        let __t = $thresh as i64;
+        let __v = $crate::chaos::assertions::to_i64_saturating($val);
+        let __t = $crate::chaos::assertions::to_i64_saturating($thresh);
         $crate::chaos::assertions::on_assertion_numeric(
             &__msg,
             __v,
@@ -575,8 +597,8 @@ macro_rules! assert_always_greater_than_or_equal_to {
 macro_rules! assert_always_less_than {
     ($val:expr, $thresh:expr, $message:expr) => {
         let __msg = $message;
-        let __v = $val as i64;
-        let __t = $thresh as i64;
+        let __v = $crate::chaos::assertions::to_i64_saturating($val);
+        let __t = $crate::chaos::assertions::to_i64_saturating($thresh);
         $crate::chaos::assertions::on_assertion_numeric(
             &__msg,
             __v,
@@ -591,8 +613,8 @@ macro_rules! assert_always_less_than {
     };
     ($val:expr, $thresh:expr, $message:expr, { $($key:expr => $dval:expr),+ $(,)? }) => {
         let __msg = $message;
-        let __v = $val as i64;
-        let __t = $thresh as i64;
+        let __v = $crate::chaos::assertions::to_i64_saturating($val);
+        let __t = $crate::chaos::assertions::to_i64_saturating($thresh);
         $crate::chaos::assertions::on_assertion_numeric(
             &__msg,
             __v,
@@ -622,8 +644,8 @@ macro_rules! assert_always_less_than {
 macro_rules! assert_always_less_than_or_equal_to {
     ($val:expr, $thresh:expr, $message:expr) => {
         let __msg = $message;
-        let __v = $val as i64;
-        let __t = $thresh as i64;
+        let __v = $crate::chaos::assertions::to_i64_saturating($val);
+        let __t = $crate::chaos::assertions::to_i64_saturating($thresh);
         $crate::chaos::assertions::on_assertion_numeric(
             &__msg,
             __v,
@@ -638,8 +660,8 @@ macro_rules! assert_always_less_than_or_equal_to {
     };
     ($val:expr, $thresh:expr, $message:expr, { $($key:expr => $dval:expr),+ $(,)? }) => {
         let __msg = $message;
-        let __v = $val as i64;
-        let __t = $thresh as i64;
+        let __v = $crate::chaos::assertions::to_i64_saturating($val);
+        let __t = $crate::chaos::assertions::to_i64_saturating($thresh);
         $crate::chaos::assertions::on_assertion_numeric(
             &__msg,
             __v,
@@ -668,9 +690,9 @@ macro_rules! assert_sometimes_greater_than {
     ($val:expr, $thresh:expr, $message:expr) => {
         $crate::chaos::assertions::on_assertion_numeric(
             &$message,
-            $val as i64,
+            $crate::chaos::assertions::to_i64_saturating($val),
             $crate::chaos::assertions::_re_export::AssertCmp::Gt,
-            $thresh as i64,
+            $crate::chaos::assertions::to_i64_saturating($thresh),
             $crate::chaos::assertions::_re_export::AssertKind::NumericSometimes,
             true,
         );
@@ -683,9 +705,9 @@ macro_rules! assert_sometimes_greater_than_or_equal_to {
     ($val:expr, $thresh:expr, $message:expr) => {
         $crate::chaos::assertions::on_assertion_numeric(
             &$message,
-            $val as i64,
+            $crate::chaos::assertions::to_i64_saturating($val),
             $crate::chaos::assertions::_re_export::AssertCmp::Ge,
-            $thresh as i64,
+            $crate::chaos::assertions::to_i64_saturating($thresh),
             $crate::chaos::assertions::_re_export::AssertKind::NumericSometimes,
             true,
         );
@@ -698,9 +720,9 @@ macro_rules! assert_sometimes_less_than {
     ($val:expr, $thresh:expr, $message:expr) => {
         $crate::chaos::assertions::on_assertion_numeric(
             &$message,
-            $val as i64,
+            $crate::chaos::assertions::to_i64_saturating($val),
             $crate::chaos::assertions::_re_export::AssertCmp::Lt,
-            $thresh as i64,
+            $crate::chaos::assertions::to_i64_saturating($thresh),
             $crate::chaos::assertions::_re_export::AssertKind::NumericSometimes,
             false,
         );
@@ -713,9 +735,9 @@ macro_rules! assert_sometimes_less_than_or_equal_to {
     ($val:expr, $thresh:expr, $message:expr) => {
         $crate::chaos::assertions::on_assertion_numeric(
             &$message,
-            $val as i64,
+            $crate::chaos::assertions::to_i64_saturating($val),
             $crate::chaos::assertions::_re_export::AssertCmp::Le,
-            $thresh as i64,
+            $crate::chaos::assertions::to_i64_saturating($thresh),
             $crate::chaos::assertions::_re_export::AssertKind::NumericSometimes,
             false,
         );
@@ -761,13 +783,17 @@ macro_rules! assert_sometimes_all {
 #[macro_export]
 macro_rules! assert_sometimes_each {
     ($msg:expr, [ $(($name:expr, $val:expr)),+ $(,)? ]) => {
-        $crate::chaos::assertions::on_sometimes_each($msg, &[ $(($name, $val as i64)),+ ], &[])
+        $crate::chaos::assertions::on_sometimes_each(
+            $msg,
+            &[ $(($name, $crate::chaos::assertions::to_i64_saturating($val))),+ ],
+            &[],
+        )
     };
     ($msg:expr, [ $(($name:expr, $val:expr)),+ $(,)? ], [ $(($qname:expr, $qval:expr)),+ $(,)? ]) => {
         $crate::chaos::assertions::on_sometimes_each(
             $msg,
-            &[ $(($name, $val as i64)),+ ],
-            &[ $(($qname, $qval as i64)),+ ],
+            &[ $(($name, $crate::chaos::assertions::to_i64_saturating($val))),+ ],
+            &[ $(($qname, $crate::chaos::assertions::to_i64_saturating($qval))),+ ],
         )
     };
 }
@@ -786,7 +812,7 @@ mod tests {
         let stats = AssertionStats::new();
         assert_eq!(stats.total_checks, 0);
         assert_eq!(stats.successes, 0);
-        assert_eq!(stats.success_rate(), 0.0);
+        assert!(stats.success_rate().abs() < f64::EPSILON);
     }
 
     #[test]
@@ -796,12 +822,12 @@ mod tests {
         stats.record(true);
         assert_eq!(stats.total_checks, 1);
         assert_eq!(stats.successes, 1);
-        assert_eq!(stats.success_rate(), 100.0);
+        assert!((stats.success_rate() - 100.0).abs() < f64::EPSILON);
 
         stats.record(false);
         assert_eq!(stats.total_checks, 2);
         assert_eq!(stats.successes, 1);
-        assert_eq!(stats.success_rate(), 50.0);
+        assert!((stats.success_rate() - 50.0).abs() < f64::EPSILON);
 
         stats.record(true);
         assert_eq!(stats.total_checks, 3);
@@ -813,13 +839,13 @@ mod tests {
     #[test]
     fn test_assertion_stats_success_rate_edge_cases() {
         let mut stats = AssertionStats::new();
-        assert_eq!(stats.success_rate(), 0.0);
+        assert!(stats.success_rate().abs() < f64::EPSILON);
 
         stats.record(false);
-        assert_eq!(stats.success_rate(), 0.0);
+        assert!(stats.success_rate().abs() < f64::EPSILON);
 
         stats.record(true);
-        assert_eq!(stats.success_rate(), 50.0);
+        assert!((stats.success_rate() - 50.0).abs() < f64::EPSILON);
     }
 
     #[test]

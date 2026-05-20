@@ -2,7 +2,7 @@
 //!
 //! Tests verify that buggified delays:
 //! - Follow FDB's pattern (sim2.actor.cpp:1100-1105) with 25% probability
-//! - Use power-law distribution: MAX_DELAY * pow(random01(), 1000.0)
+//! - Use power-law distribution: `MAX_DELAY` * `pow(random01()`, 1000.0)
 //! - Can be disabled via configuration
 //! - Add extra latency to sleep operations
 //! - Are deterministic across runs with the same seed
@@ -65,10 +65,7 @@ async fn test_buggified_delay_adds_latency() {
         "With buggified delay enabled, sleep should take at least the requested duration"
     );
 
-    println!(
-        "✅ Buggified delay added latency: requested={:?}, actual={:?}",
-        sleep_duration, elapsed
-    );
+    println!("✅ Buggified delay added latency: requested={sleep_duration:?}, actual={elapsed:?}");
 }
 
 /// Test power-law distribution behavior (mostly small delays, occasional large ones)
@@ -111,15 +108,13 @@ async fn test_buggified_delay_power_law_distribution() {
         .count();
 
     println!(
-        "Power-law distribution: {} small delays (<100µs), {} significant delays (>=1ms) out of 100",
-        small_delays, significant_delays
+        "Power-law distribution: {small_delays} small delays (<100µs), {significant_delays} significant delays (>=1ms) out of 100"
     );
 
     // With pow(random, 1000), most values should be tiny
     assert!(
         small_delays > 80,
-        "Power-law should produce mostly small delays, got {} small out of 100",
-        small_delays
+        "Power-law should produce mostly small delays, got {small_delays} small out of 100"
     );
 
     println!("✅ Power-law distribution behaves as expected");
@@ -201,7 +196,7 @@ async fn test_buggified_delay_zero_max() {
 
 /// Test interaction with default 25% probability
 /// Note: The power-law distribution pow(random, 1000) produces mostly near-zero delays,
-/// so we can't reliably count "affected" sleeps by checking elapsed > base_duration.
+/// so we can't reliably count "affected" sleeps by checking elapsed > `base_duration`.
 /// Instead, we verify the implementation doesn't crash and produces consistent behavior.
 #[tokio::test]
 async fn test_buggified_delay_default_probability() {
@@ -236,14 +231,13 @@ async fn test_buggified_delay_default_probability() {
     // With power-law distribution pow(random, 1000), most delays are near-zero
     // We just verify the system runs and produces some delays
     println!(
-        "With 25% probability: {} visible delays, total extra delay: {:?}",
-        affected_count, total_extra_delay
+        "With 25% probability: {affected_count} visible delays, total extra delay: {total_extra_delay:?}"
     );
 
     // Verify that at least the simulation ran correctly (all sleeps completed)
     // and we got some accumulated delay (even if individual delays are tiny)
     assert!(
-        sim.now() >= Duration::from_millis(1000), // 100 sleeps * 10ms = 1s minimum
+        sim.now() >= Duration::from_secs(1), // 100 sleeps * 10ms = 1s minimum
         "All sleeps should have completed"
     );
 

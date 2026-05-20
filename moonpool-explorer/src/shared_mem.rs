@@ -36,7 +36,7 @@ pub fn alloc_shared(size: usize) -> Result<*mut u8, io::Error> {
     if ptr == libc::MAP_FAILED {
         return Err(io::Error::last_os_error());
     }
-    Ok(ptr as *mut u8)
+    Ok(ptr.cast::<u8>())
 }
 
 /// Free shared memory allocated by [`alloc_shared`].
@@ -50,7 +50,7 @@ pub fn alloc_shared(size: usize) -> Result<*mut u8, io::Error> {
 #[cfg(unix)]
 pub unsafe fn free_shared(ptr: *mut u8, size: usize) {
     unsafe {
-        libc::munmap(ptr as *mut libc::c_void, size);
+        libc::munmap(ptr.cast::<libc::c_void>(), size);
     }
 }
 

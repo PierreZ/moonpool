@@ -33,6 +33,7 @@ impl std::error::Error for ParseTimelineError {}
 /// let recipe = vec![(42, 12345), (17, 67890)];
 /// assert_eq!(format_timeline(&recipe), "42@12345 -> 17@67890");
 /// ```
+#[must_use]
 pub fn format_timeline(recipe: &[(u64, u64)]) -> String {
     recipe
         .iter()

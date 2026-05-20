@@ -51,13 +51,13 @@ use syn::{
 pub fn service(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as ItemTrait);
 
-    match service_impl(item) {
+    match service_impl(&item) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
-fn service_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
+fn service_impl(item: &ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
     for trait_item in &item.items {
         if let TraitItem::Fn(method) = trait_item
             && let Some(FnArg::Receiver(recv)) = method.sig.inputs.first()
@@ -83,33 +83,40 @@ struct MethodInfo {
 /// Method index 0 is reserved for transport-level use; user methods start at 1.
 const METHOD_INDEX_OFFSET: u32 = 1;
 
-fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
-    let name = &item.ident;
-    let handler_name = format_ident!("{}Handler", name);
-
+/// Collect [`MethodInfo`] entries for every `fn` item in the trait.
+fn collect_method_infos(item: &ItemTrait) -> syn::Result<Vec<MethodInfo>> {
     let mut method_infos: Vec<MethodInfo> = Vec::new();
     for (index, trait_item) in item.items.iter().enumerate() {
         if let TraitItem::Fn(method) = trait_item {
             let (req_type, resp_type) = extract_method_types(&method.sig)?;
+            let idx = u32::try_from(index).expect("trait has more than u32::MAX methods");
             method_infos.push(MethodInfo {
-                index: (index as u32) + METHOD_INDEX_OFFSET,
+                index: idx + METHOD_INDEX_OFFSET,
                 name: method.sig.ident.clone(),
                 req_type,
                 resp_type,
             });
         }
     }
+    Ok(method_infos)
+}
 
-    let method_count = method_infos.len() as u32;
+/// Tokens for the per-method struct field declarations.
+fn struct_field_tokens(method_infos: &[MethodInfo]) -> Vec<proc_macro2::TokenStream> {
+    method_infos
+        .iter()
+        .map(|m| {
+            let name = &m.name;
+            let req_type = &m.req_type;
+            let resp_type = &m.resp_type;
+            quote! { pub #name: moonpool_transport::InterfaceMethod<#req_type, #resp_type> }
+        })
+        .collect()
+}
 
-    let struct_fields = method_infos.iter().map(|m| {
-        let name = &m.name;
-        let req_type = &m.req_type;
-        let resp_type = &m.resp_type;
-        quote! { pub #name: moonpool_transport::InterfaceMethod<#req_type, #resp_type> }
-    });
-
-    let init_at_fields: Vec<_> = method_infos
+/// Tokens for the local-mode initializers used by `init_at()`.
+fn init_at_field_tokens(method_infos: &[MethodInfo]) -> Vec<proc_macro2::TokenStream> {
+    method_infos
         .iter()
         .map(|m| {
             let name = &m.name;
@@ -120,11 +127,12 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
                 );
             }
         })
-        .collect();
+        .collect()
+}
 
-    let field_names: Vec<_> = method_infos.iter().map(|m| &m.name).collect();
-
-    let from_base_inits: Vec<_> = method_infos
+/// Tokens for the remote-mode initializers used by `from_base()`.
+fn from_base_init_tokens(method_infos: &[MethodInfo]) -> Vec<proc_macro2::TokenStream> {
+    method_infos
         .iter()
         .map(|m| {
             let name = &m.name;
@@ -142,15 +150,12 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
                 )
             }
         })
-        .collect();
+        .collect()
+}
 
-    let first_field_name = &method_infos[0].name;
-
-    let trait_vis = &item.vis;
-    let trait_items = &item.items;
-    let trait_name_snake = to_snake_case(&name.to_string());
-
-    let serve_close_handles: Vec<_> = method_infos
+/// Tokens for the per-method queue-close handles in `serve()`.
+fn serve_close_handle_tokens(method_infos: &[MethodInfo]) -> Vec<proc_macro2::TokenStream> {
+    method_infos
         .iter()
         .map(|m| {
             let method_name = &m.name;
@@ -159,9 +164,15 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
                 close_fns.push(Box::new(move || queue.close()));
             }
         })
-        .collect();
+        .collect()
+}
 
-    let serve_spawn_tasks: Vec<_> = method_infos
+/// Tokens for the per-method spawned task bodies in `serve()`.
+fn serve_spawn_task_tokens(
+    method_infos: &[MethodInfo],
+    trait_name_snake: &str,
+) -> Vec<proc_macro2::TokenStream> {
+    method_infos
         .iter()
         .map(|m| {
             let method_name = &m.name;
@@ -186,9 +197,19 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
                 }
             }
         })
-        .collect();
+        .collect()
+}
 
-    let expanded = quote! {
+/// Tokens for the handler trait and the interface struct declaration.
+fn handler_trait_and_struct_tokens(
+    item: &ItemTrait,
+    handler_name: &Ident,
+    struct_fields: &[proc_macro2::TokenStream],
+) -> proc_macro2::TokenStream {
+    let name = &item.ident;
+    let trait_vis = &item.vis;
+    let trait_items = &item.items;
+    quote! {
         #[async_trait::async_trait]
         #trait_vis trait #handler_name: Send + Sync + 'static {
             #(#trait_items)*
@@ -211,155 +232,191 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
             base_token: moonpool_transport::UID,
             address: moonpool_transport::NetworkAddress,
         }
+    }
+}
 
-        impl #name {
-            /// Number of methods in this interface.
-            pub const METHOD_COUNT: u32 = #method_count;
+/// Tokens for the server-side constructors (`init`, `init_at`, `well_known`).
+fn server_ctor_tokens(
+    method_count: u32,
+    init_at_fields: &[proc_macro2::TokenStream],
+    field_names: &[&Ident],
+) -> proc_macro2::TokenStream {
+    quote! {
+        /// Number of methods in this interface.
+        pub const METHOD_COUNT: u32 = #method_count;
 
-            /// Initialize the interface in server (local) mode.
-            ///
-            /// Allocates a dynamic base token from the transport. The codec is
-            /// taken from the transport (set at builder time).
-            #[must_use = "interface registers handlers; pass to serve() or store it"]
-            pub fn init<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
-                transport: &std::sync::Arc<moonpool_transport::NetTransport<P, C>>,
-            ) -> Self {
-                let base_token = transport.allocate_interface_token();
-                Self::init_at(transport, base_token)
-            }
+        /// Initialize the interface in server (local) mode.
+        ///
+        /// Allocates a dynamic base token from the transport. The codec is
+        /// taken from the transport (set at builder time).
+        #[must_use = "interface registers handlers; pass to serve() or store it"]
+        pub fn init<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
+            transport: &std::sync::Arc<moonpool_transport::NetTransport<P, C>>,
+        ) -> Self {
+            let base_token = transport.allocate_interface_token();
+            Self::init_at(transport, base_token)
+        }
 
-            /// Initialize at a specific base token in server (local) mode.
-            ///
-            /// Methods are registered at `base_token.adjusted(1)`, `.adjusted(2)`, etc.
-            #[must_use = "interface registers handlers; pass to serve() or store it"]
-            pub fn init_at<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
-                transport: &std::sync::Arc<moonpool_transport::NetTransport<P, C>>,
-                base_token: moonpool_transport::UID,
-            ) -> Self {
-                let address = transport.local_address().clone();
-                #(#init_at_fields)*
-                Self { #(#field_names,)* base_token, address }
-            }
+        /// Initialize at a specific base token in server (local) mode.
+        ///
+        /// Methods are registered at `base_token.adjusted(1)`, `.adjusted(2)`, etc.
+        #[must_use = "interface registers handlers; pass to serve() or store it"]
+        pub fn init_at<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
+            transport: &std::sync::Arc<moonpool_transport::NetTransport<P, C>>,
+            base_token: moonpool_transport::UID,
+        ) -> Self {
+            let address = transport.local_address().clone();
+            #(#init_at_fields)*
+            Self { #(#field_names,)* base_token, address }
+        }
 
-            /// Initialize at a well-known token in server (local) mode.
-            ///
-            /// Methods are registered at `UID::well_known(token_id).adjusted(1)`, etc.
-            #[must_use = "interface registers handlers; pass to serve() or store it"]
-            pub fn well_known<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
-                transport: &std::sync::Arc<moonpool_transport::NetTransport<P, C>>,
-                token_id: u32,
-            ) -> Self {
-                Self::init_at(transport, moonpool_transport::UID::well_known(token_id))
-            }
+        /// Initialize at a well-known token in server (local) mode.
+        ///
+        /// Methods are registered at `UID::well_known(token_id).adjusted(1)`, etc.
+        #[must_use = "interface registers handlers; pass to serve() or store it"]
+        pub fn well_known<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
+            transport: &std::sync::Arc<moonpool_transport::NetTransport<P, C>>,
+            token_id: u32,
+        ) -> Self {
+            Self::init_at(transport, moonpool_transport::UID::well_known(token_id))
+        }
+    }
+}
 
-            /// Create a client (remote mode) from a base token.
-            ///
-            /// Methods target `base_token.adjusted(1)`, `.adjusted(2)`, etc.
-            /// The codec is taken from the transport (set at builder time).
-            #[must_use = "client must be stored to issue requests"]
-            pub fn from_base<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
-                address: moonpool_transport::NetworkAddress,
-                base_token: moonpool_transport::UID,
-                transport: &std::sync::Arc<moonpool_transport::NetTransport<P, C>>,
-            ) -> Self {
-                let handle: std::sync::Arc<dyn moonpool_transport::TransportHandle> =
-                    transport.clone() as std::sync::Arc<dyn moonpool_transport::TransportHandle>;
-                let codec = transport.codec().clone();
-                Self {
-                    #(#from_base_inits,)*
-                    base_token,
-                    address,
-                }
-            }
-
-            /// Create a client (remote mode) from a well-known token.
-            ///
-            /// Methods target `UID::well_known(token_id).adjusted(1)`, etc.
-            #[must_use = "client must be stored to issue requests"]
-            pub fn client_well_known<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
-                address: moonpool_transport::NetworkAddress,
-                token_id: u32,
-                transport: &std::sync::Arc<moonpool_transport::NetTransport<P, C>>,
-            ) -> Self {
-                Self::from_base(address, moonpool_transport::UID::well_known(token_id), transport)
-            }
-
-            /// Get the base token for this interface instance.
-            ///
-            /// For server mode, serialize this for client discovery.
-            /// For client mode, this is the token received via discovery.
-            pub fn base_token(&self) -> moonpool_transport::UID {
-                self.base_token
-            }
-
-            /// Get the address this interface points to.
-            pub fn address(&self) -> &moonpool_transport::NetworkAddress {
-                &self.address
-            }
-
-            /// Returns `true` if this interface is in remote (client) mode.
-            pub fn is_remote(&self) -> bool {
-                self.#first_field_name.is_remote()
-            }
-
-            /// Deserialize an interface from `deserializer` and bind it to `transport`.
-            ///
-            /// The wire format is `{ address, base_token }` (see the matching
-            /// [`Serialize`](serde::Serialize) impl). Each method's endpoint is
-            /// reconstructed via `base_token.adjusted(idx)` — the same offset
-            /// scheme used by [`from_base()`](Self::from_base).
-            ///
-            /// Standard [`Deserialize`](serde::Deserialize) cannot be used because
-            /// building each method's [`ServiceEndpoint`](moonpool_transport::ServiceEndpoint)
-            /// requires the concrete codec type carried by `transport`.
-            ///
-            /// # Errors
-            ///
-            /// Returns the deserializer's error if the wire format is invalid.
-            pub fn deserialize_with<'__de, __P, __C, __D>(
-                transport: &std::sync::Arc<moonpool_transport::NetTransport<__P, __C>>,
-                deserializer: __D,
-            ) -> Result<Self, __D::Error>
-            where
-                __P: moonpool_transport::Providers,
-                __C: moonpool_transport::MessageCodec,
-                __D: serde::Deserializer<'__de>,
-            {
-                #[derive(serde::Deserialize)]
-                struct __Wire {
-                    address: moonpool_transport::NetworkAddress,
-                    base_token: moonpool_transport::UID,
-                }
-                let wire = __Wire::deserialize(deserializer)?;
-                Ok(Self::from_base(wire.address, wire.base_token, transport))
-            }
-
-            /// Consume this interface and spawn handler tasks for all methods.
-            ///
-            /// Each method gets its own task that loops on `recv()` and dispatches
-            /// to the handler. Returns a [`ServerHandle`](moonpool_transport::ServerHandle)
-            /// that stops all tasks when dropped.
-            ///
-            /// # Panics
-            ///
-            /// Panics if called on a remote-mode interface.
-            pub fn serve<H, P: moonpool_transport::Providers>(
-                self,
-                handler: std::sync::Arc<H>,
-                providers: &P,
-            ) -> moonpool_transport::ServerHandle
-            where
-                H: #handler_name + 'static,
-            {
-                assert!(!self.is_remote(), "serve() requires a local-mode interface");
-                use moonpool_transport::TaskProvider as _;
-                let mut close_fns: Vec<Box<dyn Fn() + Send + Sync>> = Vec::new();
-                #(#serve_close_handles)*
-                #(#serve_spawn_tasks)*
-                moonpool_transport::ServerHandle::new(close_fns)
+/// Tokens for the client-side constructors (`from_base`, `client_well_known`).
+fn client_ctor_tokens(from_base_inits: &[proc_macro2::TokenStream]) -> proc_macro2::TokenStream {
+    quote! {
+        /// Create a client (remote mode) from a base token.
+        ///
+        /// Methods target `base_token.adjusted(1)`, `.adjusted(2)`, etc.
+        /// The codec is taken from the transport (set at builder time).
+        #[must_use = "client must be stored to issue requests"]
+        pub fn from_base<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
+            address: moonpool_transport::NetworkAddress,
+            base_token: moonpool_transport::UID,
+            transport: &std::sync::Arc<moonpool_transport::NetTransport<P, C>>,
+        ) -> Self {
+            let handle: std::sync::Arc<dyn moonpool_transport::TransportHandle> =
+                transport.clone() as std::sync::Arc<dyn moonpool_transport::TransportHandle>;
+            let codec = transport.codec().clone();
+            Self {
+                #(#from_base_inits,)*
+                base_token,
+                address,
             }
         }
 
+        /// Create a client (remote mode) from a well-known token.
+        ///
+        /// Methods target `UID::well_known(token_id).adjusted(1)`, etc.
+        #[must_use = "client must be stored to issue requests"]
+        pub fn client_well_known<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
+            address: moonpool_transport::NetworkAddress,
+            token_id: u32,
+            transport: &std::sync::Arc<moonpool_transport::NetTransport<P, C>>,
+        ) -> Self {
+            Self::from_base(address, moonpool_transport::UID::well_known(token_id), transport)
+        }
+    }
+}
+
+/// Tokens for the accessor methods (`base_token`, `address`, `is_remote`).
+fn accessor_tokens(first_field_name: &Ident) -> proc_macro2::TokenStream {
+    quote! {
+        /// Get the base token for this interface instance.
+        ///
+        /// For server mode, serialize this for client discovery.
+        /// For client mode, this is the token received via discovery.
+        pub fn base_token(&self) -> moonpool_transport::UID {
+            self.base_token
+        }
+
+        /// Get the address this interface points to.
+        pub fn address(&self) -> &moonpool_transport::NetworkAddress {
+            &self.address
+        }
+
+        /// Returns `true` if this interface is in remote (client) mode.
+        pub fn is_remote(&self) -> bool {
+            self.#first_field_name.is_remote()
+        }
+    }
+}
+
+/// Tokens for the `deserialize_with` method.
+fn deserialize_with_tokens() -> proc_macro2::TokenStream {
+    quote! {
+        /// Deserialize an interface from `deserializer` and bind it to `transport`.
+        ///
+        /// The wire format is `{ address, base_token }` (see the matching
+        /// [`Serialize`](serde::Serialize) impl). Each method's endpoint is
+        /// reconstructed via `base_token.adjusted(idx)` — the same offset
+        /// scheme used by [`from_base()`](Self::from_base).
+        ///
+        /// Standard [`Deserialize`](serde::Deserialize) cannot be used because
+        /// building each method's [`ServiceEndpoint`](moonpool_transport::ServiceEndpoint)
+        /// requires the concrete codec type carried by `transport`.
+        ///
+        /// # Errors
+        ///
+        /// Returns the deserializer's error if the wire format is invalid.
+        pub fn deserialize_with<'__de, __P, __C, __D>(
+            transport: &std::sync::Arc<moonpool_transport::NetTransport<__P, __C>>,
+            deserializer: __D,
+        ) -> Result<Self, __D::Error>
+        where
+            __P: moonpool_transport::Providers,
+            __C: moonpool_transport::MessageCodec,
+            __D: serde::Deserializer<'__de>,
+        {
+            #[derive(serde::Deserialize)]
+            struct __Wire {
+                address: moonpool_transport::NetworkAddress,
+                base_token: moonpool_transport::UID,
+            }
+            let wire = __Wire::deserialize(deserializer)?;
+            Ok(Self::from_base(wire.address, wire.base_token, transport))
+        }
+    }
+}
+
+/// Tokens for the `serve` method body.
+fn serve_method_tokens(
+    handler_name: &Ident,
+    serve_close_handles: &[proc_macro2::TokenStream],
+    serve_spawn_tasks: &[proc_macro2::TokenStream],
+) -> proc_macro2::TokenStream {
+    quote! {
+        /// Consume this interface and spawn handler tasks for all methods.
+        ///
+        /// Each method gets its own task that loops on `recv()` and dispatches
+        /// to the handler. Returns a [`ServerHandle`](moonpool_transport::ServerHandle)
+        /// that stops all tasks when dropped.
+        ///
+        /// # Panics
+        ///
+        /// Panics if called on a remote-mode interface.
+        pub fn serve<H, P: moonpool_transport::Providers>(
+            self,
+            handler: std::sync::Arc<H>,
+            providers: &P,
+        ) -> moonpool_transport::ServerHandle
+        where
+            H: #handler_name + 'static,
+        {
+            assert!(!self.is_remote(), "serve() requires a local-mode interface");
+            use moonpool_transport::TaskProvider as _;
+            let mut close_fns: Vec<Box<dyn Fn() + Send + Sync>> = Vec::new();
+            #(#serve_close_handles)*
+            #(#serve_spawn_tasks)*
+            moonpool_transport::ServerHandle::new(close_fns)
+        }
+    }
+}
+
+/// Tokens for the `serde::Serialize` impl on the interface struct.
+fn serialize_impl_tokens(name: &Ident) -> proc_macro2::TokenStream {
+    quote! {
         impl serde::Serialize for #name {
             fn serialize<__S>(&self, serializer: __S) -> Result<__S::Ok, __S::Error>
             where
@@ -372,9 +429,48 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
                 state.end()
             }
         }
-    };
+    }
+}
 
-    Ok(expanded)
+fn interface_impl(item: &ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
+    let name = &item.ident;
+    let handler_name = format_ident!("{}Handler", name);
+
+    let method_infos = collect_method_infos(item)?;
+    let method_count =
+        u32::try_from(method_infos.len()).expect("trait has more than u32::MAX methods");
+
+    let struct_fields = struct_field_tokens(&method_infos);
+    let init_at_fields = init_at_field_tokens(&method_infos);
+    let field_names: Vec<_> = method_infos.iter().map(|m| &m.name).collect();
+    let from_base_inits = from_base_init_tokens(&method_infos);
+    let first_field_name = &method_infos[0].name;
+
+    let trait_name_snake = to_snake_case(&name.to_string());
+    let serve_close_handles = serve_close_handle_tokens(&method_infos);
+    let serve_spawn_tasks = serve_spawn_task_tokens(&method_infos, &trait_name_snake);
+
+    let trait_and_struct = handler_trait_and_struct_tokens(item, &handler_name, &struct_fields);
+    let server_ctors = server_ctor_tokens(method_count, &init_at_fields, &field_names);
+    let client_ctors = client_ctor_tokens(&from_base_inits);
+    let accessors = accessor_tokens(first_field_name);
+    let deserialize_with = deserialize_with_tokens();
+    let serve_method = serve_method_tokens(&handler_name, &serve_close_handles, &serve_spawn_tasks);
+    let serialize_impl = serialize_impl_tokens(name);
+
+    Ok(quote! {
+        #trait_and_struct
+
+        impl #name {
+            #server_ctors
+            #client_ctors
+            #accessors
+            #deserialize_with
+            #serve_method
+        }
+
+        #serialize_impl
+    })
 }
 
 /// Extract request and response types from `async fn name(&self, req: ReqType) -> Result<RespType, RpcError>`.
@@ -428,7 +524,7 @@ fn extract_result_ok_type(ty: &Type) -> syn::Result<Type> {
     ))
 }
 
-/// Convert a PascalCase name to snake_case.
+/// Convert a `PascalCase` name to `snake_case`.
 fn to_snake_case(s: &str) -> String {
     let mut result = String::new();
     for (i, c) in s.chars().enumerate() {

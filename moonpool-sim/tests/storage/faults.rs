@@ -43,7 +43,7 @@ fn local_runtime() -> tokio::runtime::Runtime {
         .expect("Failed to build local runtime")
 }
 
-/// Create a SimWorld with fast storage configuration.
+/// Create a `SimWorld` with fast storage configuration.
 fn fast_sim() -> SimWorld {
     let mut sim = SimWorld::new();
     sim.set_storage_config(StorageConfiguration::fast_local());
@@ -260,10 +260,7 @@ fn test_phantom_write_fault() {
         let expected = b"this data should be lost";
         let all_zeros = data.iter().all(|&b| b == 0);
 
-        println!(
-            "Phantom write result: {:?} (all zeros: {})",
-            data, all_zeros
-        );
+        println!("Phantom write result: {data:?} (all zeros: {all_zeros})");
 
         // Either empty, all zeros, or not matching expected
         assert!(
@@ -357,7 +354,7 @@ fn test_crash_torn_writes() {
         }
 
         let exists = handle2.await.expect("task panicked").expect("io error");
-        println!("File exists after crash: {}", exists);
+        println!("File exists after crash: {exists}");
         // The file may or may not exist depending on implementation
     });
 }
@@ -420,7 +417,7 @@ fn test_mixed_low_fault_probabilities() {
 
         for i in 0..100 {
             let provider = sim.storage_provider(test_ip());
-            let filename = format!("mixed_{}.txt", i);
+            let filename = format!("mixed_{i}.txt");
 
             // Try write
             let handle = tokio::spawn(async move {
@@ -448,7 +445,7 @@ fn test_mixed_low_fault_probabilities() {
             // Try read (if write succeeded)
             if write_successes > read_successes + read_failures {
                 let provider2 = sim.storage_provider(test_ip());
-                let filename = format!("mixed_{}.txt", i);
+                let filename = format!("mixed_{i}.txt");
                 let handle2 = tokio::spawn(async move {
                     let mut file = provider2.open(&filename, OpenOptions::read_only()).await?;
                     let mut buf = Vec::new();
@@ -512,14 +509,14 @@ fn test_combined_fault_types() {
             let mut results = Vec::new();
 
             for i in 0..20 {
-                let filename = format!("combined_{}.txt", i);
+                let filename = format!("combined_{i}.txt");
 
                 // Write
                 let write_result = async {
                     let mut file = provider
                         .open(&filename, OpenOptions::create_write())
                         .await?;
-                    file.write_all(format!("Data {}", i).as_bytes()).await?;
+                    file.write_all(format!("Data {i}").as_bytes()).await?;
                     file.sync_all().await?;
                     Ok::<_, std::io::Error>(())
                 }
@@ -556,10 +553,7 @@ fn test_combined_fault_types() {
         let writes_ok = results.iter().filter(|(w, _)| *w).count();
         let reads_ok = results.iter().filter(|(_, r)| *r).count();
 
-        println!(
-            "Combined faults: {} writes OK, {} reads OK out of 20",
-            writes_ok, reads_ok
-        );
+        println!("Combined faults: {writes_ok} writes OK, {reads_ok} reads OK out of 20");
 
         // With combined 10-20% fault rates, expect mixed results
         // Not all should fail, not all should succeed
@@ -591,7 +585,7 @@ fn test_fault_determinism_same_seed() {
         let handle = tokio::spawn(async move {
             let mut results = Vec::new();
             for i in 0..10 {
-                let filename = format!("det_{}.txt", i);
+                let filename = format!("det_{i}.txt");
 
                 // Create file first
                 let mut file = provider
@@ -635,7 +629,7 @@ fn test_fault_determinism_same_seed() {
         let handle = tokio::spawn(async move {
             let mut results = Vec::new();
             for i in 0..10 {
-                let filename = format!("det_{}.txt", i);
+                let filename = format!("det_{i}.txt");
 
                 let mut file = provider
                     .open(&filename, OpenOptions::create_write())
@@ -667,8 +661,8 @@ fn test_fault_determinism_same_seed() {
 
         let results2 = handle.await.expect("task panicked");
 
-        println!("Run 1: {:?}", results1);
-        println!("Run 2: {:?}", results2);
+        println!("Run 1: {results1:?}");
+        println!("Run 2: {results2:?}");
 
         assert_eq!(
             results1, results2,
@@ -698,7 +692,7 @@ fn test_fault_injection_produces_mixed_results() {
             let original_data = b"testdata";
 
             for i in 0..20 {
-                let filename = format!("mixed_{}.txt", i);
+                let filename = format!("mixed_{i}.txt");
 
                 let mut file = provider
                     .open(&filename, OpenOptions::create_write())
@@ -716,10 +710,10 @@ fn test_fault_injection_produces_mixed_results() {
                 let mut buf = vec![0u8; original_data.len()];
                 file.read_exact(&mut buf).await.expect("read failed");
 
-                if buf != original_data {
-                    corrupted_count += 1;
-                } else {
+                if buf == original_data {
                     intact_count += 1;
+                } else {
+                    corrupted_count += 1;
                 }
             }
             (corrupted_count, intact_count)
@@ -734,10 +728,7 @@ fn test_fault_injection_produces_mixed_results() {
 
         let (corrupted, intact) = handle.await.expect("task panicked");
 
-        println!(
-            "Fault injection results: {} corrupted, {} intact out of 20",
-            corrupted, intact
-        );
+        println!("Fault injection results: {corrupted} corrupted, {intact} intact out of 20");
 
         // With 50% fault probability over 20 operations, we should see
         // a mix of corrupted and intact reads (not all one or the other)
@@ -801,8 +792,8 @@ fn test_corruption_content_deterministic() {
         let corrupted1 = run_corruption_test().await;
         let corrupted2 = run_corruption_test().await;
 
-        println!("Corruption 1: {:?}", corrupted1);
-        println!("Corruption 2: {:?}", corrupted2);
+        println!("Corruption 1: {corrupted1:?}");
+        println!("Corruption 2: {corrupted2:?}");
 
         assert_eq!(
             corrupted1, corrupted2,
@@ -897,7 +888,7 @@ fn test_per_process_storage_config_isolation() {
     });
 }
 
-/// Test that simulate_crash_for_process only affects the targeted process.
+/// Test that `simulate_crash_for_process` only affects the targeted process.
 #[test]
 fn test_simulate_crash_for_process_isolation() {
     local_runtime().block_on(async {
@@ -966,7 +957,7 @@ fn test_simulate_crash_for_process_isolation() {
     });
 }
 
-/// Test that wipe_storage_for_process only deletes files for the targeted process.
+/// Test that `wipe_storage_for_process` only deletes files for the targeted process.
 #[test]
 fn test_wipe_storage_for_process() {
     local_runtime().block_on(async {

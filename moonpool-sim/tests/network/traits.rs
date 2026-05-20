@@ -72,7 +72,7 @@ fn test_provider_default() {
         // This should work without issues
         let listener = provider.bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        println!("Bound to {}", addr);
+        println!("Bound to {addr}");
     });
 }
 
@@ -96,8 +96,8 @@ fn test_provider_clone() {
         let addr1 = listener1.local_addr().unwrap();
         let addr2 = listener2.local_addr().unwrap();
 
-        println!("Provider 1 bound to {}", addr1);
-        println!("Provider 2 bound to {}", addr2);
+        println!("Provider 1 bound to {addr1}");
+        println!("Provider 2 bound to {addr2}");
 
         // Addresses should be different since they're on different ports
         assert_ne!(addr1, addr2);

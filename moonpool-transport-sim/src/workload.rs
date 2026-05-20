@@ -120,6 +120,7 @@ pub struct TransportClientWorkload {
 
 impl TransportClientWorkload {
     /// Create a new workload with the given instance index.
+    #[must_use]
     pub fn new(index: usize) -> Self {
         Self { index }
     }
@@ -127,7 +128,7 @@ impl TransportClientWorkload {
 
 #[async_trait]
 impl Workload for TransportClientWorkload {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "transport-client"
     }
 
@@ -321,7 +322,7 @@ impl Workload for TransportClientWorkload {
                             let time = ctx.providers().time().clone();
                             let result: Option<Result<EchoResponse, ReplyError>> = tokio::select! {
                                 r = reply_future => Some(r),
-                                _ = shutdown.cancelled() => {
+                                () = shutdown.cancelled() => {
                                     tracing::debug!(seq_id, "at_least_once drain timeout");
                                     None
                                 }
@@ -387,7 +388,7 @@ impl Workload for TransportClientWorkload {
                     let server_addr = parse_sim_addr(&server)?;
                     let endpoint = Endpoint::new(server_addr, echo_method_uid(method));
 
-                    let timeout_ms = sim_random_range(100..10_000) as u64;
+                    let timeout_ms = sim_random_range(100u64..10_000);
                     let timeout_dur = Duration::from_millis(timeout_ms);
 
                     let req = EchoRequest {
@@ -476,18 +477,17 @@ impl Workload for TransportClientWorkload {
                         method: 99,
                     };
 
-                    match try_get_reply(&*transport, &endpoint, req, &encode, decode.clone()).await
+                    if try_get_reply(&*transport, &endpoint, req, &encode, decode.clone())
+                        .await
+                        .is_ok()
                     {
-                        Ok(_) => {
-                            assert_always!(false, "wrong_endpoint_should_not_succeed");
-                        }
-                        Err(_) => {
-                            assert_sometimes!(true, "wrong_endpoint_returns_error");
-                            stats
-                                .write()
-                                .expect("RwLock poisoned: prior task panicked")
-                                .endpoint_not_found += 1;
-                        }
+                        assert_always!(false, "wrong_endpoint_should_not_succeed");
+                    } else {
+                        assert_sometimes!(true, "wrong_endpoint_returns_error");
+                        stats
+                            .write()
+                            .expect("RwLock poisoned: prior task panicked")
+                            .endpoint_not_found += 1;
                     }
                 }
 
@@ -498,10 +498,9 @@ impl Workload for TransportClientWorkload {
                     let server_addr = parse_sim_addr(&server)?;
                     let endpoint = Endpoint::new(server_addr, echo_method_uid(METHOD_ECHO));
 
-                    let burst_size = sim_random_range(50..500);
+                    let burst_size = sim_random_range(50u64..500);
                     for burst_i in 0..burst_size {
-                        let burst_seq =
-                            (client_id as u64) * 1_000_000 + seq_counter + burst_i as u64 + 1;
+                        let burst_seq = (client_id as u64) * 1_000_000 + seq_counter + burst_i + 1;
                         let req = EchoRequest {
                             seq_id: burst_seq,
                             client_id,
@@ -510,16 +509,16 @@ impl Workload for TransportClientWorkload {
                         };
                         let _ = get_reply(&*transport, &endpoint, req, &encode, decode.clone());
                     }
-                    seq_counter += burst_size as u64;
+                    seq_counter += burst_size;
                     stats
                         .write()
                         .expect("RwLock poisoned: prior task panicked")
-                        .at_least_once_sent += burst_size as u64;
+                        .at_least_once_sent += burst_size;
                     assert_sometimes!(true, "reliable_burst_sent");
                 }
 
                 Op::SmallDelay => {
-                    let delay_ms = sim_random_range(1..50) as u64;
+                    let delay_ms = sim_random_range(1u64..50);
                     let _ = ctx
                         .providers()
                         .time()
@@ -545,7 +544,7 @@ impl Workload for TransportClientWorkload {
             .read()
             .expect("RwLock poisoned: prior task panicked")
             .clone();
-        let key = format!("transport_stats_{}", client_id);
+        let key = format!("transport_stats_{client_id}");
         ctx.state().publish(&key, final_stats);
 
         tracing::info!(client_id, "workload finished");
@@ -562,12 +561,12 @@ impl Workload for TransportClientWorkload {
 
         let amo_entries = ctx.timeline::<DeliveryEvent>(TL_AT_MOST_ONCE);
         let mut sent = std::collections::HashSet::new();
-        for entry in amo_entries.iter() {
+        for entry in &amo_entries {
             if let DeliveryEvent::Sent { seq_id, .. } = &entry.event {
                 sent.insert(*seq_id);
             }
         }
-        for entry in amo_entries.iter() {
+        for entry in &amo_entries {
             match &entry.event {
                 DeliveryEvent::Replied { seq_id }
                 | DeliveryEvent::MaybeDelivered { seq_id }

@@ -19,7 +19,7 @@ fn test_basic_simulation_bind() {
         let addr = listener.local_addr().unwrap();
         assert_eq!(addr, "test-addr");
 
-        println!("Successfully bound to {}", addr);
+        println!("Successfully bound to {addr}");
     });
 }
 
@@ -98,8 +98,7 @@ fn test_deterministic_simulation_behavior() {
         for (i, &time) in execution_times.iter().enumerate() {
             assert_eq!(
                 time, first_time,
-                "Run {} produced different timing than first run. Expected: {:?}, Got: {:?}",
-                i, first_time, time
+                "Run {i} produced different timing than first run. Expected: {first_time:?}, Got: {time:?}"
             );
         }
 
@@ -109,6 +108,15 @@ fn test_deterministic_simulation_behavior() {
             first_time
         );
     });
+}
+
+/// Test that `SimNetworkProvider` can be used generically.
+async fn use_provider_generically<P: NetworkProvider>(
+    provider: P,
+    addr: &str,
+) -> std::io::Result<String> {
+    let listener = provider.bind(addr).await?;
+    listener.local_addr()
 }
 
 #[test]
@@ -124,20 +132,11 @@ fn test_network_provider_trait_usage() {
         let sim = SimWorld::new();
         let provider = sim.network_provider();
 
-        // Test that SimNetworkProvider can be used generically
-        async fn use_provider_generically<P: NetworkProvider>(
-            provider: P,
-            addr: &str,
-        ) -> std::io::Result<String> {
-            let listener = provider.bind(addr).await?;
-            listener.local_addr()
-        }
-
         let addr = use_provider_generically(provider, "dynamic-test")
             .await
             .unwrap();
         assert_eq!(addr, "dynamic-test");
 
-        println!("Generic provider usage successful: bound to {}", addr);
+        println!("Generic provider usage successful: bound to {addr}");
     });
 }

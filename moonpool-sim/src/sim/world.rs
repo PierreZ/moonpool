@@ -1,6 +1,6 @@
 //! Core simulation world and coordination logic.
 //!
-//! This module provides the central SimWorld coordinator that manages time,
+//! This module provides the central `SimWorld` coordinator that manages time,
 //! event processing, and network simulation state.
 
 use std::{
@@ -26,7 +26,7 @@ use super::{
     rng::{reset_sim_rng, set_sim_seed, sim_random, sim_random_range},
     sleep::SleepFuture,
     state::{
-        ClogState, CloseReason, ConnectionState, ListenerState, NetworkState, PartitionState,
+        ClogState, CloseReason, ConnectionFlags, ConnectionState, NetworkState, PartitionState,
         StorageState,
     },
     wakers::WakerRegistry,
@@ -36,8 +36,8 @@ use super::{
 #[derive(Debug)]
 pub(crate) struct SimInner {
     pub(crate) current_time: Duration,
-    /// Drifted timer time (can be ahead of current_time)
-    /// FDB ref: sim2.actor.cpp:1058-1064 - timer() drifts 0-0.1s ahead of now()
+    /// Drifted timer time (can be ahead of `current_time`)
+    /// FDB ref: sim2.actor.cpp:1058-1064 - `timer()` drifts 0-0.1s ahead of `now()`
     pub(crate) timer_time: Duration,
     pub(crate) event_queue: EventQueue,
     pub(crate) next_sequence: u64,
@@ -107,13 +107,13 @@ impl SimInner {
     /// payload; production subscribers see structured fields and a `Debug`
     /// payload.
     pub(crate) fn emit_fault(&self, event: SimFaultEvent) {
-        let time_ms = self.current_time.as_millis() as u64;
+        let time_ms = u64::try_from(self.current_time.as_millis()).unwrap_or(u64::MAX);
         crate::sim_emit!(SIM_FAULT_TIMELINE, time_ms, "sim", event);
     }
 
     /// Calculate the number of bits to flip using a power-law distribution.
     ///
-    /// Uses the formula: 32 - floor(log2(random_value))
+    /// Uses the formula: 32 - `floor(log2(random_value))`
     /// This creates a power-law distribution biased toward fewer bits:
     /// - 1-2 bits: very common
     /// - 16 bits: uncommon
@@ -165,6 +165,7 @@ impl SimWorld {
     ///
     /// Uses default seed (0) for reproducible testing. For custom seeds,
     /// use [`SimWorld::new_with_seed`].
+    #[must_use]
     pub fn new() -> Self {
         Self::create(None, 0)
     }
@@ -177,11 +178,13 @@ impl SimWorld {
     /// # Parameters
     ///
     /// * `seed` - The seed value for deterministic randomness
+    #[must_use]
     pub fn new_with_seed(seed: u64) -> Self {
         Self::create(None, seed)
     }
 
     /// Creates a new simulation world with custom network configuration.
+    #[must_use]
     pub fn new_with_network_config(network_config: NetworkConfiguration) -> Self {
         Self::create(Some(network_config), 0)
     }
@@ -192,6 +195,7 @@ impl SimWorld {
     ///
     /// * `network_config` - Network configuration for latency and fault simulation
     /// * `seed` - The seed value for deterministic randomness
+    #[must_use]
     pub fn new_with_network_config_and_seed(
         network_config: NetworkConfiguration,
         seed: u64,
@@ -203,6 +207,10 @@ impl SimWorld {
     ///
     /// Returns `true` if more events are available for processing,
     /// `false` if this was the last event or if no events are available.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     #[instrument(skip(self))]
     pub fn step(&mut self) -> bool {
         let mut inner = self
@@ -241,6 +249,10 @@ impl SimWorld {
     /// This method processes all workload-related events but stops early if only infrastructure
     /// events (like connection restoration) remain. This prevents infinite loops where
     /// infrastructure events keep the simulation running indefinitely after workloads complete.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     #[instrument(skip(self))]
     pub fn run_until_empty(&mut self) {
         while self.step() {
@@ -269,6 +281,11 @@ impl SimWorld {
     }
 
     /// Returns the current simulation time.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn current_time(&self) -> Duration {
         self.inner
             .read()
@@ -276,10 +293,15 @@ impl SimWorld {
             .current_time
     }
 
-    /// Returns the exact simulation time (equivalent to FDB's now()).
+    /// Returns the exact simulation time (equivalent to FDB's `now()`).
     ///
     /// This is the canonical simulation time used for scheduling events.
     /// Use this for precise time comparisons and scheduling.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn now(&self) -> Duration {
         self.inner
             .read()
@@ -287,7 +309,7 @@ impl SimWorld {
             .current_time
     }
 
-    /// Returns the drifted timer time (equivalent to FDB's timer()).
+    /// Returns the drifted timer time (equivalent to FDB's `timer()`).
     ///
     /// The timer can be up to `clock_drift_max` (default 100ms) ahead of `now()`.
     /// This simulates real-world clock drift between processes, which is important
@@ -301,6 +323,11 @@ impl SimWorld {
     /// FDB formula: `timerTime += random01() * (time + 0.1 - timerTime) / 2.0`
     ///
     /// FDB ref: sim2.actor.cpp:1058-1064
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn timer(&self) -> Duration {
         let mut inner = self
             .inner
@@ -321,7 +348,10 @@ impl SimWorld {
         // Only advance if timer is behind max
         if inner.timer_time < max_timer {
             let random_factor = sim_random::<f64>(); // 0.0 to 1.0
-            let gap = (max_timer - inner.timer_time).as_secs_f64();
+            let gap = max_timer
+                .checked_sub(inner.timer_time)
+                .expect("timer_time < max_timer was just checked")
+                .as_secs_f64();
             let delta = random_factor * gap / 2.0;
             inner.timer_time += Duration::from_secs_f64(delta);
         }
@@ -333,6 +363,10 @@ impl SimWorld {
     }
 
     /// Schedules an event to execute after the specified delay from the current time.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     #[instrument(skip(self))]
     pub fn schedule_event(&self, event: Event, delay: Duration) {
         let mut inner = self
@@ -348,6 +382,10 @@ impl SimWorld {
     }
 
     /// Schedules an event to execute at the specified absolute time.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     pub fn schedule_event_at(&self, event: Event, time: Duration) {
         let mut inner = self
             .inner
@@ -364,6 +402,7 @@ impl SimWorld {
     ///
     /// Weak references can be used to access the simulation without preventing
     /// it from being dropped, enabling handle-based access patterns.
+    #[must_use]
     pub fn downgrade(&self) -> WeakSimWorld {
         WeakSimWorld {
             inner: Arc::downgrade(&self.inner),
@@ -371,6 +410,11 @@ impl SimWorld {
     }
 
     /// Returns `true` if there are events waiting to be processed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn has_pending_events(&self) -> bool {
         !self
             .inner
@@ -381,6 +425,11 @@ impl SimWorld {
     }
 
     /// Returns the number of events waiting to be processed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn pending_event_count(&self) -> usize {
         self.inner
             .read()
@@ -390,21 +439,25 @@ impl SimWorld {
     }
 
     /// Create a network provider for this simulation
+    #[must_use]
     pub fn network_provider(&self) -> SimNetworkProvider {
         SimNetworkProvider::new(self.downgrade())
     }
 
     /// Create a time provider for this simulation
+    #[must_use]
     pub fn time_provider(&self) -> crate::providers::SimTimeProvider {
         crate::providers::SimTimeProvider::new(self.downgrade())
     }
 
     /// Create a task provider for this simulation
+    #[must_use]
     pub fn task_provider(&self) -> crate::TokioTaskProvider {
         crate::TokioTaskProvider
     }
 
     /// Create a storage provider for this simulation scoped to a process IP.
+    #[must_use]
     pub fn storage_provider(&self, ip: std::net::IpAddr) -> crate::storage::SimStorageProvider {
         crate::storage::SimStorageProvider::new(self.downgrade(), ip)
     }
@@ -412,6 +465,10 @@ impl SimWorld {
     /// Set the default storage configuration for this simulation.
     ///
     /// Used as fallback when no per-process config is set for a given IP.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     pub fn set_storage_config(&mut self, config: crate::storage::StorageConfiguration) {
         self.inner
             .write()
@@ -427,6 +484,10 @@ impl SimWorld {
     /// using the thread-local RNG functions like `sim_random()`.
     ///
     /// Access the network configuration for this simulation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     pub fn with_network_config<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&NetworkConfiguration) -> R,
@@ -438,8 +499,8 @@ impl SimWorld {
         f(&inner.network.config)
     }
 
-    /// Create a listener in the simulation (used by SimNetworkProvider)
-    pub(crate) fn create_listener(&self) -> SimulationResult<ListenerId> {
+    /// Create a listener in the simulation (used by `SimNetworkProvider`)
+    pub(crate) fn create_listener(&self) -> ListenerId {
         let mut inner = self
             .inner
             .write()
@@ -447,15 +508,12 @@ impl SimWorld {
         let listener_id = ListenerId(inner.network.next_listener_id);
         inner.network.next_listener_id += 1;
 
-        inner
-            .network
-            .listeners
-            .insert(listener_id, ListenerState {});
+        inner.network.listeners.insert(listener_id);
 
-        Ok(listener_id)
+        listener_id
     }
 
-    /// Read data from connection's receive buffer (used by SimTcpStream)
+    /// Read data from connection's receive buffer (used by `SimTcpStream`)
     pub(crate) fn read_from_connection(
         &self,
         connection_id: ConnectionId,
@@ -482,7 +540,7 @@ impl SimWorld {
         }
     }
 
-    /// Write data to connection's receive buffer (used by SimTcpStream write operations)
+    /// Write data to connection's receive buffer (used by `SimTcpStream` write operations)
     pub(crate) fn write_to_connection(
         &self,
         connection_id: ConnectionId,
@@ -533,11 +591,15 @@ impl SimWorld {
             );
 
             // If sender is not already active, start processing the buffer
-            if !conn.send_in_progress {
+            if conn.flags.send_in_progress() {
+                tracing::debug!(
+                    "buffer_send: sender already in progress, not scheduling new event"
+                );
+            } else {
                 tracing::debug!(
                     "buffer_send: sender not in progress, scheduling ProcessSendBuffer event"
                 );
-                conn.send_in_progress = true;
+                conn.flags.set_send_in_progress(true);
 
                 // Schedule immediate processing of the buffer
                 let scheduled_time = inner.current_time + std::time::Duration::ZERO;
@@ -556,10 +618,6 @@ impl SimWorld {
                     "buffer_send: scheduled ProcessSendBuffer event with sequence {}",
                     sequence
                 );
-            } else {
-                tracing::debug!(
-                    "buffer_send: sender already in progress, not scheduling new event"
-                );
             }
 
             Ok(())
@@ -577,45 +635,51 @@ impl SimWorld {
     /// Create a bidirectional TCP connection pair for client-server communication.
     ///
     /// FDB Pattern (sim2.actor.cpp:1149-1175):
-    /// - Client connection stores server's real address as peer_address
+    /// - Client connection stores server's real address as `peer_address`
     /// - Server connection stores synthesized ephemeral address (random IP + port 40000-60000)
     ///
     /// This simulates real TCP behavior where servers see client ephemeral ports.
     pub(crate) fn create_connection_pair(
         &self,
-        client_addr: String,
-        server_addr: String,
-    ) -> SimulationResult<(ConnectionId, ConnectionId)> {
+        client_addr: &str,
+        server_addr: &str,
+    ) -> (ConnectionId, ConnectionId) {
+        // Default send buffer capacity (Bandwidth-Delay Product); 64 KB is
+        // typical for TCP socket buffers. Real simulations could compute
+        // this as max_latency_ms * bandwidth_bytes_per_ms.
+        const DEFAULT_SEND_BUFFER_CAPACITY: usize = 64 * 1024;
+
         let mut inner = self
             .inner
             .write()
             .expect("RwLock poisoned: prior task panicked");
 
-        let client_id = ConnectionId(inner.network.next_connection_id);
+        let client_conn = ConnectionId(inner.network.next_connection_id);
         inner.network.next_connection_id += 1;
 
-        let server_id = ConnectionId(inner.network.next_connection_id);
+        let server_conn = ConnectionId(inner.network.next_connection_id);
         inner.network.next_connection_id += 1;
 
         // Capture current time to avoid borrow conflicts
         let current_time = inner.current_time;
 
         // Parse IP addresses for partition tracking
-        let client_ip = NetworkState::parse_ip_from_addr(&client_addr);
-        let server_ip = NetworkState::parse_ip_from_addr(&server_addr);
+        let client_endpoint = NetworkState::parse_ip_from_addr(client_addr);
+        let server_endpoint = NetworkState::parse_ip_from_addr(server_addr);
 
         // FDB Pattern: Synthesize ephemeral address for server-side connection
         // sim2.actor.cpp:1149-1175: randomInt(0,256) for IP offset, randomInt(40000,60000) for port
         // Use thread-local sim_random_range for deterministic randomness
-        let ephemeral_peer_addr = match client_ip {
+        let ephemeral_peer_addr = match client_endpoint {
             Some(std::net::IpAddr::V4(ipv4)) => {
                 let octets = ipv4.octets();
-                let ip_offset = sim_random_range(0u32..256) as u8;
+                let ip_offset =
+                    u8::try_from(sim_random_range(0u32..256)).expect("range bounded to u8");
                 let new_last_octet = octets[3].wrapping_add(ip_offset);
                 let ephemeral_ip =
                     std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], new_last_octet);
                 let ephemeral_port = sim_random_range(40000u16..60000);
-                format!("{}:{}", ephemeral_ip, ephemeral_port)
+                format!("{ephemeral_ip}:{ephemeral_port}")
             }
             Some(std::net::IpAddr::V6(ipv6)) => {
                 // For IPv6, just modify the last segment
@@ -625,128 +689,101 @@ impl SimWorld {
                 new_segments[7] = new_segments[7].wrapping_add(ip_offset);
                 let ephemeral_ip = std::net::Ipv6Addr::from(new_segments);
                 let ephemeral_port = sim_random_range(40000u16..60000);
-                format!("[{}]:{}", ephemeral_ip, ephemeral_port)
+                format!("[{ephemeral_ip}]:{ephemeral_port}")
             }
             None => {
                 // Fallback: use client address with random port
                 let ephemeral_port = sim_random_range(40000u16..60000);
-                format!("unknown:{}", ephemeral_port)
+                format!("unknown:{ephemeral_port}")
             }
         };
 
-        // Calculate send buffer capacity based on BDP (Bandwidth-Delay Product)
-        // Using a default of 64KB which is typical for TCP socket buffers
-        // In real simulations this could be: max_latency_ms * bandwidth_bytes_per_ms
-        const DEFAULT_SEND_BUFFER_CAPACITY: usize = 64 * 1024; // 64KB
-
-        // Create paired connections
+        // Create paired connections.
         // Client stores server's real address as peer_address
         inner.network.connections.insert(
-            client_id,
+            client_conn,
             ConnectionState {
-                local_ip: client_ip,
-                remote_ip: server_ip,
-                peer_address: server_addr.clone(),
+                local_ip: client_endpoint,
+                remote_ip: server_endpoint,
+                peer_address: server_addr.to_owned(),
                 receive_buffer: VecDeque::new(),
-                paired_connection: Some(server_id),
+                paired_connection: Some(server_conn),
                 send_buffer: VecDeque::new(),
-                send_in_progress: false,
                 next_send_time: current_time,
-                is_closed: false,
-                send_closed: false,
-                recv_closed: false,
-                is_cut: false,
+                flags: ConnectionFlags::default(),
                 cut_expiry: None,
                 close_reason: CloseReason::None,
                 send_buffer_capacity: DEFAULT_SEND_BUFFER_CAPACITY,
                 send_delay: None,
                 recv_delay: None,
-                is_half_open: false,
                 half_open_error_at: None,
-                is_stable: false,
-                graceful_close_pending: false,
                 last_data_delivery_scheduled_at: None,
-                remote_fin_received: false,
             },
         );
 
         // Server stores synthesized ephemeral address as peer_address
         inner.network.connections.insert(
-            server_id,
+            server_conn,
             ConnectionState {
-                local_ip: server_ip,
-                remote_ip: client_ip,
+                local_ip: server_endpoint,
+                remote_ip: client_endpoint,
                 peer_address: ephemeral_peer_addr,
                 receive_buffer: VecDeque::new(),
-                paired_connection: Some(client_id),
+                paired_connection: Some(client_conn),
                 send_buffer: VecDeque::new(),
-                send_in_progress: false,
                 next_send_time: current_time,
-                is_closed: false,
-                send_closed: false,
-                recv_closed: false,
-                is_cut: false,
+                flags: ConnectionFlags::default(),
                 cut_expiry: None,
                 close_reason: CloseReason::None,
                 send_buffer_capacity: DEFAULT_SEND_BUFFER_CAPACITY,
                 send_delay: None,
                 recv_delay: None,
-                is_half_open: false,
                 half_open_error_at: None,
-                is_stable: false,
-                graceful_close_pending: false,
                 last_data_delivery_scheduled_at: None,
-                remote_fin_received: false,
             },
         );
 
-        Ok((client_id, server_id))
+        (client_conn, server_conn)
     }
 
     /// Register a waker for read operations
-    pub(crate) fn register_read_waker(
-        &self,
-        connection_id: ConnectionId,
-        waker: Waker,
-    ) -> SimulationResult<()> {
+    pub(crate) fn register_read_waker(&self, connection_id: ConnectionId, waker: Waker) {
         let mut inner = self
             .inner
             .write()
             .expect("RwLock poisoned: prior task panicked");
-        let is_replacement = inner.wakers.read_wakers.contains_key(&connection_id);
-        inner.wakers.read_wakers.insert(connection_id, waker);
+        let is_replacement = inner.wakers.reads.contains_key(&connection_id);
+        inner.wakers.reads.insert(connection_id, waker);
         tracing::debug!(
             "register_read_waker: connection_id={}, replacement={}, total_wakers={}",
             connection_id.0,
             is_replacement,
-            inner.wakers.read_wakers.len()
+            inner.wakers.reads.len()
         );
-        Ok(())
     }
 
     /// Register a waker for accept operations
-    pub(crate) fn register_accept_waker(&self, addr: &str, waker: Waker) -> SimulationResult<()> {
+    pub(crate) fn register_accept_waker(&self, addr: &str, waker: Waker) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
         let mut inner = self
             .inner
             .write()
             .expect("RwLock poisoned: prior task panicked");
         // For simplicity, we'll use addr hash as listener ID for waker storage
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
         addr.hash(&mut hasher);
         let listener_key = ListenerId(hasher.finish());
 
-        inner.wakers.listener_wakers.insert(listener_key, waker);
-        Ok(())
+        inner.wakers.listeners.insert(listener_key, waker);
     }
 
-    /// Store a pending connection for later accept() call
-    pub(crate) fn store_pending_connection(
-        &self,
-        addr: &str,
-        connection_id: ConnectionId,
-    ) -> SimulationResult<()> {
+    /// Store a pending connection for later `accept()` call
+    pub(crate) fn store_pending_connection(&self, addr: &str, connection_id: ConnectionId) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
         let mut inner = self
             .inner
             .write()
@@ -757,26 +794,22 @@ impl SimWorld {
             .insert(addr.to_string(), connection_id);
 
         // Wake any accept() calls waiting for this connection
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
         addr.hash(&mut hasher);
         let listener_key = ListenerId(hasher.finish());
 
-        if let Some(waker) = inner.wakers.listener_wakers.remove(&listener_key) {
+        if let Some(waker) = inner.wakers.listeners.remove(&listener_key) {
             waker.wake();
         }
-
-        Ok(())
     }
 
-    /// Get a pending connection for accept() call
-    pub(crate) fn pending_connection(&self, addr: &str) -> SimulationResult<Option<ConnectionId>> {
+    /// Get a pending connection for `accept()` call
+    pub(crate) fn pending_connection(&self, addr: &str) -> Option<ConnectionId> {
         let mut inner = self
             .inner
             .write()
             .expect("RwLock poisoned: prior task panicked");
-        Ok(inner.network.pending_connections.remove(addr))
+        inner.network.pending_connections.remove(addr)
     }
 
     /// Get the peer address for a connection.
@@ -865,25 +898,24 @@ impl SimWorld {
     }
 
     /// Check if a task has been awakened.
-    pub(crate) fn is_task_awake(&self, task_id: u64) -> SimulationResult<bool> {
+    pub(crate) fn is_task_awake(&self, task_id: u64) -> bool {
         let inner = self
             .inner
             .read()
             .expect("RwLock poisoned: prior task panicked");
-        Ok(inner.awakened_tasks.contains(&task_id))
+        inner.awakened_tasks.contains(&task_id)
     }
 
     /// Register a waker for a task.
-    pub(crate) fn register_task_waker(&self, task_id: u64, waker: Waker) -> SimulationResult<()> {
+    pub(crate) fn register_task_waker(&self, task_id: u64, waker: Waker) {
         let mut inner = self
             .inner
             .write()
             .expect("RwLock poisoned: prior task panicked");
-        inner.wakers.task_wakers.insert(task_id, waker);
-        Ok(())
+        inner.wakers.tasks.insert(task_id, waker);
     }
 
-    /// Clear expired clogs and wake pending tasks (helper for use with SimInner)
+    /// Clear expired clogs and wake pending tasks (helper for use with `SimInner`)
     fn clear_expired_clogs_with_inner(inner: &mut SimInner) {
         let now = inner.current_time;
         let expired: Vec<ConnectionId> = inner
@@ -895,7 +927,7 @@ impl SimWorld {
 
         for id in expired {
             inner.network.connection_clogs.remove(&id);
-            Self::wake_all(&mut inner.wakers.clog_wakers, id);
+            Self::wake_all(&mut inner.wakers.write_clogs, id);
         }
     }
 
@@ -912,7 +944,7 @@ impl SimWorld {
                 operation,
             } => Self::handle_network_event(inner, connection_id, operation),
             Event::Storage { file_id, operation } => {
-                super::storage_ops::handle_storage_event(inner, file_id, operation)
+                super::storage_ops::handle_storage_event(inner, file_id, operation);
             }
             Event::Shutdown => Self::handle_shutdown_event(inner),
             Event::ProcessRestart { ip }
@@ -928,7 +960,7 @@ impl SimWorld {
     /// Handle timer events - wake sleeping tasks.
     fn handle_timer_event(inner: &mut SimInner, task_id: u64) {
         inner.awakened_tasks.insert(task_id);
-        if let Some(waker) = inner.wakers.task_wakers.remove(&task_id) {
+        if let Some(waker) = inner.wakers.tasks.remove(&task_id) {
             waker.wake();
         }
     }
@@ -943,11 +975,11 @@ impl SimWorld {
             }
             ConnectionStateChange::ClogClear => {
                 inner.network.connection_clogs.remove(&connection_id);
-                Self::wake_all(&mut inner.wakers.clog_wakers, connection_id);
+                Self::wake_all(&mut inner.wakers.write_clogs, connection_id);
             }
             ConnectionStateChange::ReadClogClear => {
                 inner.network.read_clogs.remove(&connection_id);
-                Self::wake_all(&mut inner.wakers.read_clog_wakers, connection_id);
+                Self::wake_all(&mut inner.wakers.read_clogs, connection_id);
             }
             ConnectionStateChange::PartitionRestore => {
                 Self::clear_expired_partitions(inner);
@@ -960,22 +992,22 @@ impl SimWorld {
             }
             ConnectionStateChange::CutRestore => {
                 if let Some(conn) = inner.network.connections.get_mut(&connection_id)
-                    && conn.is_cut
+                    && conn.flags.is_cut()
                 {
-                    conn.is_cut = false;
+                    conn.flags.set_is_cut(false);
                     conn.cut_expiry = None;
                     inner.emit_fault(SimFaultEvent::CutRestored { connection_id: id });
                     tracing::debug!("Connection {} restored via scheduled event", id);
-                    Self::wake_all(&mut inner.wakers.cut_wakers, connection_id);
+                    Self::wake_all(&mut inner.wakers.cuts, connection_id);
                 }
             }
             ConnectionStateChange::HalfOpenError => {
                 inner.emit_fault(SimFaultEvent::HalfOpenError { connection_id: id });
                 tracing::debug!("Connection {} half-open error time reached", id);
-                if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
+                if let Some(waker) = inner.wakers.reads.remove(&connection_id) {
                     waker.wake();
                 }
-                Self::wake_all(&mut inner.wakers.send_buffer_wakers, connection_id);
+                Self::wake_all(&mut inner.wakers.send_buffers, connection_id);
             }
         }
     }
@@ -1058,7 +1090,7 @@ impl SimWorld {
             .network
             .connections
             .get(&connection_id)
-            .is_some_and(|conn| conn.is_stable);
+            .is_some_and(|conn| conn.flags.is_stable());
 
         if !inner.network.connections.contains_key(&connection_id) {
             tracing::warn!("DataDelivery: connection {} not found", connection_id.0);
@@ -1081,7 +1113,7 @@ impl SimWorld {
             conn.receive_buffer.push_back(byte);
         }
 
-        if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
+        if let Some(waker) = inner.wakers.reads.remove(&connection_id) {
             waker.wake();
         }
     }
@@ -1102,7 +1134,7 @@ impl SimWorld {
             .network
             .connections
             .get(&connection_id)
-            .is_some_and(|conn| conn.is_closed);
+            .is_some_and(|conn| conn.flags.is_closed());
 
         if is_closed {
             tracing::debug!(
@@ -1113,17 +1145,17 @@ impl SimWorld {
         }
 
         if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-            conn.remote_fin_received = true;
+            conn.flags.set_remote_fin_received(true);
         }
 
-        if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
+        if let Some(waker) = inner.wakers.reads.remove(&connection_id) {
             waker.wake();
         }
     }
 
-    /// Schedule a FinDelivery event to the peer connection.
+    /// Schedule a `FinDelivery` event to the peer connection.
     ///
-    /// The FIN is scheduled after the last DataDelivery event to ensure all data
+    /// The FIN is scheduled after the last `DataDelivery` event to ensure all data
     /// arrives at the peer before EOF is signaled.
     fn schedule_fin_delivery(
         inner: &mut SimInner,
@@ -1189,8 +1221,14 @@ impl SimWorld {
         let mut flipped_positions = std::collections::HashSet::new();
 
         for _ in 0..flip_count {
-            let byte_idx = (sim_random::<u64>() as usize) % corrupted_data.len();
-            let bit_idx = (sim_random::<u64>() as usize) % 8;
+            // `% len` keeps the result well within `usize`; truncation is intentional.
+            let raw_byte = sim_random::<u64>();
+            let raw_bit = sim_random::<u64>();
+            let len_u64 =
+                u64::try_from(corrupted_data.len()).expect("corrupted_data length fits in u64");
+            let byte_idx =
+                usize::try_from(raw_byte % len_u64).expect("modulus bounded by usize length");
+            let bit_idx = usize::try_from(raw_bit % 8).expect("modulus 8 fits in usize");
             let position = (byte_idx, bit_idx);
 
             if !flipped_positions.contains(&position) {
@@ -1240,25 +1278,25 @@ impl SimWorld {
                 connection_id.0,
                 data.len()
             );
-            Self::wake_all(&mut inner.wakers.send_buffer_wakers, connection_id);
+            Self::wake_all(&mut inner.wakers.send_buffers, connection_id);
 
-            if !conn.send_buffer.is_empty() {
-                Self::schedule_process_send_buffer(inner, connection_id);
-            } else {
-                conn.send_in_progress = false;
+            if conn.send_buffer.is_empty() {
+                conn.flags.set_send_in_progress(false);
                 // Check for pending graceful close when pipeline drains
-                if conn.graceful_close_pending {
-                    conn.graceful_close_pending = false;
+                if conn.flags.graceful_close_pending() {
+                    conn.flags.set_graceful_close_pending(false);
                     let peer_id = conn.paired_connection;
                     let last_time = conn.last_data_delivery_scheduled_at;
                     Self::schedule_fin_delivery(inner, peer_id, last_time);
                 }
+            } else {
+                Self::schedule_process_send_buffer(inner, connection_id);
             }
         } else {
-            conn.send_in_progress = false;
+            conn.flags.set_send_in_progress(false);
             // Check for pending graceful close when pipeline drains
-            if conn.graceful_close_pending {
-                conn.graceful_close_pending = false;
+            if conn.flags.graceful_close_pending() {
+                conn.flags.set_graceful_close_pending(false);
                 let peer_id = conn.paired_connection;
                 let last_time = conn.last_data_delivery_scheduled_at;
                 Self::schedule_fin_delivery(inner, peer_id, last_time);
@@ -1277,7 +1315,7 @@ impl SimWorld {
         let send_delay = conn.send_delay;
         let next_send_time = conn.next_send_time;
         let has_data = !conn.send_buffer.is_empty();
-        let is_stable = conn.is_stable; // For stable connection checks
+        let is_stable = conn.flags.is_stable(); // For stable connection checks
 
         let recv_delay = paired_id.and_then(|pid| {
             inner
@@ -1289,10 +1327,10 @@ impl SimWorld {
 
         if !has_data {
             if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-                conn.send_in_progress = false;
+                conn.flags.set_send_in_progress(false);
                 // Check for pending graceful close when pipeline drains
-                if conn.graceful_close_pending {
-                    conn.graceful_close_pending = false;
+                if conn.flags.graceful_close_pending() {
+                    conn.flags.set_graceful_close_pending(false);
                     let peer_id = conn.paired_connection;
                     let last_time = conn.last_data_delivery_scheduled_at;
                     Self::schedule_fin_delivery(inner, peer_id, last_time);
@@ -1306,11 +1344,11 @@ impl SimWorld {
         };
 
         let Some(mut data) = conn.send_buffer.pop_front() else {
-            conn.send_in_progress = false;
+            conn.flags.set_send_in_progress(false);
             return;
         };
 
-        Self::wake_all(&mut inner.wakers.send_buffer_wakers, connection_id);
+        Self::wake_all(&mut inner.wakers.send_buffers, connection_id);
 
         // BUGGIFY: Simulate partial/short writes (skip for stable connections)
         if !is_stable && crate::buggify!() && !data.is_empty() {
@@ -1363,21 +1401,21 @@ impl SimWorld {
         }
 
         // Schedule next send if more data
-        if !conn.send_buffer.is_empty() {
-            Self::schedule_process_send_buffer(inner, connection_id);
-        } else {
-            conn.send_in_progress = false;
+        if conn.send_buffer.is_empty() {
+            conn.flags.set_send_in_progress(false);
             // Check for pending graceful close when pipeline drains
-            if conn.graceful_close_pending {
-                conn.graceful_close_pending = false;
+            if conn.flags.graceful_close_pending() {
+                conn.flags.set_graceful_close_pending(false);
                 let peer_id = conn.paired_connection;
                 let last_time = conn.last_data_delivery_scheduled_at;
                 Self::schedule_fin_delivery(inner, peer_id, last_time);
             }
+        } else {
+            Self::schedule_process_send_buffer(inner, connection_id);
         }
     }
 
-    /// Schedule a ProcessSendBuffer event for the given connection.
+    /// Schedule a `ProcessSendBuffer` event for the given connection.
     fn schedule_process_send_buffer(inner: &mut SimInner, connection_id: ConnectionId) {
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
@@ -1396,12 +1434,12 @@ impl SimWorld {
     fn handle_shutdown_event(inner: &mut SimInner) {
         tracing::debug!("Processing Shutdown event - waking all pending tasks");
 
-        for (task_id, waker) in std::mem::take(&mut inner.wakers.task_wakers) {
+        for (task_id, waker) in std::mem::take(&mut inner.wakers.tasks) {
             tracing::trace!("Waking task {}", task_id);
             waker.wake();
         }
 
-        for (_conn_id, waker) in std::mem::take(&mut inner.wakers.read_wakers) {
+        for (_conn_id, waker) in std::mem::take(&mut inner.wakers.reads) {
             waker.wake();
         }
 
@@ -1409,6 +1447,7 @@ impl SimWorld {
     }
 
     /// Get current assertion results for all tracked assertions.
+    #[must_use]
     pub fn assertion_results(
         &self,
     ) -> std::collections::HashMap<String, crate::chaos::AssertionStats> {
@@ -1425,6 +1464,10 @@ impl SimWorld {
     /// This is used during process reboot to immediately kill all network
     /// connections for the rebooted process. Both local and remote connections
     /// are aborted (RST semantics — peer sees ECONNRESET).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     pub fn abort_all_connections_for_ip(&self, ip: std::net::IpAddr) {
         let connection_ids: Vec<ConnectionId> = {
             let inner = self
@@ -1475,6 +1518,11 @@ impl SimWorld {
     ///
     /// This is used by the orchestrator to detect `ProcessRestart` events
     /// and handle them (respawn the process).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn last_processed_event(&self) -> Option<Event> {
         self.inner
             .read()
@@ -1484,6 +1532,11 @@ impl SimWorld {
     }
 
     /// Extract simulation metrics (simulated time, events processed).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn extract_metrics(&self) -> crate::runner::SimulationMetrics {
         let inner = self
             .inner
@@ -1500,6 +1553,11 @@ impl SimWorld {
     // Phase 7: Simple write clogging methods
 
     /// Check if a write should be clogged based on probability
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn should_clog_write(&self, connection_id: ConnectionId) -> bool {
         let inner = self
             .inner
@@ -1512,7 +1570,7 @@ impl SimWorld {
             .network
             .connections
             .get(&connection_id)
-            .is_some_and(|conn| conn.is_stable)
+            .is_some_and(|conn| conn.flags.is_stable())
         {
             return false;
         }
@@ -1527,6 +1585,10 @@ impl SimWorld {
     }
 
     /// Clog a connection's write operations
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     pub fn clog_write(&self, connection_id: ConnectionId) {
         let mut inner = self
             .inner
@@ -1554,6 +1616,11 @@ impl SimWorld {
     }
 
     /// Check if a connection's writes are currently clogged
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn is_write_clogged(&self, connection_id: ConnectionId) -> bool {
         let inner = self
             .inner
@@ -1568,6 +1635,10 @@ impl SimWorld {
     }
 
     /// Register a waker for when write clog clears
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     pub fn register_clog_waker(&self, connection_id: ConnectionId, waker: Waker) {
         let mut inner = self
             .inner
@@ -1575,7 +1646,7 @@ impl SimWorld {
             .expect("RwLock poisoned: prior task panicked");
         inner
             .wakers
-            .clog_wakers
+            .write_clogs
             .entry(connection_id)
             .or_default()
             .push(waker);
@@ -1584,6 +1655,11 @@ impl SimWorld {
     // Read clogging methods (symmetric with write clogging)
 
     /// Check if a read should be clogged based on probability
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn should_clog_read(&self, connection_id: ConnectionId) -> bool {
         let inner = self
             .inner
@@ -1596,7 +1672,7 @@ impl SimWorld {
             .network
             .connections
             .get(&connection_id)
-            .is_some_and(|conn| conn.is_stable)
+            .is_some_and(|conn| conn.flags.is_stable())
         {
             return false;
         }
@@ -1611,6 +1687,10 @@ impl SimWorld {
     }
 
     /// Clog a connection's read operations
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     pub fn clog_read(&self, connection_id: ConnectionId) {
         let mut inner = self
             .inner
@@ -1638,6 +1718,11 @@ impl SimWorld {
     }
 
     /// Check if a connection's reads are currently clogged
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn is_read_clogged(&self, connection_id: ConnectionId) -> bool {
         let inner = self
             .inner
@@ -1652,6 +1737,10 @@ impl SimWorld {
     }
 
     /// Register a waker for when read clog clears
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     pub fn register_read_clog_waker(&self, connection_id: ConnectionId, waker: Waker) {
         let mut inner = self
             .inner
@@ -1659,13 +1748,17 @@ impl SimWorld {
             .expect("RwLock poisoned: prior task panicked");
         inner
             .wakers
-            .read_clog_wakers
+            .read_clogs
             .entry(connection_id)
             .or_default()
             .push(waker);
     }
 
     /// Clear expired clogs and wake pending tasks
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     pub fn clear_expired_clogs(&self) {
         let mut inner = self
             .inner
@@ -1681,7 +1774,7 @@ impl SimWorld {
 
         for id in expired {
             inner.network.connection_clogs.remove(&id);
-            Self::wake_all(&mut inner.wakers.clog_wakers, id);
+            Self::wake_all(&mut inner.wakers.write_clogs, id);
         }
     }
 
@@ -1691,6 +1784,11 @@ impl SimWorld {
     ///
     /// A cut connection is temporarily unavailable but will be restored.
     /// This is different from `is_connection_closed` which indicates permanent closure.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn is_connection_cut(&self, connection_id: ConnectionId) -> bool {
         let inner = self
             .inner
@@ -1701,7 +1799,7 @@ impl SimWorld {
             .connections
             .get(&connection_id)
             .is_some_and(|conn| {
-                conn.is_cut
+                conn.flags.is_cut()
                     && conn
                         .cut_expiry
                         .is_some_and(|expiry| inner.current_time < expiry)
@@ -1709,6 +1807,10 @@ impl SimWorld {
     }
 
     /// Register a waker for when a cut connection is restored.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     pub fn register_cut_waker(&self, connection_id: ConnectionId, waker: Waker) {
         let mut inner = self
             .inner
@@ -1716,7 +1818,7 @@ impl SimWorld {
             .expect("RwLock poisoned: prior task panicked");
         inner
             .wakers
-            .cut_wakers
+            .cuts
             .entry(connection_id)
             .or_default()
             .push(waker);
@@ -1725,6 +1827,11 @@ impl SimWorld {
     // Send buffer management methods
 
     /// Get the send buffer capacity for a connection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn send_buffer_capacity(&self, connection_id: ConnectionId) -> usize {
         let inner = self
             .inner
@@ -1734,11 +1841,15 @@ impl SimWorld {
             .network
             .connections
             .get(&connection_id)
-            .map(|conn| conn.send_buffer_capacity)
-            .unwrap_or(0)
+            .map_or(0, |conn| conn.send_buffer_capacity)
     }
 
     /// Get the current send buffer usage for a connection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn send_buffer_used(&self, connection_id: ConnectionId) -> usize {
         let inner = self
             .inner
@@ -1748,11 +1859,13 @@ impl SimWorld {
             .network
             .connections
             .get(&connection_id)
-            .map(|conn| conn.send_buffer.iter().map(|v| v.len()).sum())
-            .unwrap_or(0)
+            .map_or(0, |conn| {
+                conn.send_buffer.iter().map(std::vec::Vec::len).sum()
+            })
     }
 
     /// Get the available send buffer space for a connection.
+    #[must_use]
     pub fn available_send_buffer(&self, connection_id: ConnectionId) -> usize {
         let capacity = self.send_buffer_capacity(connection_id);
         let used = self.send_buffer_used(connection_id);
@@ -1760,6 +1873,10 @@ impl SimWorld {
     }
 
     /// Register a waker for when send buffer space becomes available.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     pub fn register_send_buffer_waker(&self, connection_id: ConnectionId, waker: Waker) {
         let mut inner = self
             .inner
@@ -1767,7 +1884,7 @@ impl SimWorld {
             .expect("RwLock poisoned: prior task panicked");
         inner
             .wakers
-            .send_buffer_wakers
+            .send_buffers
             .entry(connection_id)
             .or_default()
             .push(waker);
@@ -1777,6 +1894,11 @@ impl SimWorld {
 
     /// Get the base latency for a connection pair.
     /// Returns the latency if already set, otherwise None.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn pair_latency(&self, src: IpAddr, dst: IpAddr) -> Option<Duration> {
         let inner = self
             .inner
@@ -1787,6 +1909,11 @@ impl SimWorld {
 
     /// Set the base latency for a connection pair if not already set.
     /// Returns the latency (existing or newly set).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn set_pair_latency_if_not_set(
         &self,
         src: IpAddr,
@@ -1814,6 +1941,11 @@ impl SimWorld {
 
     /// Get the base latency for a connection based on its IP pair.
     /// If not set, samples from config and sets it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn connection_base_latency(&self, connection_id: ConnectionId) -> Duration {
         let inner = self
             .inner
@@ -1847,6 +1979,11 @@ impl SimWorld {
 
     /// Get the send delay for a connection.
     /// Returns the per-connection override if set, otherwise None.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn send_delay(&self, connection_id: ConnectionId) -> Option<Duration> {
         let inner = self
             .inner
@@ -1861,6 +1998,11 @@ impl SimWorld {
 
     /// Get the receive delay for a connection.
     /// Returns the per-connection override if set, otherwise None.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn recv_delay(&self, connection_id: ConnectionId) -> Option<Duration> {
         let inner = self
             .inner
@@ -1874,6 +2016,11 @@ impl SimWorld {
     }
 
     /// Check if a connection is permanently closed
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn is_connection_closed(&self, connection_id: ConnectionId) -> bool {
         let inner = self
             .inner
@@ -1883,7 +2030,7 @@ impl SimWorld {
             .network
             .connections
             .get(&connection_id)
-            .is_some_and(|conn| conn.is_closed)
+            .is_some_and(|conn| conn.flags.is_closed())
     }
 
     /// Close a connection gracefully (FIN semantics).
@@ -1901,6 +2048,11 @@ impl SimWorld {
     }
 
     /// Get the close reason for a connection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn close_reason(&self, connection_id: ConnectionId) -> CloseReason {
         let inner = self
             .inner
@@ -1910,8 +2062,7 @@ impl SimWorld {
             .network
             .connections
             .get(&connection_id)
-            .map(|conn| conn.close_reason)
-            .unwrap_or(CloseReason::None)
+            .map_or(CloseReason::None, |conn| conn.close_reason)
     }
 
     /// Close a connection with a specific close reason.
@@ -1938,9 +2089,9 @@ impl SimWorld {
         let conn_info = inner.network.connections.get(&connection_id).map(|conn| {
             (
                 conn.paired_connection,
-                conn.send_closed,
-                conn.is_closed,
-                conn.send_in_progress,
+                conn.flags.send_closed(),
+                conn.flags.is_closed(),
+                conn.flags.send_in_progress(),
                 conn.send_buffer.is_empty(),
                 conn.last_data_delivery_scheduled_at,
             )
@@ -1969,9 +2120,9 @@ impl SimWorld {
 
         // Mark local side as closed with send side shut down
         if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-            conn.is_closed = true;
+            conn.flags.set_is_closed(true);
             conn.close_reason = CloseReason::Graceful;
-            conn.send_closed = true;
+            conn.flags.set_send_closed(true);
             tracing::debug!(
                 "Connection {} graceful close (FIN) - local write shut down",
                 connection_id.0
@@ -1979,7 +2130,7 @@ impl SimWorld {
         }
 
         // Wake local read waker (so local poll_read returns EOF if needed)
-        if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
+        if let Some(waker) = inner.wakers.reads.remove(&connection_id) {
             waker.wake();
         }
 
@@ -1988,7 +2139,7 @@ impl SimWorld {
         if send_in_progress || !send_buffer_empty {
             // Pipeline has data — defer FIN until pipeline drains
             if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-                conn.graceful_close_pending = true;
+                conn.flags.set_graceful_close_pending(true);
                 tracing::debug!(
                     "Connection {} graceful close deferred (send pipeline active)",
                     connection_id.0
@@ -2017,12 +2168,12 @@ impl SimWorld {
             .and_then(|conn| conn.paired_connection);
 
         if let Some(conn) = inner.network.connections.get_mut(&connection_id)
-            && !conn.is_closed
+            && !conn.flags.is_closed()
         {
-            conn.is_closed = true;
+            conn.flags.set_is_closed(true);
             conn.close_reason = CloseReason::Aborted;
             // Cancel any pending graceful close
-            conn.graceful_close_pending = false;
+            conn.flags.set_graceful_close_pending(false);
             tracing::debug!(
                 "Connection {} closed permanently (reason: Aborted)",
                 connection_id.0
@@ -2031,9 +2182,9 @@ impl SimWorld {
 
         if let Some(paired_id) = paired_connection_id
             && let Some(paired_conn) = inner.network.connections.get_mut(&paired_id)
-            && !paired_conn.is_closed
+            && !paired_conn.flags.is_closed()
         {
-            paired_conn.is_closed = true;
+            paired_conn.flags.set_is_closed(true);
             paired_conn.close_reason = CloseReason::Aborted;
             tracing::debug!(
                 "Paired connection {} also closed (reason: Aborted)",
@@ -2041,7 +2192,7 @@ impl SimWorld {
             );
         }
 
-        if let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
+        if let Some(waker) = inner.wakers.reads.remove(&connection_id) {
             tracing::debug!(
                 "Waking read waker for aborted connection {}",
                 connection_id.0
@@ -2050,7 +2201,7 @@ impl SimWorld {
         }
 
         if let Some(paired_id) = paired_connection_id
-            && let Some(paired_waker) = inner.wakers.read_wakers.remove(&paired_id)
+            && let Some(paired_waker) = inner.wakers.reads.remove(&paired_id)
         {
             tracing::debug!(
                 "Waking read waker for paired aborted connection {}",
@@ -2061,6 +2212,10 @@ impl SimWorld {
     }
 
     /// Close connection asymmetrically (FDB rollRandomClose pattern)
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     pub fn close_connection_asymmetric(
         &self,
         connection_id: ConnectionId,
@@ -2079,7 +2234,7 @@ impl SimWorld {
             .and_then(|conn| conn.paired_connection);
 
         if close_send && let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-            conn.send_closed = true;
+            conn.flags.set_send_closed(true);
             conn.send_buffer.clear();
             tracing::debug!(
                 "Connection {} send side closed (asymmetric)",
@@ -2091,25 +2246,29 @@ impl SimWorld {
             && let Some(paired) = paired_id
             && let Some(paired_conn) = inner.network.connections.get_mut(&paired)
         {
-            paired_conn.recv_closed = true;
+            paired_conn.flags.set_recv_closed(true);
             tracing::debug!(
                 "Connection {} recv side closed (asymmetric via peer)",
                 paired.0
             );
         }
 
-        if close_send && let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
+        if close_send && let Some(waker) = inner.wakers.reads.remove(&connection_id) {
             waker.wake();
         }
         if close_recv
             && let Some(paired) = paired_id
-            && let Some(waker) = inner.wakers.read_wakers.remove(&paired)
+            && let Some(waker) = inner.wakers.reads.remove(&paired)
         {
             waker.wake();
         }
     }
 
     /// Roll random close chaos injection (FDB rollRandomClose pattern)
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     pub fn roll_random_close(&self, connection_id: ConnectionId) -> Option<bool> {
         let mut inner = self
             .inner
@@ -2122,7 +2281,7 @@ impl SimWorld {
             .network
             .connections
             .get(&connection_id)
-            .is_some_and(|conn| conn.is_stable)
+            .is_some_and(|conn| conn.flags.is_stable())
         {
             return None;
         }
@@ -2166,7 +2325,7 @@ impl SimWorld {
         );
 
         if close_send && let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-            conn.send_closed = true;
+            conn.flags.set_send_closed(true);
             conn.send_buffer.clear();
         }
 
@@ -2174,15 +2333,15 @@ impl SimWorld {
             && let Some(paired) = paired_id
             && let Some(paired_conn) = inner.network.connections.get_mut(&paired)
         {
-            paired_conn.recv_closed = true;
+            paired_conn.flags.set_recv_closed(true);
         }
 
-        if close_send && let Some(waker) = inner.wakers.read_wakers.remove(&connection_id) {
+        if close_send && let Some(waker) = inner.wakers.reads.remove(&connection_id) {
             waker.wake();
         }
         if close_recv
             && let Some(paired) = paired_id
-            && let Some(waker) = inner.wakers.read_wakers.remove(&paired)
+            && let Some(waker) = inner.wakers.reads.remove(&paired)
         {
             waker.wake();
         }
@@ -2201,6 +2360,11 @@ impl SimWorld {
     }
 
     /// Check if a connection's send side is closed
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn is_send_closed(&self, connection_id: ConnectionId) -> bool {
         let inner = self
             .inner
@@ -2210,10 +2374,15 @@ impl SimWorld {
             .network
             .connections
             .get(&connection_id)
-            .is_some_and(|conn| conn.send_closed || conn.is_closed)
+            .is_some_and(|conn| conn.flags.send_closed() || conn.flags.is_closed())
     }
 
     /// Check if a connection's receive side is closed
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn is_recv_closed(&self, connection_id: ConnectionId) -> bool {
         let inner = self
             .inner
@@ -2223,13 +2392,18 @@ impl SimWorld {
             .network
             .connections
             .get(&connection_id)
-            .is_some_and(|conn| conn.recv_closed || conn.is_closed)
+            .is_some_and(|conn| conn.flags.recv_closed() || conn.flags.is_closed())
     }
 
     /// Check if a FIN has been received from the remote peer (graceful close).
     ///
     /// When true, `poll_read` should return EOF after draining the receive buffer.
     /// Distinct from `is_recv_closed` which is used for chaos/asymmetric closure.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn is_remote_fin_received(&self, connection_id: ConnectionId) -> bool {
         let inner = self
             .inner
@@ -2239,12 +2413,17 @@ impl SimWorld {
             .network
             .connections
             .get(&connection_id)
-            .is_some_and(|conn| conn.remote_fin_received)
+            .is_some_and(|conn| conn.flags.remote_fin_received())
     }
 
     // Half-Open Connection Simulation Methods
 
     /// Check if a connection is in half-open state
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn is_half_open(&self, connection_id: ConnectionId) -> bool {
         let inner = self
             .inner
@@ -2254,10 +2433,15 @@ impl SimWorld {
             .network
             .connections
             .get(&connection_id)
-            .is_some_and(|conn| conn.is_half_open)
+            .is_some_and(|conn| conn.flags.is_half_open())
     }
 
     /// Check if a half-open connection should return errors now
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn should_half_open_error(&self, connection_id: ConnectionId) -> bool {
         let inner = self
             .inner
@@ -2269,7 +2453,7 @@ impl SimWorld {
             .connections
             .get(&connection_id)
             .is_some_and(|conn| {
-                conn.is_half_open
+                conn.flags.is_half_open()
                     && conn
                         .half_open_error_at
                         .is_some_and(|error_at| current_time >= error_at)
@@ -2292,20 +2476,24 @@ impl SimWorld {
     /// # Real-World Scenario
     /// Use this for parent-child process connections or supervision channels
     /// that should remain reliable even during chaos testing.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     pub fn mark_connection_stable(&self, connection_id: ConnectionId) {
         let mut inner = self
             .inner
             .write()
             .expect("RwLock poisoned: prior task panicked");
         if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
-            conn.is_stable = true;
+            conn.flags.set_is_stable(true);
             tracing::debug!("Connection {} marked as stable", connection_id.0);
 
             // Also mark the paired connection as stable
             if let Some(paired_id) = conn.paired_connection
                 && let Some(paired_conn) = inner.network.connections.get_mut(&paired_id)
             {
-                paired_conn.is_stable = true;
+                paired_conn.flags.set_is_stable(true);
                 tracing::debug!("Paired connection {} also marked as stable", paired_id.0);
             }
         }
@@ -2314,6 +2502,14 @@ impl SimWorld {
     // Network Partition Control Methods
 
     /// Partition communication between two IP addresses for a specified duration
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation is rejected by the simulator (for example, the simulation has not been started).
     pub fn partition_pair(
         &self,
         from_ip: std::net::IpAddr,
@@ -2355,6 +2551,14 @@ impl SimWorld {
     }
 
     /// Block all outgoing communication from an IP address
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation is rejected by the simulator (for example, the simulation has not been started).
     pub fn partition_send_from(
         &self,
         ip: std::net::IpAddr,
@@ -2383,6 +2587,14 @@ impl SimWorld {
     }
 
     /// Block all incoming communication to an IP address
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation is rejected by the simulator (for example, the simulation has not been started).
     pub fn partition_recv_to(
         &self,
         ip: std::net::IpAddr,
@@ -2411,6 +2623,14 @@ impl SimWorld {
     }
 
     /// Immediately restore communication between two IP addresses
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation is rejected by the simulator (for example, the simulation has not been started).
     pub fn restore_partition(
         &self,
         from_ip: std::net::IpAddr,
@@ -2430,6 +2650,14 @@ impl SimWorld {
     }
 
     /// Check if communication between two IP addresses is currently partitioned
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation is rejected by the simulator (for example, the simulation has not been started).
     pub fn is_partitioned(
         &self,
         from_ip: std::net::IpAddr,
@@ -2444,12 +2672,12 @@ impl SimWorld {
             .is_partitioned(from_ip, to_ip, inner.current_time))
     }
 
-    /// Helper method for use with SimInner - randomly trigger partitions
+    /// Helper method for use with `SimInner` - randomly trigger partitions
     ///
     /// Supports different partition strategies based on configuration:
     /// - Random: randomly partition individual IP pairs
-    /// - UniformSize: create uniform-sized partition groups
-    /// - IsolateSingle: isolate exactly one node from the rest
+    /// - `UniformSize`: create uniform-sized partition groups
+    /// - `IsolateSingle`: isolate exactly one node from the rest
     fn randomly_trigger_partitions_with_inner(inner: &mut SimInner) {
         let partition_config = &inner.network.config;
 
@@ -2582,11 +2810,15 @@ pub struct WeakSimWorld {
     pub(crate) inner: Weak<RwLock<SimInner>>,
 }
 
-/// Macro to generate WeakSimWorld forwarding methods that wrap SimWorld results.
+/// Macro to generate `WeakSimWorld` forwarding methods that wrap `SimWorld` results.
 macro_rules! weak_forward {
     // For methods returning T that need Ok() wrapping
     (wrap $(#[$meta:meta])* $method:ident(&self $(, $arg:ident : $arg_ty:ty)*) -> $ret:ty) => {
         $(#[$meta])*
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if the simulation has been dropped.
         pub fn $method(&self $(, $arg: $arg_ty)*) -> SimulationResult<$ret> {
             Ok(self.upgrade()?.$method($($arg),*))
         }
@@ -2594,6 +2826,11 @@ macro_rules! weak_forward {
     // For methods already returning SimulationResult
     (pass $(#[$meta:meta])* $method:ident(&self $(, $arg:ident : $arg_ty:ty)*) -> $ret:ty) => {
         $(#[$meta])*
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if the simulation has been dropped or the
+        /// underlying operation is rejected by the simulator.
         pub fn $method(&self $(, $arg: $arg_ty)*) -> SimulationResult<$ret> {
             self.upgrade()?.$method($($arg),*)
         }
@@ -2601,6 +2838,10 @@ macro_rules! weak_forward {
     // For methods returning () that need Ok(()) wrapping
     (unit $(#[$meta:meta])* $method:ident(&self $(, $arg:ident : $arg_ty:ty)*)) => {
         $(#[$meta])*
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if the simulation has been dropped.
         pub fn $method(&self $(, $arg: $arg_ty)*) -> SimulationResult<()> {
             self.upgrade()?.$method($($arg),*);
             Ok(())
@@ -2610,6 +2851,10 @@ macro_rules! weak_forward {
 
 impl WeakSimWorld {
     /// Attempts to upgrade this weak reference to a strong reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation is rejected by the simulator (for example, the simulation has not been started).
     pub fn upgrade(&self) -> SimulationResult<SimWorld> {
         self.inner
             .upgrade()
@@ -2618,8 +2863,8 @@ impl WeakSimWorld {
     }
 
     weak_forward!(wrap #[doc = "Returns the current simulation time."] current_time(&self) -> Duration);
-    weak_forward!(wrap #[doc = "Returns the exact simulation time (equivalent to FDB's now())."] now(&self) -> Duration);
-    weak_forward!(wrap #[doc = "Returns the drifted timer time (equivalent to FDB's timer())."] timer(&self) -> Duration);
+    weak_forward!(wrap #[doc = "Returns the exact simulation time (equivalent to FDB's `now()`)."] now(&self) -> Duration);
+    weak_forward!(wrap #[doc = "Returns the drifted timer time (equivalent to FDB's `timer()`)."] timer(&self) -> Duration);
     weak_forward!(unit #[doc = "Schedules an event to execute after the specified delay."] schedule_event(&self, event: Event, delay: Duration));
     weak_forward!(unit #[doc = "Schedules an event to execute at the specified absolute time."] schedule_event_at(&self, event: Event, time: Duration));
     weak_forward!(pass #[doc = "Read data from connection's receive buffer."] read_from_connection(&self, connection_id: ConnectionId, buf: &mut [u8]) -> usize);
@@ -2630,6 +2875,10 @@ impl WeakSimWorld {
     weak_forward!(wrap #[doc = "Sleep for the specified duration in simulation time."] sleep(&self, duration: Duration) -> SleepFuture);
 
     /// Access network configuration for latency calculations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation is rejected by the simulator (for example, the simulation has not been started).
     pub fn with_network_config<F, R>(&self, f: F) -> SimulationResult<R>
     where
         F: FnOnce(&NetworkConfiguration) -> R,

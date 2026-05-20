@@ -1,10 +1,19 @@
-//! Configuration tests for StorageConfiguration.
+//! Configuration tests for `StorageConfiguration`.
 //!
-//! These tests verify that StorageConfiguration presets and customization
+//! These tests verify that `StorageConfiguration` presets and customization
 //! work correctly, following the same pattern as network configuration tests.
 
 use moonpool_sim::{SimWorld, StorageConfiguration, set_sim_seed};
 use std::time::Duration;
+
+/// Assert two f64 values are bit-identical.
+fn assert_f64_eq(left: f64, right: f64) {
+    assert_eq!(
+        left.to_bits(),
+        right.to_bits(),
+        "{left} != {right} (bit comparison)"
+    );
+}
 
 /// Create a local tokio runtime for tests.
 fn local_runtime() -> tokio::runtime::Runtime {
@@ -15,7 +24,7 @@ fn local_runtime() -> tokio::runtime::Runtime {
         .expect("Failed to build local runtime")
 }
 
-/// Test that fast_local() configuration has expected values
+/// Test that `fast_local()` configuration has expected values
 #[test]
 fn test_fast_local_configuration_values() {
     let config = StorageConfiguration::fast_local();
@@ -34,16 +43,16 @@ fn test_fast_local_configuration_values() {
     assert_eq!(config.sync_latency.end, one_us);
 
     // All faults disabled
-    assert_eq!(config.read_fault_probability, 0.0);
-    assert_eq!(config.write_fault_probability, 0.0);
-    assert_eq!(config.crash_fault_probability, 0.0);
-    assert_eq!(config.misdirect_write_probability, 0.0);
-    assert_eq!(config.misdirect_read_probability, 0.0);
-    assert_eq!(config.phantom_write_probability, 0.0);
-    assert_eq!(config.sync_failure_probability, 0.0);
+    assert_f64_eq(config.read_fault_probability, 0.0);
+    assert_f64_eq(config.write_fault_probability, 0.0);
+    assert_f64_eq(config.crash_fault_probability, 0.0);
+    assert_f64_eq(config.misdirect_write_probability, 0.0);
+    assert_f64_eq(config.misdirect_read_probability, 0.0);
+    assert_f64_eq(config.phantom_write_probability, 0.0);
+    assert_f64_eq(config.sync_failure_probability, 0.0);
 }
 
-/// Test that default() configuration has expected SATA SSD values
+/// Test that `default()` configuration has expected SATA SSD values
 #[test]
 fn test_default_configuration_values() {
     let config = StorageConfiguration::default();
@@ -61,16 +70,16 @@ fn test_default_configuration_values() {
     assert_eq!(config.sync_latency.end, Duration::from_millis(5));
 
     // All faults disabled by default
-    assert_eq!(config.read_fault_probability, 0.0);
-    assert_eq!(config.write_fault_probability, 0.0);
-    assert_eq!(config.crash_fault_probability, 0.0);
-    assert_eq!(config.misdirect_write_probability, 0.0);
-    assert_eq!(config.misdirect_read_probability, 0.0);
-    assert_eq!(config.phantom_write_probability, 0.0);
-    assert_eq!(config.sync_failure_probability, 0.0);
+    assert_f64_eq(config.read_fault_probability, 0.0);
+    assert_f64_eq(config.write_fault_probability, 0.0);
+    assert_f64_eq(config.crash_fault_probability, 0.0);
+    assert_f64_eq(config.misdirect_write_probability, 0.0);
+    assert_f64_eq(config.misdirect_read_probability, 0.0);
+    assert_f64_eq(config.phantom_write_probability, 0.0);
+    assert_f64_eq(config.sync_failure_probability, 0.0);
 }
 
-/// Test that new() equals default()
+/// Test that `new()` equals `default()`
 #[test]
 fn test_new_equals_default() {
     let config_new = StorageConfiguration::new();
@@ -83,7 +92,7 @@ fn test_new_equals_default() {
     assert_eq!(config_new.sync_latency, config_default.sync_latency);
 }
 
-/// Test that random_for_seed() produces deterministic configs for same seed
+/// Test that `random_for_seed()` produces deterministic configs for same seed
 #[test]
 fn test_random_for_seed_determinism() {
     local_runtime().block_on(async {
@@ -115,18 +124,18 @@ fn test_random_for_seed_determinism() {
             config1.sync_latency, config2.sync_latency,
             "Sync latency should be deterministic"
         );
-        assert_eq!(
-            config1.read_fault_probability, config2.read_fault_probability,
-            "Read fault probability should be deterministic"
+        assert_f64_eq(
+            config1.read_fault_probability,
+            config2.read_fault_probability,
         );
-        assert_eq!(
-            config1.write_fault_probability, config2.write_fault_probability,
-            "Write fault probability should be deterministic"
+        assert_f64_eq(
+            config1.write_fault_probability,
+            config2.write_fault_probability,
         );
     });
 }
 
-/// Test that random_for_seed() produces different configs for different seeds
+/// Test that `random_for_seed()` produces different configs for different seeds
 #[test]
 fn test_random_for_seed_varies_by_seed() {
     local_runtime().block_on(async {
@@ -158,7 +167,7 @@ fn test_random_for_seed_varies_by_seed() {
     });
 }
 
-/// Test that random_for_seed() produces values in expected ranges
+/// Test that `random_for_seed()` produces values in expected ranges
 #[test]
 fn test_random_for_seed_value_ranges() {
     local_runtime().block_on(async {
@@ -207,9 +216,9 @@ fn test_configuration_clone() {
     assert_eq!(original.read_latency, cloned.read_latency);
     assert_eq!(original.write_latency, cloned.write_latency);
     assert_eq!(original.sync_latency, cloned.sync_latency);
-    assert_eq!(
+    assert_f64_eq(
         original.read_fault_probability,
-        cloned.read_fault_probability
+        cloned.read_fault_probability,
     );
 }
 
@@ -236,12 +245,12 @@ fn test_custom_configuration() {
     assert_eq!(custom.bandwidth, 200_000_000);
     assert_eq!(custom.read_latency.start, Duration::from_micros(30));
     assert_eq!(custom.read_latency.end, Duration::from_micros(100));
-    assert_eq!(custom.read_fault_probability, 0.01);
-    assert_eq!(custom.write_fault_probability, 0.02);
-    assert_eq!(custom.crash_fault_probability, 0.001);
+    assert_f64_eq(custom.read_fault_probability, 0.01);
+    assert_f64_eq(custom.write_fault_probability, 0.02);
+    assert_f64_eq(custom.crash_fault_probability, 0.001);
 }
 
-/// Test that set_storage_config applies to SimWorld
+/// Test that `set_storage_config` applies to `SimWorld`
 #[test]
 fn test_simworld_set_storage_config() {
     local_runtime().block_on(async {
@@ -316,7 +325,7 @@ fn test_nvme_like_configuration() {
 fn test_fault_probability_boundaries() {
     // Test with 0% faults
     let no_faults = StorageConfiguration::fast_local();
-    assert_eq!(no_faults.read_fault_probability, 0.0);
+    assert_f64_eq(no_faults.read_fault_probability, 0.0);
 
     // Test with 100% faults (for testing)
     let all_faults = StorageConfiguration {
@@ -329,8 +338,8 @@ fn test_fault_probability_boundaries() {
         sync_failure_probability: 1.0,
         ..StorageConfiguration::fast_local()
     };
-    assert_eq!(all_faults.read_fault_probability, 1.0);
-    assert_eq!(all_faults.sync_failure_probability, 1.0);
+    assert_f64_eq(all_faults.read_fault_probability, 1.0);
+    assert_f64_eq(all_faults.sync_failure_probability, 1.0);
 
     // Test with fractional probabilities
     let partial_faults = StorageConfiguration {
@@ -345,7 +354,7 @@ fn test_fault_probability_boundaries() {
 #[test]
 fn test_configuration_debug() {
     let config = StorageConfiguration::fast_local();
-    let debug_str = format!("{:?}", config);
+    let debug_str = format!("{config:?}");
 
     // Should contain relevant field names
     assert!(debug_str.contains("iops"));

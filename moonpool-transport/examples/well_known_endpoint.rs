@@ -39,8 +39,8 @@ use serde::{Deserialize, Serialize};
 const SERVER_ADDR: &str = "127.0.0.1:4500";
 const CLIENT_ADDR: &str = "127.0.0.1:4501";
 
-/// Well-known token for the PingPong service.
-/// Starts at FirstAvailable (3) + 1 to avoid collisions with system tokens.
+/// Well-known token for the `PingPong` service.
+/// Starts at `FirstAvailable` (3) + 1 to avoid collisions with system tokens.
 const WLTOKEN_PING_PONG: u32 = 4;
 
 // ============================================================================
@@ -89,7 +89,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
         .build_listening()
         .await?;
 
-    println!("Server listening on {}\n", SERVER_ADDR);
+    println!("Server listening on {SERVER_ADDR}\n");
 
     let ping_server = PingPong::well_known(&transport, WLTOKEN_PING_PONG);
 
@@ -103,37 +103,31 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         tokio::select! {
             maybe_ping = ping_server.ping.recv() => {
-                match maybe_ping {
-                    Some((request, reply)) => {
-                        println!("Received ping seq={}: {:?}", request.seq, request.message);
+                if let Some((request, reply)) = maybe_ping {
+                    println!("Received ping seq={}: {:?}", request.seq, request.message);
 
-                        let response = PingResponse {
-                            seq: request.seq,
-                            echo: format!("pong: {}", request.message),
-                        };
+                    let response = PingResponse {
+                        seq: request.seq,
+                        echo: format!("pong: {}", request.message),
+                    };
 
-                        reply.send(response.clone());
-                        println!("Sent pong seq={}: {:?}\n", response.seq, response.echo);
-                    }
-                    None => {
-                        println!("Ping stream closed, shutting down.");
-                        break;
-                    }
+                    reply.send(response.clone());
+                    println!("Sent pong seq={}: {:?}\n", response.seq, response.echo);
+                } else {
+                    println!("Ping stream closed, shutting down.");
+                    break;
                 }
             }
 
             maybe_hb = ping_server.heartbeat.recv() => {
-                match maybe_hb {
-                    Some((request, _reply)) => {
-                        // Fire-and-forget: client never awaits a reply.
-                        // Dropping `_reply` here is harmless because the client
-                        // used `send()` and never registered a `ReplyFuture`.
-                        println!("heartbeat seq={}", request.seq);
-                    }
-                    None => {
-                        println!("Heartbeat stream closed, shutting down.");
-                        break;
-                    }
+                if let Some((request, _reply)) = maybe_hb {
+                    // Fire-and-forget: client never awaits a reply.
+                    // Dropping `_reply` here is harmless because the client
+                    // used `send()` and never registered a `ReplyFuture`.
+                    println!("heartbeat seq={}", request.seq);
+                } else {
+                    println!("Heartbeat stream closed, shutting down.");
+                    break;
                 }
             }
         }
@@ -160,7 +154,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
         .build_listening()
         .await?;
 
-    println!("Connecting to server at {}\n", SERVER_ADDR);
+    println!("Connecting to server at {SERVER_ADDR}\n");
 
     // Client constructed from well-known token — no discovery needed.
     let ping_client = PingPong::client_well_known(server_addr, WLTOKEN_PING_PONG, &transport);
@@ -177,7 +171,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     for seq in 0..num_pings {
         let request = PingRequest {
             seq,
-            message: format!("hello from client (seq={})", seq),
+            message: format!("hello from client (seq={seq})"),
         };
 
         println!("Sending ping seq={}: {:?}", seq, request.message);
@@ -192,7 +186,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
                 success_count += 1;
             }
             Err(e) => {
-                println!("RPC error: {:?}\n", e);
+                println!("RPC error: {e:?}\n");
             }
         }
 
@@ -200,10 +194,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("=== Results ===");
-    println!(
-        "{}/{} pings completed successfully!",
-        success_count, num_pings
-    );
+    println!("{success_count}/{num_pings} pings completed successfully!");
 
     // Demonstrate fire-and-forget delivery (`send`). Heartbeats are the
     // textbook one-way payload: the client emits liveness signals and never
@@ -225,7 +216,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let mode = args.get(1).map(|s| s.as_str()).unwrap_or("help");
+    let mode = args.get(1).map_or("help", std::string::String::as_str);
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
@@ -237,7 +228,7 @@ fn main() {
         "server" => {
             runtime.block_on(async {
                 if let Err(e) = run_server().await {
-                    eprintln!("Server error: {}", e);
+                    eprintln!("Server error: {e}");
                     std::process::exit(1);
                 }
             });
@@ -245,7 +236,7 @@ fn main() {
         "client" => {
             runtime.block_on(async {
                 if let Err(e) = run_client().await {
-                    eprintln!("Client error: {}", e);
+                    eprintln!("Client error: {e}");
                     std::process::exit(1);
                 }
             });

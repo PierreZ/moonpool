@@ -1,6 +1,6 @@
-//! LLVM SanitizerCoverage (`inline-8bit-counters`) for code edge coverage.
+//! LLVM `SanitizerCoverage` (`inline-8bit-counters`) for code edge coverage.
 //!
-//! This module hooks into LLVM's SanitizerCoverage instrumentation to track
+//! This module hooks into LLVM's `SanitizerCoverage` instrumentation to track
 //! which code edges the simulation actually executes. The explorer uses this
 //! as a second coverage signal — alongside the assertion-path fork bitmap —
 //! to decide whether a forked timeline discovered something new. Together,
@@ -328,7 +328,7 @@ pub unsafe extern "C" fn __sanitizer_cov_8bit_counters_init(start: *mut u8, stop
     }
 
     // Safety: start and stop are valid pointers provided by LLVM, stop >= start
-    let new_len = unsafe { stop.offset_from(start) } as usize;
+    let new_len = unsafe { stop.offset_from(start) }.cast_unsigned();
 
     // Merge: keep the lowest start and highest stop across all TUs.
     let prev = COUNTERS_PTR.load(Ordering::Relaxed);
@@ -456,8 +456,8 @@ pub fn has_new_sancov_coverage() -> bool {
     if !sancov_is_available() {
         return false;
     }
-    let transfer = SANCOV_TRANSFER.with(|c| c.get());
-    let history = SANCOV_HISTORY.with(|c| c.get());
+    let transfer = SANCOV_TRANSFER.with(std::cell::Cell::get);
+    let history = SANCOV_HISTORY.with(std::cell::Cell::get);
     if transfer.is_null() || history.is_null() {
         return false;
     }
@@ -472,7 +472,7 @@ pub fn has_new_sancov_coverage_from(slot_ptr: *mut u8) -> bool {
     if !sancov_is_available() || slot_ptr.is_null() {
         return false;
     }
-    let history = SANCOV_HISTORY.with(|c| c.get());
+    let history = SANCOV_HISTORY.with(std::cell::Cell::get);
     if history.is_null() {
         return false;
     }
@@ -506,7 +506,7 @@ pub fn sancov_edges_covered() -> usize {
     if !sancov_is_available() {
         return 0;
     }
-    let history = SANCOV_HISTORY.with(|c| c.get());
+    let history = SANCOV_HISTORY.with(std::cell::Cell::get);
     if history.is_null() {
         return 0;
     }
@@ -556,7 +556,7 @@ pub fn init_sancov_shared() -> Result<(), std::io::Error> {
 pub fn cleanup_sancov_shared() {
     let len = COUNTERS_LEN.load(Ordering::Relaxed);
 
-    let transfer = SANCOV_TRANSFER.with(|c| c.get());
+    let transfer = SANCOV_TRANSFER.with(std::cell::Cell::get);
     if !transfer.is_null() {
         // Safety: transfer was returned by alloc_shared(len) in init_sancov_shared().
         // Pointer is non-null (checked above) and has not been previously freed.
@@ -564,7 +564,7 @@ pub fn cleanup_sancov_shared() {
         SANCOV_TRANSFER.with(|c| c.set(std::ptr::null_mut()));
     }
 
-    let history = SANCOV_HISTORY.with(|c| c.get());
+    let history = SANCOV_HISTORY.with(std::cell::Cell::get);
     if !history.is_null() {
         // Safety: history was returned by alloc_shared(len) in init_sancov_shared().
         // Pointer is non-null (checked above) and has not been previously freed.
@@ -572,9 +572,9 @@ pub fn cleanup_sancov_shared() {
         SANCOV_HISTORY.with(|c| c.set(std::ptr::null_mut()));
     }
 
-    let pool = SANCOV_POOL.with(|c| c.get());
+    let pool = SANCOV_POOL.with(std::cell::Cell::get);
     if !pool.is_null() {
-        let slots = SANCOV_POOL_SLOTS.with(|c| c.get());
+        let slots = SANCOV_POOL_SLOTS.with(std::cell::Cell::get);
         if slots > 0 {
             // Safety: pool was returned by alloc_shared(slots * len) in
             // get_or_init_sancov_pool(). Size matches the original allocation.
@@ -592,7 +592,7 @@ pub fn clear_transfer_buffer() {
     if !sancov_is_available() {
         return;
     }
-    let transfer = SANCOV_TRANSFER.with(|c| c.get());
+    let transfer = SANCOV_TRANSFER.with(std::cell::Cell::get);
     if transfer.is_null() {
         return;
     }
@@ -616,7 +616,7 @@ pub fn copy_counters_to_shared() {
     if !sancov_is_available() {
         return;
     }
-    let transfer = SANCOV_TRANSFER.with(|c| c.get());
+    let transfer = SANCOV_TRANSFER.with(std::cell::Cell::get);
     if transfer.is_null() {
         return;
     }
@@ -666,8 +666,8 @@ pub fn get_or_init_sancov_pool(slot_count: usize) -> *mut u8 {
         return std::ptr::null_mut();
     }
 
-    let existing = SANCOV_POOL.with(|c| c.get());
-    let existing_slots = SANCOV_POOL_SLOTS.with(|c| c.get());
+    let existing = SANCOV_POOL.with(std::cell::Cell::get);
+    let existing_slots = SANCOV_POOL_SLOTS.with(std::cell::Cell::get);
 
     if !existing.is_null() && existing_slots >= slot_count {
         return existing;
@@ -823,7 +823,7 @@ mod tests {
     fn test_init_cleanup_lifecycle() {
         // When sancov is unavailable, init/cleanup are no-ops
         init_sancov_shared().expect("init should succeed as no-op");
-        let transfer = SANCOV_TRANSFER.with(|c| c.get());
+        let transfer = SANCOV_TRANSFER.with(std::cell::Cell::get);
         assert!(transfer.is_null(), "no buffers allocated without sancov");
         cleanup_sancov_shared();
     }

@@ -1,6 +1,6 @@
-//! RequestStream: Server-side stream for receiving typed requests.
+//! `RequestStream`: Server-side stream for receiving typed requests.
 //!
-//! A RequestStream receives incoming requests and provides `ReplyPromise` handles
+//! A `RequestStream` receives incoming requests and provides `ReplyPromise` handles
 //! for each request, allowing the server to respond.
 //!
 //! # FDB Reference
@@ -72,9 +72,12 @@ impl<Req, Resp> Clone for RequestStream<Req, Resp> {
 
 impl<Req, Resp> std::fmt::Debug for RequestStream<Req, Resp> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `transport` is a trait object with no useful Debug output; `encode_reply`
+        // is a function pointer; `_phantom` is zero-sized. Only the endpoint is
+        // informative for users.
         f.debug_struct("RequestStream")
             .field("endpoint", self.queue.endpoint())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -82,23 +85,27 @@ impl<Req, Resp> RequestStream<Req, Resp> {
     /// Get the endpoint for this stream.
     ///
     /// Clients use this endpoint to send requests.
+    #[must_use]
     pub fn endpoint(&self) -> &Endpoint {
         self.queue.endpoint()
     }
 
     /// Get a reference to the internal queue for registration.
     ///
-    /// This is used to register the stream with NetTransport.
+    /// This is used to register the stream with `NetTransport`.
+    #[must_use]
     pub fn queue(&self) -> Arc<NetNotifiedQueue<RequestEnvelope<Req>>> {
         self.queue.clone()
     }
 
     /// Check if the stream is empty.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
     }
 
     /// Get the number of pending requests.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.queue.len()
     }
@@ -109,6 +116,7 @@ impl<Req, Resp> RequestStream<Req, Resp> {
     }
 
     /// Check if the stream is closed.
+    #[must_use]
     pub fn is_closed(&self) -> bool {
         self.queue.is_closed()
     }
@@ -153,6 +161,7 @@ where
     /// Try to receive a request without blocking.
     ///
     /// Returns `None` if no request is available.
+    #[must_use]
     pub fn try_recv(&self) -> Option<(Req, ReplyPromise<Resp>)> {
         let envelope = self.queue.try_recv()?;
         let transport_clone = Arc::clone(&self.transport);

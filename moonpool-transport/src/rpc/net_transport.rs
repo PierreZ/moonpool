@@ -1,4 +1,4 @@
-//! NetTransport: Central transport coordinator (FDB pattern).
+//! `NetTransport`: Central transport coordinator (FDB pattern).
 //!
 //! Manages peer connections and dispatches incoming packets to endpoints.
 //! Provides synchronous send API (FDB pattern: never await on send).
@@ -24,7 +24,7 @@
 //! ```
 //!
 //! The builder automatically handles `Arc` wrapping and `set_weak_self()`,
-//! eliminating the most common footgun in NetTransport usage.
+//! eliminating the most common footgun in `NetTransport` usage.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock, Weak};
@@ -51,10 +51,10 @@ type SharedPeer<P> = Arc<RwLock<Peer<P>>>;
 /// Pending reply entry: token + weak reference to the queue closer.
 type PendingReplyEntry = (UID, Weak<dyn ReplyQueueCloser>);
 
-/// Internal transport data (FDB TransportData equivalent).
+/// Internal transport data (FDB `TransportData` equivalent).
 ///
 /// Separates internal mutable state from public API, matching FDB's pattern.
-/// See NetTransport.actor.cpp:300-350 for the original TransportData struct.
+/// See NetTransport.actor.cpp:300-350 for the original `TransportData` struct.
 ///
 /// # FDB Reference
 /// ```cpp
@@ -69,7 +69,7 @@ struct TransportData<P: Providers> {
     endpoints: EndpointMap,
 
     /// Peer connections keyed by destination address (outgoing).
-    /// FDB: std::unordered_map<NetworkAddress, Reference<struct Peer>> peers;
+    /// FDB: `std::unordered_map`<`NetworkAddress`, Reference<struct Peer>> peers;
     peers: BTreeMap<String, SharedPeer<P>>,
 
     /// Incoming peer connections (from accepted connections).
@@ -77,12 +77,12 @@ struct TransportData<P: Providers> {
     incoming_peers: BTreeMap<String, SharedPeer<P>>,
 
     /// Failure monitor for address/endpoint failure tracking.
-    /// FDB: IFailureMonitor (FailureMonitor.h)
+    /// FDB: `IFailureMonitor` (FailureMonitor.h)
     failure_monitor: Arc<FailureMonitor>,
 
     /// Pending reply queues per remote address.
     ///
-    /// Uses Weak refs so entries are automatically invalidated when ReplyFuture drops.
+    /// Uses Weak refs so entries are automatically invalidated when `ReplyFuture` drops.
     /// Cleaned lazily during `close_pending_replies`.
     ///
     /// FDB: endStreamOnDisconnect pattern (genericactors.actor.h:332)
@@ -105,7 +105,7 @@ impl<P: Providers> TransportData<P> {
     }
 }
 
-/// Central transport coordinator (FDB NetTransport equivalent).
+/// Central transport coordinator (FDB `NetTransport` equivalent).
 ///
 /// # Design
 ///
@@ -127,7 +127,7 @@ impl<P: Providers> TransportData<P> {
 /// transport.listen().await?; // Start accepting connections
 /// ```
 pub struct NetTransport<P: Providers, C: MessageCodec = crate::JsonCodec> {
-    /// Internal transport data (FDB: TransportData* self).
+    /// Internal transport data (FDB: `TransportData`* self).
     data: RwLock<TransportData<P>>,
 
     /// Local address for this transport.
@@ -147,7 +147,7 @@ pub struct NetTransport<P: Providers, C: MessageCodec = crate::JsonCodec> {
     /// Set via `set_weak_self()` after wrapping in `Arc`.
     weak_self: RwLock<Option<Weak<Self>>>,
 
-    /// Shutdown signal sender. When set to `true`, background tasks (listen_task) should exit.
+    /// Shutdown signal sender. When set to `true`, background tasks (`listen_task`) should exit.
     /// Uses watch channel so multiple receivers can observe the same signal.
     shutdown_tx: watch::Sender<bool>,
 
@@ -170,7 +170,7 @@ struct TransportStats {
 }
 
 impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
-    /// Create a new NetTransport.
+    /// Create a new `NetTransport`.
     ///
     /// # Arguments
     ///
@@ -240,6 +240,11 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     /// let transport = Arc::new(NetTransport::new(...));
     /// transport.set_weak_self(Arc::downgrade(&transport));
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn set_weak_self(&self, weak: Weak<Self>) {
         *self
             .weak_self
@@ -257,6 +262,7 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     }
 
     /// Create with custom peer configuration.
+    #[must_use]
     pub fn with_peer_config(mut self, config: PeerConfig) -> Self {
         self.peer_config = config;
         self
@@ -273,6 +279,11 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     ///
     /// # FDB Reference
     /// `IFailureMonitor::failureMonitor()` (FailureMonitor.h)
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn failure_monitor(&self) -> Arc<FailureMonitor> {
         Arc::clone(
             &self
@@ -286,6 +297,15 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     /// Register a well-known endpoint.
     ///
     /// Well-known endpoints have deterministic tokens for O(1) lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessagingError`] if a receiver is already registered under `token`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn register_well_known(
         &self,
         token: WellKnownToken,
@@ -301,6 +321,11 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     /// Register a dynamic endpoint with the given UID.
     ///
     /// Returns the endpoint that senders should use to address this receiver.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn register(&self, token: UID, receiver: Arc<dyn MessageReceiver>) -> Endpoint {
         self.data
             .write()
@@ -311,6 +336,11 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     }
 
     /// Unregister a dynamic endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn unregister(&self, token: &UID) -> Option<Arc<dyn MessageReceiver>> {
         self.data
             .write()
@@ -342,10 +372,10 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     /// Close all pending reply queues for a disconnected address.
     ///
     /// Upgrades Weak refs and calls `close_with_error`, then removes the
-    /// corresponding endpoints from the EndpointMap.
+    /// corresponding endpoints from the `EndpointMap`.
     ///
     /// FDB: endStreamOnDisconnect pattern (genericactors.actor.h:332)
-    pub(crate) fn close_pending_replies(&self, addr: &str, reason: ReplyError) {
+    pub(crate) fn close_pending_replies(&self, addr: &str, reason: &ReplyError) {
         let entries = {
             let mut data = self
                 .data
@@ -399,6 +429,11 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     ///     }
     /// }
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn register_handler<Req, Resp>(
         transport: &Arc<Self>,
         token: UID,
@@ -463,6 +498,15 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     ///
     /// * `endpoint` - Destination endpoint
     /// * `payload` - Message bytes (already serialized)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessagingError`] if local delivery fails or the peer rejects the packet.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn send_unreliable(
         &self,
         endpoint: &Endpoint,
@@ -499,6 +543,15 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     ///
     /// * `endpoint` - Destination endpoint
     /// * `payload` - Message bytes (already serialized)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessagingError`] if local delivery fails or the peer rejects the packet.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn send_reliable(&self, endpoint: &Endpoint, payload: &[u8]) -> Result<(), MessagingError> {
         // Check for local delivery
         if self.is_local_address(&endpoint.address) {
@@ -601,7 +654,7 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
                 .failure_monitor,
         ));
         let peer = Peer::new(
-            self.providers.clone(),
+            &self.providers,
             addr_str.clone(),
             self.peer_config.clone(),
             fm,
@@ -632,6 +685,16 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     /// # Returns
     ///
     /// Ok(()) if delivered, Err if endpoint not found.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessagingError::EndpointNotFound`] if no receiver is registered
+    /// under `token`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn dispatch(&self, token: &UID, payload: &[u8]) -> Result<(), MessagingError> {
         let data = self
             .data
@@ -658,6 +721,11 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     }
 
     /// Get statistics.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn packets_sent(&self) -> u64 {
         self.data
             .read()
@@ -667,6 +735,11 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     }
 
     /// Get the number of packets dispatched to endpoints.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn packets_dispatched(&self) -> u64 {
         self.data
             .read()
@@ -676,6 +749,11 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     }
 
     /// Get the number of packets that couldn't be delivered.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn packets_undelivered(&self) -> u64 {
         self.data
             .read()
@@ -685,6 +763,11 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     }
 
     /// Get the number of peers created.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn peers_created(&self) -> u64 {
         self.data
             .read()
@@ -694,6 +777,11 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     }
 
     /// Get number of active peers.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn peer_count(&self) -> usize {
         self.data
             .read()
@@ -703,6 +791,11 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     }
 
     /// Get number of registered endpoints.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn endpoint_count(&self) -> usize {
         let data = self
             .data
@@ -711,10 +804,10 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
         data.endpoints.well_known_count() + data.endpoints.dynamic_count()
     }
 
-    /// Spawn a connection_reader for a peer.
+    /// Spawn a `connection_reader` for a peer.
     ///
     /// FDB Pattern: connectionKeeper spawns connectionReader (line 843).
-    /// The connection_reader reads from the peer and dispatches to endpoints.
+    /// The `connection_reader` reads from the peer and dispatches to endpoints.
     ///
     /// # Arguments
     ///
@@ -759,6 +852,16 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     /// transport.set_weak_self(Arc::downgrade(&transport));
     /// transport.listen().await?;
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessagingError`] if `set_weak_self()` was not called, if binding
+    /// the local address fails, or if accepting incoming connections fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub async fn listen(&self) -> Result<(), MessagingError> {
         // Verify weak_self is set
         if self
@@ -780,7 +883,7 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
             .bind(&addr_str)
             .await
             .map_err(|e| MessagingError::NetworkError {
-                message: format!("Failed to bind to {}: {}", addr_str, e),
+                message: format!("Failed to bind to {addr_str}: {e}"),
             })?;
 
         tracing::info!("NetTransport: listening on {}", addr_str);
@@ -800,8 +903,8 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
 
 /// Implement Drop to signal shutdown to background tasks.
 ///
-/// When NetTransport is dropped, we signal all background tasks (listen_task)
-/// to exit gracefully. This prevents tasks from being stuck on accept() forever.
+/// When `NetTransport` is dropped, we signal all background tasks (`listen_task`)
+/// to exit gracefully. This prevents tasks from being stuck on `accept()` forever.
 impl<P: Providers, C: MessageCodec> Drop for NetTransport<P, C> {
     fn drop(&mut self) {
         tracing::debug!("NetTransport: signaling shutdown to background tasks");
@@ -909,7 +1012,7 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
 // NetTransportBuilder
 // =============================================================================
 
-/// Builder for NetTransport that eliminates common footguns.
+/// Builder for `NetTransport` that eliminates common footguns.
 ///
 /// The manual `Arc` wrapping and `set_weak_self()` pattern is error-prone:
 /// forgetting `set_weak_self()` causes a runtime panic. This builder handles
@@ -991,6 +1094,7 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransportBuilder<P, C> {
     /// # Arguments
     ///
     /// * `address` - The network address to bind to
+    #[must_use]
     pub fn local_address(mut self, address: NetworkAddress) -> Self {
         self.local_address = Some(address);
         self
@@ -999,6 +1103,7 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransportBuilder<P, C> {
     /// Set custom peer configuration.
     ///
     /// If not set, uses `PeerConfig::default()`.
+    #[must_use]
     pub fn peer_config(mut self, config: PeerConfig) -> Self {
         self.peer_config = Some(config);
         self
@@ -1052,7 +1157,7 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransportBuilder<P, C> {
     }
 }
 
-/// FDB: connectionReader() - reads from connection and dispatches to endpoints.
+/// FDB: `connectionReader()` - reads from connection and dispatches to endpoints.
 ///
 /// This is a background task that:
 /// 1. Takes ownership of the peer's receiver channel at startup
@@ -1062,7 +1167,7 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransportBuilder<P, C> {
 /// # FDB Reference
 /// From NetTransport.actor.cpp:1401-1602 connectionReader
 ///
-/// The FDB version is more complex (handles ConnectPacket, protocol negotiation),
+/// The FDB version is more complex (handles `ConnectPacket`, protocol negotiation),
 /// but the core loop is: read packets → scanPackets → deliver.
 async fn connection_reader<P: Providers + Send + Sync, C: MessageCodec>(
     transport: Weak<NetTransport<P, C>>,
@@ -1074,75 +1179,71 @@ async fn connection_reader<P: Providers + Send + Sync, C: MessageCodec>(
     // Take ownership of the receiver at startup.
     // This avoids holding the peer lock across await points (critical safety fix).
     let mut receiver = {
-        match peer
+        if let Some(rx) = peer
             .write()
             .expect("RwLock poisoned: prior task panicked")
             .take_receiver()
         {
-            Some(rx) => rx,
-            None => {
-                tracing::error!(
-                    "connection_reader: receiver already taken for peer {}",
-                    peer_addr
-                );
-                return;
-            }
+            rx
+        } else {
+            tracing::error!(
+                "connection_reader: receiver already taken for peer {}",
+                peer_addr
+            );
+            return;
         }
     }; // peer lock released here
 
     loop {
         // Await directly on the owned receiver - safe, no peer lock involved!
-        match receiver.recv().await {
-            Some((token, payload)) => {
-                // Try to get transport reference
-                let Some(transport) = transport.upgrade() else {
-                    tracing::debug!(
-                        "connection_reader: transport dropped, exiting for peer {}",
-                        peer_addr
-                    );
-                    break;
-                };
-
-                // FDB: deliver() - looks up endpoint and dispatches
-                if let Err(e) = transport.dispatch(&token, &payload) {
-                    tracing::debug!(
-                        "connection_reader: dispatch failed for token {}: {:?}",
-                        token,
-                        e
-                    );
-
-                    // FDB: send WLTOKEN_ENDPOINT_NOT_FOUND back to sender
-                    // (FlowTransport.cpp:1244-1225)
-                    if !token.is_well_known() {
-                        let mut notification = [0u8; 16];
-                        notification[0..8].copy_from_slice(&token.first.to_le_bytes());
-                        notification[8..16].copy_from_slice(&token.second.to_le_bytes());
-                        let _ = peer
-                            .write()
-                            .expect("RwLock poisoned: prior task panicked")
-                            .send_unreliable(
-                                crate::peer::core::ENDPOINT_NOT_FOUND_TOKEN,
-                                &notification,
-                            );
-                    }
-                }
-            }
-            None => {
-                // Channel closed - peer disconnected or shutdown
-                tracing::debug!("connection_reader: peer {} receiver closed", peer_addr);
-                // Close all pending reply queues for this peer with MaybeDelivered
-                if let Some(transport) = transport.upgrade() {
-                    transport.close_pending_replies(&peer_addr, ReplyError::MaybeDelivered);
-                }
+        if let Some((token, payload)) = receiver.recv().await {
+            // Try to get transport reference
+            let Some(transport) = transport.upgrade() else {
+                tracing::debug!(
+                    "connection_reader: transport dropped, exiting for peer {}",
+                    peer_addr
+                );
                 break;
+            };
+
+            // FDB: deliver() - looks up endpoint and dispatches
+            if let Err(e) = transport.dispatch(&token, &payload) {
+                tracing::debug!(
+                    "connection_reader: dispatch failed for token {}: {:?}",
+                    token,
+                    e
+                );
+
+                // FDB: send WLTOKEN_ENDPOINT_NOT_FOUND back to sender
+                // (FlowTransport.cpp:1244-1225)
+                if !token.is_well_known() {
+                    let mut notification = [0u8; 16];
+                    notification[0..8].copy_from_slice(&token.first.to_le_bytes());
+                    notification[8..16].copy_from_slice(&token.second.to_le_bytes());
+                    let _ = peer
+                        .write()
+                        .expect("RwLock poisoned: prior task panicked")
+                        .send_unreliable(
+                            crate::peer::core::ENDPOINT_NOT_FOUND_TOKEN,
+                            &notification,
+                        );
+                }
             }
+        } else {
+            // Channel closed - peer disconnected or shutdown
+            tracing::debug!("connection_reader: peer {} receiver closed", peer_addr);
+            // Close all pending reply queues for this peer with MaybeDelivered
+            if let Some(transport) = transport.upgrade() {
+                transport.close_pending_replies(&peer_addr, &ReplyError::MaybeDelivered);
+            }
+            break;
         }
     }
 
     tracing::debug!("connection_reader: exiting for peer {}", peer_addr);
 }
 
-/// FDB: listen() - accept loop spawning connectionIncoming per connection.
+/// FDB: `listen()` - accept loop spawning connectionIncoming per connection.
 ///
 /// This is a background task that:
 /// 1. Accepts incoming connections
@@ -1220,20 +1321,20 @@ async fn listen_task<P: Providers + Send + Sync, C: MessageCodec>(
     tracing::debug!("listen_task: exiting for {}", listen_addr);
 }
 
-/// FDB: connectionIncoming() - handles accepted connection.
+/// FDB: `connectionIncoming()` - handles accepted connection.
 ///
 /// This function:
 /// 1. Creates a peer for the incoming connection
-/// 2. Spawns a connection_reader for the peer
+/// 2. Spawns a `connection_reader` for the peer
 ///
 /// # FDB Reference
 /// From NetTransport.actor.cpp:1604-1644 connectionIncoming
 ///
-/// Note: FDB's connectionIncoming waits for ConnectPacket to identify the peer.
-/// We simplify by using the peer address directly since SimNetworkProvider
+/// Note: FDB's connectionIncoming waits for `ConnectPacket` to identify the peer.
+/// We simplify by using the peer address directly since `SimNetworkProvider`
 /// already provides the peer address.
 ///
-/// FDB Pattern: Use Peer::new_incoming() with the accepted stream, not Peer::new().
+/// FDB Pattern: Use `Peer::new_incoming()` with the accepted stream, not `Peer::new()`.
 /// This uses the already-established connection rather than trying to connect back.
 fn connection_incoming<P: Providers + Send + Sync, C: MessageCodec>(
     transport_weak: Weak<NetTransport<P, C>>,
@@ -1275,7 +1376,7 @@ fn connection_incoming<P: Providers + Send + Sync, C: MessageCodec>(
                 .failure_monitor,
         ));
         let peer = Peer::new_incoming(
-            transport.providers.clone(),
+            &transport.providers,
             peer_addr.clone(),
             stream,
             transport.peer_config.clone(),

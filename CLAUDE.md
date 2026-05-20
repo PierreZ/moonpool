@@ -23,6 +23,11 @@ not match CI.
 - `nix develop --command cargo clippy`
 - `nix develop --command cargo nextest run`
 
+**Clippy pedantic is enabled**. Never silence a clippy warning with
+`#[allow(clippy::...)]` — fix the underlying issue (refactor the
+function, split the type, rename the variable, etc.). The allow
+attribute is not an acceptable resolution.
+
 **Simulation binaries**: Managed via xtask:
 - `cargo xtask sim list` — list all simulation binaries
 - `cargo xtask sim run maze` — run binaries matching filter

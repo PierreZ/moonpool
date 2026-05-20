@@ -40,3 +40,6 @@ path = "src/bin/sim/dungeon_explore.rs"
 [[bin]]
 name = "sim-axum-web"
 path = "src/bin/sim/axum_web.rs"
+
+[lints]
+workspace = true

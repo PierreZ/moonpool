@@ -40,9 +40,9 @@ const SIM_BINARIES: &[SimBinary] = &[
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    match args.first().map(|s| s.as_str()) {
+    match args.first().map(std::string::String::as_str) {
         Some("sim") => sim_dispatch(&args[1..]),
-        Some("help") | Some("--help") | Some("-h") | None => print_usage(),
+        Some("help" | "--help" | "-h") | None => print_usage(),
         Some(cmd) => {
             eprintln!("unknown command: {cmd}");
             print_usage();
@@ -61,11 +61,11 @@ fn print_usage() {
 }
 
 fn sim_dispatch(args: &[String]) {
-    match args.first().map(|s| s.as_str()) {
+    match args.first().map(std::string::String::as_str) {
         Some("list") => sim_list(&args[1..]),
         Some("run") => sim_run(&args[1..]),
         Some("run-all") => sim_run_all(),
-        Some("help") | Some("--help") | Some("-h") | None => sim_help(),
+        Some("help" | "--help" | "-h") | None => sim_help(),
         Some(cmd) => {
             eprintln!("unknown sim subcommand: {cmd}");
             sim_help();
@@ -93,13 +93,13 @@ fn sim_help() {
 fn fmt_duration(d: std::time::Duration) -> String {
     let total_ms = d.as_millis();
     if total_ms < 1000 {
-        format!("{}ms", total_ms)
+        format!("{total_ms}ms")
     } else if total_ms < 60_000 {
         format!("{:.1}s", d.as_secs_f64())
     } else {
         let mins = d.as_secs() / 60;
         let secs = d.as_secs() % 60;
-        format!("{}m {:02}s", mins, secs)
+        format!("{mins}m {secs:02}s")
     }
 }
 
@@ -115,11 +115,11 @@ fn filter_binaries<'a>(filters: &[&str]) -> Vec<&'a SimBinary> {
 }
 
 fn sim_list(args: &[String]) {
-    let filters: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let filters: Vec<&str> = args.iter().map(std::string::String::as_str).collect();
     let binaries = filter_binaries(&filters);
 
     if binaries.is_empty() {
-        eprintln!("No binaries match filters: {:?}", filters);
+        eprintln!("No binaries match filters: {filters:?}");
         process::exit(1);
     }
 
@@ -135,7 +135,10 @@ fn sim_run(args: &[String]) {
         None => (args, [].as_slice()),
     };
 
-    let filters: Vec<&str> = filter_args.iter().map(|s| s.as_str()).collect();
+    let filters: Vec<&str> = filter_args
+        .iter()
+        .map(std::string::String::as_str)
+        .collect();
 
     if filters.is_empty() {
         eprintln!("error: 'run' requires at least one filter argument");
@@ -148,7 +151,7 @@ fn sim_run(args: &[String]) {
     let binaries = filter_binaries(&filters);
 
     if binaries.is_empty() {
-        eprintln!("No binaries match filters: {:?}", filters);
+        eprintln!("No binaries match filters: {filters:?}");
         process::exit(1);
     }
 

@@ -105,18 +105,15 @@ impl PingTracker {
 
     /// Compute how long until the next ping action should occur.
     fn time_until_next_action(&self, now: Duration) -> Duration {
-        match self.ping_sent_at {
-            Some(sent_at) => {
-                // AwaitingPong — timer is the ping timeout
-                let elapsed = now.saturating_sub(sent_at);
-                self.config.ping_timeout.saturating_sub(elapsed)
-            }
-            None => {
-                // Idle — timer is the ping interval
-                let last = self.last_ping_cycle.unwrap_or(now);
-                let elapsed = now.saturating_sub(last);
-                self.config.ping_interval.saturating_sub(elapsed)
-            }
+        if let Some(sent_at) = self.ping_sent_at {
+            // AwaitingPong — timer is the ping timeout
+            let elapsed = now.saturating_sub(sent_at);
+            self.config.ping_timeout.saturating_sub(elapsed)
+        } else {
+            // Idle — timer is the ping interval
+            let last = self.last_ping_cycle.unwrap_or(now);
+            let elapsed = now.saturating_sub(last);
+            self.config.ping_interval.saturating_sub(elapsed)
         }
     }
 
@@ -218,7 +215,7 @@ impl ReconnectState {
 ///
 /// Uses wire format: `[length:4][checksum:4][token:16][payload]`
 ///
-/// Follows FoundationDB's architecture: synchronous API with background actors.
+/// Follows `FoundationDB`'s architecture: synchronous API with background actors.
 pub struct Peer<P: Providers> {
     /// Shared state accessible to background actors
     shared_state: Arc<RwLock<PeerSharedState<P>>>,
@@ -294,7 +291,7 @@ impl<P: Providers> Peer<P> {
     /// * `config` - Peer configuration
     /// * `failure_monitor` - Optional failure monitor for address-level tracking
     pub fn new(
-        providers: P,
+        providers: &P,
         destination: String,
         config: PeerConfig,
         failure_monitor: Option<Arc<FailureMonitor>>,
@@ -352,8 +349,13 @@ impl<P: Providers> Peer<P> {
     /// Used by server-side listener to wrap accepted connections.
     /// Unlike `new()`, this starts with an established connection instead of
     /// initiating an outbound connection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn new_incoming(
-        providers: P,
+        providers: &P,
         peer_address: String,
         stream: <P::Network as moonpool_core::NetworkProvider>::TcpStream,
         config: PeerConfig,
@@ -418,6 +420,11 @@ impl<P: Providers> Peer<P> {
     }
 
     /// Check if currently connected.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn is_connected(&self) -> bool {
         self.shared_state
             .read()
@@ -433,6 +440,11 @@ impl<P: Providers> Peer<P> {
     /// Returns an `Arc<Notify>` that fires `notify_waiters()` on every
     /// connection failure. Consumers should call `.notified()` before
     /// checking `is_connected()` to avoid races.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn disconnect_notify(&self) -> Arc<Notify> {
         self.shared_state
             .read()
@@ -442,6 +454,11 @@ impl<P: Providers> Peer<P> {
     }
 
     /// Get peer metrics.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn metrics(&self) -> PeerMetrics {
         self.shared_state
             .read()
@@ -453,11 +470,16 @@ impl<P: Providers> Peer<P> {
     /// Send packet reliably to the peer (queued, will retry on reconnect).
     ///
     /// Serializes with wire format and queues immediately.
-    /// Returns without blocking on TCP I/O (matches FoundationDB pattern).
+    /// Returns without blocking on TCP I/O (matches `FoundationDB` pattern).
     ///
     /// # Errors
     ///
     /// Returns error if payload is too large for wire format.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn send_reliable(&mut self, token: UID, payload: &[u8]) -> PeerResult<()> {
         let packet = Self::serialize_message(token, payload)?;
 
@@ -515,6 +537,11 @@ impl<P: Providers> Peer<P> {
     /// # Errors
     ///
     /// Returns error if payload is too large for wire format.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn send_unreliable(&mut self, token: UID, payload: &[u8]) -> PeerResult<()> {
         let packet = Self::serialize_message(token, payload)?;
 
@@ -546,9 +573,9 @@ impl<P: Providers> Peer<P> {
     fn serialize_message(token: UID, payload: &[u8]) -> PeerResult<Vec<u8>> {
         serialize_packet(token, payload).map_err(|e| match e {
             WireError::PacketTooLarge { size } => {
-                PeerError::InvalidOperation(format!("payload too large: {} bytes", size))
+                PeerError::InvalidOperation(format!("payload too large: {size} bytes"))
             }
-            _ => PeerError::InvalidOperation(format!("serialization error: {}", e)),
+            _ => PeerError::InvalidOperation(format!("serialization error: {e}")),
         })
     }
 
@@ -564,6 +591,11 @@ impl<P: Providers> Peer<P> {
     }
 
     /// Close the connection and clear send queues.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub async fn close(&mut self) {
         // Signal shutdown to connection task
         let _ = self.shutdown_tx.send(());
@@ -601,7 +633,7 @@ enum ConnectionLossBehavior {
 
 /// Background connection task that handles all async TCP I/O.
 ///
-/// Matches FoundationDB's connectionWriter + connectionMonitor patterns:
+/// Matches `FoundationDB`'s connectionWriter + connectionMonitor patterns:
 /// - Waits for dataToSend trigger
 /// - Drains unsent queue continuously
 /// - Handles connection failures and reconnection (or exit for incoming)
@@ -623,6 +655,135 @@ async fn connection_task<P: Providers>(
     // Buffer for accumulating partial packet reads
     let mut read_buffer: Vec<u8> = Vec::with_capacity(4096);
 
+    let (failure_monitor, mut ping_tracker) = init_connection_task_state(
+        &shared_state,
+        &config,
+        current_connection.is_some(),
+        on_connection_loss,
+    );
+
+    loop {
+        // Compute ping timer duration before select! to avoid borrow conflicts
+        let ping_sleep_duration = compute_ping_sleep(
+            &shared_state,
+            ping_tracker.as_ref(),
+            current_connection.is_some(),
+        );
+        let ping_active = ping_sleep_duration.is_some();
+
+        tokio::select! {
+            // Check for shutdown
+            _ = shutdown_rx.recv() => {
+                break;
+            }
+
+            // Wait for data to send (FoundationDB pattern)
+            () = data_to_send.notified() => {
+                match handle_data_to_send(DataToSendCtx {
+                    shared_state: &shared_state,
+                    current_connection: &mut current_connection,
+                    read_buffer: &mut read_buffer,
+                    config: &config,
+                    data_to_send: &data_to_send,
+                    ping_tracker: ping_tracker.as_mut(),
+                    failure_monitor: failure_monitor.as_ref(),
+                    on_connection_loss,
+                }).await {
+                    DataToSendOutcome::Break => break,
+                    DataToSendOutcome::Proceed => {}
+                }
+            }
+
+            // Handle reading (truly event-driven - FDB pattern)
+            read_result = async {
+                match &mut current_connection {
+                    Some(stream) => {
+                        let mut buffer = vec![0u8; 4096];
+                        stream.read(&mut buffer).await.map(|n| (buffer, n))
+                    }
+                    None => std::future::pending().await  // Never resolves when no connection
+                }
+            } => {
+                let mut ctx = ReadHandlerCtx {
+                    shared_state: &shared_state,
+                    current_connection: &mut current_connection,
+                    read_buffer: &mut read_buffer,
+                    receive_tx: &receive_tx,
+                    ping_tracker: &mut ping_tracker,
+                    data_to_send: &data_to_send,
+                    failure_monitor: failure_monitor.as_ref(),
+                    on_connection_loss,
+                };
+                let should_exit = handle_read_result(read_result, &mut ctx);
+                if should_exit {
+                    break;
+                }
+            }
+
+            // Connection monitor: periodic ping to detect unresponsive connections
+            // FDB ref: connectionMonitor (FlowTransport.actor.cpp:616-699)
+            () = async {
+                match ping_sleep_duration {
+                    Some(duration) => {
+                        let time = shared_state.read().expect("RwLock poisoned: prior task panicked").time.clone();
+                        let _ = time.sleep(duration).await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            }, if ping_active => {
+                let should_exit = handle_ping_timer_fire(
+                    &shared_state,
+                    &mut current_connection,
+                    &mut read_buffer,
+                    ping_tracker.as_mut(),
+                    &data_to_send,
+                    failure_monitor.as_ref(),
+                    on_connection_loss,
+                );
+                if should_exit {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Connection Helpers
+// =============================================================================
+
+/// Compute how long to sleep before the next ping action, if any.
+///
+/// Returns `None` if monitoring is disabled or no connection is active, signalling
+/// that the ping arm of the `select!` should be inactive.
+fn compute_ping_sleep<P: Providers>(
+    shared_state: &Arc<RwLock<PeerSharedState<P>>>,
+    ping_tracker: Option<&PingTracker>,
+    has_connection: bool,
+) -> Option<Duration> {
+    let tracker = ping_tracker?;
+    if !has_connection {
+        return None;
+    }
+    let now = shared_state
+        .read()
+        .expect("RwLock poisoned: prior task panicked")
+        .time
+        .now();
+    Some(tracker.time_until_next_action(now))
+}
+
+/// Initialize the failure monitor handle and ping tracker for `connection_task`.
+///
+/// If the task starts with an established connection (incoming peers) this also
+/// kicks off the first ping cycle and notifies the failure monitor that the
+/// destination is currently available.
+fn init_connection_task_state<P: Providers>(
+    shared_state: &Arc<RwLock<PeerSharedState<P>>>,
+    config: &PeerConfig,
+    has_initial_connection: bool,
+    on_connection_loss: ConnectionLossBehavior,
+) -> (Option<Arc<FailureMonitor>>, Option<PingTracker>) {
     // Extract failure monitor from shared state (clone the Option<Arc>)
     let failure_monitor = shared_state
         .read()
@@ -640,8 +801,8 @@ async fn connection_task<P: Providers>(
 
     // If we start with an existing connection, initialize the ping cycle
     // and notify failure monitor that this address is available
-    if current_connection.is_some() {
-        if let Some(ref mut tracker) = ping_tracker {
+    if has_initial_connection {
+        if let Some(tracker) = ping_tracker.as_mut() {
             let now = shared_state
                 .read()
                 .expect("RwLock poisoned: prior task panicked")
@@ -649,7 +810,7 @@ async fn connection_task<P: Providers>(
                 .now();
             tracker.last_ping_cycle = Some(now);
         }
-        if let Some(ref fm) = failure_monitor {
+        if let Some(fm) = failure_monitor.as_ref() {
             let dest = shared_state
                 .read()
                 .expect("RwLock poisoned: prior task panicked")
@@ -659,302 +820,396 @@ async fn connection_task<P: Providers>(
         }
     }
 
-    loop {
-        // Compute ping timer duration before select! to avoid borrow conflicts
-        let ping_sleep_duration = if let Some(ref tracker) = ping_tracker {
-            if current_connection.is_some() {
+    (failure_monitor, ping_tracker)
+}
+
+/// Try to establish an outbound connection, updating state and ping tracker on success.
+///
+/// Returns `Some(stream)` on success, `None` if connection attempts failed (the caller
+/// should retry on the next notification).
+async fn try_establish_connection<P: Providers>(
+    shared_state: &Arc<RwLock<PeerSharedState<P>>>,
+    config: &PeerConfig,
+    read_buffer: &mut Vec<u8>,
+    failure_monitor: Option<&Arc<FailureMonitor>>,
+    ping_tracker: Option<&mut PingTracker>,
+) -> Option<<P::Network as moonpool_core::NetworkProvider>::TcpStream> {
+    tracing::debug!("connection_task: no connection, establishing new connection");
+    match establish_connection(shared_state, config).await {
+        Ok(stream) => {
+            tracing::debug!("connection_task: successfully established connection");
+            read_buffer.clear();
+            let dest = {
+                let mut state = shared_state
+                    .write()
+                    .expect("RwLock poisoned: prior task panicked");
+                state.connection = Some(());
+                state.metrics.is_connected = true;
+                state.destination.clone()
+            };
+            // Notify failure monitor: address is available
+            if let Some(fm) = failure_monitor {
+                fm.set_status(&dest, FailureStatus::Available);
+            }
+            // Reset ping tracker on new connection
+            if let Some(tracker) = ping_tracker {
                 let now = shared_state
                     .read()
                     .expect("RwLock poisoned: prior task panicked")
                     .time
                     .now();
-                Some(tracker.time_until_next_action(now))
-            } else {
-                None
+                tracker.reset();
+                tracker.last_ping_cycle = Some(now);
             }
-        } else {
+            Some(stream)
+        }
+        Err(e) => {
+            tracing::debug!("connection_task: failed to establish connection: {:?}", e);
             None
+        }
+    }
+}
+
+/// Enqueue a ping packet in the unreliable queue and notify the writer if needed.
+///
+/// Returns the timestamp at which the ping was enqueued, or `None` if a connection
+/// is not established or serialization failed.
+fn enqueue_ping<P: Providers>(
+    shared_state: &Arc<RwLock<PeerSharedState<P>>>,
+    has_connection: bool,
+    data_to_send: &Notify,
+) -> Option<Duration> {
+    if !has_connection {
+        return None;
+    }
+    let ping_packet = serialize_packet(PING_TOKEN, &[]).ok()?;
+    let mut state = shared_state
+        .write()
+        .expect("RwLock poisoned: prior task panicked");
+    let first_unsent = state.are_queues_empty();
+    state.unreliable_queue.push_back(ping_packet);
+    state.metrics.record_ping_sent();
+    let sent_at = state.time.now();
+    drop(state);
+    if first_unsent {
+        data_to_send.notify_one();
+    }
+    Some(sent_at)
+}
+
+/// Handle a ping timer firing. Returns `true` if the connection task should exit.
+fn handle_ping_timer_fire<P: Providers>(
+    shared_state: &Arc<RwLock<PeerSharedState<P>>>,
+    current_connection: &mut Option<<P::Network as moonpool_core::NetworkProvider>::TcpStream>,
+    read_buffer: &mut Vec<u8>,
+    ping_tracker: Option<&mut PingTracker>,
+    data_to_send: &Notify,
+    failure_monitor: Option<&Arc<FailureMonitor>>,
+    on_connection_loss: ConnectionLossBehavior,
+) -> bool {
+    let (now, bytes_received) = {
+        let state = shared_state
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
+        (state.time.now(), state.metrics.bytes_received)
+    };
+
+    let Some(tracker) = ping_tracker else {
+        return false;
+    };
+
+    match tracker.on_timer_fired(now, bytes_received) {
+        PingAction::SendPing => {
+            if enqueue_ping(shared_state, current_connection.is_some(), data_to_send).is_some() {
+                tracing::debug!("connection_task: enqueued ping in unreliable_queue");
+            }
+            false
+        }
+        PingAction::Tolerate => {
+            shared_state
+                .write()
+                .expect("RwLock poisoned: prior task panicked")
+                .metrics
+                .record_ping_timeout_tolerated();
+            tracing::debug!(
+                "connection_task: ping timeout tolerated (bytes still flowing), count={}",
+                tracker.timeout_count
+            );
+            // Re-send a ping for the next timeout window via unreliable queue.
+            if let Some(sent_at) =
+                enqueue_ping(shared_state, current_connection.is_some(), data_to_send)
+            {
+                tracker.ping_sent_at = Some(sent_at);
+            }
+            false
+        }
+        PingAction::TearDown => {
+            shared_state
+                .write()
+                .expect("RwLock poisoned: prior task panicked")
+                .metrics
+                .record_ping_timeout();
+            tracing::debug!(
+                "connection_task: ping timeout, tearing down connection to {}",
+                shared_state
+                    .read()
+                    .expect("RwLock poisoned: prior task panicked")
+                    .destination
+            );
+            tracker.reset();
+            handle_connection_failure(
+                shared_state,
+                current_connection,
+                read_buffer,
+                None,
+                failure_monitor,
+            );
+            if on_connection_loss == ConnectionLossBehavior::Exit {
+                return true;
+            }
+            data_to_send.notify_one();
+            false
+        }
+    }
+}
+
+/// Outcome of [`handle_data_to_send`] — how the outer connection loop should proceed.
+enum DataToSendOutcome {
+    /// Exit the outer loop (`break`).
+    Break,
+    /// Continue running the outer loop normally (no special action).
+    Proceed,
+}
+
+/// Context shared by the `data_to_send` branch of `connection_task`'s `select!`.
+struct DataToSendCtx<'a, P: Providers> {
+    shared_state: &'a Arc<RwLock<PeerSharedState<P>>>,
+    current_connection: &'a mut Option<<P::Network as moonpool_core::NetworkProvider>::TcpStream>,
+    read_buffer: &'a mut Vec<u8>,
+    config: &'a PeerConfig,
+    data_to_send: &'a Notify,
+    ping_tracker: Option<&'a mut PingTracker>,
+    failure_monitor: Option<&'a Arc<FailureMonitor>>,
+    on_connection_loss: ConnectionLossBehavior,
+}
+
+/// Handle the `data_to_send.notified()` branch of `connection_task`'s `select!`.
+///
+/// Ensures a connection is available (possibly establishing one) and drains
+/// pending send queues.
+async fn handle_data_to_send<P: Providers>(ctx: DataToSendCtx<'_, P>) -> DataToSendOutcome {
+    // First, ensure we have messages to send
+    let has_messages = {
+        let state = ctx
+            .shared_state
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
+        let total = state.reliable_queue.len() + state.unreliable_queue.len();
+        tracing::debug!(
+            "connection_task: queues have {} messages (reliable={}, unreliable={})",
+            total,
+            state.reliable_queue.len(),
+            state.unreliable_queue.len()
+        );
+        total > 0
+    };
+
+    if !has_messages {
+        tracing::debug!("connection_task: spurious wakeup, no messages to send");
+        return DataToSendOutcome::Proceed;
+    }
+
+    let DataToSendCtx {
+        shared_state,
+        current_connection,
+        read_buffer,
+        config,
+        data_to_send,
+        mut ping_tracker,
+        failure_monitor,
+        on_connection_loss,
+    } = ctx;
+
+    // Ensure we have a connection
+    if current_connection.is_none() {
+        match on_connection_loss {
+            ConnectionLossBehavior::Reconnect => {
+                match try_establish_connection(
+                    shared_state,
+                    config,
+                    read_buffer,
+                    failure_monitor,
+                    ping_tracker.as_deref_mut(),
+                )
+                .await
+                {
+                    Some(stream) => *current_connection = Some(stream),
+                    None => return DataToSendOutcome::Proceed,
+                }
+            }
+            ConnectionLossBehavior::Exit => {
+                tracing::debug!(
+                    "connection_task: connection lost, exiting (client must reconnect)"
+                );
+                return DataToSendOutcome::Break;
+            }
+        }
+    }
+
+    // Process send queues - drain reliable first, then unreliable (FDB pattern)
+    drain_send_queues(
+        shared_state,
+        current_connection,
+        read_buffer,
+        ping_tracker,
+        data_to_send,
+        failure_monitor,
+    )
+    .await;
+    DataToSendOutcome::Proceed
+}
+
+/// Drain pending messages from the send queues, writing them to the connection.
+///
+/// Reliable messages are sent first, then unreliable. On write failure the
+/// connection is torn down and the failed packet requeued (for reliable) or
+/// dropped (for unreliable). The send loop exits on the first failure so the
+/// outer loop can reconnect on the next notification.
+async fn drain_send_queues<P: Providers>(
+    shared_state: &Arc<RwLock<PeerSharedState<P>>>,
+    current_connection: &mut Option<<P::Network as moonpool_core::NetworkProvider>::TcpStream>,
+    read_buffer: &mut Vec<u8>,
+    mut ping_tracker: Option<&mut PingTracker>,
+    data_to_send: &Notify,
+    failure_monitor: Option<&Arc<FailureMonitor>>,
+) {
+    tracing::debug!("connection_task: processing send queues");
+    while let Some(stream) = current_connection.as_mut() {
+        // Get next message - reliable queue has priority
+        let (message, is_reliable) = {
+            let mut state = shared_state
+                .write()
+                .expect("RwLock poisoned: prior task panicked");
+            if let Some(msg) = state.reliable_queue.pop_front() {
+                tracing::debug!(
+                    "connection_task: popped reliable message, remaining: {}",
+                    state.reliable_queue.len()
+                );
+                (Some(msg), true)
+            } else if let Some(msg) = state.unreliable_queue.pop_front() {
+                tracing::debug!(
+                    "connection_task: popped unreliable message, remaining: {}",
+                    state.unreliable_queue.len()
+                );
+                (Some(msg), false)
+            } else {
+                (None, false)
+            }
         };
-        let ping_active = ping_sleep_duration.is_some();
 
-        tokio::select! {
-            // Check for shutdown
-            _ = shutdown_rx.recv() => {
+        let Some(data) = message else {
+            tracing::debug!("connection_task: all queues empty, breaking");
+            break;
+        };
+
+        tracing::debug!(
+            "connection_task: attempting to send {} bytes (reliable={})",
+            data.len(),
+            is_reliable
+        );
+
+        tracing::debug!(
+            "connection_task: calling stream.write_all() with {} bytes",
+            data.len()
+        );
+        match stream.write_all(&data).await {
+            Ok(()) => {
+                tracing::debug!("connection_task: write_all succeeded");
+                let mut state = shared_state
+                    .write()
+                    .expect("RwLock poisoned: prior task panicked");
+                state.metrics.record_message_sent(data.len());
+                state.metrics.record_message_dequeued();
+            }
+            Err(e) => {
+                tracing::debug!("connection_task: write_all failed: {:?}", e);
+                handle_connection_failure(
+                    shared_state,
+                    current_connection,
+                    read_buffer,
+                    Some((data, is_reliable)),
+                    failure_monitor,
+                );
+                if let Some(tracker) = ping_tracker.as_deref_mut() {
+                    tracker.reset();
+                }
+                data_to_send.notify_one();
                 break;
-            }
-
-            // Wait for data to send (FoundationDB pattern)
-            _ = data_to_send.notified() => {
-                // First, ensure we have messages to send
-                let has_messages = {
-                    let state = shared_state.read().expect("RwLock poisoned: prior task panicked");
-                    let total = state.reliable_queue.len() + state.unreliable_queue.len();
-                    tracing::debug!("connection_task: queues have {} messages (reliable={}, unreliable={})",
-                        total, state.reliable_queue.len(), state.unreliable_queue.len());
-                    total > 0
-                };
-
-                if !has_messages {
-                    tracing::debug!("connection_task: spurious wakeup, no messages to send");
-                    continue; // Spurious wakeup, wait for real data
-                }
-
-                // Ensure we have a connection
-                if current_connection.is_none() {
-                    match on_connection_loss {
-                        ConnectionLossBehavior::Reconnect => {
-                            tracing::debug!("connection_task: no connection, establishing new connection");
-                            match establish_connection(&shared_state, &config).await {
-                                Ok(stream) => {
-                                    tracing::debug!("connection_task: successfully established connection");
-                                    current_connection = Some(stream);
-                                    read_buffer.clear();
-                                    let dest = {
-                                        let mut state = shared_state.write().expect("RwLock poisoned: prior task panicked");
-                                        state.connection = Some(());
-                                        state.metrics.is_connected = true;
-                                        state.destination.clone()
-                                    };
-                                    // Notify failure monitor: address is available
-                                    if let Some(ref fm) = failure_monitor {
-                                        fm.set_status(&dest, FailureStatus::Available);
-                                    }
-                                    // Reset ping tracker on new connection
-                                    if let Some(ref mut tracker) = ping_tracker {
-                                        let now = shared_state.read().expect("RwLock poisoned: prior task panicked").time.now();
-                                        tracker.reset();
-                                        tracker.last_ping_cycle = Some(now);
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::debug!("connection_task: failed to establish connection: {:?}", e);
-                                    continue; // Will retry on next notification
-                                }
-                            }
-                        }
-                        ConnectionLossBehavior::Exit => {
-                            tracing::debug!("connection_task: connection lost, exiting (client must reconnect)");
-                            break;
-                        }
-                    }
-                }
-
-                // Process send queues - drain reliable first, then unreliable (FDB pattern)
-                tracing::debug!("connection_task: processing send queues");
-                while let Some(ref mut stream) = current_connection {
-                    // Get next message - reliable queue has priority
-                    let (message, is_reliable) = {
-                        let mut state = shared_state.write().expect("RwLock poisoned: prior task panicked");
-                        if let Some(msg) = state.reliable_queue.pop_front() {
-                            tracing::debug!("connection_task: popped reliable message, remaining: {}",
-                                state.reliable_queue.len());
-                            (Some(msg), true)
-                        } else if let Some(msg) = state.unreliable_queue.pop_front() {
-                            tracing::debug!("connection_task: popped unreliable message, remaining: {}",
-                                state.unreliable_queue.len());
-                            (Some(msg), false)
-                        } else {
-                            (None, false)
-                        }
-                    };
-
-                    let Some(data) = message else {
-                        tracing::debug!("connection_task: all queues empty, breaking");
-                        break; // All queues empty
-                    };
-
-                    tracing::debug!("connection_task: attempting to send {} bytes (reliable={})",
-                        data.len(), is_reliable);
-
-                    // Send the message (no shared-state lock held)
-                    tracing::debug!("connection_task: calling stream.write_all() with {} bytes", data.len());
-                    match stream.write_all(&data).await {
-                        Ok(_) => {
-                            tracing::debug!("connection_task: write_all succeeded");
-                            {
-                                let mut state = shared_state.write().expect("RwLock poisoned: prior task panicked");
-                                state.metrics.record_message_sent(data.len());
-                                state.metrics.record_message_dequeued();
-                            }
-                        }
-                        Err(e) => {
-                            tracing::debug!("connection_task: write_all failed: {:?}", e);
-                            handle_connection_failure(
-                                &shared_state,
-                                &mut current_connection,
-                                &mut read_buffer,
-                                Some((data, is_reliable)),
-                                &failure_monitor,
-                                );
-                            if let Some(ref mut tracker) = ping_tracker {
-                                tracker.reset();
-                            }
-                            data_to_send.notify_one();
-                            break; // Exit send loop, reconnect on next select iteration
-                        }
-                    }
-                }
-            }
-
-            // Handle reading (truly event-driven - FDB pattern)
-            read_result = async {
-                match &mut current_connection {
-                    Some(stream) => {
-                        let mut buffer = vec![0u8; 4096];
-                        stream.read(&mut buffer).await.map(|n| (buffer, n))
-                    }
-                    None => std::future::pending().await  // Never resolves when no connection
-                }
-            } => {
-                match read_result {
-                    Ok((_buffer, 0)) => {
-                        // Connection closed
-                        handle_connection_failure(
-                            &shared_state,
-                            &mut current_connection,
-                            &mut read_buffer,
-                            None,
-                            &failure_monitor,
-                        );
-                        if let Some(ref mut tracker) = ping_tracker {
-                            tracker.reset();
-                        }
-                        if on_connection_loss == ConnectionLossBehavior::Exit {
-                            break;
-                        }
-                        data_to_send.notify_one();
-                    }
-                    Ok((buffer, n)) => {
-                        // Append to read buffer
-                        read_buffer.extend_from_slice(&buffer[..n]);
-                        tracing::debug!("connection_task: received {} bytes, buffer now {} bytes", n, read_buffer.len());
-
-                        // Try to parse complete packets from buffer
-                        // Pong replies are enqueued in unreliable_queue by process_read_buffer
-                        // and picked up by the writer branch (FDB pattern: connectionWriter is sole TCP writer)
-                        let should_exit = process_read_buffer(
-                            &shared_state,
-                            &mut current_connection,
-                            &mut read_buffer,
-                            &receive_tx,
-                            on_connection_loss,
-                            &mut ping_tracker,
-                            &data_to_send,
-                        );
-
-                        if should_exit {
-                            break;
-                        }
-                    }
-                    Err(_) => {
-                        // Read error - connection likely broken
-                        handle_connection_failure(
-                            &shared_state,
-                            &mut current_connection,
-                            &mut read_buffer,
-                            None,
-                            &failure_monitor,
-                        );
-                        if let Some(ref mut tracker) = ping_tracker {
-                            tracker.reset();
-                        }
-                        if on_connection_loss == ConnectionLossBehavior::Exit {
-                            break;
-                        }
-                        data_to_send.notify_one();
-                    }
-                }
-            }
-
-            // Connection monitor: periodic ping to detect unresponsive connections
-            // FDB ref: connectionMonitor (FlowTransport.actor.cpp:616-699)
-            _ = async {
-                match ping_sleep_duration {
-                    Some(duration) => {
-                        let time = shared_state.read().expect("RwLock poisoned: prior task panicked").time.clone();
-                        let _ = time.sleep(duration).await;
-                    }
-                    None => std::future::pending::<()>().await,
-                }
-            }, if ping_active => {
-                let (now, bytes_received) = {
-                    let state = shared_state.read().expect("RwLock poisoned: prior task panicked");
-                    (state.time.now(), state.metrics.bytes_received)
-                };
-
-                if let Some(ref mut tracker) = ping_tracker {
-                    match tracker.on_timer_fired(now, bytes_received) {
-                        PingAction::SendPing => {
-                            if current_connection.is_some()
-                                && let Ok(ping_packet) = serialize_packet(PING_TOKEN, &[])
-                            {
-                                // FDB pattern: enqueue ping via unreliable queue, writer sends it
-                                // (FlowTransport.actor.cpp:663 — connectionMonitor uses sendUnreliable)
-                                let mut state = shared_state.write().expect("RwLock poisoned: prior task panicked");
-                                let first_unsent = state.are_queues_empty();
-                                state.unreliable_queue.push_back(ping_packet);
-                                state.metrics.record_ping_sent();
-                                drop(state);
-                                if first_unsent {
-                                    data_to_send.notify_one();
-                                }
-                                tracing::debug!("connection_task: enqueued ping in unreliable_queue");
-                            }
-                        }
-                        PingAction::Tolerate => {
-                            shared_state
-                                .write().expect("RwLock poisoned: prior task panicked")
-                                .metrics
-                                .record_ping_timeout_tolerated();
-                            tracing::debug!(
-                                "connection_task: ping timeout tolerated (bytes still flowing), count={}",
-                                tracker.timeout_count
-                            );
-                            // Re-send a ping for the next timeout window via unreliable queue
-                            if current_connection.is_some()
-                                && let Ok(ping_packet) = serialize_packet(PING_TOKEN, &[])
-                            {
-                                let mut state = shared_state.write().expect("RwLock poisoned: prior task panicked");
-                                let first_unsent = state.are_queues_empty();
-                                state.unreliable_queue.push_back(ping_packet);
-                                state.metrics.record_ping_sent();
-                                let sent_at = state.time.now();
-                                drop(state);
-                                tracker.ping_sent_at = Some(sent_at);
-                                if first_unsent {
-                                    data_to_send.notify_one();
-                                }
-                            }
-                        }
-                        PingAction::TearDown => {
-                            shared_state.write().expect("RwLock poisoned: prior task panicked").metrics.record_ping_timeout();
-                            tracing::debug!(
-                                "connection_task: ping timeout, tearing down connection to {}",
-                                shared_state.read().expect("RwLock poisoned: prior task panicked").destination
-                            );
-                            tracker.reset();
-                            handle_connection_failure(
-                                &shared_state,
-                                &mut current_connection,
-                                &mut read_buffer,
-                                None,
-                                &failure_monitor,
-                                );
-                            if on_connection_loss == ConnectionLossBehavior::Exit {
-                                break;
-                            }
-                            data_to_send.notify_one();
-                        }
-                    }
-                }
             }
         }
     }
 }
 
-// =============================================================================
-// Connection Helpers
-// =============================================================================
+/// Context shared by the connection task's read-result handler.
+struct ReadHandlerCtx<'a, P: Providers> {
+    shared_state: &'a Arc<RwLock<PeerSharedState<P>>>,
+    current_connection: &'a mut Option<<P::Network as moonpool_core::NetworkProvider>::TcpStream>,
+    read_buffer: &'a mut Vec<u8>,
+    receive_tx: &'a mpsc::UnboundedSender<(UID, Vec<u8>)>,
+    ping_tracker: &'a mut Option<PingTracker>,
+    data_to_send: &'a Notify,
+    failure_monitor: Option<&'a Arc<FailureMonitor>>,
+    on_connection_loss: ConnectionLossBehavior,
+}
+
+/// Handle the result of a streaming read, parsing any buffered packets.
+///
+/// Returns `true` if the connection task should exit.
+fn handle_read_result<P: Providers>(
+    read_result: std::io::Result<(Vec<u8>, usize)>,
+    ctx: &mut ReadHandlerCtx<'_, P>,
+) -> bool {
+    match read_result {
+        Ok((_, 0)) | Err(_) => {
+            handle_connection_failure(
+                ctx.shared_state,
+                ctx.current_connection,
+                ctx.read_buffer,
+                None,
+                ctx.failure_monitor,
+            );
+            if let Some(tracker) = ctx.ping_tracker.as_mut() {
+                tracker.reset();
+            }
+            if ctx.on_connection_loss == ConnectionLossBehavior::Exit {
+                return true;
+            }
+            ctx.data_to_send.notify_one();
+            false
+        }
+        Ok((buffer, n)) => {
+            ctx.read_buffer.extend_from_slice(&buffer[..n]);
+            tracing::debug!(
+                "connection_task: received {} bytes, buffer now {} bytes",
+                n,
+                ctx.read_buffer.len()
+            );
+
+            // Try to parse complete packets from buffer.
+            // Pong replies are enqueued in unreliable_queue by process_read_buffer
+            // and picked up by the writer branch (FDB pattern: connectionWriter is sole TCP writer).
+            process_read_buffer(
+                ctx.shared_state,
+                ctx.current_connection,
+                ctx.read_buffer,
+                ctx.receive_tx,
+                ctx.on_connection_loss,
+                ctx.ping_tracker,
+                ctx.data_to_send,
+            )
+        }
+    }
+}
 
 /// Handle connection failure by clearing state and optionally requeuing data.
 ///
@@ -965,7 +1220,7 @@ fn handle_connection_failure<P: Providers>(
     current_connection: &mut Option<<P::Network as moonpool_core::NetworkProvider>::TcpStream>,
     read_buffer: &mut Vec<u8>,
     failed_send: Option<(Vec<u8>, bool)>, // (data, is_reliable)
-    failure_monitor: &Option<Arc<FailureMonitor>>,
+    failure_monitor: Option<&Arc<FailureMonitor>>,
 ) {
     *current_connection = None;
     read_buffer.clear();
@@ -1060,72 +1315,18 @@ fn process_read_buffer<P: Providers>(
                 // Remove consumed bytes from buffer
                 read_buffer.drain(..consumed);
 
-                // Intercept ping token — enqueue pong in unreliable queue
-                // FDB pattern: pong goes through sendPacket → unsent queue → connectionWriter
+                // Intercept transport-layer tokens before delivering to the application.
                 if token == PING_TOKEN {
-                    if let Ok(pong_packet) = serialize_packet(PONG_TOKEN, &[]) {
-                        let mut state = shared_state
-                            .write()
-                            .expect("RwLock poisoned: prior task panicked");
-                        let first_unsent = state.are_queues_empty();
-                        state.unreliable_queue.push_back(pong_packet);
-                        drop(state);
-                        if first_unsent {
-                            data_to_send.notify_one();
-                        }
-                    }
-                    tracing::debug!(
-                        "connection_task: received ping, enqueued pong in unreliable_queue"
-                    );
-                    continue; // Do NOT deliver to application
+                    handle_ping_token(shared_state, data_to_send);
+                    continue;
                 }
-
-                // Intercept pong token — update ping tracker with RTT
                 if token == PONG_TOKEN {
-                    if let Some(tracker) = ping_tracker.as_mut() {
-                        let now = shared_state
-                            .read()
-                            .expect("RwLock poisoned: prior task panicked")
-                            .time
-                            .now();
-                        if let Some(rtt) = tracker.on_pong_received(now) {
-                            shared_state
-                                .write()
-                                .expect("RwLock poisoned: prior task panicked")
-                                .metrics
-                                .record_pong_received(rtt);
-                            tracing::debug!("connection_task: received pong, rtt={:?}", rtt);
-                        }
-                    }
-                    continue; // Do NOT deliver to application
+                    handle_pong_token(shared_state, ping_tracker.as_mut());
+                    continue;
                 }
-
-                // Intercept endpoint-not-found notification
-                // FDB: EndpointNotFoundReceiver::receive() (FlowTransport.cpp:232-236)
                 if token == ENDPOINT_NOT_FOUND_TOKEN {
-                    if payload.len() >= 16 {
-                        let first =
-                            u64::from_le_bytes(payload[0..8].try_into().unwrap_or_default());
-                        let second =
-                            u64::from_le_bytes(payload[8..16].try_into().unwrap_or_default());
-                        let missing_token = UID::new(first, second);
-
-                        let state = shared_state
-                            .read()
-                            .expect("RwLock poisoned: prior task panicked");
-                        if let Ok(addr) = crate::NetworkAddress::parse(&state.destination) {
-                            let endpoint = crate::Endpoint::new(addr, missing_token);
-                            if let Some(ref fm) = state.failure_monitor {
-                                tracing::debug!(
-                                    "connection_task: endpoint_not_found for token {} at {}",
-                                    missing_token,
-                                    state.destination
-                                );
-                                fm.endpoint_not_found(&endpoint);
-                            }
-                        }
-                    }
-                    continue; // Do NOT deliver to application
+                    handle_endpoint_not_found_token(shared_state, &payload);
+                    continue;
                 }
 
                 // Normal packet — deliver to application
@@ -1137,74 +1338,167 @@ fn process_read_buffer<P: Providers>(
                 return false; // Need more data
             }
             Err(e) => {
-                // Protocol error - invalid packet
-                // FDB pattern: Tear down connection on wire errors
-                use crate::WireError;
-                match &e {
-                    WireError::ChecksumMismatch { expected, actual } => {
-                        tracing::warn!(
-                            "ChecksumMismatch: expected={:#010x} actual={:#010x} - tearing down connection (FDB pattern)",
-                            expected,
-                            actual
-                        );
-                    }
-                    _ => {
-                        tracing::warn!(
-                            "connection_task: wire format error: {} - tearing down connection",
-                            e
-                        );
-                    }
-                }
-
-                *current_connection = None;
-                read_buffer.clear();
-
-                // Reset ping tracker on wire error
-                if let Some(tracker) = ping_tracker.as_mut() {
-                    tracker.reset();
-                }
-
-                let (disconnect_notify, destination, failure_monitor) = {
-                    let mut state = shared_state
-                        .write()
-                        .expect("RwLock poisoned: prior task panicked");
-                    state.connection = None;
-                    state.metrics.is_connected = false;
-
-                    let unreliable_count = state.unreliable_queue.len();
-                    if unreliable_count > 0 {
-                        tracing::debug!(
-                            "connection_task: discarding {} unreliable packets after wire error (FDB pattern)",
-                            unreliable_count
-                        );
-                        for _ in 0..unreliable_count {
-                            state.metrics.record_message_dropped();
-                        }
-                        state.unreliable_queue.clear();
-                        // Reconcile: unreliable user messages gone, only reliable remain tracked
-                        state.metrics.current_queue_size = state.reliable_queue.len();
-                    }
-
-                    (
-                        state.disconnect_notify.clone(),
-                        state.destination.clone(),
-                        state.failure_monitor.clone(),
-                    )
-                };
-
-                // Wake all disconnect watchers (FDB: Peer::disconnect.send(Void()))
-                disconnect_notify.notify_waiters();
-
-                // Notify failure monitor: address failed + disconnect signal
-                if let Some(fm) = failure_monitor {
-                    fm.set_status(&destination, FailureStatus::Failed);
-                    fm.notify_disconnect(&destination);
-                }
-
-                return on_connection_loss == ConnectionLossBehavior::Exit;
+                return handle_wire_error(
+                    shared_state,
+                    current_connection,
+                    read_buffer,
+                    ping_tracker.as_mut(),
+                    &e,
+                    on_connection_loss,
+                );
             }
         }
     }
+}
+
+/// Handle a `PING_TOKEN` by enqueueing a pong packet for the writer to send.
+///
+/// FDB pattern: pong goes through `sendPacket → unsent queue → connectionWriter`.
+fn handle_ping_token<P: Providers>(
+    shared_state: &Arc<RwLock<PeerSharedState<P>>>,
+    data_to_send: &Notify,
+) {
+    if let Ok(pong_packet) = serialize_packet(PONG_TOKEN, &[]) {
+        let mut state = shared_state
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
+        let first_unsent = state.are_queues_empty();
+        state.unreliable_queue.push_back(pong_packet);
+        drop(state);
+        if first_unsent {
+            data_to_send.notify_one();
+        }
+    }
+    tracing::debug!("connection_task: received ping, enqueued pong in unreliable_queue");
+}
+
+/// Handle a `PONG_TOKEN` by updating the ping tracker with the measured RTT.
+fn handle_pong_token<P: Providers>(
+    shared_state: &Arc<RwLock<PeerSharedState<P>>>,
+    ping_tracker: Option<&mut PingTracker>,
+) {
+    let Some(tracker) = ping_tracker else {
+        return;
+    };
+    let now = shared_state
+        .read()
+        .expect("RwLock poisoned: prior task panicked")
+        .time
+        .now();
+    if let Some(rtt) = tracker.on_pong_received(now) {
+        shared_state
+            .write()
+            .expect("RwLock poisoned: prior task panicked")
+            .metrics
+            .record_pong_received(rtt);
+        tracing::debug!("connection_task: received pong, rtt={:?}", rtt);
+    }
+}
+
+/// Handle an `ENDPOINT_NOT_FOUND_TOKEN` notification by reporting the missing
+/// endpoint to the failure monitor.
+///
+/// FDB: `EndpointNotFoundReceiver::receive()` (`FlowTransport.cpp:232-236`).
+fn handle_endpoint_not_found_token<P: Providers>(
+    shared_state: &Arc<RwLock<PeerSharedState<P>>>,
+    payload: &[u8],
+) {
+    if payload.len() < 16 {
+        return;
+    }
+    let first = u64::from_le_bytes(payload[0..8].try_into().unwrap_or_default());
+    let second = u64::from_le_bytes(payload[8..16].try_into().unwrap_or_default());
+    let missing_token = UID::new(first, second);
+
+    let state = shared_state
+        .read()
+        .expect("RwLock poisoned: prior task panicked");
+    if let Ok(addr) = crate::NetworkAddress::parse(&state.destination) {
+        let endpoint = crate::Endpoint::new(addr, missing_token);
+        if let Some(fm) = state.failure_monitor.as_ref() {
+            tracing::debug!(
+                "connection_task: endpoint_not_found for token {} at {}",
+                missing_token,
+                state.destination
+            );
+            fm.endpoint_not_found(&endpoint);
+        }
+    }
+}
+
+/// Tear down the connection after a wire-format error and notify failure monitor.
+///
+/// Returns `true` if the task should exit (i.e. `ConnectionLossBehavior::Exit`).
+fn handle_wire_error<P: Providers>(
+    shared_state: &Arc<RwLock<PeerSharedState<P>>>,
+    current_connection: &mut Option<<P::Network as moonpool_core::NetworkProvider>::TcpStream>,
+    read_buffer: &mut Vec<u8>,
+    ping_tracker: Option<&mut PingTracker>,
+    error: &WireError,
+    on_connection_loss: ConnectionLossBehavior,
+) -> bool {
+    // Protocol error - invalid packet (FDB pattern: tear down connection)
+    match error {
+        WireError::ChecksumMismatch { expected, actual } => {
+            tracing::warn!(
+                "ChecksumMismatch: expected={:#010x} actual={:#010x} - tearing down connection (FDB pattern)",
+                expected,
+                actual
+            );
+        }
+        _ => {
+            tracing::warn!(
+                "connection_task: wire format error: {} - tearing down connection",
+                error
+            );
+        }
+    }
+
+    *current_connection = None;
+    read_buffer.clear();
+
+    if let Some(tracker) = ping_tracker {
+        tracker.reset();
+    }
+
+    let (disconnect_notify, destination, failure_monitor) = {
+        let mut state = shared_state
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
+        state.connection = None;
+        state.metrics.is_connected = false;
+
+        let unreliable_count = state.unreliable_queue.len();
+        if unreliable_count > 0 {
+            tracing::debug!(
+                "connection_task: discarding {} unreliable packets after wire error (FDB pattern)",
+                unreliable_count
+            );
+            for _ in 0..unreliable_count {
+                state.metrics.record_message_dropped();
+            }
+            state.unreliable_queue.clear();
+            // Reconcile: unreliable user messages gone, only reliable remain tracked
+            state.metrics.current_queue_size = state.reliable_queue.len();
+        }
+
+        (
+            state.disconnect_notify.clone(),
+            state.destination.clone(),
+            state.failure_monitor.clone(),
+        )
+    };
+
+    // Wake all disconnect watchers (FDB: Peer::disconnect.send(Void()))
+    disconnect_notify.notify_waiters();
+
+    // Notify failure monitor: address failed + disconnect signal
+    if let Some(fm) = failure_monitor {
+        fm.set_status(&destination, FailureStatus::Failed);
+        fm.notify_disconnect(&destination);
+    }
+
+    on_connection_loss == ConnectionLossBehavior::Exit
 }
 
 /// Establish a connection with exponential backoff.
@@ -1232,7 +1526,12 @@ async fn establish_connection<P: Providers>(
                 if let Some(last_attempt) = state.reconnect_state.last_attempt {
                     let elapsed = now.saturating_sub(last_attempt);
                     if elapsed < state.reconnect_state.current_delay {
-                        (true, state.reconnect_state.current_delay - elapsed)
+                        let remaining = state
+                            .reconnect_state
+                            .current_delay
+                            .checked_sub(elapsed)
+                            .expect("checked_sub is safe: elapsed < current_delay verified above");
+                        (true, remaining)
                     } else {
                         (false, Duration::from_secs(0))
                     }

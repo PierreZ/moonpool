@@ -21,3 +21,6 @@ tracing-subscriber = "0.3"
 [[bin]]
 name = "sim-transport"
 path = "src/bin/sim/transport.rs"
+
+[lints]
+workspace = true

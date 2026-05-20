@@ -96,12 +96,11 @@ fn test_same_seed_same_timing() {
         for (i, time) in times.iter().enumerate() {
             assert_eq!(
                 *time, first,
-                "Run {} produced different timing: {:?} vs {:?}",
-                i, time, first
+                "Run {i} produced different timing: {time:?} vs {first:?}"
             );
         }
 
-        println!("All runs completed deterministically in {:?}", first);
+        println!("All runs completed deterministically in {first:?}");
     });
 }
 
@@ -157,8 +156,7 @@ fn test_same_seed_same_corruption() {
         for (i, result) in results.iter().enumerate() {
             assert_eq!(
                 result, first,
-                "Run {} produced different corruption pattern",
-                i
+                "Run {i} produced different corruption pattern"
             );
         }
 
@@ -200,7 +198,7 @@ fn test_different_seeds_different_timing() {
         } else {
             println!("Different seeds produced different timings:");
             for (seed, time) in &times {
-                println!("  Seed {}: {:?}", seed, time);
+                println!("  Seed {seed}: {time:?}");
             }
         }
     });
@@ -253,8 +251,7 @@ fn test_deterministic_misdirection() {
         for (i, result) in results.iter().enumerate() {
             assert_eq!(
                 result, first,
-                "Run {} produced different misdirection result",
-                i
+                "Run {i} produced different misdirection result"
             );
         }
 

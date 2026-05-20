@@ -1,4 +1,4 @@
-//! TransportHandle: Object-safe trait erasing provider and codec generics.
+//! `TransportHandle`: Object-safe trait erasing provider and codec generics.
 //!
 //! User-facing types (`ServiceEndpoint`, `RequestStream`, etc.) hold
 //! `Arc<dyn TransportHandle>` instead of `Arc<NetTransport<P>>`, which erases
@@ -41,9 +41,19 @@ pub fn make_decode_fn<T: DeserializeOwned + Send + Sync + 'static, C: MessageCod
 /// to hold `Arc<dyn TransportHandle>` without naming `P`.
 pub trait TransportHandle: Send + Sync {
     /// Send payload unreliably (best-effort, dropped on failure).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessagingError`] if the endpoint is unknown, the peer rejects
+    /// the packet, or transport-level send fails.
     fn send_unreliable(&self, endpoint: &Endpoint, payload: &[u8]) -> Result<(), MessagingError>;
 
     /// Send payload reliably (queued, retried on reconnect).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessagingError`] if the endpoint is unknown, the peer rejects
+    /// the packet, or transport-level send fails.
     fn send_reliable(&self, endpoint: &Endpoint, payload: &[u8]) -> Result<(), MessagingError>;
 
     /// Register a dynamic endpoint receiver, returning the endpoint.

@@ -65,7 +65,7 @@ pub struct ExplorationStats {
 /// Returns an error if shared memory allocation fails.
 pub fn init_shared_stats(energy: i64) -> Result<*mut SharedStats, io::Error> {
     let ptr = shared_mem::alloc_shared(std::mem::size_of::<SharedStats>())?;
-    let stats = ptr as *mut SharedStats;
+    let stats = ptr.cast::<()>().cast::<SharedStats>();
     // Safety: ptr is valid, properly aligned (mmap returns page-aligned memory),
     // and zeroed. We initialize the energy field.
     unsafe {
@@ -81,7 +81,7 @@ pub fn init_shared_stats(energy: i64) -> Result<*mut SharedStats, io::Error> {
 /// Returns an error if shared memory allocation fails.
 pub fn init_shared_recipe() -> Result<*mut SharedRecipe, io::Error> {
     let ptr = shared_mem::alloc_shared(std::mem::size_of::<SharedRecipe>())?;
-    Ok(ptr as *mut SharedRecipe)
+    Ok(ptr.cast::<()>().cast::<SharedRecipe>())
 }
 
 /// Try to consume one unit of energy. Returns `true` if successful.
@@ -123,8 +123,9 @@ pub unsafe fn reset_shared_recipe(recipe: *mut SharedRecipe) {
 /// Get a snapshot of the current exploration statistics.
 ///
 /// Returns `None` if the stats pointer is null (exploration not initialized).
+#[must_use]
 pub fn exploration_stats() -> Option<ExplorationStats> {
-    let ptr = crate::context::SHARED_STATS.with(|c| c.get());
+    let ptr = crate::context::SHARED_STATS.with(std::cell::Cell::get);
     if ptr.is_null() {
         return None;
     }
@@ -157,8 +158,9 @@ pub fn exploration_stats() -> Option<ExplorationStats> {
 /// Get the bug recipe if one was captured.
 ///
 /// Returns `None` if no bug was found or exploration is not initialized.
+#[must_use]
 pub fn bug_recipe() -> Option<Vec<(u64, u64)>> {
-    let ptr = crate::context::SHARED_RECIPE.with(|c| c.get());
+    let ptr = crate::context::SHARED_RECIPE.with(std::cell::Cell::get);
     if ptr.is_null() {
         return None;
     }

@@ -54,6 +54,7 @@ impl SimProviders {
     /// * `sim` - Weak reference to the simulation world
     /// * `seed` - Seed for deterministic random number generation
     /// * `ip` - IP address of the owning process (for per-process storage scoping)
+    #[must_use]
     pub fn new(sim: WeakSimWorld, seed: u64, ip: IpAddr) -> Self {
         Self {
             network: SimNetworkProvider::new(sim.clone()),

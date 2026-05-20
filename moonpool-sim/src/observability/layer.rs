@@ -57,6 +57,7 @@ pub struct SimulationLayer {
 
 impl SimulationLayer {
     /// Create a fresh layer with no events and no invariants.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             events: Arc::new(Mutex::new(EventStore::new())),
@@ -66,6 +67,7 @@ impl SimulationLayer {
     }
 
     /// Get a clonable handle for registering invariants and reading captured events.
+    #[must_use]
     pub fn handle(&self) -> SimulationLayerHandle {
         SimulationLayerHandle {
             events: self.events.clone(),
@@ -76,6 +78,7 @@ impl SimulationLayer {
 
     /// Install this layer as the per-thread default subscriber without any
     /// additional layers.
+    #[must_use]
     pub fn install(self) -> (SimulationLayerHandle, InstallGuard) {
         let handle = self.handle();
         increment_install_count();
@@ -155,6 +158,7 @@ impl SimulationLayerHandle {
     /// calls [`Self::set_sim_time_ms`] after each `sim.step()` so unrelated
     /// `tracing::*!` calls (with target other than `"moonpool::sim"`) emitted
     /// between events still see the current time.
+    #[must_use]
     pub fn current_sim_time_ms(&self) -> u64 {
         self.events.lock().last_sim_time_ms
     }
@@ -188,8 +192,7 @@ impl TimelineQuery for LayerQuery {
             .lock()
             .by_key
             .get(key)
-            .map(|v| v.len())
-            .unwrap_or(0)
+            .map_or(0, std::vec::Vec::len)
     }
 
     fn last_seq(&self) -> u64 {
@@ -225,11 +228,10 @@ where
             return;
         };
 
-        if self.in_check.load(Ordering::Relaxed) {
-            panic!(
-                "Invariant emitted a simulation event (forbidden — invariants must be read-only)"
-            );
-        }
+        assert!(
+            !self.in_check.load(Ordering::Relaxed),
+            "Invariant emitted a simulation event (forbidden — invariants must be read-only)"
+        );
 
         // Phase 1: append the event under the events lock.
         let sim_time_ms;

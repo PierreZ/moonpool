@@ -19,7 +19,7 @@ struct ThreeAlwaysHitWorkload;
 
 #[async_trait]
 impl Workload for ThreeAlwaysHitWorkload {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "client"
     }
 
@@ -37,7 +37,7 @@ struct RareGateWorkload;
 
 #[async_trait]
 impl Workload for RareGateWorkload {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "client"
     }
 

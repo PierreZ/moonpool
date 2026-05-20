@@ -87,6 +87,6 @@ impl FormatTime for SimTime {
         let ms = self.clock.now_ms();
         let secs = ms / 1000;
         let frac = ms % 1000;
-        write!(w, "sim+{:>5}.{:03}s", secs, frac)
+        write!(w, "sim+{secs:>5}.{frac:03}s")
     }
 }

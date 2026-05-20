@@ -5,7 +5,7 @@ use std::time::Duration;
 /// Configuration for connection health monitoring.
 ///
 /// When enabled, the peer periodically sends ping packets to detect
-/// unresponsive connections. Follows FoundationDB's `connectionMonitor`
+/// unresponsive connections. Follows `FoundationDB`'s `connectionMonitor`
 /// pattern (`FlowTransport.actor.cpp:616-699`).
 ///
 /// Monitoring is only active for outbound peers. Incoming peers

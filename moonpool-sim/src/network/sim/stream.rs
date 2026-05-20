@@ -11,14 +11,14 @@ use std::{
 };
 use tracing::instrument;
 
-/// Create an io::Error for simulation shutdown.
+/// Create an `io::Error` for simulation shutdown.
 ///
 /// Used when the simulation world has been dropped but stream operations are still attempted.
 fn sim_shutdown_error() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown")
 }
 
-/// Create an io::Error for random connection failure (chaos injection).
+/// Create an `io::Error` for random connection failure (chaos injection).
 fn random_connection_failure_error() -> io::Error {
     io::Error::new(
         io::ErrorKind::ConnectionReset,
@@ -26,7 +26,7 @@ fn random_connection_failure_error() -> io::Error {
     )
 }
 
-/// Create an io::Error for half-open connection timeout.
+/// Create an `io::Error` for half-open connection timeout.
 fn half_open_timeout_error() -> io::Error {
     io::Error::new(
         io::ErrorKind::ConnectionReset,
@@ -34,7 +34,7 @@ fn half_open_timeout_error() -> io::Error {
     )
 }
 
-/// Create an io::Error for aborted connection (RST).
+/// Create an `io::Error` for aborted connection (RST).
 fn connection_aborted_error() -> io::Error {
     io::Error::new(
         io::ErrorKind::ConnectionReset,
@@ -92,8 +92,8 @@ fn connection_aborted_error() -> io::Error {
 /// ## Performance Characteristics
 ///
 /// - **Write Latency**: O(1) - writes are buffered immediately
-/// - **Read Latency**: O(network_delay) - depends on simulation configuration
-/// - **Memory Usage**: O(buffered_data) - proportional to unread data
+/// - **Read Latency**: `O(network_delay)` - depends on simulation configuration
+/// - **Memory Usage**: `O(buffered_data)` - proportional to unread data
 /// - **CPU Overhead**: Minimal - leverages efficient event system
 ///
 /// ## Connection Lifecycle
@@ -134,6 +134,7 @@ impl SimTcpStream {
     }
 
     /// Get the connection ID (for test introspection and chaos injection)
+    #[must_use]
     pub fn connection_id(&self) -> ConnectionId {
         self.connection_id
     }
@@ -215,7 +216,7 @@ impl AsyncRead for SimTcpStream {
         let mut temp_buf = vec![0u8; buf.len()];
         let bytes_read = sim
             .read_from_connection(self.connection_id, &mut temp_buf)
-            .map_err(|e| io::Error::other(format!("read error: {}", e)))?;
+            .map_err(|e| io::Error::other(format!("read error: {e}")))?;
 
         tracing::trace!(
             "SimTcpStream::poll_read connection_id={} read {} bytes",
@@ -231,116 +232,81 @@ impl AsyncRead for SimTcpStream {
                 data_preview
             );
             buf[..bytes_read].copy_from_slice(&temp_buf[..bytes_read]);
-            Poll::Ready(Ok(bytes_read))
-        } else {
-            // No data available - check if connection has received FIN, is closed, or cut
-
-            // Check for remote FIN (graceful close, all data delivered via FinDelivery event)
-            if sim.is_remote_fin_received(self.connection_id) {
-                tracing::info!(
-                    "SimTcpStream::poll_read connection_id={} remote FIN received, returning EOF (0 bytes)",
-                    self.connection_id.0
-                );
-                return Poll::Ready(Ok(0));
-            }
-
-            if sim.is_connection_closed(self.connection_id) {
-                // Local side was closed or connection was aborted
-                match sim.close_reason(self.connection_id) {
-                    CloseReason::Aborted => {
-                        tracing::info!(
-                            "SimTcpStream::poll_read connection_id={} was aborted (RST), returning ECONNRESET",
-                            self.connection_id.0
-                        );
-                        return Poll::Ready(Err(connection_aborted_error()));
-                    }
-                    _ => {
-                        tracing::info!(
-                            "SimTcpStream::poll_read connection_id={} is closed gracefully (FIN), returning EOF (0 bytes)",
-                            self.connection_id.0
-                        );
-                        return Poll::Ready(Ok(0));
-                    }
-                }
-            }
-
-            if sim.is_connection_cut(self.connection_id) {
-                // Connection is temporarily cut - register waker and wait for restoration
-                tracing::debug!(
-                    "SimTcpStream::poll_read connection_id={} is cut, registering cut waker",
-                    self.connection_id.0
-                );
-                sim.register_cut_waker(self.connection_id, cx.waker().clone());
-                return Poll::Pending;
-            }
-
-            // Register for notification when data arrives
-            tracing::trace!(
-                "SimTcpStream::poll_read connection_id={} no data, registering waker",
-                self.connection_id.0
-            );
-            sim.register_read_waker(self.connection_id, cx.waker().clone())
-                .map_err(|e| io::Error::other(format!("waker registration error: {}", e)))?;
-
-            // Double-check for data after registering waker to handle race conditions
-            // This prevents deadlocks where DataDelivery arrives between initial check and waker registration
-            let mut temp_buf_recheck = vec![0u8; buf.len()];
-            let bytes_read_recheck = sim
-                .read_from_connection(self.connection_id, &mut temp_buf_recheck)
-                .map_err(|e| io::Error::other(format!("recheck read error: {}", e)))?;
-
-            if bytes_read_recheck > 0 {
-                let data_preview = String::from_utf8_lossy(
-                    &temp_buf_recheck[..std::cmp::min(bytes_read_recheck, 20)],
-                );
-                tracing::trace!(
-                    "SimTcpStream::poll_read connection_id={} found data on recheck: '{}' (race condition avoided)",
-                    self.connection_id.0,
-                    data_preview
-                );
-                buf[..bytes_read_recheck].copy_from_slice(&temp_buf_recheck[..bytes_read_recheck]);
-                Poll::Ready(Ok(bytes_read_recheck))
-            } else {
-                // Final check - if connection has received FIN, is closed, or cut and no data available
-
-                // Check for remote FIN (recheck after waker registration)
-                if sim.is_remote_fin_received(self.connection_id) {
-                    tracing::info!(
-                        "SimTcpStream::poll_read connection_id={} remote FIN received on recheck, returning EOF (0 bytes)",
-                        self.connection_id.0
-                    );
-                    return Poll::Ready(Ok(0));
-                }
-
-                if sim.is_connection_closed(self.connection_id) {
-                    match sim.close_reason(self.connection_id) {
-                        CloseReason::Aborted => {
-                            tracing::info!(
-                                "SimTcpStream::poll_read connection_id={} was aborted on recheck (RST), returning ECONNRESET",
-                                self.connection_id.0
-                            );
-                            Poll::Ready(Err(connection_aborted_error()))
-                        }
-                        _ => {
-                            tracing::info!(
-                                "SimTcpStream::poll_read connection_id={} is closed on recheck (FIN), returning EOF (0 bytes)",
-                                self.connection_id.0
-                            );
-                            Poll::Ready(Ok(0))
-                        }
-                    }
-                } else if sim.is_connection_cut(self.connection_id) {
-                    // Connection is temporarily cut - already registered waker above, just wait
-                    tracing::debug!(
-                        "SimTcpStream::poll_read connection_id={} is cut on recheck, waiting",
-                        self.connection_id.0
-                    );
-                    Poll::Pending
-                } else {
-                    Poll::Pending
-                }
-            }
+            return Poll::Ready(Ok(bytes_read));
         }
+        Self::poll_read_no_data(&sim, self.connection_id, cx, buf)
+    }
+}
+
+impl SimTcpStream {
+    /// Handle the `poll_read` branch where no buffered data is currently
+    /// available. Checks for graceful FIN, abort, cut, then registers a
+    /// read waker and rechecks the buffer to avoid races.
+    fn poll_read_no_data(
+        sim: &crate::sim::SimWorld,
+        connection_id: crate::network::sim::ConnectionId,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        // No data available - check if connection has received FIN, is closed, or cut.
+        if sim.is_remote_fin_received(connection_id) {
+            tracing::info!(
+                "SimTcpStream::poll_read connection_id={} remote FIN received, returning EOF",
+                connection_id.0
+            );
+            return Poll::Ready(Ok(0));
+        }
+        if sim.is_connection_closed(connection_id) {
+            if sim.close_reason(connection_id) == CloseReason::Aborted {
+                tracing::info!(
+                    "SimTcpStream::poll_read connection_id={} was aborted (RST)",
+                    connection_id.0
+                );
+                return Poll::Ready(Err(connection_aborted_error()));
+            }
+            tracing::info!(
+                "SimTcpStream::poll_read connection_id={} closed gracefully (FIN)",
+                connection_id.0
+            );
+            return Poll::Ready(Ok(0));
+        }
+        if sim.is_connection_cut(connection_id) {
+            tracing::debug!(
+                "SimTcpStream::poll_read connection_id={} is cut, registering cut waker",
+                connection_id.0
+            );
+            sim.register_cut_waker(connection_id, cx.waker().clone());
+            return Poll::Pending;
+        }
+
+        // Register for notification when data arrives, then re-check for race.
+        tracing::trace!(
+            "SimTcpStream::poll_read connection_id={} no data, registering waker",
+            connection_id.0
+        );
+        sim.register_read_waker(connection_id, cx.waker().clone());
+
+        let mut temp_buf_recheck = vec![0u8; buf.len()];
+        let bytes_read_recheck = sim
+            .read_from_connection(connection_id, &mut temp_buf_recheck)
+            .map_err(|e| io::Error::other(format!("recheck read error: {e}")))?;
+
+        if bytes_read_recheck > 0 {
+            buf[..bytes_read_recheck].copy_from_slice(&temp_buf_recheck[..bytes_read_recheck]);
+            return Poll::Ready(Ok(bytes_read_recheck));
+        }
+
+        // Final check after waker registration.
+        if sim.is_remote_fin_received(connection_id) {
+            return Poll::Ready(Ok(0));
+        }
+        if sim.is_connection_closed(connection_id) {
+            if sim.close_reason(connection_id) == CloseReason::Aborted {
+                return Poll::Ready(Err(connection_aborted_error()));
+            }
+            return Poll::Ready(Ok(0));
+        }
+        Poll::Pending
     }
 }
 
@@ -446,7 +412,7 @@ impl AsyncWrite for SimTcpStream {
 
         // Buffer the data for ordered processing instead of direct event scheduling
         sim.buffer_send(self.connection_id, buf.to_vec())
-            .map_err(|e| io::Error::other(format!("buffer send error: {}", e)))?;
+            .map_err(|e| io::Error::other(format!("buffer send error: {e}")))?;
 
         Poll::Ready(Ok(buf.len()))
     }
@@ -479,53 +445,38 @@ impl Future for AcceptFuture {
     type Output = io::Result<(SimTcpStream, String)>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let sim = match self.sim.upgrade() {
-            Ok(sim) => sim,
-            Err(_) => return Poll::Ready(Err(sim_shutdown_error())),
+        let Ok(sim) = self.sim.upgrade() else {
+            return Poll::Ready(Err(sim_shutdown_error()));
         };
 
-        match sim.pending_connection(&self.local_addr) {
-            Ok(Some(connection_id)) => {
-                // Get accept delay from network configuration
-                let delay = sim.with_network_config(|config| {
-                    crate::network::sample_duration(&config.accept_latency)
-                });
+        let Some(connection_id) = sim.pending_connection(&self.local_addr) else {
+            // No connection available yet - register waker for when connection becomes available
+            sim.register_accept_waker(&self.local_addr, cx.waker().clone());
+            return Poll::Pending;
+        };
 
-                // Schedule accept completion event to advance simulation time
-                sim.schedule_event(
-                    Event::Connection {
-                        id: connection_id.0,
-                        state: crate::ConnectionStateChange::ConnectionReady,
-                    },
-                    delay,
-                );
+        // Get accept delay from network configuration
+        let delay = sim
+            .with_network_config(|config| crate::network::sample_duration(&config.accept_latency));
 
-                // FDB Pattern (sim2.actor.cpp:1149-1175):
-                // Return the synthesized ephemeral peer address, not the client's real address.
-                // This simulates real TCP where servers see client ephemeral ports.
-                let peer_addr = sim
-                    .connection_peer_address(connection_id)
-                    .unwrap_or_else(|| "unknown:0".to_string());
+        // Schedule accept completion event to advance simulation time
+        sim.schedule_event(
+            Event::Connection {
+                id: connection_id.0,
+                state: crate::ConnectionStateChange::ConnectionReady,
+            },
+            delay,
+        );
 
-                let stream = SimTcpStream::new(self.sim.clone(), connection_id);
-                Poll::Ready(Ok((stream, peer_addr)))
-            }
-            Ok(None) => {
-                // No connection available yet - register waker for when connection becomes available
-                if let Err(e) = sim.register_accept_waker(&self.local_addr, cx.waker().clone()) {
-                    Poll::Ready(Err(io::Error::other(format!(
-                        "failed to register accept waker: {}",
-                        e
-                    ))))
-                } else {
-                    Poll::Pending
-                }
-            }
-            Err(e) => Poll::Ready(Err(io::Error::other(format!(
-                "failed to get pending connection: {}",
-                e
-            )))),
-        }
+        // FDB Pattern (sim2.actor.cpp:1149-1175):
+        // Return the synthesized ephemeral peer address, not the client's real address.
+        // This simulates real TCP where servers see client ephemeral ports.
+        let peer_addr = sim
+            .connection_peer_address(connection_id)
+            .unwrap_or_else(|| "unknown:0".to_string());
+
+        let stream = SimTcpStream::new(self.sim.clone(), connection_id);
+        Poll::Ready(Ok((stream, peer_addr)))
     }
 }
 

@@ -2,7 +2,7 @@
 //!
 //! This module provides a provider pattern for random number generation,
 //! consistent with other provider abstractions in the simulation framework
-//! like TimeProvider, NetworkProvider, and TaskProvider.
+//! like `TimeProvider`, `NetworkProvider`, and `TaskProvider`.
 
 use rand::distr::{Distribution, StandardUniform, uniform::SampleUniform};
 #[cfg(feature = "tokio-providers")]
@@ -64,6 +64,7 @@ pub struct TokioRandomProvider;
 #[cfg(feature = "tokio-providers")]
 impl TokioRandomProvider {
     /// Create a new production random provider.
+    #[must_use]
     pub fn new() -> Self {
         Self
     }

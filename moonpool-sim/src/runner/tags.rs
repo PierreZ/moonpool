@@ -27,7 +27,7 @@ use std::net::IpAddr;
 pub struct TagDimension {
     /// The tag key (e.g., "dc", "rack", "role").
     pub key: String,
-    /// The values to distribute round-robin (e.g., ["east", "west", "eu"]).
+    /// The values to distribute round-robin (e.g., `["east", "west", "eu"]`).
     pub values: Vec<String>,
 }
 
@@ -41,6 +41,7 @@ pub struct TagDistribution {
 
 impl TagDistribution {
     /// Create a new empty tag distribution.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             dimensions: Vec::new(),
@@ -51,11 +52,15 @@ impl TagDistribution {
     pub fn add(&mut self, key: &str, values: &[&str]) {
         self.dimensions.push(TagDimension {
             key: key.to_string(),
-            values: values.iter().map(|v| v.to_string()).collect(),
+            values: values
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
         });
     }
 
     /// Check if this distribution has any dimensions.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.dimensions.is_empty()
     }
@@ -64,6 +69,7 @@ impl TagDistribution {
     ///
     /// Each tag dimension is distributed independently: process `i` gets
     /// `values[i % values.len()]` for each dimension.
+    #[must_use]
     pub fn resolve(&self, index: usize) -> ProcessTags {
         let mut tags = HashMap::new();
         for dim in &self.dimensions {
@@ -84,16 +90,19 @@ pub struct ProcessTags {
 
 impl ProcessTags {
     /// Get the value of a tag by key.
+    #[must_use]
     pub fn get(&self, key: &str) -> Option<&str> {
-        self.tags.get(key).map(|s| s.as_str())
+        self.tags.get(key).map(std::string::String::as_str)
     }
 
     /// Check if a tag key-value pair matches.
+    #[must_use]
     pub fn matches(&self, key: &str, value: &str) -> bool {
         self.tags.get(key).is_some_and(|v| v == value)
     }
 
     /// Check if this process has any tags.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.tags.is_empty()
     }
@@ -110,6 +119,7 @@ pub struct TagRegistry {
 
 impl TagRegistry {
     /// Create a new empty tag registry.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             ip_tags: HashMap::new(),
@@ -122,11 +132,13 @@ impl TagRegistry {
     }
 
     /// Get tags for a specific IP.
+    #[must_use]
     pub fn tags_for(&self, ip: IpAddr) -> Option<&ProcessTags> {
         self.ip_tags.get(&ip)
     }
 
     /// Find all IPs matching a tag key-value pair.
+    #[must_use]
     pub fn ips_tagged(&self, key: &str, value: &str) -> Vec<IpAddr> {
         self.ip_tags
             .iter()
@@ -136,6 +148,7 @@ impl TagRegistry {
     }
 
     /// Get all registered process IPs.
+    #[must_use]
     pub fn all_ips(&self) -> Vec<IpAddr> {
         self.ip_tags.keys().copied().collect()
     }

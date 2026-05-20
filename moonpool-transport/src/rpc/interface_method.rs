@@ -52,6 +52,7 @@ enum InterfaceMethodInner<Req, Resp> {
 
 impl<Req, Resp> InterfaceMethod<Req, Resp> {
     /// Create a local-mode (server) interface method from a [`RequestStream`].
+    #[must_use]
     pub fn local(stream: RequestStream<Req, Resp>) -> Self {
         Self {
             inner: InterfaceMethodInner::Local { stream },
@@ -59,6 +60,7 @@ impl<Req, Resp> InterfaceMethod<Req, Resp> {
     }
 
     /// Create a remote-mode (client) interface method from a [`ServiceEndpoint`].
+    #[must_use]
     pub fn remote(endpoint: ServiceEndpoint<Req, Resp>) -> Self {
         Self {
             inner: InterfaceMethodInner::Remote { endpoint },
@@ -66,11 +68,13 @@ impl<Req, Resp> InterfaceMethod<Req, Resp> {
     }
 
     /// Returns `true` if this is a remote (client) endpoint.
+    #[must_use]
     pub fn is_remote(&self) -> bool {
         matches!(self.inner, InterfaceMethodInner::Remote { .. })
     }
 
     /// Get the endpoint for this method (works in both modes).
+    #[must_use]
     pub fn endpoint(&self) -> &Endpoint {
         match &self.inner {
             InterfaceMethodInner::Local { stream } => stream.endpoint(),
@@ -89,6 +93,7 @@ impl<Req, Resp> InterfaceMethod<Req, Resp> {
     /// # Panics
     ///
     /// Panics if called on a remote-mode handle.
+    #[must_use]
     pub fn queue(&self) -> Arc<NetNotifiedQueue<RequestEnvelope<Req>>> {
         match &self.inner {
             InterfaceMethodInner::Local { stream } => stream.queue(),
@@ -127,6 +132,7 @@ where
     /// # Panics
     ///
     /// Panics if called on a remote-mode handle.
+    #[must_use]
     pub fn try_recv(&self) -> Option<(Req, ReplyPromise<Resp>)> {
         match &self.inner {
             InterfaceMethodInner::Local { stream } => stream.try_recv(),
@@ -148,6 +154,10 @@ where
 {
     /// Fire-and-forget delivery (remote mode only).
     ///
+    /// # Errors
+    ///
+    /// Returns [`RpcError`] if request serialization or transport-level send fails.
+    ///
     /// # Panics
     ///
     /// Panics if called on a local-mode handle.
@@ -161,6 +171,11 @@ where
     }
 
     /// At-most-once delivery (remote mode only).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RpcError`] if serialization, transport, or the remote handler fails,
+    /// or if the destination becomes unreachable before a reply is received.
     ///
     /// # Panics
     ///
@@ -176,6 +191,10 @@ where
 
     /// At-least-once delivery (remote mode only).
     ///
+    /// # Errors
+    ///
+    /// Returns [`RpcError`] if serialization, transport, or the remote handler fails.
+    ///
     /// # Panics
     ///
     /// Panics if called on a local-mode handle.
@@ -189,6 +208,11 @@ where
     }
 
     /// At-least-once delivery with sustained failure timeout (remote mode only).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RpcError`] if serialization, transport, or the remote handler fails,
+    /// or if the destination is observed failed for at least `sustained_failure_duration`.
     ///
     /// # Panics
     ///
@@ -211,6 +235,10 @@ where
     }
 
     /// Send a typed request and return a raw [`ReplyFuture`] (remote mode only).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessagingError`] if request serialization or transport-level send fails.
     ///
     /// # Panics
     ///

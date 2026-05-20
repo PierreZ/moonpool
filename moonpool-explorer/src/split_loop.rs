@@ -35,15 +35,15 @@ use crate::shared_stats::MAX_RECIPE_ENTRIES;
 ///
 /// Uses FNV-1a mixing to produce well-distributed seeds.
 fn compute_child_seed(parent_seed: u64, mark_name: &str, child_idx: u32) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for &byte in mark_name.as_bytes() {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
     hash ^= parent_seed;
-    hash = hash.wrapping_mul(0x100000001b3);
-    hash ^= child_idx as u64;
-    hash = hash.wrapping_mul(0x100000001b3);
+    hash = hash.wrapping_mul(0x0100_0000_01b3);
+    hash ^= u64::from(child_idx);
+    hash = hash.wrapping_mul(0x0100_0000_01b3);
     hash
 }
 
@@ -70,7 +70,11 @@ fn resolve_parallelism(p: &Parallelism) -> usize {
     // Safety: sysconf reads a system configuration value and does not
     // dereference any pointers. It is always safe to call.
     let ncpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
-    let ncpus = if ncpus > 0 { ncpus as usize } else { 1 };
+    let ncpus = if ncpus > 0 {
+        usize::try_from(ncpus).unwrap_or(1)
+    } else {
+        1
+    };
     let n = match p {
         Parallelism::MaxCores => ncpus,
         Parallelism::HalfCores => ncpus / 2,
@@ -87,8 +91,8 @@ fn resolve_parallelism(p: &Parallelism) -> usize {
 /// if it becomes a parent (avoids sharing pool slots with siblings).
 #[cfg(unix)]
 fn get_or_init_pool(slot_count: usize) -> *mut u8 {
-    let existing = BITMAP_POOL.with(|c| c.get());
-    let existing_slots = BITMAP_POOL_SLOTS.with(|c| c.get());
+    let existing = BITMAP_POOL.with(std::cell::Cell::get);
+    let existing_slots = BITMAP_POOL_SLOTS.with(std::cell::Cell::get);
 
     if !existing.is_null() && existing_slots >= slot_count {
         return existing;
@@ -154,25 +158,250 @@ fn setup_child(
     crate::sancov::SANCOV_POOL_SLOTS.with(|c| c.set(0));
 }
 
+/// Shared state passed to fork/reap helpers — bundles the cross-process
+/// pointers (vm/stats/pool) along with the parent's RNG split point.
+#[cfg(unix)]
+struct ForkSharedState {
+    /// Snapshot of the RNG call count at the split point.
+    split_call_count: u64,
+    /// Explored-map pointer (cumulative coverage across timelines).
+    vm_ptr: *mut u8,
+    /// Shared statistics pointer.
+    stats_ptr: *mut crate::shared_stats::SharedStats,
+    /// Bitmap pool base pointer (per-slot per-child coverage scratch).
+    pool_base: *mut u8,
+    /// Sancov pool base pointer (or null).
+    sancov_pool_base: *mut u8,
+}
+
+/// Parallel-fork state resolved once per split call.
+#[cfg(unix)]
+struct ParallelState {
+    /// Number of concurrent child slots (0 → sequential mode).
+    slot_count: usize,
+    /// Base pointer of the per-slot bitmap pool.
+    pool_base: *mut u8,
+    /// Base pointer of the per-slot sancov pool (or null when sancov is unused).
+    sancov_pool_base: *mut u8,
+    /// Parent's sancov transfer pointer, restored after splitting.
+    parent_sancov_transfer: *mut u8,
+    /// True when concurrent execution is enabled.
+    parallel: bool,
+}
+
+/// Resolve parallelism configuration and allocate per-slot pools.
+#[cfg(unix)]
+fn resolve_parallel_state() -> ParallelState {
+    let parallelism = context::with_ctx(|ctx| ctx.parallelism.clone());
+    let (slot_count, pool_base) = if let Some(ref p) = parallelism {
+        let sc = resolve_parallelism(p);
+        let pb = get_or_init_pool(sc);
+        if pb.is_null() {
+            (0, std::ptr::null_mut())
+        } else {
+            (sc, pb)
+        }
+    } else {
+        (0, std::ptr::null_mut())
+    };
+    let parallel = slot_count > 0;
+
+    let sancov_pool_base = if parallel {
+        crate::sancov::get_or_init_sancov_pool(slot_count)
+    } else {
+        std::ptr::null_mut()
+    };
+    let parent_sancov_transfer = if parallel && !sancov_pool_base.is_null() {
+        crate::sancov::SANCOV_TRANSFER.with(std::cell::Cell::get)
+    } else {
+        std::ptr::null_mut()
+    };
+
+    ParallelState {
+        slot_count,
+        pool_base,
+        sancov_pool_base,
+        parent_sancov_transfer,
+        parallel,
+    }
+}
+
+/// Drain all in-flight children and merge their coverage into the parent.
+#[cfg(unix)]
+fn drain_active_children(
+    active: &mut HashMap<libc::pid_t, (u64, usize)>,
+    free_slots: &mut Vec<usize>,
+    shared: &ForkSharedState,
+    batch_has_new: &mut bool,
+) {
+    while !active.is_empty() {
+        reap_one(active, free_slots, shared, batch_has_new);
+    }
+}
+
+/// Restore parent's bitmap and sancov state after the split loop completes.
+#[cfg(unix)]
+fn restore_parent_state(state: &ParallelState, bm_ptr: *mut u8, parent_bitmap_backup: &[u8]) {
+    if state.parallel {
+        // Restore parent's bitmap pointer (children used pool slots).
+        COVERAGE_BITMAP_PTR.with(|c| c.set(bm_ptr));
+        if !state.sancov_pool_base.is_null() {
+            crate::sancov::SANCOV_TRANSFER.with(|c| c.set(state.parent_sancov_transfer));
+        }
+    } else if !bm_ptr.is_null() {
+        // Sequential mode: restore parent bitmap content from backup.
+        // Safety: bm_ptr points to COVERAGE_MAP_SIZE bytes, backup is also COVERAGE_MAP_SIZE.
+        unsafe {
+            std::ptr::copy_nonoverlapping(parent_bitmap_backup.as_ptr(), bm_ptr, COVERAGE_MAP_SIZE);
+        }
+    }
+}
+
+/// Outcome of attempting to spawn a child timeline.
+#[cfg(unix)]
+enum SpawnOutcome {
+    /// Spawn succeeded; caller should continue the loop.
+    Continued,
+    /// Fork failed or back-pressure unavailable; caller should break the loop.
+    Stop,
+    /// We are now the child process; caller must return immediately.
+    InChild,
+}
+
+/// Spawn one parallel child: reserve a pool slot, fork, and on success insert
+/// into the active map. Returns the [`SpawnOutcome`] for the caller's loop.
+#[cfg(unix)]
+fn spawn_parallel_child(
+    child_seed: u64,
+    shared: &ForkSharedState,
+    active: &mut HashMap<libc::pid_t, (u64, usize)>,
+    free_slots: &mut Vec<usize>,
+    batch_has_new: &mut bool,
+) -> SpawnOutcome {
+    while free_slots.is_empty() {
+        reap_one(active, free_slots, shared, batch_has_new);
+    }
+    let Some(slot) = free_slots.pop() else {
+        return SpawnOutcome::Stop;
+    };
+    let slot_ptr = pool_slot(shared.pool_base, slot);
+
+    // Safety: slot_ptr is valid shared memory of COVERAGE_MAP_SIZE bytes.
+    unsafe {
+        std::ptr::write_bytes(slot_ptr, 0, COVERAGE_MAP_SIZE);
+    }
+    COVERAGE_BITMAP_PTR.with(|c| c.set(slot_ptr));
+
+    if !shared.sancov_pool_base.is_null() {
+        let sancov_len = crate::sancov::sancov_edge_count();
+        // Safety: sancov_slot is within sancov_pool_base for sancov_len bytes.
+        unsafe {
+            let sancov_slot = crate::sancov::sancov_pool_slot(shared.sancov_pool_base, slot);
+            std::ptr::write_bytes(sancov_slot, 0, sancov_len);
+            crate::sancov::SANCOV_TRANSFER.with(|c| c.set(sancov_slot));
+        }
+    }
+
+    // Safety: single-threaded, no real I/O
+    let pid = unsafe { libc::fork() };
+    match pid {
+        -1 => {
+            free_slots.push(slot);
+            SpawnOutcome::Stop
+        }
+        0 => {
+            setup_child(child_seed, shared.split_call_count, shared.stats_ptr);
+            SpawnOutcome::InChild
+        }
+        child_pid => {
+            active.insert(child_pid, (child_seed, slot));
+            SpawnOutcome::Continued
+        }
+    }
+}
+
+/// Spawn one sequential child: clear parent bitmap, fork, wait, merge coverage.
+///
+/// `track_new_bits` controls whether we update `batch_has_new` on coverage
+/// growth (used by the adaptive batch-yield check).
+#[cfg(unix)]
+fn spawn_sequential_child(
+    child_seed: u64,
+    bm_ptr: *mut u8,
+    shared: &ForkSharedState,
+    batch_has_new: &mut bool,
+    track_new_bits: bool,
+) -> SpawnOutcome {
+    if !bm_ptr.is_null() {
+        // Safety: bm_ptr points to COVERAGE_MAP_SIZE bytes.
+        let bm = unsafe { CoverageBitmap::new(bm_ptr) };
+        bm.clear();
+    }
+    crate::sancov::clear_transfer_buffer();
+
+    // Safety: single-threaded, no real I/O
+    let pid = unsafe { libc::fork() };
+    match pid {
+        -1 => SpawnOutcome::Stop,
+        0 => {
+            setup_child(child_seed, shared.split_call_count, shared.stats_ptr);
+            SpawnOutcome::InChild
+        }
+        child_pid => {
+            let mut status: libc::c_int = 0;
+            // Safety: child_pid is a valid child PID we just forked.
+            unsafe { libc::waitpid(child_pid, &raw mut status, 0) };
+
+            if !bm_ptr.is_null() && !shared.vm_ptr.is_null() {
+                // Safety: both pointers are valid for COVERAGE_MAP_SIZE bytes.
+                let bm = unsafe { CoverageBitmap::new(bm_ptr) };
+                let vm = unsafe { ExploredMap::new(shared.vm_ptr) };
+                if track_new_bits && vm.has_new_bits(&bm) {
+                    *batch_has_new = true;
+                }
+                vm.merge_from(&bm);
+            }
+            *batch_has_new |= crate::sancov::has_new_sancov_coverage();
+
+            if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 42 {
+                if !shared.stats_ptr.is_null() {
+                    // Safety: stats_ptr is valid shared memory.
+                    unsafe {
+                        (*shared.stats_ptr)
+                            .bug_found
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                save_bug_recipe(shared.split_call_count, child_seed);
+            }
+
+            if !shared.stats_ptr.is_null() {
+                // Safety: stats_ptr is valid shared memory.
+                unsafe {
+                    (*shared.stats_ptr)
+                        .fork_points
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            SpawnOutcome::Continued
+        }
+    }
+}
+
 /// Reap one finished child via `waitpid(-1)`, merge its coverage, check for bugs.
 ///
 /// Removes the reaped PID from `active`, pushes its slot back to `free_slots`,
 /// and sets `batch_has_new` if the child contributed new coverage bits.
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
 fn reap_one(
     active: &mut HashMap<libc::pid_t, (u64, usize)>,
     free_slots: &mut Vec<usize>,
-    pool_base: *mut u8,
-    sancov_pool_base: *mut u8,
-    vm_ptr: *mut u8,
-    stats_ptr: *mut crate::shared_stats::SharedStats,
-    split_call_count: u64,
+    shared: &ForkSharedState,
     batch_has_new: &mut bool,
 ) {
     let mut status: libc::c_int = 0;
     // Safety: waitpid(-1) waits for any child of this process
-    let finished_pid = unsafe { libc::waitpid(-1, &mut status, 0) };
+    let finished_pid = unsafe { libc::waitpid(-1, &raw mut status, 0) };
     if finished_pid <= 0 {
         return;
     }
@@ -182,10 +411,10 @@ fn reap_one(
     };
 
     // Merge child's coverage bitmap into explored map
-    if !vm_ptr.is_null() {
+    if !shared.vm_ptr.is_null() {
         // Safety: pool_base + slot offset is valid shared memory
-        let child_bm = unsafe { CoverageBitmap::new(pool_slot(pool_base, slot)) };
-        let vm = unsafe { ExploredMap::new(vm_ptr) };
+        let child_bm = unsafe { CoverageBitmap::new(pool_slot(shared.pool_base, slot)) };
+        let vm = unsafe { ExploredMap::new(shared.vm_ptr) };
         if vm.has_new_bits(&child_bm) {
             *batch_has_new = true;
         }
@@ -193,27 +422,31 @@ fn reap_one(
     }
 
     // Check child's sancov coverage from its pool slot
-    if !sancov_pool_base.is_null() {
-        let sancov_slot = unsafe { crate::sancov::sancov_pool_slot(sancov_pool_base, slot) };
+    if !shared.sancov_pool_base.is_null() {
+        let sancov_slot = unsafe { crate::sancov::sancov_pool_slot(shared.sancov_pool_base, slot) };
         if crate::sancov::has_new_sancov_coverage_from(sancov_slot) {
             *batch_has_new = true;
         }
     }
 
     if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 42 {
-        if !stats_ptr.is_null() {
+        if !shared.stats_ptr.is_null() {
             // Safety: stats_ptr is valid shared memory.
             unsafe {
-                (*stats_ptr).bug_found.fetch_add(1, Ordering::Relaxed);
+                (*shared.stats_ptr)
+                    .bug_found
+                    .fetch_add(1, Ordering::Relaxed);
             }
         }
-        save_bug_recipe(split_call_count, child_seed);
+        save_bug_recipe(shared.split_call_count, child_seed);
     }
 
-    if !stats_ptr.is_null() {
+    if !shared.stats_ptr.is_null() {
         // Safety: stats_ptr is valid shared memory.
         unsafe {
-            (*stats_ptr).fork_points.fetch_add(1, Ordering::Relaxed);
+            (*shared.stats_ptr)
+                .fork_points
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -259,6 +492,31 @@ pub(crate) fn dispatch_split(mark_name: &str, slot_idx: usize) {
 #[cfg(not(unix))]
 pub(crate) fn dispatch_split(_mark_name: &str, _slot_idx: usize) {}
 
+/// Read adaptive batch sizing from the explorer context.
+///
+/// Returns `(batch_size, max_timelines, effective_min_timelines)` where the
+/// minimum-timelines value already accounts for the warm-start override.
+#[cfg(unix)]
+fn read_adaptive_batch_config() -> (u32, u32, u32) {
+    context::with_ctx(|ctx| {
+        let (batch_size, min_timelines, max_timelines) =
+            ctx.adaptive.as_ref().map_or((4, 1, 16), |a| {
+                (a.batch_size, a.min_timelines, a.max_timelines)
+            });
+        let warm_min = ctx
+            .adaptive
+            .as_ref()
+            .and_then(|a| a.warm_min_timelines)
+            .unwrap_or(batch_size);
+        let effective_min = if ctx.warm_start {
+            warm_min
+        } else {
+            min_timelines
+        };
+        (batch_size, max_timelines, effective_min)
+    })
+}
+
 /// Adaptive split: spawn timelines in batches, check coverage yield, stop when barren.
 ///
 /// When parallelism is configured, uses a sliding window of concurrent children
@@ -273,7 +531,7 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
         return;
     }
 
-    let budget_ptr = ENERGY_BUDGET_PTR.with(|c| c.get());
+    let budget_ptr = ENERGY_BUDGET_PTR.with(std::cell::Cell::get);
     if budget_ptr.is_null() {
         return;
     }
@@ -286,62 +544,24 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
 
     let split_call_count = context::rng_get_count();
 
-    let bm_ptr = COVERAGE_BITMAP_PTR.with(|c| c.get());
-    let vm_ptr = EXPLORED_MAP_PTR.with(|c| c.get());
-    let stats_ptr = SHARED_STATS.with(|c| c.get());
+    let bm_ptr = COVERAGE_BITMAP_PTR.with(std::cell::Cell::get);
+    let vm_ptr = EXPLORED_MAP_PTR.with(std::cell::Cell::get);
+    let stats_ptr = SHARED_STATS.with(std::cell::Cell::get);
 
-    let (batch_size, min_timelines, max_timelines) = context::with_ctx(|ctx| {
-        ctx.adaptive
-            .as_ref()
-            .map(|a| (a.batch_size, a.min_timelines, a.max_timelines))
-            .unwrap_or((4, 1, 16))
-    });
+    let (batch_size, max_timelines, effective_min_timelines) = read_adaptive_batch_config();
 
-    // Warm start: when explored map has prior coverage from previous seeds,
-    // barren marks stop after fewer timelines since they're re-treading
-    // already-discovered paths.
-    let effective_min_timelines = {
-        let (is_warm, warm_min) = context::with_ctx(|ctx| {
-            let wm = ctx
-                .adaptive
-                .as_ref()
-                .and_then(|a| a.warm_min_timelines)
-                .unwrap_or(batch_size);
-            (ctx.warm_start, wm)
-        });
-        if is_warm { warm_min } else { min_timelines }
-    };
-
-    // Check parallelism
-    let parallelism = context::with_ctx(|ctx| ctx.parallelism.clone());
-    let (slot_count, pool_base) = if let Some(ref p) = parallelism {
-        let sc = resolve_parallelism(p);
-        let pb = get_or_init_pool(sc);
-        if pb.is_null() {
-            (0, std::ptr::null_mut())
-        } else {
-            (sc, pb)
-        }
-    } else {
-        (0, std::ptr::null_mut())
-    };
-    let parallel = slot_count > 0;
-
-    // Sancov parallel pool (one slot per concurrent child for sancov counters)
-    let sancov_pool_base = if parallel {
-        crate::sancov::get_or_init_sancov_pool(slot_count)
-    } else {
-        std::ptr::null_mut()
-    };
-    let parent_sancov_transfer = if parallel && !sancov_pool_base.is_null() {
-        crate::sancov::SANCOV_TRANSFER.with(|c| c.get())
-    } else {
-        std::ptr::null_mut()
+    let state = resolve_parallel_state();
+    let shared = ForkSharedState {
+        split_call_count,
+        vm_ptr,
+        stats_ptr,
+        pool_base: state.pool_base,
+        sancov_pool_base: state.sancov_pool_base,
     };
 
     // Save parent bitmap (sequential only — parallel children use pool slots)
     let mut parent_bitmap_backup = [0u8; COVERAGE_MAP_SIZE];
-    if !parallel && !bm_ptr.is_null() {
+    if !state.parallel && !bm_ptr.is_null() {
         // Safety: bm_ptr points to COVERAGE_MAP_SIZE bytes
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -356,8 +576,8 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
 
     // Parallel state (only used when parallel == true)
     let mut active: HashMap<libc::pid_t, (u64, usize)> = HashMap::new();
-    let mut free_slots: Vec<usize> = if parallel {
-        (0..slot_count).collect()
+    let mut free_slots: Vec<usize> = if state.parallel {
+        (0..state.slot_count).collect()
     } else {
         Vec::new()
     };
@@ -380,159 +600,45 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
             let child_seed = compute_child_seed(current_seed, mark_name, timelines_spawned);
             timelines_spawned += 1;
 
-            if parallel {
-                // Back-pressure: reap a finished child if all slots are busy
-                while free_slots.is_empty() {
-                    reap_one(
-                        &mut active,
-                        &mut free_slots,
-                        pool_base,
-                        sancov_pool_base,
-                        vm_ptr,
-                        stats_ptr,
-                        split_call_count,
-                        &mut batch_has_new,
-                    );
-                }
-                let Some(slot) = free_slots.pop() else { break };
-                let slot_ptr = pool_slot(pool_base, slot);
-
-                // Safety: slot_ptr is valid shared memory of COVERAGE_MAP_SIZE bytes.
-                unsafe {
-                    std::ptr::write_bytes(slot_ptr, 0, COVERAGE_MAP_SIZE);
-                }
-                COVERAGE_BITMAP_PTR.with(|c| c.set(slot_ptr));
-
-                if !sancov_pool_base.is_null() {
-                    let sancov_len = crate::sancov::sancov_edge_count();
-                    // Safety: sancov_slot is within sancov_pool_base for sancov_len bytes.
-                    unsafe {
-                        let sancov_slot = crate::sancov::sancov_pool_slot(sancov_pool_base, slot);
-                        std::ptr::write_bytes(sancov_slot, 0, sancov_len);
-                        crate::sancov::SANCOV_TRANSFER.with(|c| c.set(sancov_slot));
-                    }
-                }
-
-                // Safety: single-threaded, no real I/O
-                let pid = unsafe { libc::fork() };
-                match pid {
-                    -1 => {
-                        free_slots.push(slot);
-                        break;
-                    }
-                    0 => {
-                        setup_child(child_seed, split_call_count, stats_ptr);
-                        return;
-                    }
-                    child_pid => {
-                        active.insert(child_pid, (child_seed, slot));
-                    }
-                }
+            let outcome = if state.parallel {
+                spawn_parallel_child(
+                    child_seed,
+                    &shared,
+                    &mut active,
+                    &mut free_slots,
+                    &mut batch_has_new,
+                )
             } else {
-                if !bm_ptr.is_null() {
-                    // Safety: bm_ptr points to COVERAGE_MAP_SIZE bytes.
-                    let bm = unsafe { CoverageBitmap::new(bm_ptr) };
-                    bm.clear();
-                }
-                crate::sancov::clear_transfer_buffer();
-
-                // Safety: single-threaded, no real I/O
-                let pid = unsafe { libc::fork() };
-                match pid {
-                    -1 => break,
-                    0 => {
-                        setup_child(child_seed, split_call_count, stats_ptr);
-                        return;
-                    }
-                    child_pid => {
-                        let mut status: libc::c_int = 0;
-                        // Safety: child_pid is a valid child PID we just forked.
-                        unsafe { libc::waitpid(child_pid, &mut status, 0) };
-
-                        if !bm_ptr.is_null() && !vm_ptr.is_null() {
-                            // Safety: both pointers are valid for COVERAGE_MAP_SIZE bytes.
-                            let bm = unsafe { CoverageBitmap::new(bm_ptr) };
-                            let vm = unsafe { ExploredMap::new(vm_ptr) };
-                            if vm.has_new_bits(&bm) {
-                                batch_has_new = true;
-                            }
-                            vm.merge_from(&bm);
-                        }
-                        batch_has_new |= crate::sancov::has_new_sancov_coverage();
-
-                        if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 42 {
-                            if !stats_ptr.is_null() {
-                                // Safety: stats_ptr is valid shared memory.
-                                unsafe {
-                                    (*stats_ptr).bug_found.fetch_add(1, Ordering::Relaxed);
-                                }
-                            }
-                            save_bug_recipe(split_call_count, child_seed);
-                        }
-
-                        if !stats_ptr.is_null() {
-                            // Safety: stats_ptr is valid shared memory.
-                            unsafe {
-                                (*stats_ptr).fork_points.fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                    }
-                }
+                spawn_sequential_child(child_seed, bm_ptr, &shared, &mut batch_has_new, true)
+            };
+            match outcome {
+                SpawnOutcome::Continued => {}
+                SpawnOutcome::Stop => break,
+                SpawnOutcome::InChild => return,
             }
         }
 
-        // Drain remaining active children before checking batch yield
-        while !active.is_empty() {
-            reap_one(
-                &mut active,
-                &mut free_slots,
-                pool_base,
-                sancov_pool_base,
-                vm_ptr,
-                stats_ptr,
-                split_call_count,
-                &mut batch_has_new,
-            );
-        }
+        drain_active_children(&mut active, &mut free_slots, &shared, &mut batch_has_new);
 
-        // Batch complete — decide whether to continue
+        // Batch complete — decide whether to continue.
         if timelines_spawned >= max_timelines {
             break;
         }
         if !batch_has_new && timelines_spawned >= effective_min_timelines {
-            // Barren — return remaining energy to pool
+            // Barren — return remaining energy to pool.
             // Safety: budget_ptr is valid
             unsafe {
                 crate::energy::return_mark_energy_to_pool(budget_ptr, slot_idx);
             }
             break;
         }
-        // Check if we ran out of energy mid-batch
+        // Energy ran out mid-batch.
         if timelines_spawned - batch_start < batch_size && timelines_spawned < max_timelines {
             break;
         }
     }
 
-    if parallel {
-        // Restore parent's bitmap pointer
-        COVERAGE_BITMAP_PTR.with(|c| c.set(bm_ptr));
-        // Restore parent's sancov transfer pointer
-        if !sancov_pool_base.is_null() {
-            crate::sancov::SANCOV_TRANSFER.with(|c| c.set(parent_sancov_transfer));
-        }
-    } else {
-        // Restore parent bitmap content
-        if !bm_ptr.is_null() {
-            // Safety: bm_ptr points to COVERAGE_MAP_SIZE bytes
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    parent_bitmap_backup.as_ptr(),
-                    bm_ptr,
-                    COVERAGE_MAP_SIZE,
-                );
-            }
-        }
-    }
+    restore_parent_state(&state, bm_ptr, &parent_bitmap_backup);
 }
 
 /// Split the simulation timeline at a discovery point.
@@ -560,7 +666,7 @@ pub fn split_on_discovery(mark_name: &str) {
         return;
     }
 
-    let stats_ptr = SHARED_STATS.with(|c| c.get());
+    let stats_ptr = SHARED_STATS.with(std::cell::Cell::get);
     if stats_ptr.is_null() {
         return;
     }
@@ -570,39 +676,21 @@ pub fn split_on_discovery(mark_name: &str) {
     }
 
     let split_call_count = context::rng_get_count();
-    let bm_ptr = COVERAGE_BITMAP_PTR.with(|c| c.get());
-    let vm_ptr = EXPLORED_MAP_PTR.with(|c| c.get());
+    let bm_ptr = COVERAGE_BITMAP_PTR.with(std::cell::Cell::get);
+    let vm_ptr = EXPLORED_MAP_PTR.with(std::cell::Cell::get);
 
-    // Check parallelism
-    let parallelism = context::with_ctx(|ctx| ctx.parallelism.clone());
-    let (slot_count, pool_base) = if let Some(ref p) = parallelism {
-        let sc = resolve_parallelism(p);
-        let pb = get_or_init_pool(sc);
-        if pb.is_null() {
-            (0, std::ptr::null_mut())
-        } else {
-            (sc, pb)
-        }
-    } else {
-        (0, std::ptr::null_mut())
-    };
-    let parallel = slot_count > 0;
-
-    // Sancov parallel pool (one slot per concurrent child for sancov counters)
-    let sancov_pool_base = if parallel {
-        crate::sancov::get_or_init_sancov_pool(slot_count)
-    } else {
-        std::ptr::null_mut()
-    };
-    let parent_sancov_transfer = if parallel && !sancov_pool_base.is_null() {
-        crate::sancov::SANCOV_TRANSFER.with(|c| c.get())
-    } else {
-        std::ptr::null_mut()
+    let state = resolve_parallel_state();
+    let shared = ForkSharedState {
+        split_call_count,
+        vm_ptr,
+        stats_ptr,
+        pool_base: state.pool_base,
+        sancov_pool_base: state.sancov_pool_base,
     };
 
     // Save parent bitmap (sequential only)
     let mut parent_bitmap_backup = [0u8; COVERAGE_MAP_SIZE];
-    if !parallel && !bm_ptr.is_null() {
+    if !state.parallel && !bm_ptr.is_null() {
         // Safety: bm_ptr points to COVERAGE_MAP_SIZE bytes
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -615,8 +703,8 @@ pub fn split_on_discovery(mark_name: &str) {
 
     // Parallel state
     let mut active: HashMap<libc::pid_t, (u64, usize)> = HashMap::new();
-    let mut free_slots: Vec<usize> = if parallel {
-        (0..slot_count).collect()
+    let mut free_slots: Vec<usize> = if state.parallel {
+        (0..state.slot_count).collect()
     } else {
         Vec::new()
     };
@@ -632,126 +720,27 @@ pub fn split_on_discovery(mark_name: &str) {
 
         let child_seed = compute_child_seed(current_seed, mark_name, child_idx);
 
-        if parallel {
-            // Back-pressure: reap if all slots busy
-            while free_slots.is_empty() {
-                reap_one(
-                    &mut active,
-                    &mut free_slots,
-                    pool_base,
-                    sancov_pool_base,
-                    vm_ptr,
-                    stats_ptr,
-                    split_call_count,
-                    &mut batch_has_new,
-                );
-            }
-            let Some(slot) = free_slots.pop() else { break };
-            let slot_ptr = pool_slot(pool_base, slot);
-
-            // Safety: slot_ptr is valid shared memory of COVERAGE_MAP_SIZE bytes.
-            unsafe {
-                std::ptr::write_bytes(slot_ptr, 0, COVERAGE_MAP_SIZE);
-            }
-            COVERAGE_BITMAP_PTR.with(|c| c.set(slot_ptr));
-
-            if !sancov_pool_base.is_null() {
-                let sancov_len = crate::sancov::sancov_edge_count();
-                // Safety: sancov_slot is within sancov_pool_base for sancov_len bytes.
-                unsafe {
-                    let sancov_slot = crate::sancov::sancov_pool_slot(sancov_pool_base, slot);
-                    std::ptr::write_bytes(sancov_slot, 0, sancov_len);
-                    crate::sancov::SANCOV_TRANSFER.with(|c| c.set(sancov_slot));
-                }
-            }
-
-            // Safety: single-threaded, no real I/O
-            let pid = unsafe { libc::fork() };
-            match pid {
-                -1 => {
-                    free_slots.push(slot);
-                    break;
-                }
-                0 => {
-                    setup_child(child_seed, split_call_count, stats_ptr);
-                    return;
-                }
-                child_pid => {
-                    active.insert(child_pid, (child_seed, slot));
-                }
-            }
+        let outcome = if state.parallel {
+            spawn_parallel_child(
+                child_seed,
+                &shared,
+                &mut active,
+                &mut free_slots,
+                &mut batch_has_new,
+            )
         } else {
-            if !bm_ptr.is_null() {
-                // Safety: bm_ptr points to COVERAGE_MAP_SIZE bytes.
-                let bm = unsafe { CoverageBitmap::new(bm_ptr) };
-                bm.clear();
-            }
-            crate::sancov::clear_transfer_buffer();
-
-            // Safety: single-threaded, no real I/O
-            let pid = unsafe { libc::fork() };
-            match pid {
-                -1 => break,
-                0 => {
-                    setup_child(child_seed, split_call_count, stats_ptr);
-                    return;
-                }
-                child_pid => {
-                    let mut status: libc::c_int = 0;
-                    // Safety: child_pid is a valid child PID we just forked.
-                    unsafe { libc::waitpid(child_pid, &mut status, 0) };
-
-                    if !bm_ptr.is_null() && !vm_ptr.is_null() {
-                        // Safety: both pointers are valid for COVERAGE_MAP_SIZE bytes.
-                        let bm = unsafe { CoverageBitmap::new(bm_ptr) };
-                        let vm = unsafe { ExploredMap::new(vm_ptr) };
-                        vm.merge_from(&bm);
-                    }
-                    batch_has_new |= crate::sancov::has_new_sancov_coverage();
-
-                    if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 42 {
-                        // Safety: stats_ptr is valid shared memory.
-                        unsafe {
-                            (*stats_ptr).bug_found.fetch_add(1, Ordering::Relaxed);
-                        }
-                        save_bug_recipe(split_call_count, child_seed);
-                    }
-
-                    // Safety: stats_ptr is valid shared memory.
-                    unsafe {
-                        (*stats_ptr).fork_points.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-            }
+            spawn_sequential_child(child_seed, bm_ptr, &shared, &mut batch_has_new, false)
+        };
+        match outcome {
+            SpawnOutcome::Continued => {}
+            SpawnOutcome::Stop => break,
+            SpawnOutcome::InChild => return,
         }
     }
 
-    // Drain remaining active children
-    while !active.is_empty() {
-        reap_one(
-            &mut active,
-            &mut free_slots,
-            pool_base,
-            sancov_pool_base,
-            vm_ptr,
-            stats_ptr,
-            split_call_count,
-            &mut batch_has_new,
-        );
-    }
+    drain_active_children(&mut active, &mut free_slots, &shared, &mut batch_has_new);
 
-    if parallel {
-        COVERAGE_BITMAP_PTR.with(|c| c.set(bm_ptr));
-        // Restore parent's sancov transfer pointer
-        if !sancov_pool_base.is_null() {
-            crate::sancov::SANCOV_TRANSFER.with(|c| c.set(parent_sancov_transfer));
-        }
-    } else if !bm_ptr.is_null() {
-        // Safety: bm_ptr points to COVERAGE_MAP_SIZE bytes
-        unsafe {
-            std::ptr::copy_nonoverlapping(parent_bitmap_backup.as_ptr(), bm_ptr, COVERAGE_MAP_SIZE);
-        }
-    }
+    restore_parent_state(&state, bm_ptr, &parent_bitmap_backup);
 }
 
 /// No-op on non-unix platforms.
@@ -760,7 +749,7 @@ pub fn split_on_discovery(_mark_name: &str) {}
 
 /// Save a bug recipe to shared memory.
 fn save_bug_recipe(split_call_count: u64, child_seed: u64) {
-    let recipe_ptr = SHARED_RECIPE.with(|c| c.get());
+    let recipe_ptr = SHARED_RECIPE.with(std::cell::Cell::get);
     if recipe_ptr.is_null() {
         return;
     }
@@ -788,7 +777,7 @@ fn save_bug_recipe(split_call_count: u64, child_seed: u64) {
                 if len > 0 {
                     recipe.entries[len - 1] = (split_call_count, child_seed);
                 }
-                recipe.len = len as u32;
+                recipe.len = u32::try_from(len).expect("len bounded by MAX_RECIPE_ENTRIES");
             });
         }
     }

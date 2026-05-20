@@ -42,7 +42,7 @@ pub trait TaskProvider: Clone + Send + Sync + 'static {
 
     /// Yield control to allow other tasks to run.
     ///
-    /// This is equivalent to tokio::task::yield_now() but abstracted
+    /// This is equivalent to `tokio::task::yield_now()` but abstracted
     /// to enable simulation control and deterministic behavior.
     fn yield_now(&self) -> impl Future<Output = ()> + Send;
 }
@@ -57,7 +57,7 @@ pub trait TaskProvider: Clone + Send + Sync + 'static {
 #[derive(Clone, Debug)]
 pub struct TokioTaskProvider;
 
-/// JoinHandle produced by [`TokioTaskProvider`].
+/// `JoinHandle` produced by [`TokioTaskProvider`].
 ///
 /// Wraps tokio's `JoinHandle<()>` and converts the runtime-specific
 /// `tokio::task::JoinError` into the runtime-agnostic [`JoinError`] variants

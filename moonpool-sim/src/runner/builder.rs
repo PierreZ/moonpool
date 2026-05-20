@@ -1,6 +1,6 @@
 //! Simulation builder pattern for configuring and running experiments.
 //!
-//! This module provides the main SimulationBuilder type for setting up
+//! This module provides the main `SimulationBuilder` type for setting up
 //! and executing simulation experiments.
 
 use std::collections::HashMap;
@@ -9,13 +9,16 @@ use std::time::{Duration, Instant};
 use tracing::instrument;
 
 use crate::SimulationError;
-use crate::observability::{Invariant, SimulationLayer, TimelineQuery};
+use crate::observability::{Invariant, SimulationLayer, SimulationLayerHandle, TimelineQuery};
 use crate::runner::fault_injector::FaultInjector;
 use crate::runner::process::{Attrition, Process};
 use crate::runner::tags::TagDistribution;
 use crate::runner::workload::Workload;
 
-use super::orchestrator::{IterationManager, MetricsCollector, WorkloadOrchestrator};
+use super::orchestrator::{
+    GenerateReportInputs, IterationManager, MetricsCollector, OrchestrateInputs, OrchestrateOutput,
+    WorkloadOrchestrator,
+};
 
 /// Client identity information for a single workload instance.
 #[derive(Debug, Clone, Copy)]
@@ -24,6 +27,96 @@ pub(crate) struct WorkloadClientInfo {
     pub(crate) client_id: usize,
     /// Total number of workload instances sharing this builder entry.
     pub(crate) client_count: usize,
+}
+
+/// Inputs to `run_orchestrator_blocking`.
+struct RunOrchestratorInputs<'a> {
+    seed: u64,
+    iteration_count: usize,
+    workloads: Vec<Box<dyn Workload>>,
+    workload_info: Vec<(String, String)>,
+    client_info: Vec<WorkloadClientInfo>,
+    process_config: Option<super::orchestrator::ProcessConfig<'a>>,
+    sim: crate::sim::SimWorld,
+    fault_injectors: Vec<Box<dyn FaultInjector>>,
+    chaos_duration: Option<Duration>,
+    obs_handle: SimulationLayerHandle,
+}
+
+/// Outcome of an orchestration attempt.
+type OrchestrationOutcome = Result<OrchestrateOutput, (Vec<u64>, usize)>;
+
+/// Per-run accumulators passed into the final-report builder.
+struct FinalReportInputs {
+    total_exploration_timelines: u64,
+    total_exploration_fork_points: u64,
+    total_exploration_bugs: u64,
+    bug_recipes: Vec<super::report::BugRecipe>,
+    converged: bool,
+    per_seed_timelines: Vec<u64>,
+}
+
+/// Aggregated state passed into the convergence / plateau check helper.
+struct ConvergenceState<'a> {
+    iteration_control: &'a IterationControl,
+    iteration_count: usize,
+    reached_sometimes: &'a std::collections::HashSet<String>,
+    all_sometimes_count: usize,
+    prev_coverage_bits: &'a mut u32,
+    plateau_count: &'a mut usize,
+    prev_reached_count: &'a mut usize,
+    already_converged: bool,
+}
+
+impl RunState {
+    /// Initialise per-run accumulators from the builder's configuration.
+    fn new(builder: &SimulationBuilder) -> Self {
+        let iteration_manager =
+            IterationManager::new(builder.iteration_control.clone(), builder.seeds.clone());
+        let progress_milestone = iteration_manager
+            .max_iterations()
+            .map(|max| std::cmp::max(max / 10, 1));
+        Self {
+            iteration_manager,
+            metrics_collector: MetricsCollector::new(),
+            progress_milestone,
+            pending_return_map: Vec::new(),
+            total_exploration_timelines: 0,
+            total_exploration_fork_points: 0,
+            total_exploration_bugs: 0,
+            bug_recipes: Vec::new(),
+            per_seed_timelines: Vec::new(),
+            reached_sometimes: std::collections::HashSet::new(),
+            prev_coverage_bits: 0,
+            converged: false,
+            plateau_count: 0,
+            prev_reached_count: 0,
+        }
+    }
+}
+
+/// Accumulated mutable state threaded through [`SimulationBuilder::run`].
+struct RunState {
+    iteration_manager: IterationManager,
+    metrics_collector: MetricsCollector,
+    /// Iteration interval at which progress is logged (`None` for unbounded runs).
+    progress_milestone: Option<usize>,
+    /// Map for routing iteration-resolved workloads back to their entry slots,
+    /// stashed between [`SimulationBuilder::run_orchestrator_for_iteration`]
+    /// and [`SimulationBuilder::handle_orchestration_result`].
+    pending_return_map: Vec<Option<usize>>,
+    // Exploration accumulators.
+    total_exploration_timelines: u64,
+    total_exploration_fork_points: u64,
+    total_exploration_bugs: u64,
+    bug_recipes: Vec<super::report::BugRecipe>,
+    per_seed_timelines: Vec<u64>,
+    // Convergence + plateau tracking.
+    reached_sometimes: std::collections::HashSet<String>,
+    prev_coverage_bits: u32,
+    converged: bool,
+    plateau_count: usize,
+    prev_reached_count: usize,
 }
 
 /// Resolved workload entries for a single iteration.
@@ -104,7 +197,7 @@ impl WorkloadCount {
 
 /// Strategy for assigning client IDs to workload instances.
 ///
-/// Inspired by FoundationDB's `WorkloadContext.clientId`, but more
+/// Inspired by `FoundationDB`'s `WorkloadContext.clientId`, but more
 /// programmable. The resolved client ID is available via
 /// [`SimContext::client_id()`](super::context::SimContext::client_id).
 ///
@@ -243,6 +336,7 @@ impl Default for SimulationBuilder {
 
 impl SimulationBuilder {
     /// Create a new empty simulation builder.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             iteration_control: IterationControl::FixedCount(1),
@@ -264,6 +358,7 @@ impl SimulationBuilder {
     ///
     /// The instance is reused across iterations (the `run()` method is called
     /// each iteration on the same struct). Gets `client_id = 0`, `client_count = 1`.
+    #[must_use]
     pub fn workload(mut self, w: impl Workload) -> Self {
         self.entries.push(WorkloadEntry::Instance(
             Some(Box::new(w)),
@@ -293,6 +388,7 @@ impl SimulationBuilder {
     /// // 3 to 7 processes, randomized per iteration
     /// builder.processes(3..=7, || Box::new(MyNode::new()))
     /// ```
+    #[must_use]
     pub fn processes(
         mut self,
         count: impl Into<ProcessCount>,
@@ -350,6 +446,7 @@ impl SimulationBuilder {
     /// will not be spawned.
     ///
     /// For custom fault injection, use `.fault()` with a [`FaultInjector`] instead.
+    #[must_use]
     pub fn attrition(mut self, config: Attrition) -> Self {
         self.attrition = Some(config);
         self
@@ -373,6 +470,7 @@ impl SimulationBuilder {
     /// // 1–5 random clients
     /// builder.workloads(WorkloadCount::Random(1..6), |i| Box::new(ClientWorkload::new(i)))
     /// ```
+    #[must_use]
     pub fn workloads(
         mut self,
         count: WorkloadCount,
@@ -387,12 +485,14 @@ impl SimulationBuilder {
     }
 
     /// Add an invariant to be checked after every simulation event.
+    #[must_use]
     pub fn invariant<I: Invariant>(mut self, i: I) -> Self {
         self.invariants.push(Box::new(i));
         self
     }
 
     /// Add a closure-based invariant.
+    #[must_use]
     pub fn invariant_fn(
         mut self,
         name: impl Into<String>,
@@ -404,6 +504,7 @@ impl SimulationBuilder {
     }
 
     /// Add a fault injector to run during the chaos phase.
+    #[must_use]
     pub fn fault(mut self, f: impl FaultInjector) -> Self {
         self.fault_injectors.push(Box::new(f));
         self
@@ -415,12 +516,14 @@ impl SimulationBuilder {
     /// duration. After it elapses, faults stop and the system continues
     /// until all workloads complete. A settle phase then drains remaining
     /// events before checks run.
+    #[must_use]
     pub fn chaos_duration(mut self, duration: Duration) -> Self {
         self.chaos_duration = Some(duration);
         self
     }
 
     /// Set the number of iterations to run.
+    #[must_use]
     pub fn set_iterations(mut self, iterations: usize) -> Self {
         self.iteration_control = IterationControl::FixedCount(iterations);
         self
@@ -430,6 +533,7 @@ impl SimulationBuilder {
     ///
     /// When a seed takes longer than this duration, a `tracing::warn!` is emitted.
     /// If not set, no slow-seed warnings are produced.
+    #[must_use]
     pub fn seed_warning_timeout(mut self, timeout: Duration) -> Self {
         self.seed_warning_timeout = Some(timeout);
         self
@@ -440,6 +544,7 @@ impl SimulationBuilder {
     ///
     /// Requires `.enable_exploration()` to be configured.
     /// `max_iterations` is a safety cap to prevent infinite loops.
+    #[must_use]
     pub fn until_converged(mut self, max_iterations: usize) -> Self {
         self.iteration_control = IterationControl::UntilConverged { max_iterations };
         self
@@ -451,6 +556,7 @@ impl SimulationBuilder {
     /// Works with or without [`SimulationBuilder::enable_exploration`].
     /// `max_iterations` is a safety cap to prevent infinite loops when the
     /// plateau is never reached.
+    #[must_use]
     pub fn until_coverage_plateau(mut self, plateau_seeds: usize, max_iterations: usize) -> Self {
         self.iteration_control = IterationControl::CoveragePlateau {
             plateau_seeds,
@@ -463,6 +569,7 @@ impl SimulationBuilder {
     /// Like [`Self::until_coverage_plateau`] but also lets the caller require
     /// every observed sometimes/reachable assertion to have fired before the
     /// plateau is allowed to terminate the run.
+    #[must_use]
     pub fn until_coverage_plateau_with(
         mut self,
         plateau_seeds: usize,
@@ -481,18 +588,21 @@ impl SimulationBuilder {
     ///
     /// Use this to reset shared state (directories, membership, stores) that
     /// lives outside the builder and is shared via `Rc` across iterations.
+    #[must_use]
     pub fn before_iteration(mut self, f: impl FnMut() + 'static) -> Self {
         self.before_iteration_hooks.push(Box::new(f));
         self
     }
 
     /// Set specific seeds for deterministic debugging and regression testing.
+    #[must_use]
     pub fn set_debug_seeds(mut self, seeds: Vec<u64>) -> Self {
         self.seeds = seeds;
         self
     }
 
     /// Enable randomized network configuration for chaos testing.
+    #[must_use]
     pub fn random_network(mut self) -> Self {
         self.use_random_config = true;
         self
@@ -502,6 +612,7 @@ impl SimulationBuilder {
     ///
     /// When enabled, the simulation will fork child processes at assertion
     /// discovery points to explore alternate timelines with different seeds.
+    #[must_use]
     pub fn enable_exploration(mut self, config: moonpool_explorer::ExplorationConfig) -> Self {
         self.exploration_config = Some(config);
         self
@@ -566,57 +677,411 @@ impl SimulationBuilder {
         }
     }
 
+    /// Spin up a fresh tokio runtime, run the orchestrator on it, and
+    /// return its outcome.
+    fn run_orchestrator_blocking(inputs: RunOrchestratorInputs<'_>) -> OrchestrationOutcome {
+        let RunOrchestratorInputs {
+            seed,
+            iteration_count,
+            workloads,
+            workload_info,
+            client_info,
+            process_config,
+            sim,
+            fault_injectors,
+            chaos_duration,
+            obs_handle,
+        } = inputs;
+        let local_runtime = Self::build_local_runtime_for_seed(seed);
+        local_runtime.block_on(async move {
+            WorkloadOrchestrator::orchestrate_workloads(OrchestrateInputs {
+                workloads,
+                fault_injectors,
+                obs: obs_handle,
+                workload_info: &workload_info,
+                client_info: &client_info,
+                process_config,
+                seed,
+                sim,
+                chaos_duration,
+                iteration_count,
+            })
+            .await
+        })
+    }
+
+    /// Build a `SimWorld` for the iteration, picking a randomised or default
+    /// network configuration.
+    fn build_sim_for_iteration(use_random: bool, seed: u64) -> crate::sim::SimWorld {
+        let network_config = if use_random {
+            crate::NetworkConfiguration::random_for_seed()
+        } else {
+            crate::NetworkConfiguration::default()
+        };
+        crate::sim::SimWorld::new_with_network_config_and_seed(network_config, seed)
+    }
+
+    /// Drain user-provided fault injectors and, when present, append the
+    /// built-in attrition injector.
+    fn collect_fault_injectors(
+        user_injectors: &mut Vec<Box<dyn FaultInjector>>,
+        attrition: Option<&Attrition>,
+    ) -> Vec<Box<dyn FaultInjector>> {
+        let mut fault_injectors = std::mem::take(user_injectors);
+        if let Some(attrition) = attrition {
+            fault_injectors.push(Box::new(
+                crate::runner::fault_injector::AttritionInjector::new(attrition.clone()),
+            ));
+        }
+        fault_injectors
+    }
+
+    /// Build an early-exit report on deadlock: snapshot the assertion
+    /// state, reset buggify, and consume the metrics collector.
+    fn build_early_exit_report(
+        metrics_collector: MetricsCollector,
+        iteration_count: usize,
+        seeds_used: Vec<u64>,
+    ) -> SimulationReport {
+        let assertion_results = crate::chaos::assertion_results();
+        let (assertion_violations, coverage_violations) =
+            crate::chaos::validate_assertion_contracts();
+        crate::chaos::buggify_reset();
+        metrics_collector.generate_report(GenerateReportInputs {
+            iteration_count,
+            seeds_used,
+            assertion_results,
+            assertion_violations,
+            coverage_violations,
+            exploration: None,
+            assertion_details: Vec::new(),
+            bucket_summaries: Vec::new(),
+            convergence_timeout: false,
+        })
+    }
+
+    /// Check whether the user's convergence / plateau condition has been
+    /// met this iteration. Returns the new `converged` flag.
+    fn check_convergence_or_plateau(state: ConvergenceState<'_>) -> bool {
+        let ConvergenceState {
+            iteration_control,
+            iteration_count,
+            reached_sometimes,
+            all_sometimes_count,
+            prev_coverage_bits,
+            plateau_count,
+            prev_reached_count,
+            already_converged,
+        } = state;
+        if already_converged {
+            return true;
+        }
+        match iteration_control {
+            IterationControl::UntilConverged { .. } => {
+                if iteration_count < 2 {
+                    return false;
+                }
+                let all_reached =
+                    all_sometimes_count > 0 && reached_sometimes.len() >= all_sometimes_count;
+                let current_bits = moonpool_explorer::explored_map_bits_set().unwrap_or(0);
+                let no_new_coverage = current_bits == *prev_coverage_bits;
+                tracing::warn!(
+                    "convergence: seed={} reached={}/{} coverage={}->{} delta={}",
+                    iteration_count,
+                    reached_sometimes.len(),
+                    all_sometimes_count,
+                    *prev_coverage_bits,
+                    current_bits,
+                    current_bits.saturating_sub(*prev_coverage_bits),
+                );
+                if all_reached && no_new_coverage {
+                    tracing::info!(
+                        "Converged after {} seeds: all {} sometimes reached, no new coverage",
+                        iteration_count,
+                        all_sometimes_count
+                    );
+                    return true;
+                }
+                false
+            }
+            IterationControl::CoveragePlateau {
+                plateau_seeds,
+                require_all_sometimes,
+                ..
+            } => {
+                let current_count = reached_sometimes.len();
+                if iteration_count == 1 {
+                    *prev_reached_count = current_count;
+                } else if current_count == *prev_reached_count {
+                    *plateau_count += 1;
+                } else {
+                    *plateau_count = 0;
+                    *prev_reached_count = current_count;
+                }
+                let all_reached = !*require_all_sometimes
+                    || (all_sometimes_count > 0 && reached_sometimes.len() >= all_sometimes_count);
+                tracing::warn!(
+                    "plateau: seed={} reached={}/{} consecutive_no_growth={}/{}",
+                    iteration_count,
+                    current_count,
+                    all_sometimes_count,
+                    *plateau_count,
+                    plateau_seeds,
+                );
+                if *plateau_count >= *plateau_seeds && all_reached {
+                    tracing::info!(
+                        "Coverage plateau after {} seeds: {} consecutive without growth, {} sometimes reached",
+                        iteration_count,
+                        *plateau_count,
+                        current_count
+                    );
+                    return true;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Emit a `warn!` when an iteration exceeded the configured threshold.
+    fn log_slow_seed(seed: u64, wall_time: Duration, threshold: Option<Duration>) {
+        if let Some(threshold) = threshold
+            && wall_time > threshold
+        {
+            tracing::warn!(
+                seed,
+                wall_time_ms = u64::try_from(wall_time.as_millis()).unwrap_or(u64::MAX),
+                threshold_ms = u64::try_from(threshold.as_millis()).unwrap_or(u64::MAX),
+                "seed took {:.2}s (threshold: {}s)",
+                wall_time.as_secs_f64(),
+                threshold.as_secs(),
+            );
+        }
+    }
+
+    /// Emit a milestone `info!` every `progress_milestone` iterations.
+    fn log_progress_milestone(
+        progress_milestone: Option<usize>,
+        iteration_count: usize,
+        max: usize,
+    ) {
+        if let Some(interval) = progress_milestone
+            && iteration_count.is_multiple_of(interval)
+        {
+            let iteration_f64 = u32::try_from(iteration_count).map_or(f64::INFINITY, f64::from);
+            let max_f64 = u32::try_from(max).map_or(f64::INFINITY, f64::from);
+            let pct = (iteration_f64 / max_f64) * 100.0;
+            tracing::info!(
+                iteration = iteration_count,
+                total = max,
+                "[{}/{}] {:.0}% complete",
+                iteration_count,
+                max,
+                pct,
+            );
+        }
+    }
+
+    /// Build a fresh single-threaded tokio runtime seeded for this iteration.
+    /// When dropped, ALL tasks are killed — no orphan tasks leak between
+    /// iterations.
+    fn build_local_runtime_for_seed(seed: u64) -> tokio::runtime::Runtime {
+        let mut seed_bytes = [0u8; 32];
+        seed_bytes[..8].copy_from_slice(&seed.to_le_bytes());
+        let rng_seed = tokio::runtime::RngSeed::from_bytes(&seed_bytes);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .rng_seed(rng_seed)
+            .build()
+            .expect("per-iteration runtime")
+    }
+
+    /// Reset per-iteration state: capture buffers, RNG, buggify, and chaos.
+    fn reset_per_iteration_state(seed: u64, obs_handle: &SimulationLayerHandle) {
+        obs_handle.reset_for_seed();
+        crate::sim::reset_sim_rng();
+        crate::sim::set_sim_seed(seed);
+        crate::chaos::reset_always_violations();
+        // Use moderate probabilities: 50% activation rate, 25% firing rate.
+        crate::chaos::buggify_init(0.5, 0.25);
+    }
+
+    /// Resolve a process entry into a `ProcessConfig` for the current
+    /// iteration, sampling the count/tags from the sim RNG (already seeded).
+    fn resolve_process_config(entry: &ProcessEntry) -> super::orchestrator::ProcessConfig<'_> {
+        let count = entry.count.resolve();
+        let mut registry = crate::runner::tags::TagRegistry::new();
+        let mut ips = Vec::with_capacity(count);
+        let mut info = Vec::with_capacity(count);
+        let base_name = &entry.name;
+        for i in 0..count {
+            let ip = format!("10.0.1.{}", i + 1);
+            let ip_addr: std::net::IpAddr = ip.parse().expect("valid process IP");
+            let tags = entry.tags.resolve(i);
+            registry.register(ip_addr, tags);
+            ips.push(ip.clone());
+            let name = if count == 1 {
+                base_name.clone()
+            } else {
+                format!("{base_name}-{i}")
+            };
+            info.push((name, ip));
+        }
+        super::orchestrator::ProcessConfig {
+            factory: &*entry.factory,
+            info,
+            ips,
+            tag_registry: registry,
+        }
+    }
+
+    /// Initialise shared-memory state (assertion table, optionally explorer).
+    fn init_assertions_and_exploration(
+        exploration_config: Option<&moonpool_explorer::ExplorationConfig>,
+    ) {
+        if let Err(e) = moonpool_explorer::init_assertions() {
+            tracing::error!("Failed to initialize assertion table: {}", e);
+        }
+        if let Some(config) = exploration_config {
+            moonpool_explorer::set_rng_hooks(crate::sim::rng_call_count, |seed| {
+                crate::sim::set_sim_seed(seed);
+                crate::sim::reset_rng_call_count();
+            });
+            if let Err(e) = moonpool_explorer::init(config) {
+                tracing::error!("Failed to initialize exploration: {}", e);
+            }
+        }
+    }
+
+    /// Build the final `ExplorationReport` from the running totals collected
+    /// across iterations.
+    fn build_exploration_report(
+        total_timelines: u64,
+        total_fork_points: u64,
+        total_bugs: u64,
+        bug_recipes: Vec<super::report::BugRecipe>,
+        converged: bool,
+        per_seed_timelines: Vec<u64>,
+    ) -> super::report::ExplorationReport {
+        let final_stats = moonpool_explorer::exploration_stats();
+        let coverage_bits = moonpool_explorer::explored_map_bits_set().unwrap_or(0);
+        super::report::ExplorationReport {
+            total_timelines,
+            fork_points: total_fork_points,
+            bugs_found: total_bugs,
+            bug_recipes,
+            energy_remaining: final_stats.as_ref().map_or(0, |s| s.global_energy),
+            realloc_pool_remaining: final_stats.as_ref().map_or(0, |s| s.realloc_pool_remaining),
+            coverage_bits,
+            coverage_total: u32::try_from(moonpool_explorer::coverage::COVERAGE_MAP_SIZE * 8)
+                .expect("coverage map size fits in u32"),
+            sancov_edges_total: final_stats.as_ref().map_or(0, |s| s.sancov_edges_total),
+            sancov_edges_covered: final_stats.as_ref().map_or(0, |s| s.sancov_edges_covered),
+            converged,
+            per_seed_timelines,
+        }
+    }
+
+    /// Read the explorer's per-seed exploration stats and accumulate into
+    /// the totals + per-seed timelines arrays. Captures any new bug recipe
+    /// produced this seed.
+    fn accumulate_exploration_stats(
+        seed: u64,
+        per_seed_timelines: &mut Vec<u64>,
+        total_timelines: &mut u64,
+        total_fork_points: &mut u64,
+        total_bugs: &mut u64,
+        bug_recipes: &mut Vec<super::report::BugRecipe>,
+    ) {
+        if let Some(stats) = moonpool_explorer::exploration_stats() {
+            per_seed_timelines.push(stats.total_timelines);
+            *total_timelines += stats.total_timelines;
+            *total_fork_points += stats.fork_points;
+            *total_bugs += stats.bug_found;
+        } else {
+            per_seed_timelines.push(0);
+        }
+        if let Some(recipe) = moonpool_explorer::bug_recipe() {
+            bug_recipes.push(super::report::BugRecipe { seed, recipe });
+        }
+    }
+
+    /// Scan all assertion slots from shared memory: insert the messages
+    /// of every "passed" Sometimes/Reachable slot into `reached`, log a
+    /// warning for every still-unreached slot, and return the count of
+    /// unique Sometimes/Reachable message strings observed.
+    fn scan_assertion_slots(reached: &mut std::collections::HashSet<String>) -> usize {
+        let slots = moonpool_explorer::assertion_read_all();
+        for slot in &slots {
+            if let Some(kind) = moonpool_explorer::AssertKind::from_u8(slot.kind)
+                && matches!(
+                    kind,
+                    moonpool_explorer::AssertKind::Sometimes
+                        | moonpool_explorer::AssertKind::Reachable
+                )
+            {
+                if slot.pass_count > 0 {
+                    reached.insert(slot.msg.clone());
+                } else if !reached.contains(&slot.msg) {
+                    tracing::warn!(
+                        "UNREACHED slot: kind={:?} msg={:?} pass={} fail={}",
+                        kind,
+                        slot.msg,
+                        slot.pass_count,
+                        slot.fail_count
+                    );
+                }
+            }
+        }
+        slots
+            .iter()
+            .filter(|s| {
+                moonpool_explorer::AssertKind::from_u8(s.kind).is_some_and(|k| {
+                    matches!(
+                        k,
+                        moonpool_explorer::AssertKind::Sometimes
+                            | moonpool_explorer::AssertKind::Reachable
+                    )
+                })
+            })
+            .map(|s| s.msg.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    }
+
+    /// Build the empty report returned when no workloads are registered.
+    fn empty_report() -> SimulationReport {
+        SimulationReport {
+            iterations: 0,
+            successful_runs: 0,
+            failed_runs: 0,
+            metrics: SimulationMetrics::default(),
+            individual_metrics: Vec::new(),
+            seeds_used: Vec::new(),
+            seeds_failing: Vec::new(),
+            assertion_results: HashMap::new(),
+            assertion_violations: Vec::new(),
+            coverage_violations: Vec::new(),
+            exploration: None,
+            assertion_details: Vec::new(),
+            bucket_summaries: Vec::new(),
+            convergence_timeout: false,
+        }
+    }
+
     #[instrument(skip_all)]
     /// Run the simulation and generate a report.
     ///
     /// Creates a fresh tokio `LocalRuntime` per iteration for full isolation —
     /// all tasks are killed when the runtime is dropped at iteration end.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a simulation invariant fails or a workload panics.
     pub fn run(mut self) -> SimulationReport {
         if self.entries.is_empty() {
-            return SimulationReport {
-                iterations: 0,
-                successful_runs: 0,
-                failed_runs: 0,
-                metrics: SimulationMetrics::default(),
-                individual_metrics: Vec::new(),
-                seeds_used: Vec::new(),
-                seeds_failing: Vec::new(),
-                assertion_results: HashMap::new(),
-                assertion_violations: Vec::new(),
-                coverage_violations: Vec::new(),
-                exploration: None,
-                assertion_details: Vec::new(),
-                bucket_summaries: Vec::new(),
-                convergence_timeout: false,
-            };
+            return Self::empty_report();
         }
-
-        // Initialize iteration state
-        let mut iteration_manager =
-            IterationManager::new(self.iteration_control.clone(), self.seeds.clone());
-        let mut metrics_collector = MetricsCollector::new();
-
-        // Progress reporting: compute milestone interval (every ~10%)
-        let progress_milestone = iteration_manager
-            .max_iterations()
-            .map(|max| std::cmp::max(max / 10, 1));
-
-        // Accumulators for multi-seed exploration stats
-        let mut total_exploration_timelines: u64 = 0;
-        let mut total_exploration_fork_points: u64 = 0;
-        let mut total_exploration_bugs: u64 = 0;
-        let mut bug_recipes: Vec<super::report::BugRecipe> = Vec::new();
-        let mut per_seed_timelines: Vec<u64> = Vec::new();
-
-        // Convergence tracking (used by UntilConverged and CoveragePlateau)
-        let mut reached_sometimes: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        let mut prev_coverage_bits: u32 = 0;
-        let mut converged = false;
-
-        // Plateau tracking (used only with CoveragePlateau)
-        let mut plateau_count: usize = 0;
-        let mut prev_reached_count: usize = 0;
 
         // Install the observability layer once for the entire run. The guard
         // is dropped when run() returns, restoring the previous subscriber.
@@ -627,472 +1092,314 @@ impl SimulationBuilder {
             obs_handle.register(inv);
         }
 
-        // Initialize assertion table (unconditional — works even without exploration)
-        if let Err(e) = moonpool_explorer::init_assertions() {
-            tracing::error!("Failed to initialize assertion table: {}", e);
-        }
+        Self::init_assertions_and_exploration(self.exploration_config.as_ref());
 
-        // Initialize exploration if configured
-        if let Some(ref config) = self.exploration_config {
-            moonpool_explorer::set_rng_hooks(crate::sim::rng_call_count, |seed| {
-                crate::sim::set_sim_seed(seed);
-                crate::sim::reset_rng_call_count();
-            });
-            if let Err(e) = moonpool_explorer::init(config.clone()) {
-                tracing::error!("Failed to initialize exploration: {}", e);
-            }
-        }
-
-        // Validate UntilConverged requires exploration
-        if matches!(
-            self.iteration_control,
-            IterationControl::UntilConverged { .. }
-        ) && self.exploration_config.is_none()
-        {
-            panic!(
-                "IterationControl::UntilConverged requires enable_exploration() to be configured"
-            );
-        }
-
-        while iteration_manager.should_continue() {
-            let seed = iteration_manager.next_iteration();
-            let iteration_count = iteration_manager.current_iteration();
-
-            // Preserve assertion data across iterations so the final report
-            // reflects all seeds, not just the last one.  For exploration runs,
-            // prepare_next_seed() also does a selective reset of coverage state.
-            if iteration_count > 1 {
-                if let Some(ref config) = self.exploration_config {
-                    moonpool_explorer::prepare_next_seed(config.global_energy);
-                }
-                crate::chaos::assertions::skip_next_assertion_reset();
-            }
-
-            // Run user-provided reset hooks
-            for hook in &mut self.before_iteration_hooks {
-                hook();
-            }
-
-            // Reset captured events and invariant state for the new seed.
-            obs_handle.reset_for_seed();
-
-            // Prepare clean state for this iteration
-            crate::sim::reset_sim_rng();
-            crate::sim::set_sim_seed(seed);
-            crate::chaos::reset_always_violations();
-
-            // Initialize buggify system for this iteration
-            // Use moderate probabilities: 50% activation rate, 25% firing rate
-            crate::chaos::buggify_init(0.5, 0.25);
-
-            // Snapshot coverage before this seed for convergence detection
-            if matches!(
+        assert!(
+            !matches!(
                 self.iteration_control,
                 IterationControl::UntilConverged { .. }
-            ) {
-                prev_coverage_bits = moonpool_explorer::explored_map_bits_set().unwrap_or(0);
+            ) || self.exploration_config.is_some(),
+            "IterationControl::UntilConverged requires enable_exploration() to be configured"
+        );
+
+        let mut state = RunState::new(&self);
+
+        while state.iteration_manager.should_continue() {
+            if let Some(report) = self.execute_iteration(&mut state, &obs_handle) {
+                return report;
             }
-
-            // Resolve workload entries into concrete instances for this iteration
-            // (WorkloadCount::Random and ClientId::RandomRange use the sim RNG, already seeded above)
-            let ResolvedEntries {
-                workloads,
-                return_map,
-                client_info,
-            } = self.resolve_entries();
-
-            // Compute workload name/IP pairs from resolved workloads
-            let workload_info: Vec<(String, String)> = workloads
-                .iter()
-                .enumerate()
-                .map(|(i, w)| (w.name().to_string(), format!("10.0.0.{}", i + 1)))
-                .collect();
-
-            // Resolve process configuration (if any)
-            let process_config = self.process_entry.as_ref().map(
-                |entry| -> super::orchestrator::ProcessConfig<'_> {
-                    let count = entry.count.resolve();
-                    let mut registry = crate::runner::tags::TagRegistry::new();
-                    let mut ips = Vec::with_capacity(count);
-                    let mut info = Vec::with_capacity(count);
-                    let base_name = &entry.name;
-                    for i in 0..count {
-                        let ip = format!("10.0.1.{}", i + 1);
-                        let ip_addr: std::net::IpAddr = ip.parse().expect("valid process IP");
-                        let tags = entry.tags.resolve(i);
-                        registry.register(ip_addr, tags);
-                        ips.push(ip.clone());
-                        let name = if count == 1 {
-                            base_name.clone()
-                        } else {
-                            format!("{}-{}", base_name, i)
-                        };
-                        info.push((name, ip));
-                    }
-                    super::orchestrator::ProcessConfig {
-                        factory: &*entry.factory,
-                        info,
-                        ips,
-                        tag_registry: registry,
-                    }
-                },
-            );
-
-            // Create fresh NetworkConfiguration for this iteration
-            let network_config = if self.use_random_config {
-                crate::NetworkConfiguration::random_for_seed()
-            } else {
-                crate::NetworkConfiguration::default()
-            };
-
-            // Create shared SimWorld for this iteration using fresh network config
-            let sim = crate::sim::SimWorld::new_with_network_config_and_seed(network_config, seed);
-
-            let start_time = Instant::now();
-
-            // Move fault injectors to orchestrator, get them back after
-            let mut fault_injectors = std::mem::take(&mut self.fault_injectors);
-
-            // Add built-in attrition injector if configured
-            if let Some(ref attrition) = self.attrition {
-                fault_injectors.push(Box::new(
-                    crate::runner::fault_injector::AttritionInjector::new(attrition.clone()),
-                ));
-            }
-
-            // Create a fresh tokio runtime per iteration for complete isolation.
-            // When this runtime is dropped, ALL tasks are killed — no orphan
-            // tasks leak between iterations.
-            let mut seed_bytes = [0u8; 32];
-            seed_bytes[..8].copy_from_slice(&seed.to_le_bytes());
-            let rng_seed = tokio::runtime::RngSeed::from_bytes(&seed_bytes);
-
-            let local_runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_time()
-                .rng_seed(rng_seed)
-                .build()
-                .expect("per-iteration runtime");
-
-            // Borrow self fields before the async block so we don't move self
-            let chaos_duration = self.chaos_duration;
-            let obs_handle_for_iter = obs_handle.clone();
-
-            // Execute workloads using orchestrator inside this iteration's runtime
-            let orchestration_result = local_runtime.block_on(async move {
-                WorkloadOrchestrator::orchestrate_workloads(
-                    workloads,
-                    fault_injectors,
-                    obs_handle_for_iter,
-                    &workload_info,
-                    &client_info,
-                    process_config,
-                    seed,
-                    sim,
-                    chaos_duration,
-                    iteration_count,
-                )
-                .await
-            });
-
-            match orchestration_result {
-                Ok((returned_workloads, returned_injectors, all_results, sim_metrics)) => {
-                    // Return Instance workloads to their entry slots
-                    self.return_entries(returned_workloads, return_map);
-                    self.fault_injectors = returned_injectors;
-
-                    let wall_time = start_time.elapsed();
-                    let has_violations = crate::chaos::has_always_violations();
-
-                    metrics_collector.record_iteration(
-                        seed,
-                        wall_time,
-                        &all_results,
-                        has_violations,
-                        sim_metrics,
-                    );
-
-                    // Progress: warn on slow seeds
-                    if let Some(threshold) = self.seed_warning_timeout
-                        && wall_time > threshold
-                    {
-                        tracing::warn!(
-                            seed,
-                            wall_time_ms = wall_time.as_millis() as u64,
-                            threshold_ms = threshold.as_millis() as u64,
-                            "seed took {:.2}s (threshold: {}s)",
-                            wall_time.as_secs_f64(),
-                            threshold.as_secs(),
-                        );
-                    }
-
-                    // Progress: milestone reporting
-                    if let Some(interval) = progress_milestone
-                        && iteration_count.is_multiple_of(interval)
-                    {
-                        let max = iteration_manager
-                            .max_iterations()
-                            .unwrap_or(iteration_count);
-                        let pct = (iteration_count as f64 / max as f64) * 100.0;
-                        tracing::info!(
-                            iteration = iteration_count,
-                            total = max,
-                            "[{}/{}] {:.0}% complete",
-                            iteration_count,
-                            max,
-                            pct,
-                        );
-                    }
-                }
-                Err((faulty_seeds_from_deadlock, failed_count)) => {
-                    // Handle deadlock case - merge with existing state and return early
-                    metrics_collector.add_faulty_seeds(faulty_seeds_from_deadlock);
-                    metrics_collector.add_failed_runs(failed_count);
-
-                    // Create early exit report
-                    let assertion_results = crate::chaos::assertion_results();
-                    let (assertion_violations, coverage_violations) =
-                        crate::chaos::validate_assertion_contracts();
-                    crate::chaos::buggify_reset();
-
-                    return metrics_collector.generate_report(
-                        iteration_count,
-                        iteration_manager.seeds_used().to_vec(),
-                        assertion_results,
-                        assertion_violations,
-                        coverage_violations,
-                        None,
-                        Vec::new(),
-                        Vec::new(),
-                        false,
-                    );
-                }
-            }
-
-            // Accumulate exploration stats across seeds (before reset)
-            if self.exploration_config.is_some() {
-                if let Some(stats) = moonpool_explorer::exploration_stats() {
-                    per_seed_timelines.push(stats.total_timelines);
-                    total_exploration_timelines += stats.total_timelines;
-                    total_exploration_fork_points += stats.fork_points;
-                    total_exploration_bugs += stats.bug_found;
-                } else {
-                    per_seed_timelines.push(0);
-                }
-                if let Some(recipe) = moonpool_explorer::bug_recipe() {
-                    bug_recipes.push(super::report::BugRecipe { seed, recipe });
-                }
-            }
-
-            // Accumulate which Sometimes/Reachable assertions have been reached
-            // (must read before next prepare_next_seed resets pass_count).
-            // Used by both UntilConverged and CoveragePlateau stop conditions.
-            let needs_assertion_scan = matches!(
-                self.iteration_control,
-                IterationControl::UntilConverged { .. } | IterationControl::CoveragePlateau { .. }
-            );
-            if needs_assertion_scan {
-                let slots = moonpool_explorer::assertion_read_all();
-                for slot in &slots {
-                    if let Some(kind) = moonpool_explorer::AssertKind::from_u8(slot.kind)
-                        && matches!(
-                            kind,
-                            moonpool_explorer::AssertKind::Sometimes
-                                | moonpool_explorer::AssertKind::Reachable
-                        )
-                    {
-                        if slot.pass_count > 0 {
-                            reached_sometimes.insert(slot.msg.clone());
-                        } else if !reached_sometimes.contains(&slot.msg) {
-                            tracing::warn!(
-                                "UNREACHED slot: kind={:?} msg={:?} pass={} fail={}",
-                                kind,
-                                slot.msg,
-                                slot.pass_count,
-                                slot.fail_count
-                            );
-                        }
-                    }
-                }
-
-                // Count unique message strings (not raw slots) to handle
-                // any residual duplicate slots from the fork allocation race.
-                let all_sometimes_count = slots
-                    .iter()
-                    .filter(|s| {
-                        moonpool_explorer::AssertKind::from_u8(s.kind)
-                            .map(|k| {
-                                matches!(
-                                    k,
-                                    moonpool_explorer::AssertKind::Sometimes
-                                        | moonpool_explorer::AssertKind::Reachable
-                                )
-                            })
-                            .unwrap_or(false)
-                    })
-                    .map(|s| s.msg.clone())
-                    .collect::<std::collections::HashSet<_>>()
-                    .len();
-
-                if let IterationControl::UntilConverged { .. } = self.iteration_control {
-                    // Check convergence from seed 2 onward (need baseline for coverage delta)
-                    if iteration_count >= 2 {
-                        let all_reached = all_sometimes_count > 0
-                            && reached_sometimes.len() >= all_sometimes_count;
-
-                        let current_bits = moonpool_explorer::explored_map_bits_set().unwrap_or(0);
-                        let no_new_coverage = current_bits == prev_coverage_bits;
-
-                        tracing::warn!(
-                            "convergence: seed={} reached={}/{} coverage={}->{} delta={}",
-                            iteration_count,
-                            reached_sometimes.len(),
-                            all_sometimes_count,
-                            prev_coverage_bits,
-                            current_bits,
-                            current_bits.saturating_sub(prev_coverage_bits),
-                        );
-
-                        if all_reached && no_new_coverage {
-                            tracing::info!(
-                                "Converged after {} seeds: all {} sometimes reached, no new coverage",
-                                iteration_count,
-                                all_sometimes_count
-                            );
-                            converged = true;
-                        }
-                    }
-                } else if let IterationControl::CoveragePlateau {
-                    plateau_seeds,
-                    require_all_sometimes,
-                    ..
-                } = self.iteration_control
-                {
-                    let current_count = reached_sometimes.len();
-                    if iteration_count == 1 {
-                        prev_reached_count = current_count;
-                    } else if current_count == prev_reached_count {
-                        plateau_count += 1;
-                    } else {
-                        plateau_count = 0;
-                        prev_reached_count = current_count;
-                    }
-
-                    let all_reached = !require_all_sometimes
-                        || (all_sometimes_count > 0
-                            && reached_sometimes.len() >= all_sometimes_count);
-
-                    tracing::warn!(
-                        "plateau: seed={} reached={}/{} consecutive_no_growth={}/{}",
-                        iteration_count,
-                        current_count,
-                        all_sometimes_count,
-                        plateau_count,
-                        plateau_seeds,
-                    );
-
-                    if plateau_count >= plateau_seeds && all_reached {
-                        tracing::info!(
-                            "Coverage plateau after {} seeds: {} consecutive without growth, {} sometimes reached",
-                            iteration_count,
-                            plateau_count,
-                            current_count
-                        );
-                        converged = true;
-                    }
-                }
-            }
-
-            // Reset buggify state after each iteration to ensure clean state
-            crate::chaos::buggify_reset();
-
-            if converged {
+            if state.converged {
                 break;
             }
         }
 
-        // End of main iteration loop
-        //
-        // Data collection: read ALL shared memory BEFORE any cleanup.
-        // cleanup() calls cleanup_assertions() which frees the assertion
-        // table and each-bucket table.
+        Self::build_final_report(
+            state.metrics_collector,
+            &state.iteration_manager,
+            self.exploration_config.as_ref(),
+            &self.iteration_control,
+            FinalReportInputs {
+                total_exploration_timelines: state.total_exploration_timelines,
+                total_exploration_fork_points: state.total_exploration_fork_points,
+                total_exploration_bugs: state.total_exploration_bugs,
+                bug_recipes: state.bug_recipes,
+                converged: state.converged,
+                per_seed_timelines: state.per_seed_timelines,
+            },
+        )
+    }
 
-        // 1. Read exploration-specific data (freed by cleanup)
-        let exploration_report = if self.exploration_config.is_some() {
-            let final_stats = moonpool_explorer::exploration_stats();
-            // The per-iteration capture above should have caught all recipes.
-            // No fallback needed since we capture after every iteration.
-            let coverage_bits = moonpool_explorer::explored_map_bits_set().unwrap_or(0);
+    /// Execute one iteration of the run loop. Returns `Some(report)` when the
+    /// loop must terminate early (e.g. orchestrator deadlock).
+    fn execute_iteration(
+        &mut self,
+        state: &mut RunState,
+        obs_handle: &SimulationLayerHandle,
+    ) -> Option<SimulationReport> {
+        let seed = state.iteration_manager.next_iteration();
+        let iteration_count = state.iteration_manager.current_iteration();
 
-            Some(super::report::ExplorationReport {
-                total_timelines: total_exploration_timelines,
-                fork_points: total_exploration_fork_points,
-                bugs_found: total_exploration_bugs,
+        self.prepare_iteration(state, obs_handle, seed, iteration_count);
+
+        let (orchestration_result, start_time) =
+            self.run_orchestrator_for_iteration(state, obs_handle, seed, iteration_count);
+
+        if let Err(report) = self.handle_orchestration_result(
+            state,
+            orchestration_result,
+            seed,
+            iteration_count,
+            start_time,
+        ) {
+            return Some(*report);
+        }
+
+        self.finish_iteration(state, seed, iteration_count);
+        None
+    }
+
+    /// Run all per-iteration setup steps before the orchestrator starts:
+    /// prepare-next-seed, user hooks, reset state, snapshot coverage.
+    fn prepare_iteration(
+        &mut self,
+        state: &mut RunState,
+        obs_handle: &SimulationLayerHandle,
+        seed: u64,
+        iteration_count: usize,
+    ) {
+        // Preserve assertion data across iterations so the final report
+        // reflects all seeds, not just the last one. For exploration runs,
+        // prepare_next_seed() also does a selective reset of coverage state.
+        if iteration_count > 1 {
+            if let Some(ref config) = self.exploration_config {
+                moonpool_explorer::prepare_next_seed(config.global_energy);
+            }
+            crate::chaos::assertions::skip_next_assertion_reset();
+        }
+
+        for hook in &mut self.before_iteration_hooks {
+            hook();
+        }
+
+        Self::reset_per_iteration_state(seed, obs_handle);
+
+        if matches!(
+            self.iteration_control,
+            IterationControl::UntilConverged { .. }
+        ) {
+            state.prev_coverage_bits = moonpool_explorer::explored_map_bits_set().unwrap_or(0);
+        }
+    }
+
+    /// Resolve workload entries, build the per-iteration sim/fault-injectors,
+    /// and drive the orchestrator. Stashes `return_map` in `state` for the
+    /// subsequent result-handling step. Returns the orchestration outcome and
+    /// the wall-clock start time of the orchestrator call (used for slow-seed
+    /// logging).
+    fn run_orchestrator_for_iteration(
+        &mut self,
+        state: &mut RunState,
+        obs_handle: &SimulationLayerHandle,
+        seed: u64,
+        iteration_count: usize,
+    ) -> (OrchestrationOutcome, Instant) {
+        let ResolvedEntries {
+            workloads,
+            return_map,
+            client_info,
+        } = self.resolve_entries();
+        state.pending_return_map = return_map;
+
+        let workload_info: Vec<(String, String)> = workloads
+            .iter()
+            .enumerate()
+            .map(|(i, w)| (w.name().to_string(), format!("10.0.0.{}", i + 1)))
+            .collect();
+
+        let process_config = self
+            .process_entry
+            .as_ref()
+            .map(Self::resolve_process_config);
+
+        let sim = Self::build_sim_for_iteration(self.use_random_config, seed);
+        let start_time = Instant::now();
+        let fault_injectors =
+            Self::collect_fault_injectors(&mut self.fault_injectors, self.attrition.as_ref());
+        let outcome = Self::run_orchestrator_blocking(RunOrchestratorInputs {
+            seed,
+            iteration_count,
+            workloads,
+            workload_info,
+            client_info,
+            process_config,
+            sim,
+            fault_injectors,
+            chaos_duration: self.chaos_duration,
+            obs_handle: obs_handle.clone(),
+        });
+        (outcome, start_time)
+    }
+
+    /// Process the orchestration outcome: route the success path back into
+    /// state, or build an early-exit report on deadlock.
+    fn handle_orchestration_result(
+        &mut self,
+        state: &mut RunState,
+        result: OrchestrationOutcome,
+        seed: u64,
+        iteration_count: usize,
+        start_time: Instant,
+    ) -> Result<(), Box<SimulationReport>> {
+        let max_iterations = state
+            .iteration_manager
+            .max_iterations()
+            .unwrap_or(iteration_count);
+        let seeds_used_snapshot = state.iteration_manager.seeds_used().to_vec();
+        match result {
+            Ok(OrchestrateOutput {
+                workloads: returned_workloads,
+                fault_injectors: returned_injectors,
+                results: all_results,
+                metrics: sim_metrics,
+            }) => {
+                let return_map = std::mem::take(&mut state.pending_return_map);
+                self.return_entries(returned_workloads, return_map);
+                self.fault_injectors = returned_injectors;
+                let wall_time = start_time.elapsed();
+                state.metrics_collector.record_iteration(
+                    seed,
+                    wall_time,
+                    &all_results,
+                    crate::chaos::has_always_violations(),
+                    sim_metrics,
+                );
+                Self::log_slow_seed(seed, wall_time, self.seed_warning_timeout);
+                Self::log_progress_milestone(
+                    state.progress_milestone,
+                    iteration_count,
+                    max_iterations,
+                );
+                Ok(())
+            }
+            Err((faulty_seeds_from_deadlock, failed_count)) => {
+                state
+                    .metrics_collector
+                    .add_faulty_seeds(faulty_seeds_from_deadlock);
+                state.metrics_collector.add_failed_runs(failed_count);
+                let metrics_collector =
+                    std::mem::replace(&mut state.metrics_collector, MetricsCollector::new());
+                Err(Box::new(Self::build_early_exit_report(
+                    metrics_collector,
+                    iteration_count,
+                    seeds_used_snapshot,
+                )))
+            }
+        }
+    }
+
+    /// Run all per-iteration cleanup steps after the orchestrator finished:
+    /// accumulate exploration stats, run the convergence scan, reset buggify.
+    fn finish_iteration(&self, state: &mut RunState, seed: u64, iteration_count: usize) {
+        if self.exploration_config.is_some() {
+            Self::accumulate_exploration_stats(
+                seed,
+                &mut state.per_seed_timelines,
+                &mut state.total_exploration_timelines,
+                &mut state.total_exploration_fork_points,
+                &mut state.total_exploration_bugs,
+                &mut state.bug_recipes,
+            );
+        }
+
+        let needs_assertion_scan = matches!(
+            self.iteration_control,
+            IterationControl::UntilConverged { .. } | IterationControl::CoveragePlateau { .. }
+        );
+        if needs_assertion_scan {
+            let all_sometimes_count = Self::scan_assertion_slots(&mut state.reached_sometimes);
+            state.converged = Self::check_convergence_or_plateau(ConvergenceState {
+                iteration_control: &self.iteration_control,
+                iteration_count,
+                reached_sometimes: &state.reached_sometimes,
+                all_sometimes_count,
+                prev_coverage_bits: &mut state.prev_coverage_bits,
+                plateau_count: &mut state.plateau_count,
+                prev_reached_count: &mut state.prev_reached_count,
+                already_converged: state.converged,
+            });
+        }
+
+        crate::chaos::buggify_reset();
+    }
+
+    /// Drain shared-memory state, free it, then build the final report.
+    fn build_final_report(
+        metrics_collector: MetricsCollector,
+        iteration_manager: &IterationManager,
+        exploration_config: Option<&moonpool_explorer::ExplorationConfig>,
+        iteration_control: &IterationControl,
+        inputs: FinalReportInputs,
+    ) -> SimulationReport {
+        let FinalReportInputs {
+            total_exploration_timelines,
+            total_exploration_fork_points,
+            total_exploration_bugs,
+            bug_recipes,
+            converged,
+            per_seed_timelines,
+        } = inputs;
+
+        // 1. Read exploration-specific data (freed by cleanup).
+        let exploration_report = if exploration_config.is_some() {
+            Some(Self::build_exploration_report(
+                total_exploration_timelines,
+                total_exploration_fork_points,
+                total_exploration_bugs,
                 bug_recipes,
-                energy_remaining: final_stats.as_ref().map(|s| s.global_energy).unwrap_or(0),
-                realloc_pool_remaining: final_stats
-                    .as_ref()
-                    .map(|s| s.realloc_pool_remaining)
-                    .unwrap_or(0),
-                coverage_bits,
-                coverage_total: (moonpool_explorer::coverage::COVERAGE_MAP_SIZE * 8) as u32,
-                sancov_edges_total: final_stats
-                    .as_ref()
-                    .map(|s| s.sancov_edges_total)
-                    .unwrap_or(0),
-                sancov_edges_covered: final_stats
-                    .as_ref()
-                    .map(|s| s.sancov_edges_covered)
-                    .unwrap_or(0),
                 converged,
                 per_seed_timelines,
-            })
+            ))
         } else {
             None
         };
 
-        // 2. Read assertion + bucket data (freed by cleanup/cleanup_assertions)
+        // 2. Read assertion + bucket data (freed by cleanup/cleanup_assertions).
         let assertion_results = crate::chaos::assertion_results();
         let (assertion_violations, coverage_violations) =
             crate::chaos::validate_assertion_contracts();
         let raw_assertion_slots = moonpool_explorer::assertion_read_all();
         let raw_each_buckets = moonpool_explorer::each_bucket_read_all();
 
-        // 3. Now safe to free all shared memory
-        if self.exploration_config.is_some() {
+        // 3. Now safe to free all shared memory.
+        if exploration_config.is_some() {
             moonpool_explorer::cleanup();
         } else {
             moonpool_explorer::cleanup_assertions();
         }
 
-        // 4. Build rich assertion details from raw slot snapshots
         let assertion_details = build_assertion_details(&raw_assertion_slots);
-
-        // 5. Build bucket summaries by grouping EachBuckets by site
         let bucket_summaries = build_bucket_summaries(&raw_each_buckets);
-
         let iteration_count = iteration_manager.current_iteration();
 
-        // Detect convergence timeout: a convergence-style stop condition was
-        // used but the safety cap was hit before we converged / plateaued.
+        // Detect convergence timeout.
         let convergence_timeout = matches!(
-            self.iteration_control,
+            iteration_control,
             IterationControl::UntilConverged { .. } | IterationControl::CoveragePlateau { .. }
         ) && !converged;
 
-        // Final buggify reset to ensure no impact on subsequent code
         crate::chaos::buggify_reset();
 
-        metrics_collector.generate_report(
+        metrics_collector.generate_report(GenerateReportInputs {
             iteration_count,
-            iteration_manager.seeds_used().to_vec(),
+            seeds_used: iteration_manager.seeds_used().to_vec(),
             assertion_results,
             assertion_violations,
             coverage_violations,
-            exploration_report,
+            exploration: exploration_report,
             assertion_details,
             bucket_summaries,
             convergence_timeout,
-        )
+        })
     }
 }
 
@@ -1124,14 +1431,7 @@ fn build_assertion_details(
                         AssertionStatus::Pass
                     }
                 }
-                AssertKind::Sometimes | AssertKind::NumericSometimes => {
-                    if slot.pass_count > 0 {
-                        AssertionStatus::Pass
-                    } else {
-                        AssertionStatus::Miss
-                    }
-                }
-                AssertKind::Reachable => {
+                AssertKind::Sometimes | AssertKind::NumericSometimes | AssertKind::Reachable => {
                     if slot.pass_count > 0 {
                         AssertionStatus::Pass
                     } else {
@@ -1186,7 +1486,7 @@ fn build_bucket_summaries(
             });
 
         entry.buckets_discovered += 1;
-        entry.total_hits += bucket.pass_count as u64;
+        entry.total_hits += u64::from(bucket.pass_count);
     }
 
     let mut summaries: Vec<_> = sites.into_values().collect();
@@ -1207,7 +1507,7 @@ mod tests {
 
     #[async_trait]
     impl Workload for BasicWorkload {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "test_workload"
         }
 
@@ -1227,7 +1527,7 @@ mod tests {
         assert_eq!(report.iterations, 3);
         assert_eq!(report.successful_runs, 3);
         assert_eq!(report.failed_runs, 0);
-        assert_eq!(report.success_rate(), 100.0);
+        assert!((report.success_rate() - 100.0).abs() < f64::EPSILON);
         assert_eq!(report.seeds_used, vec![1, 2, 3]);
     }
 
@@ -1235,7 +1535,7 @@ mod tests {
 
     #[async_trait]
     impl Workload for FailingWorkload {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "failing_workload"
         }
 

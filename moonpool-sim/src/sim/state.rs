@@ -4,7 +4,7 @@
 //! listeners, partitions, and clogs in the simulation environment.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     net::IpAddr,
     time::Duration,
 };
@@ -49,6 +49,128 @@ pub struct PartitionState {
     pub expires_at: Duration,
 }
 
+/// Bit-packed boolean flags for a [`ConnectionState`].
+///
+/// Storing the various closure / chaos flags in a single integer avoids the
+/// `clippy::struct_excessive_bools` lint while keeping a small, copy-friendly
+/// representation. Helper methods provide named access to each flag.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConnectionFlags(u16);
+
+impl ConnectionFlags {
+    const IS_CLOSED: u16 = 1 << 0;
+    const SEND_CLOSED: u16 = 1 << 1;
+    const RECV_CLOSED: u16 = 1 << 2;
+    const IS_CUT: u16 = 1 << 3;
+    const IS_HALF_OPEN: u16 = 1 << 4;
+    const IS_STABLE: u16 = 1 << 5;
+    const GRACEFUL_CLOSE_PENDING: u16 = 1 << 6;
+    const REMOTE_FIN_RECEIVED: u16 = 1 << 7;
+    const SEND_IN_PROGRESS: u16 = 1 << 8;
+
+    fn get(self, mask: u16) -> bool {
+        (self.0 & mask) != 0
+    }
+
+    fn set_bit(&mut self, mask: u16, value: bool) {
+        if value {
+            self.0 |= mask;
+        } else {
+            self.0 &= !mask;
+        }
+    }
+
+    /// Whether the connection has been permanently closed.
+    #[must_use]
+    pub fn is_closed(self) -> bool {
+        self.get(Self::IS_CLOSED)
+    }
+    /// Update the closed flag.
+    pub fn set_is_closed(&mut self, value: bool) {
+        self.set_bit(Self::IS_CLOSED, value);
+    }
+
+    /// Whether the send side has been closed.
+    #[must_use]
+    pub fn send_closed(self) -> bool {
+        self.get(Self::SEND_CLOSED)
+    }
+    /// Update the send-closed flag.
+    pub fn set_send_closed(&mut self, value: bool) {
+        self.set_bit(Self::SEND_CLOSED, value);
+    }
+
+    /// Whether the receive side has been closed.
+    #[must_use]
+    pub fn recv_closed(self) -> bool {
+        self.get(Self::RECV_CLOSED)
+    }
+    /// Update the recv-closed flag.
+    pub fn set_recv_closed(&mut self, value: bool) {
+        self.set_bit(Self::RECV_CLOSED, value);
+    }
+
+    /// Whether the connection is temporarily cut.
+    #[must_use]
+    pub fn is_cut(self) -> bool {
+        self.get(Self::IS_CUT)
+    }
+    /// Update the cut flag.
+    pub fn set_is_cut(&mut self, value: bool) {
+        self.set_bit(Self::IS_CUT, value);
+    }
+
+    /// Whether the connection is half-open (peer crashed).
+    #[must_use]
+    pub fn is_half_open(self) -> bool {
+        self.get(Self::IS_HALF_OPEN)
+    }
+    /// Update the half-open flag.
+    pub fn set_is_half_open(&mut self, value: bool) {
+        self.set_bit(Self::IS_HALF_OPEN, value);
+    }
+
+    /// Whether the connection is exempt from chaos (stable).
+    #[must_use]
+    pub fn is_stable(self) -> bool {
+        self.get(Self::IS_STABLE)
+    }
+    /// Update the stable flag.
+    pub fn set_is_stable(&mut self, value: bool) {
+        self.set_bit(Self::IS_STABLE, value);
+    }
+
+    /// Whether a graceful close (FIN) is pending delivery to the peer.
+    #[must_use]
+    pub fn graceful_close_pending(self) -> bool {
+        self.get(Self::GRACEFUL_CLOSE_PENDING)
+    }
+    /// Update the graceful-close-pending flag.
+    pub fn set_graceful_close_pending(&mut self, value: bool) {
+        self.set_bit(Self::GRACEFUL_CLOSE_PENDING, value);
+    }
+
+    /// Whether the peer's FIN has been received on this side.
+    #[must_use]
+    pub fn remote_fin_received(self) -> bool {
+        self.get(Self::REMOTE_FIN_RECEIVED)
+    }
+    /// Update the remote-fin-received flag.
+    pub fn set_remote_fin_received(&mut self, value: bool) {
+        self.set_bit(Self::REMOTE_FIN_RECEIVED, value);
+    }
+
+    /// Whether a `ProcessSendBuffer` event is currently scheduled.
+    #[must_use]
+    pub fn send_in_progress(self) -> bool {
+        self.get(Self::SEND_IN_PROGRESS)
+    }
+    /// Update the send-in-progress flag.
+    pub fn set_send_in_progress(&mut self, value: bool) {
+        self.set_bit(Self::SEND_IN_PROGRESS, value);
+    }
+}
+
 /// Internal connection state for simulation
 #[derive(Debug, Clone)]
 pub struct ConnectionState {
@@ -78,98 +200,46 @@ pub struct ConnectionState {
     /// FIFO buffer for outgoing data waiting to be sent over the network.
     pub send_buffer: VecDeque<Vec<u8>>,
 
-    /// Flag indicating whether a `ProcessSendBuffer` event is currently scheduled.
-    pub send_in_progress: bool,
-
     /// Next available time for sending messages from this connection.
     pub next_send_time: Duration,
 
-    /// Whether this connection has been permanently closed by one of the endpoints
-    pub is_closed: bool,
-
-    /// Whether the send side is closed (writes will fail) - for asymmetric closure
-    /// FDB: closeInternal() on self closes send capability
-    pub send_closed: bool,
-
-    /// Whether the receive side is closed (reads return EOF) - for asymmetric closure
-    /// FDB: closeInternal() on peer closes recv capability
-    pub recv_closed: bool,
-
-    /// Whether this connection is temporarily cut (will be restored).
-    /// Unlike `is_closed`, a cut connection can be restored after a duration.
-    /// This simulates temporary network outages where the connection is not
-    /// permanently severed but temporarily unavailable.
-    pub is_cut: bool,
+    /// Boolean flags (closure, chaos, send-in-progress) packed into a bitfield.
+    /// Use the named accessor methods on [`ConnectionFlags`] to inspect or
+    /// update individual bits.
+    pub flags: ConnectionFlags,
 
     /// When the cut expires and the connection is restored (in simulation time).
-    /// Only meaningful when `is_cut` is true.
+    /// Only meaningful when `flags.is_cut()` is true.
     pub cut_expiry: Option<Duration>,
 
     /// Reason for connection closure - distinguishes FIN vs RST semantics.
-    /// When `is_closed` is true, this indicates whether it was graceful or aborted.
+    /// When `flags.is_closed()` is true, this indicates whether it was graceful or aborted.
     pub close_reason: CloseReason,
 
     /// Send buffer capacity in bytes.
-    /// When the send buffer reaches this limit, poll_write returns Pending.
+    /// When the send buffer reaches this limit, `poll_write` returns Pending.
     /// Calculated from BDP (Bandwidth-Delay Product): latency × bandwidth.
     pub send_buffer_capacity: usize,
 
     /// Per-connection send delay override (asymmetric latency).
     /// If set, this delay is applied when sending data from this connection.
-    /// If None, the global write_latency from NetworkConfiguration is used.
+    /// If None, the global `write_latency` from `NetworkConfiguration` is used.
     pub send_delay: Option<Duration>,
 
     /// Per-connection receive delay override (asymmetric latency).
     /// If set, this delay is applied when receiving data on this connection.
-    /// If None, the global read_latency from NetworkConfiguration is used.
+    /// If None, the global `read_latency` from `NetworkConfiguration` is used.
     pub recv_delay: Option<Duration>,
-
-    /// Whether this connection is in a half-open state (peer crashed).
-    /// In this state:
-    /// - Local side still thinks it's connected
-    /// - Writes succeed but data is silently discarded
-    /// - Reads block waiting for data that will never come
-    /// - After `half_open_error_at`, errors start manifesting
-    pub is_half_open: bool,
 
     /// When a half-open connection starts returning errors (in simulation time).
     /// Before this time: writes succeed (data dropped), reads block.
     /// After this time: both read and write return ECONNRESET.
     pub half_open_error_at: Option<Duration>,
 
-    /// Whether this connection is stable (exempt from chaos).
-    ///
-    /// FDB ref: sim2.actor.cpp:357-362, 427, 440, 581-582 (stableConnection flag)
-    ///
-    /// Stable connections are exempt from:
-    /// - Random close (`roll_random_close`)
-    /// - Write clogging
-    /// - Read clogging
-    /// - Bit flip corruption
-    /// - Partial write truncation
-    ///
-    /// This is used for parent-child process connections or supervision channels
-    /// that should remain reliable even during chaos testing.
-    pub is_stable: bool,
-
-    /// Whether a graceful close (FIN) is pending delivery to the peer.
-    /// Set when close_connection is called while the send pipeline still has data.
-    /// The FIN is delivered after the last DataDelivery event.
-    pub graceful_close_pending: bool,
-
-    /// Time of the most recently scheduled DataDelivery event from this connection.
-    /// Used to ensure FinDelivery is scheduled after the last data arrives at the peer.
+    /// Time of the most recently scheduled `DataDelivery` event from this connection.
+    /// Used to ensure `FinDelivery` is scheduled after the last data arrives at the peer.
     pub last_data_delivery_scheduled_at: Option<Duration>,
-
-    /// Whether a FIN has been received from the remote peer (graceful close completed).
-    /// Distinct from `recv_closed` which is for chaos/asymmetric closure (immediate EOF).
-    /// This flag allows the reader to drain the receive buffer before seeing EOF.
-    pub remote_fin_received: bool,
 }
-
-/// Internal listener state for simulation
-#[derive(Debug)]
-pub struct ListenerState {}
 
 /// Network-related state management
 #[derive(Debug)]
@@ -182,8 +252,8 @@ pub struct NetworkState {
     pub config: NetworkConfiguration,
     /// Active connections indexed by their ID.
     pub connections: BTreeMap<ConnectionId, ConnectionState>,
-    /// Active listeners indexed by their ID.
-    pub listeners: BTreeMap<ListenerId, ListenerState>,
+    /// Active listener IDs.
+    pub listeners: BTreeSet<ListenerId>,
     /// Connections pending acceptance, indexed by address.
     pub pending_connections: BTreeMap<String, ConnectionId>,
 
@@ -212,13 +282,14 @@ pub struct NetworkState {
 
 impl NetworkState {
     /// Create a new network state with the given configuration.
+    #[must_use]
     pub fn new(config: NetworkConfiguration) -> Self {
         Self {
             next_connection_id: 0,
             next_listener_id: 0,
             config,
             connections: BTreeMap::new(),
-            listeners: BTreeMap::new(),
+            listeners: BTreeSet::new(),
             pending_connections: BTreeMap::new(),
             connection_clogs: BTreeMap::new(),
             read_clogs: BTreeMap::new(),
@@ -231,7 +302,8 @@ impl NetworkState {
     }
 
     /// Extract IP address from a network address string.
-    /// Supports formats like "127.0.0.1:8080", "\[::1\]:8080", etc.
+    /// Supports formats like "127.0.0.1:8080", "\[`::1`\]:8080", etc.
+    #[must_use]
     pub fn parse_ip_from_addr(addr: &str) -> Option<IpAddr> {
         // Handle IPv6 addresses in brackets
         if addr.starts_with('[')
@@ -249,6 +321,7 @@ impl NetworkState {
     }
 
     /// Check if communication from source IP to destination IP is partitioned
+    #[must_use]
     pub fn is_partitioned(&self, from_ip: IpAddr, to_ip: IpAddr, current_time: Duration) -> bool {
         // Check IP pair partition
         if let Some(partition) = self.ip_partitions.get(&(from_ip, to_ip))
@@ -275,6 +348,7 @@ impl NetworkState {
     }
 
     /// Check if a connection is partitioned (cannot send messages)
+    #[must_use]
     pub fn is_connection_partitioned(
         &self,
         connection_id: ConnectionId,
@@ -350,6 +424,7 @@ pub struct StorageFileState {
 
 impl StorageFileState {
     /// Create a new storage file state.
+    #[must_use]
     pub fn new(
         id: FileId,
         path: String,
@@ -387,14 +462,15 @@ pub struct StorageState {
     pub files: BTreeMap<FileId, StorageFileState>,
     /// Mapping from path to file ID for quick lookup
     pub path_to_file: BTreeMap<String, FileId>,
-    /// Set of paths that have been deleted (for create_new semantics)
+    /// Set of paths that have been deleted (for `create_new` semantics)
     pub deleted_paths: HashSet<String>,
-    /// Set of (file_id, op_seq) pairs for sync operations that failed
+    /// Set of (`file_id`, `op_seq`) pairs for sync operations that failed
     pub sync_failures: HashSet<(FileId, u64)>,
 }
 
 impl StorageState {
     /// Create a new storage state with the given configuration.
+    #[must_use]
     pub fn new(config: StorageConfiguration) -> Self {
         Self {
             next_file_id: 0,
@@ -410,6 +486,7 @@ impl StorageState {
     /// Resolve storage configuration for a given IP address.
     ///
     /// Returns the per-process config if one is set, otherwise the global default.
+    #[must_use]
     pub fn config_for(&self, ip: IpAddr) -> &StorageConfiguration {
         self.per_process_configs.get(&ip).unwrap_or(&self.config)
     }

@@ -33,11 +33,16 @@ pub struct StateHandle {
 
 impl StateHandle {
     /// Create a new empty state handle.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Publish a value under a key, replacing any existing value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the state lock is poisoned by a prior task panic.
     pub fn publish<T: Any + Send + Sync + 'static>(&self, key: &str, value: T) {
         self.inner
             .write()
@@ -48,6 +53,11 @@ impl StateHandle {
     /// Get a cloned copy of the value under a key, if it exists and matches the type.
     ///
     /// Returns `None` if the key doesn't exist or the type doesn't match.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the state lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn get<T: Any + Clone + Send + Sync + 'static>(&self, key: &str) -> Option<T> {
         self.inner
             .read()
@@ -58,6 +68,11 @@ impl StateHandle {
     }
 
     /// Check whether a key exists in the state.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the state lock is poisoned by a prior task panic.
+    #[must_use]
     pub fn contains(&self, key: &str) -> bool {
         self.inner
             .read()

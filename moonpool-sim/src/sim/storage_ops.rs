@@ -76,12 +76,9 @@ pub(crate) fn handle_storage_event(
 
 /// Handle read operation completion.
 fn handle_read_complete(inner: &mut SimInner, file_id: FileId) {
-    let read_fault_probability = inner
-        .storage
-        .files
-        .get(&file_id)
-        .map(|f| inner.storage.config_for(f.owner_ip).read_fault_probability)
-        .unwrap_or(0.0);
+    let read_fault_probability = inner.storage.files.get(&file_id).map_or(0.0, |f| {
+        inner.storage.config_for(f.owner_ip).read_fault_probability
+    });
 
     // Find and remove the oldest pending read operation
     let Some((op_seq, op)) = take_pending_op(inner, file_id, PendingOpType::Read) else {
@@ -96,8 +93,9 @@ fn handle_read_complete(inner: &mut SimInner, file_id: FileId) {
     if read_fault_probability > 0.0
         && let Some(file_state) = inner.storage.files.get_mut(&file_id)
     {
-        let start_sector = (offset as usize) / crate::storage::SECTOR_SIZE;
-        let end_sector = (offset as usize + len).div_ceil(crate::storage::SECTOR_SIZE);
+        let offset_usize = usize::try_from(offset).expect("offset fits in usize");
+        let start_sector = offset_usize / crate::storage::SECTOR_SIZE;
+        let end_sector = (offset_usize + len).div_ceil(crate::storage::SECTOR_SIZE);
 
         for sector in start_sector..end_sector {
             if sim_random::<f64>() < read_fault_probability {
@@ -122,7 +120,7 @@ fn handle_read_complete(inner: &mut SimInner, file_id: FileId) {
     }
 
     // Wake the waker for this operation
-    if let Some(waker) = inner.wakers.storage_wakers.remove(&(file_id, op_seq)) {
+    if let Some(waker) = inner.wakers.storage_ops.remove(&(file_id, op_seq)) {
         tracing::trace!("Waking read waker for file {:?}, op {}", file_id, op_seq);
         waker.wake();
     }
@@ -131,8 +129,8 @@ fn handle_read_complete(inner: &mut SimInner, file_id: FileId) {
 /// Handle write operation completion.
 ///
 /// Applies the write to storage with potential fault injection:
-/// - phantom_write_probability: write appears to succeed but isn't persisted
-/// - misdirect_write_probability: write lands at wrong location
+/// - `phantom_write_probability`: write appears to succeed but isn't persisted
+/// - `misdirect_write_probability`: write lands at wrong location
 fn handle_write_complete(inner: &mut SimInner, file_id: FileId) {
     let config = inner
         .storage
@@ -197,9 +195,9 @@ fn handle_write_complete(inner: &mut SimInner, file_id: FileId) {
         } else {
             // Check for write corruption - mark sectors as faulted after successful write
             if config.write_fault_probability > 0.0 {
-                let start_sector = (offset as usize) / crate::storage::SECTOR_SIZE;
-                let end_sector =
-                    (offset as usize + data.len()).div_ceil(crate::storage::SECTOR_SIZE);
+                let offset_usize = usize::try_from(offset).expect("offset fits in usize");
+                let start_sector = offset_usize / crate::storage::SECTOR_SIZE;
+                let end_sector = (offset_usize + data.len()).div_ceil(crate::storage::SECTOR_SIZE);
 
                 for sector in start_sector..end_sector {
                     if sim_random::<f64>() < config.write_fault_probability {
@@ -224,7 +222,7 @@ fn handle_write_complete(inner: &mut SimInner, file_id: FileId) {
     }
 
     // Wake the waker for this operation
-    if let Some(waker) = inner.wakers.storage_wakers.remove(&(file_id, op_seq)) {
+    if let Some(waker) = inner.wakers.storage_ops.remove(&(file_id, op_seq)) {
         tracing::trace!("Waking write waker for file {:?}, op {}", file_id, op_seq);
         waker.wake();
     }
@@ -232,19 +230,14 @@ fn handle_write_complete(inner: &mut SimInner, file_id: FileId) {
 
 /// Handle sync operation completion.
 ///
-/// Applies sync_failure_probability fault injection.
+/// Applies `sync_failure_probability` fault injection.
 fn handle_sync_complete(inner: &mut SimInner, file_id: FileId) {
-    let sync_failure_prob = inner
-        .storage
-        .files
-        .get(&file_id)
-        .map(|f| {
-            inner
-                .storage
-                .config_for(f.owner_ip)
-                .sync_failure_probability
-        })
-        .unwrap_or(0.0);
+    let sync_failure_prob = inner.storage.files.get(&file_id).map_or(0.0, |f| {
+        inner
+            .storage
+            .config_for(f.owner_ip)
+            .sync_failure_probability
+    });
 
     // Find and remove the oldest pending sync operation
     let Some((op_seq, _)) = take_pending_op(inner, file_id, PendingOpType::Sync) else {
@@ -272,7 +265,7 @@ fn handle_sync_complete(inner: &mut SimInner, file_id: FileId) {
     }
 
     // Wake the waker for this operation
-    if let Some(waker) = inner.wakers.storage_wakers.remove(&(file_id, op_seq)) {
+    if let Some(waker) = inner.wakers.storage_ops.remove(&(file_id, op_seq)) {
         tracing::trace!("Waking sync waker for file {:?}, op {}", file_id, op_seq);
         waker.wake();
     }
@@ -288,13 +281,13 @@ fn handle_open_complete(inner: &mut SimInner, file_id: FileId) {
     };
 
     // Wake the waker for this operation
-    if let Some(waker) = inner.wakers.storage_wakers.remove(&(file_id, op_seq)) {
+    if let Some(waker) = inner.wakers.storage_ops.remove(&(file_id, op_seq)) {
         tracing::trace!("Waking open waker for file {:?}, op {}", file_id, op_seq);
         waker.wake();
     }
 }
 
-/// Handle set_len operation completion.
+/// Handle `set_len` operation completion.
 fn handle_set_len_complete(inner: &mut SimInner, file_id: FileId, new_len: u64) {
     // Find and remove the oldest pending set_len operation
     let Some((op_seq, _)) = take_pending_op(inner, file_id, PendingOpType::SetLen) else {
@@ -308,7 +301,7 @@ fn handle_set_len_complete(inner: &mut SimInner, file_id: FileId, new_len: u64) 
     }
 
     // Wake the waker for this operation
-    if let Some(waker) = inner.wakers.storage_wakers.remove(&(file_id, op_seq)) {
+    if let Some(waker) = inner.wakers.storage_ops.remove(&(file_id, op_seq)) {
         tracing::trace!(
             "Waking set_len waker for file {:?}, op {}, new_len={}",
             file_id,
@@ -325,6 +318,10 @@ fn handle_set_len_complete(inner: &mut SimInner, file_id: FileId, new_len: u64) 
 
 impl SimWorld {
     /// Access storage configuration for the simulation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     pub fn with_storage_config<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&crate::storage::StorageConfiguration) -> R,
@@ -357,12 +354,12 @@ impl SimWorld {
         let path_str = path.to_string();
 
         // Check create_new semantics - fail if file exists
-        if options.create_new && inner.storage.path_to_file.contains_key(&path_str) {
+        if options.is_create_new() && inner.storage.path_to_file.contains_key(&path_str) {
             return Err(StorageError::AlreadyExists { path: path_str });
         }
 
         // Check if file was deleted and create is not set
-        if inner.storage.deleted_paths.contains(&path_str) && !options.create {
+        if inner.storage.deleted_paths.contains(&path_str) && !options.is_create() {
             return Err(StorageError::NotFound { path: path_str });
         }
 
@@ -370,11 +367,11 @@ impl SimWorld {
         if let Some(&existing_id) = inner.storage.path_to_file.get(&path_str) {
             if let Some(file_state) = inner.storage.files.get_mut(&existing_id) {
                 // If truncate is set, reset the storage
-                if options.truncate {
+                if options.is_truncate() {
                     let seed = sim_random::<u64>();
                     file_state.storage = InMemoryStorage::new(0, seed);
                     file_state.position = 0;
-                } else if options.append {
+                } else if options.is_append() {
                     // For append mode, seek to end
                     file_state.position = file_state.storage.size();
                 } else {
@@ -389,7 +386,7 @@ impl SimWorld {
         }
 
         // File doesn't exist - check if we're allowed to create it
-        if !options.create && !options.create_new {
+        if !options.is_create() && !options.is_create_new() {
             return Err(StorageError::NotFound { path: path_str });
         }
 
@@ -477,7 +474,7 @@ impl SimWorld {
         if let Some(file_id) = inner.storage.path_to_file.remove(&from_str) {
             // Update the path in the file state
             if let Some(file_state) = inner.storage.files.get_mut(&file_id) {
-                file_state.path = to_str.clone();
+                file_state.path.clone_from(&to_str);
             }
             inner.storage.path_to_file.insert(to_str, file_id);
             inner.storage.deleted_paths.remove(&from_str);
@@ -536,7 +533,9 @@ impl SimWorld {
 
         let event = Event::Storage {
             file_id: file_id.0,
-            operation: StorageOperation::ReadComplete { len: len as u32 },
+            operation: StorageOperation::ReadComplete {
+                len: u32::try_from(len).expect("read length fits in u32"),
+            },
         };
         inner
             .event_queue
@@ -602,7 +601,9 @@ impl SimWorld {
 
         let event = Event::Storage {
             file_id: file_id.0,
-            operation: StorageOperation::WriteComplete { len: len as u32 },
+            operation: StorageOperation::WriteComplete {
+                len: u32::try_from(len).expect("write length fits in u32"),
+            },
         };
         inner
             .event_queue
@@ -673,7 +674,7 @@ impl SimWorld {
         Ok(op_seq)
     }
 
-    /// Schedule a set_len operation on a file.
+    /// Schedule a `set_len` operation on a file.
     ///
     /// Returns an operation sequence number that can be used to check completion.
     pub(crate) fn schedule_set_len(
@@ -768,12 +769,12 @@ impl SimWorld {
             .inner
             .write()
             .expect("RwLock poisoned: prior task panicked");
-        inner.wakers.storage_wakers.insert((file_id, op_seq), waker);
+        inner.wakers.storage_ops.insert((file_id, op_seq), waker);
     }
 
     /// Read data from a file at the given offset.
     ///
-    /// This is called after ReadComplete to actually fetch the data.
+    /// This is called after `ReadComplete` to actually fetch the data.
     pub(crate) fn read_from_file(
         &self,
         file_id: FileId,
@@ -856,7 +857,7 @@ impl SimWorld {
 
     /// Calculate storage latency using FDB formula.
     ///
-    /// Latency = base_latency + iops_overhead + transfer_time
+    /// Latency = `base_latency` + `iops_overhead` + `transfer_time`
     fn calculate_storage_latency(
         config: &crate::storage::StorageConfiguration,
         size: usize,
@@ -870,11 +871,16 @@ impl SimWorld {
         };
         let base = crate::network::sample_duration(base_range);
 
-        // IOPS overhead: 1/iops seconds per operation
-        let iops_overhead = Duration::from_secs_f64(1.0 / config.iops as f64);
+        // IOPS overhead: 1/iops seconds per operation.
+        // Precision loss is acceptable: iops is typically << 2^52.
+        let iops_f64 = u32::try_from(config.iops).map_or(f64::from(u32::MAX), f64::from);
+        let iops_overhead = Duration::from_secs_f64(1.0 / iops_f64);
 
-        // Transfer time: size / bandwidth seconds
-        let transfer = Duration::from_secs_f64(size as f64 / config.bandwidth as f64);
+        // Transfer time: size / bandwidth seconds.
+        // Precision loss is acceptable: simulated sizes/bandwidths fit in 2^52.
+        let size_f64 = u32::try_from(size).map_or(f64::from(u32::MAX), f64::from);
+        let bandwidth_f64 = u32::try_from(config.bandwidth).map_or(f64::from(u32::MAX), f64::from);
+        let transfer = Duration::from_secs_f64(size_f64 / bandwidth_f64);
 
         base + iops_overhead + transfer
     }
@@ -888,6 +894,10 @@ impl SimWorld {
     /// 4. Wakes all storage wakers (operations will fail)
     ///
     /// Files owned by other IPs are unaffected.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     #[instrument(skip(self))]
     pub fn simulate_crash_for_process(&self, ip: IpAddr, close_files: bool) {
         let mut inner = self
@@ -931,7 +941,7 @@ impl SimWorld {
 
         // Wake all collected wakers (after file iteration is complete)
         for key in wakers_to_wake {
-            if let Some(waker) = inner.wakers.storage_wakers.remove(&key) {
+            if let Some(waker) = inner.wakers.storage_ops.remove(&key) {
                 waker.wake();
             }
         }
@@ -953,6 +963,10 @@ impl SimWorld {
     /// new files at the same paths.
     ///
     /// Files owned by other IPs are unaffected.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     #[instrument(skip(self))]
     pub fn wipe_storage_for_process(&self, ip: IpAddr) {
         let mut inner = self
@@ -984,7 +998,7 @@ impl SimWorld {
 
         // Wake all collected wakers
         for key in wakers_to_wake {
-            if let Some(waker) = inner.wakers.storage_wakers.remove(&key) {
+            if let Some(waker) = inner.wakers.storage_ops.remove(&key) {
                 waker.wake();
             }
         }
@@ -999,6 +1013,10 @@ impl SimWorld {
     /// Files owned by this IP will use this configuration for fault injection
     /// and latency calculations. Takes effect immediately, even for files
     /// already open.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
     #[instrument(skip(self, config))]
     pub fn set_process_storage_config(
         &self,

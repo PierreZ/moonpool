@@ -41,6 +41,7 @@ pub struct UID {
 
 impl UID {
     /// Create a new UID with explicit values.
+    #[must_use]
     pub const fn new(first: u64, second: u64) -> Self {
         Self { first, second }
     }
@@ -48,7 +49,8 @@ impl UID {
     /// Create a well-known UID (FDB pattern: first = -1).
     ///
     /// Well-known UIDs are used for system services that need deterministic
-    /// addressing without discovery (e.g., Ping, EndpointNotFound).
+    /// addressing without discovery (e.g., Ping, `EndpointNotFound`).
+    #[must_use]
     pub const fn well_known(token_id: u32) -> Self {
         Self {
             first: u64::MAX,
@@ -60,6 +62,7 @@ impl UID {
     ///
     /// Well-known UIDs have `first == u64::MAX`, allowing O(1) lookup
     /// in the endpoint map via array indexing.
+    #[must_use]
     pub const fn is_well_known(&self) -> bool {
         self.first == u64::MAX
     }
@@ -76,15 +79,21 @@ impl UID {
     /// UID(token.first() + (uint64_t(index) << 32),
     ///     (token.second() & 0xffffffff00000000LL) | newIndex)
     /// ```
+    #[must_use]
     pub const fn adjusted(&self, index: u32) -> Self {
+        // Preserve the high 32 bits of `second` and add `index` into the low
+        // 32 bits with wrapping semantics. Equivalent to the FDB pattern
+        // `(second & 0xffffffff00000000) | (second_low + index)` but expressed
+        // with u64 arithmetic to avoid intermediate `u64 -> u32` casts.
+        let new_low = (self.second.wrapping_add(index as u64)) & 0xffff_ffff;
         Self {
             first: self.first.wrapping_add((index as u64) << 32),
-            second: (self.second & 0xffffffff00000000)
-                | ((self.second as u32).wrapping_add(index) as u64),
+            second: (self.second & 0xffff_ffff_0000_0000) | new_low,
         }
     }
 
     /// Check if UID is valid (non-zero).
+    #[must_use]
     pub const fn is_valid(&self) -> bool {
         self.first != 0 || self.second != 0
     }
@@ -127,6 +136,7 @@ pub struct NetworkAddress {
 
 impl NetworkAddress {
     /// Create a new network address without flags.
+    #[must_use]
     pub fn new(ip: IpAddr, port: u16) -> Self {
         Self { ip, port, flags: 0 }
     }
@@ -221,11 +231,13 @@ pub struct Endpoint {
 
 impl Endpoint {
     /// Create a new endpoint.
+    #[must_use]
     pub fn new(address: NetworkAddress, token: UID) -> Self {
         Self { address, token }
     }
 
     /// Create a well-known endpoint.
+    #[must_use]
     pub fn well_known(address: NetworkAddress, token: WellKnownToken) -> Self {
         Self {
             address,
@@ -236,6 +248,7 @@ impl Endpoint {
     /// Get adjusted endpoint for interface serialization (FDB pattern).
     ///
     /// Creates a new endpoint with the same address but an adjusted token.
+    #[must_use]
     pub fn adjusted(&self, index: u32) -> Self {
         Self {
             address: self.address.clone(),
@@ -288,7 +301,7 @@ mod tests {
 
     #[test]
     fn test_uid_display() {
-        let uid = UID::new(0x123456789ABCDEF0, 0xFEDCBA9876543210);
+        let uid = UID::new(0x1234_5678_9ABC_DEF0, 0xFEDC_BA98_7654_3210);
         assert_eq!(uid.to_string(), "123456789abcdef0fedcba9876543210");
     }
 
@@ -354,7 +367,7 @@ mod tests {
 
     #[test]
     fn test_uid_serde_roundtrip() {
-        let uid = UID::new(0x123456789ABCDEF0, 0xFEDCBA9876543210);
+        let uid = UID::new(0x1234_5678_9ABC_DEF0, 0xFEDC_BA98_7654_3210);
         let json = serde_json::to_string(&uid).expect("serialize");
         let decoded: UID = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(uid, decoded);

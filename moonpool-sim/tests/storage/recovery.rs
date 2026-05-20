@@ -1,8 +1,8 @@
 //! Crash recovery scenario tests for storage simulation.
 //!
 //! These tests verify proper behavior of data durability guarantees
-//! across crash scenarios, following patterns from TigerBeetle and
-//! FoundationDB's crash consistency testing.
+//! across crash scenarios, following patterns from `TigerBeetle` and
+//! `FoundationDB`'s crash consistency testing.
 
 use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
@@ -24,7 +24,7 @@ fn local_runtime() -> tokio::runtime::Runtime {
         .expect("Failed to build local runtime")
 }
 
-/// Create a SimWorld with fast storage configuration.
+/// Create a `SimWorld` with fast storage configuration.
 fn fast_sim() -> SimWorld {
     let mut sim = SimWorld::new();
     sim.set_storage_config(StorageConfiguration::fast_local());
@@ -193,7 +193,7 @@ fn test_partial_sync_crash_recovery() {
             .expect("read failed");
         let content = String::from_utf8_lossy(&recovered);
 
-        println!("Recovered content: {:?}", content);
+        println!("Recovered content: {content:?}");
 
         // First synced part should be present
         assert!(
@@ -217,7 +217,7 @@ fn test_append_multiple_syncs_crash_recovery() {
                 .await?;
 
             for i in 1..=5 {
-                file.write_all(format!("Entry {}\n", i).as_bytes()).await?;
+                file.write_all(format!("Entry {i}\n").as_bytes()).await?;
                 file.sync_all().await?;
             }
 
@@ -247,14 +247,13 @@ fn test_append_multiple_syncs_crash_recovery() {
             .expect("read failed");
         let content = String::from_utf8_lossy(&recovered);
 
-        println!("Recovered append log:\n{}", content);
+        println!("Recovered append log:\n{content}");
 
         // All synced entries should be present
         for i in 1..=5 {
             assert!(
-                content.contains(&format!("Entry {}", i)),
-                "Entry {} should be recovered",
-                i
+                content.contains(&format!("Entry {i}")),
+                "Entry {i} should be recovered"
             );
         }
     });
@@ -318,7 +317,7 @@ fn test_overwrite_crash_recovery() {
             .expect("read failed");
         let content = String::from_utf8_lossy(&recovered);
 
-        println!("After overwrite crash: {:?}", content);
+        println!("After overwrite crash: {content:?}");
         // Content could be original, new, or corrupted depending on implementation
     });
 }
@@ -364,10 +363,7 @@ fn test_rename_crash_recovery() {
             .await
             .expect("exists check failed");
 
-        println!(
-            "After rename crash: temp={}, final={}",
-            temp_exists, final_exists
-        );
+        println!("After rename crash: temp={temp_exists}, final={final_exists}");
 
         // After successful rename + crash, final should exist, temp should not
         assert!(final_exists, "Renamed file should exist after crash");
@@ -469,7 +465,7 @@ fn test_multiple_files_crash_recovery() {
             .await
             .expect("exists check failed");
 
-        println!("After crash: file1={}, file2={}, file3={}", f1, f2, f3);
+        println!("After crash: file1={f1}, file2={f2}, file3={f3}");
 
         // Synced files should definitely exist
         assert!(f1, "Synced file1 should exist");
@@ -537,7 +533,7 @@ fn test_seek_overwrite_crash_recovery() {
     });
 }
 
-/// Test: Extend file with set_len, crash
+/// Test: Extend file with `set_len`, crash
 #[test]
 fn test_set_len_crash_recovery() {
     local_runtime().block_on(async {
@@ -575,12 +571,12 @@ fn test_set_len_crash_recovery() {
             .await
             .expect("size check failed");
 
-        println!("Extended file size after crash: {}", size);
+        println!("Extended file size after crash: {size}");
         assert_eq!(size, 1000, "Extended size should persist after crash");
     });
 }
 
-/// Test: Truncate file with set_len, crash
+/// Test: Truncate file with `set_len`, crash
 #[test]
 fn test_truncate_crash_recovery() {
     local_runtime().block_on(async {
@@ -622,7 +618,7 @@ fn test_truncate_crash_recovery() {
             .await
             .expect("size check failed");
 
-        println!("Truncated file size after crash: {}", size);
+        println!("Truncated file size after crash: {size}");
         assert_eq!(size, 100, "Truncated size should persist after crash");
     });
 }

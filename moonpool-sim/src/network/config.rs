@@ -86,14 +86,14 @@ use std::time::Duration;
 /// Network partition strategy for chaos testing.
 ///
 /// Controls how nodes are selected for partitioning during chaos testing.
-/// TigerBeetle ref: packet_simulator.zig:12-488
+/// `TigerBeetle` ref: packet_simulator.zig:12-488
 ///
 /// # Real-World Scenario
 ///
 /// Different partition strategies test different failure modes:
 /// - Random: General chaos, unpredictable failures
-/// - UniformSize: Tests various quorum sizes and split scenarios
-/// - IsolateSingle: Tests single-node isolation (common in production)
+/// - `UniformSize`: Tests various quorum sizes and split scenarios
+/// - `IsolateSingle`: Tests single-node isolation (common in production)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PartitionStrategy {
     /// Random IP pairs selected for partitioning.
@@ -102,7 +102,7 @@ pub enum PartitionStrategy {
     Random,
 
     /// Uniform size partitions - randomly choose partition size from 1 to n-1 nodes.
-    /// TigerBeetle pattern: creates partitions of varying sizes to test different
+    /// `TigerBeetle` pattern: creates partitions of varying sizes to test different
     /// quorum scenarios.
     UniformSize,
 
@@ -114,7 +114,7 @@ pub enum PartitionStrategy {
 /// Connection establishment failure mode for fault injection.
 ///
 /// Controls how connection attempts fail during chaos testing.
-/// FDB ref: sim2.actor.cpp:1243-1250 (SIM_CONNECT_ERROR_MODE)
+/// FDB ref: sim2.actor.cpp:1243-1250 (`SIM_CONNECT_ERROR_MODE`)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConnectFailureMode {
     /// Disabled - no connection failures injected
@@ -128,6 +128,7 @@ pub enum ConnectFailureMode {
 
 impl ConnectFailureMode {
     /// Create a random failure mode for chaos testing
+    #[must_use]
     pub fn random_for_seed() -> Self {
         match sim_random_range(0..3) {
             0 => Self::Disabled,
@@ -140,7 +141,7 @@ impl ConnectFailureMode {
 /// Configuration for chaos injection in simulations.
 ///
 /// This struct contains all settings related to fault injection and chaos testing,
-/// following FoundationDB's BUGGIFY patterns for deterministic testing.
+/// following `FoundationDB`'s BUGGIFY patterns for deterministic testing.
 #[derive(Debug, Clone)]
 pub struct ChaosConfiguration {
     /// Clogging probability for individual writes (0.0 - 1.0)
@@ -179,12 +180,12 @@ pub struct ChaosConfiguration {
     pub random_close_explicit_ratio: f64,
 
     /// Enable clock drift simulation
-    /// When enabled, timer() can return a time up to clock_drift_max ahead of now()
+    /// When enabled, `timer()` can return a time up to `clock_drift_max` ahead of `now()`
     /// FDB ref: sim2.actor.cpp:1058-1064
     pub clock_drift_enabled: bool,
 
     /// Maximum clock drift (default 100ms per FDB)
-    /// timer() can be up to this much ahead of now()
+    /// `timer()` can be up to this much ahead of `now()`
     pub clock_drift_max: Duration,
 
     /// Enable buggified delays on sleep/timer operations
@@ -193,7 +194,7 @@ pub struct ChaosConfiguration {
     pub buggified_delay_enabled: bool,
 
     /// Maximum additional delay for buggified sleep (default 100ms)
-    /// Uses power-law distribution: max_delay * pow(random01(), 1000.0)
+    /// Uses power-law distribution: `max_delay` * `pow(random01()`, 1000.0)
     /// FDB ref: sim2.actor.cpp:1104
     pub buggified_delay_max: Duration,
 
@@ -201,7 +202,7 @@ pub struct ChaosConfiguration {
     pub buggified_delay_probability: f64,
 
     /// Connection establishment failure mode (per FDB)
-    /// FDB ref: sim2.actor.cpp:1243-1250 (SIM_CONNECT_ERROR_MODE)
+    /// FDB ref: sim2.actor.cpp:1243-1250 (`SIM_CONNECT_ERROR_MODE`)
     pub connect_failure_mode: ConnectFailureMode,
 
     /// Probability of connect failure when Probabilistic mode is enabled (default 50%)
@@ -209,13 +210,13 @@ pub struct ChaosConfiguration {
 
     /// Network partition strategy.
     /// Controls how nodes are selected for partitioning.
-    /// TigerBeetle ref: packet_simulator.zig partition modes
+    /// `TigerBeetle` ref: `packet_simulator.zig` partition modes
     ///
     /// # Real-World Scenario
     /// Different strategies test different failure scenarios:
     /// - Random: unpredictable chaos
-    /// - UniformSize: various quorum sizes
-    /// - IsolateSingle: single node isolation (common in production)
+    /// - `UniformSize`: various quorum sizes
+    /// - `IsolateSingle`: single node isolation (common in production)
     pub partition_strategy: PartitionStrategy,
 }
 
@@ -248,6 +249,7 @@ impl Default for ChaosConfiguration {
 
 impl ChaosConfiguration {
     /// Create a configuration with all chaos disabled (for fast local testing)
+    #[must_use]
     pub fn disabled() -> Self {
         Self {
             clog_probability: 0.0,
@@ -274,31 +276,32 @@ impl ChaosConfiguration {
     }
 
     /// Create a randomized chaos configuration for seed-based testing
+    #[must_use]
     pub fn random_for_seed() -> Self {
         Self {
-            clog_probability: sim_random_range(0..20) as f64 / 100.0, // 0-20% for clogging
-            clog_duration: Duration::from_micros(sim_random_range(50000..300000))
-                ..Duration::from_micros(sim_random_range(100000..500000)),
-            partition_probability: sim_random_range(0..15) as f64 / 100.0, // 0-15% (lower than faults)
+            clog_probability: f64::from(sim_random_range(0..20)) / 100.0, // 0-20% for clogging
+            clog_duration: Duration::from_micros(sim_random_range(50_000..300_000))
+                ..Duration::from_micros(sim_random_range(100_000..500_000)),
+            partition_probability: f64::from(sim_random_range(0..15)) / 100.0, // 0-15% (lower than faults)
             partition_duration: Duration::from_millis(sim_random_range(100..1000))
                 ..Duration::from_millis(sim_random_range(500..3000)),
             // Bit flip probability range: 0.001% to 0.02% (very low, like FDB)
-            bit_flip_probability: sim_random_range(1..20) as f64 / 100000.0,
+            bit_flip_probability: f64::from(sim_random_range(1..20)) / 100_000.0,
             bit_flip_min_bits: 1,
             bit_flip_max_bits: 32,
             bit_flip_cooldown: Duration::from_millis(sim_random_range(0..100)),
             partial_write_max_bytes: sim_random_range(100..2000), // Vary max bytes for different scenarios
             // Random close probability: 0.0001% to 0.01% (very low, like FDB)
-            random_close_probability: sim_random_range(1..100) as f64 / 1000000.0,
-            random_close_cooldown: Duration::from_millis(sim_random_range(1000..10000)),
-            random_close_explicit_ratio: sim_random_range(20..40) as f64 / 100.0, // 20-40%
+            random_close_probability: f64::from(sim_random_range(1..100)) / 1_000_000.0,
+            random_close_cooldown: Duration::from_millis(sim_random_range(1000..10_000)),
+            random_close_explicit_ratio: f64::from(sim_random_range(20..40)) / 100.0, // 20-40%
             clock_drift_enabled: true,
             clock_drift_max: Duration::from_millis(sim_random_range(50..150)), // 50-150ms
             buggified_delay_enabled: true,
             buggified_delay_max: Duration::from_millis(sim_random_range(50..150)), // 50-150ms
-            buggified_delay_probability: sim_random_range(20..30) as f64 / 100.0,  // 20-30%
+            buggified_delay_probability: f64::from(sim_random_range(20..30)) / 100.0, // 20-30%
             connect_failure_mode: ConnectFailureMode::random_for_seed(),
-            connect_failure_probability: sim_random_range(40..60) as f64 / 100.0, // 40-60%
+            connect_failure_probability: f64::from(sim_random_range(40..60)) / 100.0, // 40-60%
             // Randomly choose partition strategy
             partition_strategy: match sim_random_range(0..3) {
                 0 => PartitionStrategy::Random,
@@ -341,28 +344,31 @@ impl Default for NetworkConfiguration {
 }
 
 /// Sample a random duration from a range
+#[must_use]
 pub fn sample_duration(range: &Range<Duration>) -> Duration {
-    let start_nanos = range.start.as_nanos() as u64;
-    let end_nanos = range.end.as_nanos() as u64;
+    let start_nanos = u64::try_from(range.start.as_nanos()).unwrap_or(u64::MAX);
+    let end_nanos = u64::try_from(range.end.as_nanos()).unwrap_or(u64::MAX);
     let random_nanos = sim_random_range_or_default(start_nanos..end_nanos);
     Duration::from_nanos(random_nanos)
 }
 
 impl NetworkConfiguration {
     /// Create a new network configuration with default settings
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Create a randomized network configuration for chaos testing
+    #[must_use]
     pub fn random_for_seed() -> Self {
         Self {
             bind_latency: Duration::from_micros(sim_random_range(10..200))
                 ..Duration::from_micros(sim_random_range(50..300)),
-            accept_latency: Duration::from_micros(sim_random_range(1000..10000))
-                ..Duration::from_micros(sim_random_range(5000..15000)),
-            connect_latency: Duration::from_micros(sim_random_range(1000..50000))
-                ..Duration::from_micros(sim_random_range(10000..100000)),
+            accept_latency: Duration::from_micros(sim_random_range(1000..10_000))
+                ..Duration::from_micros(sim_random_range(5000..15_000)),
+            connect_latency: Duration::from_micros(sim_random_range(1000..50_000))
+                ..Duration::from_micros(sim_random_range(10_000..100_000)),
             read_latency: Duration::from_micros(sim_random_range(5..100))
                 ..Duration::from_micros(sim_random_range(50..200)),
             write_latency: Duration::from_micros(sim_random_range(50..1000))
@@ -372,6 +378,7 @@ impl NetworkConfiguration {
     }
 
     /// Create a configuration optimized for fast local testing
+    #[must_use]
     pub fn fast_local() -> Self {
         let one_us = Duration::from_micros(1);
         let ten_us = Duration::from_micros(10);

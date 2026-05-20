@@ -58,7 +58,7 @@ fn check_rng_breakpoint() {
     RNG_BREAKPOINTS.with(|bp| {
         let mut breakpoints = bp.borrow_mut();
         while let Some(&(target_count, new_seed)) = breakpoints.front() {
-            let count = RNG_CALL_COUNT.with(|c| c.get());
+            let count = RNG_CALL_COUNT.with(std::cell::Cell::get);
             if count > target_count {
                 breakpoints.pop_front();
                 SIM_RNG.with(|rng| {
@@ -86,6 +86,7 @@ fn check_rng_breakpoint() {
 /// * `T` - The type to generate. Must implement the Standard distribution.
 ///
 /// Generate a random value using the thread-local simulation RNG.
+#[must_use]
 pub fn sim_random<T>() -> T
 where
     StandardUniform: Distribution<T>,
@@ -101,7 +102,7 @@ where
 ///
 /// # Type Parameters
 ///
-/// * `T` - The type to generate. Must implement SampleUniform.
+/// * `T` - The type to generate. Must implement `SampleUniform`.
 ///
 /// # Parameters
 ///
@@ -168,6 +169,7 @@ pub fn set_sim_seed(seed: u64) {
 /// # Returns
 ///
 /// A random f64 value in [0.0, 1.0).
+#[must_use]
 pub fn sim_random_f64() -> f64 {
     pre_sample();
     SIM_RNG.with(|rng| rng.borrow_mut().sample(StandardUniform))
@@ -183,6 +185,7 @@ pub fn sim_random_f64() -> f64 {
 /// The current simulation seed, or 0 if no seed has been set.
 ///
 /// Get the current simulation seed.
+#[must_use]
 pub fn current_sim_seed() -> u64 {
     CURRENT_SEED.with(|current| *current.borrow())
 }
@@ -209,8 +212,9 @@ pub fn reset_sim_rng() {
 ///
 /// Returns the number of RNG calls made since the last seed set or reset.
 /// Used by the exploration framework to record fork points.
+#[must_use]
 pub fn rng_call_count() -> u64 {
-    RNG_CALL_COUNT.with(|c| c.get())
+    RNG_CALL_COUNT.with(std::cell::Cell::get)
 }
 
 /// Reset the RNG call count to zero.
@@ -230,7 +234,7 @@ pub fn reset_rng_call_count() {
 ///
 /// # Parameters
 ///
-/// * `breakpoints` - Sorted list of (target_count, new_seed) pairs.
+/// * `breakpoints` - Sorted list of (`target_count`, `new_seed`) pairs.
 pub fn set_rng_breakpoints(breakpoints: Vec<(u64, u64)>) {
     RNG_BREAKPOINTS.with(|bp| {
         *bp.borrow_mut() = VecDeque::from(breakpoints);
@@ -246,6 +250,16 @@ pub fn clear_rng_breakpoints() {
 mod tests {
     use super::*;
 
+    /// Assert two f64 values are bit-identical.
+    fn assert_f64_eq(left: f64, right: f64) {
+        assert_eq!(left.to_bits(), right.to_bits(), "{left} != {right}");
+    }
+
+    /// Assert two f64 values are bit-different.
+    fn assert_f64_ne(left: f64, right: f64) {
+        assert_ne!(left.to_bits(), right.to_bits(), "{left} == {right}");
+    }
+
     #[test]
     fn test_deterministic_randomness() {
         // Set seed and generate some values
@@ -256,7 +270,7 @@ mod tests {
 
         // Reset to same seed and verify same sequence
         set_sim_seed(42);
-        assert_eq!(value1, sim_random::<f64>());
+        assert_f64_eq(value1, sim_random::<f64>());
         assert_eq!(value2, sim_random::<u32>());
         assert_eq!(value3, sim_random::<bool>());
     }
@@ -274,8 +288,8 @@ mod tests {
         let value2_seed2: f64 = sim_random();
 
         // Values should be different
-        assert_ne!(value1_seed1, value1_seed2);
-        assert_ne!(value2_seed1, value2_seed2);
+        assert_f64_ne(value1_seed1, value1_seed2);
+        assert_f64_ne(value2_seed1, value2_seed2);
     }
 
     #[test]
@@ -305,7 +319,7 @@ mod tests {
 
         set_sim_seed(123);
         assert_eq!(value1, sim_random_range(100..1000));
-        assert_eq!(value2, sim_random_range(0.0..10.0));
+        assert_f64_eq(value2, sim_random_range(0.0..10.0));
     }
 
     #[test]
@@ -322,7 +336,7 @@ mod tests {
         let first_value: f64 = sim_random();
 
         // Should be different because reset cleared the advanced state
-        assert_ne!(after_advance, first_value);
+        assert_f64_ne(after_advance, first_value);
     }
 
     #[test]
@@ -334,9 +348,9 @@ mod tests {
 
         // Values should form a deterministic sequence
         set_sim_seed(42);
-        assert_eq!(value1, sim_random::<f64>());
-        assert_eq!(value2, sim_random::<f64>());
-        assert_eq!(value3, sim_random::<f64>());
+        assert_f64_eq(value1, sim_random::<f64>());
+        assert_f64_eq(value2, sim_random::<f64>());
+        assert_f64_eq(value3, sim_random::<f64>());
     }
 
     #[test]
@@ -349,7 +363,7 @@ mod tests {
 
             reset_sim_rng();
             set_sim_seed(seed);
-            assert_eq!(first, sim_random::<f64>());
+            assert_f64_eq(first, sim_random::<f64>());
         }
     }
 
@@ -418,12 +432,17 @@ mod tests {
         // First 5 calls should match old seed
         for (i, expected) in old_values.iter().enumerate() {
             let actual: f64 = sim_random();
-            assert_eq!(*expected, actual, "Mismatch at call {}", i + 1);
+            assert_eq!(
+                expected.to_bits(),
+                actual.to_bits(),
+                "Mismatch at call {}",
+                i + 1
+            );
         }
 
         // Call 6 triggers breakpoint (count 6 > 5), reseeds to 200
         let after_breakpoint: f64 = sim_random();
-        assert_eq!(after_breakpoint, new_seed_first);
+        assert_f64_eq(after_breakpoint, new_seed_first);
         assert_eq!(rng_call_count(), 1);
         assert_eq!(current_sim_seed(), 200);
     }
@@ -479,8 +498,8 @@ mod tests {
         let replay_1: f64 = sim_random();
         let replay_2: f64 = sim_random();
 
-        assert_eq!(post_fork_1, replay_1);
-        assert_eq!(post_fork_2, replay_2);
+        assert_f64_eq(post_fork_1, replay_1);
+        assert_f64_eq(post_fork_2, replay_2);
     }
 
     #[test]

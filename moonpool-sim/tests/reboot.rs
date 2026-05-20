@@ -22,7 +22,7 @@ struct EchoProcess;
 
 #[async_trait]
 impl Process for EchoProcess {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "echo"
     }
 
@@ -33,7 +33,7 @@ impl Process for EchoProcess {
         loop {
             let result = tokio::select! {
                 r = listener.accept() => r,
-                _ = ctx.shutdown().cancelled() => return Ok(()),
+                () = ctx.shutdown().cancelled() => return Ok(()),
             };
 
             match result {
@@ -64,7 +64,7 @@ struct ProcessMonitorWorkload;
 
 #[async_trait]
 impl Workload for ProcessMonitorWorkload {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "monitor"
     }
 
@@ -107,7 +107,7 @@ struct TagVerifierWorkload;
 
 #[async_trait]
 impl Workload for TagVerifierWorkload {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "tag_verifier"
     }
 
@@ -149,7 +149,7 @@ struct RebootOnceInjector;
 
 #[async_trait]
 impl FaultInjector for RebootOnceInjector {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "reboot_once"
     }
 
@@ -175,13 +175,13 @@ struct TimedWorkload(Duration);
 
 #[async_trait]
 impl Workload for TimedWorkload {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "timed"
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         ctx.time().sleep(self.0).await.map_err(|e| {
-            moonpool_sim::SimulationError::InvalidState(format!("sleep failed: {}", e))
+            moonpool_sim::SimulationError::InvalidState(format!("sleep failed: {e}"))
         })?;
         Ok(())
     }
@@ -240,7 +240,7 @@ struct RebootTaggedInjector;
 
 #[async_trait]
 impl FaultInjector for RebootTaggedInjector {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "reboot_tagged"
     }
 
@@ -281,7 +281,7 @@ struct TagAwareProcess;
 
 #[async_trait]
 impl Process for TagAwareProcess {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "tag_aware"
     }
 
@@ -326,7 +326,7 @@ struct GracefulProcess;
 
 #[async_trait]
 impl Process for GracefulProcess {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "graceful"
     }
 
@@ -346,7 +346,7 @@ impl Process for GracefulProcess {
                         }
                     }
                 }
-                _ = ctx.shutdown().cancelled() => {
+                () = ctx.shutdown().cancelled() => {
                     tracing::info!("GracefulProcess at {} saw shutdown, exiting cleanly", ctx.my_ip());
                     return Ok(());
                 }
@@ -360,7 +360,7 @@ struct GracefulRebootInjector;
 
 #[async_trait]
 impl FaultInjector for GracefulRebootInjector {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "graceful_reboot"
     }
 
@@ -405,7 +405,7 @@ struct StuckProcess;
 
 #[async_trait]
 impl Process for StuckProcess {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "stuck"
     }
 
@@ -448,8 +448,8 @@ fn test_graceful_reboot_force_kills_stuck_process() {
 /// Invariant that validates process lifecycle timing from the fault timeline.
 ///
 /// Checks after every simulation event:
-/// - GracefulShutdown → ForceKill: delta == grace_period_ms
-/// - ForceKill → Restart: delta > 0 (recovery delay is positive)
+/// - `GracefulShutdown` → `ForceKill`: delta == `grace_period_ms`
+/// - `ForceKill` → Restart: delta > 0 (recovery delay is positive)
 /// - Events for same IP appear in correct order
 struct RebootTimingInvariant {
     last_checked: Cell<usize>,
@@ -464,7 +464,7 @@ impl RebootTimingInvariant {
 }
 
 impl Invariant for RebootTimingInvariant {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "reboot_timing"
     }
 

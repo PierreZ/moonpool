@@ -24,7 +24,7 @@ fn local_runtime() -> tokio::runtime::Runtime {
         .expect("Failed to build local runtime")
 }
 
-/// Create a SimWorld with fast storage configuration.
+/// Create a `SimWorld` with fast storage configuration.
 fn fast_sim() -> SimWorld {
     let mut sim = SimWorld::new();
     sim.set_storage_config(StorageConfiguration::fast_local());
@@ -43,7 +43,7 @@ fn test_multiple_files_open_simultaneously() {
             let mut files = Vec::new();
             for i in 0..5 {
                 let file = provider
-                    .open(&format!("multi_{}.txt", i), OpenOptions::create_write())
+                    .open(&format!("multi_{i}.txt"), OpenOptions::create_write())
                     .await?;
                 files.push(file);
             }
@@ -240,12 +240,9 @@ fn test_file_independence() {
             // Create three files with different content
             for i in 0..3 {
                 let mut file = provider
-                    .open(
-                        &format!("independent_{}.txt", i),
-                        OpenOptions::create_write(),
-                    )
+                    .open(&format!("independent_{i}.txt"), OpenOptions::create_write())
                     .await?;
-                let content = format!("Content for file {}", i);
+                let content = format!("Content for file {i}");
                 file.write_all(content.as_bytes()).await?;
                 file.sync_all().await?;
                 drop(file);
@@ -360,9 +357,9 @@ fn test_many_files() {
             // Create many files
             for i in 0..file_count {
                 let mut file = provider
-                    .open(&format!("many_{:03}.txt", i), OpenOptions::create_write())
+                    .open(&format!("many_{i:03}.txt"), OpenOptions::create_write())
                     .await?;
-                file.write_all(format!("File number {}", i).as_bytes())
+                file.write_all(format!("File number {i}").as_bytes())
                     .await?;
                 file.sync_all().await?;
                 drop(file);
@@ -371,21 +368,21 @@ fn test_many_files() {
             // Verify all exist
             let mut count = 0;
             for i in 0..file_count {
-                if provider.exists(&format!("many_{:03}.txt", i)).await? {
+                if provider.exists(&format!("many_{i:03}.txt")).await? {
                     count += 1;
                 }
             }
-            assert_eq!(count, file_count, "All {} files should exist", file_count);
+            assert_eq!(count, file_count, "All {file_count} files should exist");
 
             // Delete half
             for i in (0..file_count).step_by(2) {
-                provider.delete(&format!("many_{:03}.txt", i)).await?;
+                provider.delete(&format!("many_{i:03}.txt")).await?;
             }
 
             // Verify half remain
             let mut remaining = 0;
             for i in 0..file_count {
-                if provider.exists(&format!("many_{:03}.txt", i)).await? {
+                if provider.exists(&format!("many_{i:03}.txt")).await? {
                     remaining += 1;
                 }
             }

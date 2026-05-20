@@ -7,6 +7,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+/// Assert two f64 values are bit-identical (for deterministic equality checks).
+fn assert_f64_eq(left: f64, right: f64) {
+    assert_eq!(left.to_bits(), right.to_bits(), "{left} != {right}");
+}
+
+/// Assert two f64 values are bit-different.
+fn assert_f64_ne(left: f64, right: f64) {
+    assert_ne!(left.to_bits(), right.to_bits(), "{left} == {right}");
+}
+
 #[test]
 fn test_thread_local_rng_determinism() {
     // Test that same seed produces identical sequences
@@ -17,7 +27,7 @@ fn test_thread_local_rng_determinism() {
 
     // Reset to same seed
     set_sim_seed(42);
-    assert_eq!(value1, sim_random::<f64>());
+    assert_f64_eq(value1, sim_random::<f64>());
     assert_eq!(value2, sim_random::<u32>());
     assert_eq!(value3, sim_random::<bool>());
 }
@@ -61,7 +71,7 @@ fn test_consecutive_simulations_same_thread() {
     for (i, seed) in [1, 2, 3, 4, 5].iter().enumerate() {
         let sim = SimWorld::new_with_seed(*seed);
         let delay = sim.with_network_config(|config| sample_duration(&config.write_latency));
-        assert_eq!(delays[i], delay, "Delay mismatch for seed {}", seed);
+        assert_eq!(delays[i], delay, "Delay mismatch for seed {seed}");
     }
 }
 
@@ -113,7 +123,7 @@ fn test_reset_clears_state() {
     let first_value: f64 = sim_random();
 
     // Should be different because reset cleared the advanced state
-    assert_ne!(after_advance, first_value);
+    assert_f64_ne(after_advance, first_value);
 }
 
 #[test]
@@ -133,7 +143,11 @@ fn test_parallel_thread_isolation() {
         set_sim_seed(1);
         for (i, &expected) in values.iter().enumerate() {
             let actual: f64 = sim_random();
-            assert_eq!(expected, actual, "Thread 1 mismatch at index {}", i);
+            assert_eq!(
+                expected.to_bits(),
+                actual.to_bits(),
+                "Thread 1 mismatch at index {i}"
+            );
         }
 
         thread1_finished_clone.store(true, Ordering::Relaxed);
@@ -148,7 +162,7 @@ fn test_parallel_thread_isolation() {
         set_sim_seed(2);
         for (i, &expected) in values.iter().enumerate() {
             let actual: u32 = sim_random();
-            assert_eq!(expected, actual, "Thread 2 mismatch at index {}", i);
+            assert_eq!(expected, actual, "Thread 2 mismatch at index {i}");
         }
 
         thread2_finished_clone.store(true, Ordering::Relaxed);
@@ -164,7 +178,7 @@ fn test_parallel_thread_isolation() {
 
     // Verify threads produced different sequences (different seeds)
     // Convert u32 to f64 for comparison
-    let values2_as_f64: Vec<f64> = values2.iter().map(|&x| x as f64).collect();
+    let values2_as_f64: Vec<f64> = values2.iter().map(|&x| f64::from(x)).collect();
     assert_ne!(values1, values2_as_f64);
 }
 
@@ -214,7 +228,7 @@ fn test_sim_random_range_determinism() {
 
     set_sim_seed(789);
     assert_eq!(range_value1, sim_random_range(100..1000));
-    assert_eq!(range_value2, sim_random_range(0.0..10.0));
+    assert_f64_eq(range_value2, sim_random_range(0.0..10.0));
 }
 
 #[test]
@@ -271,8 +285,7 @@ fn test_multiple_simulations_same_thread_no_contamination() {
 
         assert_eq!(
             all_results[i], sim_results,
-            "Results mismatch for seed {}",
-            seed
+            "Results mismatch for seed {seed}"
         );
     }
 }

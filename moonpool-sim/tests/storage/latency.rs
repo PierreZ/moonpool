@@ -1,7 +1,7 @@
 //! Latency and performance tests for storage simulation.
 //!
 //! These tests verify that storage operations respect configured latencies
-//! and follow the FDB latency formula: base_latency + 1/iops + size/bandwidth
+//! and follow the FDB latency formula: `base_latency` + 1/iops + size/bandwidth
 
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
@@ -65,10 +65,9 @@ fn test_fast_storage_config() {
         // Total: ~3µs (open + write + sync)
         assert!(
             time < Duration::from_millis(1),
-            "Fast config should complete in microseconds, got {:?}",
-            time
+            "Fast config should complete in microseconds, got {time:?}"
         );
-        println!("Fast config completed in {:?}", time);
+        println!("Fast config completed in {time:?}");
     });
 }
 
@@ -94,10 +93,9 @@ fn test_default_storage_config() {
         // So minimum total should be > 1ms due to sync
         assert!(
             time >= Duration::from_millis(1),
-            "Default config should take at least 1ms (sync latency), got {:?}",
-            time
+            "Default config should take at least 1ms (sync latency), got {time:?}"
         );
-        println!("Default config completed in {:?}", time);
+        println!("Default config completed in {time:?}");
     });
 }
 
@@ -138,15 +136,13 @@ fn test_custom_latency_ranges() {
         // Allow some tolerance
         assert!(
             time >= Duration::from_millis(20),
-            "Custom config should respect configured latencies, got {:?}",
-            time
+            "Custom config should respect configured latencies, got {time:?}"
         );
         assert!(
             time <= Duration::from_millis(50),
-            "Latency should not exceed expected range, got {:?}",
-            time
+            "Latency should not exceed expected range, got {time:?}"
         );
-        println!("Custom config completed in {:?}", time);
+        println!("Custom config completed in {time:?}");
     });
 }
 
@@ -197,11 +193,10 @@ fn test_latency_formula() {
         // Plus open (uses read for metadata): ~1.1ms
         // Total: ~13ms minimum
 
-        println!("Latency formula test: wrote {}B in {:?}", data_size, time);
+        println!("Latency formula test: wrote {data_size}B in {time:?}");
         assert!(
             time >= Duration::from_millis(10),
-            "Large write should take noticeable time, got {:?}",
-            time
+            "Large write should take noticeable time, got {time:?}"
         );
     });
 }
@@ -286,13 +281,13 @@ fn test_read_latency_scales_with_size() {
             }
             handle2.await.expect("task panicked").expect("io error");
 
-            let read_time = sim.current_time() - start_time;
+            let read_time = sim.current_time().checked_sub(start_time).unwrap();
             read_times.push((size, read_time));
         }
 
         println!("Read latency scaling:");
         for (size, time) in &read_times {
-            println!("  {} bytes: {:?}", size, time);
+            println!("  {size} bytes: {time:?}");
         }
 
         // Larger reads should take longer
@@ -349,7 +344,7 @@ fn test_write_latency_scales_with_size() {
 
         println!("Write latency scaling:");
         for (size, time) in &write_times {
-            println!("  {} bytes: {:?}", size, time);
+            println!("  {size} bytes: {time:?}");
         }
 
         // Larger writes should take longer

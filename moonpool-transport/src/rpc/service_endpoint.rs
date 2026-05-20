@@ -3,7 +3,7 @@
 //! FDB equivalent: `RequestStream<T>` on the caller side (fdbrpc.h:726-948).
 //!
 //! A [`ServiceEndpoint`] is a typed wrapper around an [`Endpoint`] that provides
-//! delivery mode methods matching FoundationDB's `getReply`, `tryGetReply`,
+//! delivery mode methods matching `FoundationDB`'s `getReply`, `tryGetReply`,
 //! `send`, and `getReplyUnlessFailedFor`.
 //!
 //! # Example
@@ -63,9 +63,12 @@ pub struct ServiceEndpoint<Req, Resp> {
 
 impl<Req, Resp> std::fmt::Debug for ServiceEndpoint<Req, Resp> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `transport` is a trait object, `encode_envelope`/`decode_reply` are
+        // function pointers, and `_phantom` is zero-sized; none has useful
+        // Debug output for users.
         f.debug_struct("ServiceEndpoint")
             .field("endpoint", &self.endpoint)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -108,6 +111,7 @@ impl<Req, Resp> ServiceEndpoint<Req, Resp> {
     }
 
     /// Get the underlying endpoint.
+    #[must_use]
     pub fn endpoint(&self) -> &Endpoint {
         &self.endpoint
     }

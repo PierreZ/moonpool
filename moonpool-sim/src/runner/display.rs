@@ -55,7 +55,20 @@ fn fmt_i64(n: i64) -> String {
     if n < 0 {
         format!("-{}", fmt_num(n.unsigned_abs()))
     } else {
-        fmt_num(n as u64)
+        fmt_num(n.unsigned_abs())
+    }
+}
+
+/// Convert a non-negative finite `f64` to a saturated `u64`.
+fn f64_to_u64_saturating(v: f64) -> u64 {
+    const TWO_POW_64: f64 = 18_446_744_073_709_551_616.0;
+    if !v.is_finite() || v <= 0.0 {
+        0
+    } else if v >= TWO_POW_64 {
+        u64::MAX
+    } else {
+        // SAFETY: `v` is finite, non-negative, and strictly below `2^64`.
+        unsafe { v.round().to_int_unchecked::<u64>() }
     }
 }
 
@@ -63,13 +76,13 @@ fn fmt_i64(n: i64) -> String {
 fn fmt_duration(d: std::time::Duration) -> String {
     let total_ms = d.as_millis();
     if total_ms < 1000 {
-        format!("{}ms", total_ms)
+        format!("{total_ms}ms")
     } else if total_ms < 60_000 {
         format!("{:.2}s", d.as_secs_f64())
     } else {
         let mins = d.as_secs() / 60;
         let secs = d.as_secs() % 60;
-        format!("{}m {:02}s", mins, secs)
+        format!("{mins}m {secs:02}s")
     }
 }
 
@@ -109,7 +122,12 @@ const BAR_WIDTH: usize = 20;
 
 /// Render a progress bar: `████████░░░░░░░░░░░░  62.5%`
 fn progress_bar(fraction: f64, color: bool) -> String {
-    let filled = ((fraction * BAR_WIDTH as f64).round() as usize).min(BAR_WIDTH);
+    let bar_width_u32 = u32::try_from(BAR_WIDTH).expect("bar width fits in u32");
+    let filled_f = (fraction * f64::from(bar_width_u32))
+        .round()
+        .clamp(0.0, f64::from(bar_width_u32));
+    // SAFETY: `filled_f` is in `[0, BAR_WIDTH]` and finite.
+    let filled = unsafe { filled_f.to_int_unchecked::<usize>() }.min(BAR_WIDTH);
     let empty = BAR_WIDTH - filled;
 
     let bar_color = if !color {
@@ -152,7 +170,7 @@ fn section_header(w: &mut impl Write, title: &str, color: bool, style: &str) {
     };
 
     if color {
-        let _ = write!(w, "\n{style}{prefix}{title} ", style = style);
+        let _ = write!(w, "\n{style}{prefix}{title} ");
         for _ in 0..trail {
             let _ = write!(w, "{suffix_char}");
         }
@@ -195,11 +213,7 @@ pub fn eprint_report(report: &SimulationReport) {
     write_report(&mut w, report, color);
 }
 
-fn write_report(w: &mut impl Write, report: &SimulationReport, color: bool) {
-    // === Header ===
-    section_header(w, "Simulation Report", color, ansi::BOLD_CYAN);
-
-    // Summary line with colored pass/fail indicator
+fn write_report_summary(w: &mut impl Write, report: &SimulationReport, color: bool) {
     let rate = report.success_rate();
     let (rate_icon, rate_color) = if report.failed_runs == 0 {
         ("✓", ansi::BOLD_GREEN)
@@ -230,8 +244,9 @@ fn write_report(w: &mut impl Write, report: &SimulationReport, color: bool) {
             rate = rate,
         );
     }
+}
 
-    // Timing
+fn write_report_timing(w: &mut impl Write, report: &SimulationReport) {
     let _ = writeln!(w);
     let _ = writeln!(
         w,
@@ -247,19 +262,30 @@ fn write_report(w: &mut impl Write, report: &SimulationReport, color: bool) {
     let _ = writeln!(
         w,
         "  Events       {} avg",
-        fmt_num(report.average_events_processed() as u64),
+        fmt_num(f64_to_u64_saturating(report.average_events_processed())),
     );
+}
 
-    // Faulty seeds
-    if !report.seeds_failing.is_empty() {
-        let _ = writeln!(w);
-        if color {
-            let _ = write!(w, "  {}Faulty seeds:{} ", ansi::BOLD_RED, ansi::RESET);
-        } else {
-            let _ = write!(w, "  Faulty seeds: ");
-        }
-        let _ = writeln!(w, "{:?}", report.seeds_failing);
+fn write_report_faulty_seeds(w: &mut impl Write, report: &SimulationReport, color: bool) {
+    if report.seeds_failing.is_empty() {
+        return;
     }
+    let _ = writeln!(w);
+    if color {
+        let _ = write!(w, "  {}Faulty seeds:{} ", ansi::BOLD_RED, ansi::RESET);
+    } else {
+        let _ = write!(w, "  Faulty seeds: ");
+    }
+    let _ = writeln!(w, "{:?}", report.seeds_failing);
+}
+
+fn write_report(w: &mut impl Write, report: &SimulationReport, color: bool) {
+    // === Header ===
+    section_header(w, "Simulation Report", color, ansi::BOLD_CYAN);
+
+    write_report_summary(w, report, color);
+    write_report_timing(w, report);
+    write_report_faulty_seeds(w, report, color);
 
     // === Exploration ===
     if let Some(ref exp) = report.exploration {
@@ -357,29 +383,31 @@ fn write_exploration(w: &mut impl Write, exp: &ExplorationReport, color: bool) {
     );
 
     if exp.realloc_pool_remaining != 0 {
-        let _ = writeln!(w, "  Realloc Pool {}", fmt_i64(exp.realloc_pool_remaining),);
+        let _ = writeln!(w, "  Realloc Pool {}", fmt_i64(exp.realloc_pool_remaining));
     }
 
     // Progress bars
     let _ = writeln!(w);
     if exp.coverage_total > 0 {
-        let frac = exp.coverage_bits as f64 / exp.coverage_total as f64;
+        let frac = f64::from(exp.coverage_bits) / f64::from(exp.coverage_total);
         let _ = writeln!(
             w,
             "  Exploration  {}   {} / {} bits",
             progress_bar(frac, color),
-            fmt_num(exp.coverage_bits as u64),
-            fmt_num(exp.coverage_total as u64),
+            fmt_num(u64::from(exp.coverage_bits)),
+            fmt_num(u64::from(exp.coverage_total)),
         );
     }
     if exp.sancov_edges_total > 0 {
-        let frac = exp.sancov_edges_covered as f64 / exp.sancov_edges_total as f64;
+        let covered_u32 = u32::try_from(exp.sancov_edges_covered).unwrap_or(u32::MAX);
+        let total_u32 = u32::try_from(exp.sancov_edges_total).unwrap_or(u32::MAX);
+        let frac = f64::from(covered_u32) / f64::from(total_u32);
         let _ = writeln!(
             w,
             "  Code Cov     {}   {} / {} edges",
             progress_bar(frac, color),
-            fmt_num(exp.sancov_edges_covered as u64),
-            fmt_num(exp.sancov_edges_total as u64),
+            fmt_num(u64::try_from(exp.sancov_edges_covered).unwrap_or(u64::MAX)),
+            fmt_num(u64::try_from(exp.sancov_edges_total).unwrap_or(u64::MAX)),
         );
     }
 
@@ -441,7 +469,9 @@ fn write_assertions(w: &mut impl Write, details: &[AssertionDetail], color: bool
             AssertKind::Sometimes | AssertKind::Reachable => {
                 let total = detail.pass_count + detail.fail_count;
                 let rate = if total > 0 {
-                    (detail.pass_count as f64 / total as f64) * 100.0
+                    let pass_u32 = u32::try_from(detail.pass_count).unwrap_or(u32::MAX);
+                    let total_u32 = u32::try_from(total).unwrap_or(u32::MAX);
+                    (f64::from(pass_u32) / f64::from(total_u32)) * 100.0
                 } else {
                     0.0
                 };

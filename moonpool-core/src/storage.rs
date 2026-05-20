@@ -17,76 +17,123 @@ use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 /// Options for opening a file.
 ///
 /// This struct provides a builder-style API for configuring how a file
-/// should be opened, similar to [`std::fs::OpenOptions`].
+/// should be opened, similar to [`std::fs::OpenOptions`]. The individual
+/// flags are stored in a single bitfield and exposed via `is_*` accessors.
 #[derive(Debug, Clone, Default)]
 pub struct OpenOptions {
-    /// Open file for reading.
-    pub read: bool,
-    /// Open file for writing.
-    pub write: bool,
-    /// Create the file if it doesn't exist.
-    pub create: bool,
-    /// Create a new file, failing if it already exists.
-    pub create_new: bool,
-    /// Truncate the file to zero length.
-    pub truncate: bool,
-    /// Append to the end of the file.
-    pub append: bool,
+    /// Bit-packed flags. See the `FLAG_*` constants on this type.
+    flags: u8,
 }
 
 impl OpenOptions {
+    const FLAG_READ: u8 = 1 << 0;
+    const FLAG_WRITE: u8 = 1 << 1;
+    const FLAG_CREATE: u8 = 1 << 2;
+    const FLAG_CREATE_NEW: u8 = 1 << 3;
+    const FLAG_TRUNCATE: u8 = 1 << 4;
+    const FLAG_APPEND: u8 = 1 << 5;
+
     /// Create new open options with all flags set to false.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Set the read flag.
-    pub fn read(mut self, read: bool) -> Self {
-        self.read = read;
+    fn set_flag(mut self, flag: u8, value: bool) -> Self {
+        if value {
+            self.flags |= flag;
+        } else {
+            self.flags &= !flag;
+        }
         self
+    }
+
+    /// Set the read flag.
+    #[must_use]
+    pub fn read(self, read: bool) -> Self {
+        self.set_flag(Self::FLAG_READ, read)
     }
 
     /// Set the write flag.
-    pub fn write(mut self, write: bool) -> Self {
-        self.write = write;
-        self
+    #[must_use]
+    pub fn write(self, write: bool) -> Self {
+        self.set_flag(Self::FLAG_WRITE, write)
     }
 
     /// Set the create flag.
-    pub fn create(mut self, create: bool) -> Self {
-        self.create = create;
-        self
+    #[must_use]
+    pub fn create(self, create: bool) -> Self {
+        self.set_flag(Self::FLAG_CREATE, create)
     }
 
-    /// Set the create_new flag.
-    pub fn create_new(mut self, create_new: bool) -> Self {
-        self.create_new = create_new;
-        self
+    /// Set the `create_new` flag.
+    #[must_use]
+    pub fn create_new(self, create_new: bool) -> Self {
+        self.set_flag(Self::FLAG_CREATE_NEW, create_new)
     }
 
     /// Set the truncate flag.
-    pub fn truncate(mut self, truncate: bool) -> Self {
-        self.truncate = truncate;
-        self
+    #[must_use]
+    pub fn truncate(self, truncate: bool) -> Self {
+        self.set_flag(Self::FLAG_TRUNCATE, truncate)
     }
 
     /// Set the append flag.
-    pub fn append(mut self, append: bool) -> Self {
-        self.append = append;
-        self
+    #[must_use]
+    pub fn append(self, append: bool) -> Self {
+        self.set_flag(Self::FLAG_APPEND, append)
+    }
+
+    /// Returns true if the file will be opened for reading.
+    #[must_use]
+    pub fn is_read(&self) -> bool {
+        self.flags & Self::FLAG_READ != 0
+    }
+
+    /// Returns true if the file will be opened for writing.
+    #[must_use]
+    pub fn is_write(&self) -> bool {
+        self.flags & Self::FLAG_WRITE != 0
+    }
+
+    /// Returns true if the file will be created if it does not exist.
+    #[must_use]
+    pub fn is_create(&self) -> bool {
+        self.flags & Self::FLAG_CREATE != 0
+    }
+
+    /// Returns true if the file must be created new (failing if it exists).
+    #[must_use]
+    pub fn is_create_new(&self) -> bool {
+        self.flags & Self::FLAG_CREATE_NEW != 0
+    }
+
+    /// Returns true if the file will be truncated to zero length on open.
+    #[must_use]
+    pub fn is_truncate(&self) -> bool {
+        self.flags & Self::FLAG_TRUNCATE != 0
+    }
+
+    /// Returns true if writes will be appended to the end of the file.
+    #[must_use]
+    pub fn is_append(&self) -> bool {
+        self.flags & Self::FLAG_APPEND != 0
     }
 
     /// Create options for read-only access.
+    #[must_use]
     pub fn read_only() -> Self {
         Self::new().read(true)
     }
 
     /// Create options for creating and writing a new file (truncating if exists).
+    #[must_use]
     pub fn create_write() -> Self {
         Self::new().write(true).create(true).truncate(true)
     }
 
     /// Create options for creating a new file for writing (fails if exists).
+    #[must_use]
     pub fn create_new_write() -> Self {
         Self::new().write(true).create_new(true)
     }
@@ -143,6 +190,7 @@ pub struct TokioStorageProvider;
 #[cfg(feature = "tokio-providers")]
 impl TokioStorageProvider {
     /// Create a new Tokio storage provider.
+    #[must_use]
     pub fn new() -> Self {
         Self
     }
@@ -161,12 +209,12 @@ impl StorageProvider for TokioStorageProvider {
 
     async fn open(&self, path: &str, options: OpenOptions) -> io::Result<Self::File> {
         let file = tokio::fs::OpenOptions::new()
-            .read(options.read)
-            .write(options.write)
-            .create(options.create)
-            .create_new(options.create_new)
-            .truncate(options.truncate)
-            .append(options.append)
+            .read(options.is_read())
+            .write(options.is_write())
+            .create(options.is_create())
+            .create_new(options.is_create_new())
+            .truncate(options.is_truncate())
+            .append(options.is_append())
             .open(path)
             .await?;
         Ok(TokioStorageFile {
@@ -194,7 +242,7 @@ impl StorageProvider for TokioStorageProvider {
 /// Wrapper for Tokio File to implement our trait.
 ///
 /// Holds the underlying `tokio::fs::File` inside `tokio_util::compat::Compat`
-/// so the futures::io trait impls come through automatically. The four custom
+/// so the `futures::io` trait impls come through automatically. The four custom
 /// methods on [`StorageFile`] reach the inner [`tokio::fs::File`] via
 /// [`Compat::get_ref`] / [`Compat::get_mut`] to call tokio-specific APIs
 /// (`sync_all`, `sync_data`, `metadata`, `set_len`) that `Compat` itself

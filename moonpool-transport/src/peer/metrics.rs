@@ -80,6 +80,7 @@ pub struct PeerMetrics {
 
 impl PeerMetrics {
     /// Create new metrics instance with a specific creation time.
+    #[must_use]
     pub fn new_at(created_at: Duration) -> Self {
         Self {
             connection_attempts: 0,

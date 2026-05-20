@@ -44,7 +44,7 @@ fn local_runtime() -> tokio::runtime::Runtime {
         .expect("Failed to build local runtime")
 }
 
-/// Create a SimWorld with fast storage configuration.
+/// Create a `SimWorld` with fast storage configuration.
 fn fast_sim() -> SimWorld {
     let mut sim = SimWorld::new();
     sim.set_storage_config(StorageConfiguration::fast_local());

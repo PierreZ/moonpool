@@ -12,7 +12,7 @@ pub struct WorkloadStats {
     pub at_most_once_sent: u64,
     /// At-most-once successful replies.
     pub at_most_once_replied: u64,
-    /// At-most-once MaybeDelivered outcomes.
+    /// At-most-once `MaybeDelivered` outcomes.
     pub at_most_once_maybe: u64,
     /// At-most-once errors.
     pub at_most_once_errors: u64,
@@ -30,7 +30,7 @@ pub struct WorkloadStats {
     pub timeout_sent: u64,
     /// Timeout successful replies.
     pub timeout_replied: u64,
-    /// Timeout MaybeDelivered (timed out).
+    /// Timeout `MaybeDelivered` (timed out).
     pub timeout_timed_out: u64,
     /// Timeout errors.
     pub timeout_errors: u64,

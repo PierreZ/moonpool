@@ -18,50 +18,45 @@ fn test_buggify_integration() {
     for i in 0..20 {
         total_tests += 1;
         if moonpool_sim::buggify!() {
-            println!("🐛 buggify!() FIRED at iteration {}", i);
+            println!("🐛 buggify!() FIRED at iteration {i}");
             fired_count += 1;
         } else {
-            println!("   buggify!() did not fire at iteration {}", i);
+            println!("   buggify!() did not fire at iteration {i}");
         }
     }
 
-    println!("Fired {} out of {} tests", fired_count, total_tests);
+    println!("Fired {fired_count} out of {total_tests} tests");
 
     // With 100% probabilities, we should see some firings
     assert!(
         fired_count > 0,
-        "Expected at least some buggify firings with 100% probability, got {}",
-        fired_count
+        "Expected at least some buggify firings with 100% probability, got {fired_count}"
     );
 
     println!("\nTesting buggify_with_prob!(1.0) - should fire at least once:");
     let mut prob_fired_count = 0;
     for i in 0..20 {
         if moonpool_sim::buggify_with_prob!(1.0) {
-            println!("🐛 buggify_with_prob!(1.0) FIRED at iteration {}", i);
+            println!("🐛 buggify_with_prob!(1.0) FIRED at iteration {i}");
             prob_fired_count += 1;
         } else {
-            println!("   buggify_with_prob!(1.0) did not fire at iteration {}", i);
+            println!("   buggify_with_prob!(1.0) did not fire at iteration {i}");
         }
     }
 
-    println!("Prob fired {} out of 20 tests", prob_fired_count);
+    println!("Prob fired {prob_fired_count} out of 20 tests");
     assert!(
         prob_fired_count > 0,
-        "Expected at least some buggify_with_prob!(1.0) firings, got {}",
-        prob_fired_count
+        "Expected at least some buggify_with_prob!(1.0) firings, got {prob_fired_count}"
     );
 
     buggify_reset();
     println!("\nAfter reset, buggify should never fire:");
     for i in 0..5 {
         if moonpool_sim::buggify!() {
-            panic!("❌ ERROR: buggify!() fired after reset at iteration {}!", i);
+            panic!("❌ ERROR: buggify!() fired after reset at iteration {i}!");
         } else {
-            println!(
-                "✅ buggify!() correctly disabled after reset (iteration {})",
-                i
-            );
+            println!("✅ buggify!() correctly disabled after reset (iteration {i})");
         }
     }
 
@@ -70,9 +65,9 @@ fn test_buggify_integration() {
 
 #[test]
 fn test_buggify_determinism() {
-    println!("Testing buggify determinism...");
-
     const TEST_SEED: u64 = 98765;
+
+    println!("Testing buggify determinism...");
 
     // Run the same test twice with the same seed
     let mut results1 = Vec::new();
@@ -99,8 +94,8 @@ fn test_buggify_determinism() {
         buggify_reset();
     }
 
-    println!("Results 1: {:?}", results1);
-    println!("Results 2: {:?}", results2);
+    println!("Results 1: {results1:?}");
+    println!("Results 2: {results2:?}");
 
     // Results should be identical for same seed
     assert_eq!(

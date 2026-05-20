@@ -1,4 +1,4 @@
-//! ReplyFuture: Client-side future waiting for server response.
+//! `ReplyFuture`: Client-side future waiting for server response.
 //!
 //! When a client sends a request via [`send_request`], it receives a `ReplyFuture`
 //! that resolves when the server responds or an error occurs.
@@ -35,11 +35,11 @@ type DropCleanup = Box<dyn FnOnce() + Send + Sync>;
 /// request without an explicit reply. See [`ReplyPromise`]'s `Drop` impl in
 /// `moonpool-transport/src/rpc/reply_promise.rs` for the producer side.
 ///
-/// The same channel is used by FoundationDB's **WaitFailure** pattern: a
+/// The same channel is used by `FoundationDB`'s **`WaitFailure`** pattern: a
 /// server holds a `ReplyPromise<()>` indefinitely as a liveness beacon, and
 /// when the server actor dies every promise it owned drops, surfacing
 /// `BrokenPromise` to every waiting client at once. See the book chapter
-/// "Drop Semantics and the WaitFailure Pattern" for a worked example.
+/// "Drop Semantics and the `WaitFailure` Pattern" for a worked example.
 ///
 /// [`ReplyPromise`]: super::reply_promise::ReplyPromise
 /// [`ReplyError::BrokenPromise`]: super::reply_error::ReplyError::BrokenPromise
@@ -67,6 +67,7 @@ impl<T: DeserializeOwned> ReplyFuture<T> {
     /// Used by `prepare_and_send` to unregister the reply endpoint from
     /// the transport's endpoint map, preventing leaks when the future is
     /// dropped without being polled to completion.
+    #[must_use]
     pub fn with_drop_cleanup(mut self, cleanup: impl FnOnce() + Send + Sync + 'static) -> Self {
         self.drop_cleanup = Some(Box::new(cleanup));
         self

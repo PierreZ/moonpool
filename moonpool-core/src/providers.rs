@@ -123,6 +123,7 @@ impl TokioProviders {
     ///
     /// Initializes all five Tokio-based providers with their default
     /// configurations.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             network: TokioNetworkProvider::new(),

@@ -34,7 +34,7 @@
 //!
 //! | Trait | Simulation | Production | Purpose |
 //! |-------|------------|------------|---------|
-//! | [`TimeProvider`] | Logical time | Wall clock | Sleep, timeout, now() |
+//! | [`TimeProvider`] | Logical time | Wall clock | Sleep, timeout, `now()` |
 //! | [`TaskProvider`] | Event-driven | Tokio spawn | Task spawning |
 //! | [`RandomProvider`] | Seeded RNG | System RNG | Deterministic randomness |
 //! | [`NetworkProvider`] | Simulated TCP | Real TCP | Connect, listen, accept |

@@ -17,7 +17,7 @@ use crate::workload::{DeliveryEvent, TL_AT_LEAST_ONCE, TL_AT_MOST_ONCE, TL_TIMEO
 /// Invariant that validates delivery mode contracts by scanning per-mode timelines.
 ///
 /// Uses cursor-based incremental processing to stay fast (runs after every event).
-/// Maintains per-mode sets of sent/resolved seq_ids to detect phantoms and
+/// Maintains per-mode sets of sent/resolved `seq_ids` to detect phantoms and
 /// double-resolutions.
 pub struct DeliveryContractInvariant {
     cursor_amo: Cell<usize>,
@@ -44,6 +44,7 @@ impl Default for DeliveryContractInvariant {
 
 impl DeliveryContractInvariant {
     /// Create a new invariant with empty state.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             cursor_amo: Cell::new(0),
@@ -158,7 +159,7 @@ impl DeliveryContractInvariant {
 }
 
 impl Invariant for DeliveryContractInvariant {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "delivery_contract"
     }
 

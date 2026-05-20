@@ -1,6 +1,6 @@
 //! FDB-style delivery modes for typed RPC.
 //!
-//! Four delivery guarantees matching FoundationDB's fdbrpc layer:
+//! Four delivery guarantees matching `FoundationDB`'s fdbrpc layer:
 //!
 //! | Function | Guarantee | Transport | On Disconnect |
 //! |----------|-----------|-----------|---------------|

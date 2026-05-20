@@ -6,7 +6,8 @@
 
 use crate::SimulationReport;
 
-/// Run a SimulationBuilder and return the report.
+/// Run a `SimulationBuilder` and return the report.
+#[must_use]
 pub fn run_simulation(builder: crate::SimulationBuilder) -> SimulationReport {
     builder.run()
 }

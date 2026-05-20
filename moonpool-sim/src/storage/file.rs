@@ -20,22 +20,22 @@ use super::sim_shutdown_error;
 /// ## State Tracking
 ///
 /// The file tracks pending operations under a `Mutex`:
-/// - `pending_read`: Active read operation (op_seq, offset, len)
-/// - `pending_write`: Active write operation (op_seq, bytes_written)
+/// - `pending_read`: Active read operation (`op_seq`, offset, len)
+/// - `pending_write`: Active write operation (`op_seq`, `bytes_written`)
 ///
 /// ## Polling Pattern
 ///
 /// Operations follow the schedule → wait → complete pattern:
-/// 1. First poll: Schedule operation with SimWorld, store pending state
+/// 1. First poll: Schedule operation with `SimWorld`, store pending state
 /// 2. Subsequent polls: Check completion, return Pending until done
 /// 3. Final poll: Clear pending state, return result
 #[derive(Debug)]
 pub struct SimStorageFile {
     sim: WeakSimWorld,
     file_id: FileId,
-    /// Pending read operation: (op_seq, offset, len)
+    /// Pending read operation: (`op_seq`, offset, len)
     pending_read: Mutex<Option<(u64, u64, usize)>>,
-    /// Pending write operation: (op_seq, bytes_written)
+    /// Pending write operation: (`op_seq`, `bytes_written`)
     pending_write: Mutex<Option<(u64, usize)>>,
 }
 
@@ -130,7 +130,8 @@ impl AsyncRead for SimStorageFile {
         }
 
         // Calculate bytes to read (don't read past EOF)
-        let remaining_in_file = (file_size - position) as usize;
+        let remaining_in_file =
+            usize::try_from(file_size - position).expect("remaining bytes in file fit in usize");
         let len = buf.len().min(remaining_in_file);
 
         if len == 0 {
@@ -238,16 +239,16 @@ impl AsyncSeek for SimStorageFile {
             SeekFrom::Start(p) => p,
             SeekFrom::End(offset) => {
                 if offset >= 0 {
-                    file_size.saturating_add(offset as u64)
+                    file_size.saturating_add(offset.unsigned_abs())
                 } else {
-                    file_size.saturating_sub((-offset) as u64)
+                    file_size.saturating_sub(offset.unsigned_abs())
                 }
             }
             SeekFrom::Current(offset) => {
                 if offset >= 0 {
-                    current_position.saturating_add(offset as u64)
+                    current_position.saturating_add(offset.unsigned_abs())
                 } else {
-                    current_position.saturating_sub((-offset) as u64)
+                    current_position.saturating_sub(offset.unsigned_abs())
                 }
             }
         };

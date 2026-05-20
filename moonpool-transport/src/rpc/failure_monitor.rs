@@ -1,10 +1,10 @@
-//! FailureMonitor: Reactive failure tracking for addresses and endpoints.
+//! `FailureMonitor`: Reactive failure tracking for addresses and endpoints.
 //!
 //! Tracks two levels of failure:
 //! - **Address-level**: Is a remote machine reachable? (Missing = Failed)
 //! - **Endpoint-level**: Is a specific endpoint permanently dead?
 //!
-//! Producers (connection_task) call [`FailureMonitor::set_status`] and
+//! Producers (`connection_task`) call [`FailureMonitor::set_status`] and
 //! [`FailureMonitor::notify_disconnect`]. Consumers (delivery mode functions)
 //! poll [`FailureMonitor::on_disconnect_or_failure`] to race replies against
 //! disconnect signals.
@@ -70,10 +70,10 @@ struct FailureMonitorInner {
     /// Permanently failed endpoints (e.g., endpoint not found on remote).
     failed_endpoints: BTreeSet<Endpoint>,
     /// Wakers waiting for endpoint state changes, keyed by address.
-    /// Woken on: set_status change, notify_disconnect, endpoint_not_found.
+    /// Woken on: `set_status` change, `notify_disconnect`, `endpoint_not_found`.
     endpoint_watchers: BTreeMap<String, Vec<Waker>>,
     /// Wakers waiting for disconnect events, keyed by address.
-    /// Woken only on: notify_disconnect.
+    /// Woken only on: `notify_disconnect`.
     disconnect_watchers: BTreeMap<String, Vec<Waker>>,
 }
 
@@ -116,6 +116,11 @@ impl FailureMonitor {
     ///
     /// # FDB Reference
     /// `SimpleFailureMonitor::setStatus` (FailureMonitor.actor.cpp:83-115)
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn set_status(&self, address: &str, status: FailureStatus) {
         let mut inner = self
             .inner
@@ -145,6 +150,11 @@ impl FailureMonitor {
     ///
     /// # FDB Reference
     /// `SimpleFailureMonitor::notifyDisconnect` (FailureMonitor.actor.cpp:150-154)
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn notify_disconnect(&self, address: &str) {
         let mut inner = self
             .inner
@@ -163,6 +173,11 @@ impl FailureMonitor {
     ///
     /// # FDB Reference
     /// `SimpleFailureMonitor::endpointNotFound` (FailureMonitor.actor.cpp:117-139)
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn endpoint_not_found(&self, endpoint: &Endpoint) {
         // Skip well-known tokens (FDB: `if token.first() == -1 return`)
         if endpoint.token.is_well_known() {
@@ -206,6 +221,11 @@ impl FailureMonitor {
     ///
     /// # FDB Reference
     /// `SimpleFailureMonitor::getState(Endpoint)` (FailureMonitor.actor.cpp:196-206)
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn state(&self, endpoint: &Endpoint) -> FailureStatus {
         let inner = self
             .inner
@@ -228,6 +248,11 @@ impl FailureMonitor {
     ///
     /// # FDB Reference
     /// `SimpleFailureMonitor::permanentlyFailed` (FailureMonitor.h:226-228)
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn permanently_failed(&self, endpoint: &Endpoint) -> bool {
         self.inner
             .read()
@@ -245,6 +270,11 @@ impl FailureMonitor {
     ///
     /// # FDB Reference
     /// `SimpleFailureMonitor::onDisconnectOrFailure` (FailureMonitor.actor.cpp:156-178)
+    ///
+    /// # Panics
+    ///
+    /// The returned future panics if the internal `RwLock` is poisoned (only
+    /// possible if a prior task panicked while holding the lock).
     pub fn on_disconnect_or_failure(
         self: &Arc<Self>,
         endpoint: &Endpoint,
@@ -293,6 +323,11 @@ impl FailureMonitor {
     ///
     /// # FDB Reference
     /// `SimpleFailureMonitor::onDisconnect` (FailureMonitor.actor.cpp:180-182)
+    ///
+    /// # Panics
+    ///
+    /// The returned future panics if the internal `RwLock` is poisoned (only
+    /// possible if a prior task panicked while holding the lock).
     pub fn on_disconnect(self: &Arc<Self>, address: &str) -> impl Future<Output = ()> + Send {
         let fm = Arc::clone(self);
         let address = address.to_string();
@@ -348,7 +383,10 @@ impl std::fmt::Debug for FailureMonitor {
         f.debug_struct("FailureMonitor")
             .field("addresses_available", &inner.address_status.len())
             .field("endpoints_failed", &inner.failed_endpoints.len())
-            .finish()
+            .field("endpoint_watchers", &inner.endpoint_watchers.len())
+            .field("disconnect_watchers", &inner.disconnect_watchers.len())
+            // `sleep_fn` is a captured closure with no useful Debug representation.
+            .finish_non_exhaustive()
     }
 }
 
@@ -486,7 +524,7 @@ mod tests {
     fn test_debug_impl() {
         let fm = make_fm();
         fm.set_status("10.0.1.1:4500", FailureStatus::Available);
-        let debug = format!("{:?}", fm);
+        let debug = format!("{fm:?}");
         assert!(debug.contains("FailureMonitor"));
         assert!(debug.contains("addresses_available: 1"));
     }
@@ -508,13 +546,11 @@ mod tests {
 
         assert!(
             elapsed >= Duration::from_millis(50),
-            "should sleep at least 50ms, got {:?}",
-            elapsed
+            "should sleep at least 50ms, got {elapsed:?}"
         );
         assert!(
             elapsed < Duration::from_millis(500),
-            "should not exceed 500ms wall clock, got {:?}",
-            elapsed
+            "should not exceed 500ms wall clock, got {elapsed:?}"
         );
     }
 }

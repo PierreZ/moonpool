@@ -42,6 +42,7 @@ pub struct SimContext {
 
 impl SimContext {
     /// Create a new simulation context.
+    #[must_use]
     pub fn new(
         providers: SimProviders,
         topology: WorkloadTopology,
@@ -57,36 +58,43 @@ impl SimContext {
     }
 
     /// Get the full providers bundle for passing to generic code.
+    #[must_use]
     pub fn providers(&self) -> &SimProviders {
         &self.providers
     }
 
     /// Get the simulated network provider.
+    #[must_use]
     pub fn network(&self) -> &SimNetworkProvider {
         self.providers.network()
     }
 
     /// Get the simulated time provider.
+    #[must_use]
     pub fn time(&self) -> &SimTimeProvider {
         self.providers.time()
     }
 
     /// Get the task provider.
+    #[must_use]
     pub fn task(&self) -> &TokioTaskProvider {
         self.providers.task()
     }
 
     /// Get the seeded random provider.
+    #[must_use]
     pub fn random(&self) -> &SimRandomProvider {
         self.providers.random()
     }
 
     /// Get the simulated storage provider.
+    #[must_use]
     pub fn storage(&self) -> &SimStorageProvider {
         self.providers.storage()
     }
 
     /// Get this workload's IP address.
+    #[must_use]
     pub fn my_ip(&self) -> &str {
         &self.topology.my_ip
     }
@@ -95,6 +103,7 @@ impl SimContext {
     ///
     /// Assigned by the builder's [`ClientId`](crate::ClientId) strategy.
     /// Defaults to sequential IDs starting from 0 (FDB-style).
+    #[must_use]
     pub fn client_id(&self) -> usize {
         self.topology.client_id
     }
@@ -103,16 +112,19 @@ impl SimContext {
     ///
     /// For single `.workload()` entries this is 1.
     /// For `.workloads(count, factory)` entries this is the resolved count.
+    #[must_use]
     pub fn client_count(&self) -> usize {
         self.topology.client_count
     }
 
     /// Find a peer's IP address by workload name.
+    #[must_use]
     pub fn peer(&self, name: &str) -> Option<String> {
         self.topology.peer_by_name(name)
     }
 
     /// Get all peers as (name, ip) pairs.
+    #[must_use]
     pub fn peers(&self) -> Vec<(String, String)> {
         self.topology
             .peer_names
@@ -123,16 +135,19 @@ impl SimContext {
     }
 
     /// Get the shutdown cancellation token.
+    #[must_use]
     pub fn shutdown(&self) -> &tokio_util::sync::CancellationToken {
         &self.topology.shutdown_signal
     }
 
     /// Get the workload topology (peer IPs, process IPs, tags, etc.).
+    #[must_use]
     pub fn topology(&self) -> &WorkloadTopology {
         &self.topology
     }
 
     /// Get the shared state handle for cross-workload communication.
+    #[must_use]
     pub fn state(&self) -> &StateHandle {
         &self.state
     }
@@ -143,14 +158,14 @@ impl SimContext {
     /// [`crate::observability::SimulationLayer`] installed (the standard sim
     /// configuration), the layer captures the typed payload and runs invariants.
     /// Without a layer (e.g. in production), the event still reaches subscribers
-    /// like `fmt` or OTel with its `Debug` payload.
+    /// like `fmt` or `OTel` with its `Debug` payload.
     ///
     /// Captures simulation time and this process's IP address automatically.
     pub fn emit<T>(&self, key: &'static str, event: T)
     where
         T: Any + Debug + Send + Sync + 'static,
     {
-        let time_ms = self.time().now().as_millis() as u64;
+        let time_ms = u64::try_from(self.time().now().as_millis()).unwrap_or(u64::MAX);
         let source = self.my_ip().to_string();
         crate::sim_emit!(key, time_ms, source, event);
     }
@@ -159,12 +174,14 @@ impl SimContext {
     ///
     /// Returns an empty vector if no [`crate::observability::SimulationLayer`]
     /// is installed, no events were captured, or none of them match `T`.
+    #[must_use]
     pub fn timeline<T: Any + Clone + 'static>(&self, key: &'static str) -> Vec<TypedEntry<T>> {
         self.obs.timeline(key)
     }
 
     /// Get a clonable handle to the observability layer, for advanced
     /// post-simulation inspection.
+    #[must_use]
     pub fn observability(&self) -> &SimulationLayerHandle {
         &self.obs
     }

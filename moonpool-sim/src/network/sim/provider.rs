@@ -15,6 +15,7 @@ pub struct SimNetworkProvider {
 
 impl SimNetworkProvider {
     /// Create a new simulated network provider
+    #[must_use]
     pub fn new(sim: WeakSimWorld) -> Self {
         Self { sim }
     }
@@ -23,6 +24,10 @@ impl SimNetworkProvider {
     ///
     /// This allows workloads to introduce delays for coordination purposes.
     /// The sleep completes when the simulation processes the corresponding Wake event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the simulation cannot schedule the sleep event.
     pub fn sleep(
         &self,
         duration: std::time::Duration,
@@ -47,9 +52,7 @@ impl NetworkProvider for SimNetworkProvider {
             sim.with_network_config(|config| crate::network::sample_duration(&config.bind_latency));
 
         // Schedule bind completion event to advance simulation time
-        let listener_id = sim
-            .create_listener()
-            .map_err(|e| io::Error::other(format!("Failed to create listener: {}", e)))?;
+        let listener_id = sim.create_listener();
 
         // Schedule an event to simulate the bind delay - this advances simulation time
         sim.schedule_event(
@@ -67,9 +70,9 @@ impl NetworkProvider for SimNetworkProvider {
     /// Connect to a remote address.
     ///
     /// When chaos is enabled, connection establishment can fail or hang forever
-    /// based on the connect_failure_mode setting (FDB ref: sim2.actor.cpp:1243-1250):
+    /// based on the `connect_failure_mode` setting (FDB ref: sim2.actor.cpp:1243-1250):
     /// - Disabled: Normal operation (no failure injection)
-    /// - AlwaysFail: Always fail with ConnectionRefused when buggified
+    /// - `AlwaysFail`: Always fail with `ConnectionRefused` when buggified
     /// - Probabilistic: 50% fail with error, 50% hang forever (tests timeout handling)
     #[instrument(skip(self))]
     async fn connect(&self, addr: &str) -> io::Result<Self::TcpStream> {
@@ -109,13 +112,12 @@ impl NetworkProvider for SimNetworkProvider {
                             io::ErrorKind::ConnectionRefused,
                             "Connection establishment failed (Probabilistic mode)",
                         ));
-                    } else {
-                        // Hang forever - create a future that never completes
-                        // This tests timeout handling in connection retry logic
-                        tracing::debug!(addr = %addr, "Connection hanging forever (Probabilistic mode - hang)");
-                        std::future::pending::<()>().await;
-                        unreachable!("pending() never resolves");
                     }
+                    // Hang forever - create a future that never completes
+                    // This tests timeout handling in connection retry logic
+                    tracing::debug!(addr = %addr, "Connection hanging forever (Probabilistic mode - hang)");
+                    std::future::pending::<()>().await;
+                    unreachable!("pending() never resolves");
                 }
             }
         }
@@ -125,13 +127,10 @@ impl NetworkProvider for SimNetworkProvider {
             .with_network_config(|config| crate::network::sample_duration(&config.connect_latency));
 
         // Create a connection pair for bidirectional communication
-        let (client_id, server_id) = sim
-            .create_connection_pair("client-addr".to_string(), addr.to_string())
-            .map_err(|e| io::Error::other(format!("Failed to create connection pair: {}", e)))?;
+        let (client_id, server_id) = sim.create_connection_pair("client-addr", addr);
 
         // Store the server side for accept() to pick up later
-        sim.store_pending_connection(addr, server_id)
-            .map_err(|e| io::Error::other(format!("Failed to store pending connection: {}", e)))?;
+        sim.store_pending_connection(addr, server_id);
 
         // Schedule connection ready event to advance simulation time
         sim.schedule_event(

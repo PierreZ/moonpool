@@ -1,4 +1,4 @@
-//! Deterministic fault injection following FoundationDB's buggify approach.
+//! Deterministic fault injection following `FoundationDB`'s buggify approach.
 //!
 //! Each buggify location is randomly activated once per simulation run.
 //! Active locations fire probabilistically on each call.
@@ -39,6 +39,7 @@ pub fn buggify_reset() {
 }
 
 /// Internal buggify implementation
+#[must_use]
 pub fn buggify_internal(prob: f64, location: &'static str) -> bool {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
@@ -121,7 +122,7 @@ mod tests {
             };
 
             for i in 0..5 {
-                let location = format!("loc_{}", i);
+                let location = format!("loc_{i}");
                 results.push(buggify_internal(0.5, Box::leak(location.into_boxed_str())));
             }
 

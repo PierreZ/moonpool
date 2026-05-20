@@ -86,6 +86,7 @@ impl Event {
     /// Infrastructure events maintain simulation state but don't represent actual
     /// application work. These events can be safely ignored when determining if
     /// a simulation should terminate after workloads complete.
+    #[must_use]
     pub fn is_infrastructure_event(&self) -> bool {
         matches!(
             self,
@@ -111,12 +112,12 @@ pub enum NetworkOperation {
     /// Process next message from connection's send buffer
     ProcessSendBuffer,
     /// Deliver FIN (graceful close) to a connection's receive side.
-    /// Scheduled after the last DataDelivery to ensure all data arrives first.
+    /// Scheduled after the last `DataDelivery` to ensure all data arrives first.
     FinDelivery,
 }
 
 /// Connection state changes
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionStateChange {
     /// Listener bind operation completed
     BindComplete,
@@ -149,6 +150,7 @@ pub struct ScheduledEvent {
 
 impl ScheduledEvent {
     /// Creates a new scheduled event.
+    #[must_use]
     pub fn new(time: Duration, event: Event, sequence: u64) -> Self {
         Self {
             time,
@@ -158,16 +160,19 @@ impl ScheduledEvent {
     }
 
     /// Returns the scheduled execution time.
+    #[must_use]
     pub fn time(&self) -> Duration {
         self.time
     }
 
     /// Returns a reference to the event.
+    #[must_use]
     pub fn event(&self) -> &Event {
         &self.event
     }
 
     /// Consumes the scheduled event and returns the event.
+    #[must_use]
     pub fn into_event(self) -> Event {
         self.event
     }
@@ -205,6 +210,7 @@ pub struct EventQueue {
 
 impl EventQueue {
     /// Creates a new empty event queue.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             heap: BinaryHeap::new(),
@@ -222,11 +228,13 @@ impl EventQueue {
     }
 
     /// Returns `true` if the queue is empty.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.heap.is_empty()
     }
 
     /// Returns the number of events in the queue.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.heap.len()
     }
@@ -236,6 +244,7 @@ impl EventQueue {
     /// Infrastructure events are those that maintain simulation state but don't
     /// represent actual application work (like connection restoration).
     /// Returns true if empty or contains only infrastructure events.
+    #[must_use]
     pub fn has_only_infrastructure_events(&self) -> bool {
         self.heap
             .iter()
