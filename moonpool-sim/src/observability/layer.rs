@@ -135,11 +135,6 @@ impl SimulationLayerHandle {
         }
     }
 
-    /// Total number of events captured across all timelines.
-    pub fn snapshot_event_count(&self) -> usize {
-        self.events.lock().by_key.values().map(|v| v.len()).sum()
-    }
-
     /// Read all events captured under `key` as typed entries.
     ///
     /// Entries whose payload type does not match `T` are skipped.
