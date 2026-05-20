@@ -90,7 +90,7 @@ impl std::error::Error for CodecError {
 /// This trait uses serde's `Serialize` and `DeserializeOwned` bounds, which means
 /// your message types must derive or implement serde traits. If you need completely
 /// custom serialization without serde, you can implement your own queue type.
-pub trait MessageCodec: Clone + 'static {
+pub trait MessageCodec: Clone + Send + Sync + 'static {
     /// Encode a serializable message to bytes.
     ///
     /// # Errors

@@ -16,7 +16,7 @@ use crate::service::{
 /// Echo server process. Created fresh on every boot via factory.
 pub struct EchoServerProcess;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Process for EchoServerProcess {
     fn name(&self) -> &str {
         "echo-server"

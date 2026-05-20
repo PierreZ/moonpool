@@ -24,7 +24,7 @@ The answer already existed, scattered across several projects and decades of wor
 
 Moonpool brings these ideas together in a single Rust framework.
 
-From FoundationDB: the **simulation engine**. Single-threaded deterministic execution. A seeded PRNG controlling all network timing, fault injection, and process scheduling. Simulated time that jumps forward when all tasks are blocked, compressing hours of cluster behavior into seconds. The same code runs against real networking or the simulated network, swapped at the provider level.
+From FoundationDB: the **simulation engine**. A single-OS-thread runtime with deterministic execution, so every scheduling decision is reproducible from a seed. Trait types are `Send + Sync`, which means your code can use the familiar `Arc<RwLock<...>>`, `DashMap`, `Arc<AtomicBool>`, and `tokio::spawn` patterns you already know. A seeded PRNG controls all network timing, fault injection, and process scheduling. Simulated time jumps forward when all tasks are blocked, compressing hours of cluster behavior into seconds. The same code runs against real networking or the simulated network, swapped at the provider level.
 
 From TigerBeetle: **storage fault injection**. Simulated disk operations that can corrupt reads, tear writes, fail syncs, and misdirect I/O. Not just network chaos but disk chaos, because real systems fail at both layers.
 

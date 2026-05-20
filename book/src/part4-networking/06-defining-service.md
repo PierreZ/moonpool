@@ -52,7 +52,7 @@ To handle requests, implement the generated trait on a concrete type:
 ```rust
 struct CalculatorImpl;
 
-#[async_trait::async_trait(?Send)]
+#[async_trait::async_trait]
 impl Calculator for CalculatorImpl {
     async fn add(&self, req: AddRequest) -> Result<AddResponse, RpcError> {
         Ok(AddResponse { result: req.a + req.b })
@@ -64,7 +64,7 @@ impl Calculator for CalculatorImpl {
 }
 ```
 
-Note the `#[async_trait(?Send)]` attribute. All moonpool services are single-threaded (`!Send`), matching our deterministic execution model. The macro adds this attribute to the generated trait automatically, and you must repeat it on the `impl` block.
+Note the `#[async_trait]` attribute on the `impl` block. Service handler traits are dyn-stored, so the macro emits `#[async_trait]` with `Send + Sync + 'static` supertraits on the generated trait. The simulation runtime still uses a single OS thread via `new_current_thread().build()`, but our handlers are **Send-bounded** so customer code can hold `Arc<RwLock<…>>`, `DashMap`, or any other `Send + Sync` state naturally. You re-apply `#[async_trait]` (without `?Send`) on the `impl`, and the compiler enforces that your handler state stays `Send + Sync + 'static`.
 
 ## Serialization
 

@@ -7,7 +7,7 @@ fn test_basic_simulation_bind() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -45,7 +45,7 @@ fn test_simple_echo_simulation() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -72,7 +72,7 @@ fn test_deterministic_simulation_behavior() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -117,7 +117,7 @@ fn test_network_provider_trait_usage() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {

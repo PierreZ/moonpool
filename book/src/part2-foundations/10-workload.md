@@ -7,8 +7,8 @@ A Workload exercises the system under test and validates its correctness. While 
 ## The Workload Trait
 
 ```rust
-#[async_trait(?Send)]
-pub trait Workload: 'static {
+#[async_trait]
+pub trait Workload: Send + Sync + 'static {
     fn name(&self) -> &str;
 
     async fn setup(&mut self, _ctx: &SimContext) -> SimulationResult<()> {

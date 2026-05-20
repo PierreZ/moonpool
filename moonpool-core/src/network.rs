@@ -3,7 +3,6 @@
 //! This module provides trait-based networking that allows seamless swapping
 //! between real Tokio networking and simulated networking for testing.
 
-use async_trait::async_trait;
 use futures::io::{AsyncRead, AsyncWrite};
 use std::io;
 #[cfg(feature = "tokio-providers")]
@@ -11,30 +10,35 @@ use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
 /// Provider trait for creating network connections and listeners.
 ///
-/// Single-core design - no Send bounds needed.
 /// Clone allows sharing providers across multiple peers efficiently.
-#[async_trait(?Send)]
-pub trait NetworkProvider: Clone {
+pub trait NetworkProvider: Clone + Send + Sync + 'static {
     /// The TCP stream type for this provider.
-    type TcpStream: AsyncRead + AsyncWrite + Unpin + 'static;
+    type TcpStream: AsyncRead + AsyncWrite + Unpin + Send + 'static;
     /// The TCP listener type for this provider.
     type TcpListener: TcpListenerTrait<TcpStream = Self::TcpStream> + 'static;
 
     /// Create a TCP listener bound to the given address.
-    async fn bind(&self, addr: &str) -> io::Result<Self::TcpListener>;
+    fn bind(
+        &self,
+        addr: &str,
+    ) -> impl std::future::Future<Output = io::Result<Self::TcpListener>> + Send;
 
     /// Connect to a remote address.
-    async fn connect(&self, addr: &str) -> io::Result<Self::TcpStream>;
+    fn connect(
+        &self,
+        addr: &str,
+    ) -> impl std::future::Future<Output = io::Result<Self::TcpStream>> + Send;
 }
 
 /// Trait for TCP listeners that can accept connections.
-#[async_trait(?Send)]
-pub trait TcpListenerTrait {
+pub trait TcpListenerTrait: Send + Sync + 'static {
     /// The TCP stream type that this listener produces.
-    type TcpStream: AsyncRead + AsyncWrite + Unpin + 'static;
+    type TcpStream: AsyncRead + AsyncWrite + Unpin + Send + 'static;
 
     /// Accept a single incoming connection.
-    async fn accept(&self) -> io::Result<(Self::TcpStream, String)>;
+    fn accept(
+        &self,
+    ) -> impl std::future::Future<Output = io::Result<(Self::TcpStream, String)>> + Send;
 
     /// Get the local address this listener is bound to.
     fn local_addr(&self) -> io::Result<String>;
@@ -65,7 +69,6 @@ impl Default for TokioNetworkProvider {
 }
 
 #[cfg(feature = "tokio-providers")]
-#[async_trait(?Send)]
 impl NetworkProvider for TokioNetworkProvider {
     type TcpStream = Compat<tokio::net::TcpStream>;
     type TcpListener = TokioTcpListener;
@@ -88,7 +91,6 @@ pub struct TokioTcpListener {
 }
 
 #[cfg(feature = "tokio-providers")]
-#[async_trait(?Send)]
 impl TcpListenerTrait for TokioTcpListener {
     type TcpStream = Compat<tokio::net::TcpStream>;
 

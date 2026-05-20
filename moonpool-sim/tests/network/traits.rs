@@ -24,7 +24,7 @@ fn test_tokio_echo_server() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -34,8 +34,8 @@ fn test_tokio_echo_server() {
         let listener = provider.bind("127.0.0.1:0").await.unwrap();
         let server_addr = listener.local_addr().unwrap();
 
-        // Use spawn_local with local runtime
-        let server_task = tokio::task::spawn_local(async move {
+        // Spawn server task
+        let server_task = tokio::spawn(async move {
             let (mut stream, _peer_addr) = listener.accept().await.unwrap();
 
             let mut buf = [0; 1024];
@@ -62,7 +62,7 @@ fn test_provider_default() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -81,7 +81,7 @@ fn test_provider_clone() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {

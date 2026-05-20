@@ -4,8 +4,8 @@
 //! invariant checking. Drain-aware: stops sending on shutdown, waits for
 //! in-flight requests.
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -125,7 +125,7 @@ impl TransportClientWorkload {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Workload for TransportClientWorkload {
     fn name(&self) -> &str {
         "transport-client"
@@ -154,7 +154,7 @@ impl Workload for TransportClientWorkload {
         let mut seq_counter: u64 = 0;
         let shutdown = ctx.shutdown().clone();
 
-        let stats = Rc::new(RefCell::new(WorkloadStats::default()));
+        let stats = Arc::new(RwLock::new(WorkloadStats::default()));
 
         let encode =
             make_encode_fn::<moonpool_transport::RequestEnvelope<EchoRequest>, _>(JsonCodec);
@@ -203,7 +203,10 @@ impl Workload for TransportClientWorkload {
                     match send(&*transport, &endpoint, req, &encode) {
                         Ok(()) => {
                             assert_sometimes!(true, "fire_and_forget_sent_successfully");
-                            stats.borrow_mut().fire_and_forget_sent += 1;
+                            stats
+                                .write()
+                                .expect("RwLock poisoned: prior task panicked")
+                                .fire_and_forget_sent += 1;
                         }
                         Err(e) => {
                             ctx.emit(
@@ -213,7 +216,10 @@ impl Workload for TransportClientWorkload {
                                     error: e.to_string(),
                                 },
                             );
-                            stats.borrow_mut().fire_and_forget_errors += 1;
+                            stats
+                                .write()
+                                .expect("RwLock poisoned: prior task panicked")
+                                .fire_and_forget_errors += 1;
                         }
                     }
                 }
@@ -240,7 +246,10 @@ impl Workload for TransportClientWorkload {
                         },
                     );
 
-                    stats.borrow_mut().at_most_once_sent += 1;
+                    stats
+                        .write()
+                        .expect("RwLock poisoned: prior task panicked")
+                        .at_most_once_sent += 1;
 
                     match try_get_reply(&*transport, &endpoint, req, &encode, decode.clone()).await
                     {
@@ -251,12 +260,18 @@ impl Workload for TransportClientWorkload {
                             );
                             assert_sometimes!(true, "at_most_once_reply_received");
                             ctx.emit(TL_AT_MOST_ONCE, DeliveryEvent::Replied { seq_id });
-                            stats.borrow_mut().at_most_once_replied += 1;
+                            stats
+                                .write()
+                                .expect("RwLock poisoned: prior task panicked")
+                                .at_most_once_replied += 1;
                         }
                         Err(ReplyError::MaybeDelivered) => {
                             assert_sometimes!(true, "at_most_once_maybe_delivered");
                             ctx.emit(TL_AT_MOST_ONCE, DeliveryEvent::MaybeDelivered { seq_id });
-                            stats.borrow_mut().at_most_once_maybe += 1;
+                            stats
+                                .write()
+                                .expect("RwLock poisoned: prior task panicked")
+                                .at_most_once_maybe += 1;
                         }
                         Err(e) => {
                             ctx.emit(
@@ -266,7 +281,10 @@ impl Workload for TransportClientWorkload {
                                     error: e.to_string(),
                                 },
                             );
-                            stats.borrow_mut().at_most_once_errors += 1;
+                            stats
+                                .write()
+                                .expect("RwLock poisoned: prior task panicked")
+                                .at_most_once_errors += 1;
                         }
                     }
                 }
@@ -293,7 +311,10 @@ impl Workload for TransportClientWorkload {
                         },
                     );
 
-                    stats.borrow_mut().at_least_once_sent += 1;
+                    stats
+                        .write()
+                        .expect("RwLock poisoned: prior task panicked")
+                        .at_least_once_sent += 1;
 
                     match get_reply(&*transport, &endpoint, req, &encode, decode.clone()) {
                         Ok(reply_future) => {
@@ -318,7 +339,10 @@ impl Workload for TransportClientWorkload {
                                     );
                                     assert_sometimes!(true, "at_least_once_reply_received");
                                     ctx.emit(TL_AT_LEAST_ONCE, DeliveryEvent::Replied { seq_id });
-                                    stats.borrow_mut().at_least_once_replied += 1;
+                                    stats
+                                        .write()
+                                        .expect("RwLock poisoned: prior task panicked")
+                                        .at_least_once_replied += 1;
                                 }
                                 Some(Err(e)) => {
                                     ctx.emit(
@@ -328,10 +352,16 @@ impl Workload for TransportClientWorkload {
                                             error: e.to_string(),
                                         },
                                     );
-                                    stats.borrow_mut().at_least_once_errors += 1;
+                                    stats
+                                        .write()
+                                        .expect("RwLock poisoned: prior task panicked")
+                                        .at_least_once_errors += 1;
                                 }
                                 None => {
-                                    stats.borrow_mut().at_least_once_in_flight += 1;
+                                    stats
+                                        .write()
+                                        .expect("RwLock poisoned: prior task panicked")
+                                        .at_least_once_in_flight += 1;
                                 }
                             }
                         }
@@ -343,7 +373,10 @@ impl Workload for TransportClientWorkload {
                                     error: e.to_string(),
                                 },
                             );
-                            stats.borrow_mut().at_least_once_errors += 1;
+                            stats
+                                .write()
+                                .expect("RwLock poisoned: prior task panicked")
+                                .at_least_once_errors += 1;
                         }
                     }
                 }
@@ -373,7 +406,10 @@ impl Workload for TransportClientWorkload {
                         },
                     );
 
-                    stats.borrow_mut().timeout_sent += 1;
+                    stats
+                        .write()
+                        .expect("RwLock poisoned: prior task panicked")
+                        .timeout_sent += 1;
 
                     match get_reply_unless_failed_for(
                         &*transport,
@@ -392,7 +428,10 @@ impl Workload for TransportClientWorkload {
                             );
                             assert_sometimes!(true, "timeout_reply_received");
                             ctx.emit(TL_TIMEOUT, DeliveryEvent::Replied { seq_id });
-                            stats.borrow_mut().timeout_replied += 1;
+                            stats
+                                .write()
+                                .expect("RwLock poisoned: prior task panicked")
+                                .timeout_replied += 1;
                         }
                         Err(ReplyError::MaybeDelivered) => {
                             assert_sometimes!(true, "timeout_maybe_delivered");
@@ -403,7 +442,10 @@ impl Workload for TransportClientWorkload {
                                     duration_ms: timeout_ms,
                                 },
                             );
-                            stats.borrow_mut().timeout_timed_out += 1;
+                            stats
+                                .write()
+                                .expect("RwLock poisoned: prior task panicked")
+                                .timeout_timed_out += 1;
                         }
                         Err(e) => {
                             ctx.emit(
@@ -413,7 +455,10 @@ impl Workload for TransportClientWorkload {
                                     error: e.to_string(),
                                 },
                             );
-                            stats.borrow_mut().timeout_errors += 1;
+                            stats
+                                .write()
+                                .expect("RwLock poisoned: prior task panicked")
+                                .timeout_errors += 1;
                         }
                     }
                 }
@@ -438,7 +483,10 @@ impl Workload for TransportClientWorkload {
                         }
                         Err(_) => {
                             assert_sometimes!(true, "wrong_endpoint_returns_error");
-                            stats.borrow_mut().endpoint_not_found += 1;
+                            stats
+                                .write()
+                                .expect("RwLock poisoned: prior task panicked")
+                                .endpoint_not_found += 1;
                         }
                     }
                 }
@@ -463,7 +511,10 @@ impl Workload for TransportClientWorkload {
                         let _ = get_reply(&*transport, &endpoint, req, &encode, decode.clone());
                     }
                     seq_counter += burst_size as u64;
-                    stats.borrow_mut().at_least_once_sent += burst_size as u64;
+                    stats
+                        .write()
+                        .expect("RwLock poisoned: prior task panicked")
+                        .at_least_once_sent += burst_size as u64;
                     assert_sometimes!(true, "reliable_burst_sent");
                 }
 
@@ -477,7 +528,7 @@ impl Workload for TransportClientWorkload {
                 }
 
                 Op::CheckMetrics => {
-                    let s = stats.borrow();
+                    let s = stats.read().expect("RwLock poisoned: prior task panicked");
                     tracing::debug!(
                         client_id,
                         ff_sent = s.fire_and_forget_sent,
@@ -490,7 +541,10 @@ impl Workload for TransportClientWorkload {
             }
         }
 
-        let final_stats = stats.borrow().clone();
+        let final_stats = stats
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .clone();
         let key = format!("transport_stats_{}", client_id);
         ctx.state().publish(&key, final_stats);
 

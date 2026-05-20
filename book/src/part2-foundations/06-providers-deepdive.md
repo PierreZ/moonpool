@@ -44,9 +44,8 @@ The recipe is simple. Oxide's engineering teams converged on it independently ac
 4. **Inject via generics** (compile-time dispatch, zero runtime overhead)
 
 ```rust
-// Step 1: The trait
-#[async_trait(?Send)]
-pub trait TimeProvider: Clone {
+// Step 1: The trait (native AFIT, no #[async_trait])
+pub trait TimeProvider: Clone + Send + Sync + 'static {
     async fn sleep(&self, duration: Duration) -> Result<(), TimeError>;
     fn now(&self) -> Duration;
 }

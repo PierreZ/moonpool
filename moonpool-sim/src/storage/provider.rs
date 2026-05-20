@@ -2,7 +2,6 @@
 
 use super::file::SimStorageFile;
 use crate::sim::WeakSimWorld;
-use async_trait::async_trait;
 use moonpool_core::{OpenOptions, StorageProvider};
 use std::io;
 use std::net::IpAddr;
@@ -36,7 +35,6 @@ impl SimStorageProvider {
     }
 }
 
-#[async_trait(?Send)]
 impl StorageProvider for SimStorageProvider {
     type File = SimStorageFile;
 

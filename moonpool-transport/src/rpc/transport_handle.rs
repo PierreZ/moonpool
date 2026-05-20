@@ -1,11 +1,11 @@
 //! TransportHandle: Object-safe trait erasing provider and codec generics.
 //!
 //! User-facing types (`ServiceEndpoint`, `RequestStream`, etc.) hold
-//! `Rc<dyn TransportHandle>` instead of `Rc<NetTransport<P>>`, which erases
+//! `Arc<dyn TransportHandle>` instead of `Arc<NetTransport<P>>`, which erases
 //! the `P: Providers` generic from their signatures. The codec generic `C`
 //! is erased separately via typed closures ([`EncodeFn`] / [`DecodeFn`]).
 
-use std::rc::{Rc, Weak};
+use std::sync::{Arc, Weak};
 
 use crate::error::MessagingError;
 use crate::rpc::endpoint_map::MessageReceiver;
@@ -16,26 +16,30 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 /// Type-erased encode function captured from a concrete [`MessageCodec`].
-pub type EncodeFn<T> = Rc<dyn Fn(&T) -> Result<Vec<u8>, CodecError>>;
+pub type EncodeFn<T> = Arc<dyn Fn(&T) -> Result<Vec<u8>, CodecError> + Send + Sync>;
 
 /// Type-erased decode function captured from a concrete [`MessageCodec`].
-pub type DecodeFn<T> = Rc<dyn Fn(&[u8]) -> Result<T, CodecError>>;
+pub type DecodeFn<T> = Arc<dyn Fn(&[u8]) -> Result<T, CodecError> + Send + Sync>;
 
 /// Create an [`EncodeFn`] by capturing a concrete codec.
-pub fn make_encode_fn<T: Serialize + 'static, C: MessageCodec>(codec: C) -> EncodeFn<T> {
-    Rc::new(move |val: &T| codec.encode(val))
+pub fn make_encode_fn<T: Serialize + Send + Sync + 'static, C: MessageCodec>(
+    codec: C,
+) -> EncodeFn<T> {
+    Arc::new(move |val: &T| codec.encode(val))
 }
 
 /// Create a [`DecodeFn`] by capturing a concrete codec.
-pub fn make_decode_fn<T: DeserializeOwned + 'static, C: MessageCodec>(codec: C) -> DecodeFn<T> {
-    Rc::new(move |buf: &[u8]| codec.decode::<T>(buf))
+pub fn make_decode_fn<T: DeserializeOwned + Send + Sync + 'static, C: MessageCodec>(
+    codec: C,
+) -> DecodeFn<T> {
+    Arc::new(move |buf: &[u8]| codec.decode::<T>(buf))
 }
 
 /// Object-safe transport abstraction that erases provider generics.
 ///
 /// `NetTransport<P>` implements this trait, allowing user-facing types
-/// to hold `Rc<dyn TransportHandle>` without naming `P`.
-pub trait TransportHandle {
+/// to hold `Arc<dyn TransportHandle>` without naming `P`.
+pub trait TransportHandle: Send + Sync {
     /// Send payload unreliably (best-effort, dropped on failure).
     fn send_unreliable(&self, endpoint: &Endpoint, payload: &[u8]) -> Result<(), MessagingError>;
 
@@ -43,16 +47,16 @@ pub trait TransportHandle {
     fn send_reliable(&self, endpoint: &Endpoint, payload: &[u8]) -> Result<(), MessagingError>;
 
     /// Register a dynamic endpoint receiver, returning the endpoint.
-    fn register(&self, token: UID, receiver: Rc<dyn MessageReceiver>) -> Endpoint;
+    fn register(&self, token: UID, receiver: Arc<dyn MessageReceiver>) -> Endpoint;
 
     /// Unregister a dynamic endpoint.
-    fn unregister(&self, token: &UID) -> Option<Rc<dyn MessageReceiver>>;
+    fn unregister(&self, token: &UID) -> Option<Arc<dyn MessageReceiver>>;
 
     /// Track a pending reply queue for disconnect cleanup.
     fn register_pending_reply(&self, addr: &str, token: UID, closer: Weak<dyn ReplyQueueCloser>);
 
     /// Get the failure monitor.
-    fn failure_monitor(&self) -> Rc<FailureMonitor>;
+    fn failure_monitor(&self) -> Arc<FailureMonitor>;
 
     /// Get the local address of this transport.
     fn local_address(&self) -> &NetworkAddress;

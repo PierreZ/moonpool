@@ -19,7 +19,7 @@ fn test_bit_flip_disabled_with_zero_probability() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -59,7 +59,7 @@ fn test_bit_flip_injection_with_high_probability() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -104,7 +104,7 @@ fn test_bit_flip_cooldown() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -142,7 +142,7 @@ fn test_peer_checksum_error_recovery() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -178,7 +178,7 @@ fn test_bit_flip_with_message_exchange() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {

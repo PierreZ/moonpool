@@ -87,8 +87,8 @@ pub async fn try_get_reply<Req, Resp>(
     decode_reply: DecodeFn<Result<Resp, ReplyError>>,
 ) -> Result<Resp, ReplyError>
 where
-    Req: Serialize + 'static,
-    Resp: DeserializeOwned + 'static,
+    Req: Serialize + Send + Sync + 'static,
+    Resp: DeserializeOwned + Send + Sync + 'static,
 {
     let fm = transport.failure_monitor();
 
@@ -143,8 +143,8 @@ pub fn get_reply<Req, Resp>(
     decode_reply: DecodeFn<Result<Resp, ReplyError>>,
 ) -> Result<ReplyFuture<Resp>, MessagingError>
 where
-    Req: Serialize + 'static,
-    Resp: DeserializeOwned + 'static,
+    Req: Serialize + Send + Sync + 'static,
+    Resp: DeserializeOwned + Send + Sync + 'static,
 {
     send_request(
         transport,
@@ -177,8 +177,8 @@ pub async fn get_reply_unless_failed_for<Req, Resp>(
     sustained_failure_duration: Duration,
 ) -> Result<Resp, ReplyError>
 where
-    Req: Serialize + 'static,
-    Resp: DeserializeOwned + 'static,
+    Req: Serialize + Send + Sync + 'static,
+    Resp: DeserializeOwned + Send + Sync + 'static,
 {
     let fm = transport.failure_monitor();
 
@@ -214,7 +214,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
-    use std::rc::Rc;
+    use std::sync::Arc;
 
     use serde::{Deserialize, Serialize};
 
@@ -257,7 +257,7 @@ mod tests {
         let server_token = UID::new(0x1234, 0x5678);
         let server_endpoint = Endpoint::new(test_address(), server_token);
 
-        let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<TestRequest>>> = Rc::new(
+        let server_queue: Arc<NetNotifiedQueue<RequestEnvelope<TestRequest>>> = Arc::new(
             NetNotifiedQueue::with_codec(server_endpoint.clone(), JsonCodec),
         );
         transport.register(server_token, server_queue.clone());
@@ -298,7 +298,7 @@ mod tests {
     fn test_try_get_reply_success() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
-            .build_local(tokio::runtime::LocalOptions::default())
+            .build()
             .expect("build runtime");
         rt.block_on(async {
             let transport = make_transport();
@@ -306,7 +306,7 @@ mod tests {
             let server_token = UID::new(0x1234, 0x5678);
             let server_endpoint = Endpoint::new(test_address(), server_token);
 
-            let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<TestRequest>>> = Rc::new(
+            let server_queue: Arc<NetNotifiedQueue<RequestEnvelope<TestRequest>>> = Arc::new(
                 NetNotifiedQueue::with_codec(server_endpoint.clone(), JsonCodec),
             );
             transport.register(server_token, server_queue.clone());
@@ -315,9 +315,9 @@ mod tests {
                 .failure_monitor()
                 .set_status("10.0.0.1:4500", FailureStatus::Available);
 
-            let t = Rc::clone(&transport);
+            let t = Arc::clone(&transport);
             let encode = test_encode();
-            let handle = tokio::task::spawn_local(async move {
+            let handle = tokio::spawn(async move {
                 let ep = Endpoint::new(test_address(), UID::new(0x1234, 0x5678));
                 try_get_reply(&*t, &ep, TestRequest { value: 99 }, &encode, test_decode()).await
             });
@@ -340,7 +340,7 @@ mod tests {
     fn test_try_get_reply_disconnect_during_wait() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
-            .build_local(tokio::runtime::LocalOptions::default())
+            .build()
             .expect("build runtime");
         rt.block_on(async {
             let transport = make_transport();
@@ -348,7 +348,7 @@ mod tests {
             let server_token = UID::new(0x1234, 0x5678);
             let server_endpoint = Endpoint::new(test_address(), server_token);
 
-            let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<TestRequest>>> = Rc::new(
+            let server_queue: Arc<NetNotifiedQueue<RequestEnvelope<TestRequest>>> = Arc::new(
                 NetNotifiedQueue::with_codec(server_endpoint.clone(), JsonCodec),
             );
             transport.register(server_token, server_queue.clone());
@@ -357,9 +357,9 @@ mod tests {
                 .failure_monitor()
                 .set_status("10.0.0.1:4500", FailureStatus::Available);
 
-            let t = Rc::clone(&transport);
+            let t = Arc::clone(&transport);
             let encode = test_encode();
-            let handle = tokio::task::spawn_local(async move {
+            let handle = tokio::spawn(async move {
                 let ep = Endpoint::new(test_address(), UID::new(0x1234, 0x5678));
                 try_get_reply(&*t, &ep, TestRequest { value: 1 }, &encode, test_decode()).await
             });
@@ -384,7 +384,7 @@ mod tests {
         let server_token = UID::new(0x1234, 0x5678);
         let server_endpoint = Endpoint::new(test_address(), server_token);
 
-        let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<TestRequest>>> = Rc::new(
+        let server_queue: Arc<NetNotifiedQueue<RequestEnvelope<TestRequest>>> = Arc::new(
             NetNotifiedQueue::with_codec(server_endpoint.clone(), JsonCodec),
         );
         transport.register(server_token, server_queue.clone());
@@ -409,7 +409,7 @@ mod tests {
     fn test_get_reply_unless_failed_for_success() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
-            .build_local(tokio::runtime::LocalOptions::default())
+            .build()
             .expect("build runtime");
         rt.block_on(async {
             let transport = make_transport();
@@ -417,7 +417,7 @@ mod tests {
             let server_token = UID::new(0x1234, 0x5678);
             let server_endpoint = Endpoint::new(test_address(), server_token);
 
-            let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<TestRequest>>> = Rc::new(
+            let server_queue: Arc<NetNotifiedQueue<RequestEnvelope<TestRequest>>> = Arc::new(
                 NetNotifiedQueue::with_codec(server_endpoint.clone(), JsonCodec),
             );
             transport.register(server_token, server_queue.clone());
@@ -426,9 +426,9 @@ mod tests {
                 .failure_monitor()
                 .set_status("10.0.0.1:4500", FailureStatus::Available);
 
-            let t = Rc::clone(&transport);
+            let t = Arc::clone(&transport);
             let encode = test_encode();
-            let handle = tokio::task::spawn_local(async move {
+            let handle = tokio::spawn(async move {
                 let ep = Endpoint::new(test_address(), UID::new(0x1234, 0x5678));
                 get_reply_unless_failed_for(
                     &*t,

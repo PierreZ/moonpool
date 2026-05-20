@@ -16,11 +16,11 @@ fn test_ip() -> IpAddr {
 }
 
 /// Create a local tokio runtime for tests.
-fn local_runtime() -> tokio::runtime::LocalRuntime {
+fn local_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime")
 }
 
@@ -38,7 +38,7 @@ fn test_multiple_files_open_simultaneously() {
         let mut sim = fast_sim();
 
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             // Open 5 files
             let mut files = Vec::new();
             for i in 0..5 {
@@ -73,7 +73,7 @@ fn test_interleaved_writes() {
         let mut sim = fast_sim();
 
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             // Open two files
             let mut file_a = provider
                 .open("file_a.txt", OpenOptions::create_write())
@@ -132,7 +132,7 @@ fn test_write_one_read_another() {
         let mut sim = fast_sim();
 
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             // Create the source file first
             let mut source = provider
                 .open("read_source.txt", OpenOptions::create_write())
@@ -189,7 +189,7 @@ fn test_sequential_opens_same_file() {
         let mut sim = fast_sim();
 
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             // Write initial content
             let mut file = provider
                 .open("reopen.txt", OpenOptions::create_write())
@@ -236,7 +236,7 @@ fn test_file_independence() {
         let mut sim = fast_sim();
 
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             // Create three files with different content
             for i in 0..3 {
                 let mut file = provider
@@ -308,7 +308,7 @@ fn test_independent_file_positions() {
         let mut sim = fast_sim();
 
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             // Create two files with same content
             for name in &["pos_a.txt", "pos_b.txt"] {
                 let mut file = provider.open(name, OpenOptions::create_write()).await?;
@@ -354,7 +354,7 @@ fn test_many_files() {
         let mut sim = fast_sim();
 
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             let file_count = 20;
 
             // Create many files
@@ -411,7 +411,7 @@ fn test_sequential_reads_same_file() {
         let mut sim = fast_sim();
 
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             // Create the file
             let mut file = provider
                 .open("shared_read.txt", OpenOptions::create_write())

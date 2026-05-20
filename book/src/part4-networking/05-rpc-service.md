@@ -18,7 +18,7 @@ trait Calculator {
 
 From this single trait definition, the macro generates:
 
-- **`CalculatorHandler`** trait (renamed from `Calculator`) with `#[async_trait(?Send)]`
+- **`CalculatorHandler`** trait (renamed from `Calculator`) with `#[async_trait]` and `Send + Sync + 'static` supertraits, so handler implementations integrate naturally with `Arc`, `tokio::spawn`, and customer state shared across tasks
 - **`Calculator`** struct with `InterfaceMethod` fields per method, usable in both server (local) and client (remote) modes
 
 The struct replaces what used to be separate `CalculatorServer` and `CalculatorClient` types. Construction determines the mode: server constructors create local-mode fields that can `recv()`, client constructors create remote-mode fields that can `get_reply()`.
@@ -64,6 +64,7 @@ For a two-method `Calculator` service, the macro produces:
 
 ```text
 CalculatorHandler (trait, renamed from Calculator)
+  // #[async_trait] with `Send + Sync + 'static` supertraits
   ├── add(&self, AddRequest) -> Result<AddResponse, RpcError>
   └── sub(&self, SubRequest) -> Result<SubResponse, RpcError>
 

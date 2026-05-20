@@ -77,7 +77,7 @@ Storage operations in moonpool differ from network operations in one critical wa
 This means you cannot just `await` a storage operation in a test. You need the step loop pattern:
 
 ```rust
-let handle = tokio::task::spawn_local(async move {
+let handle = tokio::spawn(async move {
     // This runs inside the simulation
     let mut file = provider.open("test.txt", OpenOptions::create_write()).await?;
     file.write_all(b"hello").await?;

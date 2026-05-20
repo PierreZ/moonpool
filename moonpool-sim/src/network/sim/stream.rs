@@ -2,7 +2,6 @@ use super::types::ConnectionId;
 use crate::TcpListenerTrait;
 use crate::sim::state::CloseReason;
 use crate::{Event, WeakSimWorld};
-use async_trait::async_trait;
 use futures::io::{AsyncRead, AsyncWrite};
 use std::{
     future::Future,
@@ -106,10 +105,12 @@ fn connection_aborted_error() -> io::Error {
 ///
 /// ## Thread Safety
 ///
-/// `SimTcpStream` is designed for single-threaded simulation environments:
-/// - No `Send` or `Sync` bounds (uses `#[async_trait(?Send)]`)
-/// - Safe for use within single-threaded async runtimes
-/// - Eliminates synchronization overhead for deterministic simulation
+/// `SimTcpStream` is `Send + Sync + Unpin + 'static` via its `Arc<RwLock<…>>`
+/// backed `WeakSimWorld` handle. The simulation runtime itself runs on a
+/// single OS thread (`new_current_thread().build()`), but the stream type
+/// satisfies Send-bounded traits so it composes naturally with
+/// `tokio::spawn`, hyper/reqwest connectors, and customer code that uses
+/// `Arc<RwLock<…>>` / `DashMap` / `Arc<AtomicBool>`.
 pub struct SimTcpStream {
     /// Weak reference to the simulation world.
     ///
@@ -541,7 +542,6 @@ impl SimTcpListener {
     }
 }
 
-#[async_trait(?Send)]
 impl TcpListenerTrait for SimTcpListener {
     type TcpStream = SimTcpStream;
 

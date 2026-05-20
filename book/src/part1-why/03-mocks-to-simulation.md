@@ -25,8 +25,7 @@ If a bug lives in the interaction between your retry logic and your connection p
 There is a different approach. Instead of replacing entire subsystems with hand-programmed fakes, define a **trait** that describes the interface your code needs. Implement it once for production (real TCP, real disk, real clock). Implement it once for simulation (simulated network, simulated disk, simulated clock). Your application code depends on the trait, not the implementation. The trait implementation runs **real logic**, not pre-programmed responses, so every execution path that production exercises, simulation exercises too.
 
 ```rust
-#[async_trait(?Send)]
-pub trait TimeProvider: Clone {
+pub trait TimeProvider: Clone + Send + Sync + 'static {
     async fn sleep(&self, duration: Duration) -> Result<(), TimeError>;
     fn now(&self) -> Duration;
 }

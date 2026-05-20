@@ -32,7 +32,7 @@ The `model` is the most important field. It mirrors what the server should conta
 The `setup()` method runs before any workload's `run()` starts. Use it to locate processes and prepare connections:
 
 ```rust
-#[async_trait(?Send)]
+#[async_trait]
 impl Workload for KvWorkload {
     fn name(&self) -> &str {
         "kv-client"

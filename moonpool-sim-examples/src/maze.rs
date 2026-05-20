@@ -258,7 +258,7 @@ impl Default for MazeWorkload {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Workload for MazeWorkload {
     fn name(&self) -> &str {
         "maze"

@@ -1,6 +1,5 @@
 //! Simulation time provider implementation.
 
-use async_trait::async_trait;
 use std::time::Duration;
 
 use moonpool_core::{TimeError, TimeProvider};
@@ -20,7 +19,6 @@ impl SimTimeProvider {
     }
 }
 
-#[async_trait(?Send)]
 impl TimeProvider for SimTimeProvider {
     async fn sleep(&self, duration: Duration) -> Result<(), TimeError> {
         let sleep_future = self.sim.sleep(duration).map_err(|_| TimeError::Shutdown)?;
@@ -41,7 +39,8 @@ impl TimeProvider for SimTimeProvider {
 
     async fn timeout<F, T>(&self, duration: Duration, future: F) -> Result<T, TimeError>
     where
-        F: std::future::Future<Output = T>,
+        F: std::future::Future<Output = T> + Send,
+        T: Send,
     {
         let sleep_future = self.sim.sleep(duration).map_err(|_| TimeError::Shutdown)?;
 

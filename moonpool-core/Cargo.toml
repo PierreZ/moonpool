@@ -18,7 +18,6 @@ default = ["tokio-providers"]
 tokio-providers = ["dep:tokio", "dep:tokio-util", "rand/thread_rng"]
 
 [dependencies]
-async-trait = "0.1"
 futures = "0.3"
 rand = { version = "0.10", default-features = false }
 serde = { version = "1", features = ["derive"] }

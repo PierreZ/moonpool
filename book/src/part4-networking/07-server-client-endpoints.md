@@ -15,7 +15,7 @@ let server = Calculator::init(&transport);
 // Or well-known tokens (deterministic, no discovery needed):
 let server = Calculator::well_known(&transport, WLTOKEN_CALC);
 
-let handle = server.serve(Rc::new(CalculatorImpl), &providers);
+let handle = server.serve(Arc::new(CalculatorImpl), &providers);
 // Tasks run until handle is dropped or stop() is called
 ```
 
@@ -73,7 +73,7 @@ The `EndpointMap` is the routing table at the heart of `NetTransport`. When a pa
 It uses a **hybrid lookup** strategy:
 
 - **Well-known endpoints** use O(1) array access. The first 64 token indices are reserved for system endpoints. `WellKnownToken::Ping` (index 1) is used for health monitoring, `WellKnownToken::EndpointNotFound` (index 0) handles unroutable messages.
-- **Dynamic endpoints** use a `BTreeMap<UID, Rc<dyn MessageReceiver>>`. These are allocated at runtime for service methods and request-response correlation.
+- **Dynamic endpoints** use a `BTreeMap<UID, Arc<dyn MessageReceiver>>`. These are allocated at runtime for service methods and request-response correlation.
 
 ```rust
 // Well-known: O(1) array lookup
@@ -127,7 +127,7 @@ reply.send(AddResponse { result: req.a + req.b });
 
 `ReplyFuture` implements `Drop` to close its queue when the future is cancelled or goes out of scope. This prevents leaked wakers and ensures the temporary endpoint is cleaned up even if the caller abandons the request. Without this, a killed process would leave orphaned reply queues that hang forever.
 
-Both types are `!Send` because they contain `Rc<RefCell<...>>` internally. This is deliberate. Our entire execution model is single-threaded, and these types are designed to be efficient within that constraint rather than paying the cost of `Arc<Mutex<...>>` for thread safety we will never use.
+Both types are `Send + Sync + 'static`. Internally they hold `Arc<RwLock<...>>` (or `Arc<NetNotifiedQueue<...>>` for the future's reply channel), so you can move them across `tokio::spawn` boundaries, store them in `Arc`-shared state, and compose them with the broader Rust async ecosystem without contortions. The simulation runtime still runs on a single OS thread for determinism (`new_current_thread().build()`), but the **Send bounds are a compile-time API contract, not a runtime cost**. With only one task ever holding a given lock at a time on a single-thread runtime, there is no measurable contention.
 
 ## ReplyError
 

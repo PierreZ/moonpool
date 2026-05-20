@@ -25,7 +25,7 @@ fn test_fast_local_configuration() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -60,7 +60,7 @@ fn test_default_simulation_configuration() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -95,7 +95,7 @@ fn test_custom_latency_configuration() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -140,7 +140,7 @@ fn test_latency_range_sampling() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -194,7 +194,7 @@ fn test_network_randomization_ranges() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {

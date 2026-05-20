@@ -11,7 +11,7 @@ Network operations buffer data and return `Poll::Ready` immediately. Storage ope
 **Fix**: Use the step loop pattern for storage tests:
 
 ```rust
-let handle = tokio::task::spawn_local(async move {
+let handle = tokio::spawn(async move {
     let mut file = provider.open("test.txt", OpenOptions::create_write()).await?;
     file.write_all(b"hello").await?;
     file.sync_all().await
@@ -27,7 +27,7 @@ while !handle.is_finished() {
 
 ## Missing `yield_now()` Calls
 
-Spawned tasks via `spawn_local` do not run until the current task yields. If your workload spawns a task and immediately checks its result without yielding, the task has never run.
+Spawned tasks do not run until the current task yields. If your workload spawns a task and immediately checks its result without yielding, the task has never run.
 
 **Fix**: Call `tokio::task::yield_now().await` after spawning, and in loops where you wait for spawned tasks to complete.
 
@@ -35,7 +35,7 @@ Spawned tasks via `spawn_local` do not run until the current task yields. If you
 
 Moonpool follows a strict no-`unwrap()` policy. In simulation, a panic from `unwrap()` is not a clean error report. It is an uncontrolled crash that may mask the real failure and confuse the assertion system.
 
-**Fix**: Use `Result<T, E>` with `?` everywhere. Map errors with context when needed.
+**Fix**: Use `Result<T, E>` with `?` everywhere. Map errors with context when needed. For `RwLock` poison, use `.expect("RwLock poisoned: prior task panicked")` since poisoning means a prior panic already happened.
 
 ## Direct Tokio Calls
 
@@ -43,17 +43,42 @@ Calling `tokio::time::sleep()`, `tokio::time::timeout()`, or `tokio::spawn()` by
 
 **Fix**: Use provider traits: `time.sleep()`, `time.timeout()`, `task_provider.spawn_task()`.
 
-## Using `LocalSet`
+## Wrong Runtime Flavor
 
-The `tokio::task::LocalSet` runtime conflicts with Moonpool's simulation engine.
+Moonpool runs on a **single OS thread** for determinism. Building a `new_multi_thread()` runtime or using `#[tokio::main]` (which defaults to multi-thread) introduces real parallelism and destroys reproducibility, even though traits are `Send`-bounded.
 
-**Fix**: Use `tokio::runtime::Builder::new_current_thread().build_local()` only.
+**Fix**: Build the runtime with `tokio::runtime::Builder::new_current_thread().build()`. Do not use `LocalSet`, `spawn_local`, or `build_local()` — they are gone from the model.
 
-## Missing `#[async_trait(?Send)]`
+## Using `?Send` on Dyn Traits
 
-Moonpool runs on a single thread. All types are `!Send`. If you derive `#[async_trait]` without the `(?Send)` bound, the compiler will require `Send` on your futures.
+Moonpool's dyn-stored traits (`Process`, `Workload`, `FaultInjector`, `#[service]` handlers) carry `Send + Sync + 'static` supertraits so customer code can share state through `Arc<RwLock<…>>` and `DashMap`. Writing `#[async_trait(?Send)]` on your impl removes the `Send` bound the trait promises and the compiler rejects it.
 
-**Fix**: Always use `#[async_trait(?Send)]` for networking traits.
+**Fix**: Use plain `#[async_trait]` (no `?Send`) on dyn-stored impls. Provider traits use native AFIT with `-> impl Future<…> + Send` and need no attribute at all.
+
+## Holding a Lock Across `.await`
+
+Because spawned futures must be `Send`, any local you hold across an `.await` point must also be `Send`. A `std::sync::MutexGuard` is `!Send`, so holding one across an await fails to compile with a confusing "future is not `Send`" error pointing at the spawn site, not the lock.
+
+**Fix**: Scope the guard tightly. Lock, read or mutate, drop the guard, then `.await`. Prefer `parking_lot::Mutex` or `tokio::sync::Mutex` when you genuinely need to hold state across awaits — and even then, drop the guard before any long-running await.
+
+```rust
+// Bad: guard lives across the await
+let guard = state.lock().expect("RwLock poisoned: prior task panicked");
+network.send(&guard.payload).await?;
+
+// Good: drop the guard first
+let payload = {
+    let guard = state.lock().expect("RwLock poisoned: prior task panicked");
+    guard.payload.clone()
+};
+network.send(&payload).await?;
+```
+
+## Smuggling `!Send` Types Into Spawned Futures
+
+`Rc`, `RefCell`, and raw pointers are `!Send`. Capturing them in a future that you hand to `tokio::spawn` or `task_provider.spawn_task()` poisons the whole future and the compiler refuses it.
+
+**Fix**: Use `Arc<RwLock<…>>` or `Arc<AtomicX>` for shared mutable state. If you have a legitimate single-task data structure, keep it on the stack of a non-spawned future, never close over it in a spawn.
 
 ## Borrow Checker Fights in `world.rs`
 

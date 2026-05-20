@@ -3,7 +3,6 @@
 //! This module provides a unified interface for time operations that works
 //! seamlessly with both simulation time and real wall-clock time.
 
-use async_trait::async_trait;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -32,13 +31,15 @@ pub enum TimeError {
 ///   In simulation, this simulates real-world clock drift. In production, this equals `now()`.
 ///
 /// FDB ref: sim2.actor.cpp:1056-1064
-#[async_trait(?Send)]
-pub trait TimeProvider: Clone {
+pub trait TimeProvider: Clone + Send + Sync + 'static {
     /// Sleep for the specified duration.
     ///
     /// In simulation, this advances simulation time. In real time,
     /// this uses actual wall-clock delays.
-    async fn sleep(&self, duration: Duration) -> Result<(), TimeError>;
+    fn sleep(
+        &self,
+        duration: Duration,
+    ) -> impl std::future::Future<Output = Result<(), TimeError>> + Send;
 
     /// Get exact current time.
     ///
@@ -64,9 +65,14 @@ pub trait TimeProvider: Clone {
     ///
     /// Returns `Ok(result)` if the future completes within the timeout,
     /// or `Err(TimeError::Elapsed)` if it times out.
-    async fn timeout<F, T>(&self, duration: Duration, future: F) -> Result<T, TimeError>
+    fn timeout<F, T>(
+        &self,
+        duration: Duration,
+        future: F,
+    ) -> impl std::future::Future<Output = Result<T, TimeError>> + Send
     where
-        F: std::future::Future<Output = T>;
+        F: std::future::Future<Output = T> + Send,
+        T: Send;
 }
 
 /// Real time provider using Tokio's time facilities.
@@ -95,7 +101,6 @@ impl Default for TokioTimeProvider {
 }
 
 #[cfg(feature = "tokio-providers")]
-#[async_trait(?Send)]
 impl TimeProvider for TokioTimeProvider {
     async fn sleep(&self, duration: Duration) -> Result<(), TimeError> {
         tokio::time::sleep(duration).await;
@@ -114,7 +119,8 @@ impl TimeProvider for TokioTimeProvider {
 
     async fn timeout<F, T>(&self, duration: Duration, future: F) -> Result<T, TimeError>
     where
-        F: std::future::Future<Output = T>,
+        F: std::future::Future<Output = T> + Send,
+        T: Send,
     {
         tokio::time::timeout(duration, future)
             .await

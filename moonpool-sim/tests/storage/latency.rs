@@ -19,10 +19,10 @@ fn test_ip() -> IpAddr {
 async fn run_and_measure_time<F, Fut>(mut sim: SimWorld, f: F) -> Duration
 where
     F: FnOnce(moonpool_sim::SimStorageProvider) -> Fut,
-    Fut: std::future::Future<Output = std::io::Result<()>> + 'static,
+    Fut: std::future::Future<Output = std::io::Result<()>> + Send + 'static,
 {
     let provider = sim.storage_provider(test_ip());
-    let handle = tokio::task::spawn_local(f(provider));
+    let handle = tokio::spawn(f(provider));
 
     while !handle.is_finished() {
         while sim.pending_event_count() > 0 {
@@ -36,11 +36,11 @@ where
 }
 
 /// Create a local tokio runtime for tests.
-fn local_runtime() -> tokio::runtime::LocalRuntime {
+fn local_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime")
 }
 
@@ -249,7 +249,7 @@ fn test_read_latency_scales_with_size() {
 
             // Pre-create file
             let provider = sim.storage_provider(test_ip());
-            let handle = tokio::task::spawn_local(async move {
+            let handle = tokio::spawn(async move {
                 let mut file = provider
                     .open("read_scale.txt", OpenOptions::create_write())
                     .await?;
@@ -269,7 +269,7 @@ fn test_read_latency_scales_with_size() {
             let start_time = sim.current_time();
 
             let provider2 = sim.storage_provider(test_ip());
-            let handle2 = tokio::task::spawn_local(async move {
+            let handle2 = tokio::spawn(async move {
                 let mut file = provider2
                     .open("read_scale.txt", OpenOptions::read_only())
                     .await?;

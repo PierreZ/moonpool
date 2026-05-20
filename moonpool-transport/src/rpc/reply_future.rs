@@ -8,7 +8,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use serde::de::DeserializeOwned;
@@ -17,7 +17,7 @@ use super::net_notified_queue::NetNotifiedQueue;
 use super::reply_error::ReplyError;
 
 /// Callback to unregister the reply endpoint on drop.
-type DropCleanup = Box<dyn FnOnce()>;
+type DropCleanup = Box<dyn FnOnce() + Send + Sync>;
 
 /// Future that resolves when a reply is received from the server.
 ///
@@ -45,7 +45,7 @@ type DropCleanup = Box<dyn FnOnce()>;
 /// [`ReplyError::BrokenPromise`]: super::reply_error::ReplyError::BrokenPromise
 pub struct ReplyFuture<T: DeserializeOwned> {
     /// Queue receiving the reply.
-    queue: Rc<NetNotifiedQueue<Result<T, ReplyError>>>,
+    queue: Arc<NetNotifiedQueue<Result<T, ReplyError>>>,
 
     /// Optional cleanup callback to unregister the reply endpoint from the
     /// transport's endpoint map on drop. Prevents endpoint map leaks when
@@ -55,7 +55,7 @@ pub struct ReplyFuture<T: DeserializeOwned> {
 
 impl<T: DeserializeOwned> ReplyFuture<T> {
     /// Create a new reply future with the given queue.
-    pub fn new(queue: Rc<NetNotifiedQueue<Result<T, ReplyError>>>) -> Self {
+    pub fn new(queue: Arc<NetNotifiedQueue<Result<T, ReplyError>>>) -> Self {
         Self {
             queue,
             drop_cleanup: None,
@@ -67,7 +67,7 @@ impl<T: DeserializeOwned> ReplyFuture<T> {
     /// Used by `prepare_and_send` to unregister the reply endpoint from
     /// the transport's endpoint map, preventing leaks when the future is
     /// dropped without being polled to completion.
-    pub fn with_drop_cleanup(mut self, cleanup: impl FnOnce() + 'static) -> Self {
+    pub fn with_drop_cleanup(mut self, cleanup: impl FnOnce() + Send + Sync + 'static) -> Self {
         self.drop_cleanup = Some(Box::new(cleanup));
         self
     }
@@ -140,8 +140,8 @@ mod tests {
     #[tokio::test]
     async fn test_reply_future_success() {
         let endpoint = test_endpoint();
-        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
-            Rc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
+        let queue: Arc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
+            Arc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
 
         let future = ReplyFuture::new(queue.clone());
 
@@ -158,8 +158,8 @@ mod tests {
     #[tokio::test]
     async fn test_reply_future_error() {
         let endpoint = test_endpoint();
-        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
-            Rc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
+        let queue: Arc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
+            Arc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
 
         let future = ReplyFuture::new(queue.clone());
 
@@ -175,8 +175,8 @@ mod tests {
     #[tokio::test]
     async fn test_reply_future_connection_failed() {
         let endpoint = test_endpoint();
-        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
-            Rc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
+        let queue: Arc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
+            Arc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
 
         let future = ReplyFuture::new(queue.clone());
 
@@ -190,8 +190,8 @@ mod tests {
     #[tokio::test]
     async fn test_reply_future_maybe_delivered() {
         let endpoint = test_endpoint();
-        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
-            Rc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
+        let queue: Arc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
+            Arc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
 
         let future = ReplyFuture::new(queue.clone());
 

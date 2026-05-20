@@ -48,12 +48,11 @@ use super::layer::SimulationLayerHandle;
 /// Narrow `Send + Sync` source of simulation time, suitable for plugging into
 /// the [`SimTime`] formatter.
 ///
-/// Distinct from [`moonpool_core::TimeProvider`] which is `!Send` (single-
-/// threaded, `Rc`-backed) and not dyn-compatible (it has a generic `timeout`
-/// method). Anything that can hand out a `u64` representing "current sim time
-/// in milliseconds" can implement this — typically the active
-/// [`SimulationLayerHandle`], but tests and alternate time sources can
-/// implement it too.
+/// Distinct from [`moonpool_core::TimeProvider`], which is `Send + Sync` but
+/// not dyn-compatible (it has a generic `timeout` method). Anything that can
+/// hand out a `u64` representing "current sim time in milliseconds" can
+/// implement this — typically the active [`SimulationLayerHandle`], but
+/// tests and alternate time sources can implement it too.
 pub trait Clock: Send + Sync {
     /// Current simulation time in milliseconds.
     fn now_ms(&self) -> u64;

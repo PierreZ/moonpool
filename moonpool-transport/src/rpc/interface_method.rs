@@ -5,7 +5,7 @@
 //! for receiving requests; in remote mode it wraps a [`ServiceEndpoint`]
 //! for sending requests.
 
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -89,7 +89,7 @@ impl<Req, Resp> InterfaceMethod<Req, Resp> {
     /// # Panics
     ///
     /// Panics if called on a remote-mode handle.
-    pub fn queue(&self) -> Rc<NetNotifiedQueue<RequestEnvelope<Req>>> {
+    pub fn queue(&self) -> Arc<NetNotifiedQueue<RequestEnvelope<Req>>> {
         match &self.inner {
             InterfaceMethodInner::Local { stream } => stream.queue(),
             InterfaceMethodInner::Remote { .. } => {
@@ -105,8 +105,8 @@ impl<Req, Resp> InterfaceMethod<Req, Resp> {
 
 impl<Req, Resp> InterfaceMethod<Req, Resp>
 where
-    Req: DeserializeOwned + 'static,
-    Resp: Serialize + 'static,
+    Req: DeserializeOwned + Send + Sync + 'static,
+    Resp: Serialize + Send + Sync + 'static,
 {
     /// Receive the next request with its reply promise (local mode only).
     ///
@@ -143,8 +143,8 @@ where
 
 impl<Req, Resp> InterfaceMethod<Req, Resp>
 where
-    Req: Serialize + 'static,
-    Resp: DeserializeOwned + 'static,
+    Req: Serialize + Send + Sync + 'static,
+    Resp: DeserializeOwned + Send + Sync + 'static,
 {
     /// Fire-and-forget delivery (remote mode only).
     ///
@@ -262,7 +262,7 @@ impl<Req, Resp> std::fmt::Debug for InterfaceMethod<Req, Resp> {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
-    use std::rc::Rc;
+    use std::sync::Arc;
 
     use serde::{Deserialize, Serialize};
 
@@ -286,9 +286,9 @@ mod tests {
         Endpoint::new(addr, UID::new(1, 1))
     }
 
-    fn make_handle() -> Rc<dyn TransportHandle> {
+    fn make_handle() -> Arc<dyn TransportHandle> {
         let transport = make_transport();
-        transport as Rc<dyn TransportHandle>
+        transport as Arc<dyn TransportHandle>
     }
 
     #[test]
@@ -315,7 +315,7 @@ mod tests {
         let stream = RequestStream::<TestReq, TestResp>::new(
             endpoint.clone(),
             JsonCodec,
-            Rc::clone(&handle),
+            Arc::clone(&handle),
         );
         let local = InterfaceMethod::local(stream);
         assert_eq!(local.endpoint().token, endpoint.token);

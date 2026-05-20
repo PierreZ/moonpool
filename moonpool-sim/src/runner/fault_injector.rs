@@ -16,7 +16,7 @@
 //!
 //! struct RandomPartition { probability: f64 }
 //!
-//! #[async_trait(?Send)]
+//! #[async_trait]
 //! impl FaultInjector for RandomPartition {
 //!     fn name(&self) -> &str { "random_partition" }
 //!     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
@@ -53,7 +53,7 @@ pub struct ProcessInfo {
     /// Tag registry mapping process IPs to their resolved tags.
     pub tag_registry: TagRegistry,
     /// Shared count of currently dead (killed but not yet restarted) processes.
-    pub dead_count: std::rc::Rc<std::cell::Cell<usize>>,
+    pub dead_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Context for fault injectors — gives access to SimWorld fault injection methods.
@@ -89,7 +89,9 @@ impl FaultContext {
 
     /// Get the number of currently dead (killed but not yet restarted) processes.
     pub fn dead_count(&self) -> usize {
-        self.process_info.dead_count.get()
+        self.process_info
+            .dead_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Create a bidirectional network partition between two IPs.
@@ -215,7 +217,7 @@ impl FaultContext {
                 }
                 self.process_info
                     .dead_count
-                    .set(self.process_info.dead_count.get() + 1);
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let delay_ms = crate::sim::sim_random_range(recovery_delay_range_ms.clone()) as u64;
                 let recovery_delay = Duration::from_millis(delay_ms);
                 self.sim.schedule_process_restart(ip_addr, recovery_delay);
@@ -272,8 +274,8 @@ impl FaultContext {
 /// Fault injectors run concurrently with workloads when `chaos_duration` is set.
 /// They are signaled to stop via `ctx.chaos_shutdown()` when the chaos duration
 /// elapses. After all workloads complete, the system settles before checks run.
-#[async_trait(?Send)]
-pub trait FaultInjector: 'static {
+#[async_trait]
+pub trait FaultInjector: Send + Sync + 'static {
     /// Name of this fault injector for reporting.
     fn name(&self) -> &str;
 
@@ -299,7 +301,7 @@ impl AttritionInjector {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl FaultInjector for AttritionInjector {
     fn name(&self) -> &str {
         "attrition"

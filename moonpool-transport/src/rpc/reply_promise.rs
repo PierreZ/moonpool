@@ -24,9 +24,9 @@
 //! }
 //! ```
 
-use std::cell::RefCell;
 use std::marker::PhantomData;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 use crate::Endpoint;
 use serde::Serialize;
@@ -35,7 +35,7 @@ use super::reply_error::ReplyError;
 use super::transport_handle::EncodeFn;
 
 /// Type alias for the sender function in ReplyPromise.
-type ReplySender = Box<dyn FnOnce(&Endpoint, &[u8])>;
+type ReplySender = Box<dyn FnOnce(&Endpoint, &[u8]) + Send + Sync>;
 
 /// Promise for sending a reply to a request.
 ///
@@ -49,10 +49,10 @@ type ReplySender = Box<dyn FnOnce(&Endpoint, &[u8])>;
 /// The response type `T` is fixed at compile time, ensuring type-safe
 /// request-response pairs.
 ///
-/// # Single-Threaded
+/// # Thread Safety
 ///
-/// Uses `Rc<RefCell<>>` internally - not thread-safe but efficient for
-/// single-threaded async runtimes.
+/// Uses `Arc<RwLock<…>>` internally — safe to clone across threads while
+/// remaining cheap when held within the current-thread simulation runtime.
 ///
 /// # See Also
 ///
@@ -61,7 +61,7 @@ type ReplySender = Box<dyn FnOnce(&Endpoint, &[u8])>;
 ///
 /// [`ReplyFuture`]: super::reply_future::ReplyFuture
 pub struct ReplyPromise<T: Serialize> {
-    inner: Rc<RefCell<ReplyPromiseInner<T>>>,
+    inner: Arc<RwLock<ReplyPromiseInner<T>>>,
 }
 
 struct ReplyPromiseInner<T> {
@@ -93,10 +93,10 @@ impl<T: Serialize> ReplyPromise<T> {
         sender: F,
     ) -> Self
     where
-        F: FnOnce(&Endpoint, &[u8]) + 'static,
+        F: FnOnce(&Endpoint, &[u8]) + Send + Sync + 'static,
     {
         Self {
-            inner: Rc::new(RefCell::new(ReplyPromiseInner {
+            inner: Arc::new(RwLock::new(ReplyPromiseInner {
                 reply_endpoint,
                 encode_fn,
                 sender: Some(Box::new(sender)),
@@ -110,7 +110,10 @@ impl<T: Serialize> ReplyPromise<T> {
     ///
     /// Consumes the promise, preventing double-send.
     pub fn send(self, value: T) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         if inner.fulfilled {
             // Already fulfilled (shouldn't happen due to move semantics)
             return;
@@ -145,7 +148,10 @@ impl<T: Serialize> ReplyPromise<T> {
     ///
     /// Consumes the promise, preventing double-send.
     pub fn send_error(self, error: ReplyError) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         if inner.fulfilled {
             return;
         }
@@ -163,7 +169,10 @@ impl<T: Serialize> ReplyPromise<T> {
 
 impl<T: Serialize> Drop for ReplyPromise<T> {
     fn drop(&mut self) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         if !inner.fulfilled {
             // Send BrokenPromise error to client
             let result: Result<T, ReplyError> = Err(ReplyError::BrokenPromise);
@@ -183,9 +192,9 @@ impl<T: Serialize> Drop for ReplyPromise<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
     use std::net::{IpAddr, Ipv4Addr};
-    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::RwLock;
 
     use crate::{JsonCodec, NetworkAddress, UID};
     use serde::{Deserialize, Serialize};
@@ -209,21 +218,25 @@ mod tests {
 
     #[test]
     fn test_reply_promise_send() {
-        let sent_data: Rc<RefCell<Option<Vec<u8>>>> = Rc::new(RefCell::new(None));
+        let sent_data: Arc<RwLock<Option<Vec<u8>>>> = Arc::new(RwLock::new(None));
         let sent_clone = sent_data.clone();
 
         let promise: ReplyPromise<TestResponse> = ReplyPromise::new(
             test_endpoint(),
             test_encode_fn(),
             move |_endpoint, payload| {
-                *sent_clone.borrow_mut() = Some(payload.to_vec());
+                *sent_clone
+                    .write()
+                    .expect("RwLock poisoned: prior task panicked") = Some(payload.to_vec());
             },
         );
 
         promise.send(TestResponse { value: 42 });
 
         // Verify data was sent
-        let sent = sent_data.borrow();
+        let sent = sent_data
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         assert!(sent.is_some());
 
         // Decode and verify
@@ -235,20 +248,24 @@ mod tests {
 
     #[test]
     fn test_reply_promise_send_error() {
-        let sent_data: Rc<RefCell<Option<Vec<u8>>>> = Rc::new(RefCell::new(None));
+        let sent_data: Arc<RwLock<Option<Vec<u8>>>> = Arc::new(RwLock::new(None));
         let sent_clone = sent_data.clone();
 
         let promise: ReplyPromise<TestResponse> = ReplyPromise::new(
             test_endpoint(),
             test_encode_fn(),
             move |_endpoint, payload| {
-                *sent_clone.borrow_mut() = Some(payload.to_vec());
+                *sent_clone
+                    .write()
+                    .expect("RwLock poisoned: prior task panicked") = Some(payload.to_vec());
             },
         );
 
         promise.send_error(ReplyError::Timeout);
 
-        let sent = sent_data.borrow();
+        let sent = sent_data
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         assert!(sent.is_some());
 
         let payload = sent.as_ref().expect("should have sent payload");
@@ -259,7 +276,7 @@ mod tests {
 
     #[test]
     fn test_reply_promise_broken_on_drop() {
-        let sent_data: Rc<RefCell<Option<Vec<u8>>>> = Rc::new(RefCell::new(None));
+        let sent_data: Arc<RwLock<Option<Vec<u8>>>> = Arc::new(RwLock::new(None));
         let sent_clone = sent_data.clone();
 
         {
@@ -267,14 +284,18 @@ mod tests {
                 test_endpoint(),
                 test_encode_fn(),
                 move |_endpoint, payload| {
-                    *sent_clone.borrow_mut() = Some(payload.to_vec());
+                    *sent_clone
+                        .write()
+                        .expect("RwLock poisoned: prior task panicked") = Some(payload.to_vec());
                 },
             );
             // Promise dropped without send
         }
 
         // Should have sent BrokenPromise error
-        let sent = sent_data.borrow();
+        let sent = sent_data
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         assert!(sent.is_some());
 
         let payload = sent.as_ref().expect("should have sent payload");
@@ -285,7 +306,7 @@ mod tests {
 
     #[test]
     fn test_reply_promise_fulfilled_no_double_send_on_drop() {
-        let send_count: Rc<RefCell<u32>> = Rc::new(RefCell::new(0));
+        let send_count: Arc<RwLock<u32>> = Arc::new(RwLock::new(0));
         let count_clone = send_count.clone();
 
         {
@@ -293,7 +314,9 @@ mod tests {
                 test_endpoint(),
                 test_encode_fn(),
                 move |_endpoint, _payload| {
-                    *count_clone.borrow_mut() += 1;
+                    *count_clone
+                        .write()
+                        .expect("RwLock poisoned: prior task panicked") += 1;
                 },
             );
 
@@ -302,6 +325,11 @@ mod tests {
         }
 
         // Should only have sent once
-        assert_eq!(*send_count.borrow(), 1);
+        assert_eq!(
+            *send_count
+                .read()
+                .expect("RwLock poisoned: prior task panicked"),
+            1
+        );
     }
 }

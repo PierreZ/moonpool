@@ -25,7 +25,7 @@ Chaos engineering finds **symptoms**. The database went down and something bad h
 
 Simulation testing takes the opposite approach. Instead of injecting faults into a real system, you build a simulated world where faults are a first-class feature. The network drops packets because you told it to. Disks corrupt writes because the configuration says they should. Clocks drift because the simulator makes them drift.
 
-Everything runs in a single process, single-threaded, driven by a seeded pseudorandom number generator. The same seed produces the same execution, every time. A failing test is not a flaky signal. It is a reproducible bug with an exact replay.
+Everything runs in a single process on one OS thread, driven by a seeded pseudorandom number generator. The same seed produces the same execution, every time. A failing test is not a flaky signal. It is a reproducible bug with an exact replay.
 
 The advantages follow directly:
 

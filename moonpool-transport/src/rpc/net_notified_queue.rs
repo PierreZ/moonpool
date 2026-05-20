@@ -22,11 +22,11 @@
 //! # FDB Reference
 //! Based on PromiseStream internal queue pattern from fdbrpc.h
 
-use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::RwLock;
 use std::task::{Context, Poll, Waker};
 
 use serde::de::DeserializeOwned;
@@ -44,7 +44,7 @@ use super::transport_handle::DecodeFn;
 ///
 /// # Design
 ///
-/// - Uses `RefCell` for single-threaded runtime (no Mutex overhead)
+/// - Uses `Arc<RwLock<…>>` for thread-safe interior mutability
 /// - Waker-based notification wakes all waiting consumers
 /// - Deserializes on receive (producer side) to fail fast on bad messages
 /// - Pluggable codec via `C: MessageCodec` type parameter
@@ -54,8 +54,8 @@ use super::transport_handle::DecodeFn;
 /// The type `T` is baked in at compile time. Only messages that deserialize
 /// to `T` will be accepted. Invalid messages log an error and are dropped.
 pub struct NetNotifiedQueue<T> {
-    /// Internal state wrapped in RefCell for interior mutability.
-    inner: RefCell<NetNotifiedQueueInner<T>>,
+    /// Internal state wrapped in an `RwLock` for interior mutability.
+    inner: RwLock<NetNotifiedQueueInner<T>>,
 
     /// Endpoint associated with this queue.
     endpoint: Endpoint,
@@ -102,7 +102,7 @@ impl<T> NetNotifiedQueue<T> {
     /// Create a new queue with a type-erased decode function.
     pub fn new(endpoint: Endpoint, decode_fn: DecodeFn<T>) -> Self {
         Self {
-            inner: RefCell::new(NetNotifiedQueueInner::default()),
+            inner: RwLock::new(NetNotifiedQueueInner::default()),
             endpoint,
             decode_fn,
         }
@@ -111,7 +111,7 @@ impl<T> NetNotifiedQueue<T> {
     /// Create a new queue from a concrete codec (convenience).
     pub fn with_codec<C: MessageCodec>(endpoint: Endpoint, codec: C) -> Self
     where
-        T: DeserializeOwned + 'static,
+        T: DeserializeOwned + Send + Sync + 'static,
     {
         Self::new(endpoint, super::transport_handle::make_decode_fn(codec))
     }
@@ -127,27 +127,45 @@ impl<T> NetNotifiedQueue<T> {
     ///
     /// Returns `None` if no message is available.
     pub fn try_recv(&self) -> Option<T> {
-        self.inner.borrow_mut().queue.pop_front()
+        self.inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked")
+            .queue
+            .pop_front()
     }
 
     /// Check if the queue is empty.
     pub fn is_empty(&self) -> bool {
-        self.inner.borrow().queue.is_empty()
+        self.inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .queue
+            .is_empty()
     }
 
     /// Get the number of messages currently in the queue.
     pub fn len(&self) -> usize {
-        self.inner.borrow().queue.len()
+        self.inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .queue
+            .len()
     }
 
     /// Get the total number of messages received.
     pub fn messages_received(&self) -> u64 {
-        self.inner.borrow().messages_received
+        self.inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .messages_received
     }
 
     /// Get the number of messages dropped due to deserialization errors.
     pub fn messages_dropped(&self) -> u64 {
-        self.inner.borrow().messages_dropped
+        self.inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .messages_dropped
     }
 
     /// Mark the queue as closed.
@@ -155,7 +173,10 @@ impl<T> NetNotifiedQueue<T> {
     /// After closing, `recv()` will return `None` when the queue is empty
     /// instead of waiting for more messages.
     pub fn close(&self) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         inner.closed = true;
         // Wake all waiters to let them see the close
         for waker in inner.wakers.drain(..) {
@@ -165,7 +186,10 @@ impl<T> NetNotifiedQueue<T> {
 
     /// Check if the queue is closed.
     pub fn is_closed(&self) -> bool {
-        self.inner.borrow().closed
+        self.inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .closed
     }
 
     /// Close the queue with a specific reason.
@@ -173,7 +197,10 @@ impl<T> NetNotifiedQueue<T> {
     /// Like `close()`, but stores the reason so consumers can distinguish
     /// between different close causes (e.g., Drop vs peer disconnect).
     pub fn close_with_reason(&self, reason: ReplyError) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         inner.close_reason = Some(reason);
         inner.closed = true;
         for waker in inner.wakers.drain(..) {
@@ -185,13 +212,20 @@ impl<T> NetNotifiedQueue<T> {
     ///
     /// Returns `None` if the queue was closed via `close()` (no explicit reason).
     pub fn close_reason(&self) -> Option<ReplyError> {
-        self.inner.borrow().close_reason.clone()
+        self.inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .close_reason
+            .clone()
     }
 
     /// Push a pre-deserialized message directly (for testing).
     #[cfg(test)]
     fn push(&self, message: T) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         inner.queue.push_back(message);
         inner.messages_received += 1;
         // Wake all waiters
@@ -210,11 +244,14 @@ impl<T> NetNotifiedQueue<T> {
     }
 }
 
-impl<T: 'static> MessageReceiver for NetNotifiedQueue<T> {
+impl<T: Send + Sync + 'static> MessageReceiver for NetNotifiedQueue<T> {
     fn receive(&self, payload: &[u8]) {
         match (self.decode_fn)(payload) {
             Ok(message) => {
-                let mut inner = self.inner.borrow_mut();
+                let mut inner = self
+                    .inner
+                    .write()
+                    .expect("RwLock poisoned: prior task panicked");
                 inner.queue.push_back(message);
                 inner.messages_received += 1;
 
@@ -229,7 +266,10 @@ impl<T: 'static> MessageReceiver for NetNotifiedQueue<T> {
                     error = %e,
                     "failed to deserialize message, closing queue"
                 );
-                let mut inner = self.inner.borrow_mut();
+                let mut inner = self
+                    .inner
+                    .write()
+                    .expect("RwLock poisoned: prior task panicked");
                 inner.messages_dropped += 1;
                 // Close the queue so callers can detect the failure
                 // via close_reason() instead of silently losing the message.
@@ -257,7 +297,11 @@ impl<T> Future for RecvFuture<'_, T> {
     type Output = Option<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut inner = self.queue.inner.borrow_mut();
+        let mut inner = self
+            .queue
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
 
         // Try to get a message
         if let Some(message) = inner.queue.pop_front() {
@@ -275,10 +319,10 @@ impl<T> Future for RecvFuture<'_, T> {
     }
 }
 
-/// Wrapper for `Rc<NetNotifiedQueue<T>>` that can be registered with EndpointMap.
-pub struct SharedNetNotifiedQueue<T: 'static>(pub Rc<NetNotifiedQueue<T>>);
+/// Wrapper for `Arc<NetNotifiedQueue<T>>` that can be registered with EndpointMap.
+pub struct SharedNetNotifiedQueue<T: 'static>(pub Arc<NetNotifiedQueue<T>>);
 
-impl<T: 'static> MessageReceiver for SharedNetNotifiedQueue<T> {
+impl<T: Send + Sync + 'static> MessageReceiver for SharedNetNotifiedQueue<T> {
     fn receive(&self, payload: &[u8]) {
         self.0.receive(payload)
     }
@@ -287,7 +331,7 @@ impl<T: 'static> MessageReceiver for SharedNetNotifiedQueue<T> {
 impl<T: 'static> SharedNetNotifiedQueue<T> {
     /// Create a new shared queue.
     pub fn new(endpoint: Endpoint, decode_fn: DecodeFn<T>) -> Self {
-        Self(Rc::new(NetNotifiedQueue::new(endpoint, decode_fn)))
+        Self(Arc::new(NetNotifiedQueue::new(endpoint, decode_fn)))
     }
 
     /// Get a reference to the inner queue.
@@ -295,9 +339,9 @@ impl<T: 'static> SharedNetNotifiedQueue<T> {
         &self.0
     }
 
-    /// Get a clone of the Rc for registration with EndpointMap.
-    pub fn as_receiver(&self) -> Rc<NetNotifiedQueue<T>> {
-        Rc::clone(&self.0)
+    /// Get a clone of the `Arc` for registration with `EndpointMap`.
+    pub fn as_receiver(&self) -> Arc<NetNotifiedQueue<T>> {
+        Arc::clone(&self.0)
     }
 }
 
@@ -307,12 +351,12 @@ impl<T: 'static> SharedNetNotifiedQueue<T> {
 /// without knowing the concrete response type `T`.
 ///
 /// FDB: endStreamOnDisconnect pattern (genericactors.actor.h:332)
-pub trait ReplyQueueCloser {
+pub trait ReplyQueueCloser: Send + Sync {
     /// Close the queue and set the error reason.
     fn close_with_error(&self, reason: ReplyError);
 }
 
-impl<T> ReplyQueueCloser for NetNotifiedQueue<Result<T, ReplyError>> {
+impl<T: Send + Sync> ReplyQueueCloser for NetNotifiedQueue<Result<T, ReplyError>> {
     fn close_with_error(&self, reason: ReplyError) {
         self.close_with_reason(reason);
     }
@@ -496,11 +540,11 @@ mod tests {
 
     #[test]
     fn test_reply_queue_closer_trait() {
-        let queue: Rc<NetNotifiedQueue<Result<String, ReplyError>>> =
-            Rc::new(NetNotifiedQueue::with_codec(test_endpoint(), JsonCodec));
+        let queue: Arc<NetNotifiedQueue<Result<String, ReplyError>>> =
+            Arc::new(NetNotifiedQueue::with_codec(test_endpoint(), JsonCodec));
 
         // Use through trait object
-        let closer: Rc<dyn ReplyQueueCloser> = queue.clone();
+        let closer: Arc<dyn ReplyQueueCloser> = queue.clone();
         closer.close_with_error(ReplyError::MaybeDelivered);
 
         assert!(queue.is_closed());

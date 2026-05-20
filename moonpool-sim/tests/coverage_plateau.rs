@@ -17,7 +17,7 @@ fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
 /// coverage surface is exhausted after the first seed.
 struct ThreeAlwaysHitWorkload;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Workload for ThreeAlwaysHitWorkload {
     fn name(&self) -> &str {
         "client"
@@ -35,7 +35,7 @@ impl Workload for ThreeAlwaysHitWorkload {
 /// `require_all_sometimes=true` should refuse to stop until it has hit.
 struct RareGateWorkload;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Workload for RareGateWorkload {
     fn name(&self) -> &str {
         "client"

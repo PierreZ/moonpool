@@ -19,11 +19,11 @@ fn test_ip() -> IpAddr {
 async fn run_storage_test<F, Fut, T>(mut sim: SimWorld, f: F) -> T
 where
     F: FnOnce(moonpool_sim::SimStorageProvider) -> Fut,
-    Fut: std::future::Future<Output = T> + 'static,
-    T: 'static,
+    Fut: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
 {
     let provider = sim.storage_provider(test_ip());
-    let handle = tokio::task::spawn_local(f(provider));
+    let handle = tokio::spawn(f(provider));
 
     while !handle.is_finished() {
         while sim.pending_event_count() > 0 {
@@ -36,11 +36,11 @@ where
 }
 
 /// Create a local tokio runtime for tests.
-fn local_runtime() -> tokio::runtime::LocalRuntime {
+fn local_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime")
 }
 

@@ -137,7 +137,7 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
                             base_token.adjusted(#idx),
                         ),
                         codec.clone(),
-                        std::rc::Rc::clone(&handle),
+                        std::sync::Arc::clone(&handle),
                     )
                 )
             }
@@ -189,8 +189,8 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
         .collect();
 
     let expanded = quote! {
-        #[async_trait::async_trait(?Send)]
-        #trait_vis trait #handler_name {
+        #[async_trait::async_trait]
+        #trait_vis trait #handler_name: Send + Sync + 'static {
             #(#trait_items)*
         }
 
@@ -222,7 +222,7 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
             /// taken from the transport (set at builder time).
             #[must_use = "interface registers handlers; pass to serve() or store it"]
             pub fn init<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
-                transport: &std::rc::Rc<moonpool_transport::NetTransport<P, C>>,
+                transport: &std::sync::Arc<moonpool_transport::NetTransport<P, C>>,
             ) -> Self {
                 let base_token = transport.allocate_interface_token();
                 Self::init_at(transport, base_token)
@@ -233,7 +233,7 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
             /// Methods are registered at `base_token.adjusted(1)`, `.adjusted(2)`, etc.
             #[must_use = "interface registers handlers; pass to serve() or store it"]
             pub fn init_at<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
-                transport: &std::rc::Rc<moonpool_transport::NetTransport<P, C>>,
+                transport: &std::sync::Arc<moonpool_transport::NetTransport<P, C>>,
                 base_token: moonpool_transport::UID,
             ) -> Self {
                 let address = transport.local_address().clone();
@@ -246,7 +246,7 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
             /// Methods are registered at `UID::well_known(token_id).adjusted(1)`, etc.
             #[must_use = "interface registers handlers; pass to serve() or store it"]
             pub fn well_known<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
-                transport: &std::rc::Rc<moonpool_transport::NetTransport<P, C>>,
+                transport: &std::sync::Arc<moonpool_transport::NetTransport<P, C>>,
                 token_id: u32,
             ) -> Self {
                 Self::init_at(transport, moonpool_transport::UID::well_known(token_id))
@@ -260,10 +260,10 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
             pub fn from_base<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
                 address: moonpool_transport::NetworkAddress,
                 base_token: moonpool_transport::UID,
-                transport: &std::rc::Rc<moonpool_transport::NetTransport<P, C>>,
+                transport: &std::sync::Arc<moonpool_transport::NetTransport<P, C>>,
             ) -> Self {
-                let handle: std::rc::Rc<dyn moonpool_transport::TransportHandle> =
-                    transport.clone() as std::rc::Rc<dyn moonpool_transport::TransportHandle>;
+                let handle: std::sync::Arc<dyn moonpool_transport::TransportHandle> =
+                    transport.clone() as std::sync::Arc<dyn moonpool_transport::TransportHandle>;
                 let codec = transport.codec().clone();
                 Self {
                     #(#from_base_inits,)*
@@ -279,7 +279,7 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
             pub fn client_well_known<P: moonpool_transport::Providers, C: moonpool_transport::MessageCodec>(
                 address: moonpool_transport::NetworkAddress,
                 token_id: u32,
-                transport: &std::rc::Rc<moonpool_transport::NetTransport<P, C>>,
+                transport: &std::sync::Arc<moonpool_transport::NetTransport<P, C>>,
             ) -> Self {
                 Self::from_base(address, moonpool_transport::UID::well_known(token_id), transport)
             }
@@ -317,7 +317,7 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
             ///
             /// Returns the deserializer's error if the wire format is invalid.
             pub fn deserialize_with<'__de, __P, __C, __D>(
-                transport: &std::rc::Rc<moonpool_transport::NetTransport<__P, __C>>,
+                transport: &std::sync::Arc<moonpool_transport::NetTransport<__P, __C>>,
                 deserializer: __D,
             ) -> Result<Self, __D::Error>
             where
@@ -345,7 +345,7 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
             /// Panics if called on a remote-mode interface.
             pub fn serve<H, P: moonpool_transport::Providers>(
                 self,
-                handler: std::rc::Rc<H>,
+                handler: std::sync::Arc<H>,
                 providers: &P,
             ) -> moonpool_transport::ServerHandle
             where
@@ -353,7 +353,7 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
             {
                 assert!(!self.is_remote(), "serve() requires a local-mode interface");
                 use moonpool_transport::TaskProvider as _;
-                let mut close_fns: Vec<Box<dyn Fn()>> = Vec::new();
+                let mut close_fns: Vec<Box<dyn Fn() + Send + Sync>> = Vec::new();
                 #(#serve_close_handles)*
                 #(#serve_spawn_tasks)*
                 moonpool_transport::ServerHandle::new(close_fns)

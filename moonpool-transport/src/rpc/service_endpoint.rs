@@ -18,7 +18,7 @@
 //! ```
 
 use std::marker::PhantomData;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -55,7 +55,7 @@ use crate::error::MessagingError;
 /// `RequestStream<T>` (fdbrpc.h:726-948)
 pub struct ServiceEndpoint<Req, Resp> {
     endpoint: Endpoint,
-    transport: Rc<dyn TransportHandle>,
+    transport: Arc<dyn TransportHandle>,
     encode_envelope: EncodeFn<RequestEnvelope<Req>>,
     decode_reply: DecodeFn<Result<Resp, ReplyError>>,
     _phantom: PhantomData<fn(Req) -> Resp>,
@@ -73,7 +73,7 @@ impl<Req, Resp> Clone for ServiceEndpoint<Req, Resp> {
     fn clone(&self) -> Self {
         Self {
             endpoint: self.endpoint.clone(),
-            transport: Rc::clone(&self.transport),
+            transport: Arc::clone(&self.transport),
             encode_envelope: self.encode_envelope.clone(),
             decode_reply: self.decode_reply.clone(),
             _phantom: PhantomData,
@@ -92,11 +92,11 @@ impl<Req, Resp> ServiceEndpoint<Req, Resp> {
     pub fn new<C: crate::MessageCodec>(
         endpoint: Endpoint,
         codec: C,
-        transport: Rc<dyn TransportHandle>,
+        transport: Arc<dyn TransportHandle>,
     ) -> Self
     where
-        Req: Serialize + 'static,
-        Resp: DeserializeOwned + 'static,
+        Req: Serialize + Send + Sync + 'static,
+        Resp: DeserializeOwned + Send + Sync + 'static,
     {
         Self {
             endpoint,
@@ -115,8 +115,8 @@ impl<Req, Resp> ServiceEndpoint<Req, Resp> {
 
 impl<Req, Resp> ServiceEndpoint<Req, Resp>
 where
-    Req: Serialize + 'static,
-    Resp: DeserializeOwned + 'static,
+    Req: Serialize + Send + Sync + 'static,
+    Resp: DeserializeOwned + Send + Sync + 'static,
 {
     /// Fire-and-forget delivery: send request unreliably with no reply.
     ///
@@ -220,7 +220,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
-    use std::rc::Rc;
+    use std::sync::Arc;
 
     use serde::{Deserialize, Serialize};
 
@@ -248,7 +248,7 @@ mod tests {
         let token = UID::new(0x1234, 0x0001);
         let endpoint = Endpoint::new(addr, token);
 
-        let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+        let handle: Arc<dyn TransportHandle> = transport.clone() as Arc<dyn TransportHandle>;
         let ep: ServiceEndpoint<PingRequest, PingResponse> =
             ServiceEndpoint::new(endpoint, JsonCodec, handle);
 
@@ -267,7 +267,7 @@ mod tests {
             .failure_monitor()
             .set_status(&addr.to_string(), FailureStatus::Failed);
 
-        let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+        let handle: Arc<dyn TransportHandle> = transport.clone() as Arc<dyn TransportHandle>;
         let ep: ServiceEndpoint<PingRequest, PingResponse> =
             ServiceEndpoint::new(endpoint, JsonCodec, handle);
 
@@ -282,15 +282,15 @@ mod tests {
         let token = UID::new(0x9ABC, 0x0001);
         let server_endpoint = Endpoint::new(server_addr.clone(), token);
 
-        let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<PingRequest>>> = Rc::new(
+        let server_queue: Arc<NetNotifiedQueue<RequestEnvelope<PingRequest>>> = Arc::new(
             NetNotifiedQueue::with_codec(server_endpoint.clone(), JsonCodec),
         );
         transport.register(
             token,
-            Rc::clone(&server_queue) as Rc<dyn crate::MessageReceiver>,
+            Arc::clone(&server_queue) as Arc<dyn crate::MessageReceiver>,
         );
 
-        let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+        let handle: Arc<dyn TransportHandle> = transport.clone() as Arc<dyn TransportHandle>;
         let ep: ServiceEndpoint<PingRequest, PingResponse> =
             ServiceEndpoint::new(server_endpoint, JsonCodec, handle);
 

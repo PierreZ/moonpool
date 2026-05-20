@@ -78,7 +78,7 @@ async fn handle_request(
 
 struct HyperServer;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Process for HyperServer {
     fn name(&self) -> &str {
         "server"
@@ -115,7 +115,7 @@ impl Process for HyperServer {
 
 struct HyperClient;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Workload for HyperClient {
     fn name(&self) -> &str {
         "client"
@@ -140,15 +140,17 @@ impl Workload for HyperClient {
                 moonpool_sim::SimulationError::InvalidState(format!("hyper handshake error: {e}"))
             })?;
 
-        tokio::task::spawn_local(async move {
+        // Drive the connection inline alongside requests — hyper's conn future
+        // is !Send so it cannot be spawned on the Send-bounded sim runtime.
+        let driver = async move {
             if let Err(e) = conn.await {
                 tracing::debug!("Connection driver error (expected under chaos): {e}");
             }
-        });
+        };
 
-        // Run all requests with shutdown awareness
         tokio::select! {
             result = send_requests(&mut sender, &server_ip) => result?,
+            _ = driver => {}
             _ = ctx.shutdown().cancelled() => {}
         }
 

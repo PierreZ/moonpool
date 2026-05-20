@@ -16,11 +16,11 @@ fn test_ip() -> IpAddr {
 }
 
 /// Create a local tokio runtime for tests.
-fn local_runtime() -> tokio::runtime::LocalRuntime {
+fn local_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime")
 }
 
@@ -32,7 +32,7 @@ fn fast_sim() -> SimWorld {
 }
 
 /// Helper to run storage operations with simulation stepping.
-async fn step_until_done<T: 'static>(
+async fn step_until_done<T: Send + 'static>(
     sim: &mut SimWorld,
     handle: tokio::task::JoinHandle<std::io::Result<T>>,
 ) -> std::io::Result<T> {
@@ -54,7 +54,7 @@ fn test_write_sync_crash_recovery() {
 
         // Write and sync data
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             let mut file = provider
                 .open("synced_recovery.txt", OpenOptions::create_write())
                 .await?;
@@ -72,7 +72,7 @@ fn test_write_sync_crash_recovery() {
 
         // Recover and verify data is intact
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             let mut file = provider
                 .open("synced_recovery.txt", OpenOptions::read_only())
                 .await?;
@@ -102,7 +102,7 @@ fn test_write_nosync_crash_recovery() {
 
         // Write WITHOUT sync
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             let mut file = provider
                 .open("unsynced_recovery.txt", OpenOptions::create_write())
                 .await?;
@@ -120,7 +120,7 @@ fn test_write_nosync_crash_recovery() {
 
         // Try to recover
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             if !provider.exists("unsynced_recovery.txt").await? {
                 return Ok::<_, std::io::Error>(None);
             }
@@ -154,7 +154,7 @@ fn test_partial_sync_crash_recovery() {
 
         // Write two pieces of data, only sync the first
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             let mut file = provider
                 .open("partial_sync.txt", OpenOptions::create_write())
                 .await?;
@@ -179,7 +179,7 @@ fn test_partial_sync_crash_recovery() {
 
         // Recover
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             let mut file = provider
                 .open("partial_sync.txt", OpenOptions::read_only())
                 .await?;
@@ -211,7 +211,7 @@ fn test_append_multiple_syncs_crash_recovery() {
 
         // Append and sync multiple times
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             let mut file = provider
                 .open("append.txt", OpenOptions::create_write())
                 .await?;
@@ -233,7 +233,7 @@ fn test_append_multiple_syncs_crash_recovery() {
 
         // Recover
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             let mut file = provider
                 .open("append.txt", OpenOptions::read_only())
                 .await?;
@@ -268,7 +268,7 @@ fn test_overwrite_crash_recovery() {
 
         // Create file with initial synced content
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             let mut file = provider
                 .open("overwrite.txt", OpenOptions::create_write())
                 .await?;
@@ -283,7 +283,7 @@ fn test_overwrite_crash_recovery() {
 
         // Overwrite without sync
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             let mut file = provider
                 .open(
                     "overwrite.txt",
@@ -304,7 +304,7 @@ fn test_overwrite_crash_recovery() {
 
         // Recover - should see some content
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             let mut file = provider
                 .open("overwrite.txt", OpenOptions::read_only())
                 .await?;
@@ -331,7 +331,7 @@ fn test_rename_crash_recovery() {
 
         // Write to temp file, sync, rename to final
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             // Write to temp
             let mut file = provider
                 .open("data.tmp", OpenOptions::create_write())
@@ -354,7 +354,7 @@ fn test_rename_crash_recovery() {
 
         // Verify final file exists
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             let temp_exists = provider.exists("data.tmp").await?;
             let final_exists = provider.exists("data.final").await?;
             Ok::<_, std::io::Error>((temp_exists, final_exists))
@@ -383,7 +383,7 @@ fn test_delete_crash_recovery() {
 
         // Create and sync file
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             let mut file = provider
                 .open("to_delete.txt", OpenOptions::create_write())
                 .await?;
@@ -405,8 +405,7 @@ fn test_delete_crash_recovery() {
 
         // Verify file is still deleted
         let provider = sim.storage_provider(test_ip());
-        let handle =
-            tokio::task::spawn_local(async move { provider.exists("to_delete.txt").await });
+        let handle = tokio::spawn(async move { provider.exists("to_delete.txt").await });
 
         let exists = step_until_done(&mut sim, handle)
             .await
@@ -423,7 +422,7 @@ fn test_multiple_files_crash_recovery() {
 
         // Create files, syncing some but not all
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             // File 1 - fully synced
             let mut file = provider
                 .open("file1.txt", OpenOptions::create_write())
@@ -459,7 +458,7 @@ fn test_multiple_files_crash_recovery() {
 
         // Check which files survived
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             let f1 = provider.exists("file1.txt").await?;
             let f2 = provider.exists("file2.txt").await?;
             let f3 = provider.exists("file3.txt").await?;
@@ -487,7 +486,7 @@ fn test_seek_overwrite_crash_recovery() {
 
         // Create file with known content
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             let mut file = provider
                 .open("seek_test.txt", OpenOptions::create_write())
                 .await?;
@@ -515,7 +514,7 @@ fn test_seek_overwrite_crash_recovery() {
 
         // Verify the change persisted
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             let mut file = provider
                 .open("seek_test.txt", OpenOptions::read_only())
                 .await?;
@@ -546,7 +545,7 @@ fn test_set_len_crash_recovery() {
 
         // Create file, extend it, sync
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             let file = provider
                 .open("extended.txt", OpenOptions::create_write())
                 .await?;
@@ -564,7 +563,7 @@ fn test_set_len_crash_recovery() {
 
         // Verify size persisted
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             let file = provider
                 .open("extended.txt", OpenOptions::read_only())
                 .await?;
@@ -589,7 +588,7 @@ fn test_truncate_crash_recovery() {
 
         // Create large file
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             let mut file = provider
                 .open("truncate.txt", OpenOptions::create_write())
                 .await?;
@@ -611,7 +610,7 @@ fn test_truncate_crash_recovery() {
 
         // Verify truncated size
         let provider = sim.storage_provider(test_ip());
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::spawn(async move {
             let file = provider
                 .open("truncate.txt", OpenOptions::read_only())
                 .await?;

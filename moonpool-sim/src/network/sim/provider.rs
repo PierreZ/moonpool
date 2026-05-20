@@ -4,7 +4,6 @@ use crate::buggify;
 use crate::network::ConnectFailureMode;
 use crate::sim::rng::sim_random;
 use crate::{Event, WeakSimWorld};
-use async_trait::async_trait;
 use std::io;
 use tracing::instrument;
 
@@ -32,7 +31,6 @@ impl SimNetworkProvider {
     }
 }
 
-#[async_trait(?Send)]
 impl NetworkProvider for SimNetworkProvider {
     type TcpStream = SimTcpStream;
     type TcpListener = SimTcpListener;
