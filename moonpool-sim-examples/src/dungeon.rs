@@ -12,7 +12,6 @@ use moonpool_sim::{SimContext, SimulationResult, Workload};
 // Inlined dungeon game engine
 // ============================================================================
 
-#[allow(dead_code)]
 mod dungeon_game {
     use rand::RngExt;
 
@@ -74,17 +73,12 @@ mod dungeon_game {
         Won,
         MissingKey,
         Damaged,
-        Healed,
         EnteredRoom,
     }
 
     #[derive(Clone, Debug)]
     pub struct Status {
         pub level: u32,
-        pub alive: bool,
-        pub has_key: bool,
-        pub position: Pos,
-        pub hp: i32,
     }
 
     struct Room {
@@ -397,13 +391,7 @@ mod dungeon_game {
         }
 
         pub fn status(&self) -> Status {
-            Status {
-                level: self.level,
-                alive: self.alive,
-                has_key: self.has_key,
-                position: self.player,
-                hp: self.hp,
-            }
+            Status { level: self.level }
         }
     }
 }
@@ -594,9 +582,6 @@ impl Dungeon {
             StepOutcome::Damaged => {
                 moonpool_sim::assert_sometimes!(true, "survived monster hit");
             }
-            StepOutcome::Healed => {
-                moonpool_sim::assert_sometimes!(true, "picked up potion");
-            }
             StepOutcome::EnteredRoom => {
                 if let Some(room_idx) = self.game.player_room() {
                     moonpool_sim::assert_sometimes_each!(
@@ -637,7 +622,6 @@ impl Dungeon {
             | StepOutcome::Descended
             | StepOutcome::MissingKey
             | StepOutcome::Damaged
-            | StepOutcome::Healed
             | StepOutcome::EnteredRoom => {
                 if self.step_count >= self.max_steps {
                     StepResult::Done
