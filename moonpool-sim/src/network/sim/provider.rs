@@ -62,7 +62,7 @@ impl NetworkProvider for SimNetworkProvider {
             delay,
         );
 
-        let listener = SimTcpListener::new(self.sim.clone(), listener_id, addr.to_string());
+        let listener = SimTcpListener::new(self.sim.clone(), addr.to_string());
         Ok(listener)
     }
 

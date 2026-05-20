@@ -1,4 +1,4 @@
-use super::types::{ConnectionId, ListenerId};
+use super::types::ConnectionId;
 use crate::TcpListenerTrait;
 use crate::sim::state::CloseReason;
 use crate::{Event, WeakSimWorld};
@@ -472,8 +472,6 @@ impl AsyncWrite for SimTcpStream {
 pub struct AcceptFuture {
     sim: WeakSimWorld,
     local_addr: String,
-    #[allow(dead_code)] // May be used in future phases for more sophisticated listener tracking
-    listener_id: ListenerId,
 }
 
 impl Future for AcceptFuture {
@@ -533,19 +531,13 @@ impl Future for AcceptFuture {
 /// Simulated TCP listener
 pub struct SimTcpListener {
     sim: WeakSimWorld,
-    #[allow(dead_code)] // Will be used in future phases
-    listener_id: ListenerId,
     local_addr: String,
 }
 
 impl SimTcpListener {
     /// Create a new simulated TCP listener
-    pub(crate) fn new(sim: WeakSimWorld, listener_id: ListenerId, local_addr: String) -> Self {
-        Self {
-            sim,
-            listener_id,
-            local_addr,
-        }
+    pub(crate) fn new(sim: WeakSimWorld, local_addr: String) -> Self {
+        Self { sim, local_addr }
     }
 }
 
@@ -558,7 +550,6 @@ impl TcpListenerTrait for SimTcpListener {
         AcceptFuture {
             sim: self.sim.clone(),
             local_addr: self.local_addr.clone(),
-            listener_id: self.listener_id,
         }
         .await
     }
