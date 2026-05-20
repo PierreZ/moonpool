@@ -238,10 +238,6 @@ pub struct Peer<P: Providers> {
 
     /// Configuration (owned by Peer)
     config: PeerConfig,
-
-    /// Providers bundle for spawning background actors
-    #[allow(dead_code)]
-    providers: P,
 }
 
 /// Shared state for background actors - each actor accesses different fields
@@ -346,7 +342,6 @@ impl<P: Providers> Peer<P> {
             receive_rx: Some(receive_rx),
             shutdown_tx,
             config,
-            providers,
         }
     }
 
@@ -414,7 +409,6 @@ impl<P: Providers> Peer<P> {
             receive_rx: Some(receive_rx),
             shutdown_tx,
             config,
-            providers,
         }
     }
 
