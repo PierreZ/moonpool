@@ -3,7 +3,6 @@
 //! This module provides task provider abstractions for spawning local tasks
 //! that work with both simulation and real Tokio execution.
 
-use async_trait::async_trait;
 use std::future::Future;
 
 /// Error returned by [`TaskProvider::JoinHandle`] when a task did not complete
@@ -22,39 +21,38 @@ pub enum JoinError {
     Panicked,
 }
 
-/// Provider for spawning local tasks in single-threaded context.
+/// Provider for spawning tasks.
 ///
 /// This trait abstracts task spawning to enable both real tokio tasks
-/// and simulation-controlled task scheduling while maintaining
-/// deterministic execution in single-threaded environments.
-#[async_trait(?Send)]
-pub trait TaskProvider: Clone {
+/// and simulation-controlled task scheduling. The simulation runtime
+/// runs on a single OS thread, but the spawned futures are Send-bounded
+/// so customer call graphs can use `Arc<RwLock<…>>`, `DashMap`, and other
+/// `Send + Sync` primitives without contortion.
+pub trait TaskProvider: Clone + Send + Sync + 'static {
     /// Future returned by [`Self::spawn_task`].
     ///
     /// Resolves with `Ok(())` on normal completion, or a [`JoinError`] if the
     /// task was cancelled or panicked.
-    type JoinHandle: Future<Output = Result<(), JoinError>> + 'static;
+    type JoinHandle: Future<Output = Result<(), JoinError>> + Send + 'static;
 
-    /// Spawn a named task that runs on the current thread.
-    ///
-    /// The task will be executed using spawn_local to maintain
-    /// single-threaded execution guarantees required for simulation.
+    /// Spawn a named task.
     fn spawn_task<F>(&self, name: &str, future: F) -> Self::JoinHandle
     where
-        F: Future<Output = ()> + 'static;
+        F: Future<Output = ()> + Send + 'static;
 
     /// Yield control to allow other tasks to run.
     ///
     /// This is equivalent to tokio::task::yield_now() but abstracted
     /// to enable simulation control and deterministic behavior.
-    async fn yield_now(&self);
+    fn yield_now(&self) -> impl Future<Output = ()> + Send;
 }
 
-/// Tokio-based task provider using spawn_local for single-threaded execution.
+/// Tokio-based task provider.
 ///
-/// This provider creates tasks that run on the current thread using tokio's
-/// spawn_local mechanism, ensuring compatibility with simulation environments
-/// that require deterministic single-threaded execution.
+/// This provider creates tasks via `tokio::task::Builder::spawn`. When used
+/// inside the sim runtime (`new_current_thread().build()`) the runtime runs
+/// every task on a single OS thread, preserving determinism while still
+/// requiring `Send + 'static` futures.
 #[cfg(feature = "tokio-providers")]
 #[derive(Clone, Debug)]
 pub struct TokioTaskProvider;
@@ -87,18 +85,17 @@ impl Future for TokioJoinHandle {
 }
 
 #[cfg(feature = "tokio-providers")]
-#[async_trait(?Send)]
 impl TaskProvider for TokioTaskProvider {
     type JoinHandle = TokioJoinHandle;
 
     fn spawn_task<F>(&self, name: &str, future: F) -> Self::JoinHandle
     where
-        F: Future<Output = ()> + 'static,
+        F: Future<Output = ()> + Send + 'static,
     {
         let task_name = name.to_string();
         let inner = tokio::task::Builder::new()
             .name(name)
-            .spawn_local(async move {
+            .spawn(async move {
                 tracing::trace!("Task {} starting", task_name);
                 future.await;
                 tracing::trace!("Task {} completed", task_name);
@@ -107,7 +104,9 @@ impl TaskProvider for TokioTaskProvider {
         TokioJoinHandle(inner)
     }
 
-    async fn yield_now(&self) {
-        tokio::task::yield_now().await;
+    fn yield_now(&self) -> impl Future<Output = ()> + Send {
+        async move {
+            tokio::task::yield_now().await;
+        }
     }
 }
