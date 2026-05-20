@@ -26,7 +26,6 @@ mod request_stream;
 mod rpc_error;
 mod server_handle;
 mod service_endpoint;
-mod smoother;
 #[cfg(test)]
 mod test_support;
 mod transport_handle;
@@ -47,5 +46,4 @@ pub use request_stream::{RequestEnvelope, RequestStream};
 pub use rpc_error::RpcError;
 pub use server_handle::ServerHandle;
 pub use service_endpoint::ServiceEndpoint;
-pub use smoother::Smoother;
 pub use transport_handle::{DecodeFn, EncodeFn, TransportHandle, make_decode_fn, make_encode_fn};
