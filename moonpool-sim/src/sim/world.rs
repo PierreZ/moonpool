@@ -1647,13 +1647,6 @@ impl SimWorld {
             .push(waker);
     }
 
-    /// Wake any tasks waiting for send buffer space on a connection.
-    #[allow(dead_code)] // May be used for external buffer management
-    fn wake_send_buffer_waiters(&self, connection_id: ConnectionId) {
-        let mut inner = self.inner.borrow_mut();
-        Self::wake_all(&mut inner.wakers.send_buffer_wakers, connection_id);
-    }
-
     // Per-IP-pair base latency methods
 
     /// Get the base latency for a connection pair.
