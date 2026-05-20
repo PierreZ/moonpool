@@ -50,7 +50,7 @@ impl NetworkProvider for SimNetworkProvider {
 
         // Schedule bind completion event to advance simulation time
         let listener_id = sim
-            .create_listener(addr.to_string())
+            .create_listener()
             .map_err(|e| io::Error::other(format!("Failed to create listener: {}", e)))?;
 
         // Schedule an event to simulate the bind delay - this advances simulation time

@@ -52,14 +52,6 @@ pub struct PartitionState {
 /// Internal connection state for simulation
 #[derive(Debug, Clone)]
 pub struct ConnectionState {
-    /// Unique identifier for this connection within the simulation.
-    #[allow(dead_code)]
-    pub id: ConnectionId,
-
-    /// Network address this connection is associated with.
-    #[allow(dead_code)]
-    pub addr: String,
-
     /// Local IP address for this connection
     pub local_ip: Option<IpAddr>,
 
@@ -177,17 +169,7 @@ pub struct ConnectionState {
 
 /// Internal listener state for simulation
 #[derive(Debug)]
-pub struct ListenerState {
-    /// Unique identifier for this listener.
-    #[allow(dead_code)]
-    pub id: ListenerId,
-    /// Network address this listener is bound to.
-    #[allow(dead_code)]
-    pub addr: String,
-    /// Queue of pending connections waiting to be accepted.
-    #[allow(dead_code)]
-    pub pending_connections: VecDeque<ConnectionId>,
-}
+pub struct ListenerState {}
 
 /// Network-related state management
 #[derive(Debug)]

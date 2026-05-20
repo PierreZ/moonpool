@@ -399,19 +399,15 @@ impl SimWorld {
     }
 
     /// Create a listener in the simulation (used by SimNetworkProvider)
-    pub(crate) fn create_listener(&self, addr: String) -> SimulationResult<ListenerId> {
+    pub(crate) fn create_listener(&self) -> SimulationResult<ListenerId> {
         let mut inner = self.inner.borrow_mut();
         let listener_id = ListenerId(inner.network.next_listener_id);
         inner.network.next_listener_id += 1;
 
-        inner.network.listeners.insert(
-            listener_id,
-            ListenerState {
-                id: listener_id,
-                addr,
-                pending_connections: VecDeque::new(),
-            },
-        );
+        inner
+            .network
+            .listeners
+            .insert(listener_id, ListenerState {});
 
         Ok(listener_id)
     }
@@ -593,8 +589,6 @@ impl SimWorld {
         inner.network.connections.insert(
             client_id,
             ConnectionState {
-                id: client_id,
-                addr: client_addr,
                 local_ip: client_ip,
                 remote_ip: server_ip,
                 peer_address: server_addr.clone(),
@@ -625,8 +619,6 @@ impl SimWorld {
         inner.network.connections.insert(
             server_id,
             ConnectionState {
-                id: server_id,
-                addr: server_addr,
                 local_ip: server_ip,
                 remote_ip: client_ip,
                 peer_address: ephemeral_peer_addr,
