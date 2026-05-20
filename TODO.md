@@ -1,389 +1,453 @@
-# Moonpool Transport DX Refactor — Implementation Guide
+# Migration: moonpool from `?Send` to Send-bounded traits
 
-## Goal
+> **For future sessions** — this file is the source of truth. The plan was
+> approved on 2026-05-20. Update the checkboxes as work progresses and commit
+> the TODO.md changes alongside each phase commit so the next session sees
+> current state. If you are picking this up cold, read this entire file first.
 
-Make moonpool's RPC ergonomics match FDB's fdbrpc. After this round: define an interface trait → `transport.serve::<T>()` or `transport.client::<T>(addr)` → call methods on the result. No `&transport` threading, no codec generics on service types, no turbofish, no `time.timeout` wrapping RPCs.
+## Why this migration
 
-## Pre-reading
+moonpool is being evaluated to become the primary simulation library at Clever
+Cloud. Internal customers (e.g. the BDS service) already write production code
+with `Arc<RwLock<…>>`, `Arc<AtomicBool>`, `DashMap`, `tokio::sync::Semaphore`,
+and 11+ `tokio::spawn` sites that require `Send + 'static`. Today moonpool's
+traits are `#[async_trait(?Send)]`, which would force every customer to
+refactor their call graph to `!Send` just to integrate. An internal review
+estimated BDS integration at **3-4/5 effort if moonpool stays `?Send`, dropping
+to 2/5 ("almost purely mechanical") if moonpool migrates to Send.**
 
-- `docs/analysis/foundationdb/layer-3-fdbrpc.md` — sections 2, 4, 5, 6, 7, 8, 9, 14
-- `moonpool-transport/examples/ping_pong.rs` and `calculator.rs` — current DX gaps
-- `moonpool-transport-derive/src/lib.rs` — the `#[service]` proc macro
-- `moonpool-transport/src/rpc/failure_monitor.rs` — existing failure monitor
+Determinism in simulation is non-negotiable.
 
-## Working Rules
+## The key insight
 
-- Land tasks **one at a time**. Each task = one commit, conventional commits with `!` for breaking changes.
-- After each task: `cargo fmt`, `cargo clippy -- -D warnings`, `cargo nextest run`, run relevant examples.
-- After each task: update examples AND book. Stale book sections are not acceptable.
-- Do not batch tasks or "while I'm in here" refactors.
-- Tasks ordered by dependency.
+`Builder::new_current_thread().build()` (not `.build_local()`) returns a
+`Runtime` that:
 
-## Progress
+- Runs all tasks on **exactly one OS thread** (the thread calling `block_on`).
+- Exposes `Runtime::spawn<F: Future + Send + 'static>` — Send-bounded.
+- Polls tasks FIFO from `VecDeque<Notified>` (no LIFO slot,
+  no work-stealing, no thread handoff at `block_on`).
+- `Builder::rng_seed(...)` deterministically seeds internal PRNG.
 
-- [x] Task 0 — Remove load-balance and fan-out
-- [x] Task 1 — Remove simulation code from transport
-- [x] Task 2 — Allocate endpoint tokens dynamically
-- [x] Task 3 — Hold transport inside interface
-- [x] Task 4 — Erase codec generic
-- [x] Task 5 — Unify Server and Client
-- [x] Task 6 — Serializable interfaces
-- [x] Task 7 — Verify broken_promise (verify-only)
-- [x] Task 8 — Verify delivery modes (verify-only)
-- [x] Task 9 — Promote on_failed_for
-- [x] Final book audit
+The current `.build_local()` and the proposed `.build()` differ only by storing
+a `ThreadId` and wrapping in a `!Send` newtype — the underlying scheduler,
+queue, polling order, and drivers are bit-for-bit identical (both call
+`build_current_thread_runtime_components(...)`). Switching to `.build()`
+preserves determinism and unlocks `tokio::spawn` with `Send + 'static`.
 
-## Cross-Cutting Invariants
+**Bonus**: drops the `tokio_unstable` cfg flag (`build_local` is unstable;
+`build` is stable).
 
-1. `ServiceEndpoint<Req, Resp>` must remain cheap-clone and placeable in collections.
-2. Single-threaded runtime: `current_thread` tokio, `Rc`/`RefCell` over `Arc`/`Mutex`.
-3. `TaskProvider` trait stays — it's the simulation seam.
+## Trait style: AFIT for providers, `#[async_trait]` for dyn-stored traits
 
----
+Two styles coexist in this migration, each used where it fits best:
 
-## Task 0 — Remove load-balance and fan-out
+- **Native AFIT (async fn in trait)** for provider traits: `TimeProvider`,
+  `TaskProvider`, `NetworkProvider`, `StorageProvider`, `RandomProvider`. These
+  are used only as concrete types or generic parameters — never as
+  `Box<dyn …>` — so they don't need dyn-compatibility. AFIT removes the
+  `Pin<Box<dyn Future + Send>>` heap allocation that `#[async_trait]` adds to
+  every call. On hot paths like `time.sleep(...)` and
+  `task_provider.spawn_task(...)`, that allocation goes away.
 
-**Rationale:** These couple to the current `ServiceEndpoint<Req, Resp, C>` shape. Will be rebuilt from scratch against the post-refactor API.
+- **`#[async_trait]` (no `?Send`)** for traits stored as `Box<dyn …>`:
+  `Process`, `Workload`, `FaultInjector`, and the `#[service]` macro's handler
+  trait. The orchestrator (`moonpool-sim/src/runner/orchestrator.rs:77,91,120,263,280,281,475`,
+  `moonpool-sim/src/runner/builder.rs:31,205,213,218,299,379,556`) stores
+  these heterogeneously, and native AFIT traits are not dyn-compatible without
+  wrappers. The per-call Box allocation here is acceptable — these methods
+  fire once per setup/run/check cycle, not in inner loops.
 
-**Remove:**
-- `moonpool-transport/src/rpc/load_balance.rs` (LoadBalanceConfig, Alternatives, QueueModel, Distance, AtMostOnce, ModelHolder, load_balance fn)
-- `moonpool-transport/src/rpc/fan_out.rs` (fan_out_quorum, fan_out_all, fan_out_race, and all helper types)
-- Examples: `load_balanced_reads.rs`, `fan_out_quorum_demo.rs`, `fan_out_all_demo.rs`, `fan_out_all_partial_demo.rs`, `fan_out_race_demo.rs`
-- `[[example]]` entries in `moonpool-transport/Cargo.toml`
-- Re-exports from `moonpool-transport/src/rpc/mod.rs` and `moonpool-transport/src/lib.rs`
-- Tests exercising load-balance or fan-out. Rewrite any that tested something else using these as a vehicle.
+**Send inference for AFIT**: every provider trait gets `Self: Send + Sync + 'static`
+as a supertrait. Because `&self` is then `&(Send + Sync)` (i.e. `Send`), and
+because method arguments are required to be `Send`, the compiler infers the
+returned opaque future as `Send` automatically — no return-type notation or
+manual `+ Send` annotations needed at call sites. Callers just bound
+`T: TimeProvider` and the future is usable in `tokio::spawn`.
 
-**Book:** Remove or stub `book/src/part4-networking/11-load-balance-fan-out.md`. Add note: "Load balancing and fan-out primitives will be reintroduced in a future revision against the new transport API."
+**`#[async_trait]` traits also get `Send + Sync + 'static` supertrait**, so
+`Box<dyn Process>` is automatically `Send` without `Box<dyn Process + Send>`
+contortions at use sites.
 
-**Acceptance:** `rg 'load_balance|fan_out|Alternatives|QueueModel|LoadBalanceConfig|AtMostOnce' moonpool-transport/` returns no live code. `cargo build --all-targets` passes. `ping_pong.rs` and `calculator.rs` still run.
+## Conventions (read before every commit)
 
-**Commit:** `chore!: remove load_balance and fan_out primitives`
+- **No GPG signing**: pass `--no-gpg-sign` to every `git commit`. The yubikey
+  will time out across a long commit sequence; we accept unsigned commits for
+  this branch.
+- **Per-crate compile per commit**: after each commit, run only the touched
+  crate's checks. Use the workspace-wide build only at phase boundaries.
+  ```
+  nix develop --command cargo build -p <crate>
+  nix develop --command cargo nextest run -p <crate>
+  ```
+  At phase boundaries (and certainly before pushing):
+  ```
+  nix develop --command cargo fmt
+  nix develop --command cargo clippy -- -D warnings
+  nix develop --command cargo nextest run
+  ```
+- **Interior mutability primitive**: **`std::sync::RwLock`** (not
+  `parking_lot::Mutex`, not `parking_lot::RwLock`). Matches customer BDS
+  conventions (`Arc<RwLock<…>>`) and adds no dep. Read paths use `.read()`,
+  mutation uses `.write()`.
+- **Lock poisoning policy**: lock acquisitions use
+  `.expect("RwLock poisoned: prior task panicked")`. moonpool's "no `unwrap()`"
+  rule targets recoverable errors; poisoning indicates a prior panic and the
+  sim should die anyway. `.expect(...)` makes the intent explicit.
+- **Atomic counters**: replace `Rc<Cell<usize>>` with `Arc<AtomicUsize>`,
+  `Rc<Cell<bool>>` with `Arc<AtomicBool>`. Default to `Ordering::Relaxed` for
+  monotonic counters; use `Ordering::AcqRel` when the value gates a downstream
+  read/write.
+- **Single PR**: `refactor/send-bounded-traits`. All phases land as incremental
+  commits inside that PR — do **not** open multiple PRs.
+- **Commit messages**: conventional commits (`refactor(<crate>): …`,
+  `test(<crate>): …`, `docs: …`). Prefix all migration commits with the
+  affected crate.
+- **Update this TODO.md as you go**: check boxes off and `git add TODO.md`
+  alongside each phase commit. Future sessions read the current state from
+  this file.
 
----
+## Determinism preservation (what is unchanged)
 
-## Task 1 — Remove simulation code from transport
+- Sim runtime is still single-OS-thread → FIFO task poll order.
+- `BinaryHeap<ScheduledEvent>` with sequence-number tiebreaker in
+  `moonpool-sim/src/sim/events.rs:141-194` is unchanged.
+- `NetworkState` uses `BTreeMap` everywhere
+  (`moonpool-sim/src/sim/state.rs:184-210`) — deterministic iteration.
+- Sim-controlled time, seeded ChaCha8Rng (`moonpool-sim/src/sim/rng.rs`),
+  thread-local chaos/buggify/assertion state remain thread-local (safe on the
+  single-thread sim runtime).
+- moonpool-explorer fork happens **between** simulations, not during
+  (`moonpool-sim/src/runner/orchestrator.rs:783,790`) — orthogonal to the
+  Send choice.
 
-**Rationale:** Simulation paths will be rewritten from scratch against the cleaned-up API. Migrating them through this refactor costs more than rewriting.
+## Customer interop pattern (the goal)
 
-**Remove:**
-- All `buggify_with_prob!()` invocations (~12 sites: `peer/config.rs`, `peer/core.rs`, `rpc/net_transport.rs`)
-- All `assert_always!`, `assert_sometimes!`, `assert_reachable!` invocations (~107 sites across: `failure_monitor.rs`, `endpoint_map.rs`, `delivery.rs`, `reply_promise.rs`, `net_transport.rs`, `peer/core.rs`)
-- The `moonpool-sim` dependency from `moonpool-transport/Cargo.toml`
-- Any `cfg(simulation)` / `cfg(feature = "simulation")` conditional code
-- Any simulation transport implementations (if separate from real TCP path)
+After migration, BDS-style integration is mechanical:
 
-**Keep:**
-- `moonpool-transport/src/rpc/test_support.rs` — this is standard unit test infrastructure (MockNetworkProvider using real providers), NOT simulation code
-- The `TaskProvider` trait — it's the simulation seam, not simulation itself
-- Real TCP transport, `TokioProviders`, `JsonCodec`, `#[service]` macro, `FailureMonitor`, both examples
-- `moonpool-transport/src/rpc/smoother.rs` — pure math utility
-
-**Book:** Remove/stub chapters documenting simulation features. Add note: "Deterministic simulation will be reintroduced in a future revision against the new transport API."
-
-**Acceptance:** `rg -i 'buggify|assert_always|assert_sometimes|assert_reachable' moonpool-transport/` returns nothing. `cargo build --all-targets` passes. All remaining tests pass.
-
-**Commit:** `chore!: remove simulation code from transport`
-
----
-
-## Task 2 — Allocate endpoint tokens dynamically per server instance
-
-**Current state:** `#[service(id = 0xCA1C_0000)]` uses hardcoded ID as high bits → every instance has same tokens. Makes all services behave like FDB well-known endpoints.
-
-**Change — Two tiers:**
-
-### Tier A: Dynamic (default)
 ```rust
-#[service]
-trait Calculator {
-    async fn add(&self, req: AddRequest) -> Result<AddResponse, RpcError>;
+// Customer production code (unchanged):
+tokio::spawn(async move { … });
+tokio::time::sleep(Duration::from_secs(1)).await;
+
+// Customer test driver against moonpool:
+task_provider.spawn_task("name", async move { … });
+time_provider.sleep(Duration::from_secs(1)).await;
+```
+
+Customer state stays `Arc<RwLock<…>>` / `DashMap` / `Arc<AtomicBool>`. No
+call-graph refactor. No trait juggling.
+
+## Phases
+
+### Phase 0 — Preflight
+- [ ] `git status` && check current branch. If on `main` or `master`:
+  `git switch -c refactor/send-bounded-traits`. If already on a feature
+  branch, stay on it.
+- [ ] Capture a determinism baseline: run
+  `nix develop --command cargo xtask sim run-all` and save the output to a
+  scratch file (e.g. `/tmp/moonpool-baseline-traces.txt`). Phase 6 compares
+  against this.
+- [ ] Commit this TODO.md to the branch (the `Write` that created it leaves
+  it untracked):
+  ```
+  git add TODO.md && git commit --no-gpg-sign -m "chore: add Send-bounded traits migration TODO"
+  ```
+
+### Phase 1 — moonpool-core: migrate provider traits to native AFIT
+Scope: convert every provider trait from `#[async_trait(?Send)]` to native AFIT
+with `Send + Sync + 'static` supertraits. Drop the `async-trait` dependency
+from `moonpool-core/Cargo.toml` entirely.
+
+For each trait, the pattern is:
+
+```rust
+// Before:
+#[async_trait(?Send)]
+pub trait TimeProvider {
+    async fn sleep(&self, dur: Duration);
 }
-```
-- `transport.serve::<Calculator>()` allocates fresh random UID for first method, adjacent UIDs (offset+1, offset+2...) for rest
-- Interface holds runtime tokens — meaningful only if serialized and shipped to client (Task 6)
-- `Calculator::new(addr, codec)` **removed** — clients obtained only via serialization or shared registry
 
-### Tier B: Well-known (opt-in)
-```rust
-let iface = transport.serve_well_known::<PingPong>(WLTOKEN_PING);
-let client = transport.client_well_known::<PingPong>(addr, WLTOKEN_PING);
-```
-- `WellKnownToken` newtype around `NonZeroU64` from reserved range
-- `WLTOKEN_RESERVED_COUNT = 64` — panic if registration outside range
-- Central registry in `moonpool-transport/src/well_known.rs`
-
-**Files to modify:**
-- `moonpool-transport-derive/src/lib.rs` — drop required `id` attr, remove `INTERFACE_ID` const (or make optional)
-- `moonpool-transport/src/rpc/net_transport.rs` — add `serve::<T>()`, `serve_well_known::<T>(token)`, `client_well_known::<T>(addr, token)` methods with token allocation
-- `moonpool-transport/src/well_known.rs` (new or update existing `moonpool-core/src/well_known.rs`)
-
-**Examples:**
-- Rename `ping_pong.rs` → `well_known_endpoint.rs` using `serve_well_known`/`client_well_known`
-- Rename `calculator.rs` → `dynamic_endpoint.rs` using `serve()` + shared `Rc<RefCell<Option<Calculator>>>` registry
-
-**Acceptance:** Two `Calculator` servers in same process don't collide. Both examples run end-to-end. ServiceEndpoint cheap-clone preserved.
-
-**Commit:** `refactor!: dynamic endpoint tokens with well-known opt-in`
-
----
-
-## Task 3 — Hold the transport inside the interface
-
-**Current state:** Every RPC call passes `&transport`:
-```rust
-calc.add.get_reply(&transport, request)
-stream.recv_with_transport::<_, Resp>(&transport)
-```
-
-**Change:** Bind transport at construction. Interface objects hold `Rc<NetTransport<P>>` internally.
-
-**API target:**
-```rust
-// Server
-let (req, reply) = iface.add.recv().await;       // no &transport, no turbofish
-
-// Client
-let resp = calc.add.get_reply(req).await?;       // no &transport
-```
-
-**Files to modify:**
-- `moonpool-transport/src/rpc/service_endpoint.rs` — add transport field, remove `&transport` from `send()`, `try_get_reply()`, `get_reply()`, `get_reply_unless_failed_for()` signatures
-- `moonpool-transport/src/rpc/request_stream.rs` — rename `recv_with_transport` to `recv`, remove transport param
-- `moonpool-transport-derive/src/lib.rs` — generated structs carry transport handle, `serve()` passes it
-- `moonpool-transport/src/rpc/delivery.rs` — adjust function signatures
-
-**Acceptance:** Zero `&transport` inside `.get_reply()`, `.send()`, `.recv()` args in examples and book. ServiceEndpoint cheap-clone preserved (cloning duplicates the Rc).
-
-**Commit:** `refactor!: bind transport at interface construction`
-
----
-
-## Task 4 — Erase codec generic from user-facing types
-
-**Current state:** `CalculatorClient<C: MessageCodec>` forces turbofish everywhere.
-
-**Change:** Introduce object-safe `TransportHandle` trait. `NetTransport<P>` implements it, performing serialization internally. Service types hold `Rc<dyn TransportHandle>`.
-
-```rust
-pub trait TransportHandle {
-    fn send_unreliable(&self, endpoint: &Endpoint, payload: &[u8]) -> Result<(), MessagingError>;
-    fn send_reliable(&self, endpoint: &Endpoint, payload: &[u8]) -> Result<(), MessagingError>;
-    fn register_handler(&self, token: UID) -> /* receiver */;
-    fn failure_monitor(&self) -> Rc<FailureMonitor>;
-    fn local_address(&self) -> &NetworkAddress;
-    fn allocate_token(&self) -> UID;
-    // ... sleep for on_failed_for
-}
-```
-
-**Key insight:** `NetTransport<P>` already encapsulates both P (providers) and C (codec) internally. The `P` generic serves the simulation seam but users never need to name it. Erasing both P and C behind `dyn TransportHandle` is correct.
-
-**Codec moves to transport construction only:**
-```rust
-let transport = NetTransportBuilder::new(providers)
-    .local_address(addr)
-    .codec(JsonCodec)
-    .build_listening()
-    .await?;
-```
-
-**Files to modify:**
-- `moonpool-transport/src/rpc/service_endpoint.rs` — `ServiceEndpoint<Req, Resp>` (no C)
-- `moonpool-transport/src/rpc/request_stream.rs` — `RequestStream<Req>` (no C)
-- `moonpool-transport/src/rpc/reply_promise.rs` — `ReplyPromise<T>` (no C)
-- `moonpool-transport/src/rpc/net_transport.rs` — implement TransportHandle, add codec field to builder/transport
-- New: `moonpool-transport/src/rpc/transport_handle.rs` — trait definition
-- `moonpool-transport-derive/src/lib.rs` — remove `<C>` from emitted types
-
-**Acceptance:** `cargo expand` on macro output shows no `<C: MessageCodec>` on user-facing structs. Examples have exactly one `JsonCodec` mention (in builder). Zero turbofish.
-
-**Commit:** `refactor!: erase codec generic from user-facing types`
-
----
-
-## Task 5 — Unify Server and Client into single interface type
-
-**Current state:** Macro emits `CalculatorServer<C>` and `CalculatorClient<C>`. FDB uses one `StorageServerInterface` for both.
-
-**Change:** Single struct per service. Construction determines mode:
-```rust
-let iface = transport.serve::<Calculator>();                           // local mode (recv works)
-let iface = transport.client_well_known::<PingPong>(addr, token);     // remote mode (get_reply works)
-```
-
-**Design:** Single field type per method with `is_remote()` predicate. Server methods (`recv()`) work when local; client methods (`get_reply`) work when remote. Runtime check — panic or error if called in wrong mode.
-
-**Files to modify:**
-- `moonpool-transport-derive/src/lib.rs` — emit one struct, merge Server/Client field types
-- `moonpool-transport/src/rpc/service_endpoint.rs` + `request_stream.rs` — may unify into single bidirectional handle type
-- `moonpool-transport/src/rpc/mod.rs` — update re-exports
-
-**Acceptance:** `CalculatorServer` and `CalculatorClient` no longer exist. Both examples use one type (`Calculator` / `PingPong`). ServiceEndpoint cheap-clone preserved.
-
-**Commit:** `refactor!: unify Server and Client into single interface type`
-
----
-
-## Task 6 — Serializable interfaces with endpoint adjustment
-
-**Current state:** ServiceEndpoint already derives Serialize/Deserialize. Missing: compact serialization (address once + base token, offsets derived).
-
-**Change:** Custom Serialize/Deserialize on unified interface:
-1. Serialize: address once + first field's full token. Subsequent fields = token + offset.
-2. Deserialize: reconstruct each field's endpoint via offset. Result is remote-mode.
-3. Demonstrate round-trip in `dynamic_endpoint.rs`:
-```rust
-let iface = transport.serve::<Calculator>();
-let bytes = serde_json::to_vec(&iface)?;
-let received: Calculator = serde_json::from_slice(&bytes)?;
-*registry.borrow_mut() = Some(received);
-```
-
-**Files to modify:**
-- `moonpool-transport-derive/src/lib.rs` — emit custom Serialize/Deserialize impls with adjustment
-- `moonpool-transport/examples/dynamic_endpoint.rs` — add serialize round-trip
-
-**Book:** New chapter: "Interfaces are data" — endpoint adjustment, FDB section 7 analogy.
-
-**Acceptance:** Test: construct server interface → serialize → deserialize → make RPCs. Serialized form smaller than N independent endpoints. `dynamic_endpoint.rs` includes round-trip.
-
-**Commit:** `feat: serializable interfaces with endpoint adjustment`
-
----
-
-## Task 7 — Verify broken_promise on reply handle drop (ALREADY IMPLEMENTED)
-
-**Current state:** `ReplyPromise::drop()` in `reply_promise.rs` already sends `BrokenPromise` if `!self.consumed`. The `ReplyFuture` client-side handles this correctly.
-
-**Scope:** Verify-only. No code changes needed.
-
-**Verify:**
-- `tests/rpc_integration.rs` has `test_broken_promise` covering the server-drop → client-receives-error path
-- Document drop semantics in rustdoc on reply handle and reply future
-- Add book chapter: "Drop semantics and the WaitFailure pattern"
-
-**If missing:** Write integration test: server receives request, drops reply handle → client's `get_reply` resolves to `Err(BrokenPromise)`.
-
-**Acceptance:** Test exists and passes. Drop semantics documented.
-
-**Commit:** `docs: document broken_promise drop semantics` (or skip if already documented)
-
----
-
-## Task 8 — Verify delivery modes (ALREADY IMPLEMENTED)
-
-**Current state:** `ServiceEndpoint` already has all four delivery modes:
-- `send()` — fire-and-forget (service_endpoint.rs)
-- `try_get_reply()` — at-most-once (delivery.rs)
-- `get_reply()` — at-least-once (delivery.rs)
-- `get_reply_unless_failed_for()` — at-least-once + failure timeout (delivery.rs)
-
-**Scope:** Verify-only. Ensure examples demonstrate at least 3 modes and no `time.timeout` wraps RPCs.
-
-**Verify after Tasks 2-5:**
-- Examples use `get_reply_unless_failed_for` where timeouts are needed (not `time.timeout`)
-- At least one example demonstrates `send()` (fire-and-forget)
-- Book "Delivery modes" chapter is accurate
-
-**Acceptance:** All four modes on ServiceEndpoint. Examples demonstrate at least 3. Zero `time.timeout` wrapping RPCs.
-
-**Commit:** Part of example/book updates in earlier tasks (no separate commit needed)
-
----
-
-## Task 9 — Promote on_failed_for to FailureMonitor public API
-
-**Current state:** `on_failed_for()` exists as a private async function in `delivery.rs` (lines 219-228). It calls `fm.on_disconnect_or_failure()` then `time.sleep(duration)`. It is NOT a method on `FailureMonitor`.
-
-**Change:** Move to public method on `FailureMonitor`:
-```rust
-impl FailureMonitor {
-    pub async fn on_failed_for(&self, endpoint: &Endpoint, duration: Duration) {
-        self.on_disconnect_or_failure(endpoint).await;
-        self.time.sleep(duration).await;
-    }
+// After:
+pub trait TimeProvider: Send + Sync + 'static {
+    async fn sleep(&self, dur: Duration);
 }
 ```
 
-**Requires:** `FailureMonitor` holds (or is passed) a `TimeProvider` handle. Currently it does not. Add `Rc<dyn TimeProvider>` field at construction.
+The `Send + Sync + 'static` supertrait means `&self` is `&(Send + Sync)` which
+is `Send`. Combined with `Send` method args, the compiler infers the returned
+opaque future as `Send` automatically. No return-type notation needed.
 
-**Note:** The current private helper does NOT restart on recovery (step 3 of original plan: "if state flips back to Available, restart from step 1"). Decide whether to add retry-loop semantics or keep the simple version. The simple version (sleep after first failure detection) matches what `get_reply_unless_failed_for` currently uses.
+- [ ] `moonpool-core/src/time.rs`: convert `TimeProvider` (line 35) and
+  `TimeProviderExt` (line 98) to native AFIT. Remove the `use async_trait::async_trait`
+  import. Add `Send + Sync + 'static` supertrait to `TimeProvider`. The
+  `TokioTimeProvider` impl just becomes `impl TimeProvider for TokioTimeProvider`
+  (no `#[async_trait]` attribute, body unchanged).
+- [ ] `moonpool-core/src/task.rs`: convert `TaskProvider` (line 30) and
+  `TaskProviderExt` (line 90) to native AFIT with the supertrait. In
+  `TokioTaskProvider::spawn_task` (line 94-108), replace
+  `tokio::task::Builder::new().spawn_local(...)` with
+  `tokio::task::Builder::new().spawn(...)`. Update the bound on `F` from
+  `F: Future<Output = ()> + 'static` to
+  `F: Future<Output = ()> + Send + 'static`. Update `Self::JoinHandle`
+  associated-type bound to `Future<Output = Result<(), JoinError>> + Send + 'static`.
+- [ ] `moonpool-core/src/network.rs`: convert `NetworkProvider` (line 16),
+  `TcpListener` (line 31), `TcpStream` (line 68), and the stream trait at
+  line 91 to native AFIT with the supertrait.
+- [ ] `moonpool-core/src/storage.rs`: convert `StorageProvider` (line 100)
+  and file traits (lines 119, 155, 206) to native AFIT with the supertrait.
+- [ ] `moonpool-core/Cargo.toml`: remove the `async-trait` dependency entry.
+- [ ] Compile per-crate:
+  `nix develop --command cargo build -p moonpool-core && nix develop --command cargo nextest run -p moonpool-core`
+- [ ] Commit:
+  `git add -u && git commit --no-gpg-sign -m "refactor(core): migrate provider traits to native AFIT"`
 
-**Files to modify:**
-- `moonpool-transport/src/rpc/failure_monitor.rs` — add `on_failed_for()` method, add TimeProvider field
-- `moonpool-transport/src/rpc/delivery.rs` — replace private helper with `fm.on_failed_for()` call
-- `moonpool-transport/src/rpc/net_transport.rs` — pass TimeProvider when constructing FailureMonitor
+### Phase 2 — moonpool-sim runner + builder
+Scope: keep `#[async_trait]` on dyn-stored traits (`Process`, `Workload`,
+`FaultInjector`) but drop `?Send` and add `Send + Sync + 'static` supertraits.
+Switch the runtime constructor.
 
-**Acceptance:** `on_failed_for` available on FailureMonitor. delivery.rs uses it. Test: poison server address → `get_reply_unless_failed_for(100ms)` → `Err(MaybeDelivered)` after ~100ms.
+For each dyn-stored trait, the pattern is:
 
-**Commit:** `feat: add on_failed_for to failure monitor`
-
----
-
-## Final Book Audit (after all tasks)
-
-- Every code sample compiles against current API
-- Chapters referencing load-balance, fan-out, simulation are rewritten or deleted
-- TOC reflects: well-known vs dynamic endpoints, four delivery modes, failure monitor, drop semantics, interface transmission
-- Add "What's next" section noting load-balance, fan-out, and simulation return in future revisions
-
-**Commit:** `docs: post-refactor book audit and rewrite`
-
----
-
-## Final "Dream" Shape
-
-After all tasks, `well_known_endpoint.rs`:
 ```rust
-#[service]
-trait PingPong {
-    async fn ping(&self, req: PingRequest) -> Result<PingResponse, RpcError>;
-}
+// Before:
+#[async_trait(?Send)]
+pub trait Process: 'static { ... }
 
-async fn run_server(transport: Rc<NetTransport>) -> Result<()> {
-    let iface = transport.serve_well_known::<PingPong>(WLTOKEN_PING);
-    loop {
-        let (req, reply) = iface.ping.recv().await;
-        reply.send(PingResponse { seq: req.seq, echo: format!("pong: {}", req.message) });
-    }
-}
-
-async fn run_client(transport: Rc<NetTransport>) -> Result<()> {
-    let iface = transport.client_well_known::<PingPong>(SERVER_ADDR, WLTOKEN_PING);
-    for seq in 0..5 {
-        let resp = iface.ping.get_reply(PingRequest { seq, message: format!("hello {seq}") }).await?;
-        println!("got {resp:?}");
-    }
-    Ok(())
-}
+// After:
+#[async_trait]
+pub trait Process: Send + Sync + 'static { ... }
 ```
 
-And `dynamic_endpoint.rs`:
-```rust
-#[service]
-trait Calculator {
-    async fn add(&self, req: AddRequest) -> Result<AddResponse, RpcError>;
-    async fn sub(&self, req: SubRequest) -> Result<SubResponse, RpcError>;
-}
+The `Send + Sync` supertrait means `Box<dyn Process>` is automatically
+`Send + Sync` — no `Box<dyn Process + Send>` annotations needed at use sites.
 
-async fn main_demo(transport: Rc<NetTransport>) -> Result<()> {
-    let registry: Rc<RefCell<Option<Calculator>>> = Rc::new(RefCell::new(None));
+- [ ] `moonpool-sim/src/runner/process.rs:44-45` — change
+  `#[async_trait(?Send)] / pub trait Process: 'static` to
+  `#[async_trait] / pub trait Process: Send + Sync + 'static`.
+- [ ] `moonpool-sim/src/runner/workload.rs:37-38` — same change for `Workload`.
+- [ ] `moonpool-sim/src/runner/fault_injector.rs:275-276` — same change for
+  `FaultInjector`. Also update lines 275, 302 if they carry their own
+  `#[async_trait(?Send)]` attributes.
+- [ ] `moonpool-sim/src/runner/builder.rs:1208, 1236` — drop `?Send` from
+  `TestableProcess` / `TestableWorkload`; add `Send + Sync + 'static`
+  supertraits.
+- [ ] `moonpool-sim/src/runner/builder.rs:770-774` — replace
+  `.build_local(Default::default())` with `.build()`. Drop the `LocalOptions`
+  import if present.
+- [ ] Note: workspace will not compile cleanly until Phase 3 lands —
+  do **not** try to compile yet. Stage and continue.
+- [ ] Commit (workspace red is acceptable here — single PR, will go green by
+  end of Phase 3):
+  `git add -u && git commit --no-gpg-sign -m "refactor(sim): drop ?Send from Process/Workload/FaultInjector, switch to build()"`
 
-    let server_transport = transport.clone();
-    let server_registry = registry.clone();
-    spawn_task("calc_server", async move {
-        let iface = server_transport.serve::<Calculator>();
-        let bytes = serde_json::to_vec(&iface).unwrap();
-        let received: Calculator = serde_json::from_slice(&bytes).unwrap();
-        *server_registry.borrow_mut() = Some(received);
-        // handle requests via iface...
-    });
+### Phase 3 — moonpool-sim internals
+Scope: swap interior mutability in the sim core; replace spawn_local.
 
-    let calc = registry.borrow().clone().expect("interface published");
-    let resp = calc.add.get_reply(AddRequest { a: 2, b: 3 }).await?;
-    println!("2 + 3 = {}", resp.value);
-    Ok(())
-}
-```
+- [ ] `moonpool-sim/src/sim/world.rs:145` — `SimWorld.inner: Rc<RefCell<SimInner>>`
+  → `Arc<RwLock<SimInner>>`.
+- [ ] `moonpool-sim/src/sim/world.rs:2382` — `SimHandle.inner: Weak<RefCell<…>>`
+  → `Weak<RwLock<SimInner>>`.
+- [ ] Fix every borrow site in `moonpool-sim/src/sim/world.rs` and downstream:
+  - `inner.borrow()` → `inner.read().expect("RwLock poisoned: prior task panicked")`
+  - `inner.borrow_mut()` → `inner.write().expect("RwLock poisoned: prior task panicked")`
+  - Watch for the NLL field-disjoint pattern: `RefCell` allowed two borrows
+    of disjoint fields under NLL; `RwLock` is whole-object. If you hit it,
+    drop the guard early (`drop(guard);`) before the next acquire, or split
+    the operation so both fields are touched under one guard. The hot
+    orchestration loop in `moonpool-sim/src/sim/world.rs` (search for
+    `connections.get_mut` near event_queue scheduling) is the known pinch
+    point — extract values into locals before re-acquiring.
+- [ ] `moonpool-sim/src/runner/orchestrator.rs:101, 114, 134` —
+  `Rc<Cell<usize>>` → `Arc<AtomicUsize>`. Use
+  `.load(Ordering::Relaxed)` for reads and `.fetch_add(1, Ordering::Relaxed)`
+  for increments.
+- [ ] `moonpool-sim/src/runner/orchestrator.rs:234, 361, 411, 493, 509, 746` —
+  replace each `tokio::task::spawn_local(...)` with `tokio::spawn(...)`. Every
+  captured value in those closures must be `Send + 'static`. If a closure
+  captures `SimTcpStream` or similar, defer that fix to Phase 6 and tag the
+  commit message; otherwise this phase covers it.
+- [ ] `moonpool-sim/src/sim/world.rs:370-371` — review `task_provider()`
+  returning `TokioTaskProvider`; should still work.
+- [ ] Compile per-crate:
+  `nix develop --command cargo build -p moonpool-sim && nix develop --command cargo nextest run -p moonpool-sim`
+- [ ] Commit (split if useful):
+  `git add -u && git commit --no-gpg-sign -m "refactor(sim): swap Rc<RefCell<SimInner>> for Arc<RwLock<SimInner>>"`
+  `git add -u && git commit --no-gpg-sign -m "refactor(sim): swap spawn_local for spawn in orchestrator"`
 
-No `&transport` in call sites. No codec generics. No turbofish. No `time.timeout`. Reader sees the FDB shape.
+### Phase 4 — moonpool-transport (bottom-to-top)
+Scope: 115 `Rc<…>` + 20 `RefCell<…>` sites. Process **leaf-first** in the
+dependency graph; each commit is self-contained and compiles.
+
+For each sub-step: `Rc::new(x)` → `Arc::new(x)`, `RefCell::new(x)` →
+`RwLock::new(x)`, borrows as in Phase 3. Compile only `moonpool-transport`
+between commits.
+
+- [ ] **4.1 Primitives**: `moonpool-transport/src/rpc/interface_method.rs`,
+  `rpc/endpoint_map.rs`, `rpc/request.rs`.
+  - `cargo build -p moonpool-transport`
+  - Commit: `refactor(transport): Rc->Arc in rpc primitives`
+- [ ] **4.2 Promises / futures**: `rpc/reply_promise.rs:7, 64`,
+  `rpc/reply_future.rs:10`.
+  - Commit: `refactor(transport): Rc->Arc in reply promise/future`
+- [ ] **4.3 Queues / monitors**: `rpc/net_notified_queue.rs:8`,
+  `rpc/failure_monitor.rs:13, 59, 92`.
+  - Commit: `refactor(transport): Rc->Arc in queues/monitors`
+- [ ] **4.4 Endpoint / stream layer**: `rpc/service_endpoint.rs:8`,
+  `rpc/request_stream.rs:26, 51, 54`, `rpc/transport_handle.rs:9`.
+  - Commit: `refactor(transport): Rc->Arc in endpoint/stream layer`
+- [ ] **4.5 Transport orchestrator**:
+  `rpc/delivery.rs:8, 85, 135, 149`,
+  `rpc/net_transport.rs:50, 54, 132, 149, 157`.
+  - Note: `delivery.rs` has 3 `spawn_local` sites (lines 85, 135, 149) —
+    convert to `spawn`. Captures must be Send.
+  - `failure_monitor.rs:59, 92` — 2 more `spawn_local` sites; same
+    treatment.
+  - Commit: `refactor(transport): Rc->Arc in net_transport/delivery, spawn_local->spawn`
+- [ ] **4.6 Peer**: `peer/core.rs:21, 224, 227, 273`.
+  - Commit: `refactor(transport): Rc->Arc in peer/core`
+- [ ] **4.7 `#[service]` proc-macro**: in
+  `moonpool-transport-derive/src/lib.rs:192`, change
+  `#[async_trait::async_trait(?Send)]` to `#[async_trait::async_trait]` on
+  the emitted handler trait. Decide whether the emitted trait needs a
+  `Send + Sync + 'static` supertrait by checking how moonpool-transport uses
+  it (search for `dyn .*Handler` or generic bounds on the handler type). If
+  stored as `Box<dyn …>`, add the supertrait; if always generic, leave it
+  off (impls supply their own bounds).
+  - Commit: `refactor(transport-derive): drop ?Send from #[service] handler trait`
+- [ ] **4.8 Tests**: `rpc/test_support.rs:7`, `tests/rpc_integration.rs`,
+  any other transport tests under `moonpool-transport/tests/`.
+  - Commit: `test(transport): migrate to Arc-based handles`
+- [ ] Phase-end compile:
+  `nix develop --command cargo build -p moonpool-transport && nix develop --command cargo nextest run -p moonpool-transport`
+
+### Phase 5 — moonpool-explorer mmap newtype
+Scope: wrap raw `*mut` mmap pointers in a Send-safe newtype.
+
+- [ ] Add `moonpool-explorer/src/shared_ptr.rs`:
+  ```rust
+  // SAFETY: the wrapped pointer references memory allocated via
+  // mmap(MAP_SHARED | MAP_ANONYMOUS). The mapping is intentionally shared
+  // across threads and across forked processes; the pointer outlives all
+  // accesses (mapping is freed only on explorer cleanup). Concurrent reads
+  // and writes through this pointer go through whatever synchronization the
+  // shared structure provides (atomics for SharedStats, etc.).
+  #[repr(transparent)]
+  pub struct SharedPtr<T: ?Sized>(pub *mut T);
+
+  unsafe impl<T: ?Sized> Send for SharedPtr<T> {}
+  unsafe impl<T: ?Sized> Sync for SharedPtr<T> {}
+
+  impl<T: ?Sized> Clone for SharedPtr<T> { fn clone(&self) -> Self { SharedPtr(self.0) } }
+  impl<T: ?Sized> Copy for SharedPtr<T> {}
+  ```
+  Re-export from `moonpool-explorer/src/lib.rs`.
+- [ ] `moonpool-explorer/src/context.rs:26-50` — replace the 9 raw `*mut`
+  fields (`Cell<*mut SharedStats>`, etc.) with
+  `Cell<SharedPtr<…>>`. Update every read/write of `.get()` / `.set()`
+  accordingly.
+- [ ] `moonpool-explorer/src/sancov.rs:296-304` — replace the 3 raw `*mut`
+  fields the same way.
+- [ ] Compile per-crate:
+  `nix develop --command cargo build -p moonpool-explorer && nix develop --command cargo nextest run -p moonpool-explorer`
+- [ ] Commit: `refactor(explorer): wrap mmap pointers in SharedPtr newtype`
+
+### Phase 6 — Tests, examples, final validation
+- [ ] Migrate user-side `Process`/`Workload` impls to drop `?Send` (no
+  `#[async_trait(?Send)]` left). For each: swap any `Rc/RefCell/Cell` to
+  `Arc/RwLock/Atomic`. Files:
+  - `moonpool-sim/tests/reboot.rs` — 10 impls at lines 23, 65, 108, 150, 176,
+    241, 282, 327, 361, 406
+  - `moonpool-sim/tests/hyper_http.rs:81, 118`
+  - `moonpool-sim/tests/coverage_plateau.rs:20, 38`
+  - `moonpool-sim/tests/exploration/tests.rs:25, 40, 62, 83, 101, 135`
+- [ ] Commit: `test(sim): migrate Process/Workload impls to Send bounds`
+- [ ] `moonpool-sim-examples/src/axum_web.rs:251` — the `spawn_local` capture
+  holds a `SimTcpStream`. With Phase 3 done, `SimTcpStream` is Send. Convert
+  to `tokio::spawn`. If hyper's API in this path requires `!Send` somewhere,
+  isolate and document; otherwise full migrate.
+- [ ] Commit: `refactor(examples): migrate axum_web to Send-bounded spawning`
+- [ ] Update CLAUDE.md: remove the `Networking: #[async_trait(?Send)]` line
+  from "Core Constraints"; add a note that traits are Send-bounded and the
+  sim runtime uses `new_current_thread().build()`. Also update the "No
+  LocalSet usage" line — that's now stricter (no `spawn_local` at all).
+- [ ] Update relevant chapters in `book/src/`. Search for `?Send` and
+  `spawn_local` and revise. Build the book:
+  `nix develop --command mdbook build book/`
+- [ ] Commit: `docs: update for Send-bounded traits`
+- [ ] Workspace-wide checks:
+  ```
+  nix develop --command cargo fmt
+  nix develop --command cargo clippy -- -D warnings
+  nix develop --command cargo nextest run
+  ```
+- [ ] Determinism verification: run
+  `nix develop --command cargo xtask sim run-all` and compare seed traces
+  against the Phase 0 baseline. Must be byte-identical (or, if some test
+  output includes timestamps/PIDs, identical modulo those known fields).
+  Any divergence is a stop-the-line bug — investigate before merging.
+- [ ] Perf spot-check: pick one RPC-heavy chaos test (e.g. `bit_flip` or
+  `clock_drift`) and time it before/after. Target <10% slowdown from
+  `Arc<RwLock>` overhead.
+- [ ] `assert_sometimes!` coverage: compare hit set vs baseline. Coverage
+  should not regress.
+- [ ] Open the PR (manual; the user will trigger when ready). Title:
+  `refactor: migrate moonpool to Send-bounded traits`.
+
+## Known risk areas
+
+- **NLL → RwLock friction** in `moonpool-sim/src/sim/world.rs` orchestration
+  loop. The CLAUDE.md note documents the existing pattern: *"`conn` from
+  `inner.network.connections.get_mut()` can coexist with
+  `inner.event_queue.schedule()` (disjoint fields)"*. That pattern only works
+  with `RefCell` + NLL. With `RwLock` you'll need a write guard that covers
+  both, or extract `conn` data into locals, drop the guard, then re-acquire.
+  Plan to refactor this hot path carefully — small mistakes here are perf
+  cliffs (constant lock thrashing).
+- **`SimTcpStream` Send-ness**: hyper / axum API surface. If `SimTcpStream`
+  ends up `Send` (Phase 3 swap puts its inner state behind `Arc<RwLock>`),
+  the `spawn_local` in `axum_web.rs:251` becomes `spawn`. Verify hyper's
+  service trait accepts a Send stream in this version of the dep.
+- **`tokio::sync::RwLock` for cross-await guards**: `std::sync::RwLock`
+  guards must **not** be held across `.await`. If a site genuinely needs to
+  hold a guard across an await (rare), switch that one site to
+  `tokio::sync::RwLock` and document why.
+- **`tokio_unstable` removal**: once `build_local()` is gone, audit CI for any
+  `--cfg tokio_unstable` flag and remove it. Check `nix` flake, `xtask`
+  Cargo args, and `.cargo/config.toml`.
+- **Lock poisoning under sim panics**: when a test panic occurs inside a
+  borrow, the `RwLock` becomes poisoned and subsequent `.expect(…)` calls
+  panic too. That's intentional (a poisoned lock means broken invariants),
+  but if the orchestrator is catching panics and continuing, this changes
+  behavior — verify.
+
+## Final verification checklist
+
+- [ ] `cargo fmt` clean
+- [ ] `cargo clippy -- -D warnings` clean
+- [ ] `cargo nextest run` (full workspace) green
+- [ ] `cargo xtask sim run-all` traces byte-identical to Phase 0 baseline
+- [ ] `assert_sometimes!` coverage unchanged
+- [ ] Perf <10% regression on one RPC-heavy chaos seed
+- [ ] CLAUDE.md and `book/src/` updated
+- [ ] No `?Send` left in the workspace:
+  `rg "async_trait\(\?Send\)" -g '!target/'` returns nothing
+- [ ] No `spawn_local` left in non-test, non-example code:
+  `rg "spawn_local" -g '!target/' -g '!*/tests/*' -g '!*/examples/*'`
+  returns nothing
+- [ ] No `build_local` left:
+  `rg "build_local" -g '!target/'` returns nothing
+- [ ] No `tokio_unstable` cfg left:
+  `rg "tokio_unstable" -g '!target/'` returns nothing
+- [ ] `async-trait` dep removed from `moonpool-core/Cargo.toml`:
+  `rg "^async-trait" moonpool-core/Cargo.toml` returns nothing.
+  (`async-trait` remains in `moonpool-sim` and `moonpool-transport-derive`
+  for the dyn-stored traits — that's intentional.)
+- [ ] No `#[async_trait]` left in moonpool-core source:
+  `rg "async_trait" moonpool-core/src/` returns nothing.
+
+## When this TODO.md is done
+
+- Delete this file (`git rm TODO.md`) in a final commit:
+  `git commit --no-gpg-sign -m "chore: remove migration TODO (work complete)"`
+- The branch is ready for PR review.
