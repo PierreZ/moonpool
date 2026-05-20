@@ -135,23 +135,6 @@ where
             }
         }
     }
-
-    /// Try to receive a request without blocking, using a custom sender (local mode only).
-    ///
-    /// # Panics
-    ///
-    /// Panics if called on a remote-mode handle.
-    pub fn try_recv_with_sender<F>(&self, sender: F) -> Option<(Req, ReplyPromise<Resp>)>
-    where
-        F: FnOnce(&Endpoint, &[u8]) + 'static,
-    {
-        match &self.inner {
-            InterfaceMethodInner::Local { stream } => stream.try_recv_with_sender(sender),
-            InterfaceMethodInner::Remote { .. } => {
-                panic!("InterfaceMethod::try_recv_with_sender() called on a remote endpoint")
-            }
-        }
-    }
 }
 
 // ============================================================================
