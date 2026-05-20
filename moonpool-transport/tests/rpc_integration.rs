@@ -7,7 +7,7 @@
 //! - Client receiving via ReplyFuture
 
 use std::net::{IpAddr, Ipv4Addr};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use moonpool_transport::{
     Endpoint, FailureMonitor, FailureStatus, JsonCodec, MessagingError, NetTransport,
@@ -61,7 +61,6 @@ impl std::marker::Unpin for DummyStream {}
 
 struct DummyListener;
 
-#[async_trait::async_trait(?Send)]
 impl moonpool_transport::TcpListenerTrait for DummyListener {
     type TcpStream = DummyStream;
 
@@ -74,7 +73,6 @@ impl moonpool_transport::TcpListenerTrait for DummyListener {
     }
 }
 
-#[async_trait::async_trait(?Send)]
 impl NetworkProvider for MockNetworkProvider {
     type TcpStream = DummyStream;
     type TcpListener = DummyListener;
@@ -138,7 +136,7 @@ fn test_address() -> NetworkAddress {
     NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500)
 }
 
-fn create_transport() -> Rc<NetTransport<MockProviders>> {
+fn create_transport() -> Arc<NetTransport<MockProviders>> {
     moonpool_transport::NetTransportBuilder::new(MockProviders::new())
         .local_address(test_address())
         .build()
@@ -179,9 +177,9 @@ async fn test_basic_ping_pong() {
     let server_endpoint = Endpoint::new(test_address(), server_token);
 
     // Create request stream for server
-    let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+    let handle: Arc<dyn TransportHandle> = transport.clone() as Arc<dyn TransportHandle>;
     let request_stream: RequestStream<PingRequest, PingResponse> =
-        RequestStream::new(server_endpoint.clone(), JsonCodec, Rc::clone(&handle));
+        RequestStream::new(server_endpoint.clone(), JsonCodec, Arc::clone(&handle));
 
     // Register server queue with transport
     transport.register(server_token, request_stream.queue());
@@ -239,9 +237,9 @@ async fn test_multiple_requests() {
     let server_token = UID::new(0xAAAA, 0xBBBB);
     let server_endpoint = Endpoint::new(test_address(), server_token);
 
-    let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+    let handle: Arc<dyn TransportHandle> = transport.clone() as Arc<dyn TransportHandle>;
     let request_stream: RequestStream<EchoRequest, EchoResponse> =
-        RequestStream::new(server_endpoint.clone(), JsonCodec, Rc::clone(&handle));
+        RequestStream::new(server_endpoint.clone(), JsonCodec, Arc::clone(&handle));
 
     transport.register(server_token, request_stream.queue());
 
@@ -294,9 +292,9 @@ async fn test_broken_promise() {
     let server_token = UID::new(0xDEAD, 0xBEEF);
     let server_endpoint = Endpoint::new(test_address(), server_token);
 
-    let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+    let handle: Arc<dyn TransportHandle> = transport.clone() as Arc<dyn TransportHandle>;
     let request_stream: RequestStream<PingRequest, PingResponse> =
-        RequestStream::new(server_endpoint.clone(), JsonCodec, Rc::clone(&handle));
+        RequestStream::new(server_endpoint.clone(), JsonCodec, Arc::clone(&handle));
 
     transport.register(server_token, request_stream.queue());
 
@@ -343,9 +341,9 @@ async fn test_explicit_error_response() {
     let server_token = UID::new(0x1111, 0x2222);
     let server_endpoint = Endpoint::new(test_address(), server_token);
 
-    let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+    let handle: Arc<dyn TransportHandle> = transport.clone() as Arc<dyn TransportHandle>;
     let request_stream: RequestStream<PingRequest, PingResponse> =
-        RequestStream::new(server_endpoint.clone(), JsonCodec, Rc::clone(&handle));
+        RequestStream::new(server_endpoint.clone(), JsonCodec, Arc::clone(&handle));
 
     transport.register(server_token, request_stream.queue());
 
@@ -463,7 +461,7 @@ fn test_endpoint_not_found_notifies_failure_monitor() {
 /// Test that well-known tokens are NOT notified (prevents feedback loops).
 #[test]
 fn test_endpoint_not_found_skips_well_known_tokens() {
-    let fm = Rc::new(FailureMonitor::new(TokioTimeProvider::new()));
+    let fm = Arc::new(FailureMonitor::new(TokioTimeProvider::new()));
 
     let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
     let well_known_token = UID::well_known(42);

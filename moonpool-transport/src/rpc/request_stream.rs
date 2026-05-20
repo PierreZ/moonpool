@@ -18,7 +18,7 @@
 //! ```
 
 use std::marker::PhantomData;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::Endpoint;
 use serde::Serialize;
@@ -48,10 +48,10 @@ pub struct RequestEnvelope<T> {
 /// at construction, so `recv()` requires no parameters.
 pub struct RequestStream<Req, Resp> {
     /// Queue for incoming request envelopes.
-    queue: Rc<NetNotifiedQueue<RequestEnvelope<Req>>>,
+    queue: Arc<NetNotifiedQueue<RequestEnvelope<Req>>>,
 
     /// Transport for sending replies.
-    transport: Rc<dyn TransportHandle>,
+    transport: Arc<dyn TransportHandle>,
 
     /// Type-erased encode function for replies.
     encode_reply: EncodeFn<Result<Resp, super::reply_error::ReplyError>>,
@@ -62,8 +62,8 @@ pub struct RequestStream<Req, Resp> {
 impl<Req, Resp> Clone for RequestStream<Req, Resp> {
     fn clone(&self) -> Self {
         Self {
-            queue: Rc::clone(&self.queue),
-            transport: Rc::clone(&self.transport),
+            queue: Arc::clone(&self.queue),
+            transport: Arc::clone(&self.transport),
             encode_reply: self.encode_reply.clone(),
             _phantom: PhantomData,
         }
@@ -89,7 +89,7 @@ impl<Req, Resp> RequestStream<Req, Resp> {
     /// Get a reference to the internal queue for registration.
     ///
     /// This is used to register the stream with NetTransport.
-    pub fn queue(&self) -> Rc<NetNotifiedQueue<RequestEnvelope<Req>>> {
+    pub fn queue(&self) -> Arc<NetNotifiedQueue<RequestEnvelope<Req>>> {
         self.queue.clone()
     }
 
@@ -116,17 +116,17 @@ impl<Req, Resp> RequestStream<Req, Resp> {
 
 impl<Req, Resp> RequestStream<Req, Resp>
 where
-    Req: DeserializeOwned + 'static,
-    Resp: Serialize + 'static,
+    Req: DeserializeOwned + Send + Sync + 'static,
+    Resp: Serialize + Send + Sync + 'static,
 {
     /// Create a new request stream with transport bound for replies.
     pub fn new<C: crate::MessageCodec>(
         endpoint: Endpoint,
         codec: C,
-        transport: Rc<dyn TransportHandle>,
+        transport: Arc<dyn TransportHandle>,
     ) -> Self {
         Self {
-            queue: Rc::new(NetNotifiedQueue::with_codec(endpoint, codec.clone())),
+            queue: Arc::new(NetNotifiedQueue::with_codec(endpoint, codec.clone())),
             transport,
             encode_reply: make_encode_fn(codec),
             _phantom: PhantomData,
@@ -139,7 +139,7 @@ where
     /// transport bound at construction.
     pub async fn recv(&self) -> Option<(Req, ReplyPromise<Resp>)> {
         let envelope = self.queue.recv().await?;
-        let transport_clone = Rc::clone(&self.transport);
+        let transport_clone = Arc::clone(&self.transport);
         let reply = ReplyPromise::new(
             envelope.reply_to,
             self.encode_reply.clone(),
@@ -155,7 +155,7 @@ where
     /// Returns `None` if no request is available.
     pub fn try_recv(&self) -> Option<(Req, ReplyPromise<Resp>)> {
         let envelope = self.queue.try_recv()?;
-        let transport_clone = Rc::clone(&self.transport);
+        let transport_clone = Arc::clone(&self.transport);
         let reply = ReplyPromise::new(
             envelope.reply_to,
             self.encode_reply.clone(),
@@ -171,7 +171,7 @@ where
     /// For testing or advanced use cases where replies should bypass the transport.
     pub async fn recv_with_sender<F>(&self, sender: F) -> Option<(Req, ReplyPromise<Resp>)>
     where
-        F: FnOnce(&Endpoint, &[u8]) + 'static,
+        F: FnOnce(&Endpoint, &[u8]) + Send + Sync + 'static,
     {
         let envelope = self.queue.recv().await?;
         let reply = ReplyPromise::new(envelope.reply_to, self.encode_reply.clone(), sender);
@@ -181,7 +181,7 @@ where
     /// Try to receive a request without blocking, using a custom sender function.
     pub fn try_recv_with_sender<F>(&self, sender: F) -> Option<(Req, ReplyPromise<Resp>)>
     where
-        F: FnOnce(&Endpoint, &[u8]) + 'static,
+        F: FnOnce(&Endpoint, &[u8]) + Send + Sync + 'static,
     {
         let envelope = self.queue.try_recv()?;
         let reply = ReplyPromise::new(envelope.reply_to, self.encode_reply.clone(), sender);
@@ -191,9 +191,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
     use std::net::{IpAddr, Ipv4Addr};
-    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::RwLock;
 
     use crate::{JsonCodec, NetworkAddress, UID};
     use serde::{Deserialize, Serialize};
@@ -223,9 +223,9 @@ mod tests {
         seq: u32,
     }
 
-    fn make_handle() -> Rc<dyn TransportHandle> {
+    fn make_handle() -> Arc<dyn TransportHandle> {
         let transport = make_transport();
-        transport as Rc<dyn TransportHandle>
+        transport as Arc<dyn TransportHandle>
     }
 
     fn local_reply_endpoint() -> Endpoint {
@@ -285,11 +285,13 @@ mod tests {
         assert!(!stream.is_empty());
         assert_eq!(stream.len(), 1);
 
-        let sent_data: Rc<RefCell<Option<Vec<u8>>>> = Rc::new(RefCell::new(None));
+        let sent_data: Arc<RwLock<Option<Vec<u8>>>> = Arc::new(RwLock::new(None));
         let sent_clone = sent_data.clone();
 
         let result = stream.try_recv_with_sender(move |_endpoint, payload| {
-            *sent_clone.borrow_mut() = Some(payload.to_vec());
+            *sent_clone
+                .write()
+                .expect("RwLock poisoned: prior task panicked") = Some(payload.to_vec());
         });
 
         assert!(result.is_some());
@@ -298,7 +300,12 @@ mod tests {
         assert_eq!(request, PingRequest { seq: 123 });
 
         reply.send(PingResponse { seq: 123 });
-        assert!(sent_data.borrow().is_some());
+        assert!(
+            sent_data
+                .read()
+                .expect("RwLock poisoned: prior task panicked")
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -355,25 +362,25 @@ mod tests {
         let transport = make_transport();
 
         let reply_token = local_reply_endpoint().token;
-        let reply_queue: Rc<crate::NetNotifiedQueue<Result<PingResponse, crate::ReplyError>>> =
-            Rc::new(crate::NetNotifiedQueue::with_codec(
+        let reply_queue: Arc<crate::NetNotifiedQueue<Result<PingResponse, crate::ReplyError>>> =
+            Arc::new(crate::NetNotifiedQueue::with_codec(
                 local_reply_endpoint(),
                 JsonCodec,
             ));
         transport.register(
             reply_token,
-            Rc::clone(&reply_queue) as Rc<dyn crate::MessageReceiver>,
+            Arc::clone(&reply_queue) as Arc<dyn crate::MessageReceiver>,
         );
 
         let token = UID::new(0xABCD, 0x1234);
-        let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+        let handle: Arc<dyn TransportHandle> = transport.clone() as Arc<dyn TransportHandle>;
         let stream: RequestStream<PingRequest, PingResponse> = RequestStream::new(
             Endpoint::new(test_endpoint().address.clone(), token),
             JsonCodec,
             handle,
         );
 
-        transport.register(token, stream.queue() as Rc<dyn crate::MessageReceiver>);
+        transport.register(token, stream.queue() as Arc<dyn crate::MessageReceiver>);
 
         let envelope = RequestEnvelope {
             request: PingRequest { seq: 999 },
@@ -394,18 +401,18 @@ mod tests {
         let transport = make_transport();
 
         let reply_token = local_reply_endpoint().token;
-        let reply_queue: Rc<crate::NetNotifiedQueue<Result<PingResponse, crate::ReplyError>>> =
-            Rc::new(crate::NetNotifiedQueue::with_codec(
+        let reply_queue: Arc<crate::NetNotifiedQueue<Result<PingResponse, crate::ReplyError>>> =
+            Arc::new(crate::NetNotifiedQueue::with_codec(
                 local_reply_endpoint(),
                 JsonCodec,
             ));
         transport.register(
             reply_token,
-            Rc::clone(&reply_queue) as Rc<dyn crate::MessageReceiver>,
+            Arc::clone(&reply_queue) as Arc<dyn crate::MessageReceiver>,
         );
 
         let token = UID::new(0xABCD, 0x1234);
-        let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+        let handle: Arc<dyn TransportHandle> = transport.clone() as Arc<dyn TransportHandle>;
         let stream: RequestStream<PingRequest, PingResponse> = RequestStream::new(
             Endpoint::new(test_endpoint().address.clone(), token),
             JsonCodec,
@@ -431,25 +438,25 @@ mod tests {
         let transport = make_transport();
 
         let reply_token = local_reply_endpoint().token;
-        let reply_queue: Rc<crate::NetNotifiedQueue<Result<PingResponse, crate::ReplyError>>> =
-            Rc::new(crate::NetNotifiedQueue::with_codec(
+        let reply_queue: Arc<crate::NetNotifiedQueue<Result<PingResponse, crate::ReplyError>>> =
+            Arc::new(crate::NetNotifiedQueue::with_codec(
                 local_reply_endpoint(),
                 JsonCodec,
             ));
         transport.register(
             reply_token,
-            Rc::clone(&reply_queue) as Rc<dyn crate::MessageReceiver>,
+            Arc::clone(&reply_queue) as Arc<dyn crate::MessageReceiver>,
         );
 
         let token = UID::new(0xABCD, 0x1234);
-        let handle: Rc<dyn TransportHandle> = transport.clone() as Rc<dyn TransportHandle>;
+        let handle: Arc<dyn TransportHandle> = transport.clone() as Arc<dyn TransportHandle>;
         let stream: RequestStream<PingRequest, PingResponse> = RequestStream::new(
             Endpoint::new(test_endpoint().address.clone(), token),
             JsonCodec,
             handle,
         );
 
-        transport.register(token, stream.queue() as Rc<dyn crate::MessageReceiver>);
+        transport.register(token, stream.queue() as Arc<dyn crate::MessageReceiver>);
 
         let envelope = RequestEnvelope {
             request: PingRequest { seq: 777 },

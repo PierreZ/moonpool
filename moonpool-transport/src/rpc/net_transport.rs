@@ -26,9 +26,8 @@
 //! The builder automatically handles `Rc` wrapping and `set_weak_self()`,
 //! eliminating the most common footgun in NetTransport usage.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::rc::{Rc, Weak};
+use std::sync::{Arc, RwLock, Weak};
 
 use super::failure_monitor::FailureMonitor;
 use super::net_notified_queue::ReplyQueueCloser;
@@ -47,7 +46,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 /// Type alias for shared peer reference.
-type SharedPeer<P> = Rc<RefCell<Peer<P>>>;
+type SharedPeer<P> = Arc<RwLock<Peer<P>>>;
 
 /// Pending reply entry: token + weak reference to the queue closer.
 type PendingReplyEntry = (UID, Weak<dyn ReplyQueueCloser>);
@@ -79,7 +78,7 @@ struct TransportData<P: Providers> {
 
     /// Failure monitor for address/endpoint failure tracking.
     /// FDB: IFailureMonitor (FailureMonitor.h)
-    failure_monitor: Rc<FailureMonitor>,
+    failure_monitor: Arc<FailureMonitor>,
 
     /// Pending reply queues per remote address.
     ///
@@ -99,7 +98,7 @@ impl<P: Providers> TransportData<P> {
             endpoints: EndpointMap::new(),
             peers: BTreeMap::new(),
             incoming_peers: BTreeMap::new(),
-            failure_monitor: Rc::new(FailureMonitor::new(providers.time().clone())),
+            failure_monitor: Arc::new(FailureMonitor::new(providers.time().clone())),
             pending_replies: BTreeMap::new(),
             stats: TransportStats::default(),
         }
@@ -113,7 +112,7 @@ impl<P: Providers> TransportData<P> {
 /// - Manages peer connections lazily (created on first send)
 /// - Routes incoming packets to registered endpoints
 /// - Synchronous send API - queues immediately, returns (FDB pattern)
-/// - Explicit `Rc<NetTransport>` passing (testable, simulation-friendly)
+/// - Explicit `Arc<NetTransport>` passing (testable, simulation-friendly)
 /// - Internal state in `TransportData` (matches FDB: `TransportData* self`)
 ///
 /// # FDB Reference
@@ -123,13 +122,13 @@ impl<P: Providers> TransportData<P> {
 ///
 /// For multi-node operation, wrap in `Rc` and call `set_weak_self()`:
 /// ```ignore
-/// let transport = Rc::new(NetTransport::new(...));
-/// transport.set_weak_self(Rc::downgrade(&transport));
+/// let transport = Arc::new(NetTransport::new(...));
+/// transport.set_weak_self(Arc::downgrade(&transport));
 /// transport.listen().await?; // Start accepting connections
 /// ```
 pub struct NetTransport<P: Providers, C: MessageCodec = crate::JsonCodec> {
     /// Internal transport data (FDB: TransportData* self).
-    data: RefCell<TransportData<P>>,
+    data: RwLock<TransportData<P>>,
 
     /// Local address for this transport.
     local_address: NetworkAddress,
@@ -146,7 +145,7 @@ pub struct NetTransport<P: Providers, C: MessageCodec = crate::JsonCodec> {
     /// Weak self-reference for spawning background tasks.
     /// Required for `connection_reader` tasks to dispatch back to this transport.
     /// Set via `set_weak_self()` after wrapping in `Rc`.
-    weak_self: RefCell<Option<Weak<Self>>>,
+    weak_self: RwLock<Option<Weak<Self>>>,
 
     /// Shutdown signal sender. When set to `true`, background tasks (listen_task) should exit.
     /// Uses watch channel so multiple receivers can observe the same signal.
@@ -154,7 +153,7 @@ pub struct NetTransport<P: Providers, C: MessageCodec = crate::JsonCodec> {
 
     /// Weak reference as `dyn TransportHandle` for codec-erased types.
     /// Set by the builder alongside `weak_self`.
-    weak_handle: RefCell<Option<std::rc::Weak<dyn super::transport_handle::TransportHandle>>>,
+    weak_handle: RwLock<Option<std::sync::Weak<dyn super::transport_handle::TransportHandle>>>,
 }
 
 /// Statistics for the transport.
@@ -170,7 +169,7 @@ struct TransportStats {
     peers_created: u64,
 }
 
-impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
+impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     /// Create a new NetTransport.
     ///
     /// # Arguments
@@ -183,21 +182,21 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
     ///
     /// For multi-node operation, wrap in `Rc` and call `set_weak_self()`:
     /// ```ignore
-    /// let transport = Rc::new(NetTransport::new(...));
-    /// transport.set_weak_self(Rc::downgrade(&transport));
+    /// let transport = Arc::new(NetTransport::new(...));
+    /// transport.set_weak_self(Arc::downgrade(&transport));
     /// ```
     pub fn new(local_address: NetworkAddress, providers: P, codec: C) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
         let data = TransportData::new(&providers);
         Self {
-            data: RefCell::new(data),
+            data: RwLock::new(data),
             local_address,
             providers,
             codec,
             peer_config: PeerConfig::default(),
-            weak_self: RefCell::new(None),
+            weak_self: RwLock::new(None),
             shutdown_tx,
-            weak_handle: RefCell::new(None),
+            weak_handle: RwLock::new(None),
         }
     }
 
@@ -238,17 +237,21 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
     ///
     /// # Example
     /// ```ignore
-    /// let transport = Rc::new(NetTransport::new(...));
-    /// transport.set_weak_self(Rc::downgrade(&transport));
+    /// let transport = Arc::new(NetTransport::new(...));
+    /// transport.set_weak_self(Arc::downgrade(&transport));
     /// ```
     pub fn set_weak_self(&self, weak: Weak<Self>) {
-        *self.weak_self.borrow_mut() = Some(weak);
+        *self
+            .weak_self
+            .write()
+            .expect("RwLock poisoned: prior task panicked") = Some(weak);
     }
 
     /// Get weak self-reference, panics if not set.
     fn weak_self(&self) -> Weak<Self> {
         self.weak_self
-            .borrow()
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
             .clone()
             .expect("weak_self not set - call set_weak_self() after wrapping in Rc")
     }
@@ -270,8 +273,14 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
     ///
     /// # FDB Reference
     /// `IFailureMonitor::failureMonitor()` (FailureMonitor.h)
-    pub fn failure_monitor(&self) -> Rc<FailureMonitor> {
-        Rc::clone(&self.data.borrow().failure_monitor)
+    pub fn failure_monitor(&self) -> Arc<FailureMonitor> {
+        Arc::clone(
+            &self
+                .data
+                .read()
+                .expect("RwLock poisoned: prior task panicked")
+                .failure_monitor,
+        )
     }
 
     /// Register a well-known endpoint.
@@ -280,10 +289,11 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
     pub fn register_well_known(
         &self,
         token: WellKnownToken,
-        receiver: Rc<dyn MessageReceiver>,
+        receiver: Arc<dyn MessageReceiver>,
     ) -> Result<(), MessagingError> {
         self.data
-            .borrow_mut()
+            .write()
+            .expect("RwLock poisoned: prior task panicked")
             .endpoints
             .insert_well_known(token, receiver)
     }
@@ -291,14 +301,22 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
     /// Register a dynamic endpoint with the given UID.
     ///
     /// Returns the endpoint that senders should use to address this receiver.
-    pub fn register(&self, token: UID, receiver: Rc<dyn MessageReceiver>) -> Endpoint {
-        self.data.borrow_mut().endpoints.insert(token, receiver);
+    pub fn register(&self, token: UID, receiver: Arc<dyn MessageReceiver>) -> Endpoint {
+        self.data
+            .write()
+            .expect("RwLock poisoned: prior task panicked")
+            .endpoints
+            .insert(token, receiver);
         Endpoint::new(self.local_address.clone(), token)
     }
 
     /// Unregister a dynamic endpoint.
-    pub fn unregister(&self, token: &UID) -> Option<Rc<dyn MessageReceiver>> {
-        self.data.borrow_mut().endpoints.remove(token)
+    pub fn unregister(&self, token: &UID) -> Option<Arc<dyn MessageReceiver>> {
+        self.data
+            .write()
+            .expect("RwLock poisoned: prior task panicked")
+            .endpoints
+            .remove(token)
     }
 
     /// Register a pending reply queue for a remote address.
@@ -311,7 +329,10 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
         token: UID,
         closer: Weak<dyn ReplyQueueCloser>,
     ) {
-        let mut data = self.data.borrow_mut();
+        let mut data = self
+            .data
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         data.pending_replies
             .entry(addr.to_string())
             .or_default()
@@ -326,7 +347,10 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
     /// FDB: endStreamOnDisconnect pattern (genericactors.actor.h:332)
     pub(crate) fn close_pending_replies(&self, addr: &str, reason: ReplyError) {
         let entries = {
-            let mut data = self.data.borrow_mut();
+            let mut data = self
+                .data
+                .write()
+                .expect("RwLock poisoned: prior task panicked");
             data.pending_replies.remove(addr).unwrap_or_default()
         };
 
@@ -345,7 +369,11 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
                 closer.close_with_error(reason.clone());
             }
             // Remove from endpoint map regardless (either closed or already dropped)
-            self.data.borrow_mut().endpoints.remove(&token);
+            self.data
+                .write()
+                .expect("RwLock poisoned: prior task panicked")
+                .endpoints
+                .remove(&token);
         }
     }
 
@@ -371,20 +399,24 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
     ///     }
     /// }
     /// ```
-    pub fn register_handler<Req, Resp>(transport: &Rc<Self>, token: UID) -> RequestStream<Req, Resp>
+    pub fn register_handler<Req, Resp>(
+        transport: &Arc<Self>,
+        token: UID,
+    ) -> RequestStream<Req, Resp>
     where
-        Req: DeserializeOwned + 'static,
-        Resp: Serialize + 'static,
+        Req: DeserializeOwned + Send + Sync + 'static,
+        Resp: Serialize + Send + Sync + 'static,
     {
         let endpoint = Endpoint::new(transport.local_address.clone(), token);
-        let handle: Rc<dyn super::transport_handle::TransportHandle> =
-            Rc::clone(transport) as Rc<dyn super::transport_handle::TransportHandle>;
+        let handle: Arc<dyn super::transport_handle::TransportHandle> =
+            Arc::clone(transport) as Arc<dyn super::transport_handle::TransportHandle>;
         let stream = RequestStream::new(endpoint, transport.codec.clone(), handle);
         transport
             .data
-            .borrow_mut()
+            .write()
+            .expect("RwLock poisoned: prior task panicked")
             .endpoints
-            .insert(token, stream.queue() as Rc<dyn MessageReceiver>);
+            .insert(token, stream.queue() as Arc<dyn MessageReceiver>);
         stream
     }
 
@@ -409,13 +441,13 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
     /// }
     /// ```
     pub fn register_handler_at<Req, Resp>(
-        transport: &Rc<Self>,
+        transport: &Arc<Self>,
         interface_id: u64,
         method_index: u64,
     ) -> (RequestStream<Req, Resp>, UID)
     where
-        Req: DeserializeOwned + 'static,
-        Resp: Serialize + 'static,
+        Req: DeserializeOwned + Send + Sync + 'static,
+        Resp: Serialize + Send + Sync + 'static,
     {
         let token = UID::new(interface_id, method_index);
         let stream = Self::register_handler(transport, token);
@@ -443,13 +475,18 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
 
         // Get or create peer for remote address
         let peer = self.get_or_open_peer(&endpoint.address);
-        peer.borrow_mut()
+        peer.write()
+            .expect("RwLock poisoned: prior task panicked")
             .send_unreliable(endpoint.token, payload)
             .map_err(|e| MessagingError::PeerError {
                 message: e.to_string(),
             })?;
 
-        self.data.borrow_mut().stats.packets_sent += 1;
+        self.data
+            .write()
+            .expect("RwLock poisoned: prior task panicked")
+            .stats
+            .packets_sent += 1;
         Ok(())
     }
 
@@ -470,13 +507,18 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
 
         // Get or create peer for remote address
         let peer = self.get_or_open_peer(&endpoint.address);
-        peer.borrow_mut()
+        peer.write()
+            .expect("RwLock poisoned: prior task panicked")
             .send_reliable(endpoint.token, payload)
             .map_err(|e| MessagingError::PeerError {
                 message: e.to_string(),
             })?;
 
-        self.data.borrow_mut().stats.packets_sent += 1;
+        self.data
+            .write()
+            .expect("RwLock poisoned: prior task panicked")
+            .stats
+            .packets_sent += 1;
         Ok(())
     }
 
@@ -487,15 +529,26 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
 
     /// Deliver packet locally (same process, no network).
     fn deliver_local(&self, token: &UID, payload: &[u8]) -> Result<(), MessagingError> {
-        let data = self.data.borrow();
+        let data = self
+            .data
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         if let Some(receiver) = data.endpoints.get(token) {
             receiver.receive(payload);
             drop(data); // Release borrow before mutating stats
-            self.data.borrow_mut().stats.packets_dispatched += 1;
+            self.data
+                .write()
+                .expect("RwLock poisoned: prior task panicked")
+                .stats
+                .packets_dispatched += 1;
             Ok(())
         } else {
             drop(data); // Release borrow before mutating stats
-            self.data.borrow_mut().stats.packets_undelivered += 1;
+            self.data
+                .write()
+                .expect("RwLock poisoned: prior task panicked")
+                .stats
+                .packets_undelivered += 1;
             Err(MessagingError::EndpointNotFound { token: *token })
         }
     }
@@ -517,36 +570,57 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
         let addr_str = address.to_string();
 
         // Check if outgoing peer already exists
-        if let Some(peer) = self.data.borrow().peers.get(&addr_str) {
-            return Rc::clone(peer);
+        if let Some(peer) = self
+            .data
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .peers
+            .get(&addr_str)
+        {
+            return Arc::clone(peer);
         }
 
         // Check incoming peers — reuse accepted connection for responses
         // (FDB pattern: responses flow back on the same connection)
-        if let Some(peer) = self.data.borrow().incoming_peers.get(&addr_str) {
-            return Rc::clone(peer);
+        if let Some(peer) = self
+            .data
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .incoming_peers
+            .get(&addr_str)
+        {
+            return Arc::clone(peer);
         }
 
         // Create new peer with failure monitor
-        let fm = Some(Rc::clone(&self.data.borrow().failure_monitor));
+        let fm = Some(Arc::clone(
+            &self
+                .data
+                .read()
+                .expect("RwLock poisoned: prior task panicked")
+                .failure_monitor,
+        ));
         let peer = Peer::new(
             self.providers.clone(),
             addr_str.clone(),
             self.peer_config.clone(),
             fm,
         );
-        let peer = Rc::new(RefCell::new(peer));
+        let peer = Arc::new(RwLock::new(peer));
 
         // Store in peers map
         {
-            let mut data = self.data.borrow_mut();
-            data.peers.insert(addr_str.clone(), Rc::clone(&peer));
+            let mut data = self
+                .data
+                .write()
+                .expect("RwLock poisoned: prior task panicked");
+            data.peers.insert(addr_str.clone(), Arc::clone(&peer));
             data.stats.peers_created += 1;
         }
 
         // Spawn connection_reader for incoming packets (FDB pattern: connectionKeeper spawns connectionReader)
         // This handles responses for outgoing requests
-        self.spawn_connection_reader(Rc::clone(&peer), addr_str);
+        self.spawn_connection_reader(Arc::clone(&peer), addr_str);
 
         peer
     }
@@ -559,47 +633,81 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
     ///
     /// Ok(()) if delivered, Err if endpoint not found.
     pub fn dispatch(&self, token: &UID, payload: &[u8]) -> Result<(), MessagingError> {
-        let data = self.data.borrow();
+        let data = self
+            .data
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         if let Some(receiver) = data.endpoints.get(token) {
             receiver.receive(payload);
             drop(data); // Release borrow before mutating stats
-            self.data.borrow_mut().stats.packets_dispatched += 1;
+            self.data
+                .write()
+                .expect("RwLock poisoned: prior task panicked")
+                .stats
+                .packets_dispatched += 1;
             Ok(())
         } else {
             drop(data); // Release borrow before mutating stats
-            self.data.borrow_mut().stats.packets_undelivered += 1;
+            self.data
+                .write()
+                .expect("RwLock poisoned: prior task panicked")
+                .stats
+                .packets_undelivered += 1;
             Err(MessagingError::EndpointNotFound { token: *token })
         }
     }
 
     /// Get statistics.
     pub fn packets_sent(&self) -> u64 {
-        self.data.borrow().stats.packets_sent
+        self.data
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .stats
+            .packets_sent
     }
 
     /// Get the number of packets dispatched to endpoints.
     pub fn packets_dispatched(&self) -> u64 {
-        self.data.borrow().stats.packets_dispatched
+        self.data
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .stats
+            .packets_dispatched
     }
 
     /// Get the number of packets that couldn't be delivered.
     pub fn packets_undelivered(&self) -> u64 {
-        self.data.borrow().stats.packets_undelivered
+        self.data
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .stats
+            .packets_undelivered
     }
 
     /// Get the number of peers created.
     pub fn peers_created(&self) -> u64 {
-        self.data.borrow().stats.peers_created
+        self.data
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .stats
+            .peers_created
     }
 
     /// Get number of active peers.
     pub fn peer_count(&self) -> usize {
-        self.data.borrow().peers.len()
+        self.data
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .peers
+            .len()
     }
 
     /// Get number of registered endpoints.
     pub fn endpoint_count(&self) -> usize {
-        let data = self.data.borrow();
+        let data = self
+            .data
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         data.endpoints.well_known_count() + data.endpoints.dynamic_count()
     }
 
@@ -614,7 +722,12 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
     /// * `peer_addr` - Address string for logging
     fn spawn_connection_reader(&self, peer: SharedPeer<P>, peer_addr: String) {
         // Only spawn if weak_self is set (multi-node mode)
-        if self.weak_self.borrow().is_none() {
+        if self
+            .weak_self
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .is_none()
+        {
             return;
         }
 
@@ -642,13 +755,18 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
     /// # Example
     ///
     /// ```ignore
-    /// let transport = Rc::new(NetTransport::new(...));
-    /// transport.set_weak_self(Rc::downgrade(&transport));
+    /// let transport = Arc::new(NetTransport::new(...));
+    /// transport.set_weak_self(Arc::downgrade(&transport));
     /// transport.listen().await?;
     /// ```
     pub async fn listen(&self) -> Result<(), MessagingError> {
         // Verify weak_self is set
-        if self.weak_self.borrow().is_none() {
+        if self
+            .weak_self
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .is_none()
+        {
             return Err(MessagingError::InvalidState {
                 message: "weak_self not set - call set_weak_self() before listen()".to_string(),
             });
@@ -696,7 +814,7 @@ impl<P: Providers, C: MessageCodec> Drop for NetTransport<P, C> {
 // TransportHandle implementation
 // =============================================================================
 
-impl<P: Providers, C: MessageCodec> super::transport_handle::TransportHandle
+impl<P: Providers + Send + Sync, C: MessageCodec> super::transport_handle::TransportHandle
     for NetTransport<P, C>
 {
     fn send_unreliable(
@@ -718,7 +836,7 @@ impl<P: Providers, C: MessageCodec> super::transport_handle::TransportHandle
     fn register(
         &self,
         token: crate::UID,
-        receiver: Rc<dyn super::endpoint_map::MessageReceiver>,
+        receiver: Arc<dyn super::endpoint_map::MessageReceiver>,
     ) -> crate::Endpoint {
         NetTransport::register(self, token, receiver)
     }
@@ -726,7 +844,7 @@ impl<P: Providers, C: MessageCodec> super::transport_handle::TransportHandle
     fn unregister(
         &self,
         token: &crate::UID,
-    ) -> Option<Rc<dyn super::endpoint_map::MessageReceiver>> {
+    ) -> Option<Arc<dyn super::endpoint_map::MessageReceiver>> {
         NetTransport::unregister(self, token)
     }
 
@@ -734,12 +852,12 @@ impl<P: Providers, C: MessageCodec> super::transport_handle::TransportHandle
         &self,
         addr: &str,
         token: crate::UID,
-        closer: std::rc::Weak<dyn super::net_notified_queue::ReplyQueueCloser>,
+        closer: std::sync::Weak<dyn super::net_notified_queue::ReplyQueueCloser>,
     ) {
         NetTransport::register_pending_reply(self, addr, token, closer);
     }
 
-    fn failure_monitor(&self) -> Rc<super::failure_monitor::FailureMonitor> {
+    fn failure_monitor(&self) -> Arc<super::failure_monitor::FailureMonitor> {
         NetTransport::failure_monitor(self)
     }
 
@@ -763,23 +881,27 @@ impl<P: Providers, C: MessageCodec> super::transport_handle::TransportHandle
         NetTransport::is_local_address(self, address)
     }
 
-    fn weak_for_cleanup(&self) -> std::rc::Weak<dyn super::transport_handle::TransportHandle> {
+    fn weak_for_cleanup(&self) -> std::sync::Weak<dyn super::transport_handle::TransportHandle> {
         self.weak_handle
-            .borrow()
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
             .clone()
-            .unwrap_or_else(|| std::rc::Weak::<Self>::new())
+            .unwrap_or_else(|| std::sync::Weak::<Self>::new())
     }
 }
 
-impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
+impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     /// Set the weak handle reference for `dyn TransportHandle` usage.
     ///
     /// Called by the builder after wrapping in `Rc`.
     pub(crate) fn set_weak_handle(
         &self,
-        weak: std::rc::Weak<dyn super::transport_handle::TransportHandle>,
+        weak: std::sync::Weak<dyn super::transport_handle::TransportHandle>,
     ) {
-        *self.weak_handle.borrow_mut() = Some(weak);
+        *self
+            .weak_handle
+            .write()
+            .expect("RwLock poisoned: prior task panicked") = Some(weak);
     }
 }
 
@@ -848,7 +970,7 @@ impl<P: Providers> NetTransportBuilder<P, crate::JsonCodec> {
     }
 }
 
-impl<P: Providers, C: MessageCodec> NetTransportBuilder<P, C> {
+impl<P: Providers + Send + Sync, C: MessageCodec> NetTransportBuilder<P, C> {
     /// Set the message codec for this transport.
     ///
     /// The codec is used for all serialization/deserialization in RPC handlers
@@ -884,7 +1006,7 @@ impl<P: Providers, C: MessageCodec> NetTransportBuilder<P, C> {
 
     /// Build the transport without starting the listener.
     ///
-    /// Returns `Rc<NetTransport>` with `set_weak_self()` already called.
+    /// Returns `Arc<NetTransport>` with `set_weak_self()` already called.
     /// Use this for fire-and-forget messaging or testing.
     ///
     /// For RPC (request/response), use `build_listening()` instead.
@@ -892,7 +1014,7 @@ impl<P: Providers, C: MessageCodec> NetTransportBuilder<P, C> {
     /// # Errors
     ///
     /// Returns `MessagingError::MissingLocalAddress` if `local_address()` was not called.
-    pub fn build(self) -> Result<Rc<NetTransport<P, C>>, MessagingError> {
+    pub fn build(self) -> Result<Arc<NetTransport<P, C>>, MessagingError> {
         let address = self
             .local_address
             .ok_or(MessagingError::MissingLocalAddress)?;
@@ -903,17 +1025,17 @@ impl<P: Providers, C: MessageCodec> NetTransportBuilder<P, C> {
             transport = transport.with_peer_config(config);
         }
 
-        let transport = Rc::new(transport);
-        transport.set_weak_self(Rc::downgrade(&transport));
-        let handle: Rc<dyn super::transport_handle::TransportHandle> =
-            transport.clone() as Rc<dyn super::transport_handle::TransportHandle>;
-        transport.set_weak_handle(Rc::downgrade(&handle));
+        let transport = Arc::new(transport);
+        transport.set_weak_self(Arc::downgrade(&transport));
+        let handle: Arc<dyn super::transport_handle::TransportHandle> =
+            transport.clone() as Arc<dyn super::transport_handle::TransportHandle>;
+        transport.set_weak_handle(Arc::downgrade(&handle));
         Ok(transport)
     }
 
     /// Build the transport and start listening for incoming connections.
     ///
-    /// Returns `Rc<NetTransport>` with `set_weak_self()` already called
+    /// Returns `Arc<NetTransport>` with `set_weak_self()` already called
     /// and the listener started.
     ///
     /// Use this for typical RPC usage where you need to receive responses.
@@ -923,7 +1045,7 @@ impl<P: Providers, C: MessageCodec> NetTransportBuilder<P, C> {
     ///
     /// Returns `MessagingError::MissingLocalAddress` if `local_address()` was not called,
     /// or a network error if binding to the local address fails.
-    pub async fn build_listening(self) -> Result<Rc<NetTransport<P, C>>, MessagingError> {
+    pub async fn build_listening(self) -> Result<Arc<NetTransport<P, C>>, MessagingError> {
         let transport = self.build()?;
         transport.listen().await?;
         Ok(transport)
@@ -942,7 +1064,7 @@ impl<P: Providers, C: MessageCodec> NetTransportBuilder<P, C> {
 ///
 /// The FDB version is more complex (handles ConnectPacket, protocol negotiation),
 /// but the core loop is: read packets → scanPackets → deliver.
-async fn connection_reader<P: Providers, C: MessageCodec>(
+async fn connection_reader<P: Providers + Send + Sync, C: MessageCodec>(
     transport: Weak<NetTransport<P, C>>,
     peer: SharedPeer<P>,
     peer_addr: String,
@@ -952,7 +1074,11 @@ async fn connection_reader<P: Providers, C: MessageCodec>(
     // Take ownership of the receiver at startup.
     // This avoids holding RefCell borrows across await points (critical safety fix).
     let mut receiver = {
-        match peer.borrow_mut().take_receiver() {
+        match peer
+            .write()
+            .expect("RwLock poisoned: prior task panicked")
+            .take_receiver()
+        {
             Some(rx) => rx,
             None => {
                 tracing::error!(
@@ -991,10 +1117,13 @@ async fn connection_reader<P: Providers, C: MessageCodec>(
                         let mut notification = [0u8; 16];
                         notification[0..8].copy_from_slice(&token.first.to_le_bytes());
                         notification[8..16].copy_from_slice(&token.second.to_le_bytes());
-                        let _ = peer.borrow_mut().send_unreliable(
-                            crate::peer::core::ENDPOINT_NOT_FOUND_TOKEN,
-                            &notification,
-                        );
+                        let _ = peer
+                            .write()
+                            .expect("RwLock poisoned: prior task panicked")
+                            .send_unreliable(
+                                crate::peer::core::ENDPOINT_NOT_FOUND_TOKEN,
+                                &notification,
+                            );
                     }
                 }
             }
@@ -1022,7 +1151,7 @@ async fn connection_reader<P: Providers, C: MessageCodec>(
 ///
 /// # FDB Reference
 /// From NetTransport.actor.cpp:1646-1676 listen
-async fn listen_task<P: Providers, C: MessageCodec>(
+async fn listen_task<P: Providers + Send + Sync, C: MessageCodec>(
     transport: Weak<NetTransport<P, C>>,
     listener: <P::Network as NetworkProvider>::TcpListener,
     listen_addr: String,
@@ -1072,7 +1201,7 @@ async fn listen_task<P: Providers, C: MessageCodec>(
 
                         // Handle the incoming connection (FDB: connectionIncoming)
                         connection_incoming(
-                            Rc::downgrade(&transport_rc),
+                            Arc::downgrade(&transport_rc),
                             stream,
                             peer_addr,
                             &transport_rc,
@@ -1106,7 +1235,7 @@ async fn listen_task<P: Providers, C: MessageCodec>(
 ///
 /// FDB Pattern: Use Peer::new_incoming() with the accepted stream, not Peer::new().
 /// This uses the already-established connection rather than trying to connect back.
-fn connection_incoming<P: Providers, C: MessageCodec>(
+fn connection_incoming<P: Providers + Send + Sync, C: MessageCodec>(
     transport_weak: Weak<NetTransport<P, C>>,
     stream: <P::Network as NetworkProvider>::TcpStream,
     peer_addr: String,
@@ -1123,7 +1252,10 @@ fn connection_incoming<P: Providers, C: MessageCodec>(
     // Note: Unlike outgoing peers which can be reused, incoming peers with new streams
     // should replace the old one since the old connection is stale.
     let peer = {
-        let data = transport.data.borrow();
+        let data = transport
+            .data
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         if data.incoming_peers.contains_key(&peer_addr) {
             tracing::debug!(
                 "connection_incoming: replacing stale incoming peer for {}",
@@ -1135,7 +1267,13 @@ fn connection_incoming<P: Providers, C: MessageCodec>(
         // FDB Pattern: Use Peer::new_incoming() with the accepted stream
         // (NetTransport.actor.cpp:1123 Peer::onIncomingConnection)
         // This uses the already-established connection rather than trying to connect back.
-        let fm = Some(Rc::clone(&transport.data.borrow().failure_monitor));
+        let fm = Some(Arc::clone(
+            &transport
+                .data
+                .read()
+                .expect("RwLock poisoned: prior task panicked")
+                .failure_monitor,
+        ));
         let peer = Peer::new_incoming(
             transport.providers.clone(),
             peer_addr.clone(),
@@ -1143,14 +1281,15 @@ fn connection_incoming<P: Providers, C: MessageCodec>(
             transport.peer_config.clone(),
             fm,
         );
-        let peer = Rc::new(RefCell::new(peer));
+        let peer = Arc::new(RwLock::new(peer));
 
         // Store in incoming_peers (replaces any existing stale peer)
         transport
             .data
-            .borrow_mut()
+            .write()
+            .expect("RwLock poisoned: prior task panicked")
             .incoming_peers
-            .insert(peer_addr.clone(), Rc::clone(&peer));
+            .insert(peer_addr.clone(), Arc::clone(&peer));
 
         tracing::debug!(
             "connection_incoming: created new incoming peer for {}",
@@ -1223,7 +1362,6 @@ mod tests {
     // Dummy listener type for the mock
     struct DummyListener;
 
-    #[async_trait::async_trait(?Send)]
     impl crate::TcpListenerTrait for DummyListener {
         type TcpStream = DummyStream;
 
@@ -1236,7 +1374,6 @@ mod tests {
         }
     }
 
-    #[async_trait::async_trait(?Send)]
     impl NetworkProvider for MockNetworkProvider {
         type TcpStream = DummyStream;
         type TcpListener = DummyListener;
@@ -1317,7 +1454,7 @@ mod tests {
     fn test_register_well_known() {
         let transport = create_test_transport();
 
-        let queue: Rc<NetNotifiedQueue<String>> = Rc::new(NetNotifiedQueue::with_codec(
+        let queue: Arc<NetNotifiedQueue<String>> = Arc::new(NetNotifiedQueue::with_codec(
             Endpoint::new(test_address(), UID::new(1, 1)),
             JsonCodec,
         ));
@@ -1334,7 +1471,7 @@ mod tests {
         let transport = create_test_transport();
 
         let token = UID::new(0x1234, 0x5678);
-        let queue: Rc<NetNotifiedQueue<String>> = Rc::new(NetNotifiedQueue::with_codec(
+        let queue: Arc<NetNotifiedQueue<String>> = Arc::new(NetNotifiedQueue::with_codec(
             Endpoint::new(test_address(), token),
             JsonCodec,
         ));
@@ -1350,12 +1487,12 @@ mod tests {
         let transport = create_test_transport();
 
         let token = UID::new(0x1234, 0x5678);
-        let queue: Rc<NetNotifiedQueue<String>> = Rc::new(NetNotifiedQueue::with_codec(
+        let queue: Arc<NetNotifiedQueue<String>> = Arc::new(NetNotifiedQueue::with_codec(
             Endpoint::new(test_address(), token),
             JsonCodec,
         ));
 
-        let endpoint = transport.register(token, Rc::clone(&queue) as Rc<dyn MessageReceiver>);
+        let endpoint = transport.register(token, Arc::clone(&queue) as Arc<dyn MessageReceiver>);
 
         // Send to local endpoint
         let payload = br#""hello local""#;
@@ -1387,12 +1524,12 @@ mod tests {
         let transport = create_test_transport();
 
         let token = UID::new(0x1234, 0x5678);
-        let queue: Rc<NetNotifiedQueue<String>> = Rc::new(NetNotifiedQueue::with_codec(
+        let queue: Arc<NetNotifiedQueue<String>> = Arc::new(NetNotifiedQueue::with_codec(
             Endpoint::new(test_address(), token),
             JsonCodec,
         ));
 
-        transport.register(token, queue as Rc<dyn MessageReceiver>);
+        transport.register(token, queue as Arc<dyn MessageReceiver>);
         assert_eq!(transport.endpoint_count(), 1);
 
         let removed = transport.unregister(&token);
@@ -1405,12 +1542,12 @@ mod tests {
         let transport = create_test_transport();
 
         let token = UID::new(0x1234, 0x5678);
-        let queue: Rc<NetNotifiedQueue<String>> = Rc::new(NetNotifiedQueue::with_codec(
+        let queue: Arc<NetNotifiedQueue<String>> = Arc::new(NetNotifiedQueue::with_codec(
             Endpoint::new(test_address(), token),
             JsonCodec,
         ));
 
-        transport.register(token, Rc::clone(&queue) as Rc<dyn MessageReceiver>);
+        transport.register(token, Arc::clone(&queue) as Arc<dyn MessageReceiver>);
 
         // Dispatch directly
         let payload = br#""dispatched""#;
@@ -1448,7 +1585,13 @@ mod tests {
 
         // weak_self should be set - verify by checking it doesn't panic
         // This verifies the builder correctly calls set_weak_self()
-        assert!(transport.weak_self.borrow().is_some());
+        assert!(
+            transport
+                .weak_self
+                .read()
+                .expect("RwLock poisoned: prior task panicked")
+                .is_some()
+        );
     }
 
     #[test]
@@ -1480,12 +1623,12 @@ mod tests {
             .expect("build should succeed");
 
         let token = UID::new(0x1234, 0x5678);
-        let queue: Rc<NetNotifiedQueue<String>> = Rc::new(NetNotifiedQueue::with_codec(
+        let queue: Arc<NetNotifiedQueue<String>> = Arc::new(NetNotifiedQueue::with_codec(
             Endpoint::new(test_address(), token),
             JsonCodec,
         ));
 
-        let endpoint = transport.register(token, Rc::clone(&queue) as Rc<dyn MessageReceiver>);
+        let endpoint = transport.register(token, Arc::clone(&queue) as Arc<dyn MessageReceiver>);
 
         // Send to local endpoint
         let payload = br#""builder test""#;

@@ -22,7 +22,7 @@
 //! let response = future.await?;
 //! ```
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::Endpoint;
 use serde::Serialize;
@@ -60,8 +60,8 @@ pub fn send_request<Req, Resp>(
     decode_reply: DecodeFn<Result<Resp, ReplyError>>,
 ) -> Result<ReplyFuture<Resp>, MessagingError>
 where
-    Req: Serialize + 'static,
-    Resp: DeserializeOwned + 'static,
+    Req: Serialize + Send + Sync + 'static,
+    Resp: DeserializeOwned + Send + Sync + 'static,
 {
     prepare_and_send(
         transport,
@@ -89,8 +89,8 @@ pub(crate) fn send_request_unreliable<Req, Resp>(
     decode_reply: DecodeFn<Result<Resp, ReplyError>>,
 ) -> Result<ReplyFuture<Resp>, MessagingError>
 where
-    Req: Serialize + 'static,
-    Resp: DeserializeOwned + 'static,
+    Req: Serialize + Send + Sync + 'static,
+    Resp: DeserializeOwned + Send + Sync + 'static,
 {
     prepare_and_send(
         transport,
@@ -113,16 +113,16 @@ fn prepare_and_send<Req, Resp, F>(
     send_fn: F,
 ) -> Result<ReplyFuture<Resp>, MessagingError>
 where
-    Req: Serialize + 'static,
-    Resp: DeserializeOwned + 'static,
+    Req: Serialize + Send + Sync + 'static,
+    Resp: DeserializeOwned + Send + Sync + 'static,
     F: FnOnce(&dyn TransportHandle, &Endpoint, &[u8]) -> Result<(), MessagingError>,
 {
     let reply_token = transport.random_uid();
 
     let reply_endpoint = Endpoint::new(transport.local_address().clone(), reply_token);
 
-    let reply_queue: Rc<NetNotifiedQueue<Result<Resp, ReplyError>>> =
-        Rc::new(NetNotifiedQueue::new(reply_endpoint.clone(), decode_reply));
+    let reply_queue: Arc<NetNotifiedQueue<Result<Resp, ReplyError>>> =
+        Arc::new(NetNotifiedQueue::new(reply_endpoint.clone(), decode_reply));
 
     transport.register(reply_token, reply_queue.clone());
 
@@ -140,11 +140,11 @@ where
 
     // Track this reply queue for disconnect cleanup (skip local sends)
     if !transport.is_local_address(&destination.address) {
-        let closer: Rc<dyn ReplyQueueCloser> = reply_queue.clone();
+        let closer: Arc<dyn ReplyQueueCloser> = reply_queue.clone();
         transport.register_pending_reply(
             &destination.address.to_string(),
             reply_token,
-            Rc::downgrade(&closer),
+            Arc::downgrade(&closer),
         );
     }
 
@@ -163,7 +163,7 @@ where
 mod tests {
 
     use std::net::{IpAddr, Ipv4Addr};
-    use std::rc::Rc;
+    use std::sync::Arc;
 
     use crate::rpc::test_support::make_transport;
     use crate::rpc::transport_handle::{make_decode_fn, make_encode_fn};
@@ -193,7 +193,7 @@ mod tests {
         let server_token = UID::new(0x1234, 0x5678);
         let server_endpoint = Endpoint::new(test_address(), server_token);
 
-        let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<PingRequest>>> = Rc::new(
+        let server_queue: Arc<NetNotifiedQueue<RequestEnvelope<PingRequest>>> = Arc::new(
             NetNotifiedQueue::with_codec(server_endpoint.clone(), JsonCodec),
         );
 
@@ -228,7 +228,7 @@ mod tests {
         let server_token = UID::new(0x1234, 0x5678);
         let server_endpoint = Endpoint::new(test_address(), server_token);
 
-        let server_queue: Rc<NetNotifiedQueue<RequestEnvelope<PingRequest>>> = Rc::new(
+        let server_queue: Arc<NetNotifiedQueue<RequestEnvelope<PingRequest>>> = Arc::new(
             NetNotifiedQueue::with_codec(server_endpoint.clone(), JsonCodec),
         );
 

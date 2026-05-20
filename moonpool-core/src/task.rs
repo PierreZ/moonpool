@@ -33,7 +33,7 @@ pub trait TaskProvider: Clone + Send + Sync + 'static {
     ///
     /// Resolves with `Ok(())` on normal completion, or a [`JoinError`] if the
     /// task was cancelled or panicked.
-    type JoinHandle: Future<Output = Result<(), JoinError>> + Send + 'static;
+    type JoinHandle: Future<Output = Result<(), JoinError>> + Send + Sync + 'static;
 
     /// Spawn a named task.
     fn spawn_task<F>(&self, name: &str, future: F) -> Self::JoinHandle

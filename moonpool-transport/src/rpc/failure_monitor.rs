@@ -12,11 +12,11 @@
 //! # FDB Reference
 //! `SimpleFailureMonitor` from `FailureMonitor.h:146`, `FailureMonitor.actor.cpp`
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::RwLock;
 use std::task::{Poll, Waker};
 use std::time::Duration;
 
@@ -28,7 +28,7 @@ use crate::Endpoint;
 ///
 /// Keeps [`FailureMonitor`] non-generic while still able to call into the
 /// active time provider (real or simulated).
-type SleepFn = Box<dyn Fn(Duration) -> Pin<Box<dyn Future<Output = ()>>>>;
+type SleepFn = Box<dyn Fn(Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Maximum number of permanently failed endpoints before clearing the map.
 ///
@@ -60,7 +60,7 @@ pub enum FailureStatus {
 /// # FDB Reference
 /// `SimpleFailureMonitor` from `FailureMonitor.h:146`, `FailureMonitor.actor.cpp`
 pub struct FailureMonitor {
-    inner: RefCell<FailureMonitorInner>,
+    inner: RwLock<FailureMonitorInner>,
     sleep_fn: SleepFn,
 }
 
@@ -93,7 +93,7 @@ impl FailureMonitor {
             })
         });
         Self {
-            inner: RefCell::new(FailureMonitorInner {
+            inner: RwLock::new(FailureMonitorInner {
                 address_status: BTreeMap::new(),
                 failed_endpoints: BTreeSet::new(),
                 endpoint_watchers: BTreeMap::new(),
@@ -117,7 +117,10 @@ impl FailureMonitor {
     /// # FDB Reference
     /// `SimpleFailureMonitor::setStatus` (FailureMonitor.actor.cpp:83-115)
     pub fn set_status(&self, address: &str, status: FailureStatus) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
 
         let changed = match status {
             FailureStatus::Available => {
@@ -143,7 +146,10 @@ impl FailureMonitor {
     /// # FDB Reference
     /// `SimpleFailureMonitor::notifyDisconnect` (FailureMonitor.actor.cpp:150-154)
     pub fn notify_disconnect(&self, address: &str) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         wake_all(&mut inner.endpoint_watchers, address);
         wake_all(&mut inner.disconnect_watchers, address);
     }
@@ -163,7 +169,10 @@ impl FailureMonitor {
             return;
         }
 
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
 
         // Cap is informational: every entry here is a permanent NotFound, so
         // there is nothing to evict. Drop the new addition with a warning when
@@ -198,7 +207,10 @@ impl FailureMonitor {
     /// # FDB Reference
     /// `SimpleFailureMonitor::getState(Endpoint)` (FailureMonitor.actor.cpp:196-206)
     pub fn state(&self, endpoint: &Endpoint) -> FailureStatus {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
 
         if inner.failed_endpoints.contains(endpoint) {
             return FailureStatus::Failed;
@@ -217,7 +229,11 @@ impl FailureMonitor {
     /// # FDB Reference
     /// `SimpleFailureMonitor::permanentlyFailed` (FailureMonitor.h:226-228)
     pub fn permanently_failed(&self, endpoint: &Endpoint) -> bool {
-        self.inner.borrow().failed_endpoints.contains(endpoint)
+        self.inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .failed_endpoints
+            .contains(endpoint)
     }
 
     /// Returns a future that resolves when the endpoint's address disconnects
@@ -230,15 +246,18 @@ impl FailureMonitor {
     /// # FDB Reference
     /// `SimpleFailureMonitor::onDisconnectOrFailure` (FailureMonitor.actor.cpp:156-178)
     pub fn on_disconnect_or_failure(
-        self: &Rc<Self>,
+        self: &Arc<Self>,
         endpoint: &Endpoint,
     ) -> impl Future<Output = ()> {
-        let fm = Rc::clone(self);
+        let fm = Arc::clone(self);
         let address = endpoint.address.to_string();
         let endpoint = endpoint.clone();
 
         std::future::poll_fn(move |cx| {
-            let inner = fm.inner.borrow();
+            let inner = fm
+                .inner
+                .read()
+                .expect("RwLock poisoned: prior task panicked");
 
             // Fast path: already failed
             if inner.failed_endpoints.contains(&endpoint) {
@@ -255,7 +274,10 @@ impl FailureMonitor {
 
             // Slow path: register waker
             drop(inner);
-            let mut inner = fm.inner.borrow_mut();
+            let mut inner = fm
+                .inner
+                .write()
+                .expect("RwLock poisoned: prior task panicked");
             inner
                 .endpoint_watchers
                 .entry(address.clone())
@@ -271,20 +293,23 @@ impl FailureMonitor {
     ///
     /// # FDB Reference
     /// `SimpleFailureMonitor::onDisconnect` (FailureMonitor.actor.cpp:180-182)
-    pub fn on_disconnect(self: &Rc<Self>, address: &str) -> impl Future<Output = ()> {
-        let fm = Rc::clone(self);
+    pub fn on_disconnect(self: &Arc<Self>, address: &str) -> impl Future<Output = ()> + Send {
+        let fm = Arc::clone(self);
         let address = address.to_string();
-        let registered = Rc::new(std::cell::Cell::new(false));
+        let registered = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         std::future::poll_fn(move |cx| {
             // If we already registered and got woken, the disconnect happened
-            if registered.get() {
+            if registered.load(std::sync::atomic::Ordering::Acquire) {
                 return Poll::Ready(());
             }
 
             // First poll: register waker and mark as registered
-            registered.set(true);
-            let mut inner = fm.inner.borrow_mut();
+            registered.store(true, std::sync::atomic::Ordering::Release);
+            let mut inner = fm
+                .inner
+                .write()
+                .expect("RwLock poisoned: prior task panicked");
             inner
                 .disconnect_watchers
                 .entry(address.clone())
@@ -308,7 +333,7 @@ impl FailureMonitor {
     /// race this future against the reply future, so a recovered endpoint that
     /// answers in time wins the race anyway. Treat this as a deadline timer
     /// armed by the first observed failure, not a continuous health check.
-    pub async fn on_failed_for(self: &Rc<Self>, endpoint: &Endpoint, duration: Duration) {
+    pub async fn on_failed_for(self: &Arc<Self>, endpoint: &Endpoint, duration: Duration) {
         self.on_disconnect_or_failure(endpoint).await;
         (self.sleep_fn)(duration).await;
     }
@@ -316,7 +341,10 @@ impl FailureMonitor {
 
 impl std::fmt::Debug for FailureMonitor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let inner = self.inner.borrow();
+        let inner = self
+            .inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
         f.debug_struct("FailureMonitor")
             .field("addresses_available", &inner.address_status.len())
             .field("endpoints_failed", &inner.failed_endpoints.len())
@@ -389,7 +417,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_on_disconnect_or_failure_fast_path_unknown() {
-        let fm = Rc::new(make_fm());
+        let fm = Arc::new(make_fm());
         let ep = test_endpoint();
         // Unknown address → already failed → should resolve immediately
         fm.on_disconnect_or_failure(&ep).await;
@@ -397,7 +425,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_on_disconnect_or_failure_fast_path_permanent() {
-        let fm = Rc::new(make_fm());
+        let fm = Arc::new(make_fm());
         let ep = test_endpoint();
         fm.set_status("10.0.1.1:4500", FailureStatus::Available);
         fm.endpoint_not_found(&ep);
@@ -409,15 +437,15 @@ mod tests {
     fn test_on_disconnect_or_failure_wakes_on_status_change() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
-            .build_local(tokio::runtime::LocalOptions::default())
+            .build()
             .expect("build runtime");
         rt.block_on(async {
-            let fm = Rc::new(make_fm());
+            let fm = Arc::new(make_fm());
             let ep = test_endpoint();
             fm.set_status("10.0.1.1:4500", FailureStatus::Available);
 
-            let fm2 = Rc::clone(&fm);
-            let handle = tokio::task::spawn_local(async move {
+            let fm2 = Arc::clone(&fm);
+            let handle = tokio::spawn(async move {
                 fm2.on_disconnect_or_failure(&ep).await;
             });
 
@@ -435,14 +463,14 @@ mod tests {
     fn test_on_disconnect_wakes_on_notify() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
-            .build_local(tokio::runtime::LocalOptions::default())
+            .build()
             .expect("build runtime");
         rt.block_on(async {
-            let fm = Rc::new(make_fm());
+            let fm = Arc::new(make_fm());
             fm.set_status("10.0.1.1:4500", FailureStatus::Available);
 
-            let fm2 = Rc::clone(&fm);
-            let handle = tokio::task::spawn_local(async move {
+            let fm2 = Arc::clone(&fm);
+            let handle = tokio::spawn(async move {
                 fm2.on_disconnect("10.0.1.1:4500").await;
             });
 
@@ -465,7 +493,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_on_failed_for_resolves_after_sustained_failure() {
-        let fm = Rc::new(make_fm());
+        let fm = Arc::new(make_fm());
         let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
         let token = UID::new(0xAAAA, 0xBBBB);
         let endpoint = Endpoint::new(addr.clone(), token);

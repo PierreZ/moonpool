@@ -7,7 +7,7 @@
 //! From FlowTransport.actor.cpp:80-220
 
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::{UID, WELL_KNOWN_RESERVED_COUNT, WellKnownToken};
 
@@ -17,7 +17,7 @@ use crate::error::MessagingError;
 ///
 /// Implementors handle incoming packets dispatched by EndpointMap.
 /// The `receive` method is called synchronously during packet processing.
-pub trait MessageReceiver {
+pub trait MessageReceiver: Send + Sync {
     /// Process an incoming message payload.
     ///
     /// # Arguments
@@ -39,11 +39,11 @@ pub trait MessageReceiver {
 pub struct EndpointMap {
     /// Well-known receivers indexed by token.second (0-63).
     /// These use O(1) array access for hot-path performance.
-    well_known: [Option<Rc<dyn MessageReceiver>>; WELL_KNOWN_RESERVED_COUNT],
+    well_known: [Option<Arc<dyn MessageReceiver>>; WELL_KNOWN_RESERVED_COUNT],
 
     /// Dynamic receivers keyed by full UID.
     /// Used for endpoints allocated at runtime.
-    dynamic: BTreeMap<UID, Rc<dyn MessageReceiver>>,
+    dynamic: BTreeMap<UID, Arc<dyn MessageReceiver>>,
 
     /// Counter for metrics and debugging.
     registration_count: u64,
@@ -79,13 +79,13 @@ impl EndpointMap {
     ///
     /// ```ignore
     /// let mut map = EndpointMap::new();
-    /// let receiver = Rc::new(MyReceiver::new());
+    /// let receiver = Arc::new(MyReceiver::new());
     /// map.insert_well_known(WellKnownToken::Ping, receiver)?;
     /// ```
     pub fn insert_well_known(
         &mut self,
         token: WellKnownToken,
-        receiver: Rc<dyn MessageReceiver>,
+        receiver: Arc<dyn MessageReceiver>,
     ) -> Result<(), MessagingError> {
         let index = token.as_u32() as usize;
         if index >= WELL_KNOWN_RESERVED_COUNT {
@@ -108,7 +108,7 @@ impl EndpointMap {
     ///
     /// * `token` - The UID for this endpoint
     /// * `receiver` - The receiver to handle incoming messages
-    pub fn insert(&mut self, token: UID, receiver: Rc<dyn MessageReceiver>) {
+    pub fn insert(&mut self, token: UID, receiver: Arc<dyn MessageReceiver>) {
         self.dynamic.insert(token, receiver);
         self.registration_count += 1;
     }
@@ -120,14 +120,14 @@ impl EndpointMap {
     /// # Returns
     ///
     /// The receiver if found, or None if no endpoint is registered for this token.
-    pub fn get(&self, token: &UID) -> Option<Rc<dyn MessageReceiver>> {
+    pub fn get(&self, token: &UID) -> Option<Arc<dyn MessageReceiver>> {
         // Check well-known first (hot path)
         if token.is_well_known() {
             let index = token.second as usize;
             if index < WELL_KNOWN_RESERVED_COUNT
                 && let Some(receiver) = &self.well_known[index]
             {
-                return Some(Rc::clone(receiver));
+                return Some(Arc::clone(receiver));
             }
             return None;
         }
@@ -143,7 +143,7 @@ impl EndpointMap {
     /// # Returns
     ///
     /// The removed receiver if it existed.
-    pub fn remove(&mut self, token: &UID) -> Option<Rc<dyn MessageReceiver>> {
+    pub fn remove(&mut self, token: &UID) -> Option<Arc<dyn MessageReceiver>> {
         if token.is_well_known() {
             return None;
         }
@@ -178,34 +178,44 @@ impl EndpointMap {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::sync::RwLock;
 
     use super::*;
 
     /// Mock receiver for testing.
     struct MockReceiver {
-        received: RefCell<Vec<Vec<u8>>>,
+        received: RwLock<Vec<Vec<u8>>>,
     }
 
     impl MockReceiver {
         fn new() -> Self {
             Self {
-                received: RefCell::new(Vec::new()),
+                received: RwLock::new(Vec::new()),
             }
         }
 
         fn received_count(&self) -> usize {
-            self.received.borrow().len()
+            self.received
+                .read()
+                .expect("RwLock poisoned: prior task panicked")
+                .len()
         }
 
         fn last_received(&self) -> Option<Vec<u8>> {
-            self.received.borrow().last().cloned()
+            self.received
+                .read()
+                .expect("RwLock poisoned: prior task panicked")
+                .last()
+                .cloned()
         }
     }
 
     impl MessageReceiver for MockReceiver {
         fn receive(&self, payload: &[u8]) {
-            self.received.borrow_mut().push(payload.to_vec());
+            self.received
+                .write()
+                .expect("RwLock poisoned: prior task panicked")
+                .push(payload.to_vec());
         }
     }
 
@@ -221,7 +231,7 @@ mod tests {
     #[test]
     fn test_insert_well_known() {
         let mut map = EndpointMap::new();
-        let receiver = Rc::new(MockReceiver::new());
+        let receiver = Arc::new(MockReceiver::new());
 
         map.insert_well_known(WellKnownToken::Ping, receiver.clone())
             .expect("insert should succeed");
@@ -233,7 +243,7 @@ mod tests {
     #[test]
     fn test_get_well_known() {
         let mut map = EndpointMap::new();
-        let receiver = Rc::new(MockReceiver::new());
+        let receiver = Arc::new(MockReceiver::new());
 
         map.insert_well_known(WellKnownToken::Ping, receiver.clone())
             .expect("insert should succeed");
@@ -257,7 +267,7 @@ mod tests {
     #[test]
     fn test_insert_dynamic() {
         let mut map = EndpointMap::new();
-        let receiver = Rc::new(MockReceiver::new());
+        let receiver = Arc::new(MockReceiver::new());
         let token = UID::new(0x1234, 0x5678);
 
         map.insert(token, receiver);
@@ -269,7 +279,7 @@ mod tests {
     #[test]
     fn test_get_dynamic() {
         let mut map = EndpointMap::new();
-        let receiver = Rc::new(MockReceiver::new());
+        let receiver = Arc::new(MockReceiver::new());
         let token = UID::new(0x1234, 0x5678);
 
         map.insert(token, receiver.clone());
@@ -290,7 +300,7 @@ mod tests {
     #[test]
     fn test_remove_dynamic() {
         let mut map = EndpointMap::new();
-        let receiver = Rc::new(MockReceiver::new());
+        let receiver = Arc::new(MockReceiver::new());
         let token = UID::new(0x1234, 0x5678);
 
         map.insert(token, receiver);
@@ -308,7 +318,7 @@ mod tests {
     #[test]
     fn test_remove_well_known_not_allowed() {
         let mut map = EndpointMap::new();
-        let receiver = Rc::new(MockReceiver::new());
+        let receiver = Arc::new(MockReceiver::new());
 
         map.insert_well_known(WellKnownToken::Ping, receiver)
             .expect("insert should succeed");
@@ -325,7 +335,7 @@ mod tests {
     #[test]
     fn test_receiver_receives_payload() {
         let mut map = EndpointMap::new();
-        let receiver = Rc::new(MockReceiver::new());
+        let receiver = Arc::new(MockReceiver::new());
         let token = UID::new(0x1234, 0x5678);
 
         map.insert(token, receiver.clone());
@@ -344,7 +354,7 @@ mod tests {
         // This test verifies the design intention (O(1) array access)
         // by checking that well-known tokens use array indexing
         let mut map = EndpointMap::new();
-        let receiver = Rc::new(MockReceiver::new());
+        let receiver = Arc::new(MockReceiver::new());
 
         // Register all well-known tokens
         for i in 0..4 {

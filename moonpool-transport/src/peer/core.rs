@@ -4,9 +4,9 @@
 //! Provides wire format with UID-based endpoint addressing.
 
 use futures::io::{AsyncReadExt, AsyncWriteExt};
-use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Duration;
 use tokio::sync::{Notify, mpsc};
 
@@ -221,10 +221,10 @@ impl ReconnectState {
 /// Follows FoundationDB's architecture: synchronous API with background actors.
 pub struct Peer<P: Providers> {
     /// Shared state accessible to background actors
-    shared_state: Rc<RefCell<PeerSharedState<P>>>,
+    shared_state: Arc<RwLock<PeerSharedState<P>>>,
 
     /// Trigger to wake writer actor when data is queued
-    data_to_send: Rc<Notify>,
+    data_to_send: Arc<Notify>,
 
     /// Background actor handles
     writer_handle: Option<<P::Task as TaskProvider>::JoinHandle>,
@@ -270,11 +270,11 @@ struct PeerSharedState<P: Providers> {
 
     /// Fired on every connection failure.
     /// FDB ref: `Peer::disconnect` (`FlowTransport.h:180`)
-    disconnect_notify: Rc<Notify>,
+    disconnect_notify: Arc<Notify>,
 
     /// Failure monitor for address-level failure tracking.
     /// FDB ref: `IFailureMonitor` (FailureMonitor.h)
-    failure_monitor: Option<Rc<FailureMonitor>>,
+    failure_monitor: Option<Arc<FailureMonitor>>,
 }
 
 impl<P: Providers> PeerSharedState<P> {
@@ -297,13 +297,13 @@ impl<P: Providers> Peer<P> {
         providers: P,
         destination: String,
         config: PeerConfig,
-        failure_monitor: Option<Rc<FailureMonitor>>,
+        failure_monitor: Option<Arc<FailureMonitor>>,
     ) -> Self {
         let reconnect_state = ReconnectState::new(config.initial_reconnect_delay);
         let now = providers.time().now();
 
         // Create shared state
-        let shared_state = Rc::new(RefCell::new(PeerSharedState {
+        let shared_state = Arc::new(RwLock::new(PeerSharedState {
             network: providers.network().clone(),
             time: providers.time().clone(),
             destination,
@@ -312,12 +312,12 @@ impl<P: Providers> Peer<P> {
             unreliable_queue: VecDeque::new(),
             reconnect_state,
             metrics: PeerMetrics::new_at(now),
-            disconnect_notify: Rc::new(Notify::new()),
+            disconnect_notify: Arc::new(Notify::new()),
             failure_monitor,
         }));
 
         // Create coordination primitives
-        let data_to_send = Rc::new(Notify::new());
+        let data_to_send = Arc::new(Notify::new());
         let (receive_tx, receive_rx) = mpsc::unbounded_channel();
         let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
 
@@ -357,13 +357,13 @@ impl<P: Providers> Peer<P> {
         peer_address: String,
         stream: <P::Network as moonpool_core::NetworkProvider>::TcpStream,
         config: PeerConfig,
-        failure_monitor: Option<Rc<FailureMonitor>>,
+        failure_monitor: Option<Arc<FailureMonitor>>,
     ) -> Self {
         let reconnect_state = ReconnectState::new(config.initial_reconnect_delay);
         let now = providers.time().now();
 
         // Create shared state - mark as connected since we have an existing stream
-        let shared_state = Rc::new(RefCell::new(PeerSharedState {
+        let shared_state = Arc::new(RwLock::new(PeerSharedState {
             network: providers.network().clone(),
             time: providers.time().clone(),
             destination: peer_address,
@@ -372,19 +372,24 @@ impl<P: Providers> Peer<P> {
             unreliable_queue: VecDeque::new(),
             reconnect_state,
             metrics: PeerMetrics::new_at(now),
-            disconnect_notify: Rc::new(Notify::new()),
+            disconnect_notify: Arc::new(Notify::new()),
             failure_monitor,
         }));
 
         // Mark metrics as connected
-        shared_state.borrow_mut().metrics.is_connected = true;
         shared_state
-            .borrow_mut()
+            .write()
+            .expect("RwLock poisoned: prior task panicked")
+            .metrics
+            .is_connected = true;
+        shared_state
+            .write()
+            .expect("RwLock poisoned: prior task panicked")
             .metrics
             .record_connection_success_at(now);
 
         // Create coordination primitives
-        let data_to_send = Rc::new(Notify::new());
+        let data_to_send = Arc::new(Notify::new());
         let (receive_tx, receive_rx) = mpsc::unbounded_channel();
         let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
 
@@ -414,23 +419,35 @@ impl<P: Providers> Peer<P> {
 
     /// Check if currently connected.
     pub fn is_connected(&self) -> bool {
-        self.shared_state.borrow().connection.is_some()
+        self.shared_state
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .connection
+            .is_some()
     }
 
     /// Get the disconnect notification handle.
     ///
     /// FDB ref: `Peer::disconnect` (`FlowTransport.h:180`)
     ///
-    /// Returns an `Rc<Notify>` that fires `notify_waiters()` on every
+    /// Returns an `Arc<Notify>` that fires `notify_waiters()` on every
     /// connection failure. Consumers should call `.notified()` before
     /// checking `is_connected()` to avoid races.
-    pub fn disconnect_notify(&self) -> Rc<Notify> {
-        self.shared_state.borrow().disconnect_notify.clone()
+    pub fn disconnect_notify(&self) -> Arc<Notify> {
+        self.shared_state
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .disconnect_notify
+            .clone()
     }
 
     /// Get peer metrics.
     pub fn metrics(&self) -> PeerMetrics {
-        self.shared_state.borrow().metrics.clone()
+        self.shared_state
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .metrics
+            .clone()
     }
 
     /// Send packet reliably to the peer (queued, will retry on reconnect).
@@ -453,7 +470,10 @@ impl<P: Providers> Peer<P> {
 
         // Queue serialized packet (FoundationDB pattern)
         {
-            let mut state = self.shared_state.borrow_mut();
+            let mut state = self
+                .shared_state
+                .write()
+                .expect("RwLock poisoned: prior task panicked");
 
             // Handle queue overflow
             if state.reliable_queue.len() >= self.config.max_queue_size
@@ -506,7 +526,10 @@ impl<P: Providers> Peer<P> {
 
         // Queue packet in unreliable queue (will be discarded on failure)
         {
-            let mut state = self.shared_state.borrow_mut();
+            let mut state = self
+                .shared_state
+                .write()
+                .expect("RwLock poisoned: prior task panicked");
             let first_unsent = state.are_queues_empty();
             state.unreliable_queue.push_back(packet);
             state.metrics.record_message_queued();
@@ -550,7 +573,10 @@ impl<P: Providers> Peer<P> {
         }
 
         // Clear state
-        let mut state = self.shared_state.borrow_mut();
+        let mut state = self
+            .shared_state
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         state.connection = None;
         state.reliable_queue.clear();
         state.unreliable_queue.clear();
@@ -583,8 +609,8 @@ enum ConnectionLossBehavior {
 /// - Parses wire format packets from the read stream
 /// - Periodically pings to detect unresponsive connections (when monitoring enabled)
 async fn connection_task<P: Providers>(
-    shared_state: Rc<RefCell<PeerSharedState<P>>>,
-    data_to_send: Rc<Notify>,
+    shared_state: Arc<RwLock<PeerSharedState<P>>>,
+    data_to_send: Arc<Notify>,
     config: PeerConfig,
     receive_tx: mpsc::UnboundedSender<(UID, Vec<u8>)>,
     mut shutdown_rx: mpsc::UnboundedReceiver<()>,
@@ -597,7 +623,11 @@ async fn connection_task<P: Providers>(
     let mut read_buffer: Vec<u8> = Vec::with_capacity(4096);
 
     // Extract failure monitor from shared state (clone the Option<Rc>)
-    let failure_monitor = shared_state.borrow().failure_monitor.clone();
+    let failure_monitor = shared_state
+        .read()
+        .expect("RwLock poisoned: prior task panicked")
+        .failure_monitor
+        .clone();
 
     // Initialize ping tracker: only for outbound peers with monitoring enabled
     let mut ping_tracker: Option<PingTracker> = match (&config.monitor, on_connection_loss) {
@@ -611,11 +641,19 @@ async fn connection_task<P: Providers>(
     // and notify failure monitor that this address is available
     if current_connection.is_some() {
         if let Some(ref mut tracker) = ping_tracker {
-            let now = shared_state.borrow().time.now();
+            let now = shared_state
+                .read()
+                .expect("RwLock poisoned: prior task panicked")
+                .time
+                .now();
             tracker.last_ping_cycle = Some(now);
         }
         if let Some(ref fm) = failure_monitor {
-            let dest = shared_state.borrow().destination.clone();
+            let dest = shared_state
+                .read()
+                .expect("RwLock poisoned: prior task panicked")
+                .destination
+                .clone();
             fm.set_status(&dest, FailureStatus::Available);
         }
     }
@@ -624,7 +662,11 @@ async fn connection_task<P: Providers>(
         // Compute ping timer duration before select! to avoid borrow conflicts
         let ping_sleep_duration = if let Some(ref tracker) = ping_tracker {
             if current_connection.is_some() {
-                let now = shared_state.borrow().time.now();
+                let now = shared_state
+                    .read()
+                    .expect("RwLock poisoned: prior task panicked")
+                    .time
+                    .now();
                 Some(tracker.time_until_next_action(now))
             } else {
                 None
@@ -644,7 +686,7 @@ async fn connection_task<P: Providers>(
             _ = data_to_send.notified() => {
                 // First, ensure we have messages to send
                 let has_messages = {
-                    let state = shared_state.borrow();
+                    let state = shared_state.read().expect("RwLock poisoned: prior task panicked");
                     let total = state.reliable_queue.len() + state.unreliable_queue.len();
                     tracing::debug!("connection_task: queues have {} messages (reliable={}, unreliable={})",
                         total, state.reliable_queue.len(), state.unreliable_queue.len());
@@ -667,7 +709,7 @@ async fn connection_task<P: Providers>(
                                     current_connection = Some(stream);
                                     read_buffer.clear();
                                     let dest = {
-                                        let mut state = shared_state.borrow_mut();
+                                        let mut state = shared_state.write().expect("RwLock poisoned: prior task panicked");
                                         state.connection = Some(());
                                         state.metrics.is_connected = true;
                                         state.destination.clone()
@@ -678,7 +720,7 @@ async fn connection_task<P: Providers>(
                                     }
                                     // Reset ping tracker on new connection
                                     if let Some(ref mut tracker) = ping_tracker {
-                                        let now = shared_state.borrow().time.now();
+                                        let now = shared_state.read().expect("RwLock poisoned: prior task panicked").time.now();
                                         tracker.reset();
                                         tracker.last_ping_cycle = Some(now);
                                     }
@@ -701,7 +743,7 @@ async fn connection_task<P: Providers>(
                 while let Some(ref mut stream) = current_connection {
                     // Get next message - reliable queue has priority
                     let (message, is_reliable) = {
-                        let mut state = shared_state.borrow_mut();
+                        let mut state = shared_state.write().expect("RwLock poisoned: prior task panicked");
                         if let Some(msg) = state.reliable_queue.pop_front() {
                             tracing::debug!("connection_task: popped reliable message, remaining: {}",
                                 state.reliable_queue.len());
@@ -729,7 +771,7 @@ async fn connection_task<P: Providers>(
                         Ok(_) => {
                             tracing::debug!("connection_task: write_all succeeded");
                             {
-                                let mut state = shared_state.borrow_mut();
+                                let mut state = shared_state.write().expect("RwLock poisoned: prior task panicked");
                                 state.metrics.record_message_sent(data.len());
                                 state.metrics.record_message_dequeued();
                             }
@@ -828,14 +870,14 @@ async fn connection_task<P: Providers>(
             _ = async {
                 match ping_sleep_duration {
                     Some(duration) => {
-                        let time = shared_state.borrow().time.clone();
+                        let time = shared_state.read().expect("RwLock poisoned: prior task panicked").time.clone();
                         let _ = time.sleep(duration).await;
                     }
                     None => std::future::pending::<()>().await,
                 }
             }, if ping_active => {
                 let (now, bytes_received) = {
-                    let state = shared_state.borrow();
+                    let state = shared_state.read().expect("RwLock poisoned: prior task panicked");
                     (state.time.now(), state.metrics.bytes_received)
                 };
 
@@ -847,7 +889,7 @@ async fn connection_task<P: Providers>(
                             {
                                 // FDB pattern: enqueue ping via unreliable queue, writer sends it
                                 // (FlowTransport.actor.cpp:663 — connectionMonitor uses sendUnreliable)
-                                let mut state = shared_state.borrow_mut();
+                                let mut state = shared_state.write().expect("RwLock poisoned: prior task panicked");
                                 let first_unsent = state.are_queues_empty();
                                 state.unreliable_queue.push_back(ping_packet);
                                 state.metrics.record_ping_sent();
@@ -860,7 +902,7 @@ async fn connection_task<P: Providers>(
                         }
                         PingAction::Tolerate => {
                             shared_state
-                                .borrow_mut()
+                                .write().expect("RwLock poisoned: prior task panicked")
                                 .metrics
                                 .record_ping_timeout_tolerated();
                             tracing::debug!(
@@ -871,7 +913,7 @@ async fn connection_task<P: Providers>(
                             if current_connection.is_some()
                                 && let Ok(ping_packet) = serialize_packet(PING_TOKEN, &[])
                             {
-                                let mut state = shared_state.borrow_mut();
+                                let mut state = shared_state.write().expect("RwLock poisoned: prior task panicked");
                                 let first_unsent = state.are_queues_empty();
                                 state.unreliable_queue.push_back(ping_packet);
                                 state.metrics.record_ping_sent();
@@ -884,10 +926,10 @@ async fn connection_task<P: Providers>(
                             }
                         }
                         PingAction::TearDown => {
-                            shared_state.borrow_mut().metrics.record_ping_timeout();
+                            shared_state.write().expect("RwLock poisoned: prior task panicked").metrics.record_ping_timeout();
                             tracing::debug!(
                                 "connection_task: ping timeout, tearing down connection to {}",
-                                shared_state.borrow().destination
+                                shared_state.read().expect("RwLock poisoned: prior task panicked").destination
                             );
                             tracker.reset();
                             handle_connection_failure(
@@ -918,17 +960,19 @@ async fn connection_task<P: Providers>(
 /// Fires `disconnect_notify` to wake all watchers (FDB pattern: `Peer::disconnect`).
 /// Notifies failure monitor of address failure and disconnect.
 fn handle_connection_failure<P: Providers>(
-    shared_state: &Rc<RefCell<PeerSharedState<P>>>,
+    shared_state: &Arc<RwLock<PeerSharedState<P>>>,
     current_connection: &mut Option<<P::Network as moonpool_core::NetworkProvider>::TcpStream>,
     read_buffer: &mut Vec<u8>,
     failed_send: Option<(Vec<u8>, bool)>, // (data, is_reliable)
-    failure_monitor: &Option<Rc<FailureMonitor>>,
+    failure_monitor: &Option<Arc<FailureMonitor>>,
 ) {
     *current_connection = None;
     read_buffer.clear();
 
     let (disconnect_notify, destination) = {
-        let mut state = shared_state.borrow_mut();
+        let mut state = shared_state
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
         state.connection = None;
         state.metrics.is_connected = false;
 
@@ -983,7 +1027,7 @@ fn handle_connection_failure<P: Providers>(
 ///
 /// Returns true if the task should exit.
 fn process_read_buffer<P: Providers>(
-    shared_state: &Rc<RefCell<PeerSharedState<P>>>,
+    shared_state: &Arc<RwLock<PeerSharedState<P>>>,
     current_connection: &mut Option<<P::Network as moonpool_core::NetworkProvider>::TcpStream>,
     read_buffer: &mut Vec<u8>,
     receive_tx: &mpsc::UnboundedSender<(UID, Vec<u8>)>,
@@ -1006,7 +1050,9 @@ fn process_read_buffer<P: Providers>(
                 );
 
                 {
-                    let mut state = shared_state.borrow_mut();
+                    let mut state = shared_state
+                        .write()
+                        .expect("RwLock poisoned: prior task panicked");
                     state.metrics.record_message_received(consumed);
                 }
 
@@ -1017,7 +1063,9 @@ fn process_read_buffer<P: Providers>(
                 // FDB pattern: pong goes through sendPacket → unsent queue → connectionWriter
                 if token == PING_TOKEN {
                     if let Ok(pong_packet) = serialize_packet(PONG_TOKEN, &[]) {
-                        let mut state = shared_state.borrow_mut();
+                        let mut state = shared_state
+                            .write()
+                            .expect("RwLock poisoned: prior task panicked");
                         let first_unsent = state.are_queues_empty();
                         state.unreliable_queue.push_back(pong_packet);
                         drop(state);
@@ -1034,9 +1082,17 @@ fn process_read_buffer<P: Providers>(
                 // Intercept pong token — update ping tracker with RTT
                 if token == PONG_TOKEN {
                     if let Some(tracker) = ping_tracker.as_mut() {
-                        let now = shared_state.borrow().time.now();
+                        let now = shared_state
+                            .read()
+                            .expect("RwLock poisoned: prior task panicked")
+                            .time
+                            .now();
                         if let Some(rtt) = tracker.on_pong_received(now) {
-                            shared_state.borrow_mut().metrics.record_pong_received(rtt);
+                            shared_state
+                                .write()
+                                .expect("RwLock poisoned: prior task panicked")
+                                .metrics
+                                .record_pong_received(rtt);
                             tracing::debug!("connection_task: received pong, rtt={:?}", rtt);
                         }
                     }
@@ -1053,7 +1109,9 @@ fn process_read_buffer<P: Providers>(
                             u64::from_le_bytes(payload[8..16].try_into().unwrap_or_default());
                         let missing_token = UID::new(first, second);
 
-                        let state = shared_state.borrow();
+                        let state = shared_state
+                            .read()
+                            .expect("RwLock poisoned: prior task panicked");
                         if let Ok(addr) = crate::NetworkAddress::parse(&state.destination) {
                             let endpoint = crate::Endpoint::new(addr, missing_token);
                             if let Some(ref fm) = state.failure_monitor {
@@ -1106,7 +1164,9 @@ fn process_read_buffer<P: Providers>(
                 }
 
                 let (disconnect_notify, destination, failure_monitor) = {
-                    let mut state = shared_state.borrow_mut();
+                    let mut state = shared_state
+                        .write()
+                        .expect("RwLock poisoned: prior task panicked");
                     state.connection = None;
                     state.metrics.is_connected = false;
 
@@ -1148,13 +1208,15 @@ fn process_read_buffer<P: Providers>(
 
 /// Establish a connection with exponential backoff.
 async fn establish_connection<P: Providers>(
-    shared_state: &Rc<RefCell<PeerSharedState<P>>>,
+    shared_state: &Arc<RwLock<PeerSharedState<P>>>,
     config: &PeerConfig,
 ) -> PeerResult<<P::Network as moonpool_core::NetworkProvider>::TcpStream> {
     loop {
         // Check failure limits and get connection params
         let (network, time, destination, should_backoff, delay) = {
-            let state = shared_state.borrow_mut();
+            let state = shared_state
+                .write()
+                .expect("RwLock poisoned: prior task panicked");
 
             // Check failure limits
             if let Some(max_failures) = config.max_connection_failures
@@ -1193,7 +1255,9 @@ async fn establish_connection<P: Providers>(
 
         // Record attempt
         {
-            let mut state = shared_state.borrow_mut();
+            let mut state = shared_state
+                .write()
+                .expect("RwLock poisoned: prior task panicked");
             state.reconnect_state.last_attempt = Some(state.time.now());
             state.metrics.record_connection_attempt();
         }
@@ -1206,7 +1270,9 @@ async fn establish_connection<P: Providers>(
             Ok(Ok(stream)) => {
                 // Success
                 {
-                    let mut state = shared_state.borrow_mut();
+                    let mut state = shared_state
+                        .write()
+                        .expect("RwLock poisoned: prior task panicked");
                     let now = state.time.now();
                     state.connection = Some(()); // Mark as connected
                     state.reconnect_state.reset(config.initial_reconnect_delay);
@@ -1232,10 +1298,12 @@ async fn establish_connection<P: Providers>(
 
 /// Record a connection failure: increment failure count, update backoff delay, record metrics.
 fn record_connection_failure<P: Providers>(
-    shared_state: &Rc<RefCell<PeerSharedState<P>>>,
+    shared_state: &Arc<RwLock<PeerSharedState<P>>>,
     config: &PeerConfig,
 ) {
-    let mut state = shared_state.borrow_mut();
+    let mut state = shared_state
+        .write()
+        .expect("RwLock poisoned: prior task panicked");
     state.reconnect_state.failure_count += 1;
     let next_delay = std::cmp::min(
         state.reconnect_state.current_delay * 2,

@@ -7,12 +7,12 @@
 /// all serving tasks by closing the underlying request streams.
 #[must_use = "dropping the ServerHandle stops the server immediately"]
 pub struct ServerHandle {
-    close_fns: Vec<Box<dyn Fn()>>,
+    close_fns: Vec<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl ServerHandle {
     /// Create a new server handle from a set of close functions.
-    pub fn new(close_fns: Vec<Box<dyn Fn()>>) -> Self {
+    pub fn new(close_fns: Vec<Box<dyn Fn() + Send + Sync>>) -> Self {
         Self { close_fns }
     }
 
