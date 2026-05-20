@@ -660,7 +660,7 @@ impl Default for DungeonWorkload {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Workload for DungeonWorkload {
     fn name(&self) -> &str {
         "dungeon"

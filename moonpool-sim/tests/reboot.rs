@@ -20,7 +20,7 @@ use std::cell::Cell;
 
 struct EchoProcess;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Process for EchoProcess {
     fn name(&self) -> &str {
         "echo"
@@ -62,7 +62,7 @@ impl Process for EchoProcess {
 
 struct ProcessMonitorWorkload;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Workload for ProcessMonitorWorkload {
     fn name(&self) -> &str {
         "monitor"
@@ -105,7 +105,7 @@ fn test_process_boot_and_topology() {
 
 struct TagVerifierWorkload;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Workload for TagVerifierWorkload {
     fn name(&self) -> &str {
         "tag_verifier"
@@ -147,7 +147,7 @@ fn test_process_tags_round_robin() {
 
 struct RebootOnceInjector;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl FaultInjector for RebootOnceInjector {
     fn name(&self) -> &str {
         "reboot_once"
@@ -173,7 +173,7 @@ impl FaultInjector for RebootOnceInjector {
 /// Workload that runs for a fixed sim-time duration then returns.
 struct TimedWorkload(Duration);
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Workload for TimedWorkload {
     fn name(&self) -> &str {
         "timed"
@@ -238,7 +238,7 @@ fn test_builtin_attrition() {
 
 struct RebootTaggedInjector;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl FaultInjector for RebootTaggedInjector {
     fn name(&self) -> &str {
         "reboot_tagged"
@@ -279,7 +279,7 @@ fn test_tag_based_reboot() {
 
 struct TagAwareProcess;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Process for TagAwareProcess {
     fn name(&self) -> &str {
         "tag_aware"
@@ -324,7 +324,7 @@ fn test_process_reads_own_tags() {
 /// Process that detects shutdown token cancellation and exits cleanly.
 struct GracefulProcess;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Process for GracefulProcess {
     fn name(&self) -> &str {
         "graceful"
@@ -358,7 +358,7 @@ impl Process for GracefulProcess {
 /// Fault injector that triggers a single graceful reboot.
 struct GracefulRebootInjector;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl FaultInjector for GracefulRebootInjector {
     fn name(&self) -> &str {
         "graceful_reboot"
@@ -403,7 +403,7 @@ fn test_graceful_reboot_signals_shutdown_token() {
 /// Process that ignores the shutdown token and loops forever.
 struct StuckProcess;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Process for StuckProcess {
     fn name(&self) -> &str {
         "stuck"

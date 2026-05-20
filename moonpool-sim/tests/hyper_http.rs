@@ -78,7 +78,7 @@ async fn handle_request(
 
 struct HyperServer;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Process for HyperServer {
     fn name(&self) -> &str {
         "server"
@@ -115,7 +115,7 @@ impl Process for HyperServer {
 
 struct HyperClient;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Workload for HyperClient {
     fn name(&self) -> &str {
         "client"

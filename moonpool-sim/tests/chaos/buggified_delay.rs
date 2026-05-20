@@ -132,7 +132,7 @@ fn test_buggified_delay_deterministic() {
         let local_runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .enable_time()
-            .build_local(Default::default())
+            .build()
             .expect("Failed to build local runtime");
 
         local_runtime.block_on(async move {

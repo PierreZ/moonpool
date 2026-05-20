@@ -22,7 +22,7 @@ struct AssertOnceWorkload {
     message: &'static str,
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Workload for AssertOnceWorkload {
     fn name(&self) -> &str {
         "client"
@@ -37,7 +37,7 @@ impl Workload for AssertOnceWorkload {
 /// Workload that triggers a fork, then fails in child processes (simulates a bug).
 struct ChildBugWorkload;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Workload for ChildBugWorkload {
     fn name(&self) -> &str {
         "client"
@@ -59,7 +59,7 @@ impl Workload for ChildBugWorkload {
 /// Workload with two consecutive assertion gates (tests depth limiting).
 struct TwoGateWorkload;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Workload for TwoGateWorkload {
     fn name(&self) -> &str {
         "client"
@@ -80,7 +80,7 @@ impl Workload for TwoGateWorkload {
 /// Workload with three assertion gates (tests energy limiting).
 struct ThreeGateWorkload;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Workload for ThreeGateWorkload {
     fn name(&self) -> &str {
         "client"
@@ -98,7 +98,7 @@ impl Workload for ThreeGateWorkload {
 /// Workload with cascaded probabilistic gates (planted bug scenario).
 struct PlantedBugWorkload;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Workload for PlantedBugWorkload {
     fn name(&self) -> &str {
         "client"
@@ -132,7 +132,7 @@ impl Workload for PlantedBugWorkload {
 /// Workload that exercises assert_sometimes_each! with identity keys.
 struct EachBucketWorkload;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Workload for EachBucketWorkload {
     fn name(&self) -> &str {
         "client"

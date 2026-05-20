@@ -215,7 +215,7 @@ pub fn build_router(store: Arc<dyn Store>) -> axum::Router {
 /// simulated listener.
 pub struct WebProcess;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Process for WebProcess {
     fn name(&self) -> &str {
         "web"
@@ -270,7 +270,7 @@ impl Process for WebProcess {
 /// Test driver that sends HTTP requests to the web process and validates responses.
 pub struct WebWorkload;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Workload for WebWorkload {
     fn name(&self) -> &str {
         "client"

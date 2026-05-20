@@ -20,7 +20,7 @@ fn test_connect_failure_mode_disabled() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -57,7 +57,7 @@ fn test_connect_failure_mode_always_fail() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -99,7 +99,7 @@ fn test_connect_failure_mode_probabilistic_error() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -146,7 +146,7 @@ fn test_connect_failure_requires_buggify() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -182,7 +182,7 @@ fn test_connect_failure_mode_probabilistic_with_timeout() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -230,7 +230,7 @@ fn test_connect_failure_deterministic() {
         let local_runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .enable_time()
-            .build_local(Default::default())
+            .build()
             .expect("Failed to build local runtime");
 
         local_runtime.block_on(async move {
@@ -276,7 +276,7 @@ fn test_connect_failure_existing_connections() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -313,7 +313,7 @@ fn test_connect_failure_error_message_always_fail() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -354,7 +354,7 @@ fn test_connect_failure_error_message_probabilistic() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
@@ -401,7 +401,7 @@ fn test_connect_failure_random_config() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
