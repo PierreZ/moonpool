@@ -104,9 +104,7 @@ impl TaskProvider for TokioTaskProvider {
         TokioJoinHandle(inner)
     }
 
-    fn yield_now(&self) -> impl Future<Output = ()> + Send {
-        async move {
-            tokio::task::yield_now().await;
-        }
+    async fn yield_now(&self) {
+        tokio::task::yield_now().await;
     }
 }

@@ -285,7 +285,7 @@ fn main() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
+        .build()
         .expect("Failed to create Tokio LocalRuntime");
 
     match mode {

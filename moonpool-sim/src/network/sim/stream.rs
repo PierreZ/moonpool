@@ -544,13 +544,12 @@ impl TcpListenerTrait for SimTcpListener {
     type TcpStream = SimTcpStream;
 
     #[instrument(skip(self))]
-    fn accept(
-        &self,
-    ) -> impl std::future::Future<Output = io::Result<(Self::TcpStream, String)>> + Send {
+    async fn accept(&self) -> io::Result<(Self::TcpStream, String)> {
         AcceptFuture {
             sim: self.sim.clone(),
             local_addr: self.local_addr.clone(),
         }
+        .await
     }
 
     fn local_addr(&self) -> io::Result<String> {

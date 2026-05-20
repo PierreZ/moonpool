@@ -140,15 +140,17 @@ impl Workload for HyperClient {
                 moonpool_sim::SimulationError::InvalidState(format!("hyper handshake error: {e}"))
             })?;
 
-        tokio::task::spawn_local(async move {
+        // Drive the connection inline alongside requests — hyper's conn future
+        // is !Send so it cannot be spawned on the Send-bounded sim runtime.
+        let driver = async move {
             if let Err(e) = conn.await {
                 tracing::debug!("Connection driver error (expected under chaos): {e}");
             }
-        });
+        };
 
-        // Run all requests with shutdown awareness
         tokio::select! {
             result = send_requests(&mut sender, &server_ip) => result?,
+            _ = driver => {}
             _ = ctx.shutdown().cancelled() => {}
         }
 

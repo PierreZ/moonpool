@@ -38,62 +38,40 @@ impl SimStorageProvider {
 impl StorageProvider for SimStorageProvider {
     type File = SimStorageFile;
 
-    fn open(
-        &self,
-        path: &str,
-        options: OpenOptions,
-    ) -> impl std::future::Future<Output = io::Result<Self::File>> + Send {
-        let sim_weak = self.sim.clone();
-        let owner_ip = self.owner_ip;
-        let path = path.to_string();
-        async move {
-            let sim = sim_weak
-                .upgrade()
-                .map_err(|_| io::Error::other("simulation shutdown"))?;
+    async fn open(&self, path: &str, options: OpenOptions) -> io::Result<Self::File> {
+        let sim = self
+            .sim
+            .upgrade()
+            .map_err(|_| io::Error::other("simulation shutdown"))?;
 
-            let file_id = sim.open_file(&path, options, 0, owner_ip)?;
+        let file_id = sim.open_file(path, options, 0, self.owner_ip)?;
 
-            Ok(SimStorageFile::new(sim_weak, file_id))
-        }
+        Ok(SimStorageFile::new(self.sim.clone(), file_id))
     }
 
-    fn exists(&self, path: &str) -> impl std::future::Future<Output = io::Result<bool>> + Send {
-        let sim_weak = self.sim.clone();
-        let path = path.to_string();
-        async move {
-            let sim = sim_weak
-                .upgrade()
-                .map_err(|_| io::Error::other("simulation shutdown"))?;
-            Ok(sim.file_exists(&path))
-        }
+    async fn exists(&self, path: &str) -> io::Result<bool> {
+        let sim = self
+            .sim
+            .upgrade()
+            .map_err(|_| io::Error::other("simulation shutdown"))?;
+        Ok(sim.file_exists(path))
     }
 
-    fn delete(&self, path: &str) -> impl std::future::Future<Output = io::Result<()>> + Send {
-        let sim_weak = self.sim.clone();
-        let path = path.to_string();
-        async move {
-            let sim = sim_weak
-                .upgrade()
-                .map_err(|_| io::Error::other("simulation shutdown"))?;
-            sim.delete_file(&path)?;
-            Ok(())
-        }
+    async fn delete(&self, path: &str) -> io::Result<()> {
+        let sim = self
+            .sim
+            .upgrade()
+            .map_err(|_| io::Error::other("simulation shutdown"))?;
+        sim.delete_file(path)?;
+        Ok(())
     }
 
-    fn rename(
-        &self,
-        from: &str,
-        to: &str,
-    ) -> impl std::future::Future<Output = io::Result<()>> + Send {
-        let sim_weak = self.sim.clone();
-        let from = from.to_string();
-        let to = to.to_string();
-        async move {
-            let sim = sim_weak
-                .upgrade()
-                .map_err(|_| io::Error::other("simulation shutdown"))?;
-            sim.rename_file(&from, &to)?;
-            Ok(())
-        }
+    async fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        let sim = self
+            .sim
+            .upgrade()
+            .map_err(|_| io::Error::other("simulation shutdown"))?;
+        sim.rename_file(from, to)?;
+        Ok(())
     }
 }

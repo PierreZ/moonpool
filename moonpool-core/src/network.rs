@@ -73,23 +73,13 @@ impl NetworkProvider for TokioNetworkProvider {
     type TcpStream = Compat<tokio::net::TcpStream>;
     type TcpListener = TokioTcpListener;
 
-    fn bind(
-        &self,
-        addr: &str,
-    ) -> impl std::future::Future<Output = io::Result<Self::TcpListener>> + Send {
-        let addr = addr.to_string();
-        async move {
-            let listener = tokio::net::TcpListener::bind(&addr).await?;
-            Ok(TokioTcpListener { inner: listener })
-        }
+    async fn bind(&self, addr: &str) -> io::Result<Self::TcpListener> {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        Ok(TokioTcpListener { inner: listener })
     }
 
-    fn connect(
-        &self,
-        addr: &str,
-    ) -> impl std::future::Future<Output = io::Result<Self::TcpStream>> + Send {
-        let addr = addr.to_string();
-        async move { Ok(tokio::net::TcpStream::connect(&addr).await?.compat()) }
+    async fn connect(&self, addr: &str) -> io::Result<Self::TcpStream> {
+        Ok(tokio::net::TcpStream::connect(addr).await?.compat())
     }
 }
 
@@ -104,13 +94,9 @@ pub struct TokioTcpListener {
 impl TcpListenerTrait for TokioTcpListener {
     type TcpStream = Compat<tokio::net::TcpStream>;
 
-    fn accept(
-        &self,
-    ) -> impl std::future::Future<Output = io::Result<(Self::TcpStream, String)>> + Send {
-        async move {
-            let (stream, addr) = self.inner.accept().await?;
-            Ok((stream.compat(), addr.to_string()))
-        }
+    async fn accept(&self) -> io::Result<(Self::TcpStream, String)> {
+        let (stream, addr) = self.inner.accept().await?;
+        Ok((stream.compat(), addr.to_string()))
     }
 
     fn local_addr(&self) -> io::Result<String> {

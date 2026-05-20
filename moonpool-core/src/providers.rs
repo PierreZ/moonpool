@@ -55,7 +55,7 @@ use crate::{
 /// The trait uses associated types to preserve type information at compile time
 /// without runtime dispatch. Accessor methods provide convenient access to
 /// individual providers while maintaining the bundle.
-pub trait Providers: Clone + 'static {
+pub trait Providers: Clone + Send + Sync + 'static {
     /// Network provider type for TCP connections and listeners.
     type Network: NetworkProvider + Clone + 'static;
 

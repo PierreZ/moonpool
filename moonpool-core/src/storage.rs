@@ -159,52 +159,35 @@ impl Default for TokioStorageProvider {
 impl StorageProvider for TokioStorageProvider {
     type File = TokioStorageFile;
 
-    fn open(
-        &self,
-        path: &str,
-        options: OpenOptions,
-    ) -> impl std::future::Future<Output = io::Result<Self::File>> + Send {
-        let path = path.to_string();
-        async move {
-            let file = tokio::fs::OpenOptions::new()
-                .read(options.read)
-                .write(options.write)
-                .create(options.create)
-                .create_new(options.create_new)
-                .truncate(options.truncate)
-                .append(options.append)
-                .open(&path)
-                .await?;
-            Ok(TokioStorageFile {
-                inner: file.compat(),
-            })
+    async fn open(&self, path: &str, options: OpenOptions) -> io::Result<Self::File> {
+        let file = tokio::fs::OpenOptions::new()
+            .read(options.read)
+            .write(options.write)
+            .create(options.create)
+            .create_new(options.create_new)
+            .truncate(options.truncate)
+            .append(options.append)
+            .open(path)
+            .await?;
+        Ok(TokioStorageFile {
+            inner: file.compat(),
+        })
+    }
+
+    async fn exists(&self, path: &str) -> io::Result<bool> {
+        match tokio::fs::metadata(path).await {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
         }
     }
 
-    fn exists(&self, path: &str) -> impl std::future::Future<Output = io::Result<bool>> + Send {
-        let path = path.to_string();
-        async move {
-            match tokio::fs::metadata(&path).await {
-                Ok(_) => Ok(true),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
-                Err(e) => Err(e),
-            }
-        }
+    async fn delete(&self, path: &str) -> io::Result<()> {
+        tokio::fs::remove_file(path).await
     }
 
-    fn delete(&self, path: &str) -> impl std::future::Future<Output = io::Result<()>> + Send {
-        let path = path.to_string();
-        async move { tokio::fs::remove_file(&path).await }
-    }
-
-    fn rename(
-        &self,
-        from: &str,
-        to: &str,
-    ) -> impl std::future::Future<Output = io::Result<()>> + Send {
-        let from = from.to_string();
-        let to = to.to_string();
-        async move { tokio::fs::rename(&from, &to).await }
+    async fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        tokio::fs::rename(from, to).await
     }
 }
 
@@ -224,23 +207,21 @@ pub struct TokioStorageFile {
 
 #[cfg(feature = "tokio-providers")]
 impl StorageFile for TokioStorageFile {
-    fn sync_all(&self) -> impl std::future::Future<Output = io::Result<()>> + Send {
-        async move { self.inner.get_ref().sync_all().await }
+    async fn sync_all(&self) -> io::Result<()> {
+        self.inner.get_ref().sync_all().await
     }
 
-    fn sync_data(&self) -> impl std::future::Future<Output = io::Result<()>> + Send {
-        async move { self.inner.get_ref().sync_data().await }
+    async fn sync_data(&self) -> io::Result<()> {
+        self.inner.get_ref().sync_data().await
     }
 
-    fn size(&self) -> impl std::future::Future<Output = io::Result<u64>> + Send {
-        async move {
-            let metadata = self.inner.get_ref().metadata().await?;
-            Ok(metadata.len())
-        }
+    async fn size(&self) -> io::Result<u64> {
+        let metadata = self.inner.get_ref().metadata().await?;
+        Ok(metadata.len())
     }
 
-    fn set_len(&self, size: u64) -> impl std::future::Future<Output = io::Result<()>> + Send {
-        async move { self.inner.get_ref().set_len(size).await }
+    async fn set_len(&self, size: u64) -> io::Result<()> {
+        self.inner.get_ref().set_len(size).await
     }
 }
 

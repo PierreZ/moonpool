@@ -222,43 +222,49 @@ impl Process for WebProcess {
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        use futures::stream::{FuturesUnordered, StreamExt};
+
         let store = InMemoryStore::new();
         let app = build_router(store);
 
         let listener = ctx.network().bind(ctx.my_ip()).await?;
         tracing::info!("server bound and listening");
 
+        // hyper's serve_connection future is !Send (HTTP1 state machine holds
+        // internal Rc<…>), so it cannot be spawned on the Send-bounded sim
+        // runtime. Drive multiple in-flight connections inline via
+        // FuturesUnordered instead.
+        let mut connections = FuturesUnordered::new();
+
         loop {
-            let (stream, addr) = tokio::select! {
-                result = listener.accept() => result?,
+            tokio::select! {
+                accept = listener.accept() => {
+                    let (stream, addr) = accept?;
+                    tracing::info!(%addr, "accepted connection");
+
+                    // SimTcpStream implements futures::io traits; .compat() bridges
+                    // them back to tokio::io so TokioIo (and therefore hyper)
+                    // accepts the stream.
+                    let io = TokioIo::new(stream.compat());
+                    let service = TowerToHyperService::new(app.clone());
+
+                    connections.push(async move {
+                        tracing::info!("serve_connection starting");
+                        if let Err(e) = hyper::server::conn::http1::Builder::new()
+                            .serve_connection(io, service)
+                            .await
+                        {
+                            tracing::warn!("hyper serve_connection error (expected under chaos): {e}");
+                        }
+                        tracing::info!("serve_connection finished");
+                    });
+                }
+                Some(()) = connections.next(), if !connections.is_empty() => {}
                 _ = ctx.shutdown().cancelled() => {
                     tracing::info!("server shutting down");
                     return Ok(());
                 }
-            };
-
-            tracing::info!(%addr, "accepted connection");
-
-            // SimTcpStream implements futures::io traits; .compat() bridges them
-            // back to tokio::io so TokioIo (and therefore hyper) accepts the stream.
-            let io = TokioIo::new(stream.compat());
-            // TowerToHyperService bridges axum's tower::Service to hyper's Service trait.
-            let service = TowerToHyperService::new(app.clone());
-
-            // spawn_local, not spawn — the future holds SimTcpStream which is !Send.
-            // Axum handlers ARE Send (axum's requirement), but hyper polls them
-            // inline within the connection future. Both coexist correctly.
-            tokio::task::spawn_local(async move {
-                tracing::info!("serve_connection starting");
-                if let Err(e) = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(io, service)
-                    .await
-                {
-                    // Expected under chaos: connection reset, incomplete message
-                    tracing::warn!("hyper serve_connection error (expected under chaos): {e}");
-                }
-                tracing::info!("serve_connection finished");
-            });
+            }
         }
     }
 }
@@ -333,14 +339,15 @@ impl WebWorkload {
             .await
             .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("handshake: {e}")))?;
 
-        tracing::info!(round, "handshake complete, spawning conn driver");
-        tokio::task::spawn_local(async move {
+        tracing::info!(round, "handshake complete, driving conn inline");
+        let driver = async move {
             tracing::info!("client conn driver starting");
             if let Err(e) = conn.await {
                 tracing::warn!("client conn driver error: {e}");
             }
             tracing::info!("client conn driver finished");
-        });
+        };
+        tokio::pin!(driver);
 
         // GET /health
         tracing::info!(round, "sending GET /health");

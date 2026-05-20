@@ -102,14 +102,9 @@ impl Default for TokioTimeProvider {
 
 #[cfg(feature = "tokio-providers")]
 impl TimeProvider for TokioTimeProvider {
-    fn sleep(
-        &self,
-        duration: Duration,
-    ) -> impl std::future::Future<Output = Result<(), TimeError>> + Send {
-        async move {
-            tokio::time::sleep(duration).await;
-            Ok(())
-        }
+    async fn sleep(&self, duration: Duration) -> Result<(), TimeError> {
+        tokio::time::sleep(duration).await;
+        Ok(())
     }
 
     fn now(&self) -> Duration {
@@ -122,19 +117,13 @@ impl TimeProvider for TokioTimeProvider {
         self.now()
     }
 
-    fn timeout<F, T>(
-        &self,
-        duration: Duration,
-        future: F,
-    ) -> impl std::future::Future<Output = Result<T, TimeError>> + Send
+    async fn timeout<F, T>(&self, duration: Duration, future: F) -> Result<T, TimeError>
     where
         F: std::future::Future<Output = T> + Send,
         T: Send,
     {
-        async move {
-            tokio::time::timeout(duration, future)
-                .await
-                .map_err(|_| TimeError::Elapsed)
-        }
+        tokio::time::timeout(duration, future)
+            .await
+            .map_err(|_| TimeError::Elapsed)
     }
 }

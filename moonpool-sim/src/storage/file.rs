@@ -52,27 +52,23 @@ impl SimStorageFile {
 }
 
 impl StorageFile for SimStorageFile {
-    fn sync_all(&self) -> impl std::future::Future<Output = io::Result<()>> + Send {
-        SyncFuture::new(self.sim.clone(), self.file_id)
+    async fn sync_all(&self) -> io::Result<()> {
+        SyncFuture::new(self.sim.clone(), self.file_id).await
     }
 
-    fn sync_data(&self) -> impl std::future::Future<Output = io::Result<()>> + Send {
+    async fn sync_data(&self) -> io::Result<()> {
         // Simulation treats sync_all and sync_data identically
-        SyncFuture::new(self.sim.clone(), self.file_id)
+        SyncFuture::new(self.sim.clone(), self.file_id).await
     }
 
-    fn size(&self) -> impl std::future::Future<Output = io::Result<u64>> + Send {
-        let sim = self.sim.clone();
-        let file_id = self.file_id;
-        async move {
-            let sim = sim.upgrade().map_err(|_| sim_shutdown_error())?;
-            sim.file_size(file_id)
-                .map_err(|e| io::Error::other(e.to_string()))
-        }
+    async fn size(&self) -> io::Result<u64> {
+        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
+        sim.file_size(self.file_id)
+            .map_err(|e| io::Error::other(e.to_string()))
     }
 
-    fn set_len(&self, size: u64) -> impl std::future::Future<Output = io::Result<()>> + Send {
-        SetLenFuture::new(self.sim.clone(), self.file_id, size)
+    async fn set_len(&self, size: u64) -> io::Result<()> {
+        SetLenFuture::new(self.sim.clone(), self.file_id, size).await
     }
 }
 
