@@ -40,13 +40,20 @@ Format: `<type>(<crate>): <description>`
 Types: `fix` (bugfix), `feat` (new feature), `build`, `chore`, `ci`, `docs`, `style`, `refactor`, `perf`, `test`
 
 ## Core Constraints
-- Single-core execution (no Send/Sync)
-- No `unwrap()` - use `Result<T, E>` with `?`
+- Single-thread execution via `tokio::runtime::Builder::new_current_thread().build()`,
+  but traits are Send-bounded so customer code can use `Arc<RwLock<…>>`, `DashMap`,
+  `Arc<AtomicBool>`, and `tokio::spawn` naturally
+- No `unwrap()` - use `Result<T, E>` with `?`; for `RwLock` poison, use
+  `.expect("RwLock poisoned: prior task panicked")` (poisoning means a prior panic)
 - Document all public items
-- Networking: `#[async_trait(?Send)]`
+- Provider traits use native AFIT (`async fn` in trait) with `Send + Sync + 'static`
+  supertraits; trait declarations use `-> impl Future<…> + Send` to propagate Send
+- Dyn-stored traits (`Process`, `Workload`, `FaultInjector`, `#[service]` handler)
+  use `#[async_trait]` (no `?Send`) with `Send + Sync + 'static` supertraits
 - Use traits, not concrete types
 - KISS principle
-- **No LocalSet usage**: Use `tokio::runtime::Builder::new_current_thread().build_local()` only
+- **No LocalSet, no `spawn_local`, no `build_local`**: the sim runtime uses
+  `new_current_thread().build()` — single OS thread, but futures must be `Send + 'static`
 - **No direct tokio calls**: Use Provider traits
   - Forbidden: `tokio::time::sleep()`, `tokio::time::timeout()`, `tokio::spawn()`
   - Required: `time.sleep()`, `time.timeout()`, `task_provider.spawn_task()`
