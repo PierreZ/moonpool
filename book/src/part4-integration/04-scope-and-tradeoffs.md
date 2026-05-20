@@ -9,7 +9,7 @@ Running an axum service inside moonpool-sim exercises a specific slice of your a
 
 **HTTP behavior under chaos**. Requests arrive over simulated TCP with injected latency, connection drops, and data corruption. Hyper's HTTP/1.1 parser processes real wire bytes through a network that actively tries to break things. Half-closed connections, incomplete messages, connection resets mid-response: all exercised.
 
-**Concurrent request handling**. Multiple connections served simultaneously via `spawn_local`. Race conditions between concurrent handlers accessing shared state (your `Store` fake) surface under different scheduling orders across seeds.
+**Concurrent request handling**. Multiple connections are served simultaneously by pushing each `hyper::serve_connection` future onto a `FuturesUnordered` that the accept loop drives inline. We can't spawn those futures onto our Send-bounded runtime because hyper's HTTP/1.1 state machine is `!Send`, so we poll them all in one task instead. Race conditions between concurrent handlers accessing shared state (your `Store` fake) still surface under different scheduling orders across seeds.
 
 **Error paths**. Connection failures, timeouts, process reboots mid-request, store failures via `buggify!()`. The workload validates that your service handles these gracefully: returns appropriate status codes, doesn't panic, doesn't corrupt state.
 

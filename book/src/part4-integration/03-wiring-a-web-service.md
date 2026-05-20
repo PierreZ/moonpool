@@ -80,53 +80,62 @@ The handlers use `State(store): State<Arc<dyn Store>>` and return standard axum 
 This is where moonpool enters the picture. A `Process` is the system under test, running on a simulated server node:
 
 ```rust
-#[async_trait(?Send)]
+#[async_trait]
 impl Process for WebProcess {
     fn name(&self) -> &str { "web" }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        use futures::stream::{FuturesUnordered, StreamExt};
+
         let store = InMemoryStore::new();
         let app = build_router(store);
         let listener = ctx.network().bind(ctx.my_ip()).await?;
 
+        // hyper's serve_connection future is !Send (the HTTP1 state machine
+        // holds internal Rc<…>), so it cannot be handed to tokio::spawn on
+        // the Send-bounded sim runtime. Drive multiple in-flight connections
+        // inline via FuturesUnordered instead.
+        let mut connections = FuturesUnordered::new();
+
         loop {
-            let (stream, _addr) = tokio::select! {
-                result = listener.accept() => result?,
-                _ = ctx.shutdown().cancelled() => return Ok(()),
-            };
+            tokio::select! {
+                accept = listener.accept() => {
+                    let (stream, _addr) = accept?;
 
-            // SimTcpStream implements futures::io traits; .compat() bridges them
-            // back to tokio::io so TokioIo (and therefore hyper) accepts the stream.
-            let io = TokioIo::new(stream.compat());
-            // TowerToHyperService bridges axum's tower::Service to hyper's Service
-            let service = TowerToHyperService::new(app.clone());
+                    // SimTcpStream implements futures::io traits; .compat() bridges
+                    // them back to tokio::io so TokioIo (and therefore hyper) accepts
+                    // the stream.
+                    let io = TokioIo::new(stream.compat());
+                    // TowerToHyperService bridges axum's tower::Service to hyper's Service
+                    let service = TowerToHyperService::new(app.clone());
 
-            // spawn_local, not spawn: the future holds !Send SimTcpStream.
-            // Axum handlers ARE Send (axum's requirement), but hyper polls
-            // them inline within the connection future. Both coexist correctly.
-            tokio::task::spawn_local(async move {
-                if let Err(e) = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(io, service)
-                    .await
-                {
-                    tracing::debug!("hyper error (expected under chaos): {e}");
+                    connections.push(async move {
+                        if let Err(e) = hyper::server::conn::http1::Builder::new()
+                            .serve_connection(io, service)
+                            .await
+                        {
+                            tracing::debug!("hyper error (expected under chaos): {e}");
+                        }
+                    });
                 }
-            });
+                Some(()) = connections.next(), if !connections.is_empty() => {}
+                _ = ctx.shutdown().cancelled() => return Ok(()),
+            }
         }
     }
 }
 ```
 
-Two things to note. First, we use `hyper::server::conn::http1::serve_connection`, **not** `axum::serve()`. `axum::serve` takes `tokio::net::TcpListener` directly, so it can't accept our simulated listener. `serve_connection` takes any tokio `AsyncRead + AsyncWrite`. `SimTcpStream` implements `futures::io::AsyncRead + AsyncWrite` (the runtime-agnostic traits), so we route it through `tokio_util::compat::Compat` via `.compat()` before handing it to `TokioIo`.
+Two things to note. First, we use `hyper::server::conn::http1::serve_connection`, **not** `axum::serve()`. `axum::serve` takes `tokio::net::TcpListener` directly, so it can't accept our simulated listener. `serve_connection` takes any tokio `AsyncRead + AsyncWrite`. `SimTcpStream` implements `futures::io::AsyncRead + AsyncWrite` (the runtime-agnostic traits) and is itself `Send + Sync`, so we route it through `tokio_util::compat::Compat` via `.compat()` before handing it to `TokioIo`.
 
-Second, `spawn_local` instead of `spawn`. The future holds a `SimTcpStream` which is `!Send`. Axum handlers remain `Send` (axum enforces this at compile time). The two coexist because hyper polls handlers inline within the connection future. The handler never escapes to another thread. This is architecturally correct, not a workaround.
+Second, **`FuturesUnordered` instead of `tokio::spawn`**. Customer code on the sim runtime is `Send + Sync`, and `SimTcpStream` is `Send`. The blocker is **hyper itself**: `http1::serve_connection` returns a future that is `!Send` because the HTTP1 state machine holds internal `Rc<…>` cells. That future cannot cross `tokio::spawn`, but it polls perfectly well from the accept loop. `FuturesUnordered` lets one task drive any number of in-flight connections concurrently. The accept loop pushes new connections in, the `connections.next()` arm drains completed ones, and shutdown cancels both.
 
 ## Step 5: The Workload
 
 The workload is the test driver. It connects to the process, sends requests, and validates responses:
 
 ```rust
-#[async_trait(?Send)]
+#[async_trait]
 impl Workload for WebWorkload {
     fn name(&self) -> &str { "client" }
 
@@ -150,7 +159,24 @@ impl Workload for WebWorkload {
 }
 ```
 
-Inside `send_round`, the workload creates a hyper client connection, sends requests, and uses assertions to validate behavior:
+Inside `send_round`, the workload opens a hyper client connection. The client side has the same `!Send` problem: `hyper::client::conn::http1::handshake` hands back a `conn` driver future that is `!Send`. Rather than spawn it, we **pin it on the stack** and let the request/response future race against it:
+
+```rust
+let io = TokioIo::new(stream.compat());
+let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+
+let driver = async move {
+    if let Err(e) = conn.await {
+        tracing::warn!("client conn driver error: {e}");
+    }
+};
+tokio::pin!(driver);
+
+// sender.send_request(...) below — the surrounding tokio::select!
+// in send_round polls `driver` concurrently.
+```
+
+Assertions split into two kinds:
 
 - `assert_always!` for invariants: health returns 200, read-after-write returns the same data, nonexistent items return 404 or 500.
 - `assert_sometimes!` for coverage: items sometimes created successfully, store reads sometimes fail, request rounds sometimes fail under chaos.

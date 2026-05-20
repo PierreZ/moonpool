@@ -22,7 +22,7 @@ No fields. Each time the simulation boots this process, the factory returns a fr
 The trait has two methods: `name()` for identification and `run()` for the main logic.
 
 ```rust
-#[async_trait(?Send)]
+#[async_trait]
 impl Process for KvServer {
     fn name(&self) -> &str {
         "kv"

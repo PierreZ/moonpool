@@ -12,13 +12,13 @@ Why does this matter? Because most teams aren't building distributed systems fro
 The key fact that makes this possible lives in the `NetworkProvider` trait:
 
 ```rust
-pub trait NetworkProvider: Clone {
-    type TcpStream: AsyncRead + AsyncWrite + Unpin + 'static;
+pub trait NetworkProvider: Clone + Send + Sync + 'static {
+    type TcpStream: AsyncRead + AsyncWrite + Unpin + Send + 'static;
     // ...
 }
 ```
 
-`SimTcpStream` implements `tokio::io::AsyncRead + AsyncWrite + Unpin`. That makes it a **drop-in replacement** for `tokio::net::TcpStream` anywhere the tokio ecosystem uses trait-based I/O. And the tokio ecosystem uses trait-based I/O everywhere that matters: hyper, tonic, tower, axum (via hyper), sqlx's wire protocol, redis-rs.
+`SimTcpStream` implements `tokio::io::AsyncRead + AsyncWrite + Unpin` and is `Send + Sync + 'static`. That makes it a **drop-in replacement** for `tokio::net::TcpStream` anywhere the tokio ecosystem uses trait-based I/O. And the tokio ecosystem uses trait-based I/O everywhere that matters: hyper, tonic, tower, axum (via hyper), sqlx's wire protocol, redis-rs.
 
 This isn't an accident. We designed the provider traits to match tokio's interfaces exactly because we wanted existing libraries to work unchanged.
 
@@ -29,7 +29,7 @@ The hyper integration test in `moonpool-sim/tests/hyper_http.rs` demonstrates th
 ```rust
 struct HyperServer;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Process for HyperServer {
     fn name(&self) -> &str { "server" }
 
@@ -54,29 +54,46 @@ impl Process for HyperServer {
 }
 ```
 
-`SimTcpStream` implements `futures::io::AsyncRead + AsyncWrite` (the runtime-agnostic IO traits). Hyper expects `tokio::io` traits, so we route the stream through `tokio_util::compat::Compat` via `.compat()` (from `FuturesAsyncReadCompatExt`), then hand the result to `TokioIo`. From hyper's perspective nothing has changed: HTTP parser, chunked encoding, keep-alive logic, content-length validation — all exercised for real over simulated networking.
+`SimTcpStream` implements `futures::io::AsyncRead + AsyncWrite` (the runtime-agnostic IO traits). Hyper expects `tokio::io` traits, so we route the stream through `tokio_util::compat::Compat` via `.compat()` (from `FuturesAsyncReadCompatExt`), then hand the result to `TokioIo`. From hyper's perspective nothing has changed: HTTP parser, chunked encoding, keep-alive logic, content-length validation, all exercised for real over simulated networking.
 
 The client side follows the same pattern. Connect via `ctx.network().connect()`, `.compat()` the stream, wrap in `TokioIo`, hand to `hyper::client::conn::http1::handshake`. Real HTTP/1.1 request-response cycles over a network that drops packets, injects latency, and kills connections.
 
-## The Send Constraint
+## Spawning Inside a Simulation
 
-One constraint to understand: `SimTcpStream` is `!Send`. It lives inside the simulation's single-threaded runtime. This means you cannot use `tokio::spawn()` for futures that hold a stream reference, because `tokio::spawn` requires `Send`.
+The sim runtime is **single-threaded by construction**. We build it with `tokio::runtime::Builder::new_current_thread().build()`, so every spawned task runs on the one OS thread that drives simulation events. Determinism depends on it.
 
-The fix is straightforward: use `tokio::task::spawn_local` instead.
+What changed compared to earlier moonpool versions: the types crossing trait boundaries are now `Send + 'static`. Provider traits, `SimTcpStream`, `Process`, `Workload`, the `SimContext` you get handed, all of them. That means **`tokio::spawn` is the right tool** when you want to spawn a task from inside simulated code, and customer state can use `Arc<RwLock<…>>`, `DashMap`, `Arc<AtomicBool>` without ceremony.
 
 ```rust
-// Won't compile: spawn requires Send, SimTcpStream is !Send
-// tokio::spawn(async move { serve_connection(io, service).await });
-
-// Works: spawn_local runs on the current thread
-tokio::task::spawn_local(async move {
-    hyper::server::conn::http1::Builder::new()
-        .serve_connection(io, service)
-        .await
+// Works: SimTcpStream is Send, the future is Send, tokio::spawn accepts it.
+let handle = tokio::spawn(async move {
+    serve_one(stream).await
 });
 ```
 
-Most web frameworks work fine under this constraint because the connection-level future holds the stream, and handlers are polled inline within that future. The handler functions themselves can be `Send` (axum requires this). The connection future that wraps them is `!Send` because it holds the stream. Both coexist because hyper polls handlers inline, never spawning them onto a separate task.
+If you want to keep the provider seam (so the same code runs against a real tokio runtime later), reach for `TaskProvider::spawn_task` from `ctx.task()` instead. Same semantics, an injectable interface.
+
+**Do not use `tokio::task::spawn_local` or build a `LocalSet`**. The simulation runtime is `new_current_thread().build()`, not `build_local()`, so there is no `LocalSet` for `spawn_local` to attach to and the spawn would never poll. Whenever you reach for a `!Send` workaround, you have probably wandered off the supported path.
+
+The one case that still bites people: some third-party connection futures (hyper's `Connection` is the canonical example) are themselves `!Send` for reasons unrelated to moonpool. They hold internal state that isn't `Send`. You cannot `tokio::spawn` *those* either, regardless of runtime. The fix is to **drive them inline** alongside your other work:
+
+```rust
+let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+
+// hyper's connection future is !Send by its own design.
+// Drive it inline with select! instead of spawning.
+let driver = async move {
+    let _ = conn.await;
+};
+
+tokio::select! {
+    result = send_requests(&mut sender) => result?,
+    _ = driver => {}
+    _ = ctx.shutdown().cancelled() => {}
+}
+```
+
+That is a hyper API decision, not a moonpool constraint. Axum handlers, tonic services, tower middleware, all `Send`. Spawn them freely.
 
 ## What This Means For You
 

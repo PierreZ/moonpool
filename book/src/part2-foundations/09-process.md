@@ -9,14 +9,14 @@ A Process represents the system under test. It is the code you would ship to pro
 The trait is minimal by design:
 
 ```rust
-#[async_trait(?Send)]
-pub trait Process: 'static {
+#[async_trait]
+pub trait Process: Send + Sync + 'static {
     fn name(&self) -> &str;
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()>;
 }
 ```
 
-Two methods. `name()` identifies this process type for reporting. `run()` is where your server logic lives. The `?Send` bound exists because moonpool runs on a single thread, so nothing needs to be `Send`.
+Two methods. `name()` identifies this process type for reporting. `run()` is where your server logic lives. All Process impls are **`Send + Sync + 'static`**, which makes them composable with `tokio::spawn` and `Arc`-based shared state like `Arc<RwLock<…>>` or `DashMap`. The runtime itself is still single-thread for determinism, but your code reads like ordinary tokio code.
 
 When `run()` returns `Ok(())`, the process has exited voluntarily. When the simulation kills the process, the future is cancelled and `run()` never returns at all.
 
@@ -126,7 +126,7 @@ Here is a simple echo server as a Process:
 ```rust
 struct EchoServer;
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Process for EchoServer {
     fn name(&self) -> &str {
         "echo"

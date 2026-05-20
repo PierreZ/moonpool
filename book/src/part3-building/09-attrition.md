@@ -87,7 +87,7 @@ Set `max_dead` to match your system's fault tolerance. A system with replication
 Attrition covers the common case of random process reboots. For more targeted fault injection, implement the `FaultInjector` trait:
 
 ```rust
-#[async_trait(?Send)]
+#[async_trait]
 impl FaultInjector for RollingRestart {
     fn name(&self) -> &str { "rolling_restart" }
 

@@ -24,13 +24,13 @@ fn main() {
         .with_max_level(tracing::Level::WARN)
         .try_init();
 
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build_local(Default::default())
-        .expect("Failed to build local runtime");
+        .build()
+        .expect("Failed to build runtime");
 
-    let report = local_runtime.block_on(async move {
+    let report = runtime.block_on(async move {
         SimulationBuilder::new()
             .processes(3, || Box::new(KvServer))
             .workload(KvWorkload::new(200, keys))
@@ -48,7 +48,7 @@ fn main() {
 }
 ```
 
-Notice `build_local()`, not `build()`. Moonpool requires a single-threaded local runtime. Using `build()` will produce runtime errors because the simulation uses `!Send` types.
+Notice `new_current_thread().build()`. Determinism still demands a single OS thread, so we keep the current-thread scheduler. What changed is that every moonpool trait and future is now `Send + 'static`, which means the standard `.build()` is the correct API. Customer code can hold `Arc<RwLock<…>>`, `DashMap`, and call `tokio::spawn` naturally, while the runtime still polls everything on one thread for reproducibility.
 
 ## Reading the SimulationReport
 

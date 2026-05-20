@@ -2,7 +2,7 @@
 
 <!-- toc -->
 
-Moonpool runs every simulation on a single thread. This is not a limitation we reluctantly accept. It is the first design decision we made, and every other decision follows from it.
+Moonpool runs every simulation on a single OS thread. This is not a limitation we reluctantly accept. It is the first design decision we made, and every other decision follows from it.
 
 ## One Thread, One Order
 
@@ -12,38 +12,56 @@ With a single thread, there is exactly one legal execution order for any given s
 
 ## How We Get There
 
-Moonpool uses tokio's **single-threaded, local runtime**:
+Moonpool uses tokio's **current-thread runtime**:
 
 ```rust
 tokio::runtime::Builder::new_current_thread()
     .enable_io()
     .enable_time()
-    .build_local(Default::default())
+    .build()
 ```
 
-This is **not** a `LocalSet` on top of a multi-threaded runtime. `build_local` creates a true single-threaded runtime where `spawn_local` is the only spawn mechanism. No `Send` bounds. No `Sync` bounds. No possibility of cross-thread data races.
+One OS thread drives the entire simulation. No work-stealing pool. No preemption between yield points. When a future resumes, it resumes on the same thread that suspended it, in an order our scheduler chose deterministically from the seed.
 
-This means every type in simulation can use `Rc`, `RefCell`, raw pointers, thread-local storage, whatever is needed. No `Arc<Mutex<>>` overhead. No `Send` bounds propagating through your entire type hierarchy.
+This is the **whole** mechanism. The runtime gives us determinism. Nothing fancier is needed.
 
-## The ?Send Constraint
+## Send-Bounded Traits
 
-All networking traits in moonpool use `#[async_trait(?Send)]`:
+Here is where moonpool diverges from earlier designs. A single-threaded runtime **could** drop `Send` bounds entirely and let users sprinkle `Rc<RefCell<T>>` across `.await` points. We deliberately do not.
+
+Provider traits use native AFIT with `Send + Sync + 'static` supertraits and futures that return `impl Future<…> + Send`:
 
 ```rust
-#[async_trait(?Send)]
-pub trait TimeProvider: Clone {
-    async fn sleep(&self, duration: Duration) -> Result<(), TimeError>;
+pub trait TimeProvider: Clone + Send + Sync + 'static {
+    fn sleep(&self, duration: Duration) -> impl Future<Output = Result<(), TimeError>> + Send;
     fn now(&self) -> Duration;
     // ...
 }
 ```
 
-The `?Send` bound tells Rust that futures produced by these traits do not need to be `Send`. This is correct because we never move them between threads. It also means your async code can hold `Rc<RefCell<T>>` across `.await` points, which is impossible with `Send`-requiring runtimes.
+Dyn-stored traits (`Process`, `Workload`, `FaultInjector`, `#[service]` handlers) use `#[async_trait]` without `?Send`, also with `Send + Sync + 'static` supertraits.
 
-## The Trade-Off
+**Send is paid for interoperability, not for parallelism.**
+
+The runtime still runs on one thread. Futures and types are never actually moved between threads at runtime. But the **type system** commits to Send + Sync at every trait boundary so customer code can use the ecosystem it already knows:
+
+- `Arc<RwLock<State>>` for shared state
+- `DashMap` for concurrent maps
+- `Arc<AtomicBool>` for flags
+- `tokio::spawn` to fan out work
+
+A team adopting moonpool to test an existing service should not have to rewrite their type hierarchy. If their production code uses `Arc<RwLock<…>>` (it does), moonpool wraps it without contortions. The simulation runtime drives those types on one thread, but the types themselves look exactly like the production ones.
+
+## What This Buys, What It Costs
+
+We get determinism from the runtime and ergonomics from the bounds. The combination is rare. Most deterministic simulators force you to pick: either a single-threaded runtime with `!Send` types that don't compose with anything, or a multi-threaded runtime that loses determinism.
+
+The cost is a small one. `Send + Sync` constrains a few exotic patterns (raw `Rc`, non-`Send` futures from external crates). In a year of building on this, we have not hit a case where it mattered. The patterns that **do** matter — locks, channels, spawned tasks — are all Send-friendly already.
+
+## The Parallelism Trade-Off
 
 Single-core simulation cannot exploit CPU parallelism **within** a simulation run. A simulation of 20 nodes runs on one core, not 20.
 
-In practice, this barely matters. Simulation time compression means a single core simulates hundreds of seconds of cluster time in a few seconds of wall-clock time. And you can run **many simulations in parallel** across cores, each with a different seed. A 16-core machine runs 16 independent simulations concurrently, each fully deterministic on its own thread.
+In practice, this barely matters. Simulation time compression means a single core simulates hundreds of seconds of cluster time in a few seconds of wall-clock time. And we run **many simulations in parallel** across cores, each with a different seed. A 16-core machine runs 16 independent simulations concurrently, each fully deterministic on its own thread.
 
-Your production code is unaffected. The same code that runs single-threaded in simulation can run on a multi-threaded tokio runtime in production. The provider pattern (covered next) makes this swap transparent.
+Production code is unaffected. The same code that runs single-threaded under our simulation runtime can run on a multi-threaded tokio runtime in production. The provider pattern (covered next) makes this swap transparent.
