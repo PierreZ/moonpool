@@ -16,7 +16,7 @@
 //!
 //! struct RandomPartition { probability: f64 }
 //!
-//! #[async_trait(?Send)]
+//! #[async_trait]
 //! impl FaultInjector for RandomPartition {
 //!     fn name(&self) -> &str { "random_partition" }
 //!     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {

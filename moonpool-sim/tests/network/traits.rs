@@ -34,7 +34,7 @@ fn test_tokio_echo_server() {
         let listener = provider.bind("127.0.0.1:0").await.unwrap();
         let server_addr = listener.local_addr().unwrap();
 
-        // Use spawn_local with local runtime
+        // Spawn server task
         let server_task = tokio::spawn(async move {
             let (mut stream, _peer_addr) = listener.accept().await.unwrap();
 

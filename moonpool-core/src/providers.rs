@@ -1,20 +1,21 @@
 //! Provider bundle trait for simplified type parameters.
 //!
-//! This module provides a unified [`Providers`] trait that bundles all four
+//! This module provides a unified [`Providers`] trait that bundles all five
 //! provider types into a single type parameter, eliminating type parameter
 //! explosion in downstream code.
 //!
 //! ## Motivation
 //!
-//! Without bundling, code must carry four separate type parameters:
+//! Without bundling, code must carry five separate type parameters:
 //!
 //! ```text
-//! struct MyStruct<N, T, TP, R>
+//! struct MyStruct<N, T, TP, R, S>
 //! where
-//!     N: NetworkProvider + Clone + 'static,
-//!     T: TimeProvider + Clone + 'static,
-//!     TP: TaskProvider + Clone + 'static,
-//!     R: RandomProvider + Clone + 'static,
+//!     N: NetworkProvider,
+//!     T: TimeProvider,
+//!     TP: TaskProvider,
+//!     R: RandomProvider,
+//!     S: StorageProvider,
 //! ```
 //!
 //! With bundling, this simplifies to:
@@ -41,9 +42,10 @@ use crate::{
 
 /// Bundle of all provider types for a runtime environment.
 ///
-/// This trait consolidates the four provider types ([`NetworkProvider`],
-/// [`TimeProvider`], [`TaskProvider`], [`RandomProvider`]) into a single
-/// bundle, reducing type parameter explosion and repetitive where clauses.
+/// This trait consolidates the five provider types ([`NetworkProvider`],
+/// [`TimeProvider`], [`TaskProvider`], [`RandomProvider`], [`StorageProvider`])
+/// into a single bundle, reducing type parameter explosion and repetitive
+/// where clauses.
 ///
 /// ## Implementations
 ///
@@ -57,19 +59,19 @@ use crate::{
 /// individual providers while maintaining the bundle.
 pub trait Providers: Clone + Send + Sync + 'static {
     /// Network provider type for TCP connections and listeners.
-    type Network: NetworkProvider + Clone + 'static;
+    type Network: NetworkProvider;
 
     /// Time provider type for sleep, timeout, and time queries.
-    type Time: TimeProvider + Clone + 'static;
+    type Time: TimeProvider;
 
     /// Task provider type for spawning local tasks.
-    type Task: TaskProvider + Clone + 'static;
+    type Task: TaskProvider;
 
     /// Random provider type for deterministic or real randomness.
-    type Random: RandomProvider + Clone + 'static;
+    type Random: RandomProvider;
 
     /// Storage provider type for file I/O operations.
-    type Storage: StorageProvider + Clone + 'static;
+    type Storage: StorageProvider;
 
     /// Get the network provider instance.
     fn network(&self) -> &Self::Network;
@@ -89,7 +91,7 @@ pub trait Providers: Clone + Send + Sync + 'static {
 
 /// Production providers using Tokio runtime.
 ///
-/// This struct bundles all four Tokio-based providers into a single
+/// This struct bundles all five Tokio-based providers into a single
 /// instance that implements [`Providers`].
 ///
 /// ## Example
@@ -119,7 +121,7 @@ pub struct TokioProviders {
 impl TokioProviders {
     /// Create a new production providers bundle.
     ///
-    /// Initializes all four Tokio-based providers with their default
+    /// Initializes all five Tokio-based providers with their default
     /// configurations.
     pub fn new() -> Self {
         Self {

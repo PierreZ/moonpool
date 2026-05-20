@@ -14,7 +14,7 @@
 //!
 //! struct MyServer;
 //!
-//! #[async_trait(?Send)]
+//! #[async_trait]
 //! impl Workload for MyServer {
 //!     fn name(&self) -> &str { "server" }
 //!     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {

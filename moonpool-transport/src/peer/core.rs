@@ -555,7 +555,8 @@ impl<P: Providers> Peer<P> {
     /// Take ownership of the receive channel.
     ///
     /// Allows an external task to receive messages directly without
-    /// borrowing the Peer (avoids RefCell across await points).
+    /// borrowing the Peer (avoids holding the shared-state lock across
+    /// await points).
     ///
     /// Returns `Some(receiver)` if not yet taken, `None` otherwise.
     pub fn take_receiver(&mut self) -> Option<PeerReceiver> {
@@ -604,7 +605,7 @@ enum ConnectionLossBehavior {
 /// - Waits for dataToSend trigger
 /// - Drains unsent queue continuously
 /// - Handles connection failures and reconnection (or exit for incoming)
-/// - Owns the connection exclusively to avoid RefCell conflicts
+/// - Owns the connection exclusively to avoid contention on the shared-state lock
 /// - Handles both reading and writing operations
 /// - Parses wire format packets from the read stream
 /// - Periodically pings to detect unresponsive connections (when monitoring enabled)
@@ -622,7 +623,7 @@ async fn connection_task<P: Providers>(
     // Buffer for accumulating partial packet reads
     let mut read_buffer: Vec<u8> = Vec::with_capacity(4096);
 
-    // Extract failure monitor from shared state (clone the Option<Rc>)
+    // Extract failure monitor from shared state (clone the Option<Arc>)
     let failure_monitor = shared_state
         .read()
         .expect("RwLock poisoned: prior task panicked")
@@ -765,7 +766,7 @@ async fn connection_task<P: Providers>(
                     tracing::debug!("connection_task: attempting to send {} bytes (reliable={})",
                         data.len(), is_reliable);
 
-                    // Send the message (no RefCell borrow held)
+                    // Send the message (no shared-state lock held)
                     tracing::debug!("connection_task: calling stream.write_all() with {} bytes", data.len());
                     match stream.write_all(&data).await {
                         Ok(_) => {
@@ -1248,7 +1249,7 @@ async fn establish_connection<P: Providers>(
             )
         };
 
-        // Apply backoff if needed (no RefCell borrow held)
+        // Apply backoff if needed (no shared-state lock held)
         if should_backoff && time.sleep(delay).await.is_err() {
             return Err(PeerError::ConnectionFailed);
         }
@@ -1262,7 +1263,7 @@ async fn establish_connection<P: Providers>(
             state.metrics.record_connection_attempt();
         }
 
-        // Attempt connection (no RefCell borrow held)
+        // Attempt connection (no shared-state lock held)
         match time
             .timeout(config.connection_timeout, network.connect(&destination))
             .await

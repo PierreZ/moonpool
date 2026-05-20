@@ -405,7 +405,7 @@ impl WorkloadOrchestrator {
             contexts.push(ctx);
         }
 
-        // === 2. SETUP PHASE (spawn_local + cooperative stepping) ===
+        // === 2. SETUP PHASE (tokio::spawn + cooperative stepping) ===
         let mut setup_handles = Vec::new();
         for (workload, ctx) in workloads.into_iter().zip(contexts) {
             let handle = tokio::spawn(async move {
@@ -718,7 +718,7 @@ impl WorkloadOrchestrator {
             sim.step();
         }
 
-        // === 7. CHECK PHASE (spawn_local + cooperative stepping) ===
+        // === 7. CHECK PHASE (tokio::spawn + cooperative stepping) ===
         let mut check_contexts = Vec::with_capacity(workload_info.len());
         for (i, (_, ip)) in workload_info.iter().enumerate() {
             let WorkloadClientInfo {

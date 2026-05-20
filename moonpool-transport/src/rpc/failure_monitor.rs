@@ -49,7 +49,7 @@ pub enum FailureStatus {
 
 /// Reactive failure monitor for address and endpoint tracking.
 ///
-/// Single-threaded (`!Send`, `!Sync`) — uses `RefCell` for interior mutability.
+/// Thread-safe (`Send + Sync`) via `Arc<RwLock<…>>` for interior mutability.
 /// Consumers register wakers via `on_disconnect_or_failure` and similar methods;
 /// producers wake them via `set_status`, `notify_disconnect`, `endpoint_not_found`.
 ///
@@ -248,7 +248,7 @@ impl FailureMonitor {
     pub fn on_disconnect_or_failure(
         self: &Arc<Self>,
         endpoint: &Endpoint,
-    ) -> impl Future<Output = ()> {
+    ) -> impl Future<Output = ()> + Send {
         let fm = Arc::clone(self);
         let address = endpoint.address.to_string();
         let endpoint = endpoint.clone();

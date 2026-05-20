@@ -23,7 +23,7 @@
 //!     .build();
 //! ```
 //!
-//! The builder automatically handles `Rc` wrapping and `set_weak_self()`,
+//! The builder automatically handles `Arc` wrapping and `set_weak_self()`,
 //! eliminating the most common footgun in NetTransport usage.
 
 use std::collections::BTreeMap;
@@ -120,7 +120,7 @@ impl<P: Providers> TransportData<P> {
 ///
 /// # Multi-Node Support (Phase 12 Step 7d)
 ///
-/// For multi-node operation, wrap in `Rc` and call `set_weak_self()`:
+/// For multi-node operation, wrap in `Arc` and call `set_weak_self()`:
 /// ```ignore
 /// let transport = Arc::new(NetTransport::new(...));
 /// transport.set_weak_self(Arc::downgrade(&transport));
@@ -144,7 +144,7 @@ pub struct NetTransport<P: Providers, C: MessageCodec = crate::JsonCodec> {
 
     /// Weak self-reference for spawning background tasks.
     /// Required for `connection_reader` tasks to dispatch back to this transport.
-    /// Set via `set_weak_self()` after wrapping in `Rc`.
+    /// Set via `set_weak_self()` after wrapping in `Arc`.
     weak_self: RwLock<Option<Weak<Self>>>,
 
     /// Shutdown signal sender. When set to `true`, background tasks (listen_task) should exit.
@@ -180,7 +180,7 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     ///
     /// # Multi-Node Usage
     ///
-    /// For multi-node operation, wrap in `Rc` and call `set_weak_self()`:
+    /// For multi-node operation, wrap in `Arc` and call `set_weak_self()`:
     /// ```ignore
     /// let transport = Arc::new(NetTransport::new(...));
     /// transport.set_weak_self(Arc::downgrade(&transport));
@@ -253,7 +253,7 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
             .read()
             .expect("RwLock poisoned: prior task panicked")
             .clone()
-            .expect("weak_self not set - call set_weak_self() after wrapping in Rc")
+            .expect("weak_self not set - call set_weak_self() after wrapping in Arc")
     }
 
     /// Create with custom peer configuration.
@@ -893,7 +893,7 @@ impl<P: Providers + Send + Sync, C: MessageCodec> super::transport_handle::Trans
 impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     /// Set the weak handle reference for `dyn TransportHandle` usage.
     ///
-    /// Called by the builder after wrapping in `Rc`.
+    /// Called by the builder after wrapping in `Arc`.
     pub(crate) fn set_weak_handle(
         &self,
         weak: std::sync::Weak<dyn super::transport_handle::TransportHandle>,
@@ -911,7 +911,7 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
 
 /// Builder for NetTransport that eliminates common footguns.
 ///
-/// The manual `Rc` wrapping and `set_weak_self()` pattern is error-prone:
+/// The manual `Arc` wrapping and `set_weak_self()` pattern is error-prone:
 /// forgetting `set_weak_self()` causes a runtime panic. This builder handles
 /// both automatically.
 ///
@@ -1056,7 +1056,7 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransportBuilder<P, C> {
 ///
 /// This is a background task that:
 /// 1. Takes ownership of the peer's receiver channel at startup
-/// 2. Reads incoming packets from the channel (no RefCell borrow held during await)
+/// 2. Reads incoming packets from the channel (no peer lock held during await)
 /// 3. Dispatches them to the appropriate endpoint via `transport.dispatch()`
 ///
 /// # FDB Reference
@@ -1072,7 +1072,7 @@ async fn connection_reader<P: Providers + Send + Sync, C: MessageCodec>(
     tracing::debug!("connection_reader: started for peer {}", peer_addr);
 
     // Take ownership of the receiver at startup.
-    // This avoids holding RefCell borrows across await points (critical safety fix).
+    // This avoids holding the peer lock across await points (critical safety fix).
     let mut receiver = {
         match peer
             .write()
@@ -1088,10 +1088,10 @@ async fn connection_reader<P: Providers + Send + Sync, C: MessageCodec>(
                 return;
             }
         }
-    }; // RefCell borrow released here
+    }; // peer lock released here
 
     loop {
-        // Await directly on the owned receiver - safe, no RefCell involved!
+        // Await directly on the owned receiver - safe, no peer lock involved!
         match receiver.recv().await {
             Some((token, payload)) => {
                 // Try to get transport reference

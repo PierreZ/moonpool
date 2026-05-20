@@ -15,7 +15,7 @@ trait Calculator {
 ```
 
 Generates:
-- `CalculatorHandler` trait (renamed from `Calculator`) with `#[async_trait(?Send)]`
+- `CalculatorHandler` trait (renamed from `Calculator`) with `#[async_trait]` and `Send + Sync + 'static` supertraits
 - `Calculator` struct with `InterfaceMethod` fields for both server and client use
 
 ## Documentation

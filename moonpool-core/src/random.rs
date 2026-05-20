@@ -17,7 +17,7 @@ use std::ops::Range;
 /// deterministic simulation randomness and real random numbers
 /// in a unified way. Implementations handle the source of randomness
 /// appropriate for their environment.
-pub trait RandomProvider: Clone {
+pub trait RandomProvider: Clone + Send + Sync + 'static {
     /// Generate a random value of type T.
     ///
     /// The type T must implement the Standard distribution.

@@ -44,7 +44,7 @@ use super::transport_handle::DecodeFn;
 ///
 /// # Design
 ///
-/// - Uses `RefCell` for single-threaded runtime (no Mutex overhead)
+/// - Uses `Arc<RwLock<…>>` for thread-safe interior mutability
 /// - Waker-based notification wakes all waiting consumers
 /// - Deserializes on receive (producer side) to fail fast on bad messages
 /// - Pluggable codec via `C: MessageCodec` type parameter
@@ -54,7 +54,7 @@ use super::transport_handle::DecodeFn;
 /// The type `T` is baked in at compile time. Only messages that deserialize
 /// to `T` will be accepted. Invalid messages log an error and are dropped.
 pub struct NetNotifiedQueue<T> {
-    /// Internal state wrapped in RefCell for interior mutability.
+    /// Internal state wrapped in an `RwLock` for interior mutability.
     inner: RwLock<NetNotifiedQueueInner<T>>,
 
     /// Endpoint associated with this queue.
@@ -339,7 +339,7 @@ impl<T: 'static> SharedNetNotifiedQueue<T> {
         &self.0
     }
 
-    /// Get a clone of the Rc for registration with EndpointMap.
+    /// Get a clone of the `Arc` for registration with `EndpointMap`.
     pub fn as_receiver(&self) -> Arc<NetNotifiedQueue<T>> {
         Arc::clone(&self.0)
     }

@@ -49,10 +49,10 @@ type ReplySender = Box<dyn FnOnce(&Endpoint, &[u8]) + Send + Sync>;
 /// The response type `T` is fixed at compile time, ensuring type-safe
 /// request-response pairs.
 ///
-/// # Single-Threaded
+/// # Thread Safety
 ///
-/// Uses `Arc<RwLock<>>` internally - not thread-safe but efficient for
-/// single-threaded async runtimes.
+/// Uses `Arc<RwLock<…>>` internally — safe to clone across threads while
+/// remaining cheap when held within the current-thread simulation runtime.
 ///
 /// # See Also
 ///

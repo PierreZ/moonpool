@@ -14,7 +14,7 @@
 //!
 //! struct PaxosNode;
 //!
-//! #[async_trait(?Send)]
+//! #[async_trait]
 //! impl Process for PaxosNode {
 //!     fn name(&self) -> &str { "paxos" }
 //!     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
