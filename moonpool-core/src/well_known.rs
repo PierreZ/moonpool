@@ -2,7 +2,7 @@
 //!
 //! These are compile-time constants matching FDB's WLTOKEN_* enum.
 //! Well-known tokens enable O(1) lookup in the endpoint map via array indexing
-//! (first part is u64::MAX, second part is the index).
+//! (first part is `u64::MAX`, second part is the index).
 
 use crate::types::UID;
 
@@ -40,11 +40,13 @@ pub enum WellKnownToken {
 
 impl WellKnownToken {
     /// Convert to u32 for UID creation.
+    #[must_use]
     pub const fn as_u32(self) -> u32 {
         self as u32
     }
 
     /// Create a UID for this well-known token.
+    #[must_use]
     pub const fn uid(self) -> UID {
         UID::well_known(self as u32)
     }
@@ -55,7 +57,7 @@ impl WellKnownToken {
 /// The endpoint map reserves an array of this size for O(1) lookup
 /// of well-known endpoints. Tokens 0-63 are reserved for system use.
 ///
-/// Matches FDB's WLTOKEN_RESERVED_COUNT pattern.
+/// Matches FDB's `WLTOKEN_RESERVED_COUNT` pattern.
 pub const WELL_KNOWN_RESERVED_COUNT: usize = 64;
 
 #[cfg(test)]

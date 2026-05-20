@@ -50,9 +50,10 @@ pub enum StorageError {
 impl From<StorageError> for io::Error {
     fn from(e: StorageError) -> Self {
         let kind = match &e {
-            StorageError::NotFound { .. } => io::ErrorKind::NotFound,
+            StorageError::NotFound { .. } | StorageError::InvalidFileHandle { .. } => {
+                io::ErrorKind::NotFound
+            }
             StorageError::AlreadyExists { .. } => io::ErrorKind::AlreadyExists,
-            StorageError::InvalidFileHandle { .. } => io::ErrorKind::NotFound,
             StorageError::FileClosed { .. } => io::ErrorKind::BrokenPipe,
             StorageError::Io { kind, .. } => *kind,
         };

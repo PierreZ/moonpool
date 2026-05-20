@@ -12,16 +12,16 @@ use serde::{Deserialize, Serialize};
 /// Errors that can occur during request-response operations.
 ///
 /// These errors are serializable so they can be sent over the network
-/// (e.g., when a server sends a BrokenPromise error to the client).
+/// (e.g., when a server sends a `BrokenPromise` error to the client).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[non_exhaustive]
 pub enum ReplyError {
-    /// The server dropped the ReplyPromise without sending a response.
+    /// The server dropped the `ReplyPromise` without sending a response.
     ///
     /// This signals server liveness loss: the actor that owned the promise
     /// went away (panic, drop, runtime teardown) without calling `send` or
     /// `send_error`. The client receiving this maps the endpoint to
-    /// permanently failed because the WaitFailure pattern relies on it.
+    /// permanently failed because the `WaitFailure` pattern relies on it.
     #[error("server dropped promise without reply")]
     BrokenPromise,
 
@@ -68,7 +68,7 @@ pub enum ReplyError {
     /// The request may or may not have been delivered and processed.
     /// Callers must handle this ambiguity (e.g., query state before retrying).
     ///
-    /// FDB: request_maybe_delivered (error 1030)
+    /// FDB: `request_maybe_delivered` (error 1030)
     #[error("peer disconnected, delivery uncertain")]
     MaybeDelivered,
 }

@@ -39,7 +39,7 @@ pub fn init_energy_budget(
     per_mark_initial: i64,
 ) -> Result<*mut EnergyBudget, io::Error> {
     let ptr = shared_mem::alloc_shared(std::mem::size_of::<EnergyBudget>())?;
-    let budget = ptr as *mut EnergyBudget;
+    let budget = ptr.cast::<()>().cast::<EnergyBudget>();
     // Safety: ptr is valid, zeroed by mmap. Initialize non-zero fields.
     unsafe {
         (*budget)
@@ -154,7 +154,7 @@ mod tests {
             assert_eq!(b.per_mark[0].load(Ordering::Relaxed), 0);
             assert_eq!(b.realloc_pool.load(Ordering::Relaxed), 8);
 
-            shared_mem::free_shared(ptr as *mut u8, std::mem::size_of::<EnergyBudget>());
+            shared_mem::free_shared(ptr.cast::<u8>(), std::mem::size_of::<EnergyBudget>());
         }
     }
 
@@ -177,7 +177,7 @@ mod tests {
             let b = &*ptr;
             assert_eq!(b.realloc_pool.load(Ordering::Relaxed), 3);
 
-            shared_mem::free_shared(ptr as *mut u8, std::mem::size_of::<EnergyBudget>());
+            shared_mem::free_shared(ptr.cast::<u8>(), std::mem::size_of::<EnergyBudget>());
         }
     }
 
@@ -195,7 +195,7 @@ mod tests {
             let b = &*ptr;
             assert_eq!(b.global_remaining.load(Ordering::Relaxed), 0);
 
-            shared_mem::free_shared(ptr as *mut u8, std::mem::size_of::<EnergyBudget>());
+            shared_mem::free_shared(ptr.cast::<u8>(), std::mem::size_of::<EnergyBudget>());
         }
     }
 
@@ -221,7 +221,7 @@ mod tests {
             }
             assert_eq!(b.realloc_pool.load(Ordering::Relaxed), 1);
 
-            shared_mem::free_shared(ptr as *mut u8, std::mem::size_of::<EnergyBudget>());
+            shared_mem::free_shared(ptr.cast::<u8>(), std::mem::size_of::<EnergyBudget>());
         }
     }
 }

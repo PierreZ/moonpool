@@ -77,6 +77,7 @@ pub struct ExplorerCtx {
 
 impl ExplorerCtx {
     /// Create an inactive context (exploration disabled).
+    #[must_use]
     pub fn inactive() -> Self {
         Self {
             active: false,
@@ -125,11 +126,13 @@ pub(crate) fn with_ctx_mut<R>(f: impl FnOnce(&mut ExplorerCtx) -> R) -> R {
 }
 
 /// Check if exploration is active.
+#[must_use]
 pub fn explorer_is_active() -> bool {
     with_ctx(|ctx| ctx.active)
 }
 
 /// Check if this process is a forked child.
+#[must_use]
 pub fn explorer_is_child() -> bool {
     with_ctx(|ctx| ctx.is_child)
 }
@@ -137,8 +140,9 @@ pub fn explorer_is_child() -> bool {
 /// Get the raw pointer to the assertion table shared memory.
 ///
 /// Returns null if the table is not initialized.
+#[must_use]
 pub fn assertion_table_ptr() -> *mut u8 {
-    ASSERTION_TABLE.with(|c| c.get())
+    ASSERTION_TABLE.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
@@ -161,7 +165,7 @@ mod tests {
         }
 
         set_rng_hooks(
-            || CALL_COUNT.with(|c| c.get()),
+            || CALL_COUNT.with(std::cell::Cell::get),
             |seed| LAST_SEED.with(|s| s.set(seed)),
         );
 
@@ -169,7 +173,7 @@ mod tests {
         assert_eq!(rng_get_count(), 42);
 
         rng_reseed(123);
-        assert_eq!(LAST_SEED.with(|s| s.get()), 123);
+        assert_eq!(LAST_SEED.with(std::cell::Cell::get), 123);
 
         // Reset to defaults
         set_rng_hooks(|| 0, |_| {});

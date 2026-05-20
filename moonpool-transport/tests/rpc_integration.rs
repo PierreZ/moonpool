@@ -1,10 +1,10 @@
 //! Integration tests for the request-response RPC system.
 //!
 //! These tests exercise the full RPC flow including:
-//! - Client sending requests via send_request()
-//! - Server receiving via RequestStream
-//! - Server responding via ReplyPromise
-//! - Client receiving via ReplyFuture
+//! - Client sending requests via `send_request()`
+//! - Server receiving via `RequestStream`
+//! - Server responding via `ReplyPromise`
+//! - Client receiving via `ReplyFuture`
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -248,7 +248,7 @@ async fn test_multiple_requests() {
 
     // Send multiple requests
     for i in 0..5 {
-        let message = format!("message_{}", i);
+        let message = format!("message_{i}");
 
         let future: ReplyFuture<EchoResponse> = send_request(
             &*transport,
@@ -398,7 +398,7 @@ fn test_request_envelope_roundtrip() {
     assert_eq!(decoded.reply_to.token, envelope.reply_to.token);
 }
 
-/// Test that local delivery to non-existent endpoint returns EndpointNotFound synchronously.
+/// Test that local delivery to non-existent endpoint returns `EndpointNotFound` synchronously.
 #[test]
 fn test_endpoint_not_found_local_delivery() {
     let transport = create_transport();
@@ -421,15 +421,14 @@ fn test_endpoint_not_found_local_delivery() {
         decode,
     );
 
-    let err = match result {
-        Err(e) => e,
-        Ok(_) => panic!("expected EndpointNotFound error"),
+    let Err(err) = result else {
+        panic!("expected EndpointNotFound error");
     };
     match err {
         MessagingError::EndpointNotFound { token } => {
             assert_eq!(token, missing_token);
         }
-        other => panic!("expected EndpointNotFound, got {:?}", other),
+        other => panic!("expected EndpointNotFound, got {other:?}"),
     }
 }
 
@@ -437,7 +436,7 @@ fn test_endpoint_not_found_local_delivery() {
 /// the endpoint as permanently failed in the failure monitor.
 ///
 /// Simulates what happens when the client-side peer receives the notification:
-/// parse the 16-byte payload → reconstruct endpoint → call fm.endpoint_not_found().
+/// parse the 16-byte payload → reconstruct endpoint → call `fm.endpoint_not_found()`.
 #[test]
 fn test_endpoint_not_found_notifies_failure_monitor() {
     let transport = create_transport();

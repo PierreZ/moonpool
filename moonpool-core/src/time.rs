@@ -86,6 +86,7 @@ pub struct TokioTimeProvider {
 #[cfg(feature = "tokio-providers")]
 impl TokioTimeProvider {
     /// Create a new Tokio time provider.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             start_time: std::time::Instant::now(),

@@ -44,14 +44,10 @@ fn test_fast_local_configuration() {
         // Fast local config should complete quickly (less than 1ms simulation time)
         assert!(
             sim_time < Duration::from_millis(1),
-            "Fast local should be under 1ms, got {:?}",
-            sim_time
+            "Fast local should be under 1ms, got {sim_time:?}"
         );
 
-        println!(
-            "Fast local test completed in real time: {:?}, sim time: {:?}",
-            elapsed, sim_time
-        );
+        println!("Fast local test completed in real time: {elapsed:?}, sim time: {sim_time:?}");
     });
 }
 
@@ -79,14 +75,10 @@ fn test_default_simulation_configuration() {
         // Default config should take longer than fast config (at least 5ms simulation time)
         assert!(
             sim_time > Duration::from_millis(5),
-            "Default config should be over 5ms, got {:?}",
-            sim_time
+            "Default config should be over 5ms, got {sim_time:?}"
         );
 
-        println!(
-            "Default config test completed in real time: {:?}, sim time: {:?}",
-            elapsed, sim_time
-        );
+        println!("Default config test completed in real time: {elapsed:?}, sim time: {sim_time:?}");
     });
 }
 
@@ -122,16 +114,14 @@ fn test_custom_latency_configuration() {
         // Phase 2c focuses on configuration working - expect at least some configured delay
         assert!(
             sim_time > Duration::ZERO,
-            "Custom config should advance simulation time, got {:?}",
-            sim_time
+            "Custom config should advance simulation time, got {sim_time:?}"
         );
         assert!(
             sim_time >= Duration::from_millis(1),
-            "Custom config should have at least 1ms latency, got {:?}",
-            sim_time
+            "Custom config should have at least 1ms latency, got {sim_time:?}"
         );
 
-        println!("Custom test completed in sim time: {:?}", sim_time);
+        println!("Custom test completed in sim time: {sim_time:?}");
     });
 }
 
@@ -171,20 +161,20 @@ fn test_latency_range_sampling() {
         let all_same = execution_times.iter().all(|&t| t == first_time);
 
         // Due to random jitter, we expect some variation in latency configuration
-        println!("Execution times with jitter: {:?}", execution_times);
+        println!("Execution times with jitter: {execution_times:?}");
 
         // Verify all times are positive (configuration is working)
         for &time in &execution_times {
-            assert!(time > Duration::ZERO, "Time should be positive: {:?}", time);
+            assert!(time > Duration::ZERO, "Time should be positive: {time:?}");
         }
 
         // For Phase 2c, we just verify that latency configuration is working
         // and producing reasonable results
 
-        if !all_same {
-            println!("✓ Latency jitter working - execution times vary");
-        } else {
+        if all_same {
             println!("⚠ All execution times were identical (could happen by chance)");
+        } else {
+            println!("✓ Latency jitter working - execution times vary");
         }
     });
 }
@@ -224,16 +214,14 @@ fn test_network_randomization_ranges() {
         // The exact timing depends on event scheduling and which latencies are actually triggered
         assert!(
             sim_time >= Duration::from_millis(3),
-            "Expected at least 3ms with custom ranges, got {:?}",
-            sim_time
+            "Expected at least 3ms with custom ranges, got {sim_time:?}"
         );
 
         assert!(
             sim_time <= Duration::from_millis(10),
-            "Expected less than 10ms with custom ranges, got {:?}",
-            sim_time
+            "Expected less than 10ms with custom ranges, got {sim_time:?}"
         );
 
-        println!("Custom ranges test completed in sim time: {:?}", sim_time);
+        println!("Custom ranges test completed in sim time: {sim_time:?}");
     });
 }

@@ -1,4 +1,4 @@
-//! ReplyPromise: Server-side promise for sending responses.
+//! `ReplyPromise`: Server-side promise for sending responses.
 //!
 //! When a server receives a request via [`RequestStream`], it gets a `ReplyPromise`
 //! that must be fulfilled with either a success value or an error. If the promise
@@ -34,7 +34,7 @@ use serde::Serialize;
 use super::reply_error::ReplyError;
 use super::transport_handle::EncodeFn;
 
-/// Type alias for the sender function in ReplyPromise.
+/// Type alias for the sender function in `ReplyPromise`.
 type ReplySender = Box<dyn FnOnce(&Endpoint, &[u8]) + Send + Sync>;
 
 /// Promise for sending a reply to a request.
@@ -72,7 +72,7 @@ struct ReplyPromiseInner<T> {
     encode_fn: EncodeFn<Result<T, ReplyError>>,
 
     /// Sender function - sends serialized bytes to the endpoint.
-    /// This is injected to decouple from NetTransport.
+    /// This is injected to decouple from `NetTransport`.
     sender: Option<ReplySender>,
 
     /// Whether the promise has been fulfilled.
@@ -109,6 +109,11 @@ impl<T: Serialize> ReplyPromise<T> {
     /// Send a successful response.
     ///
     /// Consumes the promise, preventing double-send.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn send(self, value: T) {
         let mut inner = self
             .inner
@@ -147,6 +152,11 @@ impl<T: Serialize> ReplyPromise<T> {
     /// Send an error response.
     ///
     /// Consumes the promise, preventing double-send.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn send_error(self, error: ReplyError) {
         let mut inner = self
             .inner

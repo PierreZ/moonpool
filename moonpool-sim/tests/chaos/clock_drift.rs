@@ -1,9 +1,9 @@
 //! Integration tests for clock drift chaos injection
 //!
 //! Tests verify that clock drift:
-//! - Follows FDB's timer() semantics (sim2.actor.cpp:1058-1064)
-//! - timer() is always >= now()
-//! - timer() never exceeds now() + clock_drift_max
+//! - Follows FDB's `timer()` semantics (sim2.actor.cpp:1058-1064)
+//! - `timer()` is always >= `now()`
+//! - `timer()` never exceeds `now()` + `clock_drift_max`
 //! - Drift progresses smoothly using the FDB formula
 //! - Can be disabled via configuration
 //! - Is deterministic with fixed seeds
@@ -11,7 +11,7 @@
 use moonpool_sim::{NetworkConfiguration, SimTimeProvider, SimWorld, TimeProvider, set_sim_seed};
 use std::time::Duration;
 
-/// Test that timer() is always >= now()
+/// Test that `timer()` is always >= `now()`
 #[test]
 fn test_timer_never_before_now() {
     // Test with multiple seeds for robustness
@@ -25,16 +25,13 @@ fn test_timer_never_before_now() {
 
             assert!(
                 timer >= now,
-                "seed={}: timer ({:?}) should be >= now ({:?})",
-                seed,
-                timer,
-                now
+                "seed={seed}: timer ({timer:?}) should be >= now ({now:?})"
             );
         }
     }
 }
 
-/// Test that timer() never exceeds now() + clock_drift_max
+/// Test that `timer()` never exceeds `now()` + `clock_drift_max`
 #[test]
 fn test_timer_bounded_by_max_drift() {
     // Test with multiple seeds
@@ -58,7 +55,7 @@ fn test_timer_bounded_by_max_drift() {
     }
 }
 
-/// Test that timer() progresses over repeated calls
+/// Test that `timer()` progresses over repeated calls
 #[test]
 fn test_timer_progresses() {
     set_sim_seed(42);
@@ -76,17 +73,14 @@ fn test_timer_progresses() {
     // At time 0, timer starts at 0 and can drift up to 100ms
     assert!(
         final_timer > initial_timer,
-        "Timer should have progressed: initial={:?}, final={:?}",
-        initial_timer,
-        final_timer
+        "Timer should have progressed: initial={initial_timer:?}, final={final_timer:?}"
     );
 
     // Should have drifted by a significant amount (at least 50ms of the 100ms max)
-    let drift = final_timer - initial_timer;
+    let drift = final_timer.checked_sub(initial_timer).unwrap();
     assert!(
         drift >= Duration::from_millis(50),
-        "Timer should have drifted significantly: drift={:?}",
-        drift
+        "Timer should have drifted significantly: drift={drift:?}"
     );
 }
 
@@ -108,8 +102,7 @@ fn test_clock_drift_disabled() {
 
         assert_eq!(
             timer, now,
-            "With drift disabled, timer ({:?}) should equal now ({:?})",
-            timer, now
+            "With drift disabled, timer ({timer:?}) should equal now ({now:?})"
         );
     }
 }
@@ -142,7 +135,7 @@ fn test_clock_drift_deterministic() {
     );
 }
 
-/// Test custom clock_drift_max configuration
+/// Test custom `clock_drift_max` configuration
 #[test]
 fn test_custom_drift_max() {
     set_sim_seed(42);
@@ -167,7 +160,7 @@ fn test_custom_drift_max() {
     }
 }
 
-/// Test TimeProvider integration with clock drift
+/// Test `TimeProvider` integration with clock drift
 #[test]
 fn test_time_provider_clock_drift() {
     set_sim_seed(42);
@@ -179,11 +172,10 @@ fn test_time_provider_clock_drift() {
         let now = time_provider.now();
         let timer = time_provider.timer();
 
-        assert!(timer >= now, "timer ({:?}) >= now ({:?})", timer, now);
+        assert!(timer >= now, "timer ({timer:?}) >= now ({now:?})");
         assert!(
             timer <= now + Duration::from_millis(100),
-            "timer ({:?}) <= now + 100ms",
-            timer
+            "timer ({timer:?}) <= now + 100ms"
         );
     }
 }
@@ -230,7 +222,7 @@ fn test_clock_drift_with_time_advance() {
 }
 
 /// Test that FDB's drift formula produces smooth progression
-/// Formula: timerTime += random01() * (time + 0.1 - timerTime) / 2.0
+/// Formula: timerTime += `random01()` * (time + 0.1 - timerTime) / 2.0
 #[test]
 fn test_drift_formula_smoothness() {
     set_sim_seed(42);
@@ -247,9 +239,7 @@ fn test_drift_formula_smoothness() {
         // Monotonic (never goes backward)
         assert!(
             timer >= prev_timer,
-            "Timer should be monotonic: {:?} >= {:?}",
-            timer,
-            prev_timer
+            "Timer should be monotonic: {timer:?} >= {prev_timer:?}"
         );
 
         // Bounded
@@ -281,8 +271,6 @@ fn test_drift_uses_rng() {
 
     assert!(
         last > first,
-        "Timer should drift ahead over multiple calls: first={:?}, last={:?}",
-        first,
-        last
+        "Timer should drift ahead over multiple calls: first={first:?}, last={last:?}"
     );
 }

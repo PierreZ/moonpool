@@ -47,7 +47,8 @@ pub enum AssertKind {
 }
 
 impl AssertKind {
-    /// Convert from raw u8 to AssertKind, returning None for invalid values.
+    /// Convert from raw u8 to `AssertKind`, returning None for invalid values.
+    #[must_use]
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(Self::Always),
@@ -84,7 +85,7 @@ pub enum AssertCmp {
 pub struct AssertionSlot {
     /// FNV-1a hash of the assertion message (u32).
     pub msg_hash: u32,
-    /// The kind of assertion (AssertKind as u8).
+    /// The kind of assertion (`AssertKind` as u8).
     pub kind: u8,
     /// Whether this assertion must be hit (1) or not (0).
     pub must_hit: u8,
@@ -100,16 +101,17 @@ pub struct AssertionSlot {
     pub watermark: i64,
     /// Watermark value at last fork (for detecting improvement).
     pub split_watermark: i64,
-    /// Frontier: number of simultaneously true bools (for BooleanSometimesAll).
+    /// Frontier: number of simultaneously true bools (for `BooleanSometimesAll`).
     pub frontier: u8,
     /// Padding for alignment.
-    pub _pad: [u8; 7],
+    pad: [u8; 7],
     /// Assertion message string (null-terminated).
     pub msg: [u8; SLOT_MSG_LEN],
 }
 
 impl AssertionSlot {
     /// Get the assertion message as a string slice.
+    #[must_use]
     pub fn msg_str(&self) -> &str {
         let len = self
             .msg
@@ -121,16 +123,17 @@ impl AssertionSlot {
 }
 
 /// FNV-1a hash of a message string to a stable u32.
+#[must_use]
 pub fn msg_hash(msg: &str) -> u32 {
-    let mut h: u32 = 0x811c9dc5;
+    let mut h: u32 = 0x811c_9dc5;
     for b in msg.bytes() {
-        h ^= b as u32;
-        h = h.wrapping_mul(0x01000193);
+        h ^= u32::from(b);
+        h = h.wrapping_mul(0x0100_0193);
     }
     h
 }
 
-/// Find an existing slot or allocate a new one by msg_hash.
+/// Find an existing slot or allocate a new one by `msg_hash`.
 ///
 /// Returns a pointer to the slot and its index, or null if the table is full.
 ///
@@ -147,14 +150,14 @@ unsafe fn find_or_alloc_slot(
     msg: &str,
 ) -> (*mut AssertionSlot, usize) {
     unsafe {
-        let next_atomic = &*(table_ptr as *const AtomicU32);
+        let next_atomic = &*table_ptr.cast::<()>().cast::<AtomicU32>();
         let count = next_atomic.load(Ordering::Acquire) as usize;
-        let base = table_ptr.add(8) as *mut AssertionSlot;
+        let base = table_ptr.add(8).cast::<()>().cast::<AssertionSlot>();
 
         // Search existing slots (atomic load to see concurrent writers).
         for i in 0..count.min(MAX_ASSERTION_SLOTS) {
             let slot = base.add(i);
-            let h = &*(std::ptr::addr_of!((*slot).msg_hash) as *const AtomicU32);
+            let h = &*std::ptr::addr_of!((*slot).msg_hash).cast::<AtomicU32>();
             if h.load(Ordering::Acquire) == hash {
                 return (slot, i);
             }
@@ -171,18 +174,18 @@ unsafe fn find_or_alloc_slot(
         // This makes our claim visible to any concurrent process doing
         // its own re-scan, preventing the TOCTOU duplicate slot race.
         let slot = base.add(new_idx);
-        let hash_atomic = &*(std::ptr::addr_of!((*slot).msg_hash) as *const AtomicU32);
+        let hash_atomic = &*std::ptr::addr_of!((*slot).msg_hash).cast::<AtomicU32>();
         hash_atomic.store(hash, Ordering::Release);
 
         // Re-scan 0..new_idx for a concurrent registration of the same hash.
         // Lower index always wins — if we find a match, tombstone ourselves.
         for i in 0..new_idx {
             let existing = base.add(i);
-            let existing_hash = &*(std::ptr::addr_of!((*existing).msg_hash) as *const AtomicU32);
+            let existing_hash = &*std::ptr::addr_of!((*existing).msg_hash).cast::<AtomicU32>();
             if existing_hash.load(Ordering::Acquire) == hash {
                 // Another process claimed a lower slot. Tombstone ours.
                 hash_atomic.store(0, Ordering::Release);
-                std::ptr::write_bytes(slot as *mut u8, 0, std::mem::size_of::<AssertionSlot>());
+                std::ptr::write_bytes(slot.cast::<u8>(), 0, std::mem::size_of::<AssertionSlot>());
                 return (existing, i);
             }
         }
@@ -201,7 +204,7 @@ unsafe fn find_or_alloc_slot(
         (*slot).watermark = if maximize == 1 { i64::MIN } else { i64::MAX };
         (*slot).split_watermark = if maximize == 1 { i64::MIN } else { i64::MAX };
         (*slot).frontier = 0;
-        (*slot)._pad = [0; 7];
+        (*slot).pad = [0; 7];
         (*slot).msg = msg_buf;
 
         (slot, new_idx)
@@ -213,8 +216,8 @@ unsafe fn find_or_alloc_slot(
 /// Writes to coverage bitmap and explored map (if pointers are non-null),
 /// then calls `dispatch_split()` if exploration is active.
 fn assertion_split(slot_idx: usize, hash: u32) {
-    let bm_ptr = crate::context::COVERAGE_BITMAP_PTR.with(|c| c.get());
-    let vm_ptr = crate::context::EXPLORED_MAP_PTR.with(|c| c.get());
+    let bm_ptr = crate::context::COVERAGE_BITMAP_PTR.with(std::cell::Cell::get);
+    let vm_ptr = crate::context::EXPLORED_MAP_PTR.with(std::cell::Cell::get);
 
     if !bm_ptr.is_null() {
         // Safety: bm_ptr points to COVERAGE_MAP_SIZE bytes of shared memory set during init().
@@ -234,7 +237,7 @@ fn assertion_split(slot_idx: usize, hash: u32) {
 
 /// Boolean assertion backing function.
 ///
-/// Handles Always, AlwaysOrUnreachable, Sometimes, Reachable, and Unreachable.
+/// Handles Always, `AlwaysOrUnreachable`, Sometimes, Reachable, and Unreachable.
 /// Gets or allocates a slot, increments pass/fail counts, and triggers forking
 /// for Sometimes/Reachable assertions on first success.
 ///
@@ -246,7 +249,7 @@ pub fn assertion_bool(kind: AssertKind, must_hit: bool, condition: bool, msg: &s
     }
 
     let hash = msg_hash(msg);
-    let must_hit_u8 = if must_hit { 1 } else { 0 };
+    let must_hit_u8 = u8::from(must_hit);
 
     // Safety: table_ptr points to ASSERTION_TABLE_MEM_SIZE bytes of shared memory.
     let (slot, slot_idx) =
@@ -260,23 +263,23 @@ pub fn assertion_bool(kind: AssertKind, must_hit: bool, condition: bool, msg: &s
         match kind {
             AssertKind::Always | AssertKind::AlwaysOrUnreachable | AssertKind::NumericAlways => {
                 if condition {
-                    let pc = &*((&(*slot).pass_count) as *const u64 as *const AtomicI64);
+                    let pc = &*(&raw const (*slot).pass_count).cast::<AtomicI64>();
                     pc.fetch_add(1, Ordering::Relaxed);
                 } else {
-                    let fc = &*((&(*slot).fail_count) as *const u64 as *const AtomicI64);
+                    let fc = &*(&raw const (*slot).fail_count).cast::<AtomicI64>();
                     let prev = fc.fetch_add(1, Ordering::Relaxed);
                     if prev == 0 {
-                        eprintln!("[ASSERTION FAILED] {} (kind={:?})", msg, kind);
+                        eprintln!("[ASSERTION FAILED] {msg} (kind={kind:?})");
                     }
                 }
             }
             AssertKind::Sometimes | AssertKind::Reachable => {
                 if condition {
-                    let pc = &*((&(*slot).pass_count) as *const u64 as *const AtomicI64);
+                    let pc = &*(&raw const (*slot).pass_count).cast::<AtomicI64>();
                     pc.fetch_add(1, Ordering::Relaxed);
 
                     // CAS split_triggered from 0 → 1 on first success
-                    let ft = &*((&(*slot).split_triggered) as *const u8 as *const AtomicU8);
+                    let ft = &*(&raw const (*slot).split_triggered).cast::<AtomicU8>();
                     if ft
                         .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
                         .is_ok()
@@ -284,17 +287,17 @@ pub fn assertion_bool(kind: AssertKind, must_hit: bool, condition: bool, msg: &s
                         assertion_split(slot_idx, hash);
                     }
                 } else {
-                    let fc = &*((&(*slot).fail_count) as *const u64 as *const AtomicI64);
+                    let fc = &*(&raw const (*slot).fail_count).cast::<AtomicI64>();
                     fc.fetch_add(1, Ordering::Relaxed);
                 }
             }
             AssertKind::Unreachable => {
                 // Being reached at all is a "pass" (the assertion is that we should NOT reach)
                 // We track it as pass_count = times reached (bad), fail_count unused
-                let pc = &*((&(*slot).pass_count) as *const u64 as *const AtomicI64);
+                let pc = &*(&raw const (*slot).pass_count).cast::<AtomicI64>();
                 let prev = pc.fetch_add(1, Ordering::Relaxed);
                 if prev == 0 {
-                    eprintln!("[UNREACHABLE REACHED] {}", msg);
+                    eprintln!("[UNREACHABLE REACHED] {msg}");
                 }
             }
             _ => {}
@@ -306,7 +309,7 @@ pub fn assertion_bool(kind: AssertKind, must_hit: bool, condition: bool, msg: &s
 ///
 /// Evaluates a comparison (left `cmp` right), tracks pass/fail counts,
 /// and maintains a watermark of the best observed value of `left`.
-/// For NumericSometimes, forks when the watermark improves past the
+/// For `NumericSometimes`, forks when the watermark improves past the
 /// last fork watermark.
 ///
 /// `maximize` determines whether improving means getting larger (true) or smaller (false).
@@ -326,7 +329,7 @@ pub fn assertion_numeric(
     }
 
     let hash = msg_hash(msg);
-    let maximize_u8 = if maximize { 1 } else { 0 };
+    let maximize_u8 = u8::from(maximize);
 
     // Safety: table_ptr points to ASSERTION_TABLE_MEM_SIZE bytes.
     let (slot, slot_idx) =
@@ -346,21 +349,20 @@ pub fn assertion_numeric(
     // Safety: slot points to valid shared memory.
     unsafe {
         if passes {
-            let pc = &*((&(*slot).pass_count) as *const u64 as *const AtomicI64);
+            let pc = &*(&raw const (*slot).pass_count).cast::<AtomicI64>();
             pc.fetch_add(1, Ordering::Relaxed);
         } else {
-            let fc = &*((&(*slot).fail_count) as *const u64 as *const AtomicI64);
+            let fc = &*(&raw const (*slot).fail_count).cast::<AtomicI64>();
             let prev = fc.fetch_add(1, Ordering::Relaxed);
             if kind == AssertKind::NumericAlways && prev == 0 {
                 eprintln!(
-                    "[NUMERIC ASSERTION FAILED] {} (left={}, right={}, cmp={:?})",
-                    msg, left, right, cmp
+                    "[NUMERIC ASSERTION FAILED] {msg} (left={left}, right={right}, cmp={cmp:?})"
                 );
             }
         }
 
         // Update watermark: track best value of `left`
-        let wm = &*((&(*slot).watermark) as *const i64 as *const AtomicI64);
+        let wm = &*(&raw const (*slot).watermark).cast::<AtomicI64>();
         let mut current = wm.load(Ordering::Relaxed);
         loop {
             let is_better = if maximize {
@@ -379,7 +381,7 @@ pub fn assertion_numeric(
 
         // For NumericSometimes: fork when watermark improves past split_watermark
         if kind == AssertKind::NumericSometimes {
-            let fw = &*((&(*slot).split_watermark) as *const i64 as *const AtomicI64);
+            let fw = &*(&raw const (*slot).split_watermark).cast::<AtomicI64>();
             let mut fork_current = fw.load(Ordering::Relaxed);
             loop {
                 let is_better = if maximize {
@@ -428,17 +430,20 @@ pub fn assertion_sometimes_all(msg: &str, named_bools: &[(&str, bool)]) {
         return;
     }
 
-    // Count simultaneously true bools
-    let true_count = named_bools.iter().filter(|(_, v)| *v).count() as u8;
+    // Count simultaneously true bools. The frontier field is u8, so we cap at u8::MAX —
+    // callers passing more than 255 named bools is not a supported use case; clamp
+    // via `unwrap_or(u8::MAX)` so we never panic.
+    let true_count =
+        u8::try_from(named_bools.iter().filter(|(_, v)| *v).count()).unwrap_or(u8::MAX);
 
     // Safety: slot points to valid shared memory.
     unsafe {
         // Increment pass_count (always, for statistics)
-        let pc = &*((&(*slot).pass_count) as *const u64 as *const AtomicI64);
+        let pc = &*(&raw const (*slot).pass_count).cast::<AtomicI64>();
         pc.fetch_add(1, Ordering::Relaxed);
 
         // CAS loop on frontier — fork when it advances
-        let fr = &*((&(*slot).frontier) as *const u8 as *const AtomicU8);
+        let fr = &*(&raw const (*slot).frontier).cast::<AtomicU8>();
         let mut current = fr.load(Ordering::Relaxed);
         loop {
             if true_count <= current {
@@ -463,6 +468,7 @@ pub fn assertion_sometimes_all(msg: &str, named_bools: &[(&str, bool)]) {
 /// Read all allocated assertion slots from shared memory.
 ///
 /// Returns an empty vector if the assertion table is not initialized.
+#[must_use]
 pub fn assertion_read_all() -> Vec<AssertionSlotSnapshot> {
     let table_ptr = crate::context::assertion_table_ptr();
     if table_ptr.is_null() {
@@ -476,9 +482,9 @@ pub fn assertion_read_all() -> Vec<AssertionSlotSnapshot> {
     // - AssertionSlot fields are read through a shared reference; tombstoned slots
     //   (msg_hash == 0) are skipped.
     unsafe {
-        let count = (*(table_ptr as *const u32)) as usize;
+        let count = (*table_ptr.cast::<()>().cast::<u32>()) as usize;
         let count = count.min(MAX_ASSERTION_SLOTS);
-        let base = table_ptr.add(8) as *const AssertionSlot;
+        let base = table_ptr.add(8).cast::<()>().cast::<AssertionSlot>();
 
         (0..count)
             .filter_map(|i| {
@@ -506,7 +512,7 @@ pub fn assertion_read_all() -> Vec<AssertionSlotSnapshot> {
 pub struct AssertionSlotSnapshot {
     /// The assertion message.
     pub msg: String,
-    /// The kind of assertion (AssertKind as u8).
+    /// The kind of assertion (`AssertKind` as u8).
     pub kind: u8,
     /// Whether this assertion must be hit.
     pub must_hit: u8,
@@ -516,7 +522,7 @@ pub struct AssertionSlotSnapshot {
     pub fail_count: u64,
     /// Best watermark value (for numeric assertions).
     pub watermark: i64,
-    /// Frontier value (for BooleanSometimesAll).
+    /// Frontier value (for `BooleanSometimesAll`).
     pub frontier: u8,
 }
 

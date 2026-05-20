@@ -24,14 +24,14 @@ fn local_runtime() -> tokio::runtime::Runtime {
         .expect("Failed to build local runtime")
 }
 
-/// Create a SimWorld with fast storage configuration.
+/// Create a `SimWorld` with fast storage configuration.
 fn fast_sim() -> SimWorld {
     let mut sim = SimWorld::new();
     sim.set_storage_config(StorageConfiguration::fast_local());
     sim
 }
 
-/// Test the basic simulate_crash API call
+/// Test the basic `simulate_crash` API call
 #[test]
 fn test_simulate_crash_api_basic() {
     local_runtime().block_on(async {
@@ -181,11 +181,11 @@ fn test_simulate_crash_unsynced_data_behavior() {
         // Either missing, empty, or different from original
         match read_result {
             None => {
-                println!("File doesn't exist after crash (expected with high crash probability)")
+                println!("File doesn't exist after crash (expected with high crash probability)");
             }
             Some(data) if data.is_empty() => println!("File is empty after crash"),
             Some(data) if data != original_data => {
-                println!("Data corrupted after crash (expected)")
+                println!("Data corrupted after crash (expected)");
             }
             Some(data) => println!(
                 "Data survived crash (can happen if pending writes were already flushed): {:?}",
@@ -195,7 +195,7 @@ fn test_simulate_crash_unsynced_data_behavior() {
     });
 }
 
-/// Test simulate_crash with close_files=true
+/// Test `simulate_crash` with `close_files=true`
 #[test]
 fn test_simulate_crash_close_files_true() {
     local_runtime().block_on(async {
@@ -237,11 +237,11 @@ fn test_simulate_crash_close_files_true() {
         }
 
         let exists = handle2.await.expect("task panicked").expect("io error");
-        println!("File exists after crash (close_files=true): {}", exists);
+        println!("File exists after crash (close_files=true): {exists}");
     });
 }
 
-/// Test simulate_crash with close_files=false
+/// Test `simulate_crash` with `close_files=false`
 #[test]
 fn test_simulate_crash_close_files_false() {
     local_runtime().block_on(async {
@@ -283,7 +283,7 @@ fn test_simulate_crash_close_files_false() {
         }
 
         let exists = handle2.await.expect("task panicked").expect("io error");
-        println!("File exists after crash (close_files=false): {}", exists);
+        println!("File exists after crash (close_files=false): {exists}");
     });
 }
 
@@ -298,9 +298,9 @@ fn test_simulate_crash_multiple_files() {
         let handle = tokio::spawn(async move {
             for i in 0..5 {
                 let mut file = provider
-                    .open(&format!("multi_{}.txt", i), OpenOptions::create_write())
+                    .open(&format!("multi_{i}.txt"), OpenOptions::create_write())
                     .await?;
-                file.write_all(format!("File {} content", i).as_bytes())
+                file.write_all(format!("File {i} content").as_bytes())
                     .await?;
                 file.sync_all().await?;
                 drop(file);
@@ -324,7 +324,7 @@ fn test_simulate_crash_multiple_files() {
         let handle2 = tokio::spawn(async move {
             let mut count = 0;
             for i in 0..5 {
-                if provider2.exists(&format!("multi_{}.txt", i)).await? {
+                if provider2.exists(&format!("multi_{i}.txt")).await? {
                     count += 1;
                 }
             }
@@ -391,11 +391,11 @@ fn test_simulate_crash_during_write() {
         }
 
         let exists = handle2.await.expect("task panicked").expect("io error");
-        println!("File exists after mid-write crash: {}", exists);
+        println!("File exists after mid-write crash: {exists}");
     });
 }
 
-/// Test that crash_fault_probability=0.0 means no corruption
+/// Test that `crash_fault_probability=0.0` means no corruption
 #[test]
 fn test_simulate_crash_zero_corruption_probability() {
     local_runtime().block_on(async {
@@ -499,7 +499,7 @@ fn test_simulate_crash_repeated() {
         }
 
         let exists = handle2.await.expect("task panicked").expect("io error");
-        println!("File exists after repeated crashes: {}", exists);
+        println!("File exists after repeated crashes: {exists}");
     });
 }
 

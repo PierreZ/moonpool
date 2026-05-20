@@ -27,7 +27,7 @@ pub const SECTOR_SIZE: usize = 512;
 
 /// Maximum number of overlays for misdirected write simulation.
 ///
-/// TigerBeetle uses 2 overlays per misdirected write:
+/// `TigerBeetle` uses 2 overlays per misdirected write:
 /// 1. Original data at intended target (so reads see old data)
 /// 2. New data at mistaken target (so reads see wrong data there)
 const MAX_OVERLAYS: usize = 2;
@@ -46,6 +46,7 @@ impl SectorBitSet {
     /// Create a new bitset with capacity for the given number of sectors.
     ///
     /// All bits are initially unset (false).
+    #[must_use]
     pub fn new(num_sectors: usize) -> Self {
         let num_words = num_sectors.div_ceil(64);
         Self {
@@ -89,17 +90,20 @@ impl SectorBitSet {
     /// # Panics
     ///
     /// Panics if `sector` is out of bounds.
+    #[must_use]
     pub fn is_set(&self, sector: usize) -> bool {
         let (word, bit) = self.indices(sector);
         (self.bits[word] & (1 << bit)) != 0
     }
 
     /// Return the number of sectors this bitset can track.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.len
     }
 
     /// Check if the bitset is empty (has zero capacity).
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -107,6 +111,7 @@ impl SectorBitSet {
     /// Create a new bitset by copying set bits from another bitset.
     ///
     /// Only copies bits up to the minimum of both bitsets' lengths.
+    #[must_use]
     pub fn resize_copy(other: &Self, new_len: usize) -> Self {
         let mut new_bitset = Self::new(new_len);
         let copy_len = other.len.min(new_len);
@@ -199,10 +204,16 @@ impl InMemoryStorage {
     ///
     /// * `size` - Total size of the storage in bytes
     /// * `seed` - Seed for deterministic random generation (used for unwritten sector fill)
+    ///
+    /// # Panics
+    ///
+    /// Panics if `size` does not fit in `usize`.
+    #[must_use]
     pub fn new(size: u64, seed: u64) -> Self {
-        let num_sectors = (size as usize).div_ceil(SECTOR_SIZE);
+        let size_usize = usize::try_from(size).expect("storage size fits in usize");
+        let num_sectors = size_usize.div_ceil(SECTOR_SIZE);
         Self {
-            data: vec![0; size as usize],
+            data: vec![0; size_usize],
             written: SectorBitSet::new(num_sectors),
             faults: SectorBitSet::new(num_sectors),
             overlays: [const { None }; MAX_OVERLAYS],
@@ -213,6 +224,7 @@ impl InMemoryStorage {
     }
 
     /// Get the total size of the storage in bytes.
+    #[must_use]
     pub fn size(&self) -> u64 {
         self.size
     }
@@ -221,15 +233,21 @@ impl InMemoryStorage {
     ///
     /// If the new size is larger, the storage is extended with zeros.
     /// If the new size is smaller, the storage is truncated.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `size` does not fit in `usize`.
     pub fn resize(&mut self, new_size: u64) {
         let old_size = self.size;
         self.size = new_size;
 
+        let new_size_usize = usize::try_from(new_size).expect("storage size fits in usize");
+
         // Resize data buffer
-        self.data.resize(new_size as usize, 0);
+        self.data.resize(new_size_usize, 0);
 
         // Resize sector bitmaps if needed
-        let new_num_sectors = (new_size as usize).div_ceil(SECTOR_SIZE);
+        let new_num_sectors = new_size_usize.div_ceil(SECTOR_SIZE);
         let old_num_sectors = self.written.len();
 
         if new_num_sectors != old_num_sectors {
@@ -263,6 +281,10 @@ impl InMemoryStorage {
     /// # Errors
     ///
     /// Returns an error if the read would go past the end of storage.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `size` does not fit in `usize`.
     pub fn read(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         // Bounds check
         let end = offset
@@ -282,7 +304,7 @@ impl InMemoryStorage {
         }
 
         // Copy pristine data to buffer
-        let offset_usize = offset as usize;
+        let offset_usize = usize::try_from(offset).expect("offset fits in usize");
         buf.copy_from_slice(&self.data[offset_usize..offset_usize + buf.len()]);
 
         // Apply sector-level effects
@@ -352,7 +374,7 @@ impl InMemoryStorage {
     /// Uses the pristine bytes as seed so retries don't help - the same
     /// corruption will occur each time.
     ///
-    /// TigerBeetle reference: lines 476-480
+    /// `TigerBeetle` reference: lines 476-480
     fn apply_corruption(&self, sector: usize, buf: &mut [u8]) {
         if buf.is_empty() {
             return;
@@ -380,7 +402,7 @@ impl InMemoryStorage {
             }
 
             // Check if overlay intersects with read range
-            let overlay_end = overlay.offset + overlay.size as u64;
+            let overlay_end = overlay.offset + u64::from(overlay.size);
             let read_end = offset + buf.len() as u64;
 
             if overlay.offset >= read_end || overlay_end <= offset {
@@ -391,9 +413,12 @@ impl InMemoryStorage {
             let intersect_start = overlay.offset.max(offset);
             let intersect_end = overlay_end.min(read_end);
 
-            let buf_offset = (intersect_start - offset) as usize;
-            let overlay_offset = (intersect_start - overlay.offset) as usize;
-            let copy_len = (intersect_end - intersect_start) as usize;
+            let buf_offset =
+                usize::try_from(intersect_start - offset).expect("offset fits in usize");
+            let overlay_offset =
+                usize::try_from(intersect_start - overlay.offset).expect("offset fits in usize");
+            let copy_len = usize::try_from(intersect_end - intersect_start)
+                .expect("overlay length fits in usize");
 
             buf[buf_offset..buf_offset + copy_len]
                 .copy_from_slice(&overlay.data[overlay_offset..overlay_offset + copy_len]);
@@ -414,6 +439,10 @@ impl InMemoryStorage {
     /// # Errors
     ///
     /// Returns an error on overflow.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `size` does not fit in `usize`.
     pub fn write(&mut self, offset: u64, data: &[u8], is_synced: bool) -> io::Result<()> {
         // Bounds check (only for overflow)
         let end = offset
@@ -425,7 +454,7 @@ impl InMemoryStorage {
             self.resize(end);
         }
 
-        let offset_usize = offset as usize;
+        let offset_usize = usize::try_from(offset).expect("offset fits in usize");
 
         // Mark sectors as written and clear faults
         let start_sector = offset_usize / SECTOR_SIZE;
@@ -462,7 +491,7 @@ impl InMemoryStorage {
 
     /// Apply a misdirected write.
     ///
-    /// Simulates a write that lands at the wrong location. Uses the TigerBeetle
+    /// Simulates a write that lands at the wrong location. Uses the `TigerBeetle`
     /// 2-overlay pattern:
     /// 1. Overlay 1: intended target shows old data on read
     /// 2. Overlay 2: mistaken target shows new data on read
@@ -477,6 +506,10 @@ impl InMemoryStorage {
     /// # Errors
     ///
     /// Returns an error on overflow.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `size` does not fit in `usize`.
     pub fn apply_misdirected_write(
         &mut self,
         intended_offset: u64,
@@ -503,13 +536,14 @@ impl InMemoryStorage {
         }
 
         // Save old data at intended target
-        let intended_usize = intended_offset as usize;
+        let intended_usize = usize::try_from(intended_offset).expect("offset fits in usize");
         let old_data = self.data[intended_usize..intended_usize + data.len()].to_vec();
+        let overlay_size = u32::try_from(data.len()).expect("data length fits in u32");
 
         // Overlay 1: intended target shows old data on read
         self.overlays[0] = Some(WriteOverlay {
             offset: intended_offset,
-            size: data.len() as u32,
+            size: overlay_size,
             data: old_data,
             active: true,
         });
@@ -517,7 +551,7 @@ impl InMemoryStorage {
         // Overlay 2: mistaken target shows new data on read
         self.overlays[1] = Some(WriteOverlay {
             offset: mistaken_offset,
-            size: data.len() as u32,
+            size: overlay_size,
             data: data.to_vec(),
             active: true,
         });
@@ -566,6 +600,10 @@ impl InMemoryStorage {
     ///
     /// * `crash_fault_probability` - Probability [0.0, 1.0] that each pending
     ///   write experiences a crash fault
+    ///
+    /// # Panics
+    ///
+    /// Panics if `size` does not fit in `usize`.
     pub fn apply_crash(&mut self, crash_fault_probability: f64) {
         let mut rng = ChaCha8Rng::seed_from_u64(self.seed);
 
@@ -581,7 +619,8 @@ impl InMemoryStorage {
             }
 
             // Pick a random sector in the write range to fault
-            let offset_usize = pending.offset as usize;
+            let offset_usize =
+                usize::try_from(pending.offset).expect("pending offset fits in usize");
             let start_sector = offset_usize / SECTOR_SIZE;
             let end_sector = (offset_usize + pending.data.len()).div_ceil(SECTOR_SIZE);
 
@@ -605,6 +644,7 @@ impl InMemoryStorage {
     }
 
     /// Check if a sector has a fault.
+    #[must_use]
     pub fn has_fault(&self, sector: usize) -> bool {
         sector < self.faults.len() && self.faults.is_set(sector)
     }
@@ -857,7 +897,9 @@ mod tests {
         let mut storage = InMemoryStorage::new(4096, 42);
 
         // Write a full sector with repeating pattern
-        let data: Vec<u8> = (0..SECTOR_SIZE).map(|i| (i % 256) as u8).collect();
+        let data: Vec<u8> = (0..SECTOR_SIZE)
+            .map(|i| u8::try_from(i % 256).expect("modulo 256 fits in u8"))
+            .collect();
         storage.write(0, &data, true).expect("write failed");
 
         // Read partial sector

@@ -14,3 +14,6 @@ homepage = "https://pierrez.github.io/moonpool/"
 keywords = ["simulation", "testing", "distributed-systems", "deterministic", "chaos"]
 categories = ["development-tools::testing"]
 edition = "2024"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }

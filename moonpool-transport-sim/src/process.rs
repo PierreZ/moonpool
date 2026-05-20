@@ -18,7 +18,7 @@ pub struct EchoServerProcess;
 
 #[async_trait]
 impl Process for EchoServerProcess {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "echo-server"
     }
 
@@ -65,7 +65,7 @@ impl Process for EchoServerProcess {
                 Some((req, reply)) = fail_stream.recv() => {
                     handle_echo_or_fail(&req, reply, my_ip);
                 }
-                _ = shutdown.cancelled() => {
+                () = shutdown.cancelled() => {
                     tracing::info!("echo server shutting down");
                     return Ok(());
                 }
@@ -96,7 +96,7 @@ fn handle_echo_delayed(
     };
 
     let time = ctx.providers().time().clone();
-    let delay_ms = moonpool_sim::sim_random_range(1..100) as u64;
+    let delay_ms = moonpool_sim::sim_random_range(1u64..100);
     drop(
         ctx.providers()
             .task()
@@ -108,7 +108,7 @@ fn handle_echo_delayed(
     );
 }
 
-/// Echo with buggify-controlled failure: sometimes drops the promise (BrokenPromise).
+/// Echo with buggify-controlled failure: sometimes drops the promise (`BrokenPromise`).
 fn handle_echo_or_fail(req: &EchoRequest, reply: ReplyPromise<EchoResponse>, server_ip: &str) {
     if buggify!() {
         assert_sometimes!(true, "echo_or_fail_buggify_dropped_promise");

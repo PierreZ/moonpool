@@ -3,8 +3,8 @@
 //! FDB-style transport layer for the moonpool simulation framework.
 //!
 //! This crate provides networking primitives that work identically in
-//! simulation and production environments, following FoundationDB's
-//! NetTransport patterns.
+//! simulation and production environments, following `FoundationDB`'s
+//! `NetTransport` patterns.
 //!
 //! ## Architecture
 //!

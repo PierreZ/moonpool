@@ -103,8 +103,9 @@ thread_local! {
 }
 
 /// Return the current RNG call count.
+#[must_use]
 pub fn count() -> u64 {
-    CALL_COUNT.with(|c| c.get())
+    CALL_COUNT.with(std::cell::Cell::get)
 }
 
 /// Reseed the xorshift64 RNG and reset the call counter.
@@ -115,6 +116,7 @@ pub fn reseed(seed: u64) {
 }
 
 /// Advance the xorshift64 RNG and return the next value.
+#[must_use]
 pub fn next_random() -> u64 {
     CALL_COUNT.with(|c| c.set(c.get() + 1));
     RNG_STATE.with(|c| {
@@ -128,8 +130,11 @@ pub fn next_random() -> u64 {
 }
 
 /// Return a random integer in `0..divisor`.
+#[must_use]
 pub fn random_below(divisor: u32) -> u32 {
-    (next_random() % divisor as u64) as u32
+    // `next_random() % u64::from(divisor)` is always < divisor (≤ u32::MAX),
+    // so the cast is lossless; `unwrap_or` keeps us out of the panic path.
+    u32::try_from(next_random() % u64::from(divisor)).unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -145,11 +150,16 @@ pub fn random_below(divisor: u32) -> u32 {
 ///
 /// Brute-force probability: (0.3^2)^3 ~ 7x10^-4.
 /// With adaptive forking the cascade amplifies through 7 fork points.
+///
+/// # Errors
+///
+/// Returns an [`AdaptiveTestError`] if exploration initialization fails,
+/// stats cannot be read, or the exploration produces zero forks/fork-points.
 pub fn run_adaptive_maze_cascade() -> Result<(), AdaptiveTestError> {
     crate::set_rng_hooks(count, reseed);
     reseed(42);
 
-    crate::init(ExplorationConfig {
+    crate::init(&ExplorationConfig {
         max_depth: 8,
         timelines_per_split: 4,
         global_energy: 150,
@@ -241,11 +251,16 @@ pub fn run_adaptive_maze_cascade() -> Result<(), AdaptiveTestError> {
 ///
 /// Brute-force probability: 0.2^5 ~ 3.2x10^-4.
 /// Fork cascade amplifies at each floor.
+///
+/// # Errors
+///
+/// Returns an [`AdaptiveTestError`] if exploration initialization fails,
+/// stats cannot be read, or the exploration produces zero forks/fork-points.
 pub fn run_adaptive_dungeon_floors() -> Result<(), AdaptiveTestError> {
     crate::set_rng_hooks(count, reseed);
     reseed(7777);
 
-    crate::init(ExplorationConfig {
+    crate::init(&ExplorationConfig {
         max_depth: 7,
         timelines_per_split: 4,
         global_energy: 200,
@@ -319,11 +334,17 @@ pub fn run_adaptive_dungeon_floors() -> Result<(), AdaptiveTestError> {
 ///
 /// 3 always-true gates maximize energy consumption. The global energy cap
 /// of 8 limits total forks regardless of per-mark budgets.
+///
+/// # Errors
+///
+/// Returns an [`AdaptiveTestError`] if exploration initialization fails,
+/// stats cannot be read, or the energy invariants are violated (total
+/// timelines exceed cap, global energy negative, or pool negative).
 pub fn run_adaptive_energy_budget() -> Result<(), AdaptiveTestError> {
     crate::set_rng_hooks(count, reseed);
     reseed(99);
 
-    crate::init(ExplorationConfig {
+    crate::init(&ExplorationConfig {
         max_depth: 3,
         timelines_per_split: 4,
         global_energy: 8,

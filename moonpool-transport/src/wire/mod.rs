@@ -12,6 +12,9 @@ use crate::UID;
 /// Header size: 4 (length) + 4 (checksum) + 16 (token) = 24 bytes.
 pub const HEADER_SIZE: usize = 24;
 
+/// Header size as `u32`, for length-field comparisons (matches [`HEADER_SIZE`]).
+const HEADER_SIZE_U32: u32 = 24;
+
 /// Maximum payload size (1MB).
 ///
 /// Packets larger than this are rejected to prevent memory exhaustion attacks.
@@ -67,11 +70,11 @@ pub struct PacketHeader {
 }
 
 impl PacketHeader {
-    /// Serialize header into buffer (must be at least HEADER_SIZE bytes).
+    /// Serialize header into buffer (must be at least `HEADER_SIZE` bytes).
     ///
     /// # Panics
     ///
-    /// Panics if buffer is smaller than HEADER_SIZE.
+    /// Panics if buffer is smaller than `HEADER_SIZE`.
     pub fn serialize_into(&self, buf: &mut [u8]) {
         debug_assert!(buf.len() >= HEADER_SIZE);
         buf[0..4].copy_from_slice(&self.length.to_le_bytes());
@@ -84,7 +87,7 @@ impl PacketHeader {
     ///
     /// # Errors
     ///
-    /// Returns `InsufficientData` if buffer is smaller than HEADER_SIZE.
+    /// Returns `InsufficientData` if buffer is smaller than `HEADER_SIZE`.
     pub fn deserialize(buf: &[u8]) -> Result<Self, WireError> {
         if buf.len() < HEADER_SIZE {
             return Err(WireError::InsufficientData {
@@ -125,7 +128,13 @@ fn compute_checksum(token: UID, payload: &[u8]) -> u32 {
 ///
 /// # Errors
 ///
-/// Returns `PacketTooLarge` if payload exceeds MAX_PAYLOAD_SIZE.
+/// Returns `PacketTooLarge` if payload exceeds `MAX_PAYLOAD_SIZE`.
+///
+/// # Panics
+///
+/// Should not panic in practice: this function returns `PacketTooLarge` for
+/// payloads above `MAX_PAYLOAD_SIZE`, and the resulting `total_length` always
+/// fits in `u32`.
 ///
 /// # Examples
 ///
@@ -153,8 +162,10 @@ pub fn serialize_packet(token: UID, payload: &[u8]) -> Result<Vec<u8>, WireError
 
     let checksum = compute_checksum(token, payload);
 
+    // `total_length` is at most `HEADER_SIZE + MAX_PAYLOAD_SIZE`, well within `u32` range.
+    let length = u32::try_from(total_length).expect("packet length fits in u32");
     let header = PacketHeader {
-        length: total_length as u32,
+        length,
         checksum,
         token,
     };
@@ -188,7 +199,7 @@ pub fn deserialize_packet(data: &[u8]) -> Result<(UID, Vec<u8>), WireError> {
     let header = PacketHeader::deserialize(data)?;
 
     // Validate length field
-    if header.length < HEADER_SIZE as u32 {
+    if header.length < HEADER_SIZE_U32 {
         return Err(WireError::InvalidLength {
             length: header.length,
         });
@@ -226,6 +237,11 @@ pub fn deserialize_packet(data: &[u8]) -> Result<(UID, Vec<u8>), WireError> {
 /// - `Ok(None)` if more data is needed (not an error condition)
 /// - `Err` if data is malformed
 ///
+/// # Errors
+///
+/// - [`WireError::InvalidLength`] if the length field is smaller than the header size.
+/// - [`WireError::ChecksumMismatch`] if the computed checksum does not match the header.
+///
 /// # Examples
 ///
 /// ```
@@ -248,7 +264,7 @@ pub fn try_deserialize_packet(data: &[u8]) -> Result<Option<(UID, Vec<u8>, usize
 
     let header = PacketHeader::deserialize(data)?;
 
-    if header.length < HEADER_SIZE as u32 {
+    if header.length < HEADER_SIZE_U32 {
         return Err(WireError::InvalidLength {
             length: header.length,
         });
@@ -280,7 +296,7 @@ mod tests {
 
     #[test]
     fn test_serialize_deserialize_roundtrip() {
-        let token = UID::new(0x123456789ABCDEF0, 0xFEDCBA9876543210);
+        let token = UID::new(0x1234_5678_9ABC_DEF0, 0xFEDC_BA98_7654_3210);
         let payload = b"hello world";
 
         let packet = serialize_packet(token, payload).expect("serialize");
@@ -417,7 +433,7 @@ mod tests {
 
         // Verify serialization works with adjusted UIDs
         for (i, uid) in [base, adj1, adj2].iter().enumerate() {
-            let packet = serialize_packet(*uid, format!("msg{}", i).as_bytes()).expect("serialize");
+            let packet = serialize_packet(*uid, format!("msg{i}").as_bytes()).expect("serialize");
             let (recv_token, _) = deserialize_packet(&packet).expect("deserialize");
             assert_eq!(*uid, recv_token);
         }
@@ -473,8 +489,8 @@ mod tests {
     fn test_header_serialization() {
         let header = PacketHeader {
             length: 100,
-            checksum: 0xDEADBEEF,
-            token: UID::new(0x1234567890ABCDEF, 0xFEDCBA0987654321),
+            checksum: 0xDEAD_BEEF,
+            token: UID::new(0x1234_5678_90AB_CDEF, 0xFEDC_BA09_8765_4321),
         };
 
         let mut buf = [0u8; HEADER_SIZE];
@@ -486,7 +502,7 @@ mod tests {
 
     #[test]
     fn test_packet_structure() {
-        let token = UID::new(0x1111111111111111, 0x2222222222222222);
+        let token = UID::new(0x1111_1111_1111_1111, 0x2222_2222_2222_2222);
         let payload = b"test";
 
         let packet = serialize_packet(token, payload).expect("serialize");

@@ -184,9 +184,9 @@ pub fn register_servers(
 pub fn dispatch_reply(
     transport: &NetTransport<MockProviders>,
     envelope: &RequestEnvelope<Echo>,
-    result: Result<Echo, ReplyError>,
+    result: &Result<Echo, ReplyError>,
 ) {
-    let payload = serde_json::to_vec(&result).expect("serialize reply");
+    let payload = serde_json::to_vec(result).expect("serialize reply");
     transport
         .dispatch(&envelope.reply_to.token, &payload)
         .expect("dispatch reply");

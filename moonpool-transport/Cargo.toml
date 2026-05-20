@@ -37,3 +37,6 @@ name = "dynamic_endpoint"
 path = "examples/dynamic_endpoint.rs"
 
 
+
+[lints]
+workspace = true

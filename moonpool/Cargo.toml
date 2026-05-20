@@ -13,3 +13,6 @@ readme = "README.md"
 moonpool-core = { path = "../moonpool-core", version = "0.6.0" }
 moonpool-sim = { path = "../moonpool-sim", version = "0.6.0" }
 moonpool-transport = { path = "../moonpool-transport", version = "0.6.0" }
+
+[lints]
+workspace = true

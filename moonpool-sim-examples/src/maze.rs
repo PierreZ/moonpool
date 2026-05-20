@@ -35,6 +35,7 @@ pub struct Maze {
 
 impl Maze {
     /// Create a new maze with the given step limit.
+    #[must_use]
     pub fn new(max_steps: u64) -> Self {
         Maze {
             step_count: 0,
@@ -44,12 +45,61 @@ impl Maze {
     }
 
     /// Returns true when all 4 locks are open.
+    #[must_use]
     pub fn all_locks_open(&self) -> bool {
         self.locks & 0b1111 == 0b1111
     }
 
     fn random_bool(p: f64) -> bool {
         moonpool_sim::sim_random::<f64>() < p
+    }
+
+    /// Try to open one lock by passing through 5 nested probability gates.
+    /// `lock_id` identifies the lock (0-3); `bit` is the lock's mask in `self.locks`.
+    /// Each gate emits an `assert_sometimes_each!("gate", ...)` keyed by lock+depth
+    /// so coverage tracking sees independent buckets per lock.
+    fn try_open_lock(&mut self, lock_id: i64, bit: u8) {
+        let locks_open = i64::from(self.locks.count_ones());
+        moonpool_sim::assert_sometimes_each!(
+            "gate",
+            [("lock", lock_id), ("depth", 1i64), ("locks", locks_open)]
+        );
+        if !Self::random_bool(GATE_P) {
+            return;
+        }
+        moonpool_sim::assert_sometimes_each!(
+            "gate",
+            [("lock", lock_id), ("depth", 2i64), ("locks", locks_open)]
+        );
+        if !Self::random_bool(GATE_P) {
+            return;
+        }
+        moonpool_sim::assert_sometimes_each!(
+            "gate",
+            [("lock", lock_id), ("depth", 3i64), ("locks", locks_open)]
+        );
+        if !Self::random_bool(GATE_P) {
+            return;
+        }
+        moonpool_sim::assert_sometimes_each!(
+            "gate",
+            [("lock", lock_id), ("depth", 4i64), ("locks", locks_open)]
+        );
+        if !Self::random_bool(GATE_P) {
+            return;
+        }
+        moonpool_sim::assert_sometimes_each!(
+            "gate",
+            [("lock", lock_id), ("depth", 5i64), ("locks", locks_open)]
+        );
+        if !Self::random_bool(GATE_P) {
+            return;
+        }
+        self.locks |= bit;
+        moonpool_sim::assert_sometimes_each!(
+            "lock opens",
+            [("lock", lock_id), ("locks", locks_open)]
+        );
     }
 
     /// Execute one step of the maze.
@@ -59,165 +109,24 @@ impl Maze {
         // Consume one random value per step for state mixing.
         let _: u64 = moonpool_sim::sim_random();
 
-        let locks_open = self.locks.count_ones() as i64;
-
         // --- Lock 0: 5 nested gates (independent) ---
         if self.locks & 1 == 0 {
-            moonpool_sim::assert_sometimes_each!(
-                "gate",
-                [("lock", 0i64), ("depth", 1i64), ("locks", locks_open)]
-            );
-            if Self::random_bool(GATE_P) {
-                moonpool_sim::assert_sometimes_each!(
-                    "gate",
-                    [("lock", 0i64), ("depth", 2i64), ("locks", locks_open)]
-                );
-                if Self::random_bool(GATE_P) {
-                    moonpool_sim::assert_sometimes_each!(
-                        "gate",
-                        [("lock", 0i64), ("depth", 3i64), ("locks", locks_open)]
-                    );
-                    if Self::random_bool(GATE_P) {
-                        moonpool_sim::assert_sometimes_each!(
-                            "gate",
-                            [("lock", 0i64), ("depth", 4i64), ("locks", locks_open)]
-                        );
-                        if Self::random_bool(GATE_P) {
-                            moonpool_sim::assert_sometimes_each!(
-                                "gate",
-                                [("lock", 0i64), ("depth", 5i64), ("locks", locks_open)]
-                            );
-                            if Self::random_bool(GATE_P) {
-                                self.locks |= 1;
-                                moonpool_sim::assert_sometimes_each!(
-                                    "lock opens",
-                                    [("lock", 0i64), ("locks", locks_open)]
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+            self.try_open_lock(0, 1);
         }
 
         // --- Lock 1: 5 nested gates (requires lock 0) ---
-        let locks_open = self.locks.count_ones() as i64;
         if self.locks & 1 != 0 && self.locks & 2 == 0 {
-            moonpool_sim::assert_sometimes_each!(
-                "gate",
-                [("lock", 1i64), ("depth", 1i64), ("locks", locks_open)]
-            );
-            if Self::random_bool(GATE_P) {
-                moonpool_sim::assert_sometimes_each!(
-                    "gate",
-                    [("lock", 1i64), ("depth", 2i64), ("locks", locks_open)]
-                );
-                if Self::random_bool(GATE_P) {
-                    moonpool_sim::assert_sometimes_each!(
-                        "gate",
-                        [("lock", 1i64), ("depth", 3i64), ("locks", locks_open)]
-                    );
-                    if Self::random_bool(GATE_P) {
-                        moonpool_sim::assert_sometimes_each!(
-                            "gate",
-                            [("lock", 1i64), ("depth", 4i64), ("locks", locks_open)]
-                        );
-                        if Self::random_bool(GATE_P) {
-                            moonpool_sim::assert_sometimes_each!(
-                                "gate",
-                                [("lock", 1i64), ("depth", 5i64), ("locks", locks_open)]
-                            );
-                            if Self::random_bool(GATE_P) {
-                                self.locks |= 2;
-                                moonpool_sim::assert_sometimes_each!(
-                                    "lock opens",
-                                    [("lock", 1i64), ("locks", locks_open)]
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+            self.try_open_lock(1, 2);
         }
 
         // --- Lock 2: 5 nested gates (independent) ---
-        let locks_open = self.locks.count_ones() as i64;
         if self.locks & 4 == 0 {
-            moonpool_sim::assert_sometimes_each!(
-                "gate",
-                [("lock", 2i64), ("depth", 1i64), ("locks", locks_open)]
-            );
-            if Self::random_bool(GATE_P) {
-                moonpool_sim::assert_sometimes_each!(
-                    "gate",
-                    [("lock", 2i64), ("depth", 2i64), ("locks", locks_open)]
-                );
-                if Self::random_bool(GATE_P) {
-                    moonpool_sim::assert_sometimes_each!(
-                        "gate",
-                        [("lock", 2i64), ("depth", 3i64), ("locks", locks_open)]
-                    );
-                    if Self::random_bool(GATE_P) {
-                        moonpool_sim::assert_sometimes_each!(
-                            "gate",
-                            [("lock", 2i64), ("depth", 4i64), ("locks", locks_open)]
-                        );
-                        if Self::random_bool(GATE_P) {
-                            moonpool_sim::assert_sometimes_each!(
-                                "gate",
-                                [("lock", 2i64), ("depth", 5i64), ("locks", locks_open)]
-                            );
-                            if Self::random_bool(GATE_P) {
-                                self.locks |= 4;
-                                moonpool_sim::assert_sometimes_each!(
-                                    "lock opens",
-                                    [("lock", 2i64), ("locks", locks_open)]
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+            self.try_open_lock(2, 4);
         }
 
         // --- Lock 3: 5 nested gates (requires lock 0 AND lock 2) ---
-        let locks_open = self.locks.count_ones() as i64;
         if self.locks & 1 != 0 && self.locks & 4 != 0 && self.locks & 8 == 0 {
-            moonpool_sim::assert_sometimes_each!(
-                "gate",
-                [("lock", 3i64), ("depth", 1i64), ("locks", locks_open)]
-            );
-            if Self::random_bool(GATE_P) {
-                moonpool_sim::assert_sometimes_each!(
-                    "gate",
-                    [("lock", 3i64), ("depth", 2i64), ("locks", locks_open)]
-                );
-                if Self::random_bool(GATE_P) {
-                    moonpool_sim::assert_sometimes_each!(
-                        "gate",
-                        [("lock", 3i64), ("depth", 3i64), ("locks", locks_open)]
-                    );
-                    if Self::random_bool(GATE_P) {
-                        moonpool_sim::assert_sometimes_each!(
-                            "gate",
-                            [("lock", 3i64), ("depth", 4i64), ("locks", locks_open)]
-                        );
-                        if Self::random_bool(GATE_P) {
-                            moonpool_sim::assert_sometimes_each!(
-                                "gate",
-                                [("lock", 3i64), ("depth", 5i64), ("locks", locks_open)]
-                            );
-                            if Self::random_bool(GATE_P) {
-                                self.locks |= 8;
-                                moonpool_sim::assert_sometimes_each!(
-                                    "lock opens",
-                                    [("lock", 3i64), ("locks", locks_open)]
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+            self.try_open_lock(3, 8);
         }
 
         // --- Check for the bug ---
@@ -260,7 +169,7 @@ impl Default for MazeWorkload {
 
 #[async_trait]
 impl Workload for MazeWorkload {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "maze"
     }
 

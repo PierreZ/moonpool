@@ -64,8 +64,8 @@ pub enum CodecError {
 impl fmt::Display for CodecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CodecError::Encode(e) => write!(f, "encode error: {}", e),
-            CodecError::Decode(e) => write!(f, "decode error: {}", e),
+            CodecError::Encode(e) => write!(f, "encode error: {e}"),
+            CodecError::Decode(e) => write!(f, "decode error: {e}"),
         }
     }
 }
@@ -73,8 +73,7 @@ impl fmt::Display for CodecError {
 impl std::error::Error for CodecError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            CodecError::Encode(e) => Some(e.as_ref()),
-            CodecError::Decode(e) => Some(e.as_ref()),
+            CodecError::Encode(e) | CodecError::Decode(e) => Some(e.as_ref()),
         }
     }
 }
@@ -106,7 +105,7 @@ pub trait MessageCodec: Clone + Send + Sync + 'static {
     fn decode<T: DeserializeOwned>(&self, buf: &[u8]) -> Result<T, CodecError>;
 }
 
-/// JSON codec using serde_json.
+/// JSON codec using `serde_json`.
 ///
 /// This is the default codec provided by moonpool. It's great for debugging
 /// (human-readable output) but not the most efficient for production use.

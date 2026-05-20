@@ -15,7 +15,7 @@
 
 use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, Ordering};
 
-/// Maximum number of EachBucket slots in shared memory.
+/// Maximum number of `EachBucket` slots in shared memory.
 pub const MAX_EACH_BUCKETS: usize = 256;
 
 /// Maximum number of identity keys per bucket.
@@ -24,10 +24,10 @@ pub const MAX_EACH_KEYS: usize = 6;
 /// Maximum length of the assertion message stored in a bucket.
 const EACH_MSG_LEN: usize = 32;
 
-/// Total shared memory size for the EachBucket region.
+/// Total shared memory size for the `EachBucket` region.
 pub const EACH_BUCKET_MEM_SIZE: usize = 8 + MAX_EACH_BUCKETS * std::mem::size_of::<EachBucket>();
 
-/// One bucket's state in MAP_SHARED memory for per-value bucketed assertions.
+/// One bucket's state in `MAP_SHARED` memory for per-value bucketed assertions.
 ///
 /// Each unique combination of identity key values creates one bucket.
 /// Optional quality watermark (`has_quality != 0`): re-forks when `best_score` improves.
@@ -36,7 +36,7 @@ pub const EACH_BUCKET_MEM_SIZE: usize = 8 + MAX_EACH_BUCKETS * std::mem::size_of
 pub struct EachBucket {
     /// FNV-1a hash of the assertion message string.
     pub site_hash: u32,
-    /// Hash of (site_hash + identity key values) — uniquely identifies this bucket.
+    /// Hash of (`site_hash` + identity key values) — uniquely identifies this bucket.
     pub bucket_hash: u32,
     /// CAS guard: 0 = no fork yet, 1 = first fork triggered.
     pub split_triggered: u8,
@@ -45,7 +45,7 @@ pub struct EachBucket {
     /// Number of quality keys (0-4). 0 means no quality tracking.
     pub has_quality: u8,
     /// Alignment padding.
-    pub _pad: u8,
+    pad: u8,
     /// Number of times this bucket has been hit (atomic increment).
     pub pass_count: u32,
     /// Best quality watermark score (atomic CAS for improvement detection).
@@ -58,6 +58,7 @@ pub struct EachBucket {
 
 impl EachBucket {
     /// Get the assertion message as a string slice.
+    #[must_use]
     pub fn msg_str(&self) -> &str {
         let len = self
             .msg
@@ -70,13 +71,13 @@ impl EachBucket {
 
 use crate::assertion_slots::msg_hash;
 
-/// Find an existing bucket or allocate a new one by (site_hash, bucket_hash).
+/// Find an existing bucket or allocate a new one by (`site_hash`, `bucket_hash`).
 ///
 /// Returns a pointer to the bucket, or null if the table is full.
 ///
 /// # Safety
 ///
-/// `ptr` must point to a valid EachBucket shared memory region of at least
+/// `ptr` must point to a valid `EachBucket` shared memory region of at least
 /// `EACH_BUCKET_MEM_SIZE` bytes.
 unsafe fn find_or_alloc_each_bucket(
     ptr: *mut u8,
@@ -87,9 +88,9 @@ unsafe fn find_or_alloc_each_bucket(
     has_quality: u8,
 ) -> *mut EachBucket {
     unsafe {
-        let next_atomic = &*(ptr as *const AtomicU32);
+        let next_atomic = &*ptr.cast::<()>().cast::<AtomicU32>();
         let count = next_atomic.load(Ordering::Relaxed) as usize;
-        let base = ptr.add(8) as *mut EachBucket;
+        let base = ptr.add(8).cast::<()>().cast::<EachBucket>();
 
         // Search existing buckets.
         for i in 0..count.min(MAX_EACH_BUCKETS) {
@@ -123,9 +124,9 @@ unsafe fn find_or_alloc_each_bucket(
                 site_hash,
                 bucket_hash,
                 split_triggered: 0,
-                num_keys: num_keys as u8,
+                num_keys: u8::try_from(num_keys).expect("num_keys capped at MAX_EACH_KEYS=6"),
                 has_quality,
-                _pad: 0,
+                pad: 0,
                 pass_count: 0,
                 best_score: i64::MIN,
                 key_values,
@@ -149,22 +150,27 @@ fn compute_each_bucket_index(base_ptr: *mut u8, bucket: *const EachBucket) -> us
 /// Pack up to 4 quality key values into a single i64 for lexicographic comparison.
 ///
 /// First key gets the highest 16 bits (highest priority).
+/// Values are reduced to their low 16 bits (matching `v as u16` semantics) —
+/// callers should pre-scale values into the u16 range if higher fidelity is needed.
 fn pack_quality(quality: &[(&str, i64)]) -> i64 {
     let mut packed: i64 = 0;
     let n = quality.len().min(4);
     for (i, &(_, v)) in quality.iter().take(n).enumerate() {
         let shift = (3 - i) * 16;
-        packed |= ((v as u16) as i64) << shift;
+        // Mask to low 16 bits (equivalent to `v as u16 as i64`, no sign loss).
+        packed |= (v & 0xffff) << shift;
     }
     packed
 }
 
 /// Unpack a quality i64 back into individual values for display.
+#[must_use]
 pub fn unpack_quality(packed: i64, n: u8) -> Vec<i64> {
     (0..n as usize)
         .map(|i| {
             let shift = (3 - i) * 16;
-            ((packed >> shift) as u16) as i64
+            // Extract the low 16 bits at the shifted position (mirrors pack_quality).
+            (packed >> shift) & 0xffff
         })
         .collect()
 }
@@ -175,9 +181,9 @@ pub fn unpack_quality(packed: i64, n: u8) -> Vec<i64> {
 /// Forks on first discovery. Optional quality keys re-fork when the packed
 /// quality score improves (CAS loop on `best_score`).
 ///
-/// This is a no-op if EachBucket shared memory is not initialized.
+/// This is a no-op if `EachBucket` shared memory is not initialized.
 pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&str, i64)]) {
-    let ptr = crate::context::EACH_BUCKET_PTR.with(|c| c.get());
+    let ptr = crate::context::EACH_BUCKET_PTR.with(std::cell::Cell::get);
     if ptr.is_null() {
         return;
     }
@@ -188,15 +194,15 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
     let mut bucket_hash = site_hash;
     for &(_, val) in keys {
         for b in val.to_le_bytes() {
-            bucket_hash ^= b as u32;
-            bucket_hash = bucket_hash.wrapping_mul(0x01000193);
+            bucket_hash ^= u32::from(b);
+            bucket_hash = bucket_hash.wrapping_mul(0x0100_0193);
         }
     }
 
     // Mark coverage bitmap for adaptive yield detection.
     // Different identity key combinations produce different bucket_hash values,
     // so the bitmap distinguishes e.g. floor-1 from floor-2 assertions.
-    let bm_ptr = crate::context::COVERAGE_BITMAP_PTR.with(|c| c.get());
+    let bm_ptr = crate::context::COVERAGE_BITMAP_PTR.with(std::cell::Cell::get);
     if !bm_ptr.is_null() {
         // Safety: bm_ptr is non-null (checked above) and was set to a valid
         // alloc_shared() pointer of COVERAGE_MAP_SIZE bytes during init().
@@ -204,7 +210,8 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
         bm.set_bit(bucket_hash as usize);
     }
 
-    let has_quality = quality.len().min(4) as u8;
+    // `min(4)` guarantees the value fits in u8, so the cast is lossless.
+    let has_quality = u8::try_from(quality.len().min(4)).unwrap_or(4);
     let score = if has_quality > 0 {
         pack_quality(quality)
     } else {
@@ -223,11 +230,11 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
     // correct visibility for recursive fork scenarios).
     unsafe {
         // Increment pass count.
-        let count_atomic = &*((&(*bucket).pass_count) as *const u32 as *const AtomicU32);
+        let count_atomic = &*(&raw const (*bucket).pass_count).cast::<AtomicU32>();
         count_atomic.fetch_add(1, Ordering::Relaxed);
 
         // Fork on first discovery: CAS split_triggered from 0 → 1.
-        let ft = &*((&(*bucket).split_triggered) as *const u8 as *const AtomicU8);
+        let ft = &*(&raw const (*bucket).split_triggered).cast::<AtomicU8>();
         let first_discovery = ft
             .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok();
@@ -235,7 +242,7 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
         if first_discovery {
             // On first discovery, initialize best_score if quality-tracked.
             if has_quality > 0 {
-                let bs_atomic = &*((&(*bucket).best_score) as *const i64 as *const AtomicI64);
+                let bs_atomic = &*(&raw const (*bucket).best_score).cast::<AtomicI64>();
                 bs_atomic.store(score, Ordering::Relaxed);
             }
 
@@ -247,7 +254,7 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
         } else if has_quality > 0 {
             // Not first discovery: check quality watermark improvement.
             // CAS loop on best_score — re-fork when score improves.
-            let bs_atomic = &*((&(*bucket).best_score) as *const i64 as *const AtomicI64);
+            let bs_atomic = &*(&raw const (*bucket).best_score).cast::<AtomicI64>();
             let mut current = bs_atomic.load(Ordering::Relaxed);
             loop {
                 if score <= current {
@@ -274,11 +281,12 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
     }
 }
 
-/// Read all recorded EachBucket entries from shared memory.
+/// Read all recorded `EachBucket` entries from shared memory.
 ///
-/// Returns an empty vector if EachBucket shared memory is not initialized.
+/// Returns an empty vector if `EachBucket` shared memory is not initialized.
+#[must_use]
 pub fn each_bucket_read_all() -> Vec<EachBucket> {
-    let ptr = crate::context::EACH_BUCKET_PTR.with(|c| c.get());
+    let ptr = crate::context::EACH_BUCKET_PTR.with(std::cell::Cell::get);
     if ptr.is_null() {
         return Vec::new();
     }
@@ -288,9 +296,9 @@ pub fn each_bucket_read_all() -> Vec<EachBucket> {
     // - Loop bound 0..count ensures base.add(i) stays within the allocated region.
     // - EachBucket is #[repr(C)] + Copy, so ptr::read is valid for initialized slots.
     unsafe {
-        let count = (*(ptr as *const u32)) as usize;
+        let count = (*ptr.cast::<()>().cast::<u32>()) as usize;
         let count = count.min(MAX_EACH_BUCKETS);
-        let base = ptr.add(8) as *const EachBucket;
+        let base = ptr.add(8).cast::<()>().cast::<EachBucket>();
         (0..count).map(|i| std::ptr::read(base.add(i))).collect()
     }
 }

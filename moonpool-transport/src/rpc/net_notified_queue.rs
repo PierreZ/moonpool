@@ -1,4 +1,4 @@
-//! NetNotifiedQueue: Typed message queue with async notification.
+//! `NetNotifiedQueue`: Typed message queue with async notification.
 //!
 //! Deserializes incoming bytes into typed messages and provides
 //! async waiting for new messages via Waker-based notification.
@@ -20,7 +20,7 @@
 //! ```
 //!
 //! # FDB Reference
-//! Based on PromiseStream internal queue pattern from fdbrpc.h
+//! Based on `PromiseStream` internal queue pattern from fdbrpc.h
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -76,7 +76,7 @@ struct NetNotifiedQueueInner<T> {
     closed: bool,
 
     /// Reason the queue was closed, if closed externally with a reason.
-    /// `None` means closed by Drop (default: ConnectionFailed).
+    /// `None` means closed by Drop (default: `ConnectionFailed`).
     /// `Some(MaybeDelivered)` means closed by peer disconnect.
     close_reason: Option<ReplyError>,
 
@@ -126,6 +126,11 @@ impl<T> NetNotifiedQueue<T> {
     /// Try to receive a message without blocking.
     ///
     /// Returns `None` if no message is available.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn try_recv(&self) -> Option<T> {
         self.inner
             .write()
@@ -135,6 +140,11 @@ impl<T> NetNotifiedQueue<T> {
     }
 
     /// Check if the queue is empty.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn is_empty(&self) -> bool {
         self.inner
             .read()
@@ -144,6 +154,11 @@ impl<T> NetNotifiedQueue<T> {
     }
 
     /// Get the number of messages currently in the queue.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn len(&self) -> usize {
         self.inner
             .read()
@@ -153,6 +168,11 @@ impl<T> NetNotifiedQueue<T> {
     }
 
     /// Get the total number of messages received.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn messages_received(&self) -> u64 {
         self.inner
             .read()
@@ -161,6 +181,11 @@ impl<T> NetNotifiedQueue<T> {
     }
 
     /// Get the number of messages dropped due to deserialization errors.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn messages_dropped(&self) -> u64 {
         self.inner
             .read()
@@ -172,6 +197,11 @@ impl<T> NetNotifiedQueue<T> {
     ///
     /// After closing, `recv()` will return `None` when the queue is empty
     /// instead of waiting for more messages.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn close(&self) {
         let mut inner = self
             .inner
@@ -185,6 +215,11 @@ impl<T> NetNotifiedQueue<T> {
     }
 
     /// Check if the queue is closed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn is_closed(&self) -> bool {
         self.inner
             .read()
@@ -196,6 +231,11 @@ impl<T> NetNotifiedQueue<T> {
     ///
     /// Like `close()`, but stores the reason so consumers can distinguish
     /// between different close causes (e.g., Drop vs peer disconnect).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn close_with_reason(&self, reason: ReplyError) {
         let mut inner = self
             .inner
@@ -211,6 +251,11 @@ impl<T> NetNotifiedQueue<T> {
     /// Get the close reason, if one was set via `close_with_reason`.
     ///
     /// Returns `None` if the queue was closed via `close()` (no explicit reason).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (only possible if a prior
+    /// task panicked while holding the lock).
     pub fn close_reason(&self) -> Option<ReplyError> {
         self.inner
             .read()
@@ -277,7 +322,7 @@ impl<T: Send + Sync + 'static> MessageReceiver for NetNotifiedQueue<T> {
                 if !inner.closed {
                     inner.closed = true;
                     inner.close_reason = Some(ReplyError::Serialization {
-                        message: format!("{}", e),
+                        message: format!("{e}"),
                     });
                     for waker in inner.wakers.drain(..) {
                         waker.wake();
@@ -319,12 +364,12 @@ impl<T> Future for RecvFuture<'_, T> {
     }
 }
 
-/// Wrapper for `Arc<NetNotifiedQueue<T>>` that can be registered with EndpointMap.
+/// Wrapper for `Arc<NetNotifiedQueue<T>>` that can be registered with `EndpointMap`.
 pub struct SharedNetNotifiedQueue<T: 'static>(pub Arc<NetNotifiedQueue<T>>);
 
 impl<T: Send + Sync + 'static> MessageReceiver for SharedNetNotifiedQueue<T> {
     fn receive(&self, payload: &[u8]) {
-        self.0.receive(payload)
+        self.0.receive(payload);
     }
 }
 
@@ -335,11 +380,13 @@ impl<T: 'static> SharedNetNotifiedQueue<T> {
     }
 
     /// Get a reference to the inner queue.
+    #[must_use]
     pub fn inner(&self) -> &NetNotifiedQueue<T> {
         &self.0
     }
 
     /// Get a clone of the `Arc` for registration with `EndpointMap`.
+    #[must_use]
     pub fn as_receiver(&self) -> Arc<NetNotifiedQueue<T>> {
         Arc::clone(&self.0)
     }

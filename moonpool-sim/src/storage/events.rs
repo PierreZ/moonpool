@@ -9,7 +9,7 @@
 /// Unlike network operations which model data delivery, storage operations
 /// model the completion of I/O requests. Each operation represents a
 /// pending I/O that completes at the scheduled time.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageOperation {
     /// Read operation completed.
     ///
@@ -32,7 +32,7 @@ pub enum StorageOperation {
     /// Sync operation completed.
     ///
     /// All previously written data is now durable. May fail with
-    /// sync_failure_probability.
+    /// `sync_failure_probability`.
     SyncComplete,
 
     /// File open operation completed.

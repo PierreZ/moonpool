@@ -115,7 +115,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
         .build_listening()
         .await?;
 
-    println!("Server listening on {}\n", SERVER_ADDR);
+    println!("Server listening on {SERVER_ADDR}\n");
 
     // Dynamic token allocation — each init() gets a unique base token.
     let calc = Calculator::init(&transport);
@@ -138,10 +138,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     // endpoint via offset adjustment from the base token.
     let iface_json = serde_json::to_string(&calc)?;
     println!("=== COPY-PASTE THIS TO START THE CLIENT ===\n");
-    println!(
-        "  cargo run --example dynamic_endpoint -- client '{}'\n",
-        iface_json
-    );
+    println!("  cargo run --example dynamic_endpoint -- client '{iface_json}'\n");
     println!("=============================================\n");
 
     println!("Waiting for requests...\n");
@@ -210,7 +207,7 @@ async fn run_client(iface_json: &str) -> Result<(), Box<dyn std::error::Error>> 
         calc.base_token(),
     );
 
-    println!("Client started, connecting to server at {}\n", SERVER_ADDR);
+    println!("Client started, connecting to server at {SERVER_ADDR}\n");
 
     // Delivery mode is a call-site decision (FDB pattern)
     println!("--- get_reply_unless_failed_for (at-least-once) ---");
@@ -220,16 +217,16 @@ async fn run_client(iface_json: &str) -> Result<(), Box<dyn std::error::Error>> 
         .await
     {
         Ok(resp) => println!("  10 + 5 = {}\n", resp.result),
-        Err(e) => println!("  Failed: {:?}\n", e),
+        Err(e) => println!("  Failed: {e:?}\n"),
     }
 
     println!("--- try_get_reply (at-most-once) ---");
     match calc.sub.try_get_reply(SubRequest { a: 20, b: 7 }).await {
         Ok(resp) => println!("  20 - 7 = {}\n", resp.result),
         Err(e) if e.is_maybe_delivered() => {
-            println!("  MaybeDelivered — read state before retry\n")
+            println!("  MaybeDelivered — read state before retry\n");
         }
-        Err(e) => println!("  Error: {:?}\n", e),
+        Err(e) => println!("  Error: {e:?}\n"),
     }
 
     println!("--- get_reply_unless_failed_for ---");
@@ -239,7 +236,7 @@ async fn run_client(iface_json: &str) -> Result<(), Box<dyn std::error::Error>> 
         .await
     {
         Ok(resp) => println!("  6 * 8 = {}\n", resp.result),
-        Err(e) => println!("  Failed: {:?}\n", e),
+        Err(e) => println!("  Failed: {e:?}\n"),
     }
 
     println!("--- division ---");
@@ -251,10 +248,9 @@ async fn run_client(iface_json: &str) -> Result<(), Box<dyn std::error::Error>> 
         Ok(resp) => println!(
             "  100 / 4 = {}\n",
             resp.result
-                .map(|r| r.to_string())
-                .unwrap_or_else(|| "ERROR".to_string())
+                .map_or_else(|| "ERROR".to_string(), |r| r.to_string())
         ),
-        Err(e) => println!("  Failed: {:?}\n", e),
+        Err(e) => println!("  Failed: {e:?}\n"),
     }
 
     match calc
@@ -265,10 +261,9 @@ async fn run_client(iface_json: &str) -> Result<(), Box<dyn std::error::Error>> 
         Ok(resp) => println!(
             "  42 / 0 = {}\n",
             resp.result
-                .map(|r| r.to_string())
-                .unwrap_or_else(|| "ERROR (division by zero)".to_string())
+                .map_or_else(|| "ERROR (division by zero)".to_string(), |r| r.to_string())
         ),
-        Err(e) => println!("  Failed: {:?}\n", e),
+        Err(e) => println!("  Failed: {e:?}\n"),
     }
 
     Ok(())
@@ -280,7 +275,7 @@ async fn run_client(iface_json: &str) -> Result<(), Box<dyn std::error::Error>> 
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let mode = args.get(1).map(|s| s.as_str()).unwrap_or("help");
+    let mode = args.get(1).map_or("help", std::string::String::as_str);
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
@@ -292,7 +287,7 @@ fn main() {
         "server" => {
             runtime.block_on(async {
                 if let Err(e) = run_server().await {
-                    eprintln!("Server error: {}", e);
+                    eprintln!("Server error: {e}");
                     std::process::exit(1);
                 }
             });
@@ -303,7 +298,7 @@ fn main() {
                 .expect("Usage: dynamic_endpoint client '<iface_json>'");
             runtime.block_on(async {
                 if let Err(e) = run_client(iface_json).await {
-                    eprintln!("Client error: {}", e);
+                    eprintln!("Client error: {e}");
                     std::process::exit(1);
                 }
             });

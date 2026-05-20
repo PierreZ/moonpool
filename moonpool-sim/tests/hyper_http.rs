@@ -27,24 +27,22 @@ fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
 }
 
 fn assert_simulation_success(report: &SimulationReport) {
-    if !report.seeds_failing.is_empty() {
-        panic!(
-            "Simulation had {} failing seeds: {:?}",
-            report.seeds_failing.len(),
-            report.seeds_failing
-        );
-    }
-    if !report.assertion_violations.is_empty() {
-        panic!(
-            "Assertion violations:\n{}",
-            report
-                .assertion_violations
-                .iter()
-                .map(|v| format!("  - {}", v))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-    }
+    assert!(
+        report.seeds_failing.is_empty(),
+        "Simulation had {} failing seeds: {:?}",
+        report.seeds_failing.len(),
+        report.seeds_failing
+    );
+    assert!(
+        report.assertion_violations.is_empty(),
+        "Assertion violations:\n{}",
+        report
+            .assertion_violations
+            .iter()
+            .map(|v| format!("  - {v}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }
 
 // ============================================================================
@@ -80,7 +78,7 @@ struct HyperServer;
 
 #[async_trait]
 impl Process for HyperServer {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "server"
     }
 
@@ -89,7 +87,7 @@ impl Process for HyperServer {
 
         let (stream, _addr) = tokio::select! {
             result = listener.accept() => result?,
-            _ = ctx.shutdown().cancelled() => return Ok(()),
+            () = ctx.shutdown().cancelled() => return Ok(()),
         };
 
         let io = TokioIo::new(stream.compat());
@@ -102,7 +100,7 @@ impl Process for HyperServer {
                     tracing::debug!("hyper server error (expected under chaos): {e}");
                 }
             }
-            _ = ctx.shutdown().cancelled() => {}
+            () = ctx.shutdown().cancelled() => {}
         }
 
         Ok(())
@@ -117,7 +115,7 @@ struct HyperClient;
 
 #[async_trait]
 impl Workload for HyperClient {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "client"
     }
 
@@ -129,7 +127,7 @@ impl Workload for HyperClient {
         // Connect with shutdown awareness (connect may hang forever under chaos)
         let stream = tokio::select! {
             result = ctx.network().connect(&server_ip) => result?,
-            _ = ctx.shutdown().cancelled() => return Ok(()),
+            () = ctx.shutdown().cancelled() => return Ok(()),
         };
 
         let io = TokioIo::new(stream.compat());
@@ -150,8 +148,8 @@ impl Workload for HyperClient {
 
         tokio::select! {
             result = send_requests(&mut sender, &server_ip) => result?,
-            _ = driver => {}
-            _ = ctx.shutdown().cancelled() => {}
+            () = driver => {}
+            () = ctx.shutdown().cancelled() => {}
         }
 
         Ok(())
@@ -243,6 +241,6 @@ fn test_hyper_http_basic() {
             .set_debug_seeds(vec![1, 2, 3]),
     );
 
-    println!("{}", report);
+    println!("{report}");
     assert_simulation_success(&report);
 }

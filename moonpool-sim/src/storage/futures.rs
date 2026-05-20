@@ -14,10 +14,10 @@ use std::task::{Context, Poll};
 
 use super::sim_shutdown_error;
 
-/// Future for sync_all and sync_data operations.
+/// Future for `sync_all` and `sync_data` operations.
 ///
 /// Follows the schedule → wait → complete pattern:
-/// 1. First poll: Schedule sync with SimWorld, store op_seq
+/// 1. First poll: Schedule sync with `SimWorld`, store `op_seq`
 /// 2. Subsequent polls: Check completion, return Pending until done
 /// 3. Final poll: Clear state, return Ok(())
 pub struct SyncFuture {
@@ -77,10 +77,10 @@ impl Future for SyncFuture {
     }
 }
 
-/// Future for set_len operations.
+/// Future for `set_len` operations.
 ///
 /// Follows the schedule → wait → complete pattern:
-/// 1. First poll: Schedule set_len with SimWorld, store op_seq
+/// 1. First poll: Schedule `set_len` with `SimWorld`, store `op_seq`
 /// 2. Subsequent polls: Check completion, return Pending until done
 /// 3. Final poll: Clear state, return Ok(())
 pub struct SetLenFuture {
@@ -93,7 +93,7 @@ pub struct SetLenFuture {
 }
 
 impl SetLenFuture {
-    /// Create a new set_len future.
+    /// Create a new `set_len` future.
     pub(crate) fn new(sim: WeakSimWorld, file_id: FileId, new_len: u64) -> Self {
         Self {
             sim,

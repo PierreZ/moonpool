@@ -42,7 +42,8 @@ pub enum RpcError {
 
 impl RpcError {
     /// Returns true if this error indicates the request may or may not
-    /// have been delivered (FDB error 1030: request_maybe_delivered).
+    /// have been delivered (FDB error 1030: `request_maybe_delivered`).
+    #[must_use]
     pub fn is_maybe_delivered(&self) -> bool {
         matches!(self, RpcError::Reply(ReplyError::MaybeDelivered))
     }

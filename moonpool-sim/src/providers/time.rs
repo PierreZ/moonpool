@@ -6,7 +6,7 @@ use moonpool_core::{TimeError, TimeProvider};
 
 use crate::sim::WeakSimWorld;
 
-/// Simulation time provider that integrates with SimWorld.
+/// Simulation time provider that integrates with `SimWorld`.
 #[derive(Debug, Clone)]
 pub struct SimTimeProvider {
     sim: WeakSimWorld,
@@ -14,6 +14,7 @@ pub struct SimTimeProvider {
 
 impl SimTimeProvider {
     /// Create a new simulation time provider.
+    #[must_use]
     pub fn new(sim: WeakSimWorld) -> Self {
         Self { sim }
     }
@@ -105,7 +106,7 @@ mod tests {
             let timer = time_provider.timer();
 
             // timer should always be >= now
-            assert!(timer >= now, "timer ({:?}) < now ({:?})", timer, now);
+            assert!(timer >= now, "timer ({timer:?}) < now ({now:?})");
 
             // timer should not exceed now + clock_drift_max (100ms default)
             assert!(

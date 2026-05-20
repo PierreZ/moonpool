@@ -103,22 +103,19 @@ fn test_low_iops_increases_latency() {
         })
         .await;
 
-        println!("High IOPS (1M): {:?}", high_time);
-        println!("Low IOPS (100): {:?}", low_time);
+        println!("High IOPS (1M): {high_time:?}");
+        println!("Low IOPS (100): {low_time:?}");
 
         // Low IOPS should take significantly longer
         assert!(
             low_time > high_time,
-            "Low IOPS should take longer: {:?} vs {:?}",
-            low_time,
-            high_time
+            "Low IOPS should take longer: {low_time:?} vs {high_time:?}"
         );
 
         // With 100 IOPS, 10 ops should take at least 100ms (10 * 10ms)
         assert!(
             low_time >= Duration::from_millis(50),
-            "Low IOPS operations should take substantial time: {:?}",
-            low_time
+            "Low IOPS operations should take substantial time: {low_time:?}"
         );
     });
 }
@@ -178,22 +175,19 @@ fn test_low_bandwidth_increases_latency() {
         })
         .await;
 
-        println!("High BW (1GB/s): {:?}", high_time);
-        println!("Low BW (10KB/s): {:?}", low_time);
+        println!("High BW (1GB/s): {high_time:?}");
+        println!("Low BW (10KB/s): {low_time:?}");
 
         // Low bandwidth should take significantly longer
         assert!(
             low_time > high_time,
-            "Low bandwidth should take longer: {:?} vs {:?}",
-            low_time,
-            high_time
+            "Low bandwidth should take longer: {low_time:?} vs {high_time:?}"
         );
 
         // 1KB at 10KB/s = 100ms minimum
         assert!(
             low_time >= Duration::from_millis(50),
-            "Low bandwidth transfer should take substantial time: {:?}",
-            low_time
+            "Low bandwidth transfer should take substantial time: {low_time:?}"
         );
     });
 }
@@ -227,18 +221,16 @@ fn test_large_file_bandwidth_constraint() {
         })
         .await;
 
-        println!("10KB at 100KB/s: {:?}", time);
+        println!("10KB at 100KB/s: {time:?}");
 
         // 10KB / 100KB/s = 100ms, allow some margin
         assert!(
             time >= Duration::from_millis(80),
-            "Large file should respect bandwidth: {:?}",
-            time
+            "Large file should respect bandwidth: {time:?}"
         );
         assert!(
             time <= Duration::from_millis(200),
-            "Latency shouldn't be excessive: {:?}",
-            time
+            "Latency shouldn't be excessive: {time:?}"
         );
     });
 }
@@ -274,14 +266,13 @@ fn test_iops_and_bandwidth_combine() {
         })
         .await;
 
-        println!("1KB with IOPS=100, BW=10KB/s: {:?}", time);
+        println!("1KB with IOPS=100, BW=10KB/s: {time:?}");
 
         // Should see effects of both constraints
         // At minimum: base + 1/100 + 1024/10000 = 1µs + 10ms + 102ms ≈ 112ms
         assert!(
             time >= Duration::from_millis(50),
-            "Combined constraints should add up: {:?}",
-            time
+            "Combined constraints should add up: {time:?}"
         );
     });
 }
@@ -344,15 +335,14 @@ fn test_read_bandwidth_constraint() {
         }
 
         let bytes_read = handle2.await.expect("task panicked").expect("io error");
-        let read_time = sim.current_time() - start_time;
+        let read_time = sim.current_time().checked_sub(start_time).unwrap();
 
-        println!("Read {} bytes at 50KB/s: {:?}", bytes_read, read_time);
+        println!("Read {bytes_read} bytes at 50KB/s: {read_time:?}");
 
         // 5KB / 50KB/s = 100ms
         assert!(
             read_time >= Duration::from_millis(50),
-            "Read should respect bandwidth: {:?}",
-            read_time
+            "Read should respect bandwidth: {read_time:?}"
         );
     });
 }
@@ -386,18 +376,17 @@ fn test_sequential_small_ops_iops_limited() {
         })
         .await;
 
-        println!("5 small ops at 50 IOPS: {:?}", time);
+        println!("5 small ops at 50 IOPS: {time:?}");
 
         // 5 ops at 50 IOPS = 5 * 20ms = 100ms minimum
         assert!(
             time >= Duration::from_millis(50),
-            "Sequential ops should be IOPS limited: {:?}",
-            time
+            "Sequential ops should be IOPS limited: {time:?}"
         );
     });
 }
 
-/// Test that fast_local config has minimal overhead
+/// Test that `fast_local` config has minimal overhead
 #[test]
 fn test_fast_local_minimal_overhead() {
     local_runtime().block_on(async {
@@ -417,13 +406,12 @@ fn test_fast_local_minimal_overhead() {
         })
         .await;
 
-        println!("100KB with fast_local: {:?}", time);
+        println!("100KB with fast_local: {time:?}");
 
         // With 1GB/s bandwidth and 1M IOPS, should complete in microseconds
         assert!(
             time < Duration::from_millis(10),
-            "fast_local should have minimal overhead: {:?}",
-            time
+            "fast_local should have minimal overhead: {time:?}"
         );
     });
 }
@@ -483,15 +471,13 @@ fn test_hdd_vs_ssd_performance() {
         })
         .await;
 
-        println!("HDD (150 IOPS): {:?}", hdd_time);
-        println!("SSD (50K IOPS): {:?}", ssd_time);
+        println!("HDD (150 IOPS): {hdd_time:?}");
+        println!("SSD (50K IOPS): {ssd_time:?}");
 
         // HDD should be slower for random I/O
         assert!(
             hdd_time > ssd_time,
-            "HDD should be slower for random I/O: {:?} vs {:?}",
-            hdd_time,
-            ssd_time
+            "HDD should be slower for random I/O: {hdd_time:?} vs {ssd_time:?}"
         );
     });
 }

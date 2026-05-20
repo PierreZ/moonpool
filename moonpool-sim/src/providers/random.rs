@@ -29,6 +29,7 @@ impl SimRandomProvider {
     /// # Arguments
     ///
     /// * `seed` - The seed value for deterministic random generation
+    #[must_use]
     pub fn new(seed: u64) -> Self {
         // Set the thread-local RNG seed
         set_sim_seed(seed);
@@ -61,8 +62,7 @@ impl RandomProvider for SimRandomProvider {
     fn random_bool(&self, probability: f64) -> bool {
         debug_assert!(
             (0.0..=1.0).contains(&probability),
-            "Probability must be between 0.0 and 1.0, got {}",
-            probability
+            "Probability must be between 0.0 and 1.0, got {probability}"
         );
         sim_random::<f64>() < probability
     }
@@ -83,7 +83,7 @@ mod tests {
         let value2_1: f64 = provider2.random();
         let value2_2: u32 = provider2.random();
 
-        assert_eq!(value1_1, value2_1);
+        assert_eq!(value1_1.to_bits(), value2_1.to_bits());
         assert_eq!(value1_2, value2_2);
     }
 
@@ -139,8 +139,7 @@ mod tests {
         // This is a statistical test so it could occasionally fail due to randomness
         assert!(
             true_count > 30 && true_count < 70,
-            "Got {} true values out of 100",
-            true_count
+            "Got {true_count} true values out of 100"
         );
     }
 

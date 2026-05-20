@@ -127,7 +127,8 @@ mod dungeon_game {
             for ry in room.y..room.y + room.h {
                 for rx in room.x..room.x + room.w {
                     if rx < WIDTH && ry < HEIGHT {
-                        room_map[ry * WIDTH + rx] = room_idx as u8;
+                        room_map[ry * WIDTH + rx] =
+                            u8::try_from(room_idx).expect("room_idx fits in u8 (MAX_ROOMS = 6)");
                     }
                 }
             }
@@ -203,7 +204,15 @@ mod dungeon_game {
             }
         }
 
-        (grid, player, enemies, key_pos, room_map, rooms.len() as u8)
+        let num_rooms_u8 = u8::try_from(rooms.len()).expect("rooms.len() <= MAX_ROOMS = 6");
+        (grid, player, enemies, key_pos, room_map, num_rooms_u8)
+    }
+
+    /// Result of an action handler indicating whether the player entered a
+    /// new room and whether the action produced a terminal `StepOutcome`.
+    struct ActionOutcome {
+        entered_room: bool,
+        terminal: Option<StepOutcome>,
     }
 
     /// Dungeon game state.
@@ -250,70 +259,132 @@ mod dungeon_game {
                 return StepOutcome::Dead;
             }
 
+            let action_outcome = match action {
+                Action::Move(dx, dy) => self.handle_move(dx, dy),
+                Action::DownStairs => self.handle_down_stairs(rng),
+                Action::Search => self.handle_search(),
+            };
+
+            if let Some(outcome) = action_outcome.terminal {
+                return outcome;
+            }
+
+            self.move_enemies(rng);
+
+            if let Some(outcome) = self.check_enemy_contact(rng) {
+                return outcome;
+            }
+
+            if action_outcome.entered_room {
+                StepOutcome::EnteredRoom
+            } else {
+                StepOutcome::Alive
+            }
+        }
+
+        /// Try moving the player by (dx, dy). Applies tile effects (potion/trap)
+        /// and tracks room transitions. Returns whether the player entered a new
+        /// room and an optional terminal `StepOutcome`.
+        fn handle_move(&mut self, dx: i8, dy: i8) -> ActionOutcome {
             let mut entered_room = false;
-
-            match action {
-                Action::Move(dx, dy) => {
-                    let nx = self.player.0 as i32 + dx as i32;
-                    let ny = self.player.1 as i32 + dy as i32;
-                    if nx >= 0 && nx < WIDTH as i32 && ny >= 0 && ny < HEIGHT as i32 {
-                        let nu = (nx as usize, ny as usize);
-                        if self.grid[nu.1 * WIDTH + nu.0] != Tile::Wall {
-                            self.player = nu;
-                        }
-                    }
-
-                    let new_room = self.room_map[self.player.1 * WIDTH + self.player.0];
-                    if new_room != self.current_room && new_room < self.num_rooms {
-                        entered_room = true;
-                    }
-                    self.current_room = new_room;
-
-                    let tile = self.grid[self.player.1 * WIDTH + self.player.0];
-                    match tile {
-                        Tile::Potion => {
-                            self.hp = (self.hp + 2).min(self.max_hp);
-                            self.grid[self.player.1 * WIDTH + self.player.0] = Tile::Floor;
-                        }
-                        Tile::Trap => {
-                            self.hp -= 1;
-                            self.grid[self.player.1 * WIDTH + self.player.0] = Tile::Floor;
-                            if self.hp <= 0 {
-                                self.alive = false;
-                                return StepOutcome::Dead;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Action::DownStairs => {
-                    if self.grid[self.player.1 * WIDTH + self.player.0] == Tile::StairsDown {
-                        if !self.has_key {
-                            return StepOutcome::MissingKey;
-                        }
-                        self.level += 1;
-                        self.has_key = false;
-                        let (grid, player, enemies, key_pos, room_map, num_rooms) =
-                            generate_level(rng, self.level, self.target_level);
-                        self.grid = grid;
-                        self.room_map = room_map;
-                        self.num_rooms = num_rooms;
-                        self.current_room = self.room_map[player.1 * WIDTH + player.0];
-                        self.player = player;
-                        self.enemies = enemies;
-                        self.key_pos = key_pos;
-                        return StepOutcome::Descended;
-                    }
-                }
-                Action::Search => {
-                    if self.grid[self.player.1 * WIDTH + self.player.0] == Tile::Treasure {
-                        self.alive = false;
-                        return StepOutcome::Won;
-                    }
+            let nx = i32::try_from(self.player.0).expect("player.0 < WIDTH = 35 fits in i32")
+                + i32::from(dx);
+            let ny = i32::try_from(self.player.1).expect("player.1 < HEIGHT = 20 fits in i32")
+                + i32::from(dy);
+            let width_i32 = i32::try_from(WIDTH).expect("WIDTH = 35 fits in i32");
+            let height_i32 = i32::try_from(HEIGHT).expect("HEIGHT = 20 fits in i32");
+            if nx >= 0 && nx < width_i32 && ny >= 0 && ny < height_i32 {
+                let nu = (
+                    usize::try_from(nx).expect("nx is non-negative, checked above"),
+                    usize::try_from(ny).expect("ny is non-negative, checked above"),
+                );
+                if self.grid[nu.1 * WIDTH + nu.0] != Tile::Wall {
+                    self.player = nu;
                 }
             }
 
-            // Move enemies randomly.
+            let new_room = self.room_map[self.player.1 * WIDTH + self.player.0];
+            if new_room != self.current_room && new_room < self.num_rooms {
+                entered_room = true;
+            }
+            self.current_room = new_room;
+
+            let tile = self.grid[self.player.1 * WIDTH + self.player.0];
+            match tile {
+                Tile::Potion => {
+                    self.hp = (self.hp + 2).min(self.max_hp);
+                    self.grid[self.player.1 * WIDTH + self.player.0] = Tile::Floor;
+                }
+                Tile::Trap => {
+                    self.hp -= 1;
+                    self.grid[self.player.1 * WIDTH + self.player.0] = Tile::Floor;
+                    if self.hp <= 0 {
+                        self.alive = false;
+                        return ActionOutcome {
+                            entered_room,
+                            terminal: Some(StepOutcome::Dead),
+                        };
+                    }
+                }
+                _ => {}
+            }
+
+            ActionOutcome {
+                entered_room,
+                terminal: None,
+            }
+        }
+
+        /// Attempt to descend stairs. Regenerates the next level on success.
+        fn handle_down_stairs(&mut self, rng: &mut impl rand::Rng) -> ActionOutcome {
+            if self.grid[self.player.1 * WIDTH + self.player.0] == Tile::StairsDown {
+                if !self.has_key {
+                    return ActionOutcome {
+                        entered_room: false,
+                        terminal: Some(StepOutcome::MissingKey),
+                    };
+                }
+                self.level += 1;
+                self.has_key = false;
+                let (grid, player, enemies, key_pos, room_map, num_rooms) =
+                    generate_level(rng, self.level, self.target_level);
+                self.grid = grid;
+                self.room_map = room_map;
+                self.num_rooms = num_rooms;
+                self.current_room = self.room_map[player.1 * WIDTH + player.0];
+                self.player = player;
+                self.enemies = enemies;
+                self.key_pos = key_pos;
+                return ActionOutcome {
+                    entered_room: false,
+                    terminal: Some(StepOutcome::Descended),
+                };
+            }
+            ActionOutcome {
+                entered_room: false,
+                terminal: None,
+            }
+        }
+
+        /// Handle the search action: if standing on treasure, win the game.
+        fn handle_search(&mut self) -> ActionOutcome {
+            if self.grid[self.player.1 * WIDTH + self.player.0] == Tile::Treasure {
+                self.alive = false;
+                return ActionOutcome {
+                    entered_room: false,
+                    terminal: Some(StepOutcome::Won),
+                };
+            }
+            ActionOutcome {
+                entered_room: false,
+                terminal: None,
+            }
+        }
+
+        /// Move each enemy by a random direction (8 directions or stay).
+        fn move_enemies(&mut self, rng: &mut impl rand::Rng) {
+            let width_i32 = i32::try_from(WIDTH).expect("WIDTH = 35 fits in i32");
+            let height_i32 = i32::try_from(HEIGHT).expect("HEIGHT = 20 fits in i32");
             for i in 0..self.enemies.len() {
                 let (ex, ey) = self.enemies[i];
                 let dir: u8 = rng.random_range(0..9);
@@ -328,34 +399,34 @@ mod dungeon_game {
                     7 => (-1, -1),
                     _ => (0, 0),
                 };
-                let nx = ex as i32 + dx;
-                let ny = ey as i32 + dy;
-                if nx >= 0 && nx < WIDTH as i32 && ny >= 0 && ny < HEIGHT as i32 {
-                    let nu = (nx as usize, ny as usize);
+                let nx = i32::try_from(ex).expect("ex < WIDTH = 35 fits in i32") + dx;
+                let ny = i32::try_from(ey).expect("ey < HEIGHT = 20 fits in i32") + dy;
+                if nx >= 0 && nx < width_i32 && ny >= 0 && ny < height_i32 {
+                    let nu = (
+                        usize::try_from(nx).expect("nx is non-negative, checked above"),
+                        usize::try_from(ny).expect("ny is non-negative, checked above"),
+                    );
                     if self.grid[nu.1 * WIDTH + nu.0] != Tile::Wall {
                         self.enemies[i] = nu;
                     }
                 }
             }
+        }
 
-            // Check enemy contact.
+        /// Check if any enemy is on the player's tile; if so, apply damage.
+        fn check_enemy_contact(&mut self, rng: &mut impl rand::Rng) -> Option<StepOutcome> {
             for &(ex, ey) in &self.enemies {
                 if (ex, ey) == self.player {
                     let damage = rng.random_range(1..=2_i32);
                     self.hp -= damage;
                     if self.hp <= 0 {
                         self.alive = false;
-                        return StepOutcome::Dead;
+                        return Some(StepOutcome::Dead);
                     }
-                    return StepOutcome::Damaged;
+                    return Some(StepOutcome::Damaged);
                 }
             }
-
-            if entered_room {
-                StepOutcome::EnteredRoom
-            } else {
-                StepOutcome::Alive
-            }
+            None
         }
 
         pub fn player_tile(&self) -> Tile {
@@ -477,6 +548,7 @@ pub struct Dungeon {
 
 impl Dungeon {
     /// Create a new dungeon with the given step limit and target level.
+    #[must_use]
     pub fn new(max_steps: u64, target_level: u32) -> Self {
         let mut rng = SimRngAdapter;
         Dungeon {
@@ -491,86 +563,76 @@ impl Dungeon {
         moonpool_sim::sim_random::<f64>() < p
     }
 
-    /// Execute one step of the dungeon.
-    pub fn step(&mut self) -> StepResult {
-        self.step_count += 1;
+    /// Bucket HP into 4 coarse classes for assertion fanout.
+    fn hp_bucket(hp: i32) -> u8 {
+        match hp {
+            ..=1 => 0,
+            2 => 1,
+            3..=4 => 2,
+            _ => 3,
+        }
+    }
 
-        // Pick action with structured rollout (correlated sequences).
-        // Always consume both RNG values for consistent call count per step.
-        let fresh_action_index = (moonpool_sim::sim_random::<u64>() % 10) as u8;
+    /// Pick the next action index using a structured rollout. Always consumes
+    /// two RNG values per step for deterministic call count.
+    fn pick_action_index(&mut self) -> u8 {
+        let fresh_action_index =
+            u8::try_from(moonpool_sim::sim_random::<u64>() % 10).expect("value < 10 fits in u8");
         let repeat = Self::random_bool(REPEAT_ACTION_P);
         let action_index = match (repeat, self.last_action_index) {
             (true, Some(last)) => last,
             _ => fresh_action_index,
         };
         self.last_action_index = Some(action_index);
-        let action = Action::from_index(action_index);
-        let level = self.game.status().level as u8;
-        let has_key = self.game.has_key() as u8;
-        let hp = self.game.hp();
-        let hp_bucket: u8 = match hp {
-            ..=1 => 0,
-            2 => 1,
-            3..=4 => 2,
-            _ => 3,
-        };
+        action_index
+    }
 
-        // Execute the action.
-        let mut rng = SimRngAdapter;
-        let outcome = self.game.act(action, &mut rng);
-
-        // Recompute HP bucket after action (may have changed from damage/healing).
-        let hp_after = self.game.hp();
-        let hp_bucket_after: u8 = match hp_after {
-            ..=1 => 0,
-            2 => 1,
-            3..=4 => 2,
-            _ => 3,
-        };
-
-        // --- Key probability gate ---
+    /// Emit assertions for the player's current tile (key, stairs, treasure).
+    fn assert_position_events(&mut self, level: u8, hp_bucket: u8) {
         if self.game.on_key_tile() && !self.game.has_key() {
             moonpool_sim::assert_sometimes_each!(
                 "on key tile",
-                [("floor", level as i64)],
-                [("health", hp_bucket as i64)]
+                [("floor", i64::from(level))],
+                [("health", i64::from(hp_bucket))]
             );
             if Self::random_bool(KEY_FIND_P) {
                 self.game.grant_key();
-                let lvl = level as usize;
+                let lvl = usize::from(level);
                 if lvl < KEY_FOUND_MSGS.len() {
                     moonpool_sim::assert_sometimes!(true, KEY_FOUND_MSGS[lvl]);
                 }
             }
         }
 
-        // Fork point when on stairs with key -- descent amplification.
         if self.game.player_tile() == Tile::StairsDown && self.game.has_key() {
             moonpool_sim::assert_sometimes_each!(
                 "stairs with key",
-                [("floor", level as i64)],
-                [("health", hp_bucket as i64)]
+                [("floor", i64::from(level))],
+                [("health", i64::from(hp_bucket))]
             );
         }
 
-        // Fork point near treasure.
         if self.game.player_tile() == Tile::Treasure {
             moonpool_sim::assert_sometimes!(true, "near treasure");
         }
+    }
 
+    /// Emit outcome-specific assertions after the action has executed.
+    fn assert_outcome_events(
+        &self,
+        outcome: StepOutcome,
+        level: u8,
+        has_key: u8,
+        hp_bucket_after: u8,
+    ) {
         match outcome {
             StepOutcome::Descended => {
                 let new_level = self.game.status().level;
-                let hp_bucket_desc: u8 = match self.game.hp() {
-                    ..=1 => 0,
-                    2 => 1,
-                    3..=4 => 2,
-                    _ => 3,
-                };
+                let hp_bucket_desc = Self::hp_bucket(self.game.hp());
                 moonpool_sim::assert_sometimes_each!(
                     "descended",
-                    [("to_floor", new_level as i64)],
-                    [("health", hp_bucket_desc as i64)]
+                    [("to_floor", i64::from(new_level))],
+                    [("health", i64::from(hp_bucket_desc))]
                 );
             }
             StepOutcome::Won => {
@@ -586,19 +648,19 @@ impl Dungeon {
                 if let Some(room_idx) = self.game.player_room() {
                     moonpool_sim::assert_sometimes_each!(
                         "room explored",
-                        [("floor", level as i64), ("room", room_idx as i64)],
+                        [("floor", i64::from(level)), ("room", i64::from(room_idx))],
                         [
-                            ("has_key", has_key as i64),
-                            ("health", hp_bucket_after as i64)
+                            ("has_key", i64::from(has_key)),
+                            ("health", i64::from(hp_bucket_after))
                         ]
                     );
                     if room_idx == self.game.num_rooms() - 1 {
                         moonpool_sim::assert_sometimes_each!(
                             "goal room",
-                            [("floor", level as i64)],
+                            [("floor", i64::from(level))],
                             [
-                                ("has_key", has_key as i64),
-                                ("health", hp_bucket_after as i64)
+                                ("has_key", i64::from(has_key)),
+                                ("health", i64::from(hp_bucket_after))
                             ]
                         );
                     }
@@ -606,14 +668,41 @@ impl Dungeon {
             }
             StepOutcome::Dead | StepOutcome::Alive => {}
         }
+    }
+
+    /// Execute one step of the dungeon.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the current dungeon level exceeds `u8::MAX`, which the
+    /// configured target levels (default 8) cannot reach.
+    pub fn step(&mut self) -> StepResult {
+        self.step_count += 1;
+
+        let action_index = self.pick_action_index();
+        let action = Action::from_index(action_index);
+        let level = u8::try_from(self.game.status().level)
+            .expect("dungeon level fits in u8 (target_level <= 255)");
+        let has_key = u8::from(self.game.has_key());
+        let hp_bucket = Self::hp_bucket(self.game.hp());
+
+        // Execute the action.
+        let mut rng = SimRngAdapter;
+        let outcome = self.game.act(action, &mut rng);
+
+        let hp_after = self.game.hp();
+        let hp_bucket_after = Self::hp_bucket(hp_after);
+
+        self.assert_position_events(level, hp_bucket);
+        self.assert_outcome_events(outcome, level, has_key, hp_bucket_after);
 
         // Track level and HP watermarks for guidance.
         moonpool_sim::assert_sometimes_greater_than!(
-            self.game.status().level as i64,
+            i64::from(self.game.status().level),
             0,
             "dungeon level reached"
         );
-        moonpool_sim::assert_sometimes_greater_than!(hp_after as i64, 0, "health remaining");
+        moonpool_sim::assert_sometimes_greater_than!(i64::from(hp_after), 0, "health remaining");
 
         match outcome {
             StepOutcome::Won => StepResult::BugFound,
@@ -662,7 +751,7 @@ impl Default for DungeonWorkload {
 
 #[async_trait]
 impl Workload for DungeonWorkload {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "dungeon"
     }
 

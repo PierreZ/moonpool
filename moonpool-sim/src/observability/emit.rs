@@ -6,7 +6,7 @@
 //! taking from the thread-local at `on_event` time.
 //!
 //! When no [`crate::observability::SimulationLayer`] is installed, the macro
-//! still emits a tracing event so production subscribers (fmt, OTel) see the
+//! still emits a tracing event so production subscribers (fmt, `OTel`) see the
 //! event with its `Debug` representation. The thread-local stash and the layer
 //! short-circuit are guarded by an [`AtomicI32`] install counter.
 
@@ -85,6 +85,7 @@ pub fn clear_pending() {
 /// reentrancy guard suppressed our event (e.g. emitted from inside an
 /// invariant's `observe` callback).
 #[inline]
+#[must_use]
 pub fn has_pending() -> bool {
     PENDING.with(|cell| cell.borrow().is_some())
 }

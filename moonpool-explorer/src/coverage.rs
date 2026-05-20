@@ -50,6 +50,7 @@ impl CoverageBitmap {
     }
 
     /// Get a pointer to the underlying data.
+    #[must_use]
     pub fn as_ptr(&self) -> *const u8 {
         self.ptr
     }
@@ -90,6 +91,7 @@ impl ExploredMap {
     ///
     /// Returns the total number of unique assertion paths explored across
     /// all timelines.
+    #[must_use]
     pub fn count_bits_set(&self) -> u32 {
         let mut count: u32 = 0;
         // Safety: self.ptr points to COVERAGE_MAP_SIZE bytes (constructor invariant).
@@ -103,6 +105,7 @@ impl ExploredMap {
     }
 
     /// Check if a timeline's bitmap contains any bits not yet in the explored map.
+    #[must_use]
     pub fn has_new_bits(&self, other: &CoverageBitmap) -> bool {
         // Safety: both pointers are valid for COVERAGE_MAP_SIZE bytes
         // (constructor invariants of ExploredMap and CoverageBitmap).

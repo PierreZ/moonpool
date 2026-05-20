@@ -1,7 +1,7 @@
-//! EndpointMap: Token → receiver routing (FDB pattern).
+//! `EndpointMap`: Token → receiver routing (FDB pattern).
 //!
 //! Routes incoming packets by token to registered receivers.
-//! Uses hybrid lookup: O(1) array for well-known tokens, BTreeMap for dynamic.
+//! Uses hybrid lookup: O(1) array for well-known tokens, `BTreeMap` for dynamic.
 //!
 //! # FDB Reference
 //! From FlowTransport.actor.cpp:80-220
@@ -15,7 +15,7 @@ use crate::error::MessagingError;
 
 /// Trait for receiving deserialized messages from the transport layer.
 ///
-/// Implementors handle incoming packets dispatched by EndpointMap.
+/// Implementors handle incoming packets dispatched by `EndpointMap`.
 /// The `receive` method is called synchronously during packet processing.
 pub trait MessageReceiver: Send + Sync {
     /// Process an incoming message payload.
@@ -30,12 +30,12 @@ pub trait MessageReceiver: Send + Sync {
 /// # Design
 ///
 /// - **Well-known endpoints**: O(1) array access via token index (0-63)
-/// - **Dynamic endpoints**: BTreeMap lookup by full UID
+/// - **Dynamic endpoints**: `BTreeMap` lookup by full UID
 ///
 /// Well-known endpoints are checked first for hot-path performance.
 ///
 /// # FDB Reference
-/// From FlowTransport.actor.cpp:80-220 (EndpointMap class)
+/// From FlowTransport.actor.cpp:80-220 (`EndpointMap` class)
 pub struct EndpointMap {
     /// Well-known receivers indexed by token.second (0-63).
     /// These use O(1) array access for hot-path performance.
@@ -58,6 +58,7 @@ impl Default for EndpointMap {
 
 impl EndpointMap {
     /// Create a new empty endpoint map.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             well_known: std::array::from_fn(|_| None),
@@ -101,7 +102,7 @@ impl EndpointMap {
 
     /// Register a dynamic endpoint with the given UID.
     ///
-    /// Dynamic endpoints use BTreeMap lookup. Call this when you need
+    /// Dynamic endpoints use `BTreeMap` lookup. Call this when you need
     /// a specific UID (e.g., for request-response correlation).
     ///
     /// # Arguments
@@ -120,10 +121,12 @@ impl EndpointMap {
     /// # Returns
     ///
     /// The receiver if found, or None if no endpoint is registered for this token.
+    #[must_use]
     pub fn get(&self, token: &UID) -> Option<Arc<dyn MessageReceiver>> {
         // Check well-known first (hot path)
         if token.is_well_known() {
-            let index = token.second as usize;
+            // Reject out-of-range indices (covers 32-bit `usize::MAX < u64::MAX`)
+            let index = usize::try_from(token.second).ok()?;
             if index < WELL_KNOWN_RESERVED_COUNT
                 && let Some(receiver) = &self.well_known[index]
             {
@@ -156,21 +159,25 @@ impl EndpointMap {
     }
 
     /// Get the number of registered well-known endpoints.
+    #[must_use]
     pub fn well_known_count(&self) -> usize {
         self.well_known.iter().filter(|e| e.is_some()).count()
     }
 
     /// Get the number of registered dynamic endpoints.
+    #[must_use]
     pub fn dynamic_count(&self) -> usize {
         self.dynamic.len()
     }
 
     /// Get total registration count (for metrics).
+    #[must_use]
     pub fn registration_count(&self) -> u64 {
         self.registration_count
     }
 
     /// Get total deregistration count (for metrics).
+    #[must_use]
     pub fn deregistration_count(&self) -> u64 {
         self.deregistration_count
     }

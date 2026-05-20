@@ -3,7 +3,7 @@
 //! Three methods exercising different server behaviors:
 //! - `echo`: immediate echo
 //! - `echo_delayed`: echo after random delay
-//! - `echo_or_fail`: echo with buggify-controlled BrokenPromise
+//! - `echo_or_fail`: echo with buggify-controlled `BrokenPromise`
 
 use moonpool_sim::SimulationResult;
 use moonpool_transport::{NetworkAddress, UID};
@@ -22,12 +22,17 @@ pub const METHOD_ECHO_DELAYED: u64 = 2;
 pub const METHOD_ECHO_OR_FAIL: u64 = 3;
 
 /// Get the UID for a method on the echo interface.
+#[must_use]
 pub fn echo_method_uid(method_index: u64) -> UID {
     UID::new(ECHO_INTERFACE, method_index)
 }
 
-/// Parse a sim IP address (which may lack a port) into a NetworkAddress.
+/// Parse a sim IP address (which may lack a port) into a `NetworkAddress`.
 /// Appends `:4500` if no port is present.
+///
+/// # Errors
+///
+/// Returns [`SimulationError::InvalidState`] if `ip` cannot be parsed as a network address.
 pub fn parse_sim_addr(ip: &str) -> SimulationResult<NetworkAddress> {
     let addr_str = if ip.contains(':') {
         ip.to_string()

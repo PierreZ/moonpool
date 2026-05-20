@@ -141,7 +141,7 @@ pub enum SimFaultEvent {
         /// IP of the crashed process.
         ip: String,
     },
-    /// All storage wiped for a process (CrashAndWipe reboot).
+    /// All storage wiped for a process (`CrashAndWipe` reboot).
     StorageWipe {
         /// IP of the wiped process.
         ip: String,

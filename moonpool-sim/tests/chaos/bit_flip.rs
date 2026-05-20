@@ -37,7 +37,7 @@ fn test_bit_flip_disabled_with_zero_probability() {
 
         // Send data multiple times
         for i in 0..10 {
-            let msg = format!("Message {}", i);
+            let msg = format!("Message {i}");
             client.write_all(msg.as_bytes()).await.unwrap();
         }
 
@@ -81,7 +81,7 @@ fn test_bit_flip_injection_with_high_probability() {
         // Send many small messages to increase chance of corruption
         // Note: With high probability and buggify enabled, we should see bit flips in logs
         for i in 0..50 {
-            let msg = format!("Test message number {}", i);
+            let msg = format!("Test message number {i}");
             let _ = client.write_all(msg.as_bytes()).await;
             sim.run_until_empty();
         }
@@ -96,7 +96,7 @@ fn test_bit_flip_injection_with_high_probability() {
 ///
 /// Note: We test this indirectly through the integration tests above.
 /// The power-law distribution (32 - floor(log2(random))) is implemented
-/// in SimInner::calculate_flip_bit_count and matches FDB's approach.
+/// in `SimInner::calculate_flip_bit_count` and matches FDB's approach.
 /// Direct unit testing would require exposing internal implementation details.
 /// Test that cooldown prevents excessive bit flipping
 #[test]
@@ -162,7 +162,7 @@ fn test_peer_checksum_error_recovery() {
 
         // Send messages - some may be corrupted, but peer should not crash
         for i in 0..20 {
-            let msg = format!("Recovery test message {}", i);
+            let msg = format!("Recovery test message {i}");
             let _ = client.write_all(msg.as_bytes()).await;
             sim.run_until_empty();
         }

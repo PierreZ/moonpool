@@ -24,7 +24,7 @@ struct AssertOnceWorkload {
 
 #[async_trait]
 impl Workload for AssertOnceWorkload {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "client"
     }
 
@@ -39,7 +39,7 @@ struct ChildBugWorkload;
 
 #[async_trait]
 impl Workload for ChildBugWorkload {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "client"
     }
 
@@ -61,7 +61,7 @@ struct TwoGateWorkload;
 
 #[async_trait]
 impl Workload for TwoGateWorkload {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "client"
     }
 
@@ -82,7 +82,7 @@ struct ThreeGateWorkload;
 
 #[async_trait]
 impl Workload for ThreeGateWorkload {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "client"
     }
 
@@ -100,7 +100,7 @@ struct PlantedBugWorkload;
 
 #[async_trait]
 impl Workload for PlantedBugWorkload {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "client"
     }
 
@@ -129,12 +129,12 @@ impl Workload for PlantedBugWorkload {
     }
 }
 
-/// Workload that exercises assert_sometimes_each! with identity keys.
+/// Workload that exercises `assert_sometimes_each`! with identity keys.
 struct EachBucketWorkload;
 
 #[async_trait]
 impl Workload for EachBucketWorkload {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "client"
     }
 
@@ -145,7 +145,7 @@ impl Workload for EachBucketWorkload {
             for depth in 1..3 {
                 moonpool_sim::assert_sometimes_each!(
                     "each_gate",
-                    [("lock", lock as i64), ("depth", depth as i64)]
+                    [("lock", i64::from(lock)), ("depth", i64::from(depth))]
                 );
             }
         }
@@ -235,7 +235,7 @@ fn test_child_exit_code() {
     );
 }
 
-/// Test that max_depth=1 prevents grandchildren (no recursive forking).
+/// Test that `max_depth=1` prevents grandchildren (no recursive forking).
 #[test]
 fn test_depth_limit() {
     let report = run_simulation(
@@ -337,7 +337,7 @@ fn test_planted_bug() {
     );
 }
 
-/// Test that assert_sometimes_each! triggers fork-based exploration.
+/// Test that `assert_sometimes_each`! triggers fork-based exploration.
 #[test]
 fn test_sometimes_each_triggers_fork() {
     let report = run_simulation(

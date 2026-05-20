@@ -26,7 +26,7 @@ pub mod provider;
 
 use std::io;
 
-/// Create an io::Error for simulation shutdown.
+/// Create an `io::Error` for simulation shutdown.
 ///
 /// Used by storage futures and file operations when the simulation has been dropped.
 pub(crate) fn sim_shutdown_error() -> io::Error {

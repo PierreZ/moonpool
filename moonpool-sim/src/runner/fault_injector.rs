@@ -56,7 +56,7 @@ pub struct ProcessInfo {
     pub dead_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
-/// Context for fault injectors — gives access to SimWorld fault injection methods.
+/// Context for fault injectors — gives access to `SimWorld` fault injection methods.
 ///
 /// Unlike `SimContext` (which workloads receive), `FaultContext` provides direct
 /// access to network partitioning, reboot, and other fault primitives that normal
@@ -71,6 +71,7 @@ pub struct FaultContext {
 
 impl FaultContext {
     /// Create a new fault context with process information.
+    #[must_use]
     pub fn new(
         sim: SimWorld,
         process_info: ProcessInfo,
@@ -88,6 +89,7 @@ impl FaultContext {
     }
 
     /// Get the number of currently dead (killed but not yet restarted) processes.
+    #[must_use]
     pub fn dead_count(&self) -> usize {
         self.process_info
             .dead_count
@@ -97,46 +99,59 @@ impl FaultContext {
     /// Create a bidirectional network partition between two IPs.
     ///
     /// The partition persists until [`heal_partition`](Self::heal_partition) is called.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IP parsing fails or the operation is rejected by the simulator.
     pub fn partition(&self, a: &str, b: &str) -> SimulationResult<()> {
-        let a_ip: std::net::IpAddr = a.parse().map_err(|e| {
-            crate::SimulationError::InvalidState(format!("invalid IP '{}': {}", a, e))
-        })?;
-        let b_ip: std::net::IpAddr = b.parse().map_err(|e| {
-            crate::SimulationError::InvalidState(format!("invalid IP '{}': {}", b, e))
-        })?;
+        let a_ip: std::net::IpAddr = a
+            .parse()
+            .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{a}': {e}")))?;
+        let b_ip: std::net::IpAddr = b
+            .parse()
+            .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{b}': {e}")))?;
         // Use a long duration — heal_partition is the expected way to undo
-        self.sim
-            .partition_pair(a_ip, b_ip, Duration::from_secs(3600))
+        self.sim.partition_pair(a_ip, b_ip, Duration::from_hours(1))
     }
 
     /// Remove a network partition between two IPs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IP parsing fails or the operation is rejected by the simulator.
     pub fn heal_partition(&self, a: &str, b: &str) -> SimulationResult<()> {
-        let a_ip: std::net::IpAddr = a.parse().map_err(|e| {
-            crate::SimulationError::InvalidState(format!("invalid IP '{}': {}", a, e))
-        })?;
-        let b_ip: std::net::IpAddr = b.parse().map_err(|e| {
-            crate::SimulationError::InvalidState(format!("invalid IP '{}': {}", b, e))
-        })?;
+        let a_ip: std::net::IpAddr = a
+            .parse()
+            .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{a}': {e}")))?;
+        let b_ip: std::net::IpAddr = b
+            .parse()
+            .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{b}': {e}")))?;
         self.sim.restore_partition(a_ip, b_ip)
     }
 
     /// Check whether two IPs are partitioned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IP parsing fails or the operation is rejected by the simulator.
     pub fn is_partitioned(&self, a: &str, b: &str) -> SimulationResult<bool> {
-        let a_ip: std::net::IpAddr = a.parse().map_err(|e| {
-            crate::SimulationError::InvalidState(format!("invalid IP '{}': {}", a, e))
-        })?;
-        let b_ip: std::net::IpAddr = b.parse().map_err(|e| {
-            crate::SimulationError::InvalidState(format!("invalid IP '{}': {}", b, e))
-        })?;
+        let a_ip: std::net::IpAddr = a
+            .parse()
+            .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{a}': {e}")))?;
+        let b_ip: std::net::IpAddr = b
+            .parse()
+            .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{b}': {e}")))?;
         self.sim.is_partitioned(a_ip, b_ip)
     }
 
     /// Get the seeded random provider.
+    #[must_use]
     pub fn random(&self) -> &SimRandomProvider {
         &self.random
     }
 
     /// Get the simulated time provider.
+    #[must_use]
     pub fn time(&self) -> &SimTimeProvider {
         &self.time
     }
@@ -145,11 +160,13 @@ impl FaultContext {
     ///
     /// This token is cancelled at the chaos→recovery boundary,
     /// signaling fault injectors to stop.
+    #[must_use]
     pub fn chaos_shutdown(&self) -> &tokio_util::sync::CancellationToken {
         &self.chaos_shutdown
     }
 
     /// Get all server process IPs.
+    #[must_use]
     pub fn process_ips(&self) -> &[String] {
         &self.process_info.process_ips
     }
@@ -163,6 +180,10 @@ impl FaultContext {
     ///
     /// For [`RebootKind::Crash`] and [`RebootKind::CrashAndWipe`]: immediately
     /// aborts all connections and schedules a `ProcessRestart` event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IP parsing fails or the operation is rejected by the simulator.
     pub fn reboot(&self, ip: &str, kind: RebootKind) -> SimulationResult<()> {
         let recovery_range = 1000..10000;
         let grace_range = 2000..5000;
@@ -174,6 +195,10 @@ impl FaultContext {
     /// Like [`reboot`](Self::reboot) but with configurable recovery delay and
     /// grace period ranges (in milliseconds). Used by [`AttritionInjector`] to
     /// pass through [`Attrition`](super::process::Attrition) configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IP parsing fails or the operation is rejected by the simulator.
     pub fn reboot_with_delays(
         &self,
         ip: &str,
@@ -181,9 +206,9 @@ impl FaultContext {
         recovery_delay_range_ms: &std::ops::Range<usize>,
         grace_period_range_ms: &std::ops::Range<usize>,
     ) -> SimulationResult<()> {
-        let ip_addr: std::net::IpAddr = ip.parse().map_err(|e| {
-            crate::SimulationError::InvalidState(format!("invalid IP '{}': {}", ip, e))
-        })?;
+        let ip_addr: std::net::IpAddr = ip
+            .parse()
+            .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{ip}': {e}")))?;
 
         match kind {
             RebootKind::Graceful => {
@@ -236,6 +261,10 @@ impl FaultContext {
     ///
     /// Picks a random process from the process IP list and reboots it.
     /// Returns `Ok(None)` if no processes are available.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IP parsing fails or the operation is rejected by the simulator.
     pub fn reboot_random(&self, kind: RebootKind) -> SimulationResult<Option<String>> {
         if self.process_info.process_ips.is_empty() {
             return Ok(None);
@@ -247,6 +276,10 @@ impl FaultContext {
     }
 
     /// Reboot all processes matching a tag key=value pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IP parsing fails or the operation is rejected by the simulator.
     pub fn reboot_tagged(
         &self,
         key: &str,
@@ -303,7 +336,7 @@ impl AttritionInjector {
 
 #[async_trait]
 impl FaultInjector for AttritionInjector {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "attrition"
     }
 
@@ -312,11 +345,11 @@ impl FaultInjector for AttritionInjector {
             // Random delay between reboot attempts (1-5 seconds)
             let delay_ms = crate::sim::sim_random_range(1000..5000);
             ctx.time()
-                .sleep(Duration::from_millis(delay_ms as u64))
+                .sleep(Duration::from_millis(
+                    u64::try_from(delay_ms).expect("delay_ms is non-negative"),
+                ))
                 .await
-                .map_err(|e| {
-                    crate::SimulationError::InvalidState(format!("sleep failed: {}", e))
-                })?;
+                .map_err(|e| crate::SimulationError::InvalidState(format!("sleep failed: {e}")))?;
 
             if ctx.chaos_shutdown().is_cancelled() {
                 break;
@@ -333,7 +366,7 @@ impl FaultInjector for AttritionInjector {
             }
 
             // Choose reboot kind by weighted probability
-            let rand_val = crate::sim::sim_random_range(0..10000) as f64 / 10000.0;
+            let rand_val = f64::from(crate::sim::sim_random_range(0..10000)) / 10000.0;
             let kind = self.config.choose_kind(rand_val);
             assert_sometimes_each!("attrition_reboot_kind", [("kind", kind as i64)]);
 
@@ -345,8 +378,11 @@ impl FaultInjector for AttritionInjector {
                 continue;
             }
             let idx = crate::sim::sim_random_range(0..ctx.process_ips().len());
-            let ip = ctx.process_ips()[idx].to_string();
-            assert_sometimes_each!("attrition_process_targeted", [("process_idx", idx as i64)]);
+            let ip = ctx.process_ips()[idx].clone();
+            assert_sometimes_each!(
+                "attrition_process_targeted",
+                [("process_idx", i64::try_from(idx).unwrap_or(i64::MAX))]
+            );
             ctx.reboot_with_delays(&ip, kind, &recovery_range, &grace_range)?;
         }
         Ok(())

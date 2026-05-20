@@ -1,8 +1,8 @@
-//! Tests for TokioStorageProvider - the real filesystem implementation.
+//! Tests for `TokioStorageProvider` - the real filesystem implementation.
 //!
-//! These tests verify that the StorageProvider trait works correctly with
+//! These tests verify that the `StorageProvider` trait works correctly with
 //! actual filesystem operations, following the same pattern as network/traits.rs
-//! for TokioNetworkProvider.
+//! for `TokioNetworkProvider`.
 
 use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider, TokioStorageProvider};
@@ -405,7 +405,7 @@ fn test_tokio_provider_default() {
     });
 }
 
-/// Generic function that works with any StorageProvider - demonstrates trait polymorphism
+/// Generic function that works with any `StorageProvider` - demonstrates trait polymorphism
 async fn write_and_read_generic<P: StorageProvider>(
     provider: P,
     path: &str,

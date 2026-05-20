@@ -1,9 +1,9 @@
 //! Integration tests for connection establishment failure chaos injection
 //!
 //! Tests verify that connection failures:
-//! - Follow FDB's SIM_CONNECT_ERROR_MODE pattern (sim2.actor.cpp:1243-1250)
+//! - Follow FDB's `SIM_CONNECT_ERROR_MODE` pattern (sim2.actor.cpp:1243-1250)
 //! - Disabled: Normal operation (no failure injection)
-//! - AlwaysFail: Always fail with ConnectionRefused when buggified
+//! - `AlwaysFail`: Always fail with `ConnectionRefused` when buggified
 //! - Probabilistic: 50% fail with error, 50% hang forever (tests timeout handling)
 //! - Can be disabled via configuration
 //! - Are deterministic across runs with the same seed
@@ -51,7 +51,7 @@ fn test_connect_failure_mode_disabled() {
     });
 }
 
-/// Test that connection failure mode AlwaysFail fails when buggified
+/// Test that connection failure mode `AlwaysFail` fails when buggified
 #[test]
 fn test_connect_failure_mode_always_fail() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
@@ -82,10 +82,7 @@ fn test_connect_failure_mode_always_fail() {
             }
         }
 
-        println!(
-            "AlwaysFail mode with buggify: {} failures out of 10 attempts",
-            failure_count
-        );
+        println!("AlwaysFail mode with buggify: {failure_count} failures out of 10 attempts");
 
         buggify_reset();
         println!("✅ Connection failure mode AlwaysFail executed");
@@ -93,7 +90,7 @@ fn test_connect_failure_mode_always_fail() {
 }
 
 /// Test that connection failure mode Probabilistic produces errors (not hangs)
-/// Note: We set connect_failure_probability=0.0 to force error path, not hang path
+/// Note: We set `connect_failure_probability=0.0` to force error path, not hang path
 #[test]
 fn test_connect_failure_mode_probabilistic_error() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
@@ -131,8 +128,7 @@ fn test_connect_failure_mode_probabilistic_error() {
         }
 
         println!(
-            "Probabilistic mode results: {} successes, {} errors out of 20",
-            success_count, error_count
+            "Probabilistic mode results: {success_count} successes, {error_count} errors out of 20"
         );
 
         buggify_reset();
@@ -207,14 +203,14 @@ fn test_connect_failure_mode_probabilistic_with_timeout() {
             result = provider.connect(addr) => {
                 Some(result)
             }
-            _ = tokio::time::sleep(timeout_duration) => {
+            () = tokio::time::sleep(timeout_duration) => {
                 None
             }
         };
 
         match connect_result {
             Some(Ok(_)) => println!("Connection succeeded (no hang triggered)"),
-            Some(Err(e)) => println!("Connection failed with error: {:?}", e),
+            Some(Err(e)) => println!("Connection failed with error: {e:?}"),
             None => println!("Connection timed out (hang scenario)"),
         }
 
@@ -307,7 +303,7 @@ fn test_connect_failure_existing_connections() {
     });
 }
 
-/// Test error message content for AlwaysFail mode
+/// Test error message content for `AlwaysFail` mode
 #[test]
 fn test_connect_failure_error_message_always_fail() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
@@ -334,8 +330,7 @@ fn test_connect_failure_error_message_always_fail() {
             if let Err(e) = provider.connect(addr).await {
                 assert!(
                     e.to_string().contains("AlwaysFail mode"),
-                    "Error should mention AlwaysFail mode, got: {}",
-                    e
+                    "Error should mention AlwaysFail mode, got: {e}"
                 );
                 println!("✅ Error message correctly identifies AlwaysFail mode");
                 buggify_reset();
@@ -376,8 +371,7 @@ fn test_connect_failure_error_message_probabilistic() {
             if let Err(e) = provider.connect(addr).await {
                 assert!(
                     e.to_string().contains("Probabilistic mode"),
-                    "Error should mention Probabilistic mode, got: {}",
-                    e
+                    "Error should mention Probabilistic mode, got: {e}"
                 );
                 println!("✅ Error message correctly identifies Probabilistic mode");
                 buggify_reset();
@@ -390,13 +384,13 @@ fn test_connect_failure_error_message_probabilistic() {
     });
 }
 
-/// Test interaction with random_for_seed config
+/// Test interaction with `random_for_seed` config
 ///
 /// NOTE: This test may hang forever when Probabilistic mode is selected (50% hang probability).
 /// FDB's Probabilistic mode simulates connections that hang forever without timeout.
-/// Run manually: cargo test test_connect_failure_random_config -- --ignored
+/// Run manually: cargo test `test_connect_failure_random_config` -- --ignored
 #[test]
-#[ignore] // May hang forever with Probabilistic mode - requires manual testing
+#[ignore = "May hang forever with Probabilistic mode - requires manual testing"]
 fn test_connect_failure_random_config() {
     let local_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
@@ -433,10 +427,7 @@ fn test_connect_failure_random_config() {
             }
         }
 
-        println!(
-            "Random config results: {} success, {} failed",
-            success, failed
-        );
+        println!("Random config results: {success} success, {failed} failed");
 
         buggify_reset();
         println!("✅ Connection failure with random config executed");

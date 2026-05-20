@@ -389,11 +389,11 @@
 //! ```
 //!
 //! To replay: set the root seed to 42, install RNG breakpoints at
-//! call count 151 (reseed to seed_T0) and then at call count 80
-//! (reseed to seed_T0_0). The simulation will follow the exact same
+//! call count 151 (reseed to `seed_T0`) and then at call count 80
+//! (reseed to `seed_T0_0`). The simulation will follow the exact same
 //! path to the bug every time.
 //!
-//! # How fork() makes this work
+//! # How `fork()` makes this work
 //!
 //! The explorer uses Unix `fork()` to create timeline branches. This is
 //! cheap because of copy-on-write (COW): the child gets a copy of the
@@ -542,7 +542,7 @@
 //!     reset_rng_call_count();
 //! });
 //!
-//! moonpool_explorer::init(ExplorationConfig {
+//! moonpool_explorer::init(&ExplorationConfig {
 //!     max_depth: 2,
 //!     timelines_per_split: 4,
 //!     global_energy: 100,
@@ -618,7 +618,7 @@ pub struct ExplorationConfig {
 ///
 /// Returns an error if shared memory allocation fails.
 pub fn init_assertions() -> Result<(), std::io::Error> {
-    let current = ASSERTION_TABLE.with(|c| c.get());
+    let current = ASSERTION_TABLE.with(std::cell::Cell::get);
     if !current.is_null() {
         return Ok(()); // Already initialized
     }
@@ -637,13 +637,13 @@ pub fn init_assertions() -> Result<(), std::io::Error> {
 /// Nulls the pointers after freeing. No-op if not initialized.
 pub fn cleanup_assertions() {
     unsafe {
-        let table_ptr = ASSERTION_TABLE.with(|c| c.get());
+        let table_ptr = ASSERTION_TABLE.with(std::cell::Cell::get);
         if !table_ptr.is_null() {
             shared_mem::free_shared(table_ptr, assertion_slots::ASSERTION_TABLE_MEM_SIZE);
             ASSERTION_TABLE.with(|c| c.set(std::ptr::null_mut()));
         }
 
-        let each_bucket_ptr = EACH_BUCKET_PTR.with(|c| c.get());
+        let each_bucket_ptr = EACH_BUCKET_PTR.with(std::cell::Cell::get);
         if !each_bucket_ptr.is_null() {
             shared_mem::free_shared(each_bucket_ptr, each_buckets::EACH_BUCKET_MEM_SIZE);
             EACH_BUCKET_PTR.with(|c| c.set(std::ptr::null_mut()));
@@ -655,14 +655,14 @@ pub fn cleanup_assertions() {
 ///
 /// No-op if not initialized.
 pub fn reset_assertions() {
-    let table_ptr = ASSERTION_TABLE.with(|c| c.get());
+    let table_ptr = ASSERTION_TABLE.with(std::cell::Cell::get);
     if !table_ptr.is_null() {
         unsafe {
             std::ptr::write_bytes(table_ptr, 0, assertion_slots::ASSERTION_TABLE_MEM_SIZE);
         }
     }
 
-    let each_bucket_ptr = EACH_BUCKET_PTR.with(|c| c.get());
+    let each_bucket_ptr = EACH_BUCKET_PTR.with(std::cell::Cell::get);
     if !each_bucket_ptr.is_null() {
         unsafe {
             std::ptr::write_bytes(each_bucket_ptr, 0, each_buckets::EACH_BUCKET_MEM_SIZE);
@@ -684,14 +684,21 @@ pub fn prepare_next_seed(per_seed_energy: i64) {
     // validate_assertion_contracts() to avoid false "was never reached" when
     // a seed doesn't reach a guarded assertion. Forking uses split_triggered,
     // not counts. Same rationale for each-bucket pass_count.
-    let table_ptr = ASSERTION_TABLE.with(|c| c.get());
+    let table_ptr = ASSERTION_TABLE.with(std::cell::Cell::get);
     if !table_ptr.is_null() {
         unsafe {
-            let count_ptr = table_ptr as *const std::sync::atomic::AtomicU32;
+            let count_ptr = table_ptr
+                .cast::<()>()
+                .cast::<std::sync::atomic::AtomicU32>();
+            // MAX_ASSERTION_SLOTS is a small const (128), so the cast is lossless.
+            let max_slots = u32::try_from(assertion_slots::MAX_ASSERTION_SLOTS).unwrap_or(u32::MAX);
             let count = (*count_ptr)
                 .load(std::sync::atomic::Ordering::Relaxed)
-                .min(assertion_slots::MAX_ASSERTION_SLOTS as u32) as usize;
-            let base = table_ptr.add(8) as *mut assertion_slots::AssertionSlot;
+                .min(max_slots) as usize;
+            let base = table_ptr
+                .add(8)
+                .cast::<()>()
+                .cast::<assertion_slots::AssertionSlot>();
             for i in 0..count {
                 let slot = &mut *base.add(i);
                 // Skip tombstones (msg_hash == 0) left by the duplicate-slot race fix.
@@ -703,14 +710,19 @@ pub fn prepare_next_seed(per_seed_energy: i64) {
         }
     }
 
-    let each_ptr = EACH_BUCKET_PTR.with(|c| c.get());
+    let each_ptr = EACH_BUCKET_PTR.with(std::cell::Cell::get);
     if !each_ptr.is_null() {
         unsafe {
-            let count_ptr = each_ptr as *const std::sync::atomic::AtomicU32;
+            let count_ptr = each_ptr.cast::<()>().cast::<std::sync::atomic::AtomicU32>();
+            // MAX_EACH_BUCKETS is a small const (256), so the cast is lossless.
+            let max_buckets = u32::try_from(each_buckets::MAX_EACH_BUCKETS).unwrap_or(u32::MAX);
             let count = (*count_ptr)
                 .load(std::sync::atomic::Ordering::Relaxed)
-                .min(each_buckets::MAX_EACH_BUCKETS as u32) as usize;
-            let base = each_ptr.add(8) as *mut each_buckets::EachBucket;
+                .min(max_buckets) as usize;
+            let base = each_ptr
+                .add(8)
+                .cast::<()>()
+                .cast::<each_buckets::EachBucket>();
             for i in 0..count {
                 (*base.add(i)).split_triggered = 0;
             }
@@ -718,7 +730,7 @@ pub fn prepare_next_seed(per_seed_energy: i64) {
     }
 
     // Per-timeline coverage bitmap (NOT the explored map, which is preserved).
-    let bm_ptr = COVERAGE_BITMAP_PTR.with(|c| c.get());
+    let bm_ptr = COVERAGE_BITMAP_PTR.with(std::cell::Cell::get);
     if !bm_ptr.is_null() {
         unsafe {
             std::ptr::write_bytes(bm_ptr, 0, coverage::COVERAGE_MAP_SIZE);
@@ -729,21 +741,21 @@ pub fn prepare_next_seed(per_seed_energy: i64) {
     sancov::clear_transfer_buffer();
     sancov::reset_bss_counters();
 
-    let energy_ptr = ENERGY_BUDGET_PTR.with(|c| c.get());
+    let energy_ptr = ENERGY_BUDGET_PTR.with(std::cell::Cell::get);
     if !energy_ptr.is_null() {
         unsafe {
             energy::reset_energy_budget(energy_ptr, per_seed_energy);
         }
     }
 
-    let stats_ptr = SHARED_STATS.with(|c| c.get());
+    let stats_ptr = SHARED_STATS.with(std::cell::Cell::get);
     if !stats_ptr.is_null() {
         unsafe {
             shared_stats::reset_shared_stats(stats_ptr, per_seed_energy);
         }
     }
 
-    let recipe_ptr = SHARED_RECIPE.with(|c| c.get());
+    let recipe_ptr = SHARED_RECIPE.with(std::cell::Cell::get);
     if !recipe_ptr.is_null() {
         unsafe {
             shared_stats::reset_shared_recipe(recipe_ptr);
@@ -766,8 +778,9 @@ pub fn prepare_next_seed(per_seed_energy: i64) {
 /// across all timelines.
 ///
 /// Must be called before [`cleanup`] which frees the explored map memory.
+#[must_use]
 pub fn explored_map_bits_set() -> Option<u32> {
-    let ptr = EXPLORED_MAP_PTR.with(|c| c.get());
+    let ptr = EXPLORED_MAP_PTR.with(std::cell::Cell::get);
     if ptr.is_null() {
         return None;
     }
@@ -784,7 +797,7 @@ pub fn explored_map_bits_set() -> Option<u32> {
 /// # Errors
 ///
 /// Returns an error if shared memory allocation fails.
-pub fn init(config: ExplorationConfig) -> Result<(), std::io::Error> {
+pub fn init(config: &ExplorationConfig) -> Result<(), std::io::Error> {
     init_assertions()?;
     sancov::init_sancov_shared()?;
 
@@ -813,8 +826,8 @@ pub fn init(config: ExplorationConfig) -> Result<(), std::io::Error> {
         ctx.current_seed = 0;
         ctx.recipe.clear();
         ctx.timelines_per_split = config.timelines_per_split;
-        ctx.adaptive = config.adaptive.clone();
-        ctx.parallelism = config.parallelism.clone();
+        ctx.adaptive.clone_from(&config.adaptive);
+        ctx.parallelism.clone_from(&config.parallelism);
         ctx.warm_start = false;
     });
 
@@ -834,40 +847,40 @@ pub fn cleanup() {
     // Free exploration-specific shared memory regions
     // Safety: these pointers were allocated by init() via alloc_shared()
     unsafe {
-        let stats_ptr = SHARED_STATS.with(|c| c.get());
+        let stats_ptr = SHARED_STATS.with(std::cell::Cell::get);
         if !stats_ptr.is_null() {
             shared_mem::free_shared(
-                stats_ptr as *mut u8,
+                stats_ptr.cast::<u8>(),
                 std::mem::size_of::<shared_stats::SharedStats>(),
             );
             SHARED_STATS.with(|c| c.set(std::ptr::null_mut()));
         }
 
-        let recipe_ptr = SHARED_RECIPE.with(|c| c.get());
+        let recipe_ptr = SHARED_RECIPE.with(std::cell::Cell::get);
         if !recipe_ptr.is_null() {
             shared_mem::free_shared(
-                recipe_ptr as *mut u8,
+                recipe_ptr.cast::<u8>(),
                 std::mem::size_of::<shared_stats::SharedRecipe>(),
             );
             SHARED_RECIPE.with(|c| c.set(std::ptr::null_mut()));
         }
 
-        let explored_ptr = EXPLORED_MAP_PTR.with(|c| c.get());
+        let explored_ptr = EXPLORED_MAP_PTR.with(std::cell::Cell::get);
         if !explored_ptr.is_null() {
             shared_mem::free_shared(explored_ptr, coverage::COVERAGE_MAP_SIZE);
             EXPLORED_MAP_PTR.with(|c| c.set(std::ptr::null_mut()));
         }
 
-        let bitmap_ptr = COVERAGE_BITMAP_PTR.with(|c| c.get());
+        let bitmap_ptr = COVERAGE_BITMAP_PTR.with(std::cell::Cell::get);
         if !bitmap_ptr.is_null() {
             shared_mem::free_shared(bitmap_ptr, coverage::COVERAGE_MAP_SIZE);
             COVERAGE_BITMAP_PTR.with(|c| c.set(std::ptr::null_mut()));
         }
 
-        let energy_ptr = ENERGY_BUDGET_PTR.with(|c| c.get());
+        let energy_ptr = ENERGY_BUDGET_PTR.with(std::cell::Cell::get);
         if !energy_ptr.is_null() {
             shared_mem::free_shared(
-                energy_ptr as *mut u8,
+                energy_ptr.cast::<u8>(),
                 std::mem::size_of::<energy::EnergyBudget>(),
             );
             ENERGY_BUDGET_PTR.with(|c| c.set(std::ptr::null_mut()));
@@ -895,7 +908,7 @@ mod tests {
             parallelism: None,
         };
 
-        init(config).expect("init failed");
+        init(&config).expect("init failed");
         assert!(context::explorer_is_active());
         assert!(!context::explorer_is_child());
 
@@ -950,7 +963,7 @@ mod tests {
             adaptive: None,
             parallelism: None,
         };
-        init(config).expect("init failed");
+        init(&config).expect("init failed");
 
         // Energy budget pointer should be null (old path)
         let has_energy = context::ENERGY_BUDGET_PTR.with(|c| !c.get().is_null());

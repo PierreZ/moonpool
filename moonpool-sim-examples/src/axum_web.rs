@@ -10,9 +10,9 @@
 //! # Architecture
 //!
 //! - **Store trait**: dependency boundary for item persistence
-//! - **InMemoryStore**: BTreeMap-based fake with buggify fault injection
-//! - **WebProcess**: accepts TCP, serves axum via `hyper::serve_connection`
-//! - **WebWorkload**: sends HTTP requests, validates responses under chaos
+//! - **`InMemoryStore`**: BTreeMap-based fake with buggify fault injection
+//! - **`WebProcess`**: accepts TCP, serves axum via `hyper::serve_connection`
+//! - **`WebWorkload`**: sends HTTP requests, validates responses under chaos
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -62,7 +62,7 @@ pub struct CreateItemRequest {
 // ============================================================================
 
 /// Trait for item persistence. In production, backed by a real database.
-/// In simulation, backed by an in-memory BTreeMap with fault injection.
+/// In simulation, backed by an in-memory `BTreeMap` with fault injection.
 ///
 /// This is the "mock boundary": we simulate the network (HTTP traffic) via
 /// moonpool, but fake the database at the service level. A fake with 80%
@@ -70,9 +70,21 @@ pub struct CreateItemRequest {
 /// 100% fidelity but zero control over failure modes.
 pub trait Store: Send + Sync + 'static {
     /// Create an item, returning its assigned ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::WriteFailed`] when the underlying write fails
+    /// (modeled via buggify in the in-memory fake) or when an internal lock
+    /// has been poisoned.
     fn create(&self, name: &str) -> Result<Item, StoreError>;
 
     /// Get an item by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::ReadFailed`] when the underlying read fails
+    /// (modeled via buggify in the in-memory fake) or when an internal lock
+    /// has been poisoned.
     fn get(&self, id: u64) -> Result<Option<Item>, StoreError>;
 }
 
@@ -92,7 +104,7 @@ pub enum StoreError {
 // InMemoryStore — fault-injectable fake
 // ============================================================================
 
-/// In-memory store backed by BTreeMap (deterministic iteration order).
+/// In-memory store backed by `BTreeMap` (deterministic iteration order).
 ///
 /// Uses `buggify!()` to inject partial failures — the kind of failures a
 /// real database container cannot produce. A test container fails as a whole
@@ -105,6 +117,7 @@ pub struct InMemoryStore {
 
 impl InMemoryStore {
     /// Create a new empty store.
+    #[must_use]
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             items: RwLock::new(BTreeMap::new()),
@@ -217,7 +230,7 @@ pub struct WebProcess;
 
 #[async_trait]
 impl Process for WebProcess {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "web"
     }
 
@@ -260,7 +273,7 @@ impl Process for WebProcess {
                     });
                 }
                 Some(()) = connections.next(), if !connections.is_empty() => {}
-                _ = ctx.shutdown().cancelled() => {
+                () = ctx.shutdown().cancelled() => {
                     tracing::info!("server shutting down");
                     return Ok(());
                 }
@@ -278,7 +291,7 @@ pub struct WebWorkload;
 
 #[async_trait]
 impl Workload for WebWorkload {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "client"
     }
 
@@ -297,7 +310,7 @@ impl Workload for WebWorkload {
             tracing::info!(round, "starting round");
             let result = tokio::select! {
                 result = self.send_round(ctx, &server_ip, round) => result,
-                _ = ctx.shutdown().cancelled() => {
+                () = ctx.shutdown().cancelled() => {
                     tracing::info!(round, "shutdown during round, exiting");
                     break;
                 }
@@ -330,7 +343,7 @@ impl WebWorkload {
         tracing::info!(round, "connecting to server");
         let stream = tokio::select! {
             result = ctx.network().connect(server_ip) => result?,
-            _ = ctx.shutdown().cancelled() => return Ok(()),
+            () = ctx.shutdown().cancelled() => return Ok(()),
         };
         tracing::info!(round, "connected, starting handshake");
 
@@ -349,7 +362,18 @@ impl WebWorkload {
         };
         tokio::pin!(driver);
 
-        // GET /health
+        Self::check_health(&mut sender, server_ip, round).await?;
+        Self::create_and_read_item(&mut sender, server_ip, round).await?;
+        Self::check_not_found(&mut sender, server_ip, round).await?;
+
+        Ok(())
+    }
+
+    async fn check_health(
+        sender: &mut hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+        server_ip: &str,
+        round: u32,
+    ) -> SimulationResult<()> {
         tracing::info!(round, "sending GET /health");
         let req = Request::builder()
             .uri("/health")
@@ -366,8 +390,14 @@ impl WebWorkload {
             res.status() == StatusCode::OK,
             "health endpoint must return 200"
         );
+        Ok(())
+    }
 
-        // POST /items — create an item
+    async fn create_and_read_item(
+        sender: &mut hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+        server_ip: &str,
+        round: u32,
+    ) -> SimulationResult<()> {
         tracing::info!(round, "sending POST /items");
         let body = serde_json::to_vec(&CreateItemRequest {
             name: "test-item".to_string(),
@@ -403,52 +433,67 @@ impl WebWorkload {
                 moonpool_sim::SimulationError::InvalidState(format!("deserialize: {e}"))
             })?;
 
-            // GET /items/:id — read it back
-            tracing::info!(round, item_id = item.id, "sending GET /items/{}", item.id);
-            let req = Request::builder()
-                .uri(format!("/items/{}", item.id))
-                .header("host", server_ip)
-                .body(Full::new(Bytes::new()))
-                .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("build: {e}")))?;
-
-            let res = sender
-                .send_request(req)
-                .await
-                .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("get: {e}")))?;
-
-            let get_status = res.status();
-            tracing::info!(round, %get_status, "GET /items/{} response", item.id);
-            if get_status == StatusCode::OK {
-                let get_body = res
-                    .into_body()
-                    .collect()
-                    .await
-                    .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("body: {e}")))?
-                    .to_bytes();
-
-                let fetched: Item = serde_json::from_slice(&get_body).map_err(|e| {
-                    moonpool_sim::SimulationError::InvalidState(format!("deserialize: {e}"))
-                })?;
-
-                // What we wrote must match what we read.
-                moonpool_sim::assert_always!(
-                    fetched.id == item.id && fetched.name == item.name,
-                    "read-after-write consistency"
-                );
-            } else if get_status == StatusCode::INTERNAL_SERVER_ERROR {
-                // Store read failure via buggify — expected
-                moonpool_sim::assert_sometimes!(true, "store_read_failed");
-            } else {
-                moonpool_sim::assert_always!(false, format!("unexpected GET status: {get_status}"));
-            }
+            Self::read_item_back(sender, server_ip, round, &item).await?;
         } else if status == StatusCode::INTERNAL_SERVER_ERROR {
             // Store write failure via buggify — expected
             moonpool_sim::assert_sometimes!(true, "store_write_failed");
         } else {
             moonpool_sim::assert_always!(false, format!("unexpected POST status: {status}"));
         }
+        Ok(())
+    }
 
-        // GET /items/999999 — nonexistent item → 404
+    async fn read_item_back(
+        sender: &mut hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+        server_ip: &str,
+        round: u32,
+        item: &Item,
+    ) -> SimulationResult<()> {
+        tracing::info!(round, item_id = item.id, "sending GET /items/{}", item.id);
+        let req = Request::builder()
+            .uri(format!("/items/{}", item.id))
+            .header("host", server_ip)
+            .body(Full::new(Bytes::new()))
+            .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("build: {e}")))?;
+
+        let res = sender
+            .send_request(req)
+            .await
+            .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("get: {e}")))?;
+
+        let get_status = res.status();
+        tracing::info!(round, %get_status, "GET /items/{} response", item.id);
+        if get_status == StatusCode::OK {
+            let get_body = res
+                .into_body()
+                .collect()
+                .await
+                .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("body: {e}")))?
+                .to_bytes();
+
+            let fetched: Item = serde_json::from_slice(&get_body).map_err(|e| {
+                moonpool_sim::SimulationError::InvalidState(format!("deserialize: {e}"))
+            })?;
+
+            // What we wrote must match what we read.
+            moonpool_sim::assert_always!(
+                fetched.id == item.id && fetched.name == item.name,
+                "read-after-write consistency"
+            );
+        } else if get_status == StatusCode::INTERNAL_SERVER_ERROR {
+            // Store read failure via buggify — expected
+            moonpool_sim::assert_sometimes!(true, "store_read_failed");
+        } else {
+            moonpool_sim::assert_always!(false, format!("unexpected GET status: {get_status}"));
+        }
+        Ok(())
+    }
+
+    async fn check_not_found(
+        sender: &mut hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+        server_ip: &str,
+        round: u32,
+    ) -> SimulationResult<()> {
         tracing::info!(round, "sending GET /items/999999");
         let req = Request::builder()
             .uri("/items/999999")
@@ -469,7 +514,6 @@ impl WebWorkload {
                 || not_found_status == StatusCode::INTERNAL_SERVER_ERROR,
             "nonexistent item must return 404 or 500"
         );
-
         Ok(())
     }
 }

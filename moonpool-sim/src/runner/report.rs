@@ -94,7 +94,7 @@ pub struct AssertionDetail {
     pub fail_count: u64,
     /// Best watermark value (for numeric assertions).
     pub watermark: i64,
-    /// Frontier value (for BooleanSometimesAll).
+    /// Frontier value (for `BooleanSometimesAll`).
     pub frontier: u8,
     /// Computed status based on kind and counts.
     pub status: AssertionStatus,
@@ -146,38 +146,51 @@ pub struct SimulationReport {
 
 impl SimulationReport {
     /// Calculate the success rate as a percentage.
+    #[must_use]
     pub fn success_rate(&self) -> f64 {
         if self.iterations == 0 {
             0.0
         } else {
-            (self.successful_runs as f64 / self.iterations as f64) * 100.0
+            // Precision loss acceptable: simulation counts fit well within 2^52.
+            let successful = u32::try_from(self.successful_runs).map_or(f64::INFINITY, f64::from);
+            let total = u32::try_from(self.iterations).map_or(f64::INFINITY, f64::from);
+            (successful / total) * 100.0
         }
     }
 
     /// Get the average wall time per iteration.
+    #[must_use]
     pub fn average_wall_time(&self) -> Duration {
         if self.successful_runs == 0 {
             Duration::ZERO
         } else {
-            self.metrics.wall_time / self.successful_runs as u32
+            let runs = u32::try_from(self.successful_runs).unwrap_or(u32::MAX);
+            self.metrics.wall_time / runs
         }
     }
 
     /// Get the average simulated time per iteration.
+    #[must_use]
     pub fn average_simulated_time(&self) -> Duration {
         if self.successful_runs == 0 {
             Duration::ZERO
         } else {
-            self.metrics.simulated_time / self.successful_runs as u32
+            let runs = u32::try_from(self.successful_runs).unwrap_or(u32::MAX);
+            self.metrics.simulated_time / runs
         }
     }
 
     /// Get the average number of events processed per iteration.
+    #[must_use]
     pub fn average_events_processed(&self) -> f64 {
         if self.successful_runs == 0 {
             0.0
         } else {
-            self.metrics.events_processed as f64 / self.successful_runs as f64
+            // Precision loss acceptable: simulation counts fit within 2^52.
+            let events =
+                u32::try_from(self.metrics.events_processed).map_or(f64::INFINITY, f64::from);
+            let runs = u32::try_from(self.successful_runs).map_or(f64::INFINITY, f64::from);
+            events / runs
         }
     }
 
@@ -193,6 +206,24 @@ impl SimulationReport {
 // ---------------------------------------------------------------------------
 // Display helpers
 // ---------------------------------------------------------------------------
+
+/// Convert a non-negative finite `f64` to a saturated `u64`.
+///
+/// Returns 0 for NaN / negative values and `u64::MAX` for values that exceed
+/// `u64::MAX`. Smaller magnitudes round to the nearest integer.
+fn f64_to_u64_saturating(v: f64) -> u64 {
+    // `2^64` as an `f64` — values at or above this saturate to `u64::MAX`.
+    const TWO_POW_64: f64 = 18_446_744_073_709_551_616.0;
+    if !v.is_finite() || v <= 0.0 {
+        0
+    } else if v >= TWO_POW_64 {
+        u64::MAX
+    } else {
+        // SAFETY: `v` is finite, non-negative, and strictly below `2^64`;
+        // `to_int_unchecked` is therefore well-defined.
+        unsafe { v.round().to_int_unchecked::<u64>() }
+    }
+}
 
 /// Format a number with comma separators (e.g., 123456 -> "123,456").
 fn fmt_num(n: u64) -> String {
@@ -212,7 +243,7 @@ fn fmt_i64(n: i64) -> String {
     if n < 0 {
         format!("-{}", fmt_num(n.unsigned_abs()))
     } else {
-        fmt_num(n as u64)
+        fmt_num(n.unsigned_abs())
     }
 }
 
@@ -220,13 +251,13 @@ fn fmt_i64(n: i64) -> String {
 fn fmt_duration(d: Duration) -> String {
     let total_ms = d.as_millis();
     if total_ms < 1000 {
-        format!("{}ms", total_ms)
+        format!("{total_ms}ms")
     } else if total_ms < 60_000 {
         format!("{:.2}s", d.as_secs_f64())
     } else {
         let mins = d.as_secs() / 60;
         let secs = d.as_secs() % 60;
-        format!("{}m {:02}s", mins, secs)
+        format!("{mins}m {secs:02}s")
     }
 }
 
@@ -262,37 +293,175 @@ fn kind_sort_order(kind: AssertKind) -> u8 {
 // Display impl
 // ---------------------------------------------------------------------------
 
+fn fmt_summary(f: &mut fmt::Formatter<'_>, report: &SimulationReport) -> fmt::Result {
+    writeln!(f, "=== Simulation Report ===")?;
+    writeln!(
+        f,
+        "  Iterations: {}  |  Passed: {}  |  Failed: {}  |  Rate: {:.1}%",
+        report.iterations,
+        report.successful_runs,
+        report.failed_runs,
+        report.success_rate()
+    )?;
+    writeln!(f)
+}
+
+fn fmt_timing(f: &mut fmt::Formatter<'_>, report: &SimulationReport) -> fmt::Result {
+    writeln!(
+        f,
+        "  Avg Wall Time:     {:<14}Total: {}",
+        fmt_duration(report.average_wall_time()),
+        fmt_duration(report.metrics.wall_time)
+    )?;
+    writeln!(
+        f,
+        "  Avg Sim Time:      {}",
+        fmt_duration(report.average_simulated_time())
+    )?;
+    writeln!(
+        f,
+        "  Avg Events:        {}",
+        fmt_num(f64_to_u64_saturating(report.average_events_processed()))
+    )
+}
+
+fn fmt_exploration(f: &mut fmt::Formatter<'_>, exp: &ExplorationReport) -> fmt::Result {
+    writeln!(f)?;
+    writeln!(f, "--- Exploration ---")?;
+    writeln!(
+        f,
+        "  Timelines:    {:<18}Bugs found:     {}",
+        fmt_num(exp.total_timelines),
+        fmt_num(exp.bugs_found)
+    )?;
+    writeln!(
+        f,
+        "  Fork points:  {:<18}Coverage:       {} / {} bits ({:.1}%)",
+        fmt_num(exp.fork_points),
+        fmt_num(u64::from(exp.coverage_bits)),
+        fmt_num(u64::from(exp.coverage_total)),
+        if exp.coverage_total > 0 {
+            (f64::from(exp.coverage_bits) / f64::from(exp.coverage_total)) * 100.0
+        } else {
+            0.0
+        }
+    )?;
+    if exp.sancov_edges_total > 0 {
+        let covered = u64::try_from(exp.sancov_edges_covered).unwrap_or(u64::MAX);
+        let total = u64::try_from(exp.sancov_edges_total).unwrap_or(u64::MAX);
+        let covered_u32 = u32::try_from(exp.sancov_edges_covered).unwrap_or(u32::MAX);
+        let total_u32 = u32::try_from(exp.sancov_edges_total).unwrap_or(u32::MAX);
+        writeln!(
+            f,
+            "  Sancov:       {} / {} edges ({:.1}%)",
+            fmt_num(covered),
+            fmt_num(total),
+            (f64::from(covered_u32) / f64::from(total_u32)) * 100.0
+        )?;
+    }
+    writeln!(
+        f,
+        "  Energy left:  {:<18}Realloc pool:   {}",
+        fmt_i64(exp.energy_remaining),
+        fmt_i64(exp.realloc_pool_remaining)
+    )?;
+    for br in &exp.bug_recipes {
+        writeln!(
+            f,
+            "  Bug recipe (seed={}): {}",
+            br.seed,
+            moonpool_explorer::format_timeline(&br.recipe)
+        )?;
+    }
+    Ok(())
+}
+
+fn fmt_assertion_detail(f: &mut fmt::Formatter<'_>, detail: &AssertionDetail) -> fmt::Result {
+    let status_tag = match detail.status {
+        AssertionStatus::Pass => "PASS",
+        AssertionStatus::Fail => "FAIL",
+        AssertionStatus::Miss => "MISS",
+    };
+    let kind_tag = kind_label(detail.kind);
+    let quoted_msg = format!("\"{}\"", detail.msg);
+
+    match detail.kind {
+        AssertKind::Sometimes | AssertKind::Reachable => {
+            let total = detail.pass_count + detail.fail_count;
+            let rate = if total > 0 {
+                let pass_u32 = u32::try_from(detail.pass_count).unwrap_or(u32::MAX);
+                let total_u32 = u32::try_from(total).unwrap_or(u32::MAX);
+                (f64::from(pass_u32) / f64::from(total_u32)) * 100.0
+            } else {
+                0.0
+            };
+            writeln!(
+                f,
+                "  {}  [{:<10}]  {:<34}  {} / {} ({:.1}%)",
+                status_tag,
+                kind_tag,
+                quoted_msg,
+                fmt_num(detail.pass_count),
+                fmt_num(total),
+                rate
+            )
+        }
+        AssertKind::NumericSometimes | AssertKind::NumericAlways => writeln!(
+            f,
+            "  {}  [{:<10}]  {:<34}  {} pass  {} fail  watermark: {}",
+            status_tag,
+            kind_tag,
+            quoted_msg,
+            fmt_num(detail.pass_count),
+            fmt_num(detail.fail_count),
+            detail.watermark
+        ),
+        AssertKind::BooleanSometimesAll => writeln!(
+            f,
+            "  {}  [{:<10}]  {:<34}  {} calls  frontier: {}",
+            status_tag,
+            kind_tag,
+            quoted_msg,
+            fmt_num(detail.pass_count),
+            detail.frontier
+        ),
+        _ => writeln!(
+            f,
+            "  {}  [{:<10}]  {:<34}  {} pass  {} fail",
+            status_tag,
+            kind_tag,
+            quoted_msg,
+            fmt_num(detail.pass_count),
+            fmt_num(detail.fail_count)
+        ),
+    }
+}
+
+fn fmt_assertion_details(f: &mut fmt::Formatter<'_>, details: &[AssertionDetail]) -> fmt::Result {
+    if details.is_empty() {
+        return Ok(());
+    }
+    writeln!(f)?;
+    writeln!(f, "--- Assertions ({}) ---", details.len())?;
+
+    let mut sorted: Vec<&AssertionDetail> = details.iter().collect();
+    sorted.sort_by(|a, b| {
+        kind_sort_order(a.kind)
+            .cmp(&kind_sort_order(b.kind))
+            .then(a.status.cmp(&b.status))
+            .then(a.msg.cmp(&b.msg))
+    });
+
+    for detail in &sorted {
+        fmt_assertion_detail(f, detail)?;
+    }
+    Ok(())
+}
+
 impl fmt::Display for SimulationReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // === Header ===
-        writeln!(f, "=== Simulation Report ===")?;
-        writeln!(
-            f,
-            "  Iterations: {}  |  Passed: {}  |  Failed: {}  |  Rate: {:.1}%",
-            self.iterations,
-            self.successful_runs,
-            self.failed_runs,
-            self.success_rate()
-        )?;
-        writeln!(f)?;
-
-        // === Timing ===
-        writeln!(
-            f,
-            "  Avg Wall Time:     {:<14}Total: {}",
-            fmt_duration(self.average_wall_time()),
-            fmt_duration(self.metrics.wall_time)
-        )?;
-        writeln!(
-            f,
-            "  Avg Sim Time:      {}",
-            fmt_duration(self.average_simulated_time())
-        )?;
-        writeln!(
-            f,
-            "  Avg Events:        {}",
-            fmt_num(self.average_events_processed() as u64)
-        )?;
+        fmt_summary(f, self)?;
+        fmt_timing(f, self)?;
 
         // === Faulty Seeds ===
         if !self.seeds_failing.is_empty() {
@@ -300,139 +469,18 @@ impl fmt::Display for SimulationReport {
             writeln!(f, "  Faulty seeds: {:?}", self.seeds_failing)?;
         }
 
-        // === Exploration ===
         if let Some(ref exp) = self.exploration {
-            writeln!(f)?;
-            writeln!(f, "--- Exploration ---")?;
-            writeln!(
-                f,
-                "  Timelines:    {:<18}Bugs found:     {}",
-                fmt_num(exp.total_timelines),
-                fmt_num(exp.bugs_found)
-            )?;
-            writeln!(
-                f,
-                "  Fork points:  {:<18}Coverage:       {} / {} bits ({:.1}%)",
-                fmt_num(exp.fork_points),
-                fmt_num(exp.coverage_bits as u64),
-                fmt_num(exp.coverage_total as u64),
-                if exp.coverage_total > 0 {
-                    (exp.coverage_bits as f64 / exp.coverage_total as f64) * 100.0
-                } else {
-                    0.0
-                }
-            )?;
-            if exp.sancov_edges_total > 0 {
-                writeln!(
-                    f,
-                    "  Sancov:       {} / {} edges ({:.1}%)",
-                    fmt_num(exp.sancov_edges_covered as u64),
-                    fmt_num(exp.sancov_edges_total as u64),
-                    (exp.sancov_edges_covered as f64 / exp.sancov_edges_total as f64) * 100.0
-                )?;
-            }
-            writeln!(
-                f,
-                "  Energy left:  {:<18}Realloc pool:   {}",
-                fmt_i64(exp.energy_remaining),
-                fmt_i64(exp.realloc_pool_remaining)
-            )?;
-            for br in &exp.bug_recipes {
-                writeln!(
-                    f,
-                    "  Bug recipe (seed={}): {}",
-                    br.seed,
-                    moonpool_explorer::format_timeline(&br.recipe)
-                )?;
-            }
+            fmt_exploration(f, exp)?;
         }
 
-        // === Assertion Details ===
-        if !self.assertion_details.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "--- Assertions ({}) ---", self.assertion_details.len())?;
-
-            let mut sorted: Vec<&AssertionDetail> = self.assertion_details.iter().collect();
-            sorted.sort_by(|a, b| {
-                kind_sort_order(a.kind)
-                    .cmp(&kind_sort_order(b.kind))
-                    .then(a.status.cmp(&b.status))
-                    .then(a.msg.cmp(&b.msg))
-            });
-
-            for detail in &sorted {
-                let status_tag = match detail.status {
-                    AssertionStatus::Pass => "PASS",
-                    AssertionStatus::Fail => "FAIL",
-                    AssertionStatus::Miss => "MISS",
-                };
-                let kind_tag = kind_label(detail.kind);
-                let quoted_msg = format!("\"{}\"", detail.msg);
-
-                match detail.kind {
-                    AssertKind::Sometimes | AssertKind::Reachable => {
-                        let total = detail.pass_count + detail.fail_count;
-                        let rate = if total > 0 {
-                            (detail.pass_count as f64 / total as f64) * 100.0
-                        } else {
-                            0.0
-                        };
-                        writeln!(
-                            f,
-                            "  {}  [{:<10}]  {:<34}  {} / {} ({:.1}%)",
-                            status_tag,
-                            kind_tag,
-                            quoted_msg,
-                            fmt_num(detail.pass_count),
-                            fmt_num(total),
-                            rate
-                        )?;
-                    }
-                    AssertKind::NumericSometimes | AssertKind::NumericAlways => {
-                        writeln!(
-                            f,
-                            "  {}  [{:<10}]  {:<34}  {} pass  {} fail  watermark: {}",
-                            status_tag,
-                            kind_tag,
-                            quoted_msg,
-                            fmt_num(detail.pass_count),
-                            fmt_num(detail.fail_count),
-                            detail.watermark
-                        )?;
-                    }
-                    AssertKind::BooleanSometimesAll => {
-                        writeln!(
-                            f,
-                            "  {}  [{:<10}]  {:<34}  {} calls  frontier: {}",
-                            status_tag,
-                            kind_tag,
-                            quoted_msg,
-                            fmt_num(detail.pass_count),
-                            detail.frontier
-                        )?;
-                    }
-                    _ => {
-                        // Always, AlwaysOrUnreachable, Unreachable
-                        writeln!(
-                            f,
-                            "  {}  [{:<10}]  {:<34}  {} pass  {} fail",
-                            status_tag,
-                            kind_tag,
-                            quoted_msg,
-                            fmt_num(detail.pass_count),
-                            fmt_num(detail.fail_count)
-                        )?;
-                    }
-                }
-            }
-        }
+        fmt_assertion_details(f, &self.assertion_details)?;
 
         // === Assertion Violations ===
         if !self.assertion_violations.is_empty() {
             writeln!(f)?;
             writeln!(f, "--- Assertion Violations ---")?;
             for v in &self.assertion_violations {
-                writeln!(f, "  - {}", v)?;
+                writeln!(f, "  - {v}")?;
             }
         }
 
@@ -441,7 +489,7 @@ impl fmt::Display for SimulationReport {
             writeln!(f)?;
             writeln!(f, "--- Coverage Gaps ---")?;
             for v in &self.coverage_violations {
-                writeln!(f, "  - {}", v)?;
+                writeln!(f, "  - {v}")?;
             }
         }
 

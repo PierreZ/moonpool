@@ -66,7 +66,7 @@ pub struct StorageConfiguration {
     /// I/O operations per second limit.
     ///
     /// Typical values:
-    /// - NVMe SSD: 100,000-500,000 IOPS
+    /// - `NVMe` SSD: 100,000-500,000 IOPS
     /// - SATA SSD: 25,000-100,000 IOPS
     /// - HDD: 100-200 IOPS
     pub iops: u64,
@@ -74,7 +74,7 @@ pub struct StorageConfiguration {
     /// Maximum bandwidth in bytes per second.
     ///
     /// Typical values:
-    /// - NVMe SSD: 3,000-7,000 MB/s
+    /// - `NVMe` SSD: 3,000-7,000 MB/s
     /// - SATA SSD: 500-600 MB/s
     /// - HDD: 100-200 MB/s
     pub bandwidth: u64,
@@ -82,7 +82,7 @@ pub struct StorageConfiguration {
     /// Latency range for read operations.
     ///
     /// Typical values:
-    /// - NVMe SSD: 20-100µs
+    /// - `NVMe` SSD: 20-100µs
     /// - SATA SSD: 50-200µs
     /// - HDD: 2-10ms
     pub read_latency: Range<Duration>,
@@ -90,7 +90,7 @@ pub struct StorageConfiguration {
     /// Latency range for write operations.
     ///
     /// Typical values:
-    /// - NVMe SSD: 20-100µs
+    /// - `NVMe` SSD: 20-100µs
     /// - SATA SSD: 100-500µs
     /// - HDD: 2-10ms
     pub write_latency: Range<Duration>,
@@ -128,7 +128,7 @@ pub struct StorageConfiguration {
     /// # Real-World Scenario
     /// Simulates misdirected writes where data is written to a different
     /// block than intended. Tests checksum validation and corruption detection.
-    /// TigerBeetle ref: storage fault injection
+    /// `TigerBeetle` ref: storage fault injection
     pub misdirect_write_probability: f64,
 
     /// Probability of read returning data from wrong location (0.0 - 1.0).
@@ -136,7 +136,7 @@ pub struct StorageConfiguration {
     /// # Real-World Scenario
     /// Simulates misdirected reads where data is read from a different
     /// block than intended. Tests checksum validation.
-    /// TigerBeetle ref: storage fault injection
+    /// `TigerBeetle` ref: storage fault injection
     pub misdirect_read_probability: f64,
 
     /// Probability of write appearing to succeed but not persisting (0.0 - 1.0).
@@ -178,6 +178,7 @@ impl Default for StorageConfiguration {
 
 impl StorageConfiguration {
     /// Create a new storage configuration with default settings.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -186,6 +187,7 @@ impl StorageConfiguration {
     ///
     /// Uses deterministic random values based on the simulation seed
     /// to create varied configurations across test runs.
+    #[must_use]
     pub fn random_for_seed() -> Self {
         Self {
             // Randomize IOPS between 10,000 and 100,000
@@ -203,13 +205,13 @@ impl StorageConfiguration {
                 ..Duration::from_micros(sim_random_range(2000..10000)),
 
             // Low fault probabilities for chaos testing (0.001% to 0.1%)
-            read_fault_probability: sim_random_range(0..100) as f64 / 100_000.0,
-            write_fault_probability: sim_random_range(0..100) as f64 / 100_000.0,
-            crash_fault_probability: sim_random_range(0..50) as f64 / 100_000.0,
-            misdirect_write_probability: sim_random_range(0..10) as f64 / 100_000.0,
-            misdirect_read_probability: sim_random_range(0..10) as f64 / 100_000.0,
-            phantom_write_probability: sim_random_range(0..20) as f64 / 100_000.0,
-            sync_failure_probability: sim_random_range(0..50) as f64 / 100_000.0,
+            read_fault_probability: f64::from(sim_random_range(0..100)) / 100_000.0,
+            write_fault_probability: f64::from(sim_random_range(0..100)) / 100_000.0,
+            crash_fault_probability: f64::from(sim_random_range(0..50)) / 100_000.0,
+            misdirect_write_probability: f64::from(sim_random_range(0..10)) / 100_000.0,
+            misdirect_read_probability: f64::from(sim_random_range(0..10)) / 100_000.0,
+            phantom_write_probability: f64::from(sim_random_range(0..20)) / 100_000.0,
+            sync_failure_probability: f64::from(sim_random_range(0..50)) / 100_000.0,
         }
     }
 
@@ -217,6 +219,7 @@ impl StorageConfiguration {
     ///
     /// Minimal latencies and no fault injection for predictable,
     /// fast test execution.
+    #[must_use]
     pub fn fast_local() -> Self {
         let one_us = Duration::from_micros(1);
         Self {

@@ -5,7 +5,7 @@
 //!
 //! ## Why Deterministic Simulation?
 //!
-//! FoundationDB's insight: **bugs hide in error paths**. Production code rarely
+//! `FoundationDB`'s insight: **bugs hide in error paths**. Production code rarely
 //! exercises timeout handlers, retry logic, or failure recovery. Deterministic
 //! simulation with fault injection finds these bugs before production does.
 //!

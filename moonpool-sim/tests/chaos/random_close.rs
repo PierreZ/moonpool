@@ -1,7 +1,7 @@
 //! Integration tests for random connection failure chaos injection
 //!
 //! Tests verify that random connection failures:
-//! - Follow FDB's rollRandomClose() pattern with 0.001% probability per I/O
+//! - Follow FDB's `rollRandomClose()` pattern with 0.001% probability per I/O
 //! - Support asymmetric closure (send-only, recv-only, both directions)
 //! - Respect cooldown periods to prevent cascading failures
 //! - Include explicit exceptions (30%) and silent failures (70%)
@@ -38,7 +38,7 @@ fn test_random_close_disabled_with_zero_probability() {
 
         // Send data multiple times - should never fail
         for i in 0..100 {
-            let msg = format!("Message {}", i);
+            let msg = format!("Message {i}");
             client.write_all(msg.as_bytes()).await.unwrap();
         }
 
@@ -82,25 +82,19 @@ fn test_random_close_injection_with_high_probability() {
         // With 10% probability and many I/O operations, we should see failures
         let mut close_detected = false;
         for i in 0..50 {
-            let msg = format!("Test message number {}", i);
-            match client.write_all(msg.as_bytes()).await {
-                Ok(_) => {
-                    sim.run_until_empty();
-                }
-                Err(_) => {
-                    close_detected = true;
-                    println!("✅ Random connection failure detected on message {}", i);
-                    break;
-                }
+            let msg = format!("Test message number {i}");
+            if let Ok(()) = client.write_all(msg.as_bytes()).await {
+                sim.run_until_empty();
+            } else {
+                close_detected = true;
+                println!("✅ Random connection failure detected on message {i}");
+                break;
             }
         }
 
         // With such high probability, we should have detected at least one failure
         // (though not guaranteed due to randomness)
-        println!(
-            "✅ Random close injection executed (close_detected={})",
-            close_detected
-        );
+        println!("✅ Random close injection executed (close_detected={close_detected})");
     });
 }
 
@@ -232,8 +226,8 @@ fn test_random_close_explicit_vs_silent() {
 
         // Send multiple messages - may trigger random close
         for i in 0..20 {
-            match client.write_all(format!("msg{}", i).as_bytes()).await {
-                Ok(_) => {
+            match client.write_all(format!("msg{i}").as_bytes()).await {
+                Ok(()) => {
                     sim.run_until_empty();
                 }
                 Err(_) => {
@@ -350,11 +344,11 @@ fn test_random_close_bidirectional_communication() {
         for i in 0..20 {
             // Client to server
             if client
-                .write_all(format!("C2S {}", i).as_bytes())
+                .write_all(format!("C2S {i}").as_bytes())
                 .await
                 .is_err()
             {
-                println!("Client send failed at iteration {}", i);
+                println!("Client send failed at iteration {i}");
                 break;
             }
 
@@ -362,11 +356,11 @@ fn test_random_close_bidirectional_communication() {
 
             // Server to client
             if server
-                .write_all(format!("S2C {}", i).as_bytes())
+                .write_all(format!("S2C {i}").as_bytes())
                 .await
                 .is_err()
             {
-                println!("Server send failed at iteration {}", i);
+                println!("Server send failed at iteration {i}");
                 break;
             }
 
@@ -375,8 +369,7 @@ fn test_random_close_bidirectional_communication() {
         }
 
         println!(
-            "✅ Bidirectional communication with random close: {} successful exchanges",
-            exchanges
+            "✅ Bidirectional communication with random close: {exchanges} successful exchanges"
         );
     });
 }
@@ -405,10 +398,10 @@ fn test_random_close_with_partitions() {
 
         // Send messages with both partition and random close chaos active
         for i in 0..30 {
-            match client.write_all(format!("msg {}", i).as_bytes()).await {
-                Ok(_) => sim.run_until_empty(),
+            match client.write_all(format!("msg {i}").as_bytes()).await {
+                Ok(()) => sim.run_until_empty(),
                 Err(e) => {
-                    println!("Failure at message {}: {:?}", i, e);
+                    println!("Failure at message {i}: {e:?}");
                     break;
                 }
             }

@@ -4,7 +4,7 @@ use moonpool_sim::{
 };
 use std::{net::IpAddr, time::Duration};
 
-/// Test basic partition functionality by directly testing the SimWorld API
+/// Test basic partition functionality by directly testing the `SimWorld` API
 #[test]
 fn test_partition_api() {
     let sim = SimWorld::new_with_network_config(NetworkConfiguration::fast_local());
@@ -180,7 +180,7 @@ fn test_partition_fault_timeline() {
     ));
 
     // Verify all events have source "sim"
-    for entry in entries.iter() {
+    for entry in &entries {
         assert_eq!(entry.source, "sim");
     }
 

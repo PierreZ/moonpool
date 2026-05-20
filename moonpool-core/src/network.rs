@@ -41,6 +41,11 @@ pub trait TcpListenerTrait: Send + Sync + 'static {
     ) -> impl std::future::Future<Output = io::Result<(Self::TcpStream, String)>> + Send;
 
     /// Get the local address this listener is bound to.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if the local address cannot be retrieved
+    /// from the underlying listener.
     fn local_addr(&self) -> io::Result<String>;
 }
 
@@ -56,6 +61,7 @@ pub struct TokioNetworkProvider;
 #[cfg(feature = "tokio-providers")]
 impl TokioNetworkProvider {
     /// Create a new Tokio network provider.
+    #[must_use]
     pub fn new() -> Self {
         Self
     }
@@ -83,7 +89,7 @@ impl NetworkProvider for TokioNetworkProvider {
     }
 }
 
-/// Wrapper for Tokio TcpListener to implement our trait.
+/// Wrapper for Tokio `TcpListener` to implement our trait.
 #[cfg(feature = "tokio-providers")]
 #[derive(Debug)]
 pub struct TokioTcpListener {

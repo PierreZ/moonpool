@@ -30,6 +30,7 @@ pub struct SimStorageProvider {
 
 impl SimStorageProvider {
     /// Create a new simulated storage provider scoped to a process IP.
+    #[must_use]
     pub fn new(sim: WeakSimWorld, owner_ip: IpAddr) -> Self {
         Self { sim, owner_ip }
     }

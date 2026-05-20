@@ -33,6 +33,7 @@ impl SleepFuture {
     ///
     /// This is typically called by `SimWorld::sleep()` and should not be
     /// constructed directly by user code.
+    #[must_use]
     pub fn new(sim: WeakSimWorld, task_id: u64) -> Self {
         Self {
             sim,
@@ -58,20 +59,14 @@ impl Future for SleepFuture {
         };
 
         // Check if our wake event has been processed
-        match sim.is_task_awake(self.task_id) {
-            Ok(true) => {
-                // Task has been awakened, mark as completed and return ready
-                self.completed = true;
-                Poll::Ready(Ok(()))
-            }
-            Ok(false) => {
-                // Task hasn't been awakened yet, register waker and return pending
-                match sim.register_task_waker(self.task_id, cx.waker().clone()) {
-                    Ok(()) => Poll::Pending,
-                    Err(e) => Poll::Ready(Err(e)),
-                }
-            }
-            Err(e) => Poll::Ready(Err(e)),
+        if sim.is_task_awake(self.task_id) {
+            // Task has been awakened, mark as completed and return ready
+            self.completed = true;
+            Poll::Ready(Ok(()))
+        } else {
+            // Task hasn't been awakened yet, register waker and return pending
+            sim.register_task_waker(self.task_id, cx.waker().clone());
+            Poll::Pending
         }
     }
 }
