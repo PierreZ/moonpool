@@ -231,6 +231,7 @@ pub struct SimulationBuilder {
     fault_injectors: Vec<Box<dyn FaultInjector>>,
     chaos_duration: Option<Duration>,
     exploration_config: Option<moonpool_explorer::ExplorationConfig>,
+    before_iteration_hooks: Vec<Box<dyn FnMut()>>,
     seed_warning_timeout: Option<Duration>,
 }
 
@@ -254,6 +255,7 @@ impl SimulationBuilder {
             fault_injectors: Vec::new(),
             chaos_duration: None,
             exploration_config: None,
+            before_iteration_hooks: Vec::new(),
             seed_warning_timeout: None,
         }
     }
@@ -664,6 +666,11 @@ impl SimulationBuilder {
                     moonpool_explorer::prepare_next_seed(config.global_energy);
                 }
                 crate::chaos::assertions::skip_next_assertion_reset();
+            }
+
+            // Run user-provided reset hooks
+            for hook in &mut self.before_iteration_hooks {
+                hook();
             }
 
             // Reset captured events and invariant state for the new seed.

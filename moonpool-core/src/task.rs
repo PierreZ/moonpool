@@ -97,7 +97,7 @@ impl TaskProvider for TokioTaskProvider {
     {
         let task_name = name.to_string();
         let inner = tokio::task::Builder::new()
-            .name(&task_name)
+            .name(name)
             .spawn_local(async move {
                 tracing::trace!("Task {} starting", task_name);
                 future.await;
