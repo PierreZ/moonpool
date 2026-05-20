@@ -9,12 +9,8 @@ use moonpool_sim::SimulationResult;
 use moonpool_transport::{NetworkAddress, UID};
 use serde::{Deserialize, Serialize};
 
-// =============================================================================
-// Interface constants
-// =============================================================================
-
 /// Interface ID for the echo service.
-const ECHO_INTERFACE: u64 = 0xECE0_0001;
+pub(crate) const ECHO_INTERFACE: u64 = 0xECE0_0001;
 
 /// Method index for `echo`.
 pub const METHOD_ECHO: u64 = 1;
@@ -41,10 +37,6 @@ pub fn parse_sim_addr(ip: &str) -> SimulationResult<NetworkAddress> {
     NetworkAddress::parse(&addr_str)
         .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("bad addr: {e}")))
 }
-
-// =============================================================================
-// Message types
-// =============================================================================
 
 /// Which delivery mode the client used for this request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

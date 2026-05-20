@@ -26,9 +26,7 @@ use crate::Endpoint;
 
 /// Type-erased sleep closure capturing a concrete [`TimeProvider`].
 ///
-/// Mirrors the pattern used by
-/// [`TransportHandle::sleep`](crate::rpc::transport_handle::TransportHandle::sleep)
-/// to keep [`FailureMonitor`] non-generic while still able to call into the
+/// Keeps [`FailureMonitor`] non-generic while still able to call into the
 /// active time provider (real or simulated).
 type SleepFn = Box<dyn Fn(Duration) -> Pin<Box<dyn Future<Output = ()>>>>;
 
@@ -86,9 +84,7 @@ impl FailureMonitor {
     /// a connection succeeds and calls [`set_status`](Self::set_status).
     ///
     /// The `time` provider is captured behind a type-erased sleep closure
-    /// so [`FailureMonitor`] itself stays non-generic; this matches the
-    /// pattern used by
-    /// [`TransportHandle::sleep`](crate::rpc::transport_handle::TransportHandle::sleep).
+    /// so [`FailureMonitor`] itself stays non-generic.
     pub fn new<T: TimeProvider + 'static>(time: T) -> Self {
         let sleep_fn: SleepFn = Box::new(move |duration| {
             let time = time.clone();
@@ -216,21 +212,6 @@ impl FailureMonitor {
             .unwrap_or(FailureStatus::Failed) // Missing = Failed
     }
 
-    /// Get the current failure status of an address.
-    ///
-    /// Returns [`FailureStatus::Failed`] if the address is unknown.
-    ///
-    /// # FDB Reference
-    /// `SimpleFailureMonitor::getState(NetworkAddress)` (FailureMonitor.actor.cpp:208-214)
-    pub fn address_state(&self, address: &str) -> FailureStatus {
-        self.inner
-            .borrow()
-            .address_status
-            .get(address)
-            .copied()
-            .unwrap_or(FailureStatus::Failed)
-    }
-
     /// Check if an endpoint is permanently failed.
     ///
     /// # FDB Reference
@@ -273,44 +254,6 @@ impl FailureMonitor {
             }
 
             // Slow path: register waker
-            drop(inner);
-            let mut inner = fm.inner.borrow_mut();
-            inner
-                .endpoint_watchers
-                .entry(address.clone())
-                .or_default()
-                .push(cx.waker().clone());
-            Poll::Pending
-        })
-    }
-
-    /// Returns a future that resolves when the endpoint's state changes.
-    ///
-    /// If the endpoint is permanently failed, the future never resolves.
-    ///
-    /// # FDB Reference
-    /// `SimpleFailureMonitor::onStateChanged` (FailureMonitor.actor.cpp:184-194)
-    pub fn on_state_changed(self: &Rc<Self>, endpoint: &Endpoint) -> impl Future<Output = ()> {
-        let fm = Rc::clone(self);
-        let address = endpoint.address.to_string();
-        let endpoint = endpoint.clone();
-        let registered = Rc::new(std::cell::Cell::new(false));
-
-        std::future::poll_fn(move |cx| {
-            let inner = fm.inner.borrow();
-
-            // Permanently failed → never resolves (FDB: onStateChanged returns Never)
-            if inner.failed_endpoints.contains(&endpoint) {
-                return Poll::Pending;
-            }
-
-            // If we already registered and got woken, a state change happened
-            if registered.get() {
-                return Poll::Ready(());
-            }
-
-            // First poll: register waker
-            registered.set(true);
             drop(inner);
             let mut inner = fm.inner.borrow_mut();
             inner
@@ -416,7 +359,6 @@ mod tests {
         let fm = make_fm();
         let ep = test_endpoint();
         assert_eq!(fm.state(&ep), FailureStatus::Failed);
-        assert_eq!(fm.address_state("10.0.1.1:4500"), FailureStatus::Failed);
     }
 
     #[test]
@@ -425,15 +367,6 @@ mod tests {
         let ep = test_endpoint();
         fm.set_status("10.0.1.1:4500", FailureStatus::Available);
         assert_eq!(fm.state(&ep), FailureStatus::Available);
-        assert_eq!(fm.address_state("10.0.1.1:4500"), FailureStatus::Available);
-    }
-
-    #[test]
-    fn test_set_status_failed_removes_entry() {
-        let fm = make_fm();
-        fm.set_status("10.0.1.1:4500", FailureStatus::Available);
-        fm.set_status("10.0.1.1:4500", FailureStatus::Failed);
-        assert_eq!(fm.address_state("10.0.1.1:4500"), FailureStatus::Failed);
     }
 
     #[test]

@@ -11,20 +11,16 @@
 //! | Random close | `random_close_probability` | 0.001% | Reconnection logic, message redelivery, connection pooling |
 //! | Asymmetric close | `random_close_explicit_ratio` | 30% explicit | Half-closed sockets, FIN vs RST handling |
 //! | Connect failure | `connect_failure_mode` | Probabilistic | Connection establishment retries, timeout handling |
-//! | Connection cut | Manual via `cut_connection()` | N/A | Temporary network outages, transient failures |
 //!
 //! ## Network Latency & Congestion
 //!
 //! | Delay Type | Config Field | Default | Real-World Scenario |
 //! |------------|--------------|---------|---------------------|
 //! | Operation latency | `bind/accept/connect/read/write_latency` | Various ranges | Timeout settings, async operation ordering |
-//! | Latency distribution | `latency_distribution` | Uniform | Tail latency testing, P99 behavior |
-//! | Slow latency | `slow_latency_probability` | 0.1% | 99.9th percentile testing |
 //! | Write clogging | `clog_probability` + `clog_duration` | 0%, 100-300ms | Backpressure handling, flow control |
 //! | Read clogging | Same as write | Same | Symmetric flow control |
 //! | Clock drift | `clock_drift_enabled` + `clock_drift_max` | true, 100ms | Lease expiration, distributed consensus, TTL handling |
 //! | Buggified delay | `buggified_delay_enabled` + `buggified_delay_max` | true, 100ms | Race conditions, timing-dependent bugs |
-//! | Handshake delay | `handshake_delay_enabled` + `handshake_delay_max` | true, 10ms | TLS negotiation, connection startup overhead |
 //!
 //! ## Network Partitions
 //!
@@ -42,24 +38,11 @@
 //! |-------|--------------|---------|---------------------|
 //! | Bit flip | `bit_flip_probability` + `bit_flip_min/max_bits` | 0.01%, 1-32 bits | CRC/checksum validation, data corruption detection |
 //!
-//! ## Half-Open Connection Simulation
-//!
-//! | State | Method | Real-World Scenario |
-//! |-------|--------|---------------------|
-//! | Peer crash | `simulate_peer_crash()` | TCP keepalive, heartbeat detection, silent failures |
-//! | Half-open detection | `should_half_open_error()` | Timeout-based failure detection |
-//!
 //! ## Partial Write Simulation
 //!
 //! | Feature | Config Field | Default | Real-World Scenario |
 //! |---------|--------------|---------|---------------------|
 //! | Short writes | `partial_write_max_bytes` | 1000 bytes | TCP fragmentation handling, message framing |
-//!
-//! ## Stable Connections
-//!
-//! | Feature | Method | Real-World Scenario |
-//! |---------|--------|---------------------|
-//! | Mark stable | `mark_connection_stable()` | Exempt supervision from chaos, parent-child connections |
 //!
 //! ## Configuration Examples
 //!
@@ -81,11 +64,9 @@
 //!
 //! ### Custom Configuration
 //! ```rust
-//! use moonpool_sim::network::{NetworkConfiguration, ChaosConfiguration, LatencyDistribution, PartitionStrategy};
-//! use std::time::Duration;
+//! use moonpool_sim::network::{NetworkConfiguration, PartitionStrategy};
 //!
 //! let mut config = NetworkConfiguration::default();
-//! config.chaos.latency_distribution = LatencyDistribution::Bimodal;
 //! config.chaos.partition_strategy = PartitionStrategy::IsolateSingle;
 //! config.chaos.partition_probability = 0.05; // 5%
 //! ```
@@ -93,7 +74,6 @@
 //! ## FDB/TigerBeetle References
 //!
 //! - Random close: FDB sim2.actor.cpp:580-605
-//! - Latency distribution: FDB sim2.actor.cpp:317-329 (`halfLatency()`)
 //! - Partitions: FDB SimClogging, TigerBeetle partition modes
 //! - Bit flips: FDB FlowTransport.actor.cpp:1297
 //! - Clock drift: FDB sim2.actor.cpp:1058-1064
@@ -102,34 +82,6 @@
 use crate::sim::rng::{sim_random_range, sim_random_range_or_default};
 use std::ops::Range;
 use std::time::Duration;
-
-/// Latency distribution mode for network operations.
-///
-/// Controls how latencies are sampled for network operations.
-/// FDB ref: sim2.actor.cpp:317-329 (`halfLatency()`)
-///
-/// # Real-World Scenario
-///
-/// Real networks exhibit bimodal latency patterns where most operations are fast,
-/// but a small percentage experience significantly higher latency (tail latency).
-/// This is crucial for testing:
-/// - P99/P99.9 latency handling
-/// - Timeout tuning
-/// - Retry logic under tail latency conditions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum LatencyDistribution {
-    /// Uniform distribution within the configured range.
-    /// All latencies equally likely within [min, max].
-    #[default]
-    Uniform,
-
-    /// Bimodal distribution matching FDB's halfLatency() pattern.
-    /// - 99.9% of operations: fast latency (within configured range)
-    /// - 0.1% of operations: slow latency (multiplied by `slow_latency_multiplier`)
-    ///
-    /// FDB ref: sim2.actor.cpp:317-329
-    Bimodal,
-}
 
 /// Network partition strategy for chaos testing.
 ///
@@ -255,43 +207,6 @@ pub struct ChaosConfiguration {
     /// Probability of connect failure when Probabilistic mode is enabled (default 50%)
     pub connect_failure_probability: f64,
 
-    /// Latency distribution mode for network operations.
-    ///
-    /// Controls whether latencies follow a uniform or bimodal distribution.
-    /// FDB ref: sim2.actor.cpp:317-329 (`halfLatency()`)
-    ///
-    /// # Real-World Scenario
-    /// Bimodal latency tests tail latency handling (P99/P99.9).
-    pub latency_distribution: LatencyDistribution,
-
-    /// Probability of a slow latency sample when using bimodal distribution (0.0 - 1.0).
-    /// FDB default: 0.001 (0.1%) - see sim2.actor.cpp:319
-    ///
-    /// # Real-World Scenario
-    /// Tests handling of 99.9th percentile latencies.
-    pub slow_latency_probability: f64,
-
-    /// Multiplier for slow latencies in bimodal distribution.
-    /// FDB: slow latency is up to 10x normal latency
-    ///
-    /// # Real-World Scenario
-    /// Simulates network congestion, GC pauses, or cross-datacenter hops.
-    pub slow_latency_multiplier: f64,
-
-    /// Enable handshake delay simulation on new connections.
-    /// FDB ref: connectHandshake():389 adds `delay(0.01 * random01())`
-    ///
-    /// # Real-World Scenario
-    /// Simulates TLS negotiation, connection establishment overhead.
-    pub handshake_delay_enabled: bool,
-
-    /// Maximum handshake delay (default 10ms per FDB).
-    /// Applied once when a connection is established.
-    ///
-    /// # Real-World Scenario
-    /// Tests connection pool warm-up, startup latency.
-    pub handshake_delay_max: Duration,
-
     /// Network partition strategy.
     /// Controls how nodes are selected for partitioning.
     /// TigerBeetle ref: packet_simulator.zig partition modes
@@ -326,11 +241,6 @@ impl Default for ChaosConfiguration {
             buggified_delay_probability: 0.25, // FDB: random01() < 0.25
             connect_failure_mode: ConnectFailureMode::Probabilistic, // FDB: SIM_CONNECT_ERROR_MODE = 2
             connect_failure_probability: 0.5,                        // FDB: random01() > 0.5
-            latency_distribution: LatencyDistribution::default(),
-            slow_latency_probability: 0.001, // 0.1% per FDB halfLatency()
-            slow_latency_multiplier: 10.0,   // 10x normal latency
-            handshake_delay_enabled: true,
-            handshake_delay_max: Duration::from_millis(10), // FDB: 0.01 * random01()
             partition_strategy: PartitionStrategy::default(),
         }
     }
@@ -359,11 +269,6 @@ impl ChaosConfiguration {
             buggified_delay_probability: 0.25,
             connect_failure_mode: ConnectFailureMode::Disabled,
             connect_failure_probability: 0.5,
-            latency_distribution: LatencyDistribution::Uniform, // No bimodal for fast testing
-            slow_latency_probability: 0.0,                      // No slow latencies
-            slow_latency_multiplier: 1.0,                       // No multiplier
-            handshake_delay_enabled: false,                     // No handshake delays
-            handshake_delay_max: Duration::ZERO,
             partition_strategy: PartitionStrategy::Random, // Default strategy
         }
     }
@@ -394,16 +299,6 @@ impl ChaosConfiguration {
             buggified_delay_probability: sim_random_range(20..30) as f64 / 100.0,  // 20-30%
             connect_failure_mode: ConnectFailureMode::random_for_seed(),
             connect_failure_probability: sim_random_range(40..60) as f64 / 100.0, // 40-60%
-            // Randomly choose latency distribution (50% uniform, 50% bimodal)
-            latency_distribution: if sim_random_range(0..2) == 0 {
-                LatencyDistribution::Uniform
-            } else {
-                LatencyDistribution::Bimodal
-            },
-            slow_latency_probability: sim_random_range(1..5) as f64 / 1000.0, // 0.1% to 0.5%
-            slow_latency_multiplier: sim_random_range(5..20) as f64,          // 5x to 20x
-            handshake_delay_enabled: true,
-            handshake_delay_max: Duration::from_millis(sim_random_range(5..20)), // 5-20ms
             // Randomly choose partition strategy
             partition_strategy: match sim_random_range(0..3) {
                 0 => PartitionStrategy::Random,
@@ -451,65 +346,6 @@ pub fn sample_duration(range: &Range<Duration>) -> Duration {
     let end_nanos = range.end.as_nanos() as u64;
     let random_nanos = sim_random_range_or_default(start_nanos..end_nanos);
     Duration::from_nanos(random_nanos)
-}
-
-/// Sample a random duration with bimodal distribution support.
-///
-/// FDB ref: sim2.actor.cpp:317-329 (`halfLatency()`)
-///
-/// When `distribution` is `Bimodal`:
-/// - 99.9% of samples use normal latency (within `range`)
-/// - 0.1% of samples use slow latency (multiplied by `slow_multiplier`)
-///
-/// # Parameters
-/// - `range`: The base latency range
-/// - `chaos`: Chaos configuration with distribution settings
-///
-/// # Real-World Scenario
-/// Bimodal latency tests tail latency handling:
-/// - Most requests complete quickly
-/// - Rare requests experience significant delays (P99.9)
-pub fn sample_duration_bimodal(range: &Range<Duration>, chaos: &ChaosConfiguration) -> Duration {
-    use crate::sim::rng::sim_random;
-
-    let base_duration = sample_duration(range);
-
-    match chaos.latency_distribution {
-        LatencyDistribution::Uniform => base_duration,
-        LatencyDistribution::Bimodal => {
-            // FDB pattern: 99.9% fast, 0.1% slow
-            if sim_random::<f64>() < chaos.slow_latency_probability {
-                // Slow path: multiply by slow_latency_multiplier
-                let slow_nanos =
-                    (base_duration.as_nanos() as f64 * chaos.slow_latency_multiplier) as u64;
-                tracing::trace!(
-                    "Bimodal slow latency: {:?} -> {:?}",
-                    base_duration,
-                    Duration::from_nanos(slow_nanos)
-                );
-                Duration::from_nanos(slow_nanos)
-            } else {
-                base_duration
-            }
-        }
-    }
-}
-
-/// Sample a handshake delay based on chaos configuration.
-///
-/// FDB ref: connectHandshake():389 adds `delay(0.01 * random01())`
-///
-/// Returns `Duration::ZERO` if handshake delays are disabled.
-pub fn sample_handshake_delay(chaos: &ChaosConfiguration) -> Duration {
-    use crate::sim::rng::sim_random;
-
-    if !chaos.handshake_delay_enabled || chaos.handshake_delay_max == Duration::ZERO {
-        return Duration::ZERO;
-    }
-
-    // FDB pattern: 0.01 * random01() = up to 10ms
-    let random_factor = sim_random::<f64>();
-    Duration::from_nanos((chaos.handshake_delay_max.as_nanos() as f64 * random_factor) as u64)
 }
 
 impl NetworkConfiguration {

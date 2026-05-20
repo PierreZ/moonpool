@@ -34,13 +34,6 @@ pub enum MessagingError {
         message: String,
     },
 
-    /// Queue is full and cannot accept more messages.
-    #[error("queue full: capacity {capacity}")]
-    QueueFull {
-        /// Maximum capacity of the queue.
-        capacity: usize,
-    },
-
     /// Invalid well-known token index.
     #[error("invalid well-known token: {index} (max: {max})")]
     InvalidWellKnownToken {
@@ -49,10 +42,6 @@ pub enum MessagingError {
         /// Maximum allowed index.
         max: usize,
     },
-
-    /// Transport is closed or shutting down.
-    #[error("transport closed")]
-    TransportClosed,
 
     /// Invalid state for the requested operation.
     #[error("invalid state: {message}")]

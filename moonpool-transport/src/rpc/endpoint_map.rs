@@ -23,14 +23,6 @@ pub trait MessageReceiver {
     /// # Arguments
     /// * `payload` - Raw bytes to be deserialized by the receiver
     fn receive(&self, payload: &[u8]);
-
-    /// Whether this receiver handles a stream of messages (default: true).
-    ///
-    /// Stream receivers can receive multiple messages over their lifetime.
-    /// Non-stream receivers (promises) expect exactly one message.
-    fn is_stream(&self) -> bool {
-        true
-    }
 }
 
 /// Maps endpoint tokens to message receivers.

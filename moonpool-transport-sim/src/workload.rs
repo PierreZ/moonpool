@@ -26,10 +26,6 @@ use crate::service::{
     echo_method_uid, parse_sim_addr,
 };
 
-// =============================================================================
-// Timeline events
-// =============================================================================
-
 /// Events emitted to per-mode timelines for invariant checking.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DeliveryEvent {
@@ -77,10 +73,6 @@ pub const TL_AT_LEAST_ONCE: &str = "at_least_once";
 /// Timeline key for timeout delivery events.
 pub const TL_TIMEOUT: &str = "timeout";
 
-// =============================================================================
-// Operation alphabet
-// =============================================================================
-
 /// Weighted operations for the workload.
 #[derive(Debug, Clone, Copy)]
 enum Op {
@@ -94,10 +86,8 @@ enum Op {
     CheckMetrics,
 }
 
-/// Pick a random operation based on weights.
 fn random_op() -> Op {
-    let roll = sim_random_range(0..100);
-    match roll {
+    match sim_random_range(0..100) {
         0..12 => Op::SendFireAndForget,
         12..30 => Op::SendAtMostOnce,
         30..52 => Op::SendAtLeastOnce,
@@ -109,7 +99,6 @@ fn random_op() -> Op {
     }
 }
 
-/// Pick a random method index (1, 2, or 3).
 fn random_method() -> u64 {
     match sim_random_range(0..3) {
         0 => METHOD_ECHO,
@@ -118,15 +107,10 @@ fn random_method() -> u64 {
     }
 }
 
-/// Pick a random server from the list.
 fn random_server(servers: &[String]) -> &str {
     let idx = sim_random_range(0..servers.len());
     &servers[idx]
 }
-
-// =============================================================================
-// Workload
-// =============================================================================
 
 /// Transport client workload that exercises all delivery modes.
 pub struct TransportClientWorkload {
@@ -157,7 +141,6 @@ impl Workload for TransportClientWorkload {
 
         let my_addr = parse_sim_addr(ctx.my_ip())?;
 
-        // Build transport with listener (needed for RPC responses)
         let transport = NetTransportBuilder::new(ctx.providers().clone())
             .local_address(my_addr)
             .build_listening()
@@ -184,7 +167,7 @@ impl Workload for TransportClientWorkload {
             "workload starting"
         );
 
-        for _op_idx in 0..num_ops {
+        for _ in 0..num_ops {
             if shutdown.is_cancelled() {
                 tracing::info!("shutdown received, stopping new operations");
                 break;
@@ -461,8 +444,8 @@ impl Workload for TransportClientWorkload {
                 }
 
                 Op::ReliableBurst => {
-                    // Fire many reliable sends without awaiting replies to fill the queue.
-                    // This exercises the queue overflow / near-capacity path.
+                    // Fill the reliable queue without awaiting replies to exercise the
+                    // overflow / near-capacity path.
                     let server = random_server(&servers).to_string();
                     let server_addr = parse_sim_addr(&server)?;
                     let endpoint = Endpoint::new(server_addr, echo_method_uid(METHOD_ECHO));
@@ -477,7 +460,6 @@ impl Workload for TransportClientWorkload {
                             mode: DeliveryMode::AtLeastOnce,
                             method: METHOD_ECHO,
                         };
-                        // Fire-and-forget via reliable queue — don't await reply
                         let _ = get_reply(&*transport, &endpoint, req, &encode, decode.clone());
                     }
                     seq_counter += burst_size as u64;
@@ -508,7 +490,6 @@ impl Workload for TransportClientWorkload {
             }
         }
 
-        // Publish stats for report
         let final_stats = stats.borrow().clone();
         let key = format!("transport_stats_{}", client_id);
         ctx.state().publish(&key, final_stats);
@@ -519,14 +500,12 @@ impl Workload for TransportClientWorkload {
 
     #[instrument(skip(self, ctx), fields(client = self.index))]
     async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        // fire_and_forget: no Replied events should exist
         let ff_entries = ctx.timeline::<DeliveryEvent>(TL_FIRE_AND_FORGET);
         let has_reply = ff_entries
             .iter()
             .any(|e| matches!(&e.event, DeliveryEvent::Replied { .. }));
         assert_always!(!has_reply, "ff_no_replies_expected");
 
-        // at_most_once: every resolved seq_id was sent
         let amo_entries = ctx.timeline::<DeliveryEvent>(TL_AT_MOST_ONCE);
         let mut sent = std::collections::HashSet::new();
         for entry in amo_entries.iter() {

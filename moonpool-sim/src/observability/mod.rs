@@ -126,10 +126,8 @@ mod tests {
         let (handle, _guard) = layer.install();
 
         crate::sim_emit!("k", 1, "src", TestEvent::Hello(1));
-        assert_eq!(handle.snapshot_event_count(), 1);
 
         handle.reset_for_seed();
-        assert_eq!(handle.snapshot_event_count(), 0);
 
         crate::sim_emit!("k", 2, "src", TestEvent::Hello(2));
         let entries = handle.timeline::<TestEvent>("k");

@@ -159,16 +159,6 @@ impl<T: Serialize> ReplyPromise<T> {
 
         inner.fulfilled = true;
     }
-
-    /// Check if the promise has been fulfilled.
-    pub fn is_fulfilled(&self) -> bool {
-        self.inner.borrow().fulfilled
-    }
-
-    /// Get the reply endpoint.
-    pub fn endpoint(&self) -> Endpoint {
-        self.inner.borrow().reply_endpoint.clone()
-    }
 }
 
 impl<T: Serialize> Drop for ReplyPromise<T> {
@@ -229,8 +219,6 @@ mod tests {
                 *sent_clone.borrow_mut() = Some(payload.to_vec());
             },
         );
-
-        assert!(!promise.is_fulfilled());
 
         promise.send(TestResponse { value: 42 });
 
@@ -315,14 +303,5 @@ mod tests {
 
         // Should only have sent once
         assert_eq!(*send_count.borrow(), 1);
-    }
-
-    #[test]
-    fn test_reply_promise_endpoint() {
-        let endpoint = test_endpoint();
-        let promise: ReplyPromise<TestResponse> =
-            ReplyPromise::new(endpoint.clone(), test_encode_fn(), |_, _| {});
-
-        assert_eq!(promise.endpoint().token, endpoint.token);
     }
 }

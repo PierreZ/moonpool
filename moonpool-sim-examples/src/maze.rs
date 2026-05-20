@@ -3,8 +3,6 @@
 //! 4 locks, each behind 5 nested probability gates (P=0.05).
 //! Without exploration: P(all 4 locks) = (0.05^5)^4 ~ impossible.
 //! With exploration: finds all paths in seconds via fork amplification.
-//!
-//! Ported from `/home/pierrez/workspace/rust/Claude-fork-testing/maze-explorer/src/maze.rs`.
 
 use async_trait::async_trait;
 use moonpool_sim::{SimContext, SimulationResult, Workload};

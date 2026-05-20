@@ -97,62 +97,6 @@ impl<Req, Resp> InterfaceMethod<Req, Resp> {
             }
         }
     }
-
-    /// Close the stream (local mode only).
-    ///
-    /// # Panics
-    ///
-    /// Panics if called on a remote-mode handle.
-    pub fn close(&self) {
-        match &self.inner {
-            InterfaceMethodInner::Local { stream } => stream.close(),
-            InterfaceMethodInner::Remote { .. } => {
-                panic!("InterfaceMethod::close() called on a remote endpoint")
-            }
-        }
-    }
-
-    /// Check if the stream is closed (local mode only).
-    ///
-    /// # Panics
-    ///
-    /// Panics if called on a remote-mode handle.
-    pub fn is_closed(&self) -> bool {
-        match &self.inner {
-            InterfaceMethodInner::Local { stream } => stream.is_closed(),
-            InterfaceMethodInner::Remote { .. } => {
-                panic!("InterfaceMethod::is_closed() called on a remote endpoint")
-            }
-        }
-    }
-
-    /// Check if the stream is empty (local mode only).
-    ///
-    /// # Panics
-    ///
-    /// Panics if called on a remote-mode handle.
-    pub fn is_empty(&self) -> bool {
-        match &self.inner {
-            InterfaceMethodInner::Local { stream } => stream.is_empty(),
-            InterfaceMethodInner::Remote { .. } => {
-                panic!("InterfaceMethod::is_empty() called on a remote endpoint")
-            }
-        }
-    }
-
-    /// Get the number of pending requests (local mode only).
-    ///
-    /// # Panics
-    ///
-    /// Panics if called on a remote-mode handle.
-    pub fn len(&self) -> usize {
-        match &self.inner {
-            InterfaceMethodInner::Local { stream } => stream.len(),
-            InterfaceMethodInner::Remote { .. } => {
-                panic!("InterfaceMethod::len() called on a remote endpoint")
-            }
-        }
-    }
 }
 
 // ============================================================================
@@ -188,40 +132,6 @@ where
             InterfaceMethodInner::Local { stream } => stream.try_recv(),
             InterfaceMethodInner::Remote { .. } => {
                 panic!("InterfaceMethod::try_recv() called on a remote endpoint")
-            }
-        }
-    }
-
-    /// Receive the next request using a custom sender function (local mode only).
-    ///
-    /// # Panics
-    ///
-    /// Panics if called on a remote-mode handle.
-    pub async fn recv_with_sender<F>(&self, sender: F) -> Option<(Req, ReplyPromise<Resp>)>
-    where
-        F: FnOnce(&Endpoint, &[u8]) + 'static,
-    {
-        match &self.inner {
-            InterfaceMethodInner::Local { stream } => stream.recv_with_sender(sender).await,
-            InterfaceMethodInner::Remote { .. } => {
-                panic!("InterfaceMethod::recv_with_sender() called on a remote endpoint")
-            }
-        }
-    }
-
-    /// Try to receive a request without blocking, using a custom sender (local mode only).
-    ///
-    /// # Panics
-    ///
-    /// Panics if called on a remote-mode handle.
-    pub fn try_recv_with_sender<F>(&self, sender: F) -> Option<(Req, ReplyPromise<Resp>)>
-    where
-        F: FnOnce(&Endpoint, &[u8]) + 'static,
-    {
-        match &self.inner {
-            InterfaceMethodInner::Local { stream } => stream.try_recv_with_sender(sender),
-            InterfaceMethodInner::Remote { .. } => {
-                panic!("InterfaceMethod::try_recv_with_sender() called on a remote endpoint")
             }
         }
     }

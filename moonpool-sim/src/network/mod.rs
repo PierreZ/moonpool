@@ -11,8 +11,8 @@ pub mod sim;
 
 // Re-export configuration
 pub use config::{
-    ChaosConfiguration, ConnectFailureMode, LatencyDistribution, NetworkConfiguration,
-    PartitionStrategy, sample_duration, sample_duration_bimodal, sample_handshake_delay,
+    ChaosConfiguration, ConnectFailureMode, NetworkConfiguration, PartitionStrategy,
+    sample_duration,
 };
 
 // Re-export simulation network provider

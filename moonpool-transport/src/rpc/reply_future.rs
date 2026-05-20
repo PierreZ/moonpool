@@ -11,7 +11,6 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
-use crate::Endpoint;
 use serde::de::DeserializeOwned;
 
 use super::net_notified_queue::NetNotifiedQueue;
@@ -48,9 +47,6 @@ pub struct ReplyFuture<T: DeserializeOwned> {
     /// Queue receiving the reply.
     queue: Rc<NetNotifiedQueue<Result<T, ReplyError>>>,
 
-    /// The endpoint this future is listening on.
-    endpoint: Endpoint,
-
     /// Optional cleanup callback to unregister the reply endpoint from the
     /// transport's endpoint map on drop. Prevents endpoint map leaks when
     /// the future is dropped without being awaited.
@@ -58,11 +54,10 @@ pub struct ReplyFuture<T: DeserializeOwned> {
 }
 
 impl<T: DeserializeOwned> ReplyFuture<T> {
-    /// Create a new reply future with the given queue and endpoint.
-    pub fn new(queue: Rc<NetNotifiedQueue<Result<T, ReplyError>>>, endpoint: Endpoint) -> Self {
+    /// Create a new reply future with the given queue.
+    pub fn new(queue: Rc<NetNotifiedQueue<Result<T, ReplyError>>>) -> Self {
         Self {
             queue,
-            endpoint,
             drop_cleanup: None,
         }
     }
@@ -75,11 +70,6 @@ impl<T: DeserializeOwned> ReplyFuture<T> {
     pub fn with_drop_cleanup(mut self, cleanup: impl FnOnce() + 'static) -> Self {
         self.drop_cleanup = Some(Box::new(cleanup));
         self
-    }
-
-    /// Get the endpoint this future is listening on.
-    pub fn endpoint(&self) -> &Endpoint {
-        &self.endpoint
     }
 }
 
@@ -131,7 +121,7 @@ impl<T: DeserializeOwned> Drop for ReplyFuture<T> {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
-    use crate::{JsonCodec, NetworkAddress, UID};
+    use crate::{Endpoint, JsonCodec, NetworkAddress, UID};
     use serde::{Deserialize, Serialize};
 
     use super::*;
@@ -153,7 +143,7 @@ mod tests {
         let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
             Rc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
 
-        let future = ReplyFuture::new(queue.clone(), endpoint);
+        let future = ReplyFuture::new(queue.clone());
 
         // Simulate server response
         let response: Result<TestResponse, ReplyError> = Ok(TestResponse { value: 42 });
@@ -171,7 +161,7 @@ mod tests {
         let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
             Rc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
 
-        let future = ReplyFuture::new(queue.clone(), endpoint);
+        let future = ReplyFuture::new(queue.clone());
 
         // Simulate server error response
         let response: Result<TestResponse, ReplyError> = Err(ReplyError::BrokenPromise);
@@ -188,7 +178,7 @@ mod tests {
         let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
             Rc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
 
-        let future = ReplyFuture::new(queue.clone(), endpoint);
+        let future = ReplyFuture::new(queue.clone());
 
         // Close the queue to simulate connection failure
         queue.close();
@@ -203,22 +193,12 @@ mod tests {
         let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
             Rc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
 
-        let future = ReplyFuture::new(queue.clone(), endpoint);
+        let future = ReplyFuture::new(queue.clone());
 
         // Close the queue with MaybeDelivered (simulating peer disconnect)
         queue.close_with_reason(ReplyError::MaybeDelivered);
 
         let result = future.await;
         assert_eq!(result, Err(ReplyError::MaybeDelivered));
-    }
-
-    #[test]
-    fn test_reply_future_endpoint() {
-        let endpoint = test_endpoint();
-        let queue: Rc<NetNotifiedQueue<Result<TestResponse, ReplyError>>> =
-            Rc::new(NetNotifiedQueue::with_codec(endpoint.clone(), JsonCodec));
-
-        let future = ReplyFuture::new(queue, endpoint.clone());
-        assert_eq!(future.endpoint().token, endpoint.token);
     }
 }

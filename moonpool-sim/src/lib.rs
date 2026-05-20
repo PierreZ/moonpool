@@ -22,18 +22,6 @@
 //! - [`storage`]: Storage simulation with fault injection
 //! - Multiverse exploration via `moonpool-explorer` (re-exported as [`ExplorationConfig`], [`AdaptiveConfig`])
 //!
-//! ## Quick Start
-//!
-//! ```ignore
-//! use moonpool_sim::{SimulationBuilder, WorkloadTopology};
-//!
-//! SimulationBuilder::new()
-//!     .topology(WorkloadTopology::ClientServer { clients: 2, servers: 1 })
-//!     .run(|ctx| async move {
-//!         // Your distributed system workload
-//!     });
-//! ```
-//!
 //! ## Fault Injection Overview
 //!
 //! See [`chaos`] module for detailed documentation.
@@ -52,25 +40,6 @@
 //! | Storage corruption | configurable | Checksum validation, recovery |
 //! | Torn writes | configurable | Write atomicity, journaling |
 //! | Sync failures | configurable | Durability guarantees |
-//!
-//! ## Multi-Seed Testing
-//!
-//! Tests run across multiple seeds to explore the state space:
-//!
-//! ```ignore
-//! SimulationBuilder::new()
-//!     .run_count(IterationControl::UntilAllSometimesReached(1000))
-//!     .run(workload);
-//! ```
-//!
-//! Debugging a failing seed:
-//!
-//! ```ignore
-//! SimulationBuilder::new()
-//!     .set_seed(failing_seed)
-//!     .run_count(IterationControl::FixedCount(1))
-//!     .run(workload);
-//! ```
 //!
 //! ## Coverage-Preserving Multi-Seed Exploration
 //!
@@ -192,8 +161,8 @@ pub use runner::{
 // Chaos module re-exports
 pub use chaos::{
     AssertionStats, SIM_FAULT_TIMELINE, SimFaultEvent, StateHandle, assertion_results,
-    buggify_init, buggify_reset, has_always_violations, panic_on_assertion_violations,
-    reset_always_violations, reset_assertion_results, validate_assertion_contracts,
+    buggify_init, buggify_reset, has_always_violations, reset_always_violations,
+    reset_assertion_results, validate_assertion_contracts,
 };
 
 // Observability module re-exports (new system replacing legacy Timeline + Invariant)
@@ -222,6 +191,6 @@ pub use moonpool_explorer::{
     AdaptiveConfig, AssertCmp, AssertKind, ExplorationConfig, Parallelism, format_timeline,
     parse_timeline,
 };
-pub use runner::report::{BugRecipe, ExplorationReport, ReportCheckError};
+pub use runner::report::{BugRecipe, ExplorationReport};
 
 // Macros are automatically available at crate root when defined with #[macro_export]

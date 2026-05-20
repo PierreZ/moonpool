@@ -231,7 +231,6 @@ pub struct SimulationBuilder {
     fault_injectors: Vec<Box<dyn FaultInjector>>,
     chaos_duration: Option<Duration>,
     exploration_config: Option<moonpool_explorer::ExplorationConfig>,
-    replay_recipe: Option<super::report::BugRecipe>,
     before_iteration_hooks: Vec<Box<dyn FnMut()>>,
     seed_warning_timeout: Option<Duration>,
 }
@@ -256,7 +255,6 @@ impl SimulationBuilder {
             fault_injectors: Vec::new(),
             chaos_duration: None,
             exploration_config: None,
-            replay_recipe: None,
             before_iteration_hooks: Vec::new(),
             seed_warning_timeout: None,
         }
@@ -271,16 +269,6 @@ impl SimulationBuilder {
             Some(Box::new(w)),
             ClientId::default(),
         ));
-        self
-    }
-
-    /// Add a single workload instance with a custom client ID strategy.
-    ///
-    /// Like [`workload()`](Self::workload), but the resolved client ID is
-    /// available via [`SimContext::client_id()`](super::context::SimContext::client_id).
-    pub fn workload_with_client_id(mut self, client_id: ClientId, w: impl Workload) -> Self {
-        self.entries
-            .push(WorkloadEntry::Instance(Some(Box::new(w)), client_id));
         self
     }
 
@@ -398,35 +386,6 @@ impl SimulationBuilder {
         self
     }
 
-    /// Add multiple workload instances with a custom client ID strategy.
-    ///
-    /// Like [`workloads()`](Self::workloads), but client IDs are assigned
-    /// according to the given [`ClientId`] strategy instead of sequential.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// // 3 clients with random IDs in [100..200)
-    /// builder.workloads_with_client_id(
-    ///     WorkloadCount::Fixed(3),
-    ///     ClientId::RandomRange(100..200),
-    ///     |i| Box::new(ClientWorkload::new(i)),
-    /// )
-    /// ```
-    pub fn workloads_with_client_id(
-        mut self,
-        count: WorkloadCount,
-        client_id: ClientId,
-        factory: impl Fn(usize) -> Box<dyn Workload> + 'static,
-    ) -> Self {
-        self.entries.push(WorkloadEntry::Factory {
-            count,
-            client_id,
-            factory: Box::new(factory),
-        });
-        self
-    }
-
     /// Add an invariant to be checked after every simulation event.
     pub fn invariant<I: Invariant>(mut self, i: I) -> Self {
         self.invariants.push(Box::new(i));
@@ -473,18 +432,6 @@ impl SimulationBuilder {
     /// If not set, no slow-seed warnings are produced.
     pub fn seed_warning_timeout(mut self, timeout: Duration) -> Self {
         self.seed_warning_timeout = Some(timeout);
-        self
-    }
-
-    /// Set the iteration control strategy.
-    pub fn set_iteration_control(mut self, control: IterationControl) -> Self {
-        self.iteration_control = control;
-        self
-    }
-
-    /// Run for a specific wall-clock time duration.
-    pub fn set_time_limit(mut self, duration: Duration) -> Self {
-        self.iteration_control = IterationControl::TimeLimit(duration);
         self
     }
 
@@ -557,15 +504,6 @@ impl SimulationBuilder {
     /// discovery points to explore alternate timelines with different seeds.
     pub fn enable_exploration(mut self, config: moonpool_explorer::ExplorationConfig) -> Self {
         self.exploration_config = Some(config);
-        self
-    }
-
-    /// Set a bug recipe for deterministic replay.
-    ///
-    /// The builder applies the recipe's RNG breakpoints after its own
-    /// initialization, ensuring they survive internal resets.
-    pub fn replay_recipe(mut self, recipe: super::report::BugRecipe) -> Self {
-        self.replay_recipe = Some(recipe);
         self
     }
 
@@ -809,11 +747,6 @@ impl SimulationBuilder {
 
             // Create shared SimWorld for this iteration using fresh network config
             let sim = crate::sim::SimWorld::new_with_network_config_and_seed(network_config, seed);
-
-            // Apply replay breakpoints after SimWorld creation (which resets RNG state)
-            if let Some(ref br) = self.replay_recipe {
-                crate::sim::set_rng_breakpoints(br.recipe.clone());
-            }
 
             let start_time = Instant::now();
 

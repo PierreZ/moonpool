@@ -78,18 +78,7 @@ pub struct PeerMetrics {
     pub total_ping_rtt: Duration,
 }
 
-impl Default for PeerMetrics {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl PeerMetrics {
-    /// Create new metrics instance (defaults to zero creation time).
-    pub fn new() -> Self {
-        Self::new_at(Duration::ZERO)
-    }
-
     /// Create new metrics instance with a specific creation time.
     pub fn new_at(created_at: Duration) -> Self {
         Self {
@@ -202,38 +191,5 @@ impl PeerMetrics {
     /// Record a tolerated ping timeout (bytes were still flowing).
     pub fn record_ping_timeout_tolerated(&mut self) {
         self.ping_timeouts_tolerated += 1;
-    }
-
-    /// Calculate average ping RTT, or `None` if no pongs received.
-    pub fn average_ping_rtt(&self) -> Option<Duration> {
-        if self.pongs_received == 0 {
-            None
-        } else {
-            Some(self.total_ping_rtt / self.pongs_received as u32)
-        }
-    }
-
-    /// Calculate connection success rate as a percentage.
-    pub fn connection_success_rate(&self) -> f64 {
-        if self.connection_attempts == 0 {
-            100.0
-        } else {
-            (self.connections_established as f64 / self.connection_attempts as f64) * 100.0
-        }
-    }
-
-    /// Get the total uptime duration since creation.
-    pub fn total_uptime(&self, now: Duration) -> Duration {
-        now.saturating_sub(self.created_at)
-    }
-
-    /// Get time since last successful connection.
-    pub fn time_since_last_connection(&self, now: Duration) -> Option<Duration> {
-        self.last_connected.map(|t| now.saturating_sub(t))
-    }
-
-    /// Get time since last failure.
-    pub fn time_since_last_failure(&self, now: Duration) -> Option<Duration> {
-        self.last_failure.map(|t| now.saturating_sub(t))
     }
 }

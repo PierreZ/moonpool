@@ -150,7 +150,7 @@ where
 
     // Attach cleanup callback to unregister the reply endpoint on drop.
     let weak_transport = transport.weak_for_cleanup();
-    let future = ReplyFuture::new(reply_queue, reply_endpoint).with_drop_cleanup(move || {
+    let future = ReplyFuture::new(reply_queue).with_drop_cleanup(move || {
         if let Some(t) = weak_transport.upgrade() {
             t.unregister(&reply_token);
         }

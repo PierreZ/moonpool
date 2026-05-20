@@ -99,8 +99,8 @@ pub use rpc::{
     DecodeFn, EncodeFn, EndpointMap, FailureMonitor, FailureStatus, InterfaceMethod,
     MessageReceiver, NetNotifiedQueue, NetTransport, NetTransportBuilder, ReplyError, ReplyFuture,
     ReplyPromise, RequestEnvelope, RequestStream, RpcError, ServerHandle, ServiceEndpoint,
-    Smoother, TransportHandle, get_reply, get_reply_unless_failed_for, make_decode_fn,
-    make_encode_fn, method_endpoint, method_uid, send, send_request, try_get_reply,
+    TransportHandle, get_reply, get_reply_unless_failed_for, make_decode_fn, make_encode_fn, send,
+    send_request, try_get_reply,
 };
 
 // Attribute macros

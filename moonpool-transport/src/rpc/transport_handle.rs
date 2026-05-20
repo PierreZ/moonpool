@@ -5,10 +5,7 @@
 //! the `P: Providers` generic from their signatures. The codec generic `C`
 //! is erased separately via typed closures ([`EncodeFn`] / [`DecodeFn`]).
 
-use std::future::Future;
-use std::pin::Pin;
 use std::rc::{Rc, Weak};
-use std::time::Duration;
 
 use crate::error::MessagingError;
 use crate::rpc::endpoint_map::MessageReceiver;
@@ -71,7 +68,4 @@ pub trait TransportHandle {
 
     /// Get a weak reference for drop cleanup callbacks.
     fn weak_for_cleanup(&self) -> Weak<dyn TransportHandle>;
-
-    /// Sleep for a duration (object-safe wrapper around `TimeProvider::sleep`).
-    fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + '_>>;
 }

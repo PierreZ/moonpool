@@ -113,15 +113,6 @@ impl InMemoryStore {
     }
 }
 
-impl Default for InMemoryStore {
-    fn default() -> Self {
-        Self {
-            items: RwLock::new(BTreeMap::new()),
-            next_id: AtomicU64::new(1),
-        }
-    }
-}
-
 impl Store for InMemoryStore {
     fn create(&self, name: &str) -> Result<Item, StoreError> {
         // Fault injection: randomly fail writes.

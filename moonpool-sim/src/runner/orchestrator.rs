@@ -481,7 +481,6 @@ impl WorkloadOrchestrator {
                     .map_err(|_| (vec![seed], 1usize))?;
                 let fault_ctx = FaultContext::new(
                     fault_sim,
-                    all_ips.clone(),
                     crate::runner::fault_injector::ProcessInfo {
                         process_ips: process_manager.ips.clone(),
                         tag_registry: process_manager.tag_registry.clone(),

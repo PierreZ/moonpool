@@ -603,11 +603,6 @@ impl<P: Providers, C: MessageCodec> NetTransport<P, C> {
         data.endpoints.well_known_count() + data.endpoints.dynamic_count()
     }
 
-    /// Get number of incoming peers (from accepted connections).
-    pub fn incoming_peer_count(&self) -> usize {
-        self.data.borrow().incoming_peers.len()
-    }
-
     /// Spawn a connection_reader for a peer.
     ///
     /// FDB Pattern: connectionKeeper spawns connectionReader (line 843).
@@ -773,17 +768,6 @@ impl<P: Providers, C: MessageCodec> super::transport_handle::TransportHandle
             .borrow()
             .clone()
             .unwrap_or_else(|| std::rc::Weak::<Self>::new())
-    }
-
-    fn sleep(
-        &self,
-        duration: std::time::Duration,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>> {
-        use crate::TimeProvider as _;
-        let time = self.providers.time().clone();
-        Box::pin(async move {
-            let _ = time.sleep(duration).await;
-        })
     }
 }
 

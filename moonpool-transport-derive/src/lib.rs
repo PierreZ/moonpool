@@ -57,41 +57,22 @@ pub fn service(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Auto-detect mode from method receivers and delegate.
 fn service_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
-    let mut has_ref = false;
-    let mut has_mut_ref = false;
-
     for trait_item in &item.items {
         if let TraitItem::Fn(method) = trait_item
             && let Some(FnArg::Receiver(recv)) = method.sig.inputs.first()
+            && recv.mutability.is_some()
         {
-            if recv.mutability.is_some() {
-                has_mut_ref = true;
-            } else {
-                has_ref = true;
-            }
+            return Err(syn::Error::new_spanned(
+                &item.ident,
+                "`&mut self` methods (virtual actor mode) have been removed. Use `&self` for RPC services.",
+            ));
         }
-    }
-
-    if has_ref && has_mut_ref {
-        return Err(syn::Error::new_spanned(
-            &item.ident,
-            "all methods must use `&self` receivers",
-        ));
-    }
-
-    if has_mut_ref {
-        return Err(syn::Error::new_spanned(
-            &item.ident,
-            "`&mut self` methods (virtual actor mode) have been removed. Use `&self` for RPC services.",
-        ));
     }
 
     interface_impl(item)
 }
 
-/// Method info extracted from trait methods.
 struct MethodInfo {
     index: u32,
     name: Ident,
@@ -106,18 +87,13 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
     let name = &item.ident;
     let handler_name = format_ident!("{}Handler", name);
 
-    // Parse trait methods
     let mut method_infos: Vec<MethodInfo> = Vec::new();
     for (index, trait_item) in item.items.iter().enumerate() {
         if let TraitItem::Fn(method) = trait_item {
-            let method_name = &method.sig.ident;
-
-            // Extract request and response types from method signature
             let (req_type, resp_type) = extract_method_types(&method.sig)?;
-
             method_infos.push(MethodInfo {
                 index: (index as u32) + METHOD_INDEX_OFFSET,
-                name: method_name.clone(),
+                name: method.sig.ident.clone(),
                 req_type,
                 resp_type,
             });
@@ -126,7 +102,6 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
 
     let method_count = method_infos.len() as u32;
 
-    // Generate unified fields — InterfaceMethod<Req, Resp> per method
     let struct_fields = method_infos.iter().map(|m| {
         let name = &m.name;
         let req_type = &m.req_type;
@@ -134,7 +109,6 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
         quote! { pub #name: moonpool_transport::InterfaceMethod<#req_type, #resp_type> }
     });
 
-    // Generate init_at — registers handlers and wraps in InterfaceMethod::local
     let init_at_fields: Vec<_> = method_infos
         .iter()
         .map(|m| {
@@ -150,7 +124,6 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
 
     let field_names: Vec<_> = method_infos.iter().map(|m| &m.name).collect();
 
-    // Generate from_base field constructors — wraps in InterfaceMethod::remote
     let from_base_inits: Vec<_> = method_infos
         .iter()
         .map(|m| {
@@ -173,12 +146,10 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
 
     let first_field_name = &method_infos[0].name;
 
-    // Generate the trait with async_trait attribute (renamed to {Name}Handler)
     let trait_vis = &item.vis;
     let trait_items = &item.items;
     let trait_name_snake = to_snake_case(&name.to_string());
 
-    // Generate serve() method blocks — one close handle + one spawned task per method
     let serve_close_handles: Vec<_> = method_infos
         .iter()
         .map(|m| {
@@ -218,7 +189,6 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
         .collect();
 
     let expanded = quote! {
-        // Emit the original trait renamed to {Name}Handler
         #[async_trait::async_trait(?Send)]
         #trait_vis trait #handler_name {
             #(#trait_items)*
@@ -245,10 +215,6 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
         impl #name {
             /// Number of methods in this interface.
             pub const METHOD_COUNT: u32 = #method_count;
-
-            // ==============================================================
-            // Server constructors (local mode)
-            // ==============================================================
 
             /// Initialize the interface in server (local) mode.
             ///
@@ -286,10 +252,6 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
                 Self::init_at(transport, moonpool_transport::UID::well_known(token_id))
             }
 
-            // ==============================================================
-            // Client constructors (remote mode)
-            // ==============================================================
-
             /// Create a client (remote mode) from a base token.
             ///
             /// Methods target `base_token.adjusted(1)`, `.adjusted(2)`, etc.
@@ -321,10 +283,6 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
             ) -> Self {
                 Self::from_base(address, moonpool_transport::UID::well_known(token_id), transport)
             }
-
-            // ==============================================================
-            // Shared methods
-            // ==============================================================
 
             /// Get the base token for this interface instance.
             ///
@@ -419,25 +377,17 @@ fn interface_impl(item: ItemTrait) -> syn::Result<proc_macro2::TokenStream> {
     Ok(expanded)
 }
 
-/// Extract request and response types from method signature.
-///
-/// Expected signature: `async fn name(&self, req: ReqType) -> Result<RespType, RpcError>`
+/// Extract request and response types from `async fn name(&self, req: ReqType) -> Result<RespType, RpcError>`.
 fn extract_method_types(sig: &syn::Signature) -> syn::Result<(Type, Type)> {
-    // Skip &self, get the second argument
     let mut inputs = sig.inputs.iter();
 
-    // First should be &self
-    match inputs.next() {
-        Some(FnArg::Receiver(_)) => {}
-        _ => {
-            return Err(syn::Error::new_spanned(
-                sig,
-                "Interface method must have &self as first parameter",
-            ));
-        }
+    if !matches!(inputs.next(), Some(FnArg::Receiver(_))) {
+        return Err(syn::Error::new_spanned(
+            sig,
+            "Interface method must have &self as first parameter",
+        ));
     }
 
-    // Second should be the request parameter
     let req_type = match inputs.next() {
         Some(FnArg::Typed(pat_type)) => (*pat_type.ty).clone(),
         _ => {
@@ -448,7 +398,6 @@ fn extract_method_types(sig: &syn::Signature) -> syn::Result<(Type, Type)> {
         }
     };
 
-    // Extract response type from return type: Result<RespType, RpcError>
     let resp_type = match &sig.output {
         ReturnType::Type(_, ty) => extract_result_ok_type(ty)?,
         ReturnType::Default => {

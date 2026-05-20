@@ -15,7 +15,6 @@
 mod delivery;
 mod endpoint_map;
 mod failure_monitor;
-mod interface;
 mod interface_method;
 mod net_notified_queue;
 mod net_transport;
@@ -27,7 +26,6 @@ mod request_stream;
 mod rpc_error;
 mod server_handle;
 mod service_endpoint;
-mod smoother;
 #[cfg(test)]
 mod test_support;
 mod transport_handle;
@@ -35,7 +33,6 @@ mod transport_handle;
 pub use delivery::{get_reply, get_reply_unless_failed_for, send, try_get_reply};
 pub use endpoint_map::{EndpointMap, MessageReceiver};
 pub use failure_monitor::{FailureMonitor, FailureStatus};
-pub use interface::{method_endpoint, method_uid};
 pub use interface_method::InterfaceMethod;
 pub use net_notified_queue::{
     NetNotifiedQueue, RecvFuture, ReplyQueueCloser, SharedNetNotifiedQueue,
@@ -49,5 +46,4 @@ pub use request_stream::{RequestEnvelope, RequestStream};
 pub use rpc_error::RpcError;
 pub use server_handle::ServerHandle;
 pub use service_endpoint::ServiceEndpoint;
-pub use smoother::Smoother;
 pub use transport_handle::{DecodeFn, EncodeFn, TransportHandle, make_decode_fn, make_encode_fn};

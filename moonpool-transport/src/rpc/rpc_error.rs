@@ -67,7 +67,7 @@ mod tests {
 
     #[test]
     fn test_rpc_error_from_messaging() {
-        let err = MessagingError::TransportClosed;
+        let err = MessagingError::MissingLocalAddress;
         let rpc_err: RpcError = err.into();
         assert!(matches!(rpc_err, RpcError::Messaging(_)));
     }

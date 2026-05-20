@@ -20,23 +20,18 @@ use crate::workload::{DeliveryEvent, TL_AT_LEAST_ONCE, TL_AT_MOST_ONCE, TL_TIMEO
 /// Maintains per-mode sets of sent/resolved seq_ids to detect phantoms and
 /// double-resolutions.
 pub struct DeliveryContractInvariant {
-    // Cursors for incremental timeline scanning
     cursor_amo: Cell<usize>,
     cursor_alo: Cell<usize>,
     cursor_to: Cell<usize>,
     cursor_faults: Cell<usize>,
 
-    // at_most_once tracking
     amo_sent: RefCell<HashSet<u64>>,
     amo_resolved: RefCell<HashSet<u64>>,
 
-    // at_least_once tracking
     alo_sent: RefCell<HashSet<u64>>,
 
-    // timeout tracking
     to_timed_out: RefCell<HashSet<u64>>,
 
-    // cross-mode tracking
     any_faults: Cell<bool>,
     any_replies: Cell<bool>,
 }
@@ -64,7 +59,6 @@ impl DeliveryContractInvariant {
         }
     }
 
-    /// Check at-most-once timeline: no phantoms, at most one resolution per seq_id.
     fn check_at_most_once(&self, q: &dyn TimelineQuery) {
         let new_entries = q.since::<DeliveryEvent>(TL_AT_MOST_ONCE, &self.cursor_amo);
         if new_entries.is_empty() {
@@ -99,7 +93,6 @@ impl DeliveryContractInvariant {
         }
     }
 
-    /// Check at-least-once timeline: no phantom replies.
     fn check_at_least_once(&self, q: &dyn TimelineQuery) {
         let new_entries = q.since::<DeliveryEvent>(TL_AT_LEAST_ONCE, &self.cursor_alo);
         if new_entries.is_empty() {
@@ -123,7 +116,6 @@ impl DeliveryContractInvariant {
         }
     }
 
-    /// Check timeout timeline: no response after timeout declared.
     fn check_timeout(&self, q: &dyn TimelineQuery) {
         let new_entries = q.since::<DeliveryEvent>(TL_TIMEOUT, &self.cursor_to);
         if new_entries.is_empty() {
@@ -150,7 +142,6 @@ impl DeliveryContractInvariant {
         }
     }
 
-    /// Check cross-mode: faults injected AND messages still delivered.
     fn check_cross_mode(&self, q: &dyn TimelineQuery) {
         if !self.any_faults.get() {
             let new_faults = q.since::<SimFaultEvent>(SIM_FAULT_TIMELINE, &self.cursor_faults);

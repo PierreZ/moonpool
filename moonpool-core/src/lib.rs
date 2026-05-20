@@ -59,7 +59,6 @@
 mod codec;
 mod error;
 mod network;
-mod node_address;
 mod providers;
 mod random;
 mod storage;
@@ -95,6 +94,5 @@ pub use time::TokioTimeProvider;
 pub use time::{TimeError, TimeProvider};
 
 // Core type exports
-pub use node_address::NodeAddress;
 pub use types::{Endpoint, NetworkAddress, NetworkAddressParseError, UID, flags};
 pub use well_known::{WELL_KNOWN_RESERVED_COUNT, WellKnownToken};

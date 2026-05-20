@@ -68,15 +68,7 @@ impl EachBucket {
     }
 }
 
-/// FNV-1a hash of a message string to a stable u32.
-fn msg_hash(msg: &str) -> u32 {
-    let mut h: u32 = 0x811c9dc5;
-    for b in msg.bytes() {
-        h ^= b as u32;
-        h = h.wrapping_mul(0x01000193);
-    }
-    h
-}
+use crate::assertion_slots::msg_hash;
 
 /// Find an existing bucket or allocate a new one by (site_hash, bucket_hash).
 ///

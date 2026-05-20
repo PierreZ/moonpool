@@ -31,7 +31,7 @@ use std::task::{Context, Poll, Waker};
 
 use serde::de::DeserializeOwned;
 
-use crate::{Endpoint, MessageCodec, NetworkAddress, UID};
+use crate::{Endpoint, MessageCodec};
 
 use super::endpoint_map::MessageReceiver;
 use super::reply_error::ReplyError;
@@ -114,12 +114,6 @@ impl<T> NetNotifiedQueue<T> {
         T: DeserializeOwned + 'static,
     {
         Self::new(endpoint, super::transport_handle::make_decode_fn(codec))
-    }
-
-    /// Create a new queue with a dynamically allocated endpoint.
-    pub fn with_address(address: NetworkAddress, decode_fn: DecodeFn<T>) -> Self {
-        let token = UID::new(0, rand_simple_id());
-        Self::new(Endpoint::new(address, token), decode_fn)
     }
 
     /// Get the endpoint for this queue.
@@ -324,20 +318,12 @@ impl<T> ReplyQueueCloser for NetNotifiedQueue<Result<T, ReplyError>> {
     }
 }
 
-/// Simple sequential ID generator for testing.
-/// In production, use RandomProvider for deterministic IDs.
-fn rand_simple_id() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
-}
-
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
     use super::*;
-    use crate::JsonCodec;
+    use crate::{JsonCodec, NetworkAddress, UID};
 
     fn test_endpoint() -> Endpoint {
         let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4500);

@@ -221,12 +221,6 @@ impl EventQueue {
         self.heap.pop()
     }
 
-    /// Returns a reference to the earliest scheduled event without removing it.
-    #[allow(dead_code)]
-    pub fn peek_earliest(&self) -> Option<&ScheduledEvent> {
-        self.heap.peek()
-    }
-
     /// Returns `true` if the queue is empty.
     pub fn is_empty(&self) -> bool {
         self.heap.is_empty()

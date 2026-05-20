@@ -131,21 +131,6 @@ impl NetworkAddress {
         Self { ip, port, flags: 0 }
     }
 
-    /// Create a new network address with flags.
-    pub fn with_flags(ip: IpAddr, port: u16, flags: u16) -> Self {
-        Self { ip, port, flags }
-    }
-
-    /// Check if this address uses TLS.
-    pub fn is_tls(&self) -> bool {
-        self.flags & flags::FLAG_TLS != 0
-    }
-
-    /// Check if this address is publicly routable.
-    pub fn is_public(&self) -> bool {
-        self.flags & flags::FLAG_PUBLIC != 0
-    }
-
     /// Parse from string "ip:port" format.
     ///
     /// Supports both IPv4 (`127.0.0.1:4500`) and IPv6 (`[::1]:4500`) notation.
@@ -218,7 +203,7 @@ pub enum NetworkAddressParseError {
 /// # Examples
 ///
 /// ```
-/// use moonpool_core::{Endpoint, NetworkAddress, UID, WellKnownToken};
+/// use moonpool_core::{Endpoint, NetworkAddress, WellKnownToken};
 /// use std::net::{IpAddr, Ipv4Addr};
 ///
 /// let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4500);
@@ -256,11 +241,6 @@ impl Endpoint {
             address: self.address.clone(),
             token: self.token.adjusted(index),
         }
-    }
-
-    /// Check if endpoint is valid (has valid token).
-    pub fn is_valid(&self) -> bool {
-        self.token.is_valid()
     }
 }
 
@@ -316,25 +296,12 @@ mod tests {
     fn test_network_address_ipv4() {
         let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 4500);
         assert_eq!(addr.to_string(), "192.168.1.1:4500");
-        assert!(!addr.is_tls());
-        assert!(!addr.is_public());
     }
 
     #[test]
     fn test_network_address_ipv6() {
         let addr = NetworkAddress::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 4500);
         assert_eq!(addr.to_string(), "[::1]:4500");
-    }
-
-    #[test]
-    fn test_network_address_flags() {
-        let addr = NetworkAddress::with_flags(
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            4500,
-            flags::FLAG_TLS | flags::FLAG_PUBLIC,
-        );
-        assert!(addr.is_tls());
-        assert!(addr.is_public());
     }
 
     #[test]
@@ -365,7 +332,7 @@ mod tests {
         let endpoint = Endpoint::well_known(addr, WellKnownToken::Ping);
 
         assert!(endpoint.token.is_well_known());
-        assert!(endpoint.is_valid());
+        assert!(endpoint.token.is_valid());
     }
 
     #[test]
@@ -416,20 +383,6 @@ mod tests {
         let json = serde_json::to_string(&addr).expect("serialize");
         let decoded: NetworkAddress = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(addr, decoded);
-    }
-
-    #[test]
-    fn test_network_address_serde_with_flags() {
-        let addr = NetworkAddress::with_flags(
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            4500,
-            flags::FLAG_TLS | flags::FLAG_PUBLIC,
-        );
-        let json = serde_json::to_string(&addr).expect("serialize");
-        let decoded: NetworkAddress = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(addr, decoded);
-        assert!(decoded.is_tls());
-        assert!(decoded.is_public());
     }
 
     #[test]

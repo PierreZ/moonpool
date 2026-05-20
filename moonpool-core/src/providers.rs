@@ -145,6 +145,7 @@ impl Providers for TokioProviders {
     type Time = TokioTimeProvider;
     type Task = TokioTaskProvider;
     type Random = TokioRandomProvider;
+    type Storage = TokioStorageProvider;
 
     fn network(&self) -> &Self::Network {
         &self.network
@@ -161,8 +162,6 @@ impl Providers for TokioProviders {
     fn random(&self) -> &Self::Random {
         &self.random
     }
-
-    type Storage = TokioStorageProvider;
 
     fn storage(&self) -> &Self::Storage {
         &self.storage

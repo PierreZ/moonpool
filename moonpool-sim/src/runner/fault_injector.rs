@@ -20,7 +20,7 @@
 //! impl FaultInjector for RandomPartition {
 //!     fn name(&self) -> &str { "random_partition" }
 //!     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
-//!         let ips = ctx.all_ips();
+//!         let ips = ctx.process_ips();
 //!         while !ctx.chaos_shutdown().is_cancelled() {
 //!             if ctx.random().random_bool(self.probability) && ips.len() >= 2 {
 //!                 ctx.partition(&ips[0], &ips[1])?;
@@ -63,7 +63,6 @@ pub struct ProcessInfo {
 /// workloads should not use.
 pub struct FaultContext {
     sim: SimWorld,
-    all_ips: Vec<String>,
     process_info: ProcessInfo,
     random: SimRandomProvider,
     time: SimTimeProvider,
@@ -74,7 +73,6 @@ impl FaultContext {
     /// Create a new fault context with process information.
     pub fn new(
         sim: SimWorld,
-        all_ips: Vec<String>,
         process_info: ProcessInfo,
         random: SimRandomProvider,
         time: SimTimeProvider,
@@ -82,7 +80,6 @@ impl FaultContext {
     ) -> Self {
         Self {
             sim,
-            all_ips,
             process_info,
             random,
             time,
@@ -130,11 +127,6 @@ impl FaultContext {
             crate::SimulationError::InvalidState(format!("invalid IP '{}': {}", b, e))
         })?;
         self.sim.is_partitioned(a_ip, b_ip)
-    }
-
-    /// Get all IP addresses in the simulation.
-    pub fn all_ips(&self) -> &[String] {
-        &self.all_ips
     }
 
     /// Get the seeded random provider.
