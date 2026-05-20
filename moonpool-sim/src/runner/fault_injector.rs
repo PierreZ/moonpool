@@ -272,8 +272,8 @@ impl FaultContext {
 /// Fault injectors run concurrently with workloads when `chaos_duration` is set.
 /// They are signaled to stop via `ctx.chaos_shutdown()` when the chaos duration
 /// elapses. After all workloads complete, the system settles before checks run.
-#[async_trait(?Send)]
-pub trait FaultInjector: 'static {
+#[async_trait]
+pub trait FaultInjector: Send + Sync + 'static {
     /// Name of this fault injector for reporting.
     fn name(&self) -> &str;
 
@@ -299,7 +299,7 @@ impl AttritionInjector {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl FaultInjector for AttritionInjector {
     fn name(&self) -> &str {
         "attrition"

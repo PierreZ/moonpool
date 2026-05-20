@@ -41,8 +41,8 @@ use super::context::SimContext;
 /// persists through storage, not in-memory fields.
 ///
 /// The process reads its tags and index from [`SimContext`] to determine its role.
-#[async_trait(?Send)]
-pub trait Process: 'static {
+#[async_trait]
+pub trait Process: Send + Sync + 'static {
     /// Name of this process type for reporting.
     fn name(&self) -> &str;
 

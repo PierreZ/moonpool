@@ -770,7 +770,7 @@ impl SimulationBuilder {
             let local_runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_time()
                 .rng_seed(rng_seed)
-                .build_local(Default::default())
+                .build()
                 .expect("per-iteration runtime");
 
             // Borrow self fields before the async block so we don't move self
@@ -1205,7 +1205,7 @@ mod tests {
 
     struct BasicWorkload;
 
-    #[async_trait(?Send)]
+    #[async_trait]
     impl Workload for BasicWorkload {
         fn name(&self) -> &str {
             "test_workload"
@@ -1233,7 +1233,7 @@ mod tests {
 
     struct FailingWorkload;
 
-    #[async_trait(?Send)]
+    #[async_trait]
     impl Workload for FailingWorkload {
         fn name(&self) -> &str {
             "failing_workload"

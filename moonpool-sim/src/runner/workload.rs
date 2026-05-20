@@ -34,8 +34,8 @@ use super::context::SimContext;
 ///
 /// Workloads are the primary unit of distributed system behavior. The simulation
 /// framework calls lifecycle methods in order: `setup` → `run` → `check`.
-#[async_trait(?Send)]
-pub trait Workload: 'static {
+#[async_trait]
+pub trait Workload: Send + Sync + 'static {
     /// Name of this workload for topology and reporting.
     fn name(&self) -> &str;
 
