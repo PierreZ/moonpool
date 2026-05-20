@@ -12,8 +12,6 @@ use crate::sim::state::FileId;
 /// Waker management for async coordination.
 #[derive(Debug, Default)]
 pub struct WakerRegistry {
-    #[allow(dead_code)] // Will be used for connection coordination in future phases
-    pub(crate) connection_wakers: BTreeMap<ConnectionId, Waker>,
     pub(crate) listener_wakers: BTreeMap<ListenerId, Waker>,
     pub(crate) read_wakers: BTreeMap<ConnectionId, Waker>,
     pub(crate) task_wakers: BTreeMap<u64, Waker>,
