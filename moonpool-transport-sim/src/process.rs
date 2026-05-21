@@ -1,25 +1,41 @@
-//! Echo server process for transport simulation.
+//! Hash-chain server process for the transport simulation.
 
 use async_trait::async_trait;
 use tracing::instrument;
 
 use moonpool_sim::{Process, SimContext, SimulationResult, assert_sometimes, buggify};
-use moonpool_transport::{
-    NetTransport, NetTransportBuilder, Providers, ReplyPromise, TaskProvider, TimeProvider,
-};
+use moonpool_transport::{NetTransport, NetTransportBuilder, ReplyPromise};
 
+use crate::hash::{INITIAL_DIGEST, fold};
 use crate::service::{
-    ECHO_INTERFACE, EchoRequest, EchoResponse, METHOD_ECHO, METHOD_ECHO_DELAYED,
-    METHOD_ECHO_OR_FAIL, parse_sim_addr,
+    APPEND_INTERFACE, AppendBlockRequest, AppendBlockResponse, METHOD_APPEND_BLOCK, parse_sim_addr,
 };
 
-/// Echo server process. Created fresh on every boot via factory.
-pub struct EchoServerProcess;
+/// Timeline key for server-side append events. The integrity invariant replays
+/// from this timeline.
+pub const TL_APPEND: &str = "append";
+
+/// Event emitted per successful append. Includes the block bytes so the
+/// invariant can replay the chain end-to-end from `(0, INITIAL_DIGEST)`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AppendBlockEvent {
+    /// Block count after this append (`N` post-transition).
+    pub n: u64,
+    /// Chain digest after this append (`H` post-transition).
+    pub h: u64,
+    /// Block bytes that were folded in.
+    pub block: Vec<u8>,
+    /// IP of the server that produced this event.
+    pub server_ip: String,
+}
+
+/// Hash-chain server. State is in-memory only and resets on every boot.
+pub struct TransportServerProcess;
 
 #[async_trait]
-impl Process for EchoServerProcess {
+impl Process for TransportServerProcess {
     fn name(&self) -> &'static str {
-        "echo-server"
+        "transport-server"
     }
 
     #[instrument(skip(self, ctx))]
@@ -35,38 +51,25 @@ impl Process for EchoServerProcess {
                 moonpool_sim::SimulationError::InvalidState(format!("transport build: {e}"))
             })?;
 
-        let (echo_stream, _) = NetTransport::register_handler_at::<EchoRequest, EchoResponse>(
-            &transport,
-            ECHO_INTERFACE,
-            METHOD_ECHO,
-        );
-        let (delayed_stream, _) = NetTransport::register_handler_at::<EchoRequest, EchoResponse>(
-            &transport,
-            ECHO_INTERFACE,
-            METHOD_ECHO_DELAYED,
-        );
-        let (fail_stream, _) = NetTransport::register_handler_at::<EchoRequest, EchoResponse>(
-            &transport,
-            ECHO_INTERFACE,
-            METHOD_ECHO_OR_FAIL,
-        );
+        let (append_stream, _) = NetTransport::register_handler_at::<
+            AppendBlockRequest,
+            AppendBlockResponse,
+        >(&transport, APPEND_INTERFACE, METHOD_APPEND_BLOCK);
 
-        tracing::info!(%my_ip, "echo server started, 3 methods registered");
+        // Hash-chain state lives on the run() stack — fresh on every boot.
+        let mut h: u64 = INITIAL_DIGEST;
+        let mut n: u64 = 0;
 
+        tracing::info!(%my_ip, "transport server started");
         let shutdown = ctx.shutdown().clone();
+
         loop {
             tokio::select! {
-                Some((req, reply)) = echo_stream.recv() => {
-                    handle_echo(&req, reply, my_ip);
-                }
-                Some((req, reply)) = delayed_stream.recv() => {
-                    handle_echo_delayed(&req, reply, my_ip, ctx);
-                }
-                Some((req, reply)) = fail_stream.recv() => {
-                    handle_echo_or_fail(&req, reply, my_ip);
+                Some((req, reply)) = append_stream.recv() => {
+                    handle_append(&mut h, &mut n, &req, reply, ctx, my_ip);
                 }
                 () = shutdown.cancelled() => {
-                    tracing::info!("echo server shutting down");
+                    tracing::info!(final_n = n, final_h = h, "transport server shutting down");
                     return Ok(());
                 }
             }
@@ -74,51 +77,49 @@ impl Process for EchoServerProcess {
     }
 }
 
-fn handle_echo(req: &EchoRequest, reply: ReplyPromise<EchoResponse>, server_ip: &str) {
-    assert_sometimes!(true, "echo_request_handled");
-    reply.send(EchoResponse {
-        seq_id: req.seq_id,
-        client_id: req.client_id,
-        server_ip: server_ip.to_string(),
-    });
-}
-
-fn handle_echo_delayed(
-    req: &EchoRequest,
-    reply: ReplyPromise<EchoResponse>,
-    server_ip: &str,
+fn handle_append(
+    h: &mut u64,
+    n: &mut u64,
+    req: &AppendBlockRequest,
+    reply: ReplyPromise<AppendBlockResponse>,
     ctx: &SimContext,
+    server_ip: &str,
 ) {
-    let response = EchoResponse {
-        seq_id: req.seq_id,
-        client_id: req.client_id,
-        server_ip: server_ip.to_string(),
-    };
-
-    let time = ctx.providers().time().clone();
-    let delay_ms = moonpool_sim::sim_random_range(1u64..100);
-    drop(
-        ctx.providers()
-            .task()
-            .spawn_task("echo_delayed_reply", async move {
-                let _ = time.sleep(std::time::Duration::from_millis(delay_ms)).await;
-                assert_sometimes!(true, "echo_delayed_request_handled");
-                reply.send(response);
-            }),
-    );
-}
-
-/// Echo with buggify-controlled failure: sometimes drops the promise (`BrokenPromise`).
-fn handle_echo_or_fail(req: &EchoRequest, reply: ReplyPromise<EchoResponse>, server_ip: &str) {
+    // Drop the reply mid-RPC without mutating state. Simulates "server crashed
+    // between receive and commit" and forces the transport's at-least-once
+    // retry path. If the transport double-delivers a retry and we commit twice,
+    // N advances past the workload's expected_n+1 on the next op and the
+    // reference-model check fails.
     if buggify!() {
-        assert_sometimes!(true, "echo_or_fail_buggify_dropped_promise");
+        assert_sometimes!(true, "server_buggify_dropped_promise");
         drop(reply);
         return;
     }
 
-    reply.send(EchoResponse {
+    let new_h = fold(*h, &req.block);
+    let new_n = n
+        .checked_add(1)
+        .expect("N overflow impossible in 10s chaos_duration");
+    *h = new_h;
+    *n = new_n;
+
+    ctx.emit(
+        TL_APPEND,
+        AppendBlockEvent {
+            n: new_n,
+            h: new_h,
+            block: req.block.clone(),
+            server_ip: server_ip.to_string(),
+        },
+    );
+
+    assert_sometimes!(req.block.is_empty(), "handled_empty_block");
+    assert_sometimes!(req.block.len() >= 60, "handled_large_block");
+
+    reply.send(AppendBlockResponse {
         seq_id: req.seq_id,
-        client_id: req.client_id,
+        n: new_n,
+        h: new_h,
         server_ip: server_ip.to_string(),
     });
 }
