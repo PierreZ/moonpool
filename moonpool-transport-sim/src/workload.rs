@@ -1,11 +1,14 @@
-//! Client workload that exercises all 4 RPC delivery modes under chaos.
+//! Hash-chain client workload that exercises moonpool-transport end-to-end.
 //!
-//! Sends random operations to echo servers, emitting timeline events for
-//! invariant checking. Drain-aware: stops sending on shutdown, waits for
-//! in-flight requests.
+//! The workload maintains an exact local reference model — `(expected_n, expected_h)` —
+//! and precomputes what the server's response *must* be before each request. Any
+//! transport bug that mutates, reorders, drops, or duplicates a request/response
+//! produces a deterministic `assert_always!` failure with a reproducible seed.
+//!
+//! Pedagogical demo: mistype [`fold`] in either the server or the workload so the
+//! two diverge by one bit — the very first append after the mistype trips
+//! `response_h_matches_reference_model` with a reproducible seed.
 
-use std::sync::Arc;
-use std::sync::RwLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -20,101 +23,87 @@ use moonpool_transport::{
     get_reply_unless_failed_for, make_decode_fn, make_encode_fn, send, try_get_reply,
 };
 
-use crate::report::WorkloadStats;
+use crate::hash::{INITIAL_DIGEST, fold};
+use crate::process::{AppendBlockEvent, TL_APPEND};
 use crate::service::{
-    DeliveryMode, EchoRequest, EchoResponse, METHOD_ECHO, METHOD_ECHO_DELAYED, METHOD_ECHO_OR_FAIL,
-    echo_method_uid, parse_sim_addr,
+    AppendBlockRequest, AppendBlockResponse, METHOD_APPEND_BLOCK, append_method_uid, parse_sim_addr,
 };
 
-/// Events emitted to per-mode timelines for invariant checking.
+/// Timeline key for client-side append attempts and outcomes.
+pub const TL_CLIENT: &str = "client";
+
+/// Client-side timeline event recording the outcome of each attempted append.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum DeliveryEvent {
-    /// Request sent to a server.
-    Sent {
-        /// Unique sequence ID.
+pub enum ClientEvent {
+    /// Request issued; outcome not yet known.
+    Issued {
+        /// Workload-side request id.
         seq_id: u64,
-        /// Server IP address.
-        server: String,
-        /// Method index (1, 2, or 3).
-        method: u64,
+        /// Number of bytes in the block.
+        block_len: usize,
     },
-    /// Response received successfully.
-    Replied {
-        /// Echoed sequence ID.
+    /// Server returned a response; compared bit-for-bit against the reference model.
+    Acknowledged {
+        /// Workload-side request id.
         seq_id: u64,
+        /// `n` reported by the server.
+        server_n: u64,
+        /// `h` reported by the server.
+        server_h: u64,
+        /// `n` projected by the local reference model.
+        expected_n: u64,
+        /// `h` projected by the local reference model.
+        expected_h: u64,
     },
-    /// Request failed with an error.
+    /// At-least-once RPC failed terminally.
     Failed {
-        /// Sequence ID of the failed request.
+        /// Workload-side request id.
         seq_id: u64,
-        /// Error description.
+        /// Stringified error.
         error: String,
     },
-    /// Request timed out after sustained failure.
-    TimedOut {
-        /// Sequence ID.
-        seq_id: u64,
-        /// Timeout duration in milliseconds.
-        duration_ms: u64,
-    },
-    /// Ambiguous outcome: request may or may not have been delivered.
-    MaybeDelivered {
-        /// Sequence ID.
+    /// Ambiguous outcome (`MaybeDelivered`, drain timeout, or shutdown mid-await).
+    Ambiguous {
+        /// Workload-side request id.
         seq_id: u64,
     },
 }
 
-/// Timeline key for fire-and-forget delivery events.
-pub const TL_FIRE_AND_FORGET: &str = "fire_and_forget";
-/// Timeline key for at-most-once delivery events.
-pub const TL_AT_MOST_ONCE: &str = "at_most_once";
-/// Timeline key for at-least-once delivery events.
-pub const TL_AT_LEAST_ONCE: &str = "at_least_once";
-/// Timeline key for timeout delivery events.
-pub const TL_TIMEOUT: &str = "timeout";
-
-/// Weighted operations for the workload.
 #[derive(Debug, Clone, Copy)]
 enum Op {
-    SendFireAndForget,
-    SendAtMostOnce,
-    SendAtLeastOnce,
-    SendWithTimeout,
+    NormalAppend,
+    EmptyBlock,
+    MaxSizeBlock,
+    AtMostOnceAppend,
+    AppendWithTimeout,
     SendToWrongEndpoint,
-    ReliableBurst,
     SmallDelay,
-    CheckMetrics,
 }
 
 fn random_op() -> Op {
-    match sim_random_range(0..100) {
-        0..12 => Op::SendFireAndForget,
-        12..30 => Op::SendAtMostOnce,
-        30..52 => Op::SendAtLeastOnce,
-        52..67 => Op::SendWithTimeout,
-        67..72 => Op::SendToWrongEndpoint,
-        72..80 => Op::ReliableBurst,
-        80..90 => Op::SmallDelay,
-        _ => Op::CheckMetrics,
+    match sim_random_range(0u32..100) {
+        0..70 => Op::NormalAppend,
+        70..78 => Op::EmptyBlock,
+        78..85 => Op::MaxSizeBlock,
+        85..91 => Op::AtMostOnceAppend,
+        91..96 => Op::AppendWithTimeout,
+        96..98 => Op::SendToWrongEndpoint,
+        _ => Op::SmallDelay,
     }
 }
 
-fn random_method() -> u64 {
-    match sim_random_range(0..3) {
-        0 => METHOD_ECHO,
-        1 => METHOD_ECHO_DELAYED,
-        _ => METHOD_ECHO_OR_FAIL,
-    }
+fn random_block(min: usize, max: usize) -> Vec<u8> {
+    let len = sim_random_range(min..max.saturating_add(1));
+    (0..len)
+        .map(|_| {
+            let v: u32 = sim_random_range(0u32..256);
+            u8::try_from(v).expect("v < 256 by construction")
+        })
+        .collect()
 }
 
-fn random_server(servers: &[String]) -> &str {
-    let idx = sim_random_range(0..servers.len());
-    &servers[idx]
-}
-
-/// Transport client workload that exercises all delivery modes.
+/// Hash-chain client workload. One instance per simulation (1 server + 1 workload).
 pub struct TransportClientWorkload {
-    /// Instance index for naming.
     index: usize,
 }
 
@@ -140,6 +129,8 @@ impl Workload for TransportClientWorkload {
             return Ok(());
         }
 
+        // Topology is 1 server — pick the first deterministically.
+        let server_ip = servers[0].clone();
         let my_addr = parse_sim_addr(ctx.my_ip())?;
 
         let transport = NetTransportBuilder::new(ctx.providers().clone())
@@ -150,27 +141,36 @@ impl Workload for TransportClientWorkload {
                 moonpool_sim::SimulationError::InvalidState(format!("transport build: {e}"))
             })?;
 
-        let client_id = ctx.client_id();
-        let num_ops = sim_random_range(3..20);
-        let mut seq_counter: u64 = 0;
-        let shutdown = ctx.shutdown().clone();
-
-        let stats = Arc::new(RwLock::new(WorkloadStats::default()));
-
-        let encode =
-            make_encode_fn::<moonpool_transport::RequestEnvelope<EchoRequest>, _>(JsonCodec);
-        let decode = make_decode_fn::<Result<EchoResponse, ReplyError>, _>(JsonCodec);
-
-        tracing::info!(
-            client_id,
-            num_ops,
-            num_servers = servers.len(),
-            "workload starting"
+        let endpoint = Endpoint::new(
+            parse_sim_addr(&server_ip)?,
+            append_method_uid(METHOD_APPEND_BLOCK),
+        );
+        let bad_endpoint = Endpoint::new(
+            parse_sim_addr(&server_ip)?,
+            UID::new(0xDEAD_BEEF, 0xBAD0_BAD0),
         );
 
+        let encode =
+            make_encode_fn::<moonpool_transport::RequestEnvelope<AppendBlockRequest>, _>(JsonCodec);
+        let decode = make_decode_fn::<Result<AppendBlockResponse, ReplyError>, _>(JsonCodec);
+
+        let client_id = ctx.client_id();
+        let num_ops = sim_random_range(20u64..200);
+        let shutdown = ctx.shutdown().clone();
+        let time = ctx.providers().time().clone();
+        let mut seq_counter: u64 = 0;
+
+        // Reference model: locally-projected expected (N, H). With a single client
+        // this matches server-side truth bit-for-bit until an ambiguous outcome,
+        // at which point we stop driving and let the invariant be the oracle.
+        let mut expected_n: u64 = 0;
+        let mut expected_h: u64 = INITIAL_DIGEST;
+        let mut stopped_after_ambiguous = false;
+
+        tracing::info!(client_id, num_ops, "workload starting");
+
         for _ in 0..num_ops {
-            if shutdown.is_cancelled() {
-                tracing::info!("shutdown received, stopping new operations");
+            if shutdown.is_cancelled() || stopped_after_ambiguous {
                 break;
             }
 
@@ -179,404 +179,209 @@ impl Workload for TransportClientWorkload {
             let seq_id = (client_id as u64) * 1_000_000 + seq_counter;
 
             match op {
-                Op::SendFireAndForget => {
-                    let server = random_server(&servers);
-                    let method = random_method();
-                    let server_addr = parse_sim_addr(server)?;
-                    let endpoint = Endpoint::new(server_addr, echo_method_uid(method));
-
-                    let req = EchoRequest {
-                        seq_id,
-                        client_id,
-                        mode: DeliveryMode::FireAndForget,
-                        method,
-                    };
-
-                    ctx.emit(
-                        TL_FIRE_AND_FORGET,
-                        DeliveryEvent::Sent {
-                            seq_id,
-                            server: server.to_string(),
-                            method,
-                        },
-                    );
-
-                    match send(&*transport, &endpoint, req, &encode) {
-                        Ok(()) => {
-                            assert_sometimes!(true, "fire_and_forget_sent_successfully");
-                            stats
-                                .write()
-                                .expect("RwLock poisoned: prior task panicked")
-                                .fire_and_forget_sent += 1;
-                        }
-                        Err(e) => {
-                            ctx.emit(
-                                TL_FIRE_AND_FORGET,
-                                DeliveryEvent::Failed {
-                                    seq_id,
-                                    error: e.to_string(),
-                                },
-                            );
-                            stats
-                                .write()
-                                .expect("RwLock poisoned: prior task panicked")
-                                .fire_and_forget_errors += 1;
-                        }
-                    }
+                Op::SmallDelay => {
+                    let ms = sim_random_range(1u64..50);
+                    let _ = time.sleep(Duration::from_millis(ms)).await;
+                    continue;
                 }
-
-                Op::SendAtMostOnce => {
-                    let server = random_server(&servers).to_string();
-                    let method = random_method();
-                    let server_addr = parse_sim_addr(&server)?;
-                    let endpoint = Endpoint::new(server_addr, echo_method_uid(method));
-
-                    let req = EchoRequest {
+                Op::SendToWrongEndpoint => {
+                    let req = AppendBlockRequest {
                         seq_id,
                         client_id,
-                        mode: DeliveryMode::AtMostOnce,
-                        method,
+                        block: vec![0u8; 1],
                     };
-
-                    ctx.emit(
-                        TL_AT_MOST_ONCE,
-                        DeliveryEvent::Sent {
-                            seq_id,
-                            server: server.clone(),
-                            method,
-                        },
-                    );
-
-                    stats
-                        .write()
-                        .expect("RwLock poisoned: prior task panicked")
-                        .at_most_once_sent += 1;
-
-                    match try_get_reply(&*transport, &endpoint, req, &encode, decode.clone()).await
-                    {
-                        Ok(resp) => {
-                            assert_always!(
-                                resp.seq_id == seq_id,
-                                "at_most_once_response_matches_request"
-                            );
-                            assert_sometimes!(true, "at_most_once_reply_received");
-                            ctx.emit(TL_AT_MOST_ONCE, DeliveryEvent::Replied { seq_id });
-                            stats
-                                .write()
-                                .expect("RwLock poisoned: prior task panicked")
-                                .at_most_once_replied += 1;
-                        }
-                        Err(ReplyError::MaybeDelivered) => {
-                            assert_sometimes!(true, "at_most_once_maybe_delivered");
-                            ctx.emit(TL_AT_MOST_ONCE, DeliveryEvent::MaybeDelivered { seq_id });
-                            stats
-                                .write()
-                                .expect("RwLock poisoned: prior task panicked")
-                                .at_most_once_maybe += 1;
-                        }
-                        Err(e) => {
-                            ctx.emit(
-                                TL_AT_MOST_ONCE,
-                                DeliveryEvent::Failed {
-                                    seq_id,
-                                    error: e.to_string(),
-                                },
-                            );
-                            stats
-                                .write()
-                                .expect("RwLock poisoned: prior task panicked")
-                                .at_most_once_errors += 1;
-                        }
-                    }
+                    let result =
+                        try_get_reply(&*transport, &bad_endpoint, req, &encode, decode.clone())
+                            .await;
+                    assert_always!(result.is_err(), "wrong_endpoint_should_not_succeed");
+                    assert_sometimes!(true, "wrong_endpoint_returns_error");
+                    continue;
                 }
+                _ => {}
+            }
 
-                Op::SendAtLeastOnce => {
-                    let server = random_server(&servers).to_string();
-                    let method = random_method();
-                    let server_addr = parse_sim_addr(&server)?;
-                    let endpoint = Endpoint::new(server_addr, echo_method_uid(method));
+            let block: Vec<u8> = match op {
+                Op::NormalAppend | Op::AtMostOnceAppend | Op::AppendWithTimeout => {
+                    random_block(1, 64)
+                }
+                Op::EmptyBlock => Vec::new(),
+                Op::MaxSizeBlock => random_block(64, 64),
+                Op::SmallDelay | Op::SendToWrongEndpoint => unreachable!("handled above"),
+            };
 
-                    let req = EchoRequest {
-                        seq_id,
-                        client_id,
-                        mode: DeliveryMode::AtLeastOnce,
-                        method,
-                    };
+            let projected_n = expected_n + 1;
+            let projected_h = fold(expected_h, &block);
 
-                    ctx.emit(
-                        TL_AT_LEAST_ONCE,
-                        DeliveryEvent::Sent {
-                            seq_id,
-                            server: server.clone(),
-                            method,
-                        },
-                    );
+            ctx.emit(
+                TL_CLIENT,
+                ClientEvent::Issued {
+                    seq_id,
+                    block_len: block.len(),
+                },
+            );
 
-                    stats
-                        .write()
-                        .expect("RwLock poisoned: prior task panicked")
-                        .at_least_once_sent += 1;
+            let req = AppendBlockRequest {
+                seq_id,
+                client_id,
+                block: block.clone(),
+            };
 
+            // Drive the request through the chosen delivery mode.
+            let result: Result<AppendBlockResponse, ReplyError> = match op {
+                Op::NormalAppend | Op::EmptyBlock | Op::MaxSizeBlock => {
                     match get_reply(&*transport, &endpoint, req, &encode, decode.clone()) {
-                        Ok(reply_future) => {
-                            let time = ctx.providers().time().clone();
-                            let result: Option<Result<EchoResponse, ReplyError>> = tokio::select! {
-                                r = reply_future => Some(r),
-                                () = shutdown.cancelled() => {
-                                    tracing::debug!(seq_id, "at_least_once drain timeout");
-                                    None
-                                }
-                                _ = time.sleep(Duration::from_secs(10)) => {
-                                    tracing::debug!(seq_id, "at_least_once timed out waiting");
-                                    None
-                                }
+                        Ok(fut) => {
+                            let drained: Option<Result<AppendBlockResponse, ReplyError>> = tokio::select! {
+                                r = fut => Some(r),
+                                () = shutdown.cancelled() => None,
+                                _ = time.sleep(Duration::from_secs(10)) => None,
                             };
-
-                            match result {
-                                Some(Ok(resp)) => {
-                                    assert_always!(
-                                        resp.seq_id == seq_id,
-                                        "at_least_once_response_matches_request"
-                                    );
-                                    assert_sometimes!(true, "at_least_once_reply_received");
-                                    ctx.emit(TL_AT_LEAST_ONCE, DeliveryEvent::Replied { seq_id });
-                                    stats
-                                        .write()
-                                        .expect("RwLock poisoned: prior task panicked")
-                                        .at_least_once_replied += 1;
-                                }
-                                Some(Err(e)) => {
-                                    ctx.emit(
-                                        TL_AT_LEAST_ONCE,
-                                        DeliveryEvent::Failed {
-                                            seq_id,
-                                            error: e.to_string(),
-                                        },
-                                    );
-                                    stats
-                                        .write()
-                                        .expect("RwLock poisoned: prior task panicked")
-                                        .at_least_once_errors += 1;
-                                }
-                                None => {
-                                    stats
-                                        .write()
-                                        .expect("RwLock poisoned: prior task panicked")
-                                        .at_least_once_in_flight += 1;
-                                }
+                            if let Some(r) = drained {
+                                r
+                            } else {
+                                ctx.emit(TL_CLIENT, ClientEvent::Ambiguous { seq_id });
+                                stopped_after_ambiguous = true;
+                                continue;
                             }
                         }
                         Err(e) => {
                             ctx.emit(
-                                TL_AT_LEAST_ONCE,
-                                DeliveryEvent::Failed {
+                                TL_CLIENT,
+                                ClientEvent::Failed {
                                     seq_id,
                                     error: e.to_string(),
                                 },
                             );
-                            stats
-                                .write()
-                                .expect("RwLock poisoned: prior task panicked")
-                                .at_least_once_errors += 1;
+                            continue;
                         }
                     }
                 }
-
-                Op::SendWithTimeout => {
-                    let server = random_server(&servers).to_string();
-                    let method = random_method();
-                    let server_addr = parse_sim_addr(&server)?;
-                    let endpoint = Endpoint::new(server_addr, echo_method_uid(method));
-
-                    let timeout_ms = sim_random_range(100u64..10_000);
-                    let timeout_dur = Duration::from_millis(timeout_ms);
-
-                    let req = EchoRequest {
-                        seq_id,
-                        client_id,
-                        mode: DeliveryMode::Timeout,
-                        method,
-                    };
-
-                    ctx.emit(
-                        TL_TIMEOUT,
-                        DeliveryEvent::Sent {
-                            seq_id,
-                            server: server.clone(),
-                            method,
-                        },
-                    );
-
-                    stats
-                        .write()
-                        .expect("RwLock poisoned: prior task panicked")
-                        .timeout_sent += 1;
-
-                    match get_reply_unless_failed_for(
+                Op::AtMostOnceAppend => {
+                    try_get_reply(&*transport, &endpoint, req, &encode, decode.clone()).await
+                }
+                Op::AppendWithTimeout => {
+                    let dur = Duration::from_millis(sim_random_range(50u64..5_000));
+                    get_reply_unless_failed_for(
                         &*transport,
                         &endpoint,
                         req,
                         &encode,
                         decode.clone(),
-                        timeout_dur,
+                        dur,
                     )
                     .await
-                    {
-                        Ok(resp) => {
-                            assert_always!(
-                                resp.seq_id == seq_id,
-                                "timeout_response_matches_request"
-                            );
-                            assert_sometimes!(true, "timeout_reply_received");
-                            ctx.emit(TL_TIMEOUT, DeliveryEvent::Replied { seq_id });
-                            stats
-                                .write()
-                                .expect("RwLock poisoned: prior task panicked")
-                                .timeout_replied += 1;
-                        }
-                        Err(ReplyError::MaybeDelivered) => {
-                            assert_sometimes!(true, "timeout_maybe_delivered");
-                            ctx.emit(
-                                TL_TIMEOUT,
-                                DeliveryEvent::TimedOut {
-                                    seq_id,
-                                    duration_ms: timeout_ms,
-                                },
-                            );
-                            stats
-                                .write()
-                                .expect("RwLock poisoned: prior task panicked")
-                                .timeout_timed_out += 1;
-                        }
-                        Err(e) => {
-                            ctx.emit(
-                                TL_TIMEOUT,
-                                DeliveryEvent::Failed {
-                                    seq_id,
-                                    error: e.to_string(),
-                                },
-                            );
-                            stats
-                                .write()
-                                .expect("RwLock poisoned: prior task panicked")
-                                .timeout_errors += 1;
-                        }
-                    }
                 }
+                Op::SmallDelay | Op::SendToWrongEndpoint => unreachable!("handled above"),
+            };
 
-                Op::SendToWrongEndpoint => {
-                    let server = random_server(&servers).to_string();
-                    let server_addr = parse_sim_addr(&server)?;
-                    let bad_uid = UID::new(0xDEAD_BEEF, 0xBAD0_BAD0);
-                    let endpoint = Endpoint::new(server_addr, bad_uid);
+            match result {
+                Ok(resp) => {
+                    assert_always!(resp.seq_id == seq_id, "response_seq_matches");
+                    assert_always!(resp.n == projected_n, "response_n_matches_reference_model");
+                    assert_always!(resp.h == projected_h, "response_h_matches_reference_model");
+                    assert_sometimes!(true, "reply_received");
 
-                    let req = EchoRequest {
-                        seq_id,
-                        client_id,
-                        mode: DeliveryMode::AtMostOnce,
-                        method: 99,
-                    };
+                    expected_n = projected_n;
+                    expected_h = projected_h;
 
-                    if try_get_reply(&*transport, &endpoint, req, &encode, decode.clone())
-                        .await
-                        .is_ok()
-                    {
-                        assert_always!(false, "wrong_endpoint_should_not_succeed");
-                    } else {
-                        assert_sometimes!(true, "wrong_endpoint_returns_error");
-                        stats
-                            .write()
-                            .expect("RwLock poisoned: prior task panicked")
-                            .endpoint_not_found += 1;
-                    }
+                    ctx.emit(
+                        TL_CLIENT,
+                        ClientEvent::Acknowledged {
+                            seq_id,
+                            server_n: resp.n,
+                            server_h: resp.h,
+                            expected_n: projected_n,
+                            expected_h: projected_h,
+                        },
+                    );
                 }
-
-                Op::ReliableBurst => {
-                    // Fill the reliable queue without awaiting replies to exercise the
-                    // overflow / near-capacity path.
-                    let server = random_server(&servers).to_string();
-                    let server_addr = parse_sim_addr(&server)?;
-                    let endpoint = Endpoint::new(server_addr, echo_method_uid(METHOD_ECHO));
-
-                    let burst_size = sim_random_range(50u64..500);
-                    for burst_i in 0..burst_size {
-                        let burst_seq = (client_id as u64) * 1_000_000 + seq_counter + burst_i + 1;
-                        let req = EchoRequest {
-                            seq_id: burst_seq,
-                            client_id,
-                            mode: DeliveryMode::AtLeastOnce,
-                            method: METHOD_ECHO,
-                        };
-                        let _ = get_reply(&*transport, &endpoint, req, &encode, decode.clone());
-                    }
-                    seq_counter += burst_size;
-                    stats
-                        .write()
-                        .expect("RwLock poisoned: prior task panicked")
-                        .at_least_once_sent += burst_size;
-                    assert_sometimes!(true, "reliable_burst_sent");
+                Err(ReplyError::MaybeDelivered) => {
+                    assert_sometimes!(true, "maybe_delivered_observed");
+                    ctx.emit(TL_CLIENT, ClientEvent::Ambiguous { seq_id });
+                    stopped_after_ambiguous = true;
                 }
-
-                Op::SmallDelay => {
-                    let delay_ms = sim_random_range(1u64..50);
-                    let _ = ctx
-                        .providers()
-                        .time()
-                        .sleep(Duration::from_millis(delay_ms))
-                        .await;
-                }
-
-                Op::CheckMetrics => {
-                    let s = stats.read().expect("RwLock poisoned: prior task panicked");
-                    tracing::debug!(
-                        client_id,
-                        ff_sent = s.fire_and_forget_sent,
-                        amo_sent = s.at_most_once_sent,
-                        alo_sent = s.at_least_once_sent,
-                        to_sent = s.timeout_sent,
-                        "metrics checkpoint"
+                Err(e) => {
+                    assert_sometimes!(true, "terminal_error_observed");
+                    ctx.emit(
+                        TL_CLIENT,
+                        ClientEvent::Failed {
+                            seq_id,
+                            error: e.to_string(),
+                        },
                     );
                 }
             }
         }
 
-        let final_stats = stats
-            .read()
-            .expect("RwLock poisoned: prior task panicked")
-            .clone();
-        let key = format!("transport_stats_{client_id}");
-        ctx.state().publish(&key, final_stats);
+        // Phase 2: fire-and-forget burst. `send()` produces no reply, so we
+        // can't update the reference model from it. The integrity invariant
+        // remains the oracle for any FF commits. Drain-aware: respects shutdown.
+        if !shutdown.is_cancelled() {
+            let ff_count = sim_random_range(0u64..10);
+            for _ in 0..ff_count {
+                if shutdown.is_cancelled() {
+                    break;
+                }
+                seq_counter += 1;
+                let seq_id = (client_id as u64) * 1_000_000 + seq_counter;
+                let block = random_block(1, 64);
+                let req = AppendBlockRequest {
+                    seq_id,
+                    client_id,
+                    block: block.clone(),
+                };
+                ctx.emit(
+                    TL_CLIENT,
+                    ClientEvent::Issued {
+                        seq_id,
+                        block_len: block.len(),
+                    },
+                );
+                match send(&*transport, &endpoint, req, &encode) {
+                    Ok(()) => {
+                        assert_sometimes!(true, "fire_and_forget_sent");
+                        ctx.emit(TL_CLIENT, ClientEvent::Ambiguous { seq_id });
+                    }
+                    Err(e) => {
+                        ctx.emit(
+                            TL_CLIENT,
+                            ClientEvent::Failed {
+                                seq_id,
+                                error: e.to_string(),
+                            },
+                        );
+                    }
+                }
+            }
+        }
 
-        tracing::info!(client_id, "workload finished");
+        ctx.state().publish(
+            &format!("transport_client_state_{client_id}"),
+            (expected_n, expected_h),
+        );
+
+        tracing::info!(client_id, expected_n, expected_h, "workload finished");
         Ok(())
     }
 
     #[instrument(skip(self, ctx), fields(client = self.index))]
     async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let ff_entries = ctx.timeline::<DeliveryEvent>(TL_FIRE_AND_FORGET);
-        let has_reply = ff_entries
-            .iter()
-            .any(|e| matches!(&e.event, DeliveryEvent::Replied { .. }));
-        assert_always!(!has_reply, "ff_no_replies_expected");
-
-        let amo_entries = ctx.timeline::<DeliveryEvent>(TL_AT_MOST_ONCE);
-        let mut sent = std::collections::HashSet::new();
-        for entry in &amo_entries {
-            if let DeliveryEvent::Sent { seq_id, .. } = &entry.event {
-                sent.insert(*seq_id);
+        // Every Acknowledged event must have a matching server-side AppendBlockEvent
+        // with the same (n, h). Catches "transport claimed delivery, server never
+        // emitted" — a lost server-side event.
+        let client_events = ctx.timeline::<ClientEvent>(TL_CLIENT);
+        let server_events = ctx.timeline::<AppendBlockEvent>(TL_APPEND);
+        for entry in &client_events {
+            if let ClientEvent::Acknowledged {
+                server_n, server_h, ..
+            } = &entry.event
+            {
+                let matched = server_events
+                    .iter()
+                    .any(|s| s.event.n == *server_n && s.event.h == *server_h);
+                assert_always!(matched, "check_ack_has_matching_server_event");
             }
         }
-        for entry in &amo_entries {
-            match &entry.event {
-                DeliveryEvent::Replied { seq_id }
-                | DeliveryEvent::MaybeDelivered { seq_id }
-                | DeliveryEvent::Failed { seq_id, .. } => {
-                    assert_always!(sent.contains(seq_id), "amo_check_all_resolved_were_sent");
-                }
-                _ => {}
-            }
-        }
-
         tracing::info!("check passed");
         Ok(())
     }

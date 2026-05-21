@@ -1,4 +1,7 @@
-//! Binary target for transport simulation: echo server + delivery-mode client workload.
+//! Binary target for the transport simulation: hash-chain workload.
+//!
+//! 1 server + 1 workload + integrity invariant under transport chaos.
+//! Follow-ups: enable attrition + storage-backed persistence for crash recovery.
 
 use std::process;
 use std::time::Duration;
@@ -6,8 +9,8 @@ use std::time::Duration;
 use moonpool_sim::SimulationBuilder;
 use moonpool_sim::runner::builder::{ProcessCount, WorkloadCount};
 
-use moonpool_transport_sim::invariants::DeliveryContractInvariant;
-use moonpool_transport_sim::process::EchoServerProcess;
+use moonpool_transport_sim::invariants::TransportIntegrityInvariant;
+use moonpool_transport_sim::process::TransportServerProcess;
 use moonpool_transport_sim::workload::TransportClientWorkload;
 
 fn main() {
@@ -17,11 +20,11 @@ fn main() {
 
     let report = moonpool_sim::simulations::run_simulation(
         SimulationBuilder::new()
-            .processes(ProcessCount::Range(1..=5), || Box::new(EchoServerProcess))
-            .workloads(WorkloadCount::Random(1..10), |i| {
+            .processes(ProcessCount::Fixed(1), || Box::new(TransportServerProcess))
+            .workloads(WorkloadCount::Fixed(1), |i| {
                 Box::new(TransportClientWorkload::new(i))
             })
-            .invariant(DeliveryContractInvariant::new())
+            .invariant(TransportIntegrityInvariant::new())
             .chaos_duration(Duration::from_secs(10))
             .random_network()
             .set_iterations(20)

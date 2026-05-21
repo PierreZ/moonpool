@@ -1,149 +1,69 @@
-//! Delivery contract invariants checked via timelines.
+//! Hash-chain integrity invariant.
 //!
-//! Validates cross-operation and cross-workload properties that inline
-//! per-operation assertions cannot catch. Runs after every simulation event
-//! using incremental timeline scanning.
+//! Replays the server-side timeline of [`AppendBlockEvent`]s starting from
+//! `(0, INITIAL_DIGEST)` and asserts every event satisfies the chain rule
+//! `n == last_n + 1` and `h == fold(last_h, &block)`. Catches transport bugs
+//! that reorder, drop, or duplicate server-side events — bugs the workload's
+//! per-response reference-model check cannot see on its own.
 
-use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::cell::Cell;
 
 use moonpool_sim::{
     Invariant, SIM_FAULT_TIMELINE, SimFaultEvent, TimelineQuery, TimelineQueryExt, assert_always,
     assert_sometimes,
 };
 
-use crate::workload::{DeliveryEvent, TL_AT_LEAST_ONCE, TL_AT_MOST_ONCE, TL_TIMEOUT};
+use crate::hash::{INITIAL_DIGEST, fold};
+use crate::process::{AppendBlockEvent, TL_APPEND};
 
-/// Invariant that validates delivery mode contracts by scanning per-mode timelines.
-///
-/// Uses cursor-based incremental processing to stay fast (runs after every event).
-/// Maintains per-mode sets of sent/resolved `seq_ids` to detect phantoms and
-/// double-resolutions.
-pub struct DeliveryContractInvariant {
-    cursor_amo: Cell<usize>,
-    cursor_alo: Cell<usize>,
-    cursor_to: Cell<usize>,
+/// Replay-based invariant over the server's append timeline.
+pub struct TransportIntegrityInvariant {
+    cursor: Cell<usize>,
     cursor_faults: Cell<usize>,
-
-    amo_sent: RefCell<HashSet<u64>>,
-    amo_resolved: RefCell<HashSet<u64>>,
-
-    alo_sent: RefCell<HashSet<u64>>,
-
-    to_timed_out: RefCell<HashSet<u64>>,
-
+    last_n: Cell<u64>,
+    last_h: Cell<u64>,
     any_faults: Cell<bool>,
-    any_replies: Cell<bool>,
+    any_progress: Cell<bool>,
 }
 
-impl Default for DeliveryContractInvariant {
+impl Default for TransportIntegrityInvariant {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl DeliveryContractInvariant {
+impl TransportIntegrityInvariant {
     /// Create a new invariant with empty state.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            cursor_amo: Cell::new(0),
-            cursor_alo: Cell::new(0),
-            cursor_to: Cell::new(0),
+            cursor: Cell::new(0),
             cursor_faults: Cell::new(0),
-            amo_sent: RefCell::new(HashSet::new()),
-            amo_resolved: RefCell::new(HashSet::new()),
-            alo_sent: RefCell::new(HashSet::new()),
-            to_timed_out: RefCell::new(HashSet::new()),
+            last_n: Cell::new(0),
+            last_h: Cell::new(INITIAL_DIGEST),
             any_faults: Cell::new(false),
-            any_replies: Cell::new(false),
+            any_progress: Cell::new(false),
         }
     }
+}
 
-    fn check_at_most_once(&self, q: &dyn TimelineQuery) {
-        let new_entries = q.since::<DeliveryEvent>(TL_AT_MOST_ONCE, &self.cursor_amo);
-        if new_entries.is_empty() {
-            return;
-        }
+impl Invariant for TransportIntegrityInvariant {
+    fn name(&self) -> &'static str {
+        "transport_integrity"
+    }
 
-        let mut sent = self.amo_sent.borrow_mut();
-        let mut resolved = self.amo_resolved.borrow_mut();
-
+    fn observe(&self, q: &dyn TimelineQuery, _sim_time_ms: u64) {
+        let new_entries = q.since::<AppendBlockEvent>(TL_APPEND, &self.cursor);
         for entry in &new_entries {
-            match &entry.event {
-                DeliveryEvent::Sent { seq_id, .. } => {
-                    sent.insert(*seq_id);
-                }
-                DeliveryEvent::Replied { seq_id } => {
-                    assert_always!(sent.contains(seq_id), "amo_no_phantom_reply");
-                    assert_always!(!resolved.contains(seq_id), "amo_at_most_one_resolution");
-                    resolved.insert(*seq_id);
-                    self.any_replies.set(true);
-                }
-                DeliveryEvent::MaybeDelivered { seq_id } => {
-                    assert_always!(!resolved.contains(seq_id), "amo_at_most_one_resolution");
-                    assert_sometimes!(true, "amo_invariant_maybe_delivered_observed");
-                    resolved.insert(*seq_id);
-                }
-                DeliveryEvent::Failed { seq_id, .. } => {
-                    assert_always!(!resolved.contains(seq_id), "amo_at_most_one_resolution");
-                    resolved.insert(*seq_id);
-                }
-                DeliveryEvent::TimedOut { .. } => {}
-            }
-        }
-    }
-
-    fn check_at_least_once(&self, q: &dyn TimelineQuery) {
-        let new_entries = q.since::<DeliveryEvent>(TL_AT_LEAST_ONCE, &self.cursor_alo);
-        if new_entries.is_empty() {
-            return;
+            let expected_n = self.last_n.get() + 1;
+            let expected_h = fold(self.last_h.get(), &entry.event.block);
+            assert_always!(entry.event.n == expected_n, "invariant_n_matches_replay");
+            assert_always!(entry.event.h == expected_h, "invariant_h_matches_replay");
+            self.last_n.set(entry.event.n);
+            self.last_h.set(entry.event.h);
+            self.any_progress.set(true);
         }
 
-        let mut sent = self.alo_sent.borrow_mut();
-
-        for entry in &new_entries {
-            match &entry.event {
-                DeliveryEvent::Sent { seq_id, .. } => {
-                    sent.insert(*seq_id);
-                }
-                DeliveryEvent::Replied { seq_id } => {
-                    assert_always!(sent.contains(seq_id), "alo_no_phantom_reply");
-                    assert_sometimes!(true, "alo_invariant_reply_observed");
-                    self.any_replies.set(true);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn check_timeout(&self, q: &dyn TimelineQuery) {
-        let new_entries = q.since::<DeliveryEvent>(TL_TIMEOUT, &self.cursor_to);
-        if new_entries.is_empty() {
-            return;
-        }
-
-        let mut timed_out = self.to_timed_out.borrow_mut();
-
-        for entry in &new_entries {
-            match &entry.event {
-                DeliveryEvent::TimedOut { seq_id, .. } => {
-                    assert_sometimes!(true, "timeout_invariant_timeout_observed");
-                    timed_out.insert(*seq_id);
-                }
-                DeliveryEvent::Replied { seq_id } => {
-                    assert_always!(
-                        !timed_out.contains(seq_id),
-                        "timeout_no_reply_after_timeout"
-                    );
-                    self.any_replies.set(true);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn check_cross_mode(&self, q: &dyn TimelineQuery) {
         if !self.any_faults.get() {
             let new_faults = q.since::<SimFaultEvent>(SIM_FAULT_TIMELINE, &self.cursor_faults);
             if !new_faults.is_empty() {
@@ -152,34 +72,17 @@ impl DeliveryContractInvariant {
         }
 
         assert_sometimes!(
-            self.any_faults.get() && self.any_replies.get(),
-            "cross_mode_recovery_after_faults"
+            self.any_faults.get() && self.any_progress.get(),
+            "progress_under_transport_chaos"
         );
-    }
-}
-
-impl Invariant for DeliveryContractInvariant {
-    fn name(&self) -> &'static str {
-        "delivery_contract"
-    }
-
-    fn observe(&self, q: &dyn TimelineQuery, _sim_time_ms: u64) {
-        self.check_at_most_once(q);
-        self.check_at_least_once(q);
-        self.check_timeout(q);
-        self.check_cross_mode(q);
     }
 
     fn reset(&mut self) {
-        self.cursor_amo.set(0);
-        self.cursor_alo.set(0);
-        self.cursor_to.set(0);
+        self.cursor.set(0);
         self.cursor_faults.set(0);
-        self.amo_sent.borrow_mut().clear();
-        self.amo_resolved.borrow_mut().clear();
-        self.alo_sent.borrow_mut().clear();
-        self.to_timed_out.borrow_mut().clear();
+        self.last_n.set(0);
+        self.last_h.set(INITIAL_DIGEST);
         self.any_faults.set(false);
-        self.any_replies.set(false);
+        self.any_progress.set(false);
     }
 }
