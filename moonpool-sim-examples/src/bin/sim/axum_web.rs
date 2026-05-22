@@ -8,12 +8,11 @@ use std::process;
 fn main() {
     moonpool_sim::init_sim_tracing(tracing::Level::WARN);
 
-    let report = moonpool_sim::simulations::run_simulation(
-        moonpool_sim::SimulationBuilder::new()
-            .processes(1, || Box::new(moonpool_sim_examples::axum_web::WebProcess))
-            .workload(moonpool_sim_examples::axum_web::WebWorkload)
-            .set_iterations(50),
-    );
+    let report = moonpool_sim::SimulationBuilder::new()
+        .processes(1, || Box::new(moonpool_sim_examples::axum_web::WebProcess))
+        .workload(moonpool_sim_examples::axum_web::WebWorkload)
+        .set_iterations(50)
+        .run();
 
     report.eprint();
 
