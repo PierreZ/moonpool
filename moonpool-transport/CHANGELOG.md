@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-05-22
+
+### 🚀 Features
+
+- **core**: Make moonpool-core wasm-buildable and abstract TaskProvider JoinHandle
+- Add on_failed_for to failure monitor
+- Serializable interfaces with endpoint adjustment
+- **transport**: Add LoadBalanceConfig with exponential backoff
+- **transport**: Add load_balance and fan-out primitives
+
+### 🐛 Bug Fixes
+
+- **rebase**: Reconcile with main's futures::io and CoveragePlateau
+- Send EndpointNotFound notification back to client
+- **transport**: Fast-path fan_out_quorum when required is zero
+
+### 📚 Documentation
+
+- Document broken_promise drop semantics
+- **transport**: Add load_balance and fan-out examples
+
+### 🚜 Refactor
+
+- **transport**: Extract race_reply_or_signal helper in rpc::delivery
+- **transport**: Dedupe test_address and reply_promise lock pattern
+- **core,sim,transport,derive**: Post-migration cleanup of Send-bounded traits
+- **core,sim**: Switch trait impls back to async fn syntax
+- **core,transport,derive**: Migrate transport to Send-bounded traits
+- **transport**: Drop dead PeerCore::providers field
+- **transport**: Drop unused InterfaceMethod::try_recv_with_sender
+- **transport**: Drop unused ReplyFuture::endpoint
+- **transport**: Drop unused NetTransport::incoming_peer_count
+- **transport**: Drop unused FailureMonitor::address_state
+- **transport**: Drop unused smoother module
+- **transport**: Drop unused MessagingError::QueueFull and TransportClosed
+- **transport**: Drop unused TransportHandle::sleep
+- **transport**: Drop unused ReplyPromise::is_fulfilled and endpoint
+- **transport**: Drop unused NetNotifiedQueue::with_address and rand_simple_id
+- **transport**: Drop unused InterfaceMethod accessors
+- **transport**: Drop unused FailureMonitor::on_state_changed
+- **transport**: Drop unused MessageReceiver::is_stream default method
+- **transport**: Drop unused method_endpoint/method_uid helpers and interface.rs
+- **transport**: Drop dead peer module APIs
+- **core**: Switch NetworkProvider IO bounds to futures::io
+- **transport**: Apply rust-api-guidelines review
+- Examples use get_reply_unless_failed_for, demonstrate send()
+- Unify Server and Client into single interface type
+- Move codec to transport, erase from user-facing API
+- Erase codec and provider generics from user-facing types
+- Bind transport at interface construction
+- Dynamic endpoint tokens with well-known opt-in
+
+### ⚙️ Miscellaneous Tasks
+
+- **workspace**: Enable clippy pedantic and fix all warnings
+- **transport**: Drop unused futures, tokio-util, tracing-subscriber deps
+- Remove simulation code from transport
+- Remove load_balance and fan_out primitives
+
+
 ## [0.6.0] - 2026-03-28
 
 ### 🚀 Features

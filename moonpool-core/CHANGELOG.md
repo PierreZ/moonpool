@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-05-22
+
+### 🚀 Features
+
+- **core**: Make moonpool-core wasm-buildable and abstract TaskProvider JoinHandle
+
+### 🐛 Bug Fixes
+
+- **rebase**: Reconcile with main's futures::io and CoveragePlateau
+
+### 🚜 Refactor
+
+- **core**: Derive Default for unit-struct Tokio providers
+- **core**: Macro-fy OpenOptions flag setters
+- **core,sim**: Collapse provider getter forwards via macro
+- **core,sim,transport,derive**: Post-migration cleanup of Send-bounded traits
+- **core,sim**: Switch trait impls back to async fn syntax
+- **core,transport,derive**: Migrate transport to Send-bounded traits
+- **core**: Migrate provider traits to native AFIT
+- **core**: Drop unused NetworkAddress flag helpers
+- **core**: Drop redundant task_name_clone in spawn_task
+- **core**: Collapse timeout match to map_err
+- **core**: Drop unused OpenOptions::read_write helper
+- **core**: Drop unused Endpoint::is_valid
+- **core**: Drop unused NodeAddress type
+- **core**: Switch StorageFile IO bounds to futures::io
+- **core**: Switch NetworkProvider IO bounds to futures::io
+
+### 🎨 Styling
+
+- **core**: Remove stray blank line after flag_setters! macro
+- **core**: Group Storage associated type with the others in TokioProviders
+
+### ⚙️ Miscellaneous Tasks
+
+- **workspace**: Enable clippy pedantic and fix all warnings
+
+
 ## [0.6.0] - 2026-03-28
 
 ### 🚜 Refactor
