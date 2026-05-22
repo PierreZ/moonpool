@@ -103,23 +103,22 @@ fn fmt_duration(d: std::time::Duration) -> String {
     }
 }
 
-fn filter_binaries<'a>(filters: &[&str]) -> Vec<&'a SimBinary> {
+fn filter_binaries(filters: &[String]) -> Vec<&'static SimBinary> {
     if filters.is_empty() {
         SIM_BINARIES.iter().collect()
     } else {
         SIM_BINARIES
             .iter()
-            .filter(|b| filters.iter().any(|f| b.name.contains(f)))
+            .filter(|b| filters.iter().any(|f| b.name.contains(f.as_str())))
             .collect()
     }
 }
 
 fn sim_list(args: &[String]) {
-    let filters: Vec<&str> = args.iter().map(std::string::String::as_str).collect();
-    let binaries = filter_binaries(&filters);
+    let binaries = filter_binaries(args);
 
     if binaries.is_empty() {
-        eprintln!("No binaries match filters: {filters:?}");
+        eprintln!("No binaries match filters: {args:?}");
         process::exit(1);
     }
 
@@ -135,12 +134,7 @@ fn sim_run(args: &[String]) {
         None => (args, [].as_slice()),
     };
 
-    let filters: Vec<&str> = filter_args
-        .iter()
-        .map(std::string::String::as_str)
-        .collect();
-
-    if filters.is_empty() {
+    if filter_args.is_empty() {
         eprintln!("error: 'run' requires at least one filter argument");
         eprintln!();
         eprintln!("Usage: cargo xtask sim run <filter...> [-- <binary-args...>]");
@@ -148,10 +142,10 @@ fn sim_run(args: &[String]) {
         process::exit(1);
     }
 
-    let binaries = filter_binaries(&filters);
+    let binaries = filter_binaries(filter_args);
 
     if binaries.is_empty() {
-        eprintln!("No binaries match filters: {filters:?}");
+        eprintln!("No binaries match filters: {filter_args:?}");
         process::exit(1);
     }
 
