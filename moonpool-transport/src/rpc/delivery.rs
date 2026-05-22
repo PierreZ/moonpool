@@ -213,7 +213,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
 
     use serde::{Deserialize, Serialize};
@@ -222,13 +221,9 @@ mod tests {
     use crate::rpc::failure_monitor::FailureStatus;
     use crate::rpc::net_notified_queue::NetNotifiedQueue;
     use crate::rpc::request_stream::RequestEnvelope;
-    use crate::rpc::test_support::make_transport;
+    use crate::rpc::test_support::{make_transport, test_address};
     use crate::rpc::transport_handle::{make_decode_fn, make_encode_fn};
-    use crate::{JsonCodec, NetworkAddress, UID};
-
-    fn test_address() -> NetworkAddress {
-        NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500)
-    }
+    use crate::{JsonCodec, UID};
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     struct TestRequest {

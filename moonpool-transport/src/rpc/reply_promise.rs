@@ -106,6 +106,12 @@ impl<T: Serialize> ReplyPromise<T> {
         }
     }
 
+    fn write_inner(&self) -> std::sync::RwLockWriteGuard<'_, ReplyPromiseInner<T>> {
+        self.inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked")
+    }
+
     /// Send a successful response.
     ///
     /// Consumes the promise, preventing double-send.
@@ -115,10 +121,7 @@ impl<T: Serialize> ReplyPromise<T> {
     /// Panics if the internal `RwLock` is poisoned (only possible if a prior
     /// task panicked while holding the lock).
     pub fn send(self, value: T) {
-        let mut inner = self
-            .inner
-            .write()
-            .expect("RwLock poisoned: prior task panicked");
+        let mut inner = self.write_inner();
         if inner.fulfilled {
             // Already fulfilled (shouldn't happen due to move semantics)
             return;
@@ -158,10 +161,7 @@ impl<T: Serialize> ReplyPromise<T> {
     /// Panics if the internal `RwLock` is poisoned (only possible if a prior
     /// task panicked while holding the lock).
     pub fn send_error(self, error: ReplyError) {
-        let mut inner = self
-            .inner
-            .write()
-            .expect("RwLock poisoned: prior task panicked");
+        let mut inner = self.write_inner();
         if inner.fulfilled {
             return;
         }
@@ -179,10 +179,7 @@ impl<T: Serialize> ReplyPromise<T> {
 
 impl<T: Serialize> Drop for ReplyPromise<T> {
     fn drop(&mut self) {
-        let mut inner = self
-            .inner
-            .write()
-            .expect("RwLock poisoned: prior task panicked");
+        let mut inner = self.write_inner();
         if !inner.fulfilled {
             // Send BrokenPromise error to client
             let result: Result<T, ReplyError> = Err(ReplyError::BrokenPromise);

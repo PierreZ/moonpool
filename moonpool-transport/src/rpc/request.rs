@@ -162,19 +162,14 @@ where
 #[cfg(test)]
 mod tests {
 
-    use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
 
-    use crate::rpc::test_support::make_transport;
+    use crate::rpc::test_support::{make_transport, test_address};
     use crate::rpc::transport_handle::{make_decode_fn, make_encode_fn};
-    use crate::{JsonCodec, NetworkAddress, UID};
+    use crate::{JsonCodec, UID};
     use serde::{Deserialize, Serialize};
 
     use super::*;
-
-    fn test_address() -> NetworkAddress {
-        NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500)
-    }
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     struct PingRequest {
