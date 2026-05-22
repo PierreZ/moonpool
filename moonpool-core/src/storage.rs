@@ -180,7 +180,7 @@ pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync 
 
 /// Real Tokio storage implementation.
 #[cfg(feature = "tokio-providers")]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TokioStorageProvider;
 
 #[cfg(feature = "tokio-providers")]
@@ -189,13 +189,6 @@ impl TokioStorageProvider {
     #[must_use]
     pub fn new() -> Self {
         Self
-    }
-}
-
-#[cfg(feature = "tokio-providers")]
-impl Default for TokioStorageProvider {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
