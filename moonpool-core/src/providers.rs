@@ -40,6 +40,56 @@ use crate::{
     TokioTimeProvider,
 };
 
+/// Implement [`Providers`] for a struct whose fields are named
+/// `network`, `time`, `task`, `random`, `storage` — the five canonical
+/// provider slots.
+///
+/// Expands to the trait impl plus the five trivial getter forwards. The
+/// type of each slot is specified once in the macro invocation, so the
+/// implementing struct does not have to repeat the field-to-type mapping
+/// in the trait body.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! impl_providers_bundle {
+    (
+        $struct:ty {
+            network: $network_ty:ty,
+            time: $time_ty:ty,
+            task: $task_ty:ty,
+            random: $random_ty:ty,
+            storage: $storage_ty:ty $(,)?
+        }
+    ) => {
+        impl $crate::Providers for $struct {
+            type Network = $network_ty;
+            type Time = $time_ty;
+            type Task = $task_ty;
+            type Random = $random_ty;
+            type Storage = $storage_ty;
+
+            fn network(&self) -> &Self::Network {
+                &self.network
+            }
+
+            fn time(&self) -> &Self::Time {
+                &self.time
+            }
+
+            fn task(&self) -> &Self::Task {
+                &self.task
+            }
+
+            fn random(&self) -> &Self::Random {
+                &self.random
+            }
+
+            fn storage(&self) -> &Self::Storage {
+                &self.storage
+            }
+        }
+    };
+}
+
 /// Bundle of all provider types for a runtime environment.
 ///
 /// This trait consolidates the five provider types ([`NetworkProvider`],
@@ -143,30 +193,10 @@ impl Default for TokioProviders {
 }
 
 #[cfg(feature = "tokio-providers")]
-impl Providers for TokioProviders {
-    type Network = TokioNetworkProvider;
-    type Time = TokioTimeProvider;
-    type Task = TokioTaskProvider;
-    type Random = TokioRandomProvider;
-    type Storage = TokioStorageProvider;
-
-    fn network(&self) -> &Self::Network {
-        &self.network
-    }
-
-    fn time(&self) -> &Self::Time {
-        &self.time
-    }
-
-    fn task(&self) -> &Self::Task {
-        &self.task
-    }
-
-    fn random(&self) -> &Self::Random {
-        &self.random
-    }
-
-    fn storage(&self) -> &Self::Storage {
-        &self.storage
-    }
-}
+impl_providers_bundle!(TokioProviders {
+    network: TokioNetworkProvider,
+    time: TokioTimeProvider,
+    task: TokioTaskProvider,
+    random: TokioRandomProvider,
+    storage: TokioStorageProvider,
+});
