@@ -47,42 +47,38 @@ impl OpenOptions {
         }
         self
     }
+}
 
+macro_rules! flag_setters {
+    ($($(#[$attr:meta])* $name:ident => $flag:ident),* $(,)?) => {
+        impl OpenOptions {
+            $(
+                $(#[$attr])*
+                #[must_use]
+                pub fn $name(self, value: bool) -> Self {
+                    self.set_flag(Self::$flag, value)
+                }
+            )*
+        }
+    };
+}
+
+flag_setters! {
     /// Set the read flag.
-    #[must_use]
-    pub fn read(self, read: bool) -> Self {
-        self.set_flag(Self::FLAG_READ, read)
-    }
-
+    read => FLAG_READ,
     /// Set the write flag.
-    #[must_use]
-    pub fn write(self, write: bool) -> Self {
-        self.set_flag(Self::FLAG_WRITE, write)
-    }
-
+    write => FLAG_WRITE,
     /// Set the create flag.
-    #[must_use]
-    pub fn create(self, create: bool) -> Self {
-        self.set_flag(Self::FLAG_CREATE, create)
-    }
-
+    create => FLAG_CREATE,
     /// Set the `create_new` flag.
-    #[must_use]
-    pub fn create_new(self, create_new: bool) -> Self {
-        self.set_flag(Self::FLAG_CREATE_NEW, create_new)
-    }
-
+    create_new => FLAG_CREATE_NEW,
     /// Set the truncate flag.
-    #[must_use]
-    pub fn truncate(self, truncate: bool) -> Self {
-        self.set_flag(Self::FLAG_TRUNCATE, truncate)
-    }
-
+    truncate => FLAG_TRUNCATE,
     /// Set the append flag.
-    #[must_use]
-    pub fn append(self, append: bool) -> Self {
-        self.set_flag(Self::FLAG_APPEND, append)
-    }
+    append => FLAG_APPEND,
+}
+
+impl OpenOptions {
 
     /// Returns true if the file will be opened for reading.
     #[must_use]
