@@ -13,12 +13,13 @@
 //! `RequestStream::send`, `tryGetReply`, `getReply`, `getReplyUnlessFailedFor`
 //! from `fdbrpc.h:727-895`
 
+use std::future::Future;
 use std::time::Duration;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use super::failure_monitor::FailureStatus;
+use super::failure_monitor::{FailureMonitor, FailureStatus};
 use super::reply_error::ReplyError;
 use super::reply_future::ReplyFuture;
 use super::request::{send_request, send_request_unreliable};
@@ -26,6 +27,37 @@ use super::request_stream::RequestEnvelope;
 use super::transport_handle::{DecodeFn, EncodeFn, TransportHandle};
 use crate::error::MessagingError;
 use crate::{Endpoint, UID};
+
+/// Race a `ReplyFuture` against a signal future (disconnect, failure-window
+/// timeout, etc.) and translate the outcome into a `ReplyError`.
+///
+/// Shared by [`try_get_reply`] and [`get_reply_unless_failed_for`]: both want
+/// "give me the reply, but if the signal fires first treat the request as
+/// `MaybeDelivered`", and both map `BrokenPromise` from the server into a
+/// `MaybeDelivered` after notifying the failure monitor.
+async fn race_reply_or_signal<Resp, S>(
+    reply_future: ReplyFuture<Resp>,
+    signal: S,
+    fm: &FailureMonitor,
+    destination: &Endpoint,
+) -> Result<Resp, ReplyError>
+where
+    Resp: DeserializeOwned + Send + Sync + 'static,
+    S: Future<Output = ()>,
+{
+    tokio::pin!(signal);
+    tokio::select! {
+        result = reply_future => match result {
+            Ok(resp) => Ok(resp),
+            Err(ReplyError::BrokenPromise) => {
+                fm.endpoint_not_found(destination);
+                Err(ReplyError::MaybeDelivered)
+            }
+            Err(e) => Err(e),
+        },
+        () = &mut signal => Err(ReplyError::MaybeDelivered),
+    }
+}
 
 /// Fire-and-forget delivery: send request unreliably with no reply.
 ///
@@ -108,19 +140,7 @@ where
     })?;
 
     let disconnect = fm.on_disconnect_or_failure(destination);
-    tokio::pin!(disconnect);
-
-    tokio::select! {
-        result = reply_future => match result {
-            Ok(resp) => Ok(resp),
-            Err(ReplyError::BrokenPromise) => {
-                fm.endpoint_not_found(destination);
-                Err(ReplyError::MaybeDelivered)
-            }
-            Err(e) => Err(e),
-        },
-        () = &mut disconnect => Err(ReplyError::MaybeDelivered),
-    }
+    race_reply_or_signal(reply_future, disconnect, &fm, destination).await
 }
 
 /// At-least-once delivery: send reliably, retransmit on reconnect.
@@ -194,21 +214,7 @@ where
     })?;
 
     let failed_for = fm.on_failed_for(destination, sustained_failure_duration);
-    tokio::pin!(failed_for);
-
-    tokio::select! {
-        result = reply_future => match result {
-            Ok(resp) => Ok(resp),
-            Err(ReplyError::BrokenPromise) => {
-                fm.endpoint_not_found(destination);
-                Err(ReplyError::MaybeDelivered)
-            }
-            Err(e) => Err(e),
-        },
-        () = &mut failed_for => {
-            Err(ReplyError::MaybeDelivered)
-        }
-    }
+    race_reply_or_signal(reply_future, failed_for, &fm, destination).await
 }
 
 #[cfg(test)]
