@@ -141,10 +141,14 @@ impl Providers for MockProviders {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Echo(pub u32);
 
+/// Canonical server-side network address used by the rpc test suites.
+pub fn test_address() -> NetworkAddress {
+    NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500)
+}
+
 pub fn make_transport() -> Arc<NetTransport<MockProviders>> {
-    let local = NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4500);
     crate::NetTransportBuilder::new(MockProviders::new())
-        .local_address(local)
+        .local_address(test_address())
         .build()
         .expect("build transport")
 }

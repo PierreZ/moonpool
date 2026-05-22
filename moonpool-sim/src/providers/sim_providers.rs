@@ -2,7 +2,7 @@
 
 use std::net::IpAddr;
 
-use moonpool_core::{Providers, TokioTaskProvider};
+use moonpool_core::{TokioTaskProvider, impl_providers_bundle};
 
 use crate::network::SimNetworkProvider;
 use crate::sim::WeakSimWorld;
@@ -66,31 +66,10 @@ impl SimProviders {
     }
 }
 
-impl Providers for SimProviders {
-    type Network = SimNetworkProvider;
-    type Time = SimTimeProvider;
-    type Task = TokioTaskProvider;
-    type Random = SimRandomProvider;
-
-    fn network(&self) -> &Self::Network {
-        &self.network
-    }
-
-    fn time(&self) -> &Self::Time {
-        &self.time
-    }
-
-    fn task(&self) -> &Self::Task {
-        &self.task
-    }
-
-    fn random(&self) -> &Self::Random {
-        &self.random
-    }
-
-    type Storage = SimStorageProvider;
-
-    fn storage(&self) -> &Self::Storage {
-        &self.storage
-    }
-}
+impl_providers_bundle!(SimProviders {
+    network: SimNetworkProvider,
+    time: SimTimeProvider,
+    task: TokioTaskProvider,
+    random: SimRandomProvider,
+    storage: SimStorageProvider,
+});

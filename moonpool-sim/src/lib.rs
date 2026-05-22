@@ -168,7 +168,7 @@ pub use chaos::{
 // Observability module re-exports (new system replacing legacy Timeline + Invariant)
 pub use observability::{
     CapturedEvent, Clock, InstallGuard, Invariant, SimTime, SimulationLayer, SimulationLayerHandle,
-    TimelineQuery, TimelineQueryExt, TypedEntry, invariant_fn,
+    TimelineQuery, TimelineQueryExt, TypedEntry, init_sim_tracing, invariant_fn,
 };
 
 // Network exports

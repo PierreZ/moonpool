@@ -55,7 +55,7 @@ pub trait TcpListenerTrait: Send + Sync + 'static {
 /// implements the runtime-agnostic `futures::io::AsyncRead + AsyncWrite` traits
 /// required by [`NetworkProvider`].
 #[cfg(feature = "tokio-providers")]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TokioNetworkProvider;
 
 #[cfg(feature = "tokio-providers")]
@@ -64,13 +64,6 @@ impl TokioNetworkProvider {
     #[must_use]
     pub fn new() -> Self {
         Self
-    }
-}
-
-#[cfg(feature = "tokio-providers")]
-impl Default for TokioNetworkProvider {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

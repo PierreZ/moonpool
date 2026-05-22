@@ -14,22 +14,19 @@ use moonpool_transport_sim::process::TransportServerProcess;
 use moonpool_transport_sim::workload::TransportClientWorkload;
 
 fn main() {
-    let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .try_init();
+    moonpool_sim::init_sim_tracing(tracing::Level::INFO);
 
-    let report = moonpool_sim::simulations::run_simulation(
-        SimulationBuilder::new()
-            .processes(ProcessCount::Fixed(1), || Box::new(TransportServerProcess))
-            .workloads(WorkloadCount::Fixed(1), |i| {
-                Box::new(TransportClientWorkload::new(i))
-            })
-            .invariant(TransportIntegrityInvariant::new())
-            .chaos_duration(Duration::from_secs(10))
-            .random_network()
-            .set_iterations(20)
-            .seed_warning_timeout(Duration::from_secs(15)),
-    );
+    let report = SimulationBuilder::new()
+        .processes(ProcessCount::Fixed(1), || Box::new(TransportServerProcess))
+        .workloads(WorkloadCount::Fixed(1), |i| {
+            Box::new(TransportClientWorkload::new(i))
+        })
+        .invariant(TransportIntegrityInvariant::new())
+        .chaos_duration(Duration::from_secs(10))
+        .random_network()
+        .set_iterations(20)
+        .seed_warning_timeout(Duration::from_secs(15))
+        .run();
 
     report.eprint();
 
