@@ -79,7 +79,6 @@ flag_setters! {
 }
 
 impl OpenOptions {
-
     /// Returns true if the file will be opened for reading.
     #[must_use]
     pub fn is_read(&self) -> bool {
