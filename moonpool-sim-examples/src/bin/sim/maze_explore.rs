@@ -6,9 +6,7 @@
 use std::process;
 
 fn main() {
-    let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
-        .try_init();
+    moonpool_sim::init_sim_tracing(tracing::Level::WARN);
 
     let report = moonpool_sim::simulations::run_simulation(
         moonpool_sim::SimulationBuilder::new()

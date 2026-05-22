@@ -26,12 +26,14 @@
 pub mod emit;
 pub mod event;
 pub mod fmt;
+pub mod init;
 pub mod invariant;
 pub mod layer;
 pub mod query;
 
 pub use event::{CapturedEvent, TypedEntry};
 pub use fmt::{Clock, SimTime};
+pub use init::init_sim_tracing;
 pub use invariant::{Invariant, invariant_fn};
 pub use layer::{InstallGuard, SimulationLayer, SimulationLayerHandle};
 pub use query::{TimelineQuery, TimelineQueryExt};

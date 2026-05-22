@@ -14,9 +14,7 @@ use moonpool_transport_sim::process::TransportServerProcess;
 use moonpool_transport_sim::workload::TransportClientWorkload;
 
 fn main() {
-    let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .try_init();
+    moonpool_sim::init_sim_tracing(tracing::Level::INFO);
 
     let report = moonpool_sim::simulations::run_simulation(
         SimulationBuilder::new()
