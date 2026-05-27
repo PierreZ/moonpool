@@ -196,9 +196,11 @@ pub struct MockConfig {
     /// Probability per `commit` of injecting a synthetic `NotCommitted`
     /// before any mutations are applied.
     pub not_committed_prob: f64,
-    /// Probability per `commit` of injecting `CommitUnknownResult` **after**
-    /// mutations have been applied — exactly mirroring real FDB's most
-    /// dangerous failure mode.
+    /// Probability per `commit` of injecting `CommitUnknownResult`. When
+    /// triggered, the fake flips a fair coin to decide whether mutations
+    /// landed (ack lost on the wire) or were dropped (proxy crashed before
+    /// log write). A correct layer must handle both — re-read state before
+    /// retrying — exactly as it would against a real FDB cluster.
     pub commit_unknown_result_prob: f64,
     /// Probability per `get` of injecting `TransactionTooOld`.
     pub transaction_too_old_prob: f64,
@@ -453,28 +455,37 @@ impl<P: Providers> FdbTransaction for MockTransaction<P> {
             return Err(FdbError::NotCommitted);
         }
 
-        // Assign version and apply. `next_commit_version` reads
-        // `providers.time().now()` for the µs clock, so the version
-        // sequence is deterministic under SimProviders.
-        let commit_version = fdb.next_commit_version(self.providers.time());
-        for (key, value) in self.write_set {
-            fdb.data
-                .entry(key)
-                .or_default()
-                .push((commit_version, value));
-        }
-
-        // Commit-unknown-result — by design fires *after* mutations land.
-        // A naive retry here would double-apply; this is exactly the trap
-        // that motivates FDB's idempotency guidance.
-        if self
+        // Decide upfront whether to inject CommitUnknownResult and, if so,
+        // whether mutations land or get dropped. Models the two physical
+        // causes in real FDB:
+        //   - ack lost after log write → mutations landed, client doesn't know
+        //   - proxy crashed before log write → mutations dropped, client doesn't know
+        // A layer that retries CommitUnknownResult blindly will double-apply
+        // in the first case; a layer that gives up will lose work in the
+        // second. Forcing both outcomes in tests catches both bugs.
+        let inject_unknown = self
             .providers
             .random()
-            .random_bool(fdb.config.commit_unknown_result_prob)
-        {
-            return Err(FdbError::CommitUnknownResult);
+            .random_bool(fdb.config.commit_unknown_result_prob);
+        let drop_mutations = inject_unknown && self.providers.random().random_bool(0.5);
+
+        // Always advance the version counter — real FDB does too, since the
+        // master assigns the version before knowing whether the commit will
+        // be durably logged.
+        let commit_version = fdb.next_commit_version(self.providers.time());
+
+        if !drop_mutations {
+            for (key, value) in self.write_set {
+                fdb.data
+                    .entry(key)
+                    .or_default()
+                    .push((commit_version, value));
+            }
         }
 
+        if inject_unknown {
+            return Err(FdbError::CommitUnknownResult);
+        }
         Ok(commit_version)
     }
 }
@@ -725,5 +736,41 @@ mod tests {
                 "tag/{i} missing — task didn't commit",
             );
         }
+    }
+
+    #[tokio::test]
+    async fn commit_unknown_result_models_both_outcomes() {
+        // Force every commit to return CommitUnknownResult and verify the
+        // fake exhibits BOTH physical causes: sometimes mutations landed
+        // (ack lost), sometimes they didn't (proxy crashed before log).
+        // A fake that always lands the write would let buggy "always
+        // retry" layer code pass tests undetected.
+        let mut config = MockConfig::deterministic();
+        config.commit_unknown_result_prob = 1.0;
+        let db = MockDatabase::new(TokioProviders::new(), config);
+
+        let (mut saw_landed, mut saw_dropped) = (false, false);
+        for i in 0..200_u64 {
+            let key = Bytes::from(format!("k/{i}"));
+            let val = Bytes::from_static(b"v");
+
+            let mut tx = db.create_transaction();
+            tx.put(key.clone(), val.clone());
+            assert_eq!(tx.commit().await, Err(FdbError::CommitUnknownResult));
+
+            let mut tx = db.create_transaction();
+            match tx.get(key).await.unwrap() {
+                Some(got) if got == val => saw_landed = true,
+                None => saw_dropped = true,
+                other => panic!("unexpected value: {other:?}"),
+            }
+            if saw_landed && saw_dropped {
+                return;
+            }
+        }
+        panic!(
+            "did not observe both outcomes in 200 iterations: \
+             landed={saw_landed} dropped={saw_dropped}"
+        );
     }
 }
