@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use tracing::instrument;
 
 use crate::SimulationError;
-use crate::observability::{Invariant, SimulationLayer, SimulationLayerHandle, TimelineQuery};
+use crate::observability::{Invariant, SimulationLayer, SimulationLayerHandle, TrailQuery};
 use crate::runner::fault_injector::FaultInjector;
 use crate::runner::process::{Attrition, Process};
 use crate::runner::tags::TagDistribution;
@@ -496,7 +496,7 @@ impl SimulationBuilder {
     pub fn invariant_fn(
         mut self,
         name: impl Into<String>,
-        f: impl Fn(&dyn TimelineQuery, u64) + Send + 'static,
+        f: impl Fn(&dyn TrailQuery, u64) + Send + 'static,
     ) -> Self {
         self.invariants
             .push(crate::observability::invariant_fn(name, f));

@@ -1,5 +1,5 @@
 use moonpool_sim::{
-    SIM_FAULT_TIMELINE, SimFaultEvent, SimWorld, SimulationLayer,
+    SIM_FAULT_TRAIL, SimFaultEvent, SimWorld, SimulationLayer,
     network::config::NetworkConfiguration,
 };
 use std::{net::IpAddr, time::Duration};
@@ -159,7 +159,7 @@ fn test_partition_fault_timeline() {
     sim.partition_recv_to(b, Duration::from_secs(5)).unwrap();
 
     // Read the fault timeline from the captured layer
-    let entries = handle.timeline::<SimFaultEvent>(SIM_FAULT_TIMELINE);
+    let entries = handle.trail::<SimFaultEvent>(SIM_FAULT_TRAIL);
     assert_eq!(entries.len(), 4, "should have 4 fault events");
 
     // Verify event types in order

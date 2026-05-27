@@ -12,9 +12,11 @@ use std::{
 };
 use tracing::instrument;
 
+use tracing::field::valuable;
+
 use crate::{
     SimulationError, SimulationResult,
-    chaos::fault_events::{SIM_FAULT_TIMELINE, SimFaultEvent},
+    chaos::fault_events::{SIM_FAULT_TRAIL, SimFaultEvent},
     network::{
         NetworkConfiguration, PartitionStrategy,
         sim::{ConnectionId, ListenerId, SimNetworkProvider},
@@ -100,15 +102,19 @@ impl SimInner {
         }
     }
 
-    /// Emit a fault event to the [`SIM_FAULT_TIMELINE`].
+    /// Emit a fault event to the [`SIM_FAULT_TRAIL`].
     ///
-    /// Routes through `tracing::event!` at target `"moonpool::sim"`. The active
-    /// [`crate::observability::SimulationLayer`] (if any) captures the typed
-    /// payload; production subscribers see structured fields and a `Debug`
-    /// payload.
-    pub(crate) fn emit_fault(&self, event: SimFaultEvent) {
-        let time_ms = u64::try_from(self.current_time.as_millis()).unwrap_or(u64::MAX);
-        crate::sim_emit!(SIM_FAULT_TIMELINE, time_ms, "sim", event);
+    /// Emits a `tracing::info!` with `capture = true`, `trail = SIM_FAULT_TRAIL`,
+    /// `source = "sim"`, and the typed event. The active
+    /// [`crate::observability::SimulationLayer`] (if any) captures it for
+    /// invariants; production subscribers see structured fields.
+    pub(crate) fn emit_fault(event: &SimFaultEvent) {
+        tracing::info!(
+            capture = true,
+            trail = SIM_FAULT_TRAIL,
+            source = "sim",
+            event = valuable(event),
+        );
     }
 
     /// Calculate the number of bits to flip using a power-law distribution.
@@ -996,13 +1002,13 @@ impl SimWorld {
                 {
                     conn.flags.set_is_cut(false);
                     conn.cut_expiry = None;
-                    inner.emit_fault(SimFaultEvent::CutRestored { connection_id: id });
+                    SimInner::emit_fault(&SimFaultEvent::CutRestored { connection_id: id });
                     tracing::debug!("Connection {} restored via scheduled event", id);
                     Self::wake_all(&mut inner.wakers.cuts, connection_id);
                 }
             }
             ConnectionStateChange::HalfOpenError => {
-                inner.emit_fault(SimFaultEvent::HalfOpenError { connection_id: id });
+                SimInner::emit_fault(&SimFaultEvent::HalfOpenError { connection_id: id });
                 tracing::debug!("Connection {} half-open error time reached", id);
                 if let Some(waker) = inner.wakers.reads.remove(&connection_id) {
                     waker.wake();
@@ -1245,7 +1251,7 @@ impl SimWorld {
             flipped_positions.len()
         );
 
-        inner.emit_fault(SimFaultEvent::BitFlip {
+        SimInner::emit_fault(&SimFaultEvent::BitFlip {
             connection_id: connection_id.0,
             flip_count: flipped_positions.len(),
         });
@@ -2302,7 +2308,7 @@ impl SimWorld {
 
         inner.network.last_random_close_time = current_time;
 
-        inner.emit_fault(SimFaultEvent::RandomClose {
+        SimInner::emit_fault(&SimFaultEvent::RandomClose {
             connection_id: connection_id.0,
         });
 
@@ -2536,7 +2542,7 @@ impl SimWorld {
         let scheduled_event = ScheduledEvent::new(expires_at, restore_event, sequence);
         inner.event_queue.schedule(scheduled_event);
 
-        inner.emit_fault(SimFaultEvent::PartitionCreated {
+        SimInner::emit_fault(&SimFaultEvent::PartitionCreated {
             from: from_ip.to_string(),
             to: to_ip.to_string(),
         });
@@ -2581,7 +2587,7 @@ impl SimWorld {
         let scheduled_event = ScheduledEvent::new(expires_at, clear_event, sequence);
         inner.event_queue.schedule(scheduled_event);
 
-        inner.emit_fault(SimFaultEvent::SendPartitionCreated { ip: ip.to_string() });
+        SimInner::emit_fault(&SimFaultEvent::SendPartitionCreated { ip: ip.to_string() });
         tracing::debug!("Partitioned sends from {} until {:?}", ip, expires_at);
         Ok(())
     }
@@ -2617,7 +2623,7 @@ impl SimWorld {
         let scheduled_event = ScheduledEvent::new(expires_at, clear_event, sequence);
         inner.event_queue.schedule(scheduled_event);
 
-        inner.emit_fault(SimFaultEvent::RecvPartitionCreated { ip: ip.to_string() });
+        SimInner::emit_fault(&SimFaultEvent::RecvPartitionCreated { ip: ip.to_string() });
         tracing::debug!("Partitioned receives to {} until {:?}", ip, expires_at);
         Ok(())
     }
@@ -2641,7 +2647,7 @@ impl SimWorld {
             .write()
             .expect("RwLock poisoned: prior task panicked");
         inner.network.ip_partitions.remove(&(from_ip, to_ip));
-        inner.emit_fault(SimFaultEvent::PartitionHealed {
+        SimInner::emit_fault(&SimFaultEvent::PartitionHealed {
             from: from_ip.to_string(),
             to: to_ip.to_string(),
         });
@@ -2768,7 +2774,7 @@ impl SimWorld {
                     .ip_partitions
                     .insert((to_ip, from_ip), PartitionState { expires_at });
 
-                inner.emit_fault(SimFaultEvent::PartitionCreated {
+                SimInner::emit_fault(&SimFaultEvent::PartitionCreated {
                     from: from_ip.to_string(),
                     to: to_ip.to_string(),
                 });
@@ -3031,25 +3037,27 @@ mod tests {
     #[test]
     fn emit_fault_without_layer_is_noop() {
         // No SimulationLayer installed — emit_fault should still not panic.
-        let inner = SimInner::new();
-        inner.emit_fault(SimFaultEvent::StorageCrash {
+        SimInner::emit_fault(&SimFaultEvent::StorageCrash {
             ip: "10.0.1.1".to_string(),
         });
     }
 
     #[test]
-    fn emit_fault_with_layer_writes_to_timeline() {
+    fn emit_fault_with_layer_writes_to_trail() {
         use crate::observability::SimulationLayer;
         let layer = SimulationLayer::new();
         let (handle, _guard) = layer.install();
 
-        let mut inner = SimInner::new();
-        inner.current_time = Duration::from_millis(500);
-        inner.emit_fault(SimFaultEvent::StorageCrash {
+        // The layer stamps `time_ms` from its own clock, which the
+        // orchestrator advances after each `sim.step()`. In this unit test
+        // we push the time directly.
+        handle.set_sim_time_ms(500);
+
+        SimInner::emit_fault(&SimFaultEvent::StorageCrash {
             ip: "10.0.1.1".to_string(),
         });
 
-        let entries = handle.timeline::<SimFaultEvent>(SIM_FAULT_TIMELINE);
+        let entries = handle.trail::<SimFaultEvent>(SIM_FAULT_TRAIL);
         assert_eq!(entries.len(), 1);
         let entry = &entries[0];
         assert_eq!(entry.time_ms, 500);
@@ -3069,7 +3077,7 @@ mod tests {
         sim.partition_pair(from, to, Duration::from_secs(10))
             .expect("partition should succeed");
 
-        let entries = handle.timeline::<SimFaultEvent>(SIM_FAULT_TIMELINE);
+        let entries = handle.trail::<SimFaultEvent>(SIM_FAULT_TRAIL);
         assert_eq!(entries.len(), 1);
         assert!(matches!(
             &entries[0].event,
@@ -3091,7 +3099,7 @@ mod tests {
             .expect("partition");
         sim.restore_partition(from, to).expect("restore");
 
-        let entries = handle.timeline::<SimFaultEvent>(SIM_FAULT_TIMELINE);
+        let entries = handle.trail::<SimFaultEvent>(SIM_FAULT_TRAIL);
         assert_eq!(entries.len(), 2);
         assert!(matches!(
             &entries[0].event,

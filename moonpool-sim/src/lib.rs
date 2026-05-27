@@ -160,15 +160,15 @@ pub use runner::{
 
 // Chaos module re-exports
 pub use chaos::{
-    AssertionStats, SIM_FAULT_TIMELINE, SimFaultEvent, StateHandle, assertion_results,
-    buggify_init, buggify_reset, has_always_violations, reset_always_violations,
-    reset_assertion_results, validate_assertion_contracts,
+    AssertionStats, SIM_FAULT_TRAIL, SimFaultEvent, StateHandle, assertion_results, buggify_init,
+    buggify_reset, has_always_violations, reset_always_violations, reset_assertion_results,
+    validate_assertion_contracts,
 };
 
-// Observability module re-exports (new system replacing legacy Timeline + Invariant)
+// Observability module re-exports (plain-tracing capture + invariants)
 pub use observability::{
     CapturedEvent, Clock, InstallGuard, Invariant, SimTime, SimulationLayer, SimulationLayerHandle,
-    TimelineQuery, TimelineQueryExt, TypedEntry, init_sim_tracing, invariant_fn,
+    TrailQuery, TrailQueryExt, TypedEntry, init_sim_tracing, invariant_fn,
 };
 
 // Network exports

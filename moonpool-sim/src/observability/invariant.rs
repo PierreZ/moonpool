@@ -1,11 +1,11 @@
-//! Cross-process invariant trait checked after every simulation event.
+//! Cross-process invariant trait checked after every captured event.
 //!
 //! Invariants are registered on the [`crate::SimulationBuilder`] and run by
-//! the [`crate::observability::SimulationLayer`] each time an event is captured.
-//! They receive a [`TimelineQuery`] view of all events seen so far and panic on
-//! violation.
+//! the [`crate::observability::SimulationLayer`] each time an event marked
+//! with `capture = true` is captured. They receive a [`TrailQuery`] view of
+//! all events seen so far and panic on violation.
 
-use super::query::TimelineQuery;
+use super::query::TrailQuery;
 
 /// An invariant validated after every captured simulation event.
 ///
@@ -21,9 +21,14 @@ pub trait Invariant: 'static + Send {
 
     /// Observe the latest captured events and validate properties.
     ///
-    /// `q` exposes cursor-based incremental scans over typed timelines.
+    /// `q` exposes cursor-based incremental scans over typed trails.
     /// `sim_time_ms` is the simulated time of the event that just fired.
-    fn observe(&self, q: &dyn TimelineQuery, sim_time_ms: u64);
+    ///
+    /// **Don't emit captured events from here.** `tracing-core`'s dispatch
+    /// reentrancy guard silently drops events emitted while another event is
+    /// being processed, so an emit from inside `observe` is a no-op — not an
+    /// error. Treat invariants as read-only.
+    fn observe(&self, q: &dyn TrailQuery, sim_time_ms: u64);
 
     /// Reset internal state at the start of each seed.
     ///
@@ -32,7 +37,7 @@ pub trait Invariant: 'static + Send {
     fn reset(&mut self) {}
 }
 
-type InvariantFn = Box<dyn Fn(&dyn TimelineQuery, u64) + Send>;
+type InvariantFn = Box<dyn Fn(&dyn TrailQuery, u64) + Send>;
 
 struct FnInvariant {
     name: String,
@@ -44,7 +49,7 @@ impl Invariant for FnInvariant {
         &self.name
     }
 
-    fn observe(&self, q: &dyn TimelineQuery, sim_time_ms: u64) {
+    fn observe(&self, q: &dyn TrailQuery, sim_time_ms: u64) {
         (self.check)(q, sim_time_ms);
     }
 }
@@ -52,7 +57,7 @@ impl Invariant for FnInvariant {
 /// Wrap a closure as an [`Invariant`].
 pub fn invariant_fn(
     name: impl Into<String>,
-    f: impl Fn(&dyn TimelineQuery, u64) + Send + 'static,
+    f: impl Fn(&dyn TrailQuery, u64) + Send + 'static,
 ) -> Box<dyn Invariant + Send> {
     Box::new(FnInvariant {
         name: name.into(),

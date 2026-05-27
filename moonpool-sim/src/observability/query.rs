@@ -1,63 +1,54 @@
 //! Read-side traits used by invariants to inspect captured events.
 //!
-//! [`TimelineQuery`] is dyn-safe (no generic methods) so invariants can take
-//! `&dyn TimelineQuery`. The generic helpers live on
-//! [`TimelineQueryExt`], which is auto-implemented for every `TimelineQuery`.
-//! Cursor-based incremental scans match the original `Timeline::since` shape.
+//! [`TrailQuery`] is dyn-safe (no generic methods) so invariants can take
+//! `&dyn TrailQuery`. The generic helpers live on [`TrailQueryExt`], which is
+//! auto-implemented for every `TrailQuery`. Cursor-based incremental scans
+//! deserialize the payload into the caller-chosen `T` on demand.
 
 use std::cell::Cell;
+
+use serde::de::DeserializeOwned;
 
 use super::event::{CapturedEvent, TypedEntry};
 
 /// Read-only view of captured events provided to invariants.
 ///
-/// Dyn-safe core; for the generic `since::<T>` helper, see [`TimelineQueryExt`].
-pub trait TimelineQuery {
-    /// Total number of events captured under `key`.
-    fn len(&self, key: &'static str) -> usize;
+/// Dyn-safe core; for the generic `since::<T>` helper, see [`TrailQueryExt`].
+pub trait TrailQuery {
+    /// Total number of events captured under `trail`.
+    fn len(&self, trail: &str) -> usize;
 
     /// Highest sequence number assigned so far. Returns 0 if no events yet.
     fn last_seq(&self) -> u64;
 
-    /// Drain new captured events under `key` past `cursor`, advance `cursor`
+    /// Drain new captured events under `trail` past `cursor`, advance `cursor`
     /// to the new end, and return clones.
-    fn drain_since(&self, key: &'static str, cursor: &Cell<usize>) -> Vec<CapturedEvent>;
+    fn drain_since(&self, trail: &str, cursor: &Cell<usize>) -> Vec<CapturedEvent>;
 }
 
-/// Generic helpers on top of [`TimelineQuery`].
+/// Generic helpers on top of [`TrailQuery`].
 ///
 /// Provides the typed `since::<T>` and `snapshot::<T>` APIs. Auto-implemented
-/// for every type that implements [`TimelineQuery`], including `dyn TimelineQuery`.
-pub trait TimelineQueryExt: TimelineQuery {
-    /// Drain new typed events under `key` past `cursor`, advance `cursor`,
-    /// and downcast to `T`.
+/// for every type that implements [`TrailQuery`], including `dyn TrailQuery`.
+pub trait TrailQueryExt: TrailQuery {
+    /// Drain new typed events under `trail` past `cursor`, advance `cursor`,
+    /// and deserialize each payload into `T`.
     ///
-    /// Entries whose payload type does not match `T` are skipped. The cursor
-    /// is always advanced to the current length of the timeline.
-    fn since<T: 'static + Clone>(
-        &self,
-        key: &'static str,
-        cursor: &Cell<usize>,
-    ) -> Vec<TypedEntry<T>> {
-        self.drain_since(key, cursor)
-            .into_iter()
-            .filter_map(|e| {
-                e.payload.as_any().downcast_ref::<T>().map(|t| TypedEntry {
-                    event: t.clone(),
-                    time_ms: e.time_ms,
-                    source: e.source.clone(),
-                    seq: e.seq,
-                })
-            })
+    /// Entries whose payload does not deserialize as `T` are skipped. The
+    /// cursor is always advanced to the current length of the trail.
+    fn since<T: DeserializeOwned>(&self, trail: &str, cursor: &Cell<usize>) -> Vec<TypedEntry<T>> {
+        self.drain_since(trail, cursor)
+            .iter()
+            .filter_map(TypedEntry::<T>::deserialize)
             .collect()
     }
 
-    /// Snapshot all typed events under `key`. Convenience for full re-scans;
+    /// Snapshot all typed events under `trail`. Convenience for full re-scans;
     /// prefer [`since`](Self::since) when an incremental cursor will do.
-    fn snapshot<T: 'static + Clone>(&self, key: &'static str) -> Vec<TypedEntry<T>> {
+    fn snapshot<T: DeserializeOwned>(&self, trail: &str) -> Vec<TypedEntry<T>> {
         let cursor = Cell::new(0);
-        self.since::<T>(key, &cursor)
+        self.since::<T>(trail, &cursor)
     }
 }
 
-impl<Q: TimelineQuery + ?Sized> TimelineQueryExt for Q {}
+impl<Q: TrailQuery + ?Sized> TrailQueryExt for Q {}

@@ -28,7 +28,9 @@ thiserror = "2.0"
 parking_lot = "0.12"
 tokio = { version = "1", features = ["full", "tracing"] }
 tokio-util = { version = "0.7", features = ["compat"] }
-tracing = "0.1"
+tracing = { version = "0.1", features = ["valuable"] }
+valuable = { version = "0.1", features = ["derive"] }
+valuable-serde = "0.1"
 
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 

@@ -11,13 +11,13 @@ use crate::service::{
     APPEND_INTERFACE, AppendBlockRequest, AppendBlockResponse, METHOD_APPEND_BLOCK, parse_sim_addr,
 };
 
-/// Timeline key for server-side append events. The integrity invariant replays
-/// from this timeline.
+/// Trail name for server-side append events. The integrity invariant replays
+/// from this trail.
 pub const TL_APPEND: &str = "append";
 
 /// Event emitted per successful append. Includes the block bytes so the
 /// invariant can replay the chain end-to-end from `(0, INITIAL_DIGEST)`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, valuable::Valuable)]
 pub struct AppendBlockEvent {
     /// Block count after this append (`N` post-transition).
     pub n: u64,

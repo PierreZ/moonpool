@@ -112,7 +112,7 @@ fn handle_read_complete(inner: &mut SimInner, file_id: FileId) {
     if read_faulted {
         let ip = inner.storage.files.get(&file_id).map(|f| f.owner_ip);
         if let Some(ip) = ip {
-            inner.emit_fault(SimFaultEvent::StorageReadFault {
+            SimInner::emit_fault(&SimFaultEvent::StorageReadFault {
                 ip: ip.to_string(),
                 file_id: file_id.0,
             });
@@ -214,7 +214,7 @@ fn handle_write_complete(inner: &mut SimInner, file_id: FileId) {
         }
     }
     if let (Some(kind), Some(ip)) = (write_fault_kind, owner_ip) {
-        inner.emit_fault(SimFaultEvent::StorageWriteFault {
+        SimInner::emit_fault(&SimFaultEvent::StorageWriteFault {
             ip: ip.to_string(),
             file_id: file_id.0,
             kind: kind.to_string(),
@@ -254,7 +254,7 @@ fn handle_sync_complete(inner: &mut SimInner, file_id: FileId) {
         // Data remains in pending state and may be lost on crash
         let ip = inner.storage.files.get(&file_id).map(|f| f.owner_ip);
         if let Some(ip) = ip {
-            inner.emit_fault(SimFaultEvent::StorageSyncFault {
+            SimInner::emit_fault(&SimFaultEvent::StorageSyncFault {
                 ip: ip.to_string(),
                 file_id: file_id.0,
             });
@@ -946,7 +946,7 @@ impl SimWorld {
             }
         }
 
-        inner.emit_fault(SimFaultEvent::StorageCrash { ip: ip.to_string() });
+        SimInner::emit_fault(&SimFaultEvent::StorageCrash { ip: ip.to_string() });
 
         tracing::info!(
             "Storage crash simulated for {}: {} files affected, close_files={}",
@@ -1003,7 +1003,7 @@ impl SimWorld {
             }
         }
 
-        inner.emit_fault(SimFaultEvent::StorageWipe { ip: ip.to_string() });
+        SimInner::emit_fault(&SimFaultEvent::StorageWipe { ip: ip.to_string() });
 
         tracing::info!("Storage wiped for {}: {} files deleted", ip, file_ids.len(),);
     }

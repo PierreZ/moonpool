@@ -1,21 +1,21 @@
-//! Simulator-emitted fault events for the event timeline.
+//! Simulator-emitted fault events for the fault trail.
 //!
 //! When faults are injected (network partitions, process reboots, storage corruption, etc.),
-//! the simulator automatically emits [`SimFaultEvent`]s to the [`SIM_FAULT_TIMELINE`] timeline.
+//! the simulator automatically emits [`SimFaultEvent`]s to the [`SIM_FAULT_TRAIL`] trail.
 //! Invariants can read these to correlate application behavior with infrastructure faults.
 //!
 //! # Usage
 //!
 //! ```ignore
 //! use std::cell::Cell;
-//! use moonpool_sim::{Invariant, SimFaultEvent, SIM_FAULT_TIMELINE, TimelineQuery, TimelineQueryExt};
+//! use moonpool_sim::{Invariant, SimFaultEvent, SIM_FAULT_TRAIL, TrailQuery, TrailQueryExt};
 //!
 //! struct FaultCounter { cursor: Cell<usize> }
 //!
 //! impl Invariant for FaultCounter {
 //!     fn name(&self) -> &str { "fault_counter" }
-//!     fn observe(&self, q: &dyn TimelineQuery, _t: u64) {
-//!         for entry in q.since::<SimFaultEvent>(SIM_FAULT_TIMELINE, &self.cursor) {
+//!     fn observe(&self, q: &dyn TrailQuery, _t: u64) {
+//!         for entry in q.since::<SimFaultEvent>(SIM_FAULT_TRAIL, &self.cursor) {
 //!             if let SimFaultEvent::ProcessForceKill { ip } = &entry.event {
 //!                 // ...
 //!             }
@@ -24,14 +24,17 @@
 //! }
 //! ```
 
-/// Well-known timeline key for simulator-emitted fault events.
-pub const SIM_FAULT_TIMELINE: &str = "sim:faults";
+use serde::{Deserialize, Serialize};
+use valuable::Valuable;
+
+/// Well-known trail name for simulator-emitted fault events.
+pub const SIM_FAULT_TRAIL: &str = "sim:faults";
 
 /// Fault events automatically emitted by the simulator.
 ///
-/// Invariants read these via the [`crate::TimelineQuery`] / [`crate::TimelineQueryExt`]
-/// API: `q.since::<SimFaultEvent>(SIM_FAULT_TIMELINE, &cursor)`.
-#[derive(Debug, Clone)]
+/// Invariants read these via the [`crate::TrailQuery`] / [`crate::TrailQueryExt`]
+/// API: `q.since::<SimFaultEvent>(SIM_FAULT_TRAIL, &cursor)`.
+#[derive(Debug, Clone, Valuable, Serialize, Deserialize)]
 pub enum SimFaultEvent {
     // -- Process lifecycle --
     /// Process graceful shutdown initiated.

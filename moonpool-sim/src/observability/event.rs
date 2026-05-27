@@ -1,71 +1,70 @@
 //! Captured event records and typed views.
 //!
-//! Events emitted via [`crate::sim_emit!`] are captured by the [`crate::observability::SimulationLayer`]
-//! and stored as [`CapturedEvent`] records. Invariants and inspection code read
-//! them as [`TypedEntry<T>`] via cursor-based incremental queries.
+//! Events emitted as plain `tracing::*!` macros with the `capture = true` marker
+//! field are picked up by [`crate::observability::SimulationLayer`] and stored
+//! as [`CapturedEvent`] records. Invariants and inspection code read them as
+//! [`TypedEntry<T>`] via cursor-based incremental queries that deserialize the
+//! payload on demand.
 
-use std::any::Any;
-use std::sync::Arc;
-
-/// Trait for typed event payloads. Auto-implemented for all `T: Any + Send + Sync`.
-///
-/// `Send + Sync` is required because captured events live inside a
-/// `tracing::Subscriber`, which must be `Send + Sync`. moonpool simulations
-/// run single-threaded so this is purely a type-system requirement; no actual
-/// cross-thread access happens at runtime.
-///
-/// The `as_any` method enables downcasting back to the concrete `T` since
-/// trait objects of `AnyPayload` cannot be downcast directly.
-pub trait AnyPayload: Send + Sync + 'static {
-    /// Return a reference as `&dyn Any` to enable type-safe downcasting.
-    fn as_any(&self) -> &dyn Any;
-}
-
-impl<T: Any + Send + Sync> AnyPayload for T {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 
 /// A single event captured by the simulation layer.
 ///
-/// Stored internally; invariants typically read these via the
-/// [`crate::observability::TimelineQueryExt::since`] generic helper which
-/// downcasts the payload into [`TypedEntry<T>`] values.
-#[derive(Clone)]
+/// The payload is stored as a [`serde_json::Value`] produced from the
+/// `event = valuable(&p)` field at capture time. Invariants downcast via
+/// [`crate::observability::TrailQueryExt::since`], which deserializes into
+/// the requested type.
+#[derive(Debug, Clone)]
 pub struct CapturedEvent {
-    /// Timeline key (e.g. [`crate::SIM_FAULT_TIMELINE`]).
-    pub key: &'static str,
-    /// Simulation time in milliseconds when the event was emitted.
+    /// Trail name (e.g. [`crate::SIM_FAULT_TRAIL`]).
+    pub trail: String,
+    /// Simulation time in milliseconds when the event was captured. Stamped
+    /// by the layer from its current clock; not carried as a tracing field.
     pub time_ms: u64,
-    /// Source identifier — process IP or `"sim"` for simulator-emitted events.
+    /// Source identifier — process IP, `"sim"` for simulator-emitted events,
+    /// or empty if no `source` field was supplied.
     pub source: String,
-    /// Global monotonic sequence number across all timelines.
+    /// Global monotonic sequence number across all trails.
     pub seq: u64,
-    /// Typed payload. Downcast via `Any::downcast_ref` in the consumer.
-    pub payload: Arc<dyn AnyPayload>,
-}
-
-impl std::fmt::Debug for CapturedEvent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CapturedEvent")
-            .field("key", &self.key)
-            .field("time_ms", &self.time_ms)
-            .field("source", &self.source)
-            .field("seq", &self.seq)
-            .finish_non_exhaustive()
-    }
+    /// Serialized payload from the `event` field, deserializable into the
+    /// caller-chosen `T` via [`TypedEntry::deserialize`].
+    pub payload: Value,
 }
 
 /// A typed view of a captured event for use by invariants and tests.
 #[derive(Debug, Clone)]
 pub struct TypedEntry<T> {
-    /// Cloned payload of the captured event.
+    /// Deserialized payload.
     pub event: T,
-    /// Simulation time in milliseconds when the event was emitted.
+    /// Simulation time in milliseconds when the event was captured.
     pub time_ms: u64,
-    /// Source identifier (process IP or `"sim"`).
+    /// Source identifier (process IP, `"sim"`, or empty).
     pub source: String,
-    /// Global monotonic sequence number across all timelines.
+    /// Global monotonic sequence number across all trails.
     pub seq: u64,
+}
+
+impl<T: DeserializeOwned> TypedEntry<T> {
+    /// Deserialize a [`CapturedEvent`] into a typed entry.
+    ///
+    /// Returns `None` if the payload does not deserialize as `T`.
+    ///
+    /// **Payload shape note:** `valuable-serde` emits enum unit variants as
+    /// `{"VariantName": []}` while `serde`'s default external tagging expects
+    /// the bare string `"VariantName"`. To avoid this round-trip mismatch,
+    /// payload types should use **structs** or struct/tuple enum variants —
+    /// not unit-variant enums. The `Heartbeat`/`LeaderElected`-style structs
+    /// in `observability` tests and `tests/leader_election.rs` are the
+    /// canonical shape.
+    #[must_use]
+    pub fn deserialize(e: &CapturedEvent) -> Option<Self> {
+        let event: T = serde_json::from_value(e.payload.clone()).ok()?;
+        Some(Self {
+            event,
+            time_ms: e.time_ms,
+            source: e.source.clone(),
+            seq: e.seq,
+        })
+    }
 }

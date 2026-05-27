@@ -139,5 +139,5 @@ pub use assertions::{
     reset_always_violations, reset_assertion_results, validate_assertion_contracts,
 };
 pub use buggify::{buggify_init, buggify_internal, buggify_reset};
-pub use fault_events::{SIM_FAULT_TIMELINE, SimFaultEvent};
+pub use fault_events::{SIM_FAULT_TRAIL, SimFaultEvent};
 pub use state_handle::StateHandle;

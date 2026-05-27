@@ -9,7 +9,7 @@
 use std::cell::Cell;
 
 use moonpool_sim::{
-    Invariant, SIM_FAULT_TIMELINE, SimFaultEvent, TimelineQuery, TimelineQueryExt, assert_always,
+    Invariant, SIM_FAULT_TRAIL, SimFaultEvent, TrailQuery, TrailQueryExt, assert_always,
     assert_sometimes,
 };
 
@@ -52,7 +52,7 @@ impl Invariant for TransportIntegrityInvariant {
         "transport_integrity"
     }
 
-    fn observe(&self, q: &dyn TimelineQuery, _sim_time_ms: u64) {
+    fn observe(&self, q: &dyn TrailQuery, _sim_time_ms: u64) {
         let new_entries = q.since::<AppendBlockEvent>(TL_APPEND, &self.cursor);
         for entry in &new_entries {
             let expected_n = self.last_n.get() + 1;
@@ -65,7 +65,7 @@ impl Invariant for TransportIntegrityInvariant {
         }
 
         if !self.any_faults.get() {
-            let new_faults = q.since::<SimFaultEvent>(SIM_FAULT_TIMELINE, &self.cursor_faults);
+            let new_faults = q.since::<SimFaultEvent>(SIM_FAULT_TRAIL, &self.cursor_faults);
             if !new_faults.is_empty() {
                 self.any_faults.set(true);
             }

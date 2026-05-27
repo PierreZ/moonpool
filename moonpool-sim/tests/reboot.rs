@@ -8,8 +8,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moonpool_sim::{
     Attrition, FaultContext, FaultInjector, Invariant, NetworkProvider, Process, RebootKind,
-    SIM_FAULT_TIMELINE, SimContext, SimFaultEvent, SimulationBuilder, SimulationResult,
-    TcpListenerTrait, TimeProvider, TimelineQuery, TimelineQueryExt, Workload, assert_always,
+    SIM_FAULT_TRAIL, SimContext, SimFaultEvent, SimulationBuilder, SimulationResult,
+    TcpListenerTrait, TimeProvider, TrailQuery, TrailQueryExt, Workload, assert_always,
 };
 
 use std::cell::Cell;
@@ -468,14 +468,14 @@ impl Invariant for RebootTimingInvariant {
         "reboot_timing"
     }
 
-    fn observe(&self, q: &dyn TimelineQuery, _sim_time_ms: u64) {
-        let len = q.len(SIM_FAULT_TIMELINE);
+    fn observe(&self, q: &dyn TrailQuery, _sim_time_ms: u64) {
+        let len = q.len(SIM_FAULT_TRAIL);
         if len == self.last_checked.get() {
             return; // No new events
         }
         self.last_checked.set(len);
 
-        let entries = q.snapshot::<SimFaultEvent>(SIM_FAULT_TIMELINE);
+        let entries = q.snapshot::<SimFaultEvent>(SIM_FAULT_TRAIL);
 
         // Check grace period timing: GracefulShutdown → ForceKill for same IP
         for (i, entry) in entries.iter().enumerate() {

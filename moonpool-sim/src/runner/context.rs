@@ -16,8 +16,10 @@
 //! }
 //! ```
 
-use std::any::Any;
-use std::fmt::Debug;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use tracing::field::valuable;
+use valuable::Valuable;
 
 use crate::chaos::state_handle::StateHandle;
 use crate::network::SimNetworkProvider;
@@ -25,7 +27,7 @@ use crate::observability::{SimulationLayerHandle, TypedEntry};
 use crate::providers::{SimProviders, SimRandomProvider, SimTimeProvider};
 use crate::storage::SimStorageProvider;
 
-use moonpool_core::{Providers, TimeProvider, TokioTaskProvider};
+use moonpool_core::{Providers, TokioTaskProvider};
 
 use super::topology::WorkloadTopology;
 
@@ -152,31 +154,33 @@ impl SimContext {
         &self.state
     }
 
-    /// Emit a typed event to a named timeline.
+    /// Emit a typed event to a named trail.
     ///
-    /// Routes through `tracing::event!` at target `"moonpool::sim"`. With a
-    /// [`crate::observability::SimulationLayer`] installed (the standard sim
-    /// configuration), the layer captures the typed payload and runs invariants.
-    /// Without a layer (e.g. in production), the event still reaches subscribers
-    /// like `fmt` or `OTel` with its `Debug` payload.
-    ///
-    /// Captures simulation time and this process's IP address automatically.
-    pub fn emit<T>(&self, key: &'static str, event: T)
+    /// Emits a `tracing::info!` with `capture = true`, `trail = key`,
+    /// `source = my_ip`, and `event = valuable(&event)`. A
+    /// [`crate::observability::SimulationLayer`] subscribed alongside other
+    /// `tracing` subscribers captures the typed payload and runs invariants.
+    /// Without a layer (e.g. in production), the event still reaches
+    /// subscribers like `fmt` or `OTel` with structured fields.
+    pub fn emit<T>(&self, trail: &'static str, event: T)
     where
-        T: Any + Debug + Send + Sync + 'static,
+        T: Valuable + Serialize,
     {
-        let time_ms = u64::try_from(self.time().now().as_millis()).unwrap_or(u64::MAX);
-        let source = self.my_ip().to_string();
-        crate::sim_emit!(key, time_ms, source, event);
+        tracing::info!(
+            capture = true,
+            trail = trail,
+            source = self.my_ip(),
+            event = valuable(&event),
+        );
     }
 
-    /// Read all captured events under `key` as typed entries.
+    /// Read all captured events under `trail` as typed entries.
     ///
     /// Returns an empty vector if no [`crate::observability::SimulationLayer`]
     /// is installed, no events were captured, or none of them match `T`.
     #[must_use]
-    pub fn timeline<T: Any + Clone + 'static>(&self, key: &'static str) -> Vec<TypedEntry<T>> {
-        self.obs.timeline(key)
+    pub fn trail<T: DeserializeOwned>(&self, trail: &str) -> Vec<TypedEntry<T>> {
+        self.obs.trail(trail)
     }
 
     /// Get a clonable handle to the observability layer, for advanced
