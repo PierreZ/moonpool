@@ -15,5 +15,8 @@ keywords = ["simulation", "testing", "distributed-systems", "deterministic", "ch
 categories = ["development-tools::testing"]
 edition = "2024"
 
+[workspace.lints.rust]
+async_fn_in_trait = "allow"
+
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

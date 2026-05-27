@@ -11,4 +11,5 @@
 
 pub mod axum_web;
 pub mod dungeon;
+pub mod fdb;
 pub mod maze;
