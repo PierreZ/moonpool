@@ -181,5 +181,28 @@ Strategic placement: error handling, timeouts, retries, resource limits
 ## Invariant System
 **When to use invariants**: Cross-process properties, global system constraints, deterministic bug detection
 **When to use assertions**: Per-process validation (`assert_always!` in process code)
-**Performance**: Invariants run after every simulation event - design accordingly
-**Architecture**: Processes expose state via JSON → StateRegistry → InvariantCheck functions → panic on violation
+**Performance**: Invariants run after every captured event - design accordingly
+
+**Architecture**: Correctness facts emitted as plain `tracing` events with a marker field; `SimulationLayer` captures them and runs registered invariants.
+
+```rust
+// Emit (in process / workload code)
+tracing::info!(
+    capture = true,
+    trail = "leader",
+    source = my_ip,
+    event = valuable(&LeaderElected { term, leader: my_ip.into() }),
+);
+
+// Observe (in the invariant)
+fn observe(&self, q: &dyn TrailQuery, _sim_time_ms: u64) {
+    for entry in q.since::<LeaderElected>("leader", &self.cursor) { ... }
+}
+```
+
+- **Required fields**: `capture = true`, `trail = "..."`, `event = valuable(&p)`. Optional: `source = "..."`.
+- **Payload types** must derive `Valuable + Serialize + Deserialize`. Use structs (or struct/tuple enum variants), not unit-variant enums (valuable-serde shape mismatch).
+- **Sim time** is stamped by the layer from its internal clock (the orchestrator pushes `obs.set_sim_time_ms(...)` after each `sim.step()`). Do NOT include a `time_ms` field on the emit.
+- **Invariants emitting events** are silently dropped by tracing-core's dispatch reentrancy guard — treat `observe(...)` as read-only.
+- **Production**: any tracing subscriber (fmt, OpenTelemetry) sees the same emissions as structured events; install `SimulationLayer` to layer invariants on top.
+- **Canonical example**: `moonpool-sim/tests/leader_election.rs` (split-brain detection).

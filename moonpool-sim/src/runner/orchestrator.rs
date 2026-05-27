@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::chaos::fault_events::{SIM_FAULT_TIMELINE, SimFaultEvent};
+use tracing::field::valuable;
+
+use crate::chaos::fault_events::{SIM_FAULT_TRAIL, SimFaultEvent};
 use crate::chaos::state_handle::StateHandle;
 use crate::observability::SimulationLayerHandle;
 use crate::runner::builder::WorkloadClientInfo;
@@ -1442,7 +1444,6 @@ impl WorkloadOrchestrator {
         obs: &SimulationLayerHandle,
         shutdown_signal: &tokio_util::sync::CancellationToken,
     ) {
-        let time_ms = u64::try_from(sim.current_time().as_millis()).unwrap_or(u64::MAX);
         match sim.last_processed_event() {
             Some(crate::sim::Event::ProcessGracefulShutdown {
                 ip,
@@ -1450,14 +1451,15 @@ impl WorkloadOrchestrator {
                 recovery_delay_ms,
             }) => {
                 assert_reachable!("event: ProcessGracefulShutdown");
-                crate::sim_emit!(
-                    SIM_FAULT_TIMELINE,
-                    time_ms,
-                    "sim",
-                    SimFaultEvent::ProcessGracefulShutdown {
-                        ip: ip.to_string(),
-                        grace_period_ms,
-                    }
+                let event = SimFaultEvent::ProcessGracefulShutdown {
+                    ip: ip.to_string(),
+                    grace_period_ms,
+                };
+                tracing::info!(
+                    capture = true,
+                    trail = SIM_FAULT_TRAIL,
+                    source = "sim",
+                    event = valuable(&event),
                 );
                 process_manager.signal_graceful_shutdown(ip);
                 sim.schedule_event(
@@ -1472,11 +1474,12 @@ impl WorkloadOrchestrator {
                 ip,
                 recovery_delay_ms,
             }) => {
-                crate::sim_emit!(
-                    SIM_FAULT_TIMELINE,
-                    time_ms,
-                    "sim",
-                    SimFaultEvent::ProcessForceKill { ip: ip.to_string() }
+                let event = SimFaultEvent::ProcessForceKill { ip: ip.to_string() };
+                tracing::info!(
+                    capture = true,
+                    trail = SIM_FAULT_TRAIL,
+                    source = "sim",
+                    event = valuable(&event),
                 );
                 process_manager.abort_process(ip);
                 sim.abort_all_connections_for_ip(ip);
@@ -1484,11 +1487,12 @@ impl WorkloadOrchestrator {
             }
             Some(crate::sim::Event::ProcessRestart { ip }) => {
                 assert_reachable!("event: ProcessRestart");
-                crate::sim_emit!(
-                    SIM_FAULT_TIMELINE,
-                    time_ms,
-                    "sim",
-                    SimFaultEvent::ProcessRestart { ip: ip.to_string() }
+                let event = SimFaultEvent::ProcessRestart { ip: ip.to_string() };
+                tracing::info!(
+                    capture = true,
+                    trail = SIM_FAULT_TRAIL,
+                    source = "sim",
+                    event = valuable(&event),
                 );
                 let weak_sim = sim.downgrade();
                 process_manager.handle_restart(ip, &weak_sim, seed, state, obs, shutdown_signal);

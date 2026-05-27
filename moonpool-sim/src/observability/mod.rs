@@ -1,29 +1,56 @@
 //! Production-friendly observability layer for moonpool simulations.
 //!
-//! Replaces the legacy `Timeline<T>` + `Invariant` system with a custom
-//! `tracing::Layer` that captures simulation events while letting the same
-//! emission code paths reach production subscribers (fmt, OTel, etc.).
+//! Captures correctness-relevant events emitted as ordinary `tracing` events
+//! and runs registered [`Invariant`]s against them after each capture. The
+//! same emission API works in simulation AND in production: any subscriber —
+//! including [`SimulationLayer`] — can consume the events.
 //!
-//! # Architecture
+//! # Emission convention
 //!
-//! - Producers call [`crate::SimContext::emit`] (or the [`crate::sim_emit!`]
-//!   macro for sim-internal sites). The macro stashes the typed payload in a
-//!   thread-local and emits a `tracing::event!` at target `"moonpool::sim"`.
-//! - The [`SimulationLayer`] (subscribed alongside any production layers)
-//!   takes the typed payload from the thread-local at `on_event` time and
-//!   stores it in a per-key vector along with `time_ms`, `source`, and a
-//!   monotonic `seq`.
-//! - After capturing each event, the layer runs all registered [`Invariant`]s.
-//!   They see a [`TimelineQuery`] view supporting cursor-based incremental
-//!   scans of typed entries.
+//! Use a standard `tracing::*!` macro with three structured fields:
 //!
-//! # Production
+//! - `capture = true` — the marker; events without it are ignored by the layer.
+//! - `trail = "name"` — selects which append-only stream the event joins.
+//! - `event = valuable(&payload)` — typed payload via the [`valuable`] crate.
 //!
-//! With no [`SimulationLayer`] installed, the macro still emits a tracing event
-//! so production subscribers see structured fields and a `Debug` payload. The
-//! typed payload is not allocated. A relaxed atomic load gates the fast path.
+//! An optional `source = "..."` field records the originating actor (e.g. a
+//! process IP or `"sim"`). Sim time is stamped automatically from the
+//! orchestrator-pushed clock; do not include it as a field.
+//!
+//! ```ignore
+//! use serde::{Deserialize, Serialize};
+//! use tracing::field::valuable;
+//! use valuable::Valuable;
+//!
+//! #[derive(Valuable, Serialize, Deserialize, Clone)]
+//! struct LeaderElected { term: u64, leader: String }
+//!
+//! tracing::info!(
+//!     capture = true,
+//!     trail = "leader",
+//!     source = node_ip,
+//!     event = valuable(&LeaderElected { term: 5, leader: node_ip.to_string() }),
+//!     "elected",
+//! );
+//! ```
+//!
+//! Invariants read the trail via [`TrailQueryExt::since`]:
+//!
+//! ```ignore
+//! for entry in q.since::<LeaderElected>("leader", &cursor) {
+//!     // panic on split-brain, validate term monotonicity, etc.
+//! }
+//! ```
+//!
+//! # Payload type guidance
+//!
+//! Payload types should be **structs** or struct/tuple enum variants. Avoid
+//! unit-variant enums: `valuable-serde` emits them as `{"VariantName": []}`
+//! while `serde`'s default external tagging deserializes from the bare string
+//! `"VariantName"`, so the round-trip silently fails. Add at least one field
+//! (e.g. a `reason: String` for catch-all variants) and the shape is
+//! unambiguous in both directions.
 
-pub mod emit;
 pub mod event;
 pub mod fmt;
 pub mod init;
@@ -35,76 +62,174 @@ pub use event::{CapturedEvent, TypedEntry};
 pub use fmt::{Clock, SimTime};
 pub use init::init_sim_tracing;
 pub use invariant::{Invariant, invariant_fn};
-pub use layer::{InstallGuard, SimulationLayer, SimulationLayerHandle};
-pub use query::{TimelineQuery, TimelineQueryExt};
+pub use layer::{InstallGuard, SimulationLayer, SimulationLayerHandle, layer_installed};
+pub use query::{TrailQuery, TrailQueryExt};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::Cell;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-    // Bring the generic helper trait into scope.
-    use crate::observability::TimelineQueryExt;
+    use serde::{Deserialize, Serialize};
+    use tracing::field::valuable;
+    use valuable::Valuable;
 
-    #[derive(Debug, Clone, PartialEq)]
-    enum TestEvent {
-        Hello(u64),
-        World,
+    use crate::observability::TrailQueryExt;
+
+    /// Realistic correctness fact used by the capture-path tests. A `Heartbeat`
+    /// is the kind of payload a user actually emits: a struct with named
+    /// fields that round-trips cleanly through valuable-serde and serde.
+    #[derive(Debug, Clone, PartialEq, Valuable, Serialize, Deserialize)]
+    struct Heartbeat {
+        node: String,
+        term: u64,
     }
+
+    fn heartbeat(node: &str, term: u64) -> Heartbeat {
+        Heartbeat {
+            node: node.into(),
+            term,
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Capture-path tests
+    // ------------------------------------------------------------------
 
     #[test]
     fn emit_without_layer_is_safe() {
-        // No layer installed: macro still fires tracing::event! but does nothing else.
-        let payload = TestEvent::Hello(7);
-        crate::sim_emit!("test_key", 100, "10.0.1.1", payload);
+        // No layer installed: tracing::info! does not panic and there's
+        // nothing to observe. We just check the macro compiles and runs.
+        tracing::info!(
+            capture = true,
+            trail = "hb",
+            source = "10.0.1.1",
+            event = valuable(&heartbeat("n1", 1)),
+        );
     }
 
     #[test]
-    fn layer_captures_typed_events() {
+    fn layer_captures_marked_event() {
         let layer = SimulationLayer::new();
         let (handle, _guard) = layer.install();
 
-        crate::sim_emit!("test_key", 100, "10.0.1.1", TestEvent::Hello(42));
-        crate::sim_emit!("test_key", 200, "10.0.1.2", TestEvent::World);
+        handle.set_sim_time_ms(1234);
+        tracing::info!(
+            capture = true,
+            trail = "hb",
+            source = "10.0.1.1",
+            event = valuable(&heartbeat("n1", 7)),
+        );
 
-        let entries = handle.timeline::<TestEvent>("test_key");
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].event, TestEvent::Hello(42));
-        assert_eq!(entries[0].time_ms, 100);
+        let entries = handle.trail::<Heartbeat>("hb");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].event, heartbeat("n1", 7));
         assert_eq!(entries[0].source, "10.0.1.1");
         assert_eq!(entries[0].seq, 0);
-        assert_eq!(entries[1].event, TestEvent::World);
-        assert_eq!(entries[1].seq, 1);
+        assert_eq!(entries[0].time_ms, 1234);
     }
 
     #[test]
-    fn invariants_run_after_each_event() {
+    fn event_missing_capture_marker_is_ignored() {
         let layer = SimulationLayer::new();
         let (handle, _guard) = layer.install();
 
-        let count = Arc::new(AtomicUsize::new(0));
-        let count_clone = count.clone();
-        handle.register(invariant_fn("counter", move |q, _t| {
-            count_clone.store(q.len("test_key"), Ordering::Relaxed);
-        }));
+        // Note: no `capture = true`.
+        tracing::info!(trail = "hb", event = valuable(&heartbeat("n1", 1)));
 
-        crate::sim_emit!("test_key", 1, "src", TestEvent::Hello(1));
-        assert_eq!(count.load(Ordering::Relaxed), 1);
-        crate::sim_emit!("test_key", 2, "src", TestEvent::Hello(2));
-        assert_eq!(count.load(Ordering::Relaxed), 2);
+        assert!(handle.trail::<Heartbeat>("hb").is_empty());
     }
 
-    /// Send-and-Sync wrapper around `Cell` so tests can share a cursor between
-    /// the test thread and the (notionally `Send`) invariant closure. moonpool
-    /// runs single-threaded so this is sound.
+    #[test]
+    fn event_missing_trail_is_ignored() {
+        let layer = SimulationLayer::new();
+        let (handle, _guard) = layer.install();
+
+        tracing::info!(capture = true, event = valuable(&heartbeat("n1", 1)));
+
+        // Without a trail name there's no key to read under.
+        assert!(handle.trail::<Heartbeat>("").is_empty());
+        assert!(handle.trail::<Heartbeat>("hb").is_empty());
+    }
+
+    #[test]
+    fn event_missing_payload_is_ignored() {
+        let layer = SimulationLayer::new();
+        let (handle, _guard) = layer.install();
+
+        tracing::info!(capture = true, trail = "hb", "no payload");
+
+        assert!(handle.trail::<Heartbeat>("hb").is_empty());
+    }
+
+    #[test]
+    fn multiple_trails_are_independent() {
+        let layer = SimulationLayer::new();
+        let (handle, _guard) = layer.install();
+
+        tracing::info!(
+            capture = true,
+            trail = "a",
+            event = valuable(&heartbeat("n1", 1))
+        );
+        tracing::info!(
+            capture = true,
+            trail = "b",
+            event = valuable(&heartbeat("n2", 2))
+        );
+        tracing::info!(
+            capture = true,
+            trail = "a",
+            event = valuable(&heartbeat("n3", 3))
+        );
+
+        let a = handle.trail::<Heartbeat>("a");
+        let b = handle.trail::<Heartbeat>("b");
+        assert_eq!(a.len(), 2);
+        assert_eq!(b.len(), 1);
+        assert_eq!(a[0].event.node, "n1");
+        assert_eq!(a[1].event.node, "n3");
+        assert_eq!(b[0].event.node, "n2");
+    }
+
+    #[test]
+    fn seq_is_monotonic_across_trails() {
+        let layer = SimulationLayer::new();
+        let (handle, _guard) = layer.install();
+
+        tracing::info!(
+            capture = true,
+            trail = "a",
+            event = valuable(&heartbeat("n", 1))
+        );
+        tracing::info!(
+            capture = true,
+            trail = "b",
+            event = valuable(&heartbeat("n", 2))
+        );
+        tracing::info!(
+            capture = true,
+            trail = "a",
+            event = valuable(&heartbeat("n", 3))
+        );
+
+        let a = handle.trail::<Heartbeat>("a");
+        let b = handle.trail::<Heartbeat>("b");
+        assert_eq!(a[0].seq, 0);
+        assert_eq!(b[0].seq, 1);
+        assert_eq!(a[1].seq, 2);
+    }
+
+    /// Send+Sync wrapper around `Cell` for sharing cursors with a `Send`
+    /// invariant closure. moonpool runs single-threaded so this is sound.
     struct SendCell(Cell<usize>);
     unsafe impl Send for SendCell {}
     unsafe impl Sync for SendCell {}
 
     #[test]
-    fn cursor_based_since_returns_only_new_events() {
+    fn cursor_since_returns_only_new_entries() {
         let layer = SimulationLayer::new();
         let (handle, _guard) = layer.install();
 
@@ -113,51 +238,112 @@ mod tests {
         let observed = Arc::new(AtomicUsize::new(0));
         let observed_clone = observed.clone();
         handle.register(invariant_fn("counter", move |q, _t| {
-            let new = q.since::<TestEvent>("k", &cursor_clone.0);
+            let new = q.since::<Heartbeat>("hb", &cursor_clone.0);
             observed_clone.fetch_add(new.len(), Ordering::Relaxed);
         }));
 
-        crate::sim_emit!("k", 1, "src", TestEvent::Hello(1));
-        crate::sim_emit!("k", 2, "src", TestEvent::Hello(2));
+        tracing::info!(
+            capture = true,
+            trail = "hb",
+            event = valuable(&heartbeat("n", 1))
+        );
+        tracing::info!(
+            capture = true,
+            trail = "hb",
+            event = valuable(&heartbeat("n", 2))
+        );
+
+        // 2 events, but each invariant call sees only the NEW entries past
+        // the cursor: 1 then 1, total 2.
         assert_eq!(observed.load(Ordering::Relaxed), 2);
     }
 
     #[test]
-    fn reset_for_seed_clears_events() {
+    fn reset_for_seed_clears_state() {
         let layer = SimulationLayer::new();
         let (handle, _guard) = layer.install();
 
-        crate::sim_emit!("k", 1, "src", TestEvent::Hello(1));
-
+        tracing::info!(
+            capture = true,
+            trail = "hb",
+            event = valuable(&heartbeat("n", 1))
+        );
         handle.reset_for_seed();
+        tracing::info!(
+            capture = true,
+            trail = "hb",
+            event = valuable(&heartbeat("n", 2))
+        );
 
-        crate::sim_emit!("k", 2, "src", TestEvent::Hello(2));
-        let entries = handle.timeline::<TestEvent>("k");
-        assert_eq!(entries.len(), 1);
+        let entries = handle.trail::<Heartbeat>("hb");
+        assert_eq!(entries.len(), 1, "reset cleared the first event");
         assert_eq!(entries[0].seq, 0, "seq counter resets per seed");
+        assert_eq!(handle.current_sim_time_ms(), 0, "clock resets per seed");
     }
 
     #[test]
-    fn sim_emit_updates_layer_sim_time() {
+    fn invariants_run_after_each_event_with_sim_time() {
         let layer = SimulationLayer::new();
         let (handle, _guard) = layer.install();
 
-        crate::sim_emit!("k", 12345, "src", TestEvent::Hello(1));
-        assert_eq!(handle.current_sim_time_ms(), 12345);
+        let last_time = Arc::new(AtomicU64::new(u64::MAX));
+        let last_time_clone = last_time.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        handle.register(invariant_fn("witness", move |_q, t| {
+            last_time_clone.store(t, Ordering::Relaxed);
+            calls_clone.fetch_add(1, Ordering::Relaxed);
+        }));
 
-        crate::sim_emit!("k", 99000, "src", TestEvent::Hello(2));
-        assert_eq!(handle.current_sim_time_ms(), 99000);
+        handle.set_sim_time_ms(100);
+        tracing::info!(
+            capture = true,
+            trail = "hb",
+            event = valuable(&heartbeat("n", 1))
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(last_time.load(Ordering::Relaxed), 100);
+
+        handle.set_sim_time_ms(250);
+        tracing::info!(
+            capture = true,
+            trail = "hb",
+            event = valuable(&heartbeat("n", 2))
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(last_time.load(Ordering::Relaxed), 250);
     }
 
     #[test]
-    fn handle_set_sim_time_for_non_emit_paths() {
-        // The orchestrator advances the layer's clock between events so
-        // unrelated `tracing::*!` calls also see the right sim time.
+    fn invariant_emitting_event_is_silently_dropped() {
+        // tracing-core's dispatch reentrancy guard suppresses events emitted
+        // from inside another event's processing. So an invariant that emits
+        // captured events is a no-op — no deadlock, no double-capture, no
+        // panic. We document and lock in this behavior.
         let layer = SimulationLayer::new();
-        let handle = layer.handle();
-        handle.set_sim_time_ms(42_000);
-        assert_eq!(handle.current_sim_time_ms(), 42_000);
+        let (handle, _guard) = layer.install();
+
+        handle.register(invariant_fn("noisy", |_q, _t| {
+            tracing::info!(
+                capture = true,
+                trail = "from_invariant",
+                event = valuable(&heartbeat("from_inv", 99)),
+            );
+        }));
+
+        tracing::info!(
+            capture = true,
+            trail = "outer",
+            event = valuable(&heartbeat("outer", 1)),
+        );
+
+        assert_eq!(handle.trail::<Heartbeat>("outer").len(), 1);
+        assert!(handle.trail::<Heartbeat>("from_invariant").is_empty());
     }
+
+    // ------------------------------------------------------------------
+    // SimTime fmt-integration tests (formatter, not the capture path)
+    // ------------------------------------------------------------------
 
     #[test]
     fn sim_time_format_writes_seconds_and_millis() {
@@ -178,8 +364,6 @@ mod tests {
 
     #[test]
     fn clock_trait_can_be_implemented_for_a_stub() {
-        // Demonstrates that `Clock` is the formatter's only dependency on a
-        // time source — alternate impls (e.g. test stubs) work without a layer.
         use tracing_subscriber::fmt::format::Writer;
         use tracing_subscriber::fmt::time::FormatTime;
 
@@ -200,9 +384,6 @@ mod tests {
 
     #[test]
     fn fmt_layer_with_sim_time_prefixes_log_output() {
-        // End-to-end: register a real fmt::Layer with SimTime as its timer
-        // alongside SimulationLayer, then verify a `tracing::info!` is
-        // prefixed with the layer's current sim time.
         use std::io;
         use std::sync::Mutex;
 
@@ -239,8 +420,6 @@ mod tests {
         let writer = VecWriter::default();
         let buf = writer.0.clone();
 
-        // Order matters: SimulationLayer must precede fmt so its on_event
-        // updates `current_sim_time_ms` before fmt formats the event.
         let fmt_layer = tracing_subscriber::fmt::layer()
             .with_writer(writer)
             .with_ansi(false)
@@ -250,8 +429,6 @@ mod tests {
 
         tracing::subscriber::with_default(subscriber, || {
             tracing::info!("hello at 5s");
-            // Advance the layer clock as the orchestrator would, then emit
-            // an unrelated tracing event — fmt should see the new sim time.
             handle.set_sim_time_ms(12_345);
             tracing::info!("hello at 12.345s");
         });
@@ -265,18 +442,5 @@ mod tests {
             output.contains("sim+   12.345s"),
             "expected sim+12.345s prefix after clock advance; got: {output}"
         );
-    }
-
-    #[test]
-    #[should_panic(expected = "Invariant emitted")]
-    fn invariant_emitting_event_panics() {
-        let layer = SimulationLayer::new();
-        let (handle, _guard) = layer.install();
-
-        handle.register(invariant_fn("evil", |_q, _t| {
-            crate::sim_emit!("k", 0, "src", TestEvent::World);
-        }));
-
-        crate::sim_emit!("k", 1, "src", TestEvent::Hello(1));
     }
 }

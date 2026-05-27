@@ -29,11 +29,11 @@ use crate::service::{
     AppendBlockRequest, AppendBlockResponse, METHOD_APPEND_BLOCK, append_method_uid, parse_sim_addr,
 };
 
-/// Timeline key for client-side append attempts and outcomes.
+/// Trail name for client-side append attempts and outcomes.
 pub const TL_CLIENT: &str = "client";
 
-/// Client-side timeline event recording the outcome of each attempted append.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Client-side trail event recording the outcome of each attempted append.
+#[derive(Debug, Clone, Serialize, Deserialize, valuable::Valuable)]
 pub enum ClientEvent {
     /// Request issued; outcome not yet known.
     Issued {
@@ -369,8 +369,8 @@ impl Workload for TransportClientWorkload {
         // Every Acknowledged event must have a matching server-side AppendBlockEvent
         // with the same (n, h). Catches "transport claimed delivery, server never
         // emitted" — a lost server-side event.
-        let client_events = ctx.timeline::<ClientEvent>(TL_CLIENT);
-        let server_events = ctx.timeline::<AppendBlockEvent>(TL_APPEND);
+        let client_events = ctx.trail::<ClientEvent>(TL_CLIENT);
+        let server_events = ctx.trail::<AppendBlockEvent>(TL_APPEND);
         for entry in &client_events {
             if let ClientEvent::Acknowledged {
                 server_n, server_h, ..

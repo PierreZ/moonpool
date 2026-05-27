@@ -179,7 +179,7 @@ ctx.state().publish("kv_model", self.model.clone());
 An invariant function (registered on the builder) can then read this state:
 
 ```rust
-fn check_model_size(q: &dyn TimelineQuery, _sim_time_ms: u64) {
+fn check_model_size(q: &dyn TrailQuery, _sim_time_ms: u64) {
     // Snapshot the latest size events; assert_always if any exceeds bounds.
     let entries = q.snapshot::<usize>("kv_model_size");
     if let Some(latest) = entries.last() {
