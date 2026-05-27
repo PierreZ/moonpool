@@ -60,6 +60,28 @@
 //! moonpool's reproducibility guarantee. The provider indirection is what
 //! turns the fake from "an in-memory database" into "an in-memory database
 //! that's also a moonpool citizen".
+//!
+//! # Concurrent transactions
+//!
+//! Many in-flight transactions on the same [`MockDatabase`] are safe. Three
+//! properties keep concurrency from corrupting state:
+//!
+//! - **Per-transaction state is local.** Each `MockTransaction` owns its
+//!   own `read_version`, read-conflict-range vector, and write-set. Two
+//!   transactions cannot trample each other because they share none of it.
+//! - **Shared state goes through one mutex.** Every touch of the version
+//!   chain or version counter happens under `self.db.lock()`. The guard
+//!   never crosses an `.await` (every lock sits in a scoped block), so
+//!   futures stay `Send` and there's no deadlock under cooperative
+//!   scheduling.
+//! - **Snapshot reads are pure.** `read_at(key, read_version)` walks an
+//!   append-only chain — concurrent commits append new entries but never
+//!   mutate existing ones, so a read at a captured `read_version` returns
+//!   the same value no matter what else is happening.
+//!
+//! The version generator's floor-of-1 guarantees that two commits landing
+//! in the same microsecond still get distinct versions, preserving strict
+//! monotonicity even under heavy concurrent load.
 
 #![allow(clippy::missing_errors_doc, clippy::doc_markdown)]
 
@@ -406,14 +428,9 @@ impl<P: Providers> FdbTransaction for MockTransaction<P> {
             .await
             .expect("time provider sleep failed");
 
-        let (not_committed_prob, unknown_result_prob) = {
-            let fdb = self.db.lock().expect("MockFdb mutex poisoned");
-            (
-                fdb.config.not_committed_prob,
-                fdb.config.commit_unknown_result_prob,
-            )
-        };
-
+        // Single critical section: resolver + chaos check + version + apply.
+        // Two commits cannot interleave any of this — that's the atomicity
+        // boundary that gives the fake its serializable guarantee.
         let mut fdb = self.db.lock().expect("MockFdb mutex poisoned");
 
         // This loop *is* FDB's resolver. In a real cluster the resolver is
@@ -428,7 +445,11 @@ impl<P: Providers> FdbTransaction for MockTransaction<P> {
 
         // Synthetic conflict — fail *before* applying mutations, so a real
         // production layer cannot tell the difference from a real conflict.
-        if self.providers.random().random_bool(not_committed_prob) {
+        if self
+            .providers
+            .random()
+            .random_bool(fdb.config.not_committed_prob)
+        {
             return Err(FdbError::NotCommitted);
         }
 
@@ -446,7 +467,11 @@ impl<P: Providers> FdbTransaction for MockTransaction<P> {
         // Commit-unknown-result — by design fires *after* mutations land.
         // A naive retry here would double-apply; this is exactly the trap
         // that motivates FDB's idempotency guidance.
-        if self.providers.random().random_bool(unknown_result_prob) {
+        if self
+            .providers
+            .random()
+            .random_bool(fdb.config.commit_unknown_result_prob)
+        {
             return Err(FdbError::CommitUnknownResult);
         }
 
@@ -621,5 +646,84 @@ mod tests {
             "did not observe all errors in 1000 iterations: \
              not_committed={saw_not_committed} unknown={saw_unknown} too_old={saw_too_old}"
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_disjoint_commits_both_succeed() {
+        let db = deterministic();
+
+        let mut tx_a = db.create_transaction();
+        let mut tx_b = db.create_transaction();
+        tx_a.put(k("a"), k("1"));
+        tx_b.put(k("b"), k("2"));
+
+        // Drive both commits concurrently. Disjoint write sets means no
+        // resolver conflict; the floor-of-1 in next_commit_version ensures
+        // they still get distinct commit_versions.
+        let (a, b) = tokio::join!(tx_a.commit(), tx_b.commit());
+        let v_a = a.unwrap();
+        let v_b = b.unwrap();
+        assert_ne!(v_a, v_b, "concurrent commits must get distinct versions");
+
+        let mut tx = db.create_transaction();
+        assert_eq!(tx.get(k("a")).await.unwrap(), Some(k("1")));
+        assert_eq!(tx.get(k("b")).await.unwrap(), Some(k("2")));
+    }
+
+    #[tokio::test]
+    async fn concurrent_writers_retry_until_done() {
+        // N tasks race for the same counter key. Conflicts are inevitable;
+        // each task retries on NotCommitted. The test passes iff every
+        // increment is reflected exactly once in the final counter and
+        // every task left its unique tag — that is, the fake actually
+        // serializes increments instead of losing or duplicating them.
+        const N: u64 = 20;
+
+        let db = deterministic();
+
+        let mut tx = db.create_transaction();
+        tx.put(k("counter"), Bytes::from_static(b"0"));
+        tx.commit().await.unwrap();
+
+        let mut handles = Vec::new();
+        for i in 0..N {
+            let db = db.clone();
+            handles.push(tokio::spawn(async move {
+                loop {
+                    let mut tx = db.create_transaction();
+                    let cur: u64 = tx
+                        .get(k("counter"))
+                        .await
+                        .unwrap()
+                        .map_or(0, |b| std::str::from_utf8(&b).unwrap().parse().unwrap());
+                    tx.put(k("counter"), Bytes::from((cur + 1).to_string()));
+                    tx.put(Bytes::from(format!("tag/{i}")), Bytes::from_static(b"done"));
+                    match tx.commit().await {
+                        Ok(_) => return,
+                        Err(FdbError::NotCommitted) => {}
+                        Err(e) => panic!("unexpected commit error: {e:?}"),
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let mut tx = db.create_transaction();
+        let final_count: u64 = tx
+            .get(k("counter"))
+            .await
+            .unwrap()
+            .map(|b| std::str::from_utf8(&b).unwrap().parse().unwrap())
+            .unwrap();
+        assert_eq!(final_count, N, "every increment must land exactly once");
+        for i in 0..N {
+            assert_eq!(
+                tx.get(Bytes::from(format!("tag/{i}"))).await.unwrap(),
+                Some(Bytes::from_static(b"done")),
+                "tag/{i} missing — task didn't commit",
+            );
+        }
     }
 }
