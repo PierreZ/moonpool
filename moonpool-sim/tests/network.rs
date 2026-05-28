@@ -8,3 +8,5 @@ mod latency;
 mod partition;
 #[path = "network/traits.rs"]
 mod traits;
+#[path = "network/vectored.rs"]
+mod vectored;
