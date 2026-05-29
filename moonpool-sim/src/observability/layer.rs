@@ -108,9 +108,30 @@ impl SimulationLayer {
     pub fn install(self) -> (SimulationLayerHandle, InstallGuard) {
         let handle = self.handle();
         INSTALL_COUNT.fetch_add(1, Ordering::Relaxed);
+        // Anchor: an inert, always-interested dispatcher kept alive for the
+        // lifetime of the guard. `tracing` caches callsite interest globally and
+        // recomputes it (against whichever dispatchers are currently live)
+        // whenever that set changes. Without an anchor, a `capture = true`
+        // callsite can be re-cached as `Interest::never` the moment the only
+        // live capturing dispatcher's thread default is a `NoSubscriber` (a
+        // sibling test on another thread, or a guard dropping mid-run), silently
+        // dropping our events. Holding one dispatcher that votes "interested" for
+        // every callsite guarantees the cache can never collapse to `never` while
+        // a layer is installed. See issue #112.
+        let interest_anchor = tracing::Dispatch::new(tracing_subscriber::registry());
         let subscriber = tracing_subscriber::registry().with(self);
         let guard = tracing::subscriber::set_default(subscriber);
-        (handle, InstallGuard { _guard: guard })
+        // `set_default` is thread-local and does not rebuild the interest cache,
+        // so re-evaluate every callsite now against this capturing subscriber to
+        // clear any stale `never` left by a callsite first hit before install.
+        tracing::callsite::rebuild_interest_cache();
+        (
+            handle,
+            InstallGuard {
+                _guard: guard,
+                _interest_anchor: interest_anchor,
+            },
+        )
     }
 }
 
@@ -124,6 +145,10 @@ impl Default for SimulationLayer {
 /// subscriber and decrements the install count when dropped.
 pub struct InstallGuard {
     _guard: tracing::subscriber::DefaultGuard,
+    /// Inert dispatcher kept alive so tracing's global callsite-interest cache
+    /// cannot collapse capture callsites to `Interest::never` while a layer is
+    /// installed. See `SimulationLayer::install`.
+    _interest_anchor: tracing::Dispatch,
 }
 
 impl Drop for InstallGuard {
@@ -285,6 +310,18 @@ impl<S> Layer<S> for SimulationLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
+    // Report `sometimes` rather than caching a static interest, so tracing
+    // re-checks `enabled` per event on the actual emitting thread. This keeps
+    // capture correct under thread-local installs where the interest cache would
+    // otherwise be decided once, globally, by whichever thread hit the callsite
+    // first.
+    fn register_callsite(
+        &self,
+        _metadata: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::sometimes()
+    }
+
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
         let mut visitor = CaptureVisitor::new();
         event.record(&mut visitor);
