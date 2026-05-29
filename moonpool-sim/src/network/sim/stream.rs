@@ -5,7 +5,7 @@ use crate::{Event, WeakSimWorld};
 use futures::io::{AsyncRead, AsyncWrite};
 use std::{
     future::Future,
-    io,
+    io::{self, IoSlice},
     pin::Pin,
     task::{Context, Poll},
 };
@@ -137,6 +137,105 @@ impl SimTcpStream {
     #[must_use]
     pub fn connection_id(&self) -> ConnectionId {
         self.connection_id
+    }
+
+    /// Returns `true`: `SimTcpStream` implements an efficient vectored write that
+    /// records each `IoSlice` as its own ordered delivery event, so the chaos pack
+    /// can act on individual segments.
+    #[must_use]
+    pub fn is_write_vectored(&self) -> bool {
+        true
+    }
+
+    /// Run the chaos/closure checks that precede backpressure for a write.
+    ///
+    /// Returns `Some(poll)` to short-circuit, `None` to proceed.
+    fn write_guard_pre_backpressure(
+        &self,
+        sim: &crate::sim::SimWorld,
+        cx: &mut Context<'_>,
+    ) -> Option<Poll<Result<usize, io::Error>>> {
+        // Random close chaos injection (FDB rollRandomClose pattern)
+        // Check at start of every write operation - sim2.actor.cpp:423
+        // Returns Some(true) for explicit error, Some(false) for silent (connection marked closed)
+        if let Some(true) = sim.roll_random_close(self.connection_id) {
+            // 30% explicit exception - throw connection_failed immediately
+            return Some(Poll::Ready(Err(random_connection_failure_error())));
+            // 70% silent case: connection already marked as closed, will fail below
+        }
+
+        // Check if send side is closed (asymmetric closure)
+        if sim.is_send_closed(self.connection_id) {
+            return Some(Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Connection send side closed",
+            ))));
+        }
+
+        // Check if connection is closed or cut
+        if sim.is_connection_closed(self.connection_id) {
+            // Check how the connection was closed
+            return Some(match sim.close_reason(self.connection_id) {
+                CloseReason::Aborted => Poll::Ready(Err(connection_aborted_error())),
+                _ => Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "Connection was closed (FIN)",
+                ))),
+            });
+        }
+
+        if sim.is_connection_cut(self.connection_id) {
+            // Connection is temporarily cut - register waker and wait for restoration
+            tracing::debug!(
+                "SimTcpStream::poll_write connection_id={} is cut, registering cut waker",
+                self.connection_id.0
+            );
+            sim.register_cut_waker(self.connection_id, cx.waker().clone());
+            tracing::debug!(
+                "SimTcpStream::poll_write connection_id={} registered waker for cut connection",
+                self.connection_id.0
+            );
+            return Some(Poll::Pending);
+        }
+
+        // Check for half-open connection (peer crashed)
+        if sim.is_half_open(self.connection_id) && sim.should_half_open_error(self.connection_id) {
+            // Error time reached - return ECONNRESET
+            tracing::debug!(
+                "SimTcpStream::poll_write connection_id={} half-open error time reached, returning ECONNRESET",
+                self.connection_id.0
+            );
+            return Some(Poll::Ready(Err(half_open_timeout_error())));
+        }
+        // Half-open but not yet error time - writes succeed but data goes nowhere
+        // (paired_connection is already None, so buffer_send will silently succeed)
+
+        None
+    }
+
+    /// Run the write-clog checks after the backpressure decision.
+    ///
+    /// Returns `Some(poll)` to short-circuit, `None` to proceed.
+    fn write_guard_clog(
+        &self,
+        sim: &crate::sim::SimWorld,
+        cx: &mut Context<'_>,
+    ) -> Option<Poll<Result<usize, io::Error>>> {
+        // Phase 7: Check for write clogging
+        if sim.is_write_clogged(self.connection_id) {
+            // Already clogged, register waker and return Pending
+            sim.register_clog_waker(self.connection_id, cx.waker().clone());
+            return Some(Poll::Pending);
+        }
+
+        // Check if this write should be clogged
+        if sim.should_clog_write(self.connection_id) {
+            sim.clog_write(self.connection_id);
+            sim.register_clog_waker(self.connection_id, cx.waker().clone());
+            return Some(Poll::Pending);
+        }
+
+        None
     }
 }
 
@@ -319,60 +418,9 @@ impl AsyncWrite for SimTcpStream {
     ) -> Poll<Result<usize, io::Error>> {
         let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
-        // Random close chaos injection (FDB rollRandomClose pattern)
-        // Check at start of every write operation - sim2.actor.cpp:423
-        // Returns Some(true) for explicit error, Some(false) for silent (connection marked closed)
-        if let Some(true) = sim.roll_random_close(self.connection_id) {
-            // 30% explicit exception - throw connection_failed immediately
-            return Poll::Ready(Err(random_connection_failure_error()));
-            // 70% silent case: connection already marked as closed, will fail below
+        if let Some(poll) = self.write_guard_pre_backpressure(&sim, cx) {
+            return poll;
         }
-
-        // Check if send side is closed (asymmetric closure)
-        if sim.is_send_closed(self.connection_id) {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "Connection send side closed",
-            )));
-        }
-
-        // Check if connection is closed or cut
-        if sim.is_connection_closed(self.connection_id) {
-            // Check how the connection was closed
-            return match sim.close_reason(self.connection_id) {
-                CloseReason::Aborted => Poll::Ready(Err(connection_aborted_error())),
-                _ => Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "Connection was closed (FIN)",
-                ))),
-            };
-        }
-
-        if sim.is_connection_cut(self.connection_id) {
-            // Connection is temporarily cut - register waker and wait for restoration
-            tracing::debug!(
-                "SimTcpStream::poll_write connection_id={} is cut, registering cut waker",
-                self.connection_id.0
-            );
-            sim.register_cut_waker(self.connection_id, cx.waker().clone());
-            tracing::debug!(
-                "SimTcpStream::poll_write connection_id={} registered waker for cut connection",
-                self.connection_id.0
-            );
-            return Poll::Pending;
-        }
-
-        // Check for half-open connection (peer crashed)
-        if sim.is_half_open(self.connection_id) && sim.should_half_open_error(self.connection_id) {
-            // Error time reached - return ECONNRESET
-            tracing::debug!(
-                "SimTcpStream::poll_write connection_id={} half-open error time reached, returning ECONNRESET",
-                self.connection_id.0
-            );
-            return Poll::Ready(Err(half_open_timeout_error()));
-        }
-        // Half-open but not yet error time - writes succeed but data goes nowhere
-        // (paired_connection is already None, so buffer_send will silently succeed)
 
         // Check for send buffer space (backpressure)
         let available_buffer = sim.available_send_buffer(self.connection_id);
@@ -388,18 +436,8 @@ impl AsyncWrite for SimTcpStream {
             return Poll::Pending;
         }
 
-        // Phase 7: Check for write clogging
-        if sim.is_write_clogged(self.connection_id) {
-            // Already clogged, register waker and return Pending
-            sim.register_clog_waker(self.connection_id, cx.waker().clone());
-            return Poll::Pending;
-        }
-
-        // Check if this write should be clogged
-        if sim.should_clog_write(self.connection_id) {
-            sim.clog_write(self.connection_id);
-            sim.register_clog_waker(self.connection_id, cx.waker().clone());
-            return Poll::Pending;
+        if let Some(poll) = self.write_guard_clog(&sim, cx) {
+            return poll;
         }
 
         // Use buffered send to maintain TCP ordering
@@ -415,6 +453,57 @@ impl AsyncWrite for SimTcpStream {
             .map_err(|e| io::Error::other(format!("buffer send error: {e}")))?;
 
         Poll::Ready(Ok(buf.len()))
+    }
+
+    #[instrument(skip(self, cx, bufs))]
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<Result<usize, io::Error>> {
+        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
+
+        if let Some(poll) = self.write_guard_pre_backpressure(&sim, cx) {
+            return poll;
+        }
+
+        let total: usize = bufs.iter().map(|slice| slice.len()).sum();
+        if total == 0 {
+            return Poll::Ready(Ok(0));
+        }
+
+        // writev(2) partial-accept semantics: if there's SOME room, accept what
+        // fits and report a short count; only block when there is NO room at all.
+        let available = sim.available_send_buffer(self.connection_id);
+        if available == 0 {
+            sim.register_send_buffer_waker(self.connection_id, cx.waker().clone());
+            return Poll::Pending;
+        }
+
+        if let Some(poll) = self.write_guard_clog(&sim, cx) {
+            return poll;
+        }
+
+        let accepted = total.min(available);
+
+        // Buffer each IoSlice as its own ordered delivery event, truncating the
+        // boundary slice when `accepted < total`. Skip empty slices so they do not
+        // create empty delivery events.
+        let mut remaining = accepted;
+        for slice in bufs {
+            if remaining == 0 {
+                break;
+            }
+            if slice.is_empty() {
+                continue;
+            }
+            let take = remaining.min(slice.len());
+            sim.buffer_send(self.connection_id, slice[..take].to_vec())
+                .map_err(|e| io::Error::other(format!("buffer send error: {e}")))?;
+            remaining -= take;
+        }
+
+        Poll::Ready(Ok(accepted))
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {

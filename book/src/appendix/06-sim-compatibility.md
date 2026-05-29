@@ -32,6 +32,8 @@ The `TimeProvider` trait gives us a single seam. In simulation `sleep` advances 
 
 `NetworkProvider::TcpStream` implements `futures::io::AsyncRead + AsyncWrite`. For libraries that expect tokio I/O traits (hyper, axum), wrap with `tokio_util::compat::Compat` and `hyper_util::rt::TokioIo`. See the axum example for the bridge.
 
+The simulated stream overrides `poll_write_vectored`: each `IoSlice` becomes its own ordered delivery event (so the chaos pack can act on individual segments), and it follows `writev(2)` partial-accept semantics — under send-buffer pressure it accepts the bytes that fit and reports a short count rather than blocking all-or-nothing. `SimTcpStream::is_write_vectored()` returns `true`.
+
 ## 4. Filesystem and storage
 
 | Forbidden | Use instead |
