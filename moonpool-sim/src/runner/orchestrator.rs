@@ -26,6 +26,17 @@ use crate::{
 
 use super::report::SimulationMetrics;
 
+/// Default virtual-time budget for a single run phase.
+///
+/// If simulated time advances past this bound while workloads are still
+/// running, the run is declared deadlocked. The default is intentionally
+/// enormous (one simulated hour) so it never trips a legitimate long-running
+/// simulation; it exists only to convert a self-perpetuating-timer hang
+/// (a detached keepalive/reconnect loop re-arming a sleep every tick) into an
+/// actionable deadlock instead of an unbounded spin. Override per simulation
+/// with [`crate::SimulationBuilder::run_time_budget`].
+pub(crate) const DEFAULT_RUN_TIME_BUDGET: Duration = Duration::from_hours(1);
+
 /// Deadlock detection utility to identify stuck simulations.
 #[derive(Debug, Default)]
 pub(crate) struct DeadlockDetector {
@@ -323,6 +334,7 @@ struct RunPhaseInputs<'a, 'pm> {
     injector_handles: &'a mut InjectorHandleSlots,
     seed: u64,
     iteration_count: usize,
+    run_time_budget: Duration,
 }
 
 /// Aggregated borrows needed to build workload contexts.
@@ -364,6 +376,10 @@ pub(crate) struct OrchestrateInputs<'a> {
     pub(crate) chaos_duration: Option<Duration>,
     /// Iteration count (used for diagnostics on deadlock).
     pub(crate) iteration_count: usize,
+    /// Virtual-time budget for the run phase. If simulated time advances past
+    /// this bound while workloads are still running, the run is declared a
+    /// deadlock. See [`DEFAULT_RUN_TIME_BUDGET`].
+    pub(crate) run_time_budget: Duration,
 }
 
 /// Successful output of [`WorkloadOrchestrator::orchestrate_workloads`].
@@ -449,6 +465,7 @@ struct ChaosAndRunInputs<'a, 'pm> {
     shutdown_signal: &'a tokio_util::sync::CancellationToken,
     seed: u64,
     iteration_count: usize,
+    run_time_budget: Duration,
 }
 
 /// Output of [`WorkloadOrchestrator::do_chaos_and_run_phase`].
@@ -456,6 +473,91 @@ struct ChaosAndRunOutput {
     returned_workloads: Vec<Box<dyn Workload>>,
     returned_injectors: Vec<Box<dyn FaultInjector>>,
     results: Vec<SimulationResult<()>>,
+}
+
+/// Inputs to [`WorkloadOrchestrator::check_run_time_budget`].
+struct BudgetGuardInputs {
+    /// Workloads still running this iteration.
+    current_active: usize,
+    /// Current simulated time.
+    now: Duration,
+    /// Simulated time at which the run phase started.
+    run_start: Duration,
+    /// Configured virtual-time budget for the run phase.
+    run_time_budget: Duration,
+    /// Simulated time at which the budget was first breached, if any.
+    budget_breach_time: Option<Duration>,
+    /// Iteration seed (diagnostics).
+    seed: u64,
+    /// Iteration index (diagnostics).
+    iteration_count: usize,
+}
+
+/// Borrows + scalars needed by [`WorkloadOrchestrator::evaluate_stall_guards`]
+/// for one run-loop iteration.
+struct StallGuardInputs<'a> {
+    sim: &'a crate::sim::SimWorld,
+    deadlock_detector: &'a mut DeadlockDetector,
+    /// Simulated time at which the run phase started.
+    run_start: Duration,
+    /// Configured virtual-time budget for the run phase.
+    run_time_budget: Duration,
+    /// Simulated time at which the budget was first breached, if any.
+    budget_breach_time: &'a mut Option<Duration>,
+    /// Whether a shutdown has already been triggered this run.
+    shutdown_triggered: bool,
+    /// Workloads still running this iteration.
+    current_active: usize,
+    /// Workloads running at the start of this iteration.
+    initial_handle_count: usize,
+    /// Pending events at the start of this iteration.
+    initial_event_count: usize,
+    /// Iteration seed (diagnostics).
+    seed: u64,
+    /// Iteration index (diagnostics).
+    iteration_count: usize,
+}
+
+/// Inputs to [`WorkloadOrchestrator::check_no_progress`].
+struct NoProgressInputs {
+    /// Workloads still running this iteration.
+    current_active: usize,
+    /// Workloads running at the start of this iteration.
+    initial_handle_count: usize,
+    /// Pending events after this iteration's step.
+    event_count: usize,
+    /// Pending events at the start of this iteration.
+    initial_event_count: usize,
+    /// Iteration seed (diagnostics).
+    seed: u64,
+    /// Iteration index (diagnostics).
+    iteration_count: usize,
+}
+
+/// Outcome of a run-phase stall guard (no-progress counter or virtual-time
+/// budget). Both guards share the same two-phase escalation: first breach
+/// triggers a graceful shutdown; a persistent stall after shutdown is a
+/// deadlock.
+#[derive(Clone, Copy)]
+enum StallOutcome {
+    /// Making progress (or already shut down inside the grace window).
+    Ok,
+    /// Stall first detected: trigger a graceful shutdown to unblock workloads.
+    Breached,
+    /// Still stalled after shutdown: declare deadlock.
+    Deadlock,
+}
+
+impl StallOutcome {
+    /// Combine two stall verdicts, keeping the most severe
+    /// (`Deadlock` > `Breached` > `Ok`).
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Deadlock, _) | (_, Self::Deadlock) => Self::Deadlock,
+            (Self::Breached, _) | (_, Self::Breached) => Self::Breached,
+            _ => Self::Ok,
+        }
+    }
 }
 
 impl WorkloadOrchestrator {
@@ -482,6 +584,7 @@ impl WorkloadOrchestrator {
             mut sim,
             chaos_duration,
             iteration_count,
+            run_time_budget,
         } = inputs;
 
         tracing::debug!(
@@ -551,6 +654,7 @@ impl WorkloadOrchestrator {
             shutdown_signal: &shutdown_signal,
             seed,
             iteration_count,
+            run_time_budget,
         })
         .await?;
 
@@ -686,6 +790,7 @@ impl WorkloadOrchestrator {
             shutdown_signal,
             seed,
             iteration_count,
+            run_time_budget,
         } = inputs;
 
         let chaos_shutdown = tokio_util::sync::CancellationToken::new();
@@ -718,6 +823,7 @@ impl WorkloadOrchestrator {
             injector_handles: &mut injector_handles,
             seed,
             iteration_count,
+            run_time_budget,
         })
         .await?;
 
@@ -923,12 +1029,22 @@ impl WorkloadOrchestrator {
             injector_handles,
             seed,
             iteration_count,
+            run_time_budget,
         } = inputs;
 
         let chaos_start = sim.current_time();
+        // Virtual-time origin for the run-phase budget. Both this and the
+        // running `sim.current_time()` are pure functions of the event
+        // schedule, so the budget trip point is bit-for-bit deterministic
+        // across replays (no wall clock, no RNG).
+        let run_start = sim.current_time();
         let mut chaos_ended = chaos_duration.is_none();
         let mut deadlock_detector = DeadlockDetector::new(3);
         let mut shutdown_triggered = false;
+        // Virtual time at which the run-phase budget was first breached, if any.
+        // Used to give workloads a virtual-time grace window to observe the
+        // shutdown and exit before the run is declared deadlocked.
+        let mut budget_breach_time: Option<Duration> = None;
         let mut loop_count: u64 = 0;
 
         loop {
@@ -985,31 +1101,29 @@ impl WorkloadOrchestrator {
 
             let current_active = workload_handles.iter().filter(|h| h.is_some()).count();
 
-            if deadlock_detector.check_deadlock(
+            // Evaluate both stall guards (virtual-time budget + classic
+            // no-progress detector) and act on the most severe verdict.
+            let stall = Self::evaluate_stall_guards(StallGuardInputs {
+                sim,
+                deadlock_detector: &mut deadlock_detector,
+                run_start,
+                run_time_budget,
+                budget_breach_time: &mut budget_breach_time,
+                shutdown_triggered,
                 current_active,
                 initial_handle_count,
-                sim.pending_event_count(),
                 initial_event_count,
-            ) {
-                if shutdown_triggered {
-                    tracing::error!(
-                        "DEADLOCK detected on iteration {} with seed {}: {} tasks remaining after {} no-progress iterations",
-                        iteration_count,
-                        seed,
-                        current_active,
-                        deadlock_detector.no_progress_count()
-                    );
-                    return Err((vec![seed], 1));
+                seed,
+                iteration_count,
+            });
+            match stall {
+                StallOutcome::Ok => {}
+                StallOutcome::Breached => {
+                    Self::trigger_shutdown(sim, shutdown_signal);
+                    shutdown_triggered = true;
+                    deadlock_detector.reset();
                 }
-                tracing::warn!(
-                    "No progress detected on iteration {} with seed {}: {} tasks remaining. Triggering shutdown to unblock workloads.",
-                    iteration_count,
-                    seed,
-                    current_active,
-                );
-                Self::trigger_shutdown(sim, shutdown_signal);
-                shutdown_triggered = true;
-                deadlock_detector.reset();
+                StallOutcome::Deadlock => return Err((vec![seed], 1)),
             }
 
             if current_active > 0 {
@@ -1017,6 +1131,164 @@ impl WorkloadOrchestrator {
             }
         }
         Ok(())
+    }
+
+    /// Run both run-loop stall guards and combine their verdicts.
+    ///
+    /// The virtual-time budget guard ([`Self::check_run_time_budget`]) catches
+    /// a self-perpetuating timer that the classic no-progress detector
+    /// ([`Self::check_no_progress`]) cannot; the most severe of the two
+    /// verdicts wins (`Deadlock` > `Breached` > `Ok`). Records the budget
+    /// breach time so the post-shutdown grace window can be measured.
+    fn evaluate_stall_guards(inputs: StallGuardInputs<'_>) -> StallOutcome {
+        let StallGuardInputs {
+            sim,
+            deadlock_detector,
+            run_start,
+            run_time_budget,
+            budget_breach_time,
+            shutdown_triggered,
+            current_active,
+            initial_handle_count,
+            initial_event_count,
+            seed,
+            iteration_count,
+        } = inputs;
+
+        let budget = Self::check_run_time_budget(&BudgetGuardInputs {
+            current_active,
+            now: sim.current_time(),
+            run_start,
+            run_time_budget,
+            budget_breach_time: *budget_breach_time,
+            seed,
+            iteration_count,
+        });
+        if let StallOutcome::Breached = budget {
+            *budget_breach_time = Some(sim.current_time());
+        }
+        let no_progress = Self::check_no_progress(
+            deadlock_detector,
+            shutdown_triggered,
+            &NoProgressInputs {
+                current_active,
+                initial_handle_count,
+                event_count: sim.pending_event_count(),
+                initial_event_count,
+                seed,
+                iteration_count,
+            },
+        );
+        budget.merge(no_progress)
+    }
+
+    /// Evaluate the no-progress deadlock detector for one loop iteration.
+    ///
+    /// This is the classic stall guard: it fires when the event queue is empty
+    /// and the handle count is unchanged for several consecutive iterations
+    /// (see [`DeadlockDetector::check_deadlock`]). It cannot catch a
+    /// self-perpetuating timer — that path keeps the queue non-empty forever;
+    /// [`Self::check_run_time_budget`] covers that case.
+    fn check_no_progress(
+        deadlock_detector: &mut DeadlockDetector,
+        shutdown_triggered: bool,
+        inputs: &NoProgressInputs,
+    ) -> StallOutcome {
+        let &NoProgressInputs {
+            current_active,
+            initial_handle_count,
+            event_count,
+            initial_event_count,
+            seed,
+            iteration_count,
+        } = inputs;
+        if !deadlock_detector.check_deadlock(
+            current_active,
+            initial_handle_count,
+            event_count,
+            initial_event_count,
+        ) {
+            return StallOutcome::Ok;
+        }
+        if shutdown_triggered {
+            tracing::error!(
+                "DEADLOCK detected on iteration {} with seed {}: {} tasks remaining after {} no-progress iterations",
+                iteration_count,
+                seed,
+                current_active,
+                deadlock_detector.no_progress_count()
+            );
+            return StallOutcome::Deadlock;
+        }
+        tracing::warn!(
+            "No progress detected on iteration {} with seed {}: {} tasks remaining. Triggering shutdown to unblock workloads.",
+            iteration_count,
+            seed,
+            current_active,
+        );
+        StallOutcome::Breached
+    }
+
+    /// Evaluate the run-phase virtual-time budget for one loop iteration.
+    ///
+    /// A *self-perpetuating timer* (e.g. a detached keepalive/reconnect loop
+    /// re-arming a sleep every tick) keeps the event queue non-empty forever,
+    /// so the no-progress [`DeadlockDetector`] never fires — yet simulated
+    /// time climbs without bound while a workload waits on it. This guard
+    /// catches that class:
+    ///
+    /// - The first breach (run-phase elapsed > budget while workloads remain)
+    ///   returns [`StallOutcome::Breached`]: the caller triggers a
+    ///   graceful shutdown so a cancellation-aware workload can drain and exit
+    ///   via the nanosecond-offset wake events (which barely advance virtual
+    ///   time, so it finishes inside the grace window).
+    /// - If simulated time then climbs by *another* full budget after the
+    ///   breach while workloads are still running, the self-perpetuating timer
+    ///   is confirmed and this returns [`StallOutcome::Deadlock`].
+    ///
+    /// The decision is a pure function of the simulated event schedule (no
+    /// wall clock, no RNG), so the trip point replays bit-for-bit.
+    fn check_run_time_budget(inputs: &BudgetGuardInputs) -> StallOutcome {
+        let &BudgetGuardInputs {
+            current_active,
+            now,
+            run_start,
+            run_time_budget,
+            budget_breach_time,
+            seed,
+            iteration_count,
+        } = inputs;
+
+        if current_active == 0 {
+            return StallOutcome::Ok;
+        }
+        let run_elapsed = now.saturating_sub(run_start);
+        match budget_breach_time {
+            None if run_elapsed > run_time_budget => {
+                tracing::warn!(
+                    "Run-phase virtual-time budget exceeded on iteration {} with seed {}: simulated time advanced {:?} (budget {:?}) with {} workload(s) still running. Triggering shutdown to unblock workloads.",
+                    iteration_count,
+                    seed,
+                    run_elapsed,
+                    run_time_budget,
+                    current_active,
+                );
+                StallOutcome::Breached
+            }
+            Some(breach) if now.saturating_sub(breach) > run_time_budget => {
+                tracing::error!(
+                    "DEADLOCK detected on iteration {} with seed {}: run-phase virtual time advanced {:?} (budget {:?}) and kept climbing for another {:?} after shutdown with {} workload(s) still running — self-perpetuating timer making no workload progress",
+                    iteration_count,
+                    seed,
+                    run_elapsed,
+                    run_time_budget,
+                    now.saturating_sub(breach),
+                    current_active,
+                );
+                StallOutcome::Deadlock
+            }
+            _ => StallOutcome::Ok,
+        }
     }
 
     /// Spawn the fault injectors for the chaos phase. When `chaos_duration`
