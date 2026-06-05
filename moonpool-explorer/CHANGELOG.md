@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-06-05
+
+### 🚜 Refactor
+
+- **explorer**: Tighten fork/wait paths in split_on_discovery
+- **explorer**: Merge duplicate COVERAGE_BITMAP_PTR lookups in assertion_split
+- **explorer**: De-duplicate msg_hash via assertion_slots re-use
+
+### 🎨 Styling
+
+- Fix clippy warnings for Rust 1.92
+
+### ⚙️ Miscellaneous Tasks
+
+- **workspace**: Enable clippy pedantic and fix all warnings
+- **explorer**: Strip enumerated step comments in prepare_next_seed and init
+
+
 ## [0.6.0] - 2026-03-28
 
 ### 🐛 Bug Fixes

@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-06-05
+
+### 🚀 Features
+
+- **core**: Make moonpool-core wasm-buildable and abstract TaskProvider JoinHandle
+- Serializable interfaces with endpoint adjustment
+
+### 🚜 Refactor
+
+- **core,sim,transport,derive**: Post-migration cleanup of Send-bounded traits
+- **core,transport,derive**: Migrate transport to Send-bounded traits
+- **transport-derive**: Collapse extract_method_types match
+- **transport-derive**: Drop dead has_ref tracking in service_impl
+- **transport**: Apply rust-api-guidelines review
+- Unify Server and Client into single interface type
+- Move codec to transport, erase from user-facing API
+- Erase codec and provider generics from user-facing types
+- Bind transport at interface construction
+- Dynamic endpoint tokens with well-known opt-in
+
+### ⚙️ Miscellaneous Tasks
+
+- **workspace**: Enable clippy pedantic and fix all warnings
+- **transport-derive**: Strip obvious "what" comments
+
+
 ## [0.6.0] - 2026-03-28
 
 ### 🚀 Features
