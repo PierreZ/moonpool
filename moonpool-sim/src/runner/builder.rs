@@ -41,6 +41,7 @@ struct RunOrchestratorInputs<'a> {
     fault_injectors: Vec<Box<dyn FaultInjector>>,
     chaos_duration: Option<Duration>,
     obs_handle: SimulationLayerHandle,
+    run_time_budget: Duration,
 }
 
 /// Outcome of an orchestration attempt.
@@ -326,6 +327,7 @@ pub struct SimulationBuilder {
     exploration_config: Option<moonpool_explorer::ExplorationConfig>,
     before_iteration_hooks: Vec<Box<dyn FnMut()>>,
     seed_warning_timeout: Option<Duration>,
+    run_time_budget: Duration,
 }
 
 impl Default for SimulationBuilder {
@@ -351,6 +353,7 @@ impl SimulationBuilder {
             exploration_config: None,
             before_iteration_hooks: Vec::new(),
             seed_warning_timeout: None,
+            run_time_budget: super::orchestrator::DEFAULT_RUN_TIME_BUDGET,
         }
     }
 
@@ -539,6 +542,30 @@ impl SimulationBuilder {
         self
     }
 
+    /// Set the virtual-time budget for a single run phase.
+    ///
+    /// If simulated time advances past this bound while one or more workloads
+    /// are still running, the orchestrator first triggers a graceful shutdown
+    /// and — if simulated time keeps climbing by another full budget while
+    /// workloads remain — declares the run deadlocked.
+    ///
+    /// This is a deterministic safety net for a *self-perpetuating timer*: a
+    /// detached task (e.g. a reconnect / keepalive loop) that re-arms a
+    /// [`crate::TimeProvider::sleep`] every tick keeps the event queue
+    /// non-empty forever, so the no-progress deadlock detector never fires
+    /// even though no workload-relevant progress is being made. The budget
+    /// turns that silent hang into an actionable deadlock failure.
+    ///
+    /// The decision is a pure function of the simulated event schedule (no
+    /// wall clock, no RNG), so it never perturbs replay determinism. The
+    /// default (one simulated hour) is deliberately generous; raise it for
+    /// legitimately long simulations.
+    #[must_use]
+    pub fn run_time_budget(mut self, budget: Duration) -> Self {
+        self.run_time_budget = budget;
+        self
+    }
+
     /// Run until exploration has converged: all `assert_sometimes!` assertions
     /// have been reached and no new coverage was found on the last seed.
     ///
@@ -691,6 +718,7 @@ impl SimulationBuilder {
             fault_injectors,
             chaos_duration,
             obs_handle,
+            run_time_budget,
         } = inputs;
         let local_runtime = Self::build_local_runtime_for_seed(seed);
         local_runtime.block_on(async move {
@@ -705,6 +733,7 @@ impl SimulationBuilder {
                 sim,
                 chaos_duration,
                 iteration_count,
+                run_time_budget,
             })
             .await
         })
@@ -1236,6 +1265,7 @@ impl SimulationBuilder {
             fault_injectors,
             chaos_duration: self.chaos_duration,
             obs_handle: obs_handle.clone(),
+            run_time_budget: self.run_time_budget,
         });
         (outcome, start_time)
     }
