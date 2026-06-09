@@ -5,6 +5,68 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-06-05
+
+### 🚀 Features
+
+- **sim**: Add CoveragePlateau iteration control
+- **core**: Make moonpool-core wasm-buildable and abstract TaskProvider JoinHandle
+- **sim**: Add SimTime formatter backed by SimulationLayerHandle
+
+### 🐛 Bug Fixes
+
+- **orchestrator**: Deterministic run-phase virtual-time budget to catch self-perpetuating timers
+- **sim**: Prevent flaky capture loss in parallel tests
+- **rebase**: Reconcile with main's futures::io and CoveragePlateau
+
+### 🚜 Refactor
+
+- **sim**: Plain-tracing capture + rename timelines to trails
+- **sim**: Inline trivial run_simulation wrapper
+- **core,sim**: Collapse provider getter forwards via macro
+- **sim**: Extract init_sim_tracing helper for example binaries
+- **core,sim,transport,derive**: Post-migration cleanup of Send-bounded traits
+- **core,sim**: Switch trait impls back to async fn syntax
+- **sim**: Swap Rc<RefCell<SimInner>> for Arc<RwLock<SimInner>>, spawn_local for spawn
+- **sim**: Drop ?Send from Process/Workload/FaultInjector, switch to build()
+- **sim**: Drop unused FaultContext::all_ips
+- **sim**: Drop duplicate network/sim/types.rs ConnectionState/ListenerState
+- **sim**: Drop dead AcceptFuture/SimTcpListener listener_id fields
+- **sim**: Drop unused WakerRegistry::connection_wakers
+- **sim**: Drop unused EventQueue::peek_earliest
+- **sim**: Drop dead ConnectionState/ListenerState fields
+- **sim**: Drop unused wake_send_buffer_waiters wrapper
+- **sim**: Drop test-only SimulationLayerHandle::snapshot_event_count
+- **sim**: Drop misc unused helpers across chaos/observability/topology/tags/storage
+- **sim**: Drop unused InMemoryStorage helpers
+- **sim**: Drop unused SimulationReport::check, is_success, and ReportCheckError
+- **sim**: Drop unused network config helpers and chaos fields
+- **sim**: Drop dead SimWorld connection helpers
+- **sim**: Drop unused SimulationBuilder helpers
+- **core**: Switch StorageFile IO bounds to futures::io
+- **core**: Switch NetworkProvider IO bounds to futures::io
+- **sim**: Introduce Clock trait, decouple SimTime from layer handle
+- **sim**: Replace Timeline + Invariant with tracing-based SimulationLayer
+
+### 🎨 Styling
+
+- Fix clippy warnings for Rust 1.92
+
+### 🧪 Testing
+
+- **workspace**: Migrate tests/examples to Send-bounded traits
+
+### ⚙️ Miscellaneous Tasks
+
+- **workspace**: Enable clippy pedantic and fix all warnings
+- **sim**: Drop stale lib.rs doc examples
+- Bump Rust toolchain to 1.95.0
+
+### 📦 Other
+
+- Merge pull request #113 from FlorentinDUBOIS/feat/poll-write-vectored
+
+
 ## [0.6.0] - 2026-03-28
 
 ### 🚀 Features
