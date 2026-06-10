@@ -6,70 +6,61 @@ Assertions live inside workloads. They validate local properties: this key shoul
 
 Other properties span time rather than space. Monotonicity says a term number never decreased. Causal ordering says the lock was acquired before the write. Conservation over time says total money stayed constant through a sequence of transfers. A snapshot of the latest state cannot tell us any of these. If a balance went 100, then 50, then 100 again, a snapshot-based check sees 100 and declares everything fine. The dip to 50 is invisible.
 
-Both kinds of properties need the same two ingredients: an append-only log of typed events, and a watcher that runs after every step.
+Both kinds of properties need the same two ingredients: an append-only timeline of events, and a watcher that runs as the simulation advances.
+
+How would you find a dual leader in production? You would query your traces: every `leader_elected` event, grouped by term, flagged when two nodes claim the same one. Moonpool's invariant system runs exactly that query, against exactly those traces, inside the simulation. The instrumentation you write for production observability **is** the test oracle.
 
 ## Emitting Events
 
-Correctness facts are ordinary `tracing` events with three structured fields. Anywhere you have a typed payload that derives `Valuable + Serialize + Deserialize`, fire a normal `tracing::info!`:
+Correctness facts are plain `tracing` events. No markers, no derives, no moonpool-specific API:
 
 ```rust
-use serde::{Deserialize, Serialize};
-use tracing::field::valuable;
-use valuable::Valuable;
-
-#[derive(Debug, Clone, Valuable, Serialize, Deserialize)]
-struct CommitEvent {
-    slot: u64,
-    value: u64,
-}
-
-// Inside a process or workload
-tracing::info!(
-    capture = true,
-    trail = "commits",
-    source = ctx.my_ip(),
-    event = valuable(&CommitEvent { slot: 7, value: 42 }),
-);
+// Inside a process or workload — exactly what you'd write for production
+// observability anyway.
+tracing::info!(target: "raft", term, leader = %my_ip, "leader_elected");
 ```
 
-Three rules. `capture = true` is the marker that tells `SimulationLayer` this event matters; without it, the layer ignores the event. `trail = "name"` selects the append-only stream that invariants read from. `event = valuable(&payload)` carries the typed payload through `tracing`'s structured field machinery. An optional `source = "..."` records the originating actor; sim time is stamped automatically by the layer, so do not include a `time_ms` field.
+Three rules:
 
-For convenience inside a `SimContext`, `ctx.emit(trail, payload)` expands to the same `tracing::info!` with `source = ctx.my_ip()` filled in.
+1. **The message is the event name.** Use a constant name like `"leader_elected"`, not an interpolated sentence. Events are grouped and queried by name, the same way you would query Loki or your OTel backend.
+2. **Use `%` for strings.** `%value` records the `Display` form without quotes. `?value` on a `String` keeps `Debug` quotes, which makes field matching annoying.
+3. **`INFO` or above.** `debug!` and `trace!` events are not captured.
 
-```rust
-ctx.emit("commits", CommitEvent { slot: 7, value: 42 });
-```
+That's the whole convention. Sim time is stamped automatically from the simulation clock, so do not include a `time_ms` field.
 
-**One emission, two audiences.** In simulation, `SimulationLayer` captures the typed payload and runs invariants. In production, where no `SimulationLayer` is registered, the same event flows to whatever subscriber is configured: `fmt`, OpenTelemetry, structured JSON. The `valuable` machinery keeps the payload's fields visible to every layer; nothing is hidden behind a `Debug` blob.
+**Where does the source come from?** The orchestrator wraps every process and workload task in a tracing span carrying its `ip` (`info_span!("process", ip = %ip)`). When an event fires inside that task, the capture layer walks the span scope and attributes the event to the nearest enclosing actor. In production the same role is played by host or pod attributes on your trace resource. Events emitted outside any actor span (runtime internals, the orchestrator itself) are not captured.
 
-**Use structs, not unit-variant enums.** `valuable-serde` emits enum unit variants as `{"VariantName": []}` while `serde`'s default external tagging deserializes from the bare string `"VariantName"`, so the round-trip silently fails. Add at least one field (e.g. a `reason: String` for catch-all variants) and the shape is unambiguous.
-
-Each captured entry is wrapped as a `TypedEntry<T>`:
+Each captured event is a `TraceEvent`:
 
 ```rust
-pub struct TypedEntry<T> {
-    pub event: T,        // your payload, deserialized on read
+pub struct TraceEvent {
+    pub seq: u64,        // global monotonic sequence number, reset per seed
     pub time_ms: u64,    // simulation time at capture
-    pub source: String,  // source field (or empty if omitted)
-    pub seq: u64,        // global monotonic sequence number
+    pub source: String,  // ip of the enclosing actor span, or "sim" for faults
+    pub target: String,  // tracing target, e.g. "raft"
+    pub level: tracing::Level,
+    pub name: String,    // the message, e.g. "leader_elected"
+    pub fields: BTreeMap<String, FieldValue>,
 }
 ```
 
-The `seq` field gives total ordering across all trails. If trail A gets seq 0 and trail B gets seq 1, A's event was emitted first, even at the same `time_ms`.
+The `seq` field gives total ordering across all event names. If `leader_elected` gets seq 0 and `client_ack` gets seq 1, the election was captured first, even at the same `time_ms`. Typed values come out per field: `e.u64("term")`, `e.str("leader")`, `e.bool("ok")`, `e.f64("ratio")` all return `Option`s.
+
+**One emission, two audiences.** In simulation, `SimulationLayer` captures the event into the timeline and invariants cross-validate it. In production, where no `SimulationLayer` is installed, the same event flows to whatever subscriber is configured: `fmt`, OpenTelemetry, structured JSON. Nothing in the emission is moonpool-specific.
 
 ## The Invariant Trait
 
-An invariant is a check that runs **after every captured event**. The simulation engine calls it automatically. If the invariant panics, the simulation stops and reports the failing seed.
+An invariant is a check the orchestrator runs **after every simulation step**. If the invariant records a failure, the simulation reports the failing seed.
 
 ```rust
 pub trait Invariant: 'static + Send {
     fn name(&self) -> &str;
-    fn observe(&self, q: &dyn TrailQuery, sim_time_ms: u64);
+    fn observe(&self, q: &dyn TraceQuery, sim_time_ms: u64);
     fn reset(&mut self) {}
 }
 ```
 
-The invariant gets a `TrailQuery` view of all captured events plus the current simulation time. The contract: if the invariant holds, return normally. If it does not, panic with a descriptive message. The `reset` hook is called between seeds to clear cursors and tracking sets. Treat `observe` as read-only: any captured event you try to emit from inside it is silently dropped by `tracing-core`'s dispatch reentrancy guard.
+The invariant gets a `TraceQuery` view of all captured events plus the current simulation time. The contract: if the property holds, return normally. If it does not, report with `assert_always!` so the failure is recorded with the seed. The `reset` hook is called between seeds to clear cursors and tracking sets. Because steps batch events, one `observe` call may see several new events.
 
 Register invariants on the builder:
 
@@ -84,29 +75,24 @@ SimulationBuilder::new()
 For quick one-off checks there is a closure shorthand:
 
 ```rust
-use moonpool_sim::TrailQueryExt;
-
 SimulationBuilder::new()
-    .invariant_fn("single_leader", |q, _t| {
-        let leaders = q.snapshot::<LeaderEvent>("leadership");
-        let active = leaders.iter().filter(|e| matches!(e.event, LeaderEvent::Elected { .. })).count()
-                   - leaders.iter().filter(|e| matches!(e.event, LeaderEvent::StepDown { .. })).count();
-        assert!(active <= 1, "multiple leaders elected at once");
+    .invariant_fn("commit_volume", |q, _t| {
+        assert_always!(q.len("commit") <= 10_000, "runaway commit volume");
     });
 ```
 
-## Reading Trails
+## Querying the Timeline
 
-`TrailQuery` is the dyn-safe core trait. `TrailQueryExt` is auto-implemented for any `TrailQuery` and adds two generic helpers. Use `since::<T>(name, &cursor)` when you only need new entries since the last call (cheap, advances the cursor). Use `snapshot::<T>(name)` when you need a full re-scan.
+`TraceQuery` has three methods. `since(name, &cursor)` returns only the events newer than the cursor and advances it — cheap, and the right default. `snapshot(name)` re-reads everything from the start of the seed. `len(name)` counts.
 
 A real consensus example. Multiple nodes must agree on committed values. The agreement invariant checks that no two nodes have committed different values for the same slot. This catches subtle bugs: a leader change that replays a proposal, a vote that arrives after a new ballot, a crash during the accept phase.
 
-Each node emits a `CommitEvent { slot, value }` whenever it commits. The invariant scans the trail and verifies no two commits for the same slot disagree.
+Each node emits `tracing::info!(slot, value, "commit")` whenever it commits. The invariant scans the timeline and verifies no two commits for the same slot disagree.
 
 ```rust
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use moonpool_sim::{Invariant, TrailQuery, TrailQueryExt, assert_always};
+use moonpool_sim::{Invariant, TraceQuery, assert_always};
 
 #[derive(Default)]
 pub struct AgreementInvariant {
@@ -117,16 +103,16 @@ pub struct AgreementInvariant {
 impl Invariant for AgreementInvariant {
     fn name(&self) -> &str { "agreement" }
 
-    fn observe(&self, q: &dyn TrailQuery, _t: u64) {
-        // Cursor-based: only new entries since the last call.
-        let new = q.since::<CommitEvent>("commits", &self.cursor);
+    fn observe(&self, q: &dyn TraceQuery, _t: u64) {
+        // Cursor-based: only new events since the last call.
         let mut committed = self.committed.borrow_mut();
-        for entry in new {
-            let CommitEvent { slot, value } = entry.event;
+        for e in q.since("commit", &self.cursor) {
+            let slot = e.u64("slot").expect("commit carries a slot");
+            let value = e.u64("value").expect("commit carries a value");
             if let Some(prev) = committed.get(&slot) {
                 assert_always!(
                     *prev == value,
-                    format!("agreement violated at slot {}: {} vs {}", slot, prev, value)
+                    format!("agreement violated at slot {slot}: {prev} vs {value}")
                 );
             } else {
                 committed.insert(slot, value);
@@ -141,27 +127,30 @@ impl Invariant for AgreementInvariant {
 }
 ```
 
-This runs after every simulation event. If a leader change causes two nodes to commit different values for the same slot, the invariant fires immediately on the second `Commit`. Reset between seeds is the invariant's responsibility. Clear the cursor in `reset()` and the simulation builder calls it for you between iterations.
+If a leader change causes two nodes to commit different values for the same slot, the invariant fires on the step that captured the second commit. Reset between seeds is the invariant's responsibility: clear the cursor in `reset()` and the simulation builder calls it for you between iterations.
+
+The canonical runnable example is [`moonpool-sim/tests/leader_election.rs`](https://github.com/PierreZ/moonpool/blob/main/moonpool-sim/tests/leader_election.rs): a workload emits `leader_elected` events, a `SplitBrainInvariant` detects two leaders claiming the same term. For a deeper one, [`moonpool-transport-sim`](https://github.com/PierreZ/moonpool/tree/main/moonpool-transport-sim) replays a hash chain from `append_block` events, with the block bytes hex-encoded into a string field.
 
 ## Reading from a Workload
 
-Inside `Workload::check()` or anywhere you have a `SimContext`, query the layer directly:
+Inside `Workload::check()` or anywhere you have a `SimContext`, the observability handle implements `TraceQuery` too:
 
 ```rust
-let entries = ctx.trail::<TransferEvent>("transfers");
-let total: u64 = entries.iter().map(|e| e.event.amount).sum();
+let q = ctx.observability();
+let transfers = q.snapshot("transfer");
+let total: u64 = transfers.iter().filter_map(|e| e.u64("amount")).sum();
 assert_always!(total <= max_funds, "spent more than reserves");
 ```
 
-`ctx.trail()` returns `Vec<TypedEntry<T>>`, empty if nothing emitted under that trail. No `Option` to unwrap.
+`snapshot` returns an empty `Vec` if nothing was emitted under that name. No `Option` to unwrap.
 
-## The Fault Trail
+## The Fault Timeline
 
-Every fault the simulator injects, from network partitions to storage corruption to process kills, is automatically emitted to a well-known trail called `"sim:faults"`. No workload code needed.
+Every fault the simulator injects, from network partitions to storage corruption to process kills, lands in the same timeline under the well-known name `"sim_fault"`, with `source = "sim"` and a `kind` field identifying the variant. No workload code needed. These are not production traces — there is no simulator in production — so the engine records them internally and the runner merges them into the timeline after each step (engine-level tests can drain them directly with `SimWorld::take_faults()`).
 
 ```rust
 use std::cell::Cell;
-use moonpool_sim::{Invariant, SimFaultEvent, SIM_FAULT_TRAIL, TrailQuery, TrailQueryExt};
+use moonpool_sim::{Invariant, SIM_FAULT_EVENT_NAME, TraceQuery, assert_always};
 
 pub struct KillRateInvariant {
     cursor: Cell<usize>,
@@ -171,10 +160,9 @@ pub struct KillRateInvariant {
 impl Invariant for KillRateInvariant {
     fn name(&self) -> &str { "kill_rate" }
 
-    fn observe(&self, q: &dyn TrailQuery, _t: u64) {
-        let new = q.since::<SimFaultEvent>(SIM_FAULT_TRAIL, &self.cursor);
-        for entry in new {
-            if matches!(entry.event, SimFaultEvent::ProcessForceKill { .. }) {
+    fn observe(&self, q: &dyn TraceQuery, _t: u64) {
+        for e in q.since(SIM_FAULT_EVENT_NAME, &self.cursor) {
+            if e.str("kind") == Some("process_force_kill") {
                 self.kill_count.set(self.kill_count.get() + 1);
             }
         }
@@ -191,15 +179,13 @@ impl Invariant for KillRateInvariant {
 }
 ```
 
-`SimFaultEvent` covers fault variants across three categories:
+The `kind` values cover three categories:
 
-- **Process lifecycle**: `ProcessGracefulShutdown`, `ProcessForceKill`, `ProcessRestart`
-- **Network**: `PartitionCreated`, `PartitionHealed`, `ConnectionCut`, `CutRestored`, `HalfOpenError`, `SendPartitionCreated`, `RecvPartitionCreated`, `RandomClose`, `PeerCrash`, `BitFlip`
-- **Storage**: `StorageReadFault`, `StorageWriteFault`, `StorageSyncFault`, `StorageCrash`, `StorageWipe`
+- **Process lifecycle**: `process_graceful_shutdown` (with `grace_period_ms`), `process_force_kill`, `process_restart` (all with `ip`)
+- **Network**: `partition_created`, `partition_healed` (with `from`/`to`), `connection_cut`, `cut_restored`, `half_open_error`, `random_close`, `peer_crash`, `bit_flip` (with `connection_id`), `send_partition_created`, `recv_partition_created` (with `ip`)
+- **Storage**: `storage_read_fault`, `storage_write_fault` (with `write_kind`), `storage_sync_fault`, `storage_crash`, `storage_wipe` (all with `ip`)
 
-The real power is **correlation**. When an application-level invariant fires, cross-reference the fault trail to understand what the infrastructure was doing at that moment. A conservation law violation at `t=5000` that coincides with a `ProcessForceKill` at `t=4980` tells a very different story than one with no faults nearby.
-
-Because fault events also flow through `tracing`, the same correlation works in production. Capture the same events into a log aggregator and search around the alert window.
+The real power is **correlation**. When an application-level invariant fires, cross-reference the fault events to understand what the infrastructure was doing at that moment. A conservation law violation at `t=5000` that coincides with a `process_force_kill` at `t=4980` tells a very different story than one with no faults nearby. Both kinds of events sit in one timeline with one clock, which is exactly how you would correlate an alert window against infrastructure events in a production log aggregator.
 
 ## Simulation Time in Log Output
 
@@ -214,8 +200,6 @@ use tracing_subscriber::layer::SubscriberExt;
 let sim_layer = SimulationLayer::new();
 let handle = sim_layer.handle();
 
-// SimulationLayer must precede fmt in the registry chain so its on_event
-// updates the layer's sim time *before* fmt formats the event.
 let subscriber = tracing_subscriber::registry()
     .with(sim_layer)
     .with(
@@ -226,48 +210,46 @@ let subscriber = tracing_subscriber::registry()
 let _guard = tracing::subscriber::set_default(subscriber);
 ```
 
-`Clock` is the only thing `SimTime` depends on. Implement it for a test stub or an alternate time source if you need one.
-
 Output:
 
 ```text
-sim+    1.234s  INFO myservice: trail="delivery.at_most_once" event=Replied { seq_id: 7 }
+sim+    1.234s  INFO raft: term=3 leader=10.0.1.2 leader_elected
 sim+    1.235s  INFO myservice::handler: processing request id=42
-sim+    5.000s  WARN moonpool::sim: trail="sim:faults" event=PartitionCreated { from: "10.0.1.1", to: "10.0.1.2" }
 ```
 
-The orchestrator advances the clock by calling `handle.set_sim_time_ms(sim.current_time())` after each `sim.step()`. All `tracing::*!` calls between events, captured or not, see the right time. The handle is per-layer, so two parallel sims keep their clocks isolated.
+The orchestrator advances the clock by calling `handle.set_sim_time_ms(...)` after each `sim.step()`. All `tracing::*!` calls between steps, captured or not, see the right time. The handle is per-layer, so two parallel sims keep their clocks isolated.
 
 In production, no `SimulationLayer` is registered and the formatter falls back to its default zero. Use plain wall-clock `fmt::layer()` there, and only pull `SimTime` in for sim and test runs.
 
-## Snapshots vs Trails
+## Snapshots vs Timelines
 
 Use both. They solve different problems.
 
 **`StateHandle::publish/get`** stores the latest snapshot. Good for properties about the current state: the sum of all balances equals total deposits minus total withdrawals. Workloads call `ctx.state().publish("model", model.clone())` and read the snapshot at the end of the simulation in `Workload::check`.
 
-**`ctx.emit` and `ctx.trail`** store append-only history. Good for properties about how the state changed over time: no message was received before it was sent, the leader term never decreased, every debit has a matching credit.
+**The trace timeline** stores append-only history. Good for properties about how the state changed over time: no message was received before it was sent, the leader term never decreased, every debit has a matching credit.
 
-Invariants can derive snapshots from event histories by keeping an internal counter and updating it as events arrive. The fault trail adds infrastructure context for free, and every event you emit is one that production observability can also see.
+Invariants can derive snapshots from event histories by keeping an internal counter and updating it as events arrive. The fault timeline adds infrastructure context for free, and every event you emit is one that production observability also sees.
 
 ## When to Use Invariants vs Assertions
 
 **Assertions** (`assert_always!`, `assert_sometimes!`) belong inside workloads. They validate local properties from the workload's perspective: this response has the right balance, this error path was exercised.
 
-**Invariants** validate global, cross-workload properties from an omniscient perspective. They watch trails and check that the system's history is consistent. Use them for:
+**Invariants** validate global, cross-workload properties from an omniscient perspective. They watch the trace timeline and check that the system's history is consistent. Use them for:
 
 - Conservation laws (messages, resources, committed values)
 - No-phantom properties (never receive something that was not sent)
-- Consistency across processes (leader election: at most one leader at any time)
+- Consistency across processes (leader election: at most one leader per term)
 - Monotonicity properties (ballot numbers only increase)
 - Causal ordering (a write to `x` must come before a read that returns it)
+- Time-shaped anomalies (retry rates that stay elevated after the trigger fault healed — the metastable failure signature)
 
-A useful rule of thumb: if the property involves state from more than one process or workload, it is an invariant. If it is about one workload's local view, it is an assertion.
+A useful rule of thumb: if the property involves state from more than one process or workload, it is an invariant. If it is about one workload's local view, it is an assertion. Inside an invariant, prefer the assertion macros over a raw `panic!` so failures are recorded with the seed.
 
 ## Performance
 
-Invariants run after **every** simulation event. A typical simulation processes thousands of events per iteration, and you might run hundreds of iterations. Keep invariants fast.
+Invariants run after **every** simulation step. A typical simulation processes thousands of steps per iteration, and you might run hundreds of iterations. Keep invariants fast.
 
-Concretely: use cursor-based `since` rather than full `snapshot`, iterate only the new entries, compare a few counters, check a simple predicate. Avoid expensive operations like sorting large datasets or formatting strings on the happy path. The `format!` in the panic message is fine because it only runs when the invariant fails.
+Concretely: use cursor-based `since` rather than full `snapshot`, iterate only the new events, compare a few counters, check a simple predicate. Avoid expensive operations like sorting large datasets or formatting strings on the happy path. The `format!` in the failure message is fine because it only runs when the invariant fails.
 
-If you find yourself wanting a slow invariant, like replaying a log to verify consistency, run it only in the workload's `check()` method at the end of the simulation rather than after every event.
+If you find yourself wanting a slow invariant, like replaying a log to verify consistency, run it only in the workload's `check()` method at the end of the simulation rather than on every step.

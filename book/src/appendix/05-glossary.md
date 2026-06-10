@@ -24,7 +24,7 @@ Terms are listed alphabetically. Cross-references are shown in **bold**.
 
 **Determinism** -- The property that given the same **seed**, the simulation produces exactly the same execution. All randomness flows through the seeded RNG, and all I/O is simulated. This makes bugs reproducible: same seed, same bug, every time.
 
-**Trail** -- An append-only typed log captured by `SimulationLayer`. Producers emit events as ordinary `tracing::*!` calls with three structured fields: `capture = true` (the marker), `trail = "name"` (selects the stream), `event = valuable(&p)` (the typed payload). An optional `source = "..."` records the originating actor; sim time is stamped automatically. Invariants read via the `TrailQuery` trait: `q.since::<T>(name, &cursor)` for incremental scans, `q.snapshot::<T>(name)` for full re-scans. Each entry carries `time_ms`, `source`, and a global monotonic `seq`. Distinct from **Timeline** (a simulation run in the explorer); see also **Fault trail**.
+**Trace timeline** -- The append-only log of trace events captured by `SimulationLayer`. Producers emit plain `tracing::*!` events with a constant message (the event name) and structured fields; no markers or derives. The `source` is attributed from the process/workload span the orchestrator wraps around each actor task; sim time is stamped automatically. Invariants read via the `TraceQuery` trait: `q.since(name, &cursor)` for incremental scans, `q.snapshot(name)` for full re-scans, with per-field accessors (`e.u64("term")`, `e.str("leader")`). Each event carries `time_ms`, `source`, `target`, `level`, and a global monotonic `seq`. Distinct from **Timeline** (a simulation run in the explorer); see also **Fault timeline**.
 
 **Endpoint** -- A `(IpAddr, Token)` pair that uniquely identifies a connection endpoint in the simulated network. The IP address identifies the node; the **token** identifies the specific listener or connection on that node.
 
@@ -34,13 +34,13 @@ Terms are listed alphabetically. Cross-references are shown in **bold**.
 
 **Explorer** -- The multiverse exploration framework (`moonpool-explorer` crate). Uses `fork()` to create **timeline** branches at **splitpoints**, exploring alternate executions with different randomness. Has zero knowledge of Moonpool internals -- communicates only through RNG function pointers.
 
-**Fault trail** -- The well-known **trail** named `"sim:faults"` (`SIM_FAULT_TRAIL`). Automatically populated by the simulator with `SimFaultEvent` entries covering network, storage, and process lifecycle faults. Invariants use it to correlate application behavior with infrastructure events. Because the same fault events flow through `tracing`, production observability tools see them too.
+**Fault timeline** -- The well-known event name `"sim_fault"` (`SIM_FAULT_EVENT_NAME`) in the trace timeline. The engine records `SimFaultEvent`s internally and the runner merges them in with `source = "sim"` and a `kind` field (e.g. `"partition_created"`, `"process_force_kill"`) covering network, storage, and process lifecycle faults. Invariants use it to correlate application behavior with infrastructure events. Engine-level tests can drain records directly via `SimWorld::take_faults()`.
 
 **Fork** -- An OS-level `fork()` call that creates a child process sharing the parent's memory via copy-on-write. Each child continues the simulation with a new **seed**, creating an alternate **timeline**. Forks are triggered at **splitpoints**.
 
 **Frontier** -- For `assert_sometimes_all!`: the maximum number of named conditions that have been simultaneously true. When the frontier advances (more conditions true at once than ever before), a **splitpoint** is triggered. The frontier value is preserved across seeds in multi-seed exploration.
 
-**Invariant** -- A property that must hold across the entire simulated system, checked after every captured event. Invariants read from a **trail** via the `TrailQuery` trait and panic (typically via `assert_always!`) on violation. Registered on the builder with `.invariant(...)` or `.invariant_fn(...)`.
+**Invariant** -- A property that must hold across the entire simulated system, checked by the runner after every simulation step. Invariants read from the **trace timeline** via the `TraceQuery` trait and report violations via `assert_always!`. Registered on the builder with `.invariant(...)` or `.invariant_fn(...)`.
 
 **Mark** -- An assertion site that can trigger **splitpoints** in the **explorer**. Each mark has a name, a shared-memory slot index, and (in **adaptive** mode) its own **energy** allowance. Marks are the unit of exploration budget management.
 

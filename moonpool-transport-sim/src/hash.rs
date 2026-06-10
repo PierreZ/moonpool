@@ -30,6 +30,30 @@ pub fn fold(prev: u64, block: &[u8]) -> u64 {
     h
 }
 
+/// Hex-encode bytes for carrying a block in a tracing string field.
+#[must_use]
+pub fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(out, "{b:02x}").expect("writing to a String never fails");
+    }
+    out
+}
+
+/// Decode a hex string produced by [`hex_encode`]. Returns `None` on
+/// malformed input (odd length or non-hex characters).
+#[must_use]
+pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,5 +76,15 @@ mod tests {
     #[test]
     fn distinct_prev_diff() {
         assert_ne!(fold(0, b"a"), fold(1, b"a"));
+    }
+
+    #[test]
+    fn hex_round_trip() {
+        let bytes = vec![0x00, 0x0f, 0xff, 0x42];
+        assert_eq!(hex_decode(&hex_encode(&bytes)), Some(bytes));
+        assert_eq!(hex_encode(&[]), "");
+        assert_eq!(hex_decode(""), Some(Vec::new()));
+        assert_eq!(hex_decode("0"), None, "odd length");
+        assert_eq!(hex_decode("zz"), None, "non-hex");
     }
 }

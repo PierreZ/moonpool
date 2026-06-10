@@ -1,20 +1,17 @@
 //! Hash-chain integrity invariant.
 //!
-//! Replays the server-side timeline of [`AppendBlockEvent`]s starting from
-//! `(0, INITIAL_DIGEST)` and asserts every event satisfies the chain rule
-//! `n == last_n + 1` and `h == fold(last_h, &block)`. Catches transport bugs
-//! that reorder, drop, or duplicate server-side events — bugs the workload's
-//! per-response reference-model check cannot see on its own.
+//! Replays the server-side timeline of `append_block` trace events starting
+//! from `(0, INITIAL_DIGEST)` and asserts every event satisfies the chain
+//! rule `n == last_n + 1` and `h == fold(last_h, &block)`. Catches transport
+//! bugs that reorder, drop, or duplicate server-side events — bugs the
+//! workload's per-response reference-model check cannot see on its own.
 
 use std::cell::Cell;
 
-use moonpool_sim::{
-    Invariant, SIM_FAULT_TRAIL, SimFaultEvent, TrailQuery, TrailQueryExt, assert_always,
-    assert_sometimes,
-};
+use moonpool_sim::{Invariant, SIM_FAULT_EVENT_NAME, TraceQuery, assert_always, assert_sometimes};
 
-use crate::hash::{INITIAL_DIGEST, fold};
-use crate::process::{AppendBlockEvent, TL_APPEND};
+use crate::hash::{INITIAL_DIGEST, fold, hex_decode};
+use crate::process::EV_APPEND_BLOCK;
 
 /// Replay-based invariant over the server's append timeline.
 pub struct TransportIntegrityInvariant {
@@ -52,23 +49,33 @@ impl Invariant for TransportIntegrityInvariant {
         "transport_integrity"
     }
 
-    fn observe(&self, q: &dyn TrailQuery, _sim_time_ms: u64) {
-        let new_entries = q.since::<AppendBlockEvent>(TL_APPEND, &self.cursor);
-        for entry in &new_entries {
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        for entry in q.since(EV_APPEND_BLOCK, &self.cursor) {
+            let n = entry.u64("n");
+            let h = entry.u64("h");
+            let block = entry.str("block").and_then(hex_decode);
+            assert_always!(
+                n.is_some() && h.is_some() && block.is_some(),
+                "append_block_event_well_formed"
+            );
+            let (Some(n), Some(h), Some(block)) = (n, h, block) else {
+                continue;
+            };
             let expected_n = self.last_n.get() + 1;
-            let expected_h = fold(self.last_h.get(), &entry.event.block);
-            assert_always!(entry.event.n == expected_n, "invariant_n_matches_replay");
-            assert_always!(entry.event.h == expected_h, "invariant_h_matches_replay");
-            self.last_n.set(entry.event.n);
-            self.last_h.set(entry.event.h);
+            let expected_h = fold(self.last_h.get(), &block);
+            assert_always!(n == expected_n, "invariant_n_matches_replay");
+            assert_always!(h == expected_h, "invariant_h_matches_replay");
+            self.last_n.set(n);
+            self.last_h.set(h);
             self.any_progress.set(true);
         }
 
-        if !self.any_faults.get() {
-            let new_faults = q.since::<SimFaultEvent>(SIM_FAULT_TRAIL, &self.cursor_faults);
-            if !new_faults.is_empty() {
-                self.any_faults.set(true);
-            }
+        if !self.any_faults.get()
+            && !q
+                .since(SIM_FAULT_EVENT_NAME, &self.cursor_faults)
+                .is_empty()
+        {
+            self.any_faults.set(true);
         }
 
         assert_sometimes!(

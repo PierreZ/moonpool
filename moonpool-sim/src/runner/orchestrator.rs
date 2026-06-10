@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use tracing::field::valuable;
+use tracing::Instrument as _;
 
-use crate::chaos::fault_events::{SIM_FAULT_TRAIL, SimFaultEvent};
+use crate::chaos::fault_events::SimFaultEvent;
 use crate::chaos::state_handle::StateHandle;
 use crate::observability::SimulationLayerHandle;
 use crate::runner::builder::WorkloadClientInfo;
@@ -244,11 +244,14 @@ impl<'a> ProcessManager<'a> {
         let providers = crate::SimProviders::new(sim.clone(), seed, ip);
         let ctx = SimContext::new(providers, topology, state.clone(), obs.clone());
         let ip_for_log = ip_str.clone();
-        let handle = tokio::spawn(async move {
-            if let Err(e) = process.run(&ctx).await {
-                tracing::debug!("Restarted process at {} exited: {}", ip_for_log, e);
+        let handle = tokio::spawn(
+            async move {
+                if let Err(e) = process.run(&ctx).await {
+                    tracing::debug!("Restarted process at {} exited: {}", ip_for_log, e);
+                }
             }
-        });
+            .instrument(tracing::info_span!("process", ip = %ip_str)),
+        );
         self.handles[idx] = Some(handle);
         // Process is alive again
         let current = self.dead_count.load(Ordering::Relaxed);
@@ -872,6 +875,9 @@ impl WorkloadOrchestrator {
                 metrics: sim.extract_metrics(),
             });
         }
+        // Faults recorded during settle carry their own timestamps; one pump
+        // suffices to flush them into the timeline.
+        Self::pump_observability(sim, obs);
 
         // === 7. CHECK PHASE (tokio::spawn + cooperative stepping) ===
         let final_workloads = Self::do_check_phase(CheckPhaseInputs {
@@ -947,7 +953,7 @@ impl WorkloadOrchestrator {
             state,
             obs,
         })?;
-        Ok(Self::run_check_phase(sim, workloads, check_contexts).await)
+        Ok(Self::run_check_phase(sim, workloads, check_contexts, obs).await)
     }
 
     /// Run the entire setup phase: spawn `setup()` futures, drive the
@@ -984,11 +990,15 @@ impl WorkloadOrchestrator {
     ) -> Vec<SetupHandle> {
         let mut setup_handles = Vec::with_capacity(workloads.len());
         for (workload, ctx) in workloads.into_iter().zip(contexts) {
-            let handle = tokio::spawn(async move {
-                let mut w = workload;
-                let result = w.setup(&ctx).await;
-                (w, ctx, result)
-            });
+            let ip = ctx.my_ip().to_string();
+            let handle = tokio::spawn(
+                async move {
+                    let mut w = workload;
+                    let result = w.setup(&ctx).await;
+                    (w, ctx, result)
+                }
+                .instrument(tracing::info_span!("workload", ip = %ip)),
+            );
             setup_handles.push(handle);
         }
         setup_handles
@@ -1002,11 +1012,15 @@ impl WorkloadOrchestrator {
     ) -> WorkloadHandleSlots {
         let mut workload_handles = Vec::with_capacity(workloads.len());
         for (workload, ctx) in workloads.into_iter().zip(contexts) {
-            let handle = tokio::spawn(async move {
-                let mut w = workload;
-                let result = w.run(&ctx).await;
-                (w, result)
-            });
+            let ip = ctx.my_ip().to_string();
+            let handle = tokio::spawn(
+                async move {
+                    let mut w = workload;
+                    let result = w.run(&ctx).await;
+                    (w, result)
+                }
+                .instrument(tracing::info_span!("workload", ip = %ip)),
+            );
             workload_handles.push(Some(handle));
         }
         workload_handles
@@ -1076,9 +1090,6 @@ impl WorkloadOrchestrator {
 
             if sim.pending_event_count() > 0 {
                 sim.step();
-                obs.set_sim_time_ms(
-                    u64::try_from(sim.current_time().as_millis()).unwrap_or(u64::MAX),
-                );
                 Self::handle_process_events(
                     sim,
                     process_manager,
@@ -1087,6 +1098,7 @@ impl WorkloadOrchestrator {
                     obs,
                     shutdown_signal,
                 );
+                Self::pump_observability(sim, obs);
             }
 
             let any_finished =
@@ -1130,6 +1142,8 @@ impl WorkloadOrchestrator {
                 tokio::task::yield_now().await;
             }
         }
+        // Final pump: capture events emitted after the last step.
+        Self::pump_observability(sim, obs);
         Ok(())
     }
 
@@ -1415,11 +1429,15 @@ impl WorkloadOrchestrator {
             let providers = crate::SimProviders::new(sim.downgrade(), seed, ip_addr);
             let ctx = SimContext::new(providers, topology, state.clone(), obs.clone());
             let ip_for_log = ip.clone();
-            let handle = tokio::spawn(async move {
-                if let Err(e) = process.run(&ctx).await {
-                    tracing::debug!("Process at {} exited: {}", ip_for_log, e);
+            let span_ip = ip.clone();
+            let handle = tokio::spawn(
+                async move {
+                    if let Err(e) = process.run(&ctx).await {
+                        tracing::debug!("Process at {} exited: {}", ip_for_log, e);
+                    }
                 }
-            });
+                .instrument(tracing::info_span!("process", ip = %span_ip)),
+            );
             process_handles.push(Some(handle));
             process_tokens.push(Some(process_token));
             tracing::debug!("Booted process {} at {}", i, ip);
@@ -1433,17 +1451,22 @@ impl WorkloadOrchestrator {
         sim: &mut crate::sim::SimWorld,
         workloads: Vec<Box<dyn Workload>>,
         contexts: Vec<SimContext>,
+        obs: &SimulationLayerHandle,
     ) -> Vec<Box<dyn Workload>> {
         let mut check_handles = Vec::with_capacity(workloads.len());
         for (workload, ctx) in workloads.into_iter().zip(contexts) {
-            let handle = tokio::spawn(async move {
-                let mut w = workload;
-                let result = w.check(&ctx).await;
-                if let Err(ref e) = result {
-                    tracing::error!("Workload '{}' check failed: {}", w.name(), e);
+            let ip = ctx.my_ip().to_string();
+            let handle = tokio::spawn(
+                async move {
+                    let mut w = workload;
+                    let result = w.check(&ctx).await;
+                    if let Err(ref e) = result {
+                        tracing::error!("Workload '{}' check failed: {}", w.name(), e);
+                    }
+                    w
                 }
-                w
-            });
+                .instrument(tracing::info_span!("workload", ip = %ip)),
+            );
             check_handles.push(handle);
         }
 
@@ -1457,9 +1480,11 @@ impl WorkloadOrchestrator {
             }
             if sim.pending_event_count() > 0 {
                 sim.step();
+                Self::pump_observability(sim, obs);
             }
             tokio::task::yield_now().await;
         }
+        Self::pump_observability(sim, obs);
 
         // Collect check results.
         let mut final_workloads = Vec::with_capacity(check_handles.len());
@@ -1639,9 +1664,11 @@ impl WorkloadOrchestrator {
                     obs,
                     shutdown_signal,
                 );
+                Self::pump_observability(sim, obs);
             }
             tokio::task::yield_now().await;
         }
+        Self::pump_observability(sim, obs);
     }
 
     /// Collect results from spawned `setup()` tasks.
@@ -1675,6 +1702,24 @@ impl WorkloadOrchestrator {
             }
         }
         (workloads, contexts, setup_results, setup_failed)
+    }
+
+    /// Current simulation time in milliseconds, saturating at `u64::MAX`.
+    fn sim_now_ms(sim: &crate::sim::SimWorld) -> u64 {
+        u64::try_from(sim.current_time().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Pump the observability pipeline after a simulation step.
+    ///
+    /// Pushes the sim clock into the layer (stamping subsequently captured
+    /// trace events), drains engine-recorded faults into the timeline, and
+    /// runs registered invariants over everything captured so far.
+    fn pump_observability(sim: &crate::sim::SimWorld, obs: &SimulationLayerHandle) {
+        obs.set_sim_time_ms(Self::sim_now_ms(sim));
+        for record in sim.take_faults() {
+            obs.record_sim_fault(record.time_ms, &record.event);
+        }
+        obs.run_invariants();
     }
 
     /// Drain remaining simulation events synchronously after all workloads
@@ -1727,12 +1772,7 @@ impl WorkloadOrchestrator {
                     ip: ip.to_string(),
                     grace_period_ms,
                 };
-                tracing::info!(
-                    capture = true,
-                    trail = SIM_FAULT_TRAIL,
-                    source = "sim",
-                    event = valuable(&event),
-                );
+                obs.record_sim_fault(Self::sim_now_ms(sim), &event);
                 process_manager.signal_graceful_shutdown(ip);
                 sim.schedule_event(
                     crate::sim::Event::ProcessForceKill {
@@ -1747,12 +1787,7 @@ impl WorkloadOrchestrator {
                 recovery_delay_ms,
             }) => {
                 let event = SimFaultEvent::ProcessForceKill { ip: ip.to_string() };
-                tracing::info!(
-                    capture = true,
-                    trail = SIM_FAULT_TRAIL,
-                    source = "sim",
-                    event = valuable(&event),
-                );
+                obs.record_sim_fault(Self::sim_now_ms(sim), &event);
                 process_manager.abort_process(ip);
                 sim.abort_all_connections_for_ip(ip);
                 sim.schedule_process_restart(ip, Duration::from_millis(recovery_delay_ms));
@@ -1760,12 +1795,7 @@ impl WorkloadOrchestrator {
             Some(crate::sim::Event::ProcessRestart { ip }) => {
                 assert_reachable!("event: ProcessRestart");
                 let event = SimFaultEvent::ProcessRestart { ip: ip.to_string() };
-                tracing::info!(
-                    capture = true,
-                    trail = SIM_FAULT_TRAIL,
-                    source = "sim",
-                    event = valuable(&event),
-                );
+                obs.record_sim_fault(Self::sim_now_ms(sim), &event);
                 let weak_sim = sim.downgrade();
                 process_manager.handle_restart(ip, &weak_sim, seed, state, obs, shutdown_signal);
             }

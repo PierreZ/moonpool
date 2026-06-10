@@ -29,4 +29,4 @@ pub use rng::{
     set_rng_breakpoints, set_sim_seed, sim_random, sim_random_range, sim_random_range_or_default,
 };
 pub use sleep::SleepFuture;
-pub use world::{SimWorld, WeakSimWorld};
+pub use world::{SimFaultRecord, SimWorld, WeakSimWorld};

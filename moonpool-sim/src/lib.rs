@@ -145,8 +145,8 @@ pub mod simulations;
 
 // Sim module re-exports
 pub use sim::{
-    ConnectionStateChange, Event, EventQueue, NetworkOperation, ScheduledEvent, SimWorld,
-    SleepFuture, StorageOperation, WeakSimWorld, clear_rng_breakpoints, current_sim_seed,
+    ConnectionStateChange, Event, EventQueue, NetworkOperation, ScheduledEvent, SimFaultRecord,
+    SimWorld, SleepFuture, StorageOperation, WeakSimWorld, clear_rng_breakpoints, current_sim_seed,
     reset_rng_call_count, reset_sim_rng, rng_call_count, set_rng_breakpoints, set_sim_seed,
     sim_random, sim_random_range, sim_random_range_or_default,
 };
@@ -160,15 +160,15 @@ pub use runner::{
 
 // Chaos module re-exports
 pub use chaos::{
-    AssertionStats, SIM_FAULT_TRAIL, SimFaultEvent, StateHandle, assertion_results, buggify_init,
-    buggify_reset, has_always_violations, reset_always_violations, reset_assertion_results,
-    validate_assertion_contracts,
+    AssertionStats, SIM_FAULT_EVENT_NAME, SimFaultEvent, StateHandle, assertion_results,
+    buggify_init, buggify_reset, has_always_violations, reset_always_violations,
+    reset_assertion_results, validate_assertion_contracts,
 };
 
 // Observability module re-exports (plain-tracing capture + invariants)
 pub use observability::{
-    CapturedEvent, Clock, InstallGuard, Invariant, SimTime, SimulationLayer, SimulationLayerHandle,
-    TrailQuery, TrailQueryExt, TypedEntry, init_sim_tracing, invariant_fn,
+    Clock, FieldValue, InstallGuard, Invariant, SimTime, SimulationLayer, SimulationLayerHandle,
+    TraceEvent, TraceQuery, init_sim_tracing, invariant_fn,
 };
 
 // Network exports

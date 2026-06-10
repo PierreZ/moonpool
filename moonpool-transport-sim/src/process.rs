@@ -6,28 +6,16 @@ use tracing::instrument;
 use moonpool_sim::{Process, SimContext, SimulationResult, assert_sometimes, buggify};
 use moonpool_transport::{NetTransport, NetTransportBuilder, ReplyPromise};
 
-use crate::hash::{INITIAL_DIGEST, fold};
+use crate::hash::{INITIAL_DIGEST, fold, hex_encode};
 use crate::service::{
     APPEND_INTERFACE, AppendBlockRequest, AppendBlockResponse, METHOD_APPEND_BLOCK, parse_sim_addr,
 };
 
-/// Trail name for server-side append events. The integrity invariant replays
-/// from this trail.
-pub const TL_APPEND: &str = "append";
-
-/// Event emitted per successful append. Includes the block bytes so the
-/// invariant can replay the chain end-to-end from `(0, INITIAL_DIGEST)`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, valuable::Valuable)]
-pub struct AppendBlockEvent {
-    /// Block count after this append (`N` post-transition).
-    pub n: u64,
-    /// Chain digest after this append (`H` post-transition).
-    pub h: u64,
-    /// Block bytes that were folded in.
-    pub block: Vec<u8>,
-    /// IP of the server that produced this event.
-    pub server_ip: String,
-}
+/// Event name for server-side append events. Emitted as a plain `tracing`
+/// event with fields `n`, `h`, and `block` (hex-encoded bytes, so the
+/// integrity invariant can replay the chain end-to-end from
+/// `(0, INITIAL_DIGEST)`).
+pub const EV_APPEND_BLOCK: &str = "append_block";
 
 /// Hash-chain server. State is in-memory only and resets on every boot.
 pub struct TransportServerProcess;
@@ -66,7 +54,7 @@ impl Process for TransportServerProcess {
         loop {
             tokio::select! {
                 Some((req, reply)) = append_stream.recv() => {
-                    handle_append(&mut h, &mut n, &req, reply, ctx, my_ip);
+                    handle_append(&mut h, &mut n, &req, reply, my_ip);
                 }
                 () = shutdown.cancelled() => {
                     tracing::info!(final_n = n, final_h = h, "transport server shutting down");
@@ -82,7 +70,6 @@ fn handle_append(
     n: &mut u64,
     req: &AppendBlockRequest,
     reply: ReplyPromise<AppendBlockResponse>,
-    ctx: &SimContext,
     server_ip: &str,
 ) {
     // Drop the reply mid-RPC without mutating state. Simulates "server crashed
@@ -103,14 +90,11 @@ fn handle_append(
     *h = new_h;
     *n = new_n;
 
-    ctx.emit(
-        TL_APPEND,
-        AppendBlockEvent {
-            n: new_n,
-            h: new_h,
-            block: req.block.clone(),
-            server_ip: server_ip.to_string(),
-        },
+    tracing::info!(
+        n = new_n,
+        h = new_h,
+        block = %hex_encode(&req.block),
+        "append_block"
     );
 
     assert_sometimes!(req.block.is_empty(), "handled_empty_block");

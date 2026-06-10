@@ -94,11 +94,11 @@ When working on simulation internals, you may need to access a connection (`inne
 
 ## Forgetting to Emit Events for Invariants
 
-Invariants read events emitted via `ctx.emit(...)`. If your workload changes state but forgets to emit a corresponding event, invariants see an incomplete history and either miss bugs or report false violations.
+Invariants read plain `tracing` events captured into the timeline. If your workload changes state but forgets to emit a corresponding event, invariants see an incomplete history and either miss bugs or report false violations.
 
-**Fix**: Emit a typed event for every state change you want invariants to observe. The same event also flows to production observability subscribers, so this serves a dual purpose.
+**Fix**: Emit a trace event for every state change you want invariants to observe. The same event also flows to production observability subscribers, so this serves a dual purpose.
 
 ```rust
 self.model.record_commit(slot, value);
-ctx.emit("commits", CommitEvent { slot, value });
+tracing::info!(slot, value, "commit");
 ```

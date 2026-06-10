@@ -8,8 +8,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moonpool_sim::{
     Attrition, FaultContext, FaultInjector, Invariant, NetworkProvider, Process, RebootKind,
-    SIM_FAULT_TRAIL, SimContext, SimFaultEvent, SimulationBuilder, SimulationResult,
-    TcpListenerTrait, TimeProvider, TrailQuery, TrailQueryExt, Workload, assert_always,
+    SIM_FAULT_EVENT_NAME, SimContext, SimulationBuilder, SimulationResult, TcpListenerTrait,
+    TimeProvider, TraceQuery, Workload, assert_always,
 };
 
 use std::cell::Cell;
@@ -447,9 +447,9 @@ fn test_graceful_reboot_force_kills_stuck_process() {
 
 /// Invariant that validates process lifecycle timing from the fault timeline.
 ///
-/// Checks after every simulation event:
-/// - `GracefulShutdown` → `ForceKill`: delta == `grace_period_ms`
-/// - `ForceKill` → Restart: delta > 0 (recovery delay is positive)
+/// Checks after every simulation step:
+/// - `process_graceful_shutdown` → `process_force_kill`: delta == `grace_period_ms`
+/// - `process_force_kill` → `process_restart`: delta > 0 (recovery delay is positive)
 /// - Events for same IP appear in correct order
 struct RebootTimingInvariant {
     last_checked: Cell<usize>,
@@ -468,29 +468,30 @@ impl Invariant for RebootTimingInvariant {
         "reboot_timing"
     }
 
-    fn observe(&self, q: &dyn TrailQuery, _sim_time_ms: u64) {
-        let len = q.len(SIM_FAULT_TRAIL);
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        let len = q.len(SIM_FAULT_EVENT_NAME);
         if len == self.last_checked.get() {
             return; // No new events
         }
         self.last_checked.set(len);
 
-        let entries = q.snapshot::<SimFaultEvent>(SIM_FAULT_TRAIL);
+        let entries = q.snapshot(SIM_FAULT_EVENT_NAME);
 
-        // Check grace period timing: GracefulShutdown → ForceKill for same IP
+        // Check grace period timing: graceful shutdown → force kill for same IP
         for (i, entry) in entries.iter().enumerate() {
-            if let SimFaultEvent::ProcessForceKill { ip } = &entry.event {
-                // Look backwards for matching GracefulShutdown
+            if entry.str("kind") == Some("process_force_kill") {
+                let ip = entry.str("ip").expect("force kill carries an ip");
+                // Look backwards for matching graceful shutdown
                 for j in (0..i).rev() {
-                    if let SimFaultEvent::ProcessGracefulShutdown {
-                        ip: gs_ip,
-                        grace_period_ms,
-                    } = &entries[j].event
-                        && gs_ip == ip
+                    if entries[j].str("kind") == Some("process_graceful_shutdown")
+                        && entries[j].str("ip") == Some(ip)
                     {
+                        let grace_period_ms = entries[j]
+                            .u64("grace_period_ms")
+                            .expect("graceful shutdown carries grace_period_ms");
                         let actual_delta = entry.time_ms - entries[j].time_ms;
                         assert_always!(
-                            actual_delta == *grace_period_ms,
+                            actual_delta == grace_period_ms,
                             format!(
                                 "Grace period mismatch for {}: expected {}ms, got {}ms",
                                 ip, grace_period_ms, actual_delta
@@ -502,17 +503,18 @@ impl Invariant for RebootTimingInvariant {
             }
         }
 
-        // Check ordering: ForceKill → Restart for same IP
+        // Check ordering: force kill → restart for same IP
         for (i, entry) in entries.iter().enumerate() {
-            if let SimFaultEvent::ProcessRestart { ip } = &entry.event {
+            if entry.str("kind") == Some("process_restart") {
+                let ip = entry.str("ip").expect("restart carries an ip");
                 for j in (0..i).rev() {
-                    if let SimFaultEvent::ProcessForceKill { ip: fk_ip } = &entries[j].event
-                        && fk_ip == ip
+                    if entries[j].str("kind") == Some("process_force_kill")
+                        && entries[j].str("ip") == Some(ip)
                     {
                         assert_always!(
                             entry.time_ms > entries[j].time_ms,
                             format!(
-                                "ProcessRestart at {}ms should be after ProcessForceKill at {}ms for {}",
+                                "process_restart at {}ms should be after process_force_kill at {}ms for {}",
                                 entry.time_ms, entries[j].time_ms, ip
                             )
                         );
@@ -521,6 +523,10 @@ impl Invariant for RebootTimingInvariant {
                 }
             }
         }
+    }
+
+    fn reset(&mut self) {
+        self.last_checked.set(0);
     }
 }
 
