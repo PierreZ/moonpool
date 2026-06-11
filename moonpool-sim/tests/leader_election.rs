@@ -1,15 +1,18 @@
 //! Canonical leader-election example: detect split-brain via captured traces.
 //!
-//! Demonstrates the end-to-end story for moonpool's plain-`tracing` capture
-//! convention:
+//! Demonstrates the end-to-end story for moonpool's trace-based
+//! cross-validation:
 //!
-//! 1. Define a correctness-fact payload (`LeaderElected`) with the required
-//!    derives.
-//! 2. Workloads emit the fact via `SimContext::emit` (which expands to
-//!    `tracing::info!(capture = true, trail = "leader", event = valuable(&..))`).
-//! 3. Register a `SplitBrainInvariant` on the builder; it scans the `"leader"`
-//!    trail after every captured event and asserts that no two distinct
-//!    nodes claim leadership for the same term.
+//! 1. Workloads emit a plain `tracing` event — exactly the instrumentation
+//!    production observability would consume:
+//!    `tracing::info!(term, leader = %ip, "leader_elected")`.
+//! 2. The simulation captures every such event into a timeline, attributing
+//!    its `source` from the actor span the orchestrator wraps around each
+//!    task.
+//! 3. A `SplitBrainInvariant` registered on the builder scans the
+//!    `"leader_elected"` events after every simulation step and asserts that
+//!    no two distinct nodes claim leadership for the same term — the same
+//!    query you would run against production traces to find a dual leader.
 //!
 //! Happy path: only one leader per term. Invariant passes; the simulation
 //! reports zero failed runs.
@@ -23,28 +26,16 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use valuable::Valuable;
 
 use moonpool_sim::{
-    Invariant, SimContext, SimulationBuilder, SimulationResult, TimeProvider, TrailQuery,
-    TrailQueryExt, Workload, assert_always,
+    Invariant, SimContext, SimulationBuilder, SimulationResult, TimeProvider, TraceQuery, Workload,
+    assert_always,
 };
 
-/// Trail name shared by emitter and invariant.
-const LEADER_TRAIL: &str = "leader";
+/// Event name shared by emitter and invariant.
+const LEADER_ELECTED: &str = "leader_elected";
 
-/// Correctness fact emitted on every successful leader election.
-///
-/// Uses a struct (not a unit-variant enum) so it round-trips cleanly through
-/// `valuable-serde` and `serde`.
-#[derive(Debug, Clone, Valuable, Serialize, Deserialize)]
-struct LeaderElected {
-    term: u64,
-    leader: String,
-}
-
-/// Invariant: at most one distinct leader per term. Panics via
+/// Invariant: at most one distinct leader per term. Records a failure via
 /// `assert_always!` on conflict.
 struct SplitBrainInvariant {
     cursor: Cell<usize>,
@@ -67,12 +58,14 @@ impl Invariant for SplitBrainInvariant {
         "no_split_brain"
     }
 
-    fn observe(&self, q: &dyn TrailQuery, _sim_time_ms: u64) {
-        let new_entries = q.since::<LeaderElected>(LEADER_TRAIL, &self.cursor);
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
         let mut seen = self.seen.borrow_mut();
-        for entry in new_entries {
-            let term = entry.event.term;
-            let leader = entry.event.leader.clone();
+        for e in q.since(LEADER_ELECTED, &self.cursor) {
+            let term = e.u64("term").expect("leader_elected carries a term");
+            let leader = e
+                .str("leader")
+                .expect("leader_elected carries a leader")
+                .to_owned();
             if let Some(prior) = seen.get(&term) {
                 assert_always!(
                     prior == &leader,
@@ -90,7 +83,7 @@ impl Invariant for SplitBrainInvariant {
     }
 }
 
-/// Workload emitting `LeaderElected` events. `bug_split_brain` controls
+/// Workload emitting `leader_elected` events. `bug_split_brain` controls
 /// whether the workload also emits a *conflicting* leader for term 1, which
 /// the invariant must catch.
 struct LeaderWorkload {
@@ -104,28 +97,16 @@ impl Workload for LeaderWorkload {
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        // Elect node1 across a few terms with small delays so the layer
+        // Elect node1 across a few terms with small delays so the timeline
         // captures them in order with distinct sim times.
-        for term in 1..=3 {
-            ctx.emit(
-                LEADER_TRAIL,
-                LeaderElected {
-                    term,
-                    leader: "node1".into(),
-                },
-            );
+        for term in 1..=3_u64 {
+            tracing::info!(term, leader = %"node1", "leader_elected");
             ctx.time().sleep(Duration::from_millis(10)).await.ok();
         }
 
         if self.bug_split_brain {
             // Conflict: claim node2 as leader for term 1.
-            ctx.emit(
-                LEADER_TRAIL,
-                LeaderElected {
-                    term: 1,
-                    leader: "node2".into(),
-                },
-            );
+            tracing::info!(term = 1_u64, leader = %"node2", "leader_elected");
             ctx.time().sleep(Duration::from_millis(10)).await.ok();
         }
 

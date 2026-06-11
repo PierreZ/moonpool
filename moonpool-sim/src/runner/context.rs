@@ -16,14 +16,9 @@
 //! }
 //! ```
 
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-use tracing::field::valuable;
-use valuable::Valuable;
-
 use crate::chaos::state_handle::StateHandle;
 use crate::network::SimNetworkProvider;
-use crate::observability::{SimulationLayerHandle, TypedEntry};
+use crate::observability::SimulationLayerHandle;
 use crate::providers::{SimProviders, SimRandomProvider, SimTimeProvider};
 use crate::storage::SimStorageProvider;
 
@@ -154,37 +149,14 @@ impl SimContext {
         &self.state
     }
 
-    /// Emit a typed event to a named trail.
+    /// Get a clonable handle to the observability layer.
     ///
-    /// Emits a `tracing::info!` with `capture = true`, `trail = key`,
-    /// `source = my_ip`, and `event = valuable(&event)`. A
-    /// [`crate::observability::SimulationLayer`] subscribed alongside other
-    /// `tracing` subscribers captures the typed payload and runs invariants.
-    /// Without a layer (e.g. in production), the event still reaches
-    /// subscribers like `fmt` or `OTel` with structured fields.
-    pub fn emit<T>(&self, trail: &'static str, event: T)
-    where
-        T: Valuable + Serialize,
-    {
-        tracing::info!(
-            capture = true,
-            trail = trail,
-            source = self.my_ip(),
-            event = valuable(&event),
-        );
-    }
-
-    /// Read all captured events under `trail` as typed entries.
-    ///
-    /// Returns an empty vector if no [`crate::observability::SimulationLayer`]
-    /// is installed, no events were captured, or none of them match `T`.
-    #[must_use]
-    pub fn trail<T: DeserializeOwned>(&self, trail: &str) -> Vec<TypedEntry<T>> {
-        self.obs.trail(trail)
-    }
-
-    /// Get a clonable handle to the observability layer, for advanced
-    /// post-simulation inspection.
+    /// The handle implements [`crate::TraceQuery`], so workloads can read
+    /// the captured timeline (e.g. in `check()`) the same way invariants do.
+    /// To get events INTO the timeline, emit plain `tracing` events — e.g.
+    /// `tracing::info!(term, leader = %ip, "leader_elected")` — from inside
+    /// a process or workload task; the orchestrator's actor spans attribute
+    /// them automatically.
     #[must_use]
     pub fn observability(&self) -> &SimulationLayerHandle {
         &self.obs

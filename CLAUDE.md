@@ -81,7 +81,7 @@ xtask/                       - Cargo xtask automation (simulation runner)
 **Multi-seed testing**: Default `UntilAllSometimesReached(1000)` runs until all assert_sometimes! statements have triggered
 **Failing seeds**: Debug with `SimulationBuilder::set_seed(failing_seed)` → fix root cause → verify → re-enable chaos
 **Infrastructure events**: Tests terminate early when only ConnectionRestore events remain
-**Invariant checking**: Cross-workload properties validated after every simulation event
+**Invariant checking**: Cross-workload properties validated after every simulation step
 **Goal**: Find bugs, not regression testing
 **NEVER remove assertions that catch bugs** — if an assertion fails, fix the underlying bug. Assertions exist to find real issues; deleting a failing assertion hides the bug.
 **When an assertion catches a bug**: Stop, enter plan mode, and enable deep thinking. Read relevant reference code, trace the full data flow, and understand the root cause before attempting a fix. Do not rush.
@@ -181,28 +181,29 @@ Strategic placement: error handling, timeouts, retries, resource limits
 ## Invariant System
 **When to use invariants**: Cross-process properties, global system constraints, deterministic bug detection
 **When to use assertions**: Per-process validation (`assert_always!` in process code)
-**Performance**: Invariants run after every captured event - design accordingly
+**Performance**: Invariants run after every simulation step - design accordingly (cursor-based `since`, not `snapshot`)
 
-**Architecture**: Correctness facts emitted as plain `tracing` events with a marker field; `SimulationLayer` captures them and runs registered invariants.
+**Architecture**: Correctness facts are plain `tracing` events — the same instrumentation production observability consumes. `SimulationLayer` captures them into a timeline; the orchestrator runs registered invariants after each `sim.step()`.
 
 ```rust
-// Emit (in process / workload code)
-tracing::info!(
-    capture = true,
-    trail = "leader",
-    source = my_ip,
-    event = valuable(&LeaderElected { term, leader: my_ip.into() }),
-);
+// Emit (in process / workload code) — plain production-style tracing
+tracing::info!(target: "raft", term, leader = %my_ip, "leader_elected");
 
-// Observe (in the invariant)
-fn observe(&self, q: &dyn TrailQuery, _sim_time_ms: u64) {
-    for entry in q.since::<LeaderElected>("leader", &self.cursor) { ... }
+// Observe (in the invariant) — query by event name, extract fields by key
+fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+    for e in q.since("leader_elected", &self.cursor) {
+        let term = e.u64("term");
+        let leader = e.str("leader");
+        ...
+    }
 }
 ```
 
-- **Required fields**: `capture = true`, `trail = "..."`, `event = valuable(&p)`. Optional: `source = "..."`.
-- **Payload types** must derive `Valuable + Serialize + Deserialize`. Use structs (or struct/tuple enum variants), not unit-variant enums (valuable-serde shape mismatch).
+- **Capture rule**: INFO+ level, non-empty constant message (= the event name), emitted inside a process/workload task. No special fields, no derives.
+- **Source attribution**: the orchestrator wraps each process/workload task in `info_span!("process"/"workload", ip = %ip)`; the layer resolves `TraceEvent::source` from the nearest enclosing span. Events outside actor spans are dropped.
+- **Field tips**: use `%` for strings (`?` on a `String` keeps Debug quotes); bytes go hex-encoded into a string field.
+- **Sim faults**: engine records `SimFaultEvent`s internally (`SimWorld::take_faults()`); the runner merges them into the timeline under `SIM_FAULT_EVENT_NAME` (`"sim_fault"`) with a `kind` field and `source = "sim"`.
 - **Sim time** is stamped by the layer from its internal clock (the orchestrator pushes `obs.set_sim_time_ms(...)` after each `sim.step()`). Do NOT include a `time_ms` field on the emit.
-- **Invariants emitting events** are silently dropped by tracing-core's dispatch reentrancy guard — treat `observe(...)` as read-only.
-- **Production**: any tracing subscriber (fmt, OpenTelemetry) sees the same emissions as structured events; install `SimulationLayer` to layer invariants on top.
-- **Canonical example**: `moonpool-sim/tests/leader_election.rs` (split-brain detection).
+- **Invariants** run from the runner loop (not tracing dispatch); use the assertion macros, not raw `panic!`, and treat `observe(...)` as read-only.
+- **Production**: any tracing subscriber (fmt, OpenTelemetry) sees the same emissions as structured events; cross-validation in sim uses the very same traces.
+- **Canonical example**: `moonpool-sim/tests/leader_election.rs` (split-brain detection). Deeper: `moonpool-transport-sim` (hash-chain replay from `append_block` events).

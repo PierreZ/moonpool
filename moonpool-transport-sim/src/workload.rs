@@ -12,11 +12,11 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use moonpool_sim::{
-    SimContext, SimulationResult, Workload, assert_always, assert_sometimes, sim_random_range,
+    SimContext, SimulationResult, TraceQuery, Workload, assert_always, assert_sometimes,
+    sim_random_range,
 };
 use moonpool_transport::{
     Endpoint, JsonCodec, NetTransportBuilder, Providers, ReplyError, TimeProvider, UID, get_reply,
@@ -24,50 +24,27 @@ use moonpool_transport::{
 };
 
 use crate::hash::{INITIAL_DIGEST, fold};
-use crate::process::{AppendBlockEvent, TL_APPEND};
+use crate::process::EV_APPEND_BLOCK;
 use crate::service::{
     AppendBlockRequest, AppendBlockResponse, METHOD_APPEND_BLOCK, append_method_uid, parse_sim_addr,
 };
 
-/// Trail name for client-side append attempts and outcomes.
-pub const TL_CLIENT: &str = "client";
+/// Event name: request issued; outcome not yet known. Fields: `seq_id`,
+/// `block_len`.
+pub const EV_CLIENT_ISSUED: &str = "client_issued";
 
-/// Client-side trail event recording the outcome of each attempted append.
-#[derive(Debug, Clone, Serialize, Deserialize, valuable::Valuable)]
-pub enum ClientEvent {
-    /// Request issued; outcome not yet known.
-    Issued {
-        /// Workload-side request id.
-        seq_id: u64,
-        /// Number of bytes in the block.
-        block_len: usize,
-    },
-    /// Server returned a response; compared bit-for-bit against the reference model.
-    Acknowledged {
-        /// Workload-side request id.
-        seq_id: u64,
-        /// `n` reported by the server.
-        server_n: u64,
-        /// `h` reported by the server.
-        server_h: u64,
-        /// `n` projected by the local reference model.
-        expected_n: u64,
-        /// `h` projected by the local reference model.
-        expected_h: u64,
-    },
-    /// At-least-once RPC failed terminally.
-    Failed {
-        /// Workload-side request id.
-        seq_id: u64,
-        /// Stringified error.
-        error: String,
-    },
-    /// Ambiguous outcome (`MaybeDelivered`, drain timeout, or shutdown mid-await).
-    Ambiguous {
-        /// Workload-side request id.
-        seq_id: u64,
-    },
-}
+/// Event name: server response compared bit-for-bit against the reference
+/// model. Fields: `seq_id`, `server_n`, `server_h`, `expected_n`,
+/// `expected_h`.
+pub const EV_CLIENT_ACKNOWLEDGED: &str = "client_acknowledged";
+
+/// Event name: at-least-once RPC failed terminally. Fields: `seq_id`,
+/// `error`.
+pub const EV_CLIENT_FAILED: &str = "client_failed";
+
+/// Event name: ambiguous outcome (`MaybeDelivered`, drain timeout, or
+/// shutdown mid-await). Fields: `seq_id`.
+pub const EV_CLIENT_AMBIGUOUS: &str = "client_ambiguous";
 
 #[derive(Debug, Clone, Copy)]
 enum Op {
@@ -212,13 +189,7 @@ impl Workload for TransportClientWorkload {
             let projected_n = expected_n + 1;
             let projected_h = fold(expected_h, &block);
 
-            ctx.emit(
-                TL_CLIENT,
-                ClientEvent::Issued {
-                    seq_id,
-                    block_len: block.len(),
-                },
-            );
+            tracing::info!(seq_id, block_len = block.len(), "client_issued");
 
             let req = AppendBlockRequest {
                 seq_id,
@@ -239,19 +210,13 @@ impl Workload for TransportClientWorkload {
                             if let Some(r) = drained {
                                 r
                             } else {
-                                ctx.emit(TL_CLIENT, ClientEvent::Ambiguous { seq_id });
+                                tracing::info!(seq_id, "client_ambiguous");
                                 stopped_after_ambiguous = true;
                                 continue;
                             }
                         }
                         Err(e) => {
-                            ctx.emit(
-                                TL_CLIENT,
-                                ClientEvent::Failed {
-                                    seq_id,
-                                    error: e.to_string(),
-                                },
-                            );
+                            tracing::info!(seq_id, error = %e, "client_failed");
                             continue;
                         }
                     }
@@ -284,31 +249,23 @@ impl Workload for TransportClientWorkload {
                     expected_n = projected_n;
                     expected_h = projected_h;
 
-                    ctx.emit(
-                        TL_CLIENT,
-                        ClientEvent::Acknowledged {
-                            seq_id,
-                            server_n: resp.n,
-                            server_h: resp.h,
-                            expected_n: projected_n,
-                            expected_h: projected_h,
-                        },
+                    tracing::info!(
+                        seq_id,
+                        server_n = resp.n,
+                        server_h = resp.h,
+                        expected_n = projected_n,
+                        expected_h = projected_h,
+                        "client_acknowledged"
                     );
                 }
                 Err(ReplyError::MaybeDelivered) => {
                     assert_sometimes!(true, "maybe_delivered_observed");
-                    ctx.emit(TL_CLIENT, ClientEvent::Ambiguous { seq_id });
+                    tracing::info!(seq_id, "client_ambiguous");
                     stopped_after_ambiguous = true;
                 }
                 Err(e) => {
                     assert_sometimes!(true, "terminal_error_observed");
-                    ctx.emit(
-                        TL_CLIENT,
-                        ClientEvent::Failed {
-                            seq_id,
-                            error: e.to_string(),
-                        },
-                    );
+                    tracing::info!(seq_id, error = %e, "client_failed");
                 }
             }
         }
@@ -330,26 +287,14 @@ impl Workload for TransportClientWorkload {
                     client_id,
                     block: block.clone(),
                 };
-                ctx.emit(
-                    TL_CLIENT,
-                    ClientEvent::Issued {
-                        seq_id,
-                        block_len: block.len(),
-                    },
-                );
+                tracing::info!(seq_id, block_len = block.len(), "client_issued");
                 match send(&*transport, &endpoint, req, &encode) {
                     Ok(()) => {
                         assert_sometimes!(true, "fire_and_forget_sent");
-                        ctx.emit(TL_CLIENT, ClientEvent::Ambiguous { seq_id });
+                        tracing::info!(seq_id, "client_ambiguous");
                     }
                     Err(e) => {
-                        ctx.emit(
-                            TL_CLIENT,
-                            ClientEvent::Failed {
-                                seq_id,
-                                error: e.to_string(),
-                            },
-                        );
+                        tracing::info!(seq_id, error = %e, "client_failed");
                     }
                 }
             }
@@ -366,21 +311,23 @@ impl Workload for TransportClientWorkload {
 
     #[instrument(skip(self, ctx), fields(client = self.index))]
     async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        // Every Acknowledged event must have a matching server-side AppendBlockEvent
-        // with the same (n, h). Catches "transport claimed delivery, server never
-        // emitted" — a lost server-side event.
-        let client_events = ctx.trail::<ClientEvent>(TL_CLIENT);
-        let server_events = ctx.trail::<AppendBlockEvent>(TL_APPEND);
-        for entry in &client_events {
-            if let ClientEvent::Acknowledged {
-                server_n, server_h, ..
-            } = &entry.event
-            {
-                let matched = server_events
-                    .iter()
-                    .any(|s| s.event.n == *server_n && s.event.h == *server_h);
-                assert_always!(matched, "check_ack_has_matching_server_event");
-            }
+        // Every acknowledged append must have a matching server-side
+        // `append_block` event with the same (n, h). Catches "transport
+        // claimed delivery, server never emitted" — a lost server-side event.
+        let q = ctx.observability();
+        let acks = q.snapshot(EV_CLIENT_ACKNOWLEDGED);
+        let server_events = q.snapshot(EV_APPEND_BLOCK);
+        for ack in &acks {
+            let server_n = ack.u64("server_n");
+            let server_h = ack.u64("server_h");
+            assert_always!(
+                server_n.is_some() && server_h.is_some(),
+                "check_ack_event_well_formed"
+            );
+            let matched = server_events
+                .iter()
+                .any(|s| s.u64("n") == server_n && s.u64("h") == server_h);
+            assert_always!(matched, "check_ack_has_matching_server_event");
         }
         tracing::info!("check passed");
         Ok(())

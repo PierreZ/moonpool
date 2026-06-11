@@ -1,67 +1,50 @@
-//! Custom `tracing` layer that captures correctness events and runs invariants.
+//! Custom `tracing` layer that captures plain trace events for invariants.
 //!
-//! [`SimulationLayer`] subscribes to ordinary `tracing` events. An event is
-//! captured iff it carries `capture = true` as a structured field. Required
-//! companion field: `trail = "..."` selects the named stream. Optional field:
-//! `source = "..."` (defaults to empty string). The typed payload is carried
-//! as `event = valuable(&p)` and converted to a [`serde_json::Value`] at
-//! capture time.
+//! [`SimulationLayer`] subscribes to ordinary `tracing` events — the same
+//! emissions production observability consumes. An event is captured iff:
+//!
+//! 1. its level is `INFO` or more severe, and
+//! 2. it is emitted inside a span carrying an `ip` field (the orchestrator
+//!    wraps every process and workload task in such a span), and
+//! 3. it has a non-empty message, which becomes the event's name.
+//!
+//! Runner-injected fault events bypass tracing entirely: the orchestrator
+//! drains them from the simulation engine and records them via
+//! [`SimulationLayerHandle::record_sim_fault`] with `source = "sim"`.
 //!
 //! Simulation time is stamped from the layer's internal clock, advanced by
-//! the orchestrator via [`SimulationLayerHandle::set_sim_time_ms`] between
-//! events. In production (no orchestrator), the clock stays at 0 unless the
-//! user pushes wall time themselves.
+//! the orchestrator via [`SimulationLayerHandle::set_sim_time_ms`] after each
+//! step. Invariants are run by the orchestrator through
+//! [`SimulationLayerHandle::run_invariants`] — never from inside tracing
+//! dispatch.
 //!
 //! Storage is held behind a [`parking_lot::Mutex`] to satisfy the
 //! `Send + Sync` bound on `tracing::Layer`. moonpool simulations run
 //! single-threaded so the mutex is uncontended.
-//!
-//! ## Invariants are read-only by construction
-//!
-//! `tracing-core`'s dispatch reentrancy guard silently drops any event emitted
-//! while another event is being processed. So an invariant that calls
-//! `tracing::info!(capture = true, ...)` from inside `observe(...)` is a no-op,
-//! not a panic — there is no deadlock risk and no need for an explicit guard
-//! in the layer.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
 
 use parking_lot::Mutex;
-use serde::de::DeserializeOwned;
-use serde_json::Value;
 use tracing::Subscriber;
 use tracing::field::{Field, Visit};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 
-use super::event::{CapturedEvent, TypedEntry};
+use crate::chaos::{SIM_FAULT_EVENT_NAME, SimFaultEvent};
+
+use super::event::{FieldValue, TraceEvent};
 use super::invariant::Invariant;
-use super::query::TrailQuery;
-
-#[allow(unused_imports)]
-use super::query::TrailQueryExt;
-
-/// Tracks how many [`SimulationLayer`]s are currently installed as a default
-/// subscriber. Used by tests; not part of the capture path.
-static INSTALL_COUNT: AtomicI32 = AtomicI32::new(0);
-
-/// Returns true when at least one [`SimulationLayer`] is currently installed.
-#[inline]
-#[must_use]
-pub fn layer_installed() -> bool {
-    INSTALL_COUNT.load(Ordering::Relaxed) > 0
-}
+use super::query::TraceQuery;
 
 /// Mutable storage for captured events.
-pub(crate) struct EventStore {
+struct EventStore {
     /// Monotonic sequence counter assigned to each captured event.
     seq_counter: u64,
-    /// Captured events grouped by their trail name.
-    by_trail: HashMap<String, Vec<CapturedEvent>>,
+    /// Captured events grouped by their name (the tracing message).
+    by_name: HashMap<String, Vec<TraceEvent>>,
     /// Latest known sim time. Advanced by `SimulationLayerHandle::set_sim_time_ms`
     /// (orchestrator pushes after each `sim.step()`) and read at capture time.
     last_sim_time_ms: u64,
@@ -71,13 +54,37 @@ impl EventStore {
     fn new() -> Self {
         Self {
             seq_counter: 0,
-            by_trail: HashMap::new(),
+            by_name: HashMap::new(),
             last_sim_time_ms: 0,
         }
     }
+
+    fn push(
+        &mut self,
+        time_ms: u64,
+        source: String,
+        target: String,
+        level: tracing::Level,
+        name: String,
+        fields: BTreeMap<String, FieldValue>,
+    ) {
+        let seq = self.seq_counter;
+        self.seq_counter += 1;
+        let event = TraceEvent {
+            seq,
+            time_ms,
+            source,
+            target,
+            level,
+            name: name.clone(),
+            fields,
+        };
+        self.by_name.entry(name).or_default().push(event);
+    }
 }
 
-/// A `tracing::Layer` that captures `capture = true` events and pumps invariants.
+/// A `tracing::Layer` that captures plain trace events emitted inside
+/// process/workload spans.
 pub struct SimulationLayer {
     events: Arc<Mutex<EventStore>>,
     invariants: Arc<Mutex<Vec<Box<dyn Invariant + Send>>>>,
@@ -107,17 +114,16 @@ impl SimulationLayer {
     #[must_use]
     pub fn install(self) -> (SimulationLayerHandle, InstallGuard) {
         let handle = self.handle();
-        INSTALL_COUNT.fetch_add(1, Ordering::Relaxed);
         // Anchor: an inert, always-interested dispatcher kept alive for the
         // lifetime of the guard. `tracing` caches callsite interest globally and
         // recomputes it (against whichever dispatchers are currently live)
-        // whenever that set changes. Without an anchor, a `capture = true`
-        // callsite can be re-cached as `Interest::never` the moment the only
-        // live capturing dispatcher's thread default is a `NoSubscriber` (a
-        // sibling test on another thread, or a guard dropping mid-run), silently
-        // dropping our events. Holding one dispatcher that votes "interested" for
-        // every callsite guarantees the cache can never collapse to `never` while
-        // a layer is installed. See issue #112.
+        // whenever that set changes. Without an anchor, a callsite can be
+        // re-cached as `Interest::never` the moment the only live capturing
+        // dispatcher's thread default is a `NoSubscriber` (a sibling test on
+        // another thread, or a guard dropping mid-run), silently dropping our
+        // events. Holding one dispatcher that votes "interested" for every
+        // callsite guarantees the cache can never collapse to `never` while a
+        // layer is installed. See issue #112.
         let interest_anchor = tracing::Dispatch::new(tracing_subscriber::registry());
         let subscriber = tracing_subscriber::registry().with(self);
         let guard = tracing::subscriber::set_default(subscriber);
@@ -142,19 +148,13 @@ impl Default for SimulationLayer {
 }
 
 /// Drop-guard returned by [`SimulationLayer::install`]. Restores the previous
-/// subscriber and decrements the install count when dropped.
+/// subscriber when dropped.
 pub struct InstallGuard {
     _guard: tracing::subscriber::DefaultGuard,
     /// Inert dispatcher kept alive so tracing's global callsite-interest cache
-    /// cannot collapse capture callsites to `Interest::never` while a layer is
+    /// cannot collapse callsites to `Interest::never` while a layer is
     /// installed. See `SimulationLayer::install`.
     _interest_anchor: tracing::Dispatch,
-}
-
-impl Drop for InstallGuard {
-    fn drop(&mut self) {
-        INSTALL_COUNT.fetch_sub(1, Ordering::Relaxed);
-    }
 }
 
 /// Cheap-to-clone handle to a [`SimulationLayer`]'s captured state.
@@ -165,19 +165,19 @@ pub struct SimulationLayerHandle {
 }
 
 impl SimulationLayerHandle {
-    /// Register an invariant. Subsequently called after every captured event.
+    /// Register an invariant, run on every [`Self::run_invariants`] call.
     pub fn register(&self, inv: Box<dyn Invariant + Send>) {
         self.invariants.lock().push(inv);
     }
 
     /// Reset captured events and invariant state for a new seed.
     ///
-    /// Clears all event vectors, resets sequence counter, calls `Invariant::reset`
-    /// on each registered invariant.
+    /// Clears all event vectors, resets the sequence counter, and calls
+    /// `Invariant::reset` on each registered invariant.
     pub fn reset_for_seed(&self) {
         {
             let mut store = self.events.lock();
-            store.by_trail.clear();
+            store.by_name.clear();
             store.seq_counter = 0;
             store.last_sim_time_ms = 0;
         }
@@ -187,60 +187,63 @@ impl SimulationLayerHandle {
         }
     }
 
-    /// Read all events captured under `trail` as typed entries.
-    ///
-    /// Entries whose payload does not deserialize as `T` are skipped.
-    pub fn trail<T: DeserializeOwned>(&self, trail: &str) -> Vec<TypedEntry<T>> {
-        let store = self.events.lock();
-        let Some(entries) = store.by_trail.get(trail) else {
-            return Vec::new();
-        };
-        entries
-            .iter()
-            .filter_map(TypedEntry::<T>::deserialize)
-            .collect()
-    }
-
     /// Latest known simulation time in milliseconds.
     ///
     /// Updated by [`Self::set_sim_time_ms`] (the orchestrator pushes after
-    /// each `sim.step()`). Read at capture time to stamp the captured event.
+    /// each `sim.step()`). Read at capture time to stamp captured events.
     #[must_use]
     pub fn current_sim_time_ms(&self) -> u64 {
         self.events.lock().last_sim_time_ms
     }
 
     /// Override the latest known simulation time. Called by the orchestrator
-    /// to keep the layer's clock advancing between events.
+    /// to keep the layer's clock advancing between steps.
     pub fn set_sim_time_ms(&self, ms: u64) {
         self.events.lock().last_sim_time_ms = ms;
     }
+
+    /// Record a runner-injected fault into the timeline.
+    ///
+    /// Stored under the [`SIM_FAULT_EVENT_NAME`] event name with
+    /// `source = "sim"`, a `kind` field identifying the fault variant, and
+    /// the fault's payload flattened into fields. `time_ms` is the sim time
+    /// at which the fault occurred (stamped by the engine, not at drain time).
+    pub fn record_sim_fault(&self, time_ms: u64, fault: &SimFaultEvent) {
+        let mut fields = fault.to_fields();
+        fields.insert("kind".to_owned(), FieldValue::Str(fault.kind().to_owned()));
+        self.events.lock().push(
+            time_ms,
+            "sim".to_owned(),
+            "moonpool_sim::fault".to_owned(),
+            tracing::Level::INFO,
+            SIM_FAULT_EVENT_NAME.to_owned(),
+            fields,
+        );
+    }
+
+    /// Run all registered invariants against the captured events at the
+    /// current sim time. Called by the orchestrator after each step.
+    pub fn run_invariants(&self) {
+        let sim_time_ms = self.current_sim_time_ms();
+        let invariants = self.invariants.lock();
+        for inv in invariants.iter() {
+            inv.observe(self, sim_time_ms);
+        }
+    }
 }
 
-/// `TrailQuery` view backed by an [`EventStore`]. Created on the fly inside
-/// `on_event` so invariants can read from the live store without holding the
-/// invariants lock during their `observe` call.
-struct LayerQuery {
-    events: Arc<Mutex<EventStore>>,
-}
-
-impl TrailQuery for LayerQuery {
-    fn len(&self, trail: &str) -> usize {
+impl TraceQuery for SimulationLayerHandle {
+    fn len(&self, name: &str) -> usize {
         self.events
             .lock()
-            .by_trail
-            .get(trail)
+            .by_name
+            .get(name)
             .map_or(0, std::vec::Vec::len)
     }
 
-    fn last_seq(&self) -> u64 {
+    fn since(&self, name: &str, cursor: &Cell<usize>) -> Vec<TraceEvent> {
         let store = self.events.lock();
-        store.seq_counter.saturating_sub(1)
-    }
-
-    fn drain_since(&self, trail: &str, cursor: &Cell<usize>) -> Vec<CapturedEvent> {
-        let store = self.events.lock();
-        let Some(entries) = store.by_trail.get(trail) else {
+        let Some(entries) = store.by_name.get(name) else {
             return Vec::new();
         };
         let len = entries.len();
@@ -248,62 +251,112 @@ impl TrailQuery for LayerQuery {
         if from >= len {
             return Vec::new();
         }
-        let result: Vec<CapturedEvent> = entries[from..].to_vec();
+        let result: Vec<TraceEvent> = entries[from..].to_vec();
         cursor.set(len);
         result
     }
+
+    fn snapshot(&self, name: &str) -> Vec<TraceEvent> {
+        self.events
+            .lock()
+            .by_name
+            .get(name)
+            .cloned()
+            .unwrap_or_default()
+    }
 }
 
-/// Visitor that scans a `tracing::Event` for the capture marker and required
-/// companion fields. After visiting, the populated fields tell the layer
-/// whether and how to record the event.
-struct CaptureVisitor {
-    capture: bool,
-    trail: Option<String>,
-    source: String,
-    payload: Option<Value>,
+/// Span-extension marker storing the `ip` field recorded on a process or
+/// workload span. Read back at event time to attribute the event's source.
+struct SourceIp(String);
+
+/// Visitor that extracts an `ip` field from span attributes.
+struct SpanIpVisitor {
+    ip: Option<String>,
 }
 
-impl CaptureVisitor {
-    fn new() -> Self {
-        Self {
-            capture: false,
-            trail: None,
-            source: String::new(),
-            payload: None,
+impl Visit for SpanIpVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "ip" {
+            self.ip = Some(value.to_owned());
+        }
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "ip" {
+            self.ip = Some(format!("{value:?}"));
         }
     }
 }
 
-impl Visit for CaptureVisitor {
-    fn record_bool(&mut self, field: &Field, value: bool) {
-        if field.name() == "capture" {
-            self.capture = value;
+/// Visitor that collects an event's message (as its name) and structured
+/// fields.
+struct EventVisitor {
+    name: Option<String>,
+    fields: BTreeMap<String, FieldValue>,
+}
+
+impl EventVisitor {
+    fn new() -> Self {
+        Self {
+            name: None,
+            fields: BTreeMap::new(),
         }
+    }
+}
+
+impl Visit for EventVisitor {
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.fields
+            .insert(field.name().to_owned(), FieldValue::Bool(value));
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.fields
+            .insert(field.name().to_owned(), FieldValue::I64(value));
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.fields
+            .insert(field.name().to_owned(), FieldValue::U64(value));
+    }
+
+    fn record_f64(&mut self, field: &Field, value: f64) {
+        self.fields
+            .insert(field.name().to_owned(), FieldValue::F64(value));
     }
 
     fn record_str(&mut self, field: &Field, value: &str) {
-        match field.name() {
-            "trail" => self.trail = Some(value.to_owned()),
-            "source" => value.clone_into(&mut self.source),
-            _ => {}
-        }
+        self.fields
+            .insert(field.name().to_owned(), FieldValue::Str(value.to_owned()));
     }
 
-    fn record_value(&mut self, field: &Field, value: valuable::Value<'_>) {
-        if field.name() == "event" {
-            // Serialize the Valuable into a serde_json::Value. valuable-serde's
-            // Serializable wrapper bridges Valuable → serde::Serialize.
-            let serializable = valuable_serde::Serializable::new(value);
-            if let Ok(v) = serde_json::to_value(serializable) {
-                self.payload = Some(v);
-            }
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        // `%`-formatted (Display) values also land here, formatted without
+        // quotes by tracing's DisplayValue wrapper.
+        let formatted = format!("{value:?}");
+        if field.name() == "message" {
+            self.name = Some(formatted);
+        } else {
+            self.fields
+                .insert(field.name().to_owned(), FieldValue::Str(formatted));
         }
     }
+}
 
-    fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {
-        // Other fields (e.g. tracing's auto-added `message`) are ignored.
+/// Walk the event's span scope from the innermost span outwards and return
+/// the first recorded `ip`.
+fn nearest_source<S>(ctx: &Context<'_, S>, event: &tracing::Event<'_>) -> Option<String>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    let scope = ctx.event_scope(event)?;
+    for span in scope {
+        if let Some(ip) = span.extensions().get::<SourceIp>() {
+            return Some(ip.0.clone());
+        }
     }
+    None
 }
 
 impl<S> Layer<S> for SimulationLayer
@@ -322,49 +375,47 @@ where
         tracing::subscriber::Interest::sometimes()
     }
 
-    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-        let mut visitor = CaptureVisitor::new();
-        event.record(&mut visitor);
-        if !visitor.capture {
-            return;
-        }
-        let Some(trail) = visitor.trail else {
-            return;
-        };
-        let Some(payload) = visitor.payload else {
-            return;
-        };
-
-        // Phase 1: append the event under the events lock.
-        let sim_time_ms;
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: Context<'_, S>,
+    ) {
+        let mut visitor = SpanIpVisitor { ip: None };
+        attrs.record(&mut visitor);
+        if let Some(ip) = visitor.ip
+            && let Some(span) = ctx.span(id)
         {
-            let mut store = self.events.lock();
-            let seq = store.seq_counter;
-            store.seq_counter += 1;
-            sim_time_ms = store.last_sim_time_ms;
-            store
-                .by_trail
-                .entry(trail.clone())
-                .or_default()
-                .push(CapturedEvent {
-                    trail,
-                    time_ms: sim_time_ms,
-                    source: visitor.source,
-                    seq,
-                    payload,
-                });
+            span.extensions_mut().insert(SourceIp(ip));
         }
+    }
 
-        // Phase 2: run each invariant. The invariants lock is held during the
-        // call; the event store is released so LayerQuery can re-acquire it.
-        // Any captured event an invariant tries to emit is silently dropped by
-        // tracing-core's dispatch reentrancy guard.
-        let query = LayerQuery {
-            events: self.events.clone(),
-        };
-        let invariants = self.invariants.lock();
-        for inv in invariants.iter() {
-            inv.observe(&query, sim_time_ms);
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
+        // 1. INFO or more severe only (Level::TRACE > Level::INFO in tracing's
+        //    ordering).
+        if *event.metadata().level() > tracing::Level::INFO {
+            return;
         }
+        // 2. Only events attributable to an actor span carrying an `ip`.
+        let Some(source) = nearest_source(&ctx, event) else {
+            return;
+        };
+        // 3. The message becomes the event name; drop unnamed events.
+        let mut visitor = EventVisitor::new();
+        event.record(&mut visitor);
+        let Some(name) = visitor.name.filter(|n| !n.is_empty()) else {
+            return;
+        };
+
+        let mut store = self.events.lock();
+        let time_ms = store.last_sim_time_ms;
+        store.push(
+            time_ms,
+            source,
+            event.metadata().target().to_owned(),
+            *event.metadata().level(),
+            name,
+            visitor.fields,
+        );
     }
 }

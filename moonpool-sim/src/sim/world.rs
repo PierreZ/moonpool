@@ -12,11 +12,9 @@ use std::{
 };
 use tracing::instrument;
 
-use tracing::field::valuable;
-
 use crate::{
     SimulationError, SimulationResult,
-    chaos::fault_events::{SIM_FAULT_TRAIL, SimFaultEvent},
+    chaos::fault_events::SimFaultEvent,
     network::{
         NetworkConfiguration, PartitionStrategy,
         sim::{ConnectionId, ListenerId, SimNetworkProvider},
@@ -65,6 +63,10 @@ pub(crate) struct SimInner {
 
     // Last event processed by step() — used by orchestrator to detect ProcessRestart
     pub(crate) last_processed_event: Option<Event>,
+
+    /// Faults recorded by the engine since the last [`SimWorld::take_faults`]
+    /// drain. The runner pumps these into the observability timeline.
+    pub(crate) pending_faults: Vec<SimFaultRecord>,
 }
 
 impl SimInner {
@@ -82,6 +84,7 @@ impl SimInner {
             events_processed: 0,
             last_bit_flip_time: Duration::ZERO,
             last_processed_event: None,
+            pending_faults: Vec::new(),
         }
     }
 
@@ -99,22 +102,18 @@ impl SimInner {
             events_processed: 0,
             last_bit_flip_time: Duration::ZERO,
             last_processed_event: None,
+            pending_faults: Vec::new(),
         }
     }
 
-    /// Emit a fault event to the [`SIM_FAULT_TRAIL`].
+    /// Record an engine-injected fault, stamped with the current sim time.
     ///
-    /// Emits a `tracing::info!` with `capture = true`, `trail = SIM_FAULT_TRAIL`,
-    /// `source = "sim"`, and the typed event. The active
-    /// [`crate::observability::SimulationLayer`] (if any) captures it for
-    /// invariants; production subscribers see structured fields.
-    pub(crate) fn emit_fault(event: &SimFaultEvent) {
-        tracing::info!(
-            capture = true,
-            trail = SIM_FAULT_TRAIL,
-            source = "sim",
-            event = valuable(event),
-        );
+    /// Faults accumulate in [`SimInner::pending_faults`] until the runner
+    /// drains them via [`SimWorld::take_faults`] into the observability
+    /// timeline. The engine never touches `tracing` for faults.
+    pub(crate) fn record_fault(&mut self, event: SimFaultEvent) {
+        let time_ms = u64::try_from(self.current_time.as_millis()).unwrap_or(u64::MAX);
+        self.pending_faults.push(SimFaultRecord { time_ms, event });
     }
 
     /// Calculate the number of bits to flip using a power-law distribution.
@@ -138,6 +137,20 @@ impl SimInner {
         // Clamp to configured range
         bit_count.clamp(min_bits, max_bits)
     }
+}
+
+/// A fault recorded by the simulation engine, stamped with the sim time at
+/// which it occurred.
+///
+/// Drained by the runner via [`SimWorld::take_faults`] and recorded into the
+/// observability timeline under
+/// [`crate::SIM_FAULT_EVENT_NAME`](crate::chaos::SIM_FAULT_EVENT_NAME).
+#[derive(Debug, Clone)]
+pub struct SimFaultRecord {
+    /// Simulation time in milliseconds when the fault occurred.
+    pub time_ms: u64,
+    /// The fault event.
+    pub event: SimFaultEvent,
 }
 
 /// The central simulation coordinator that manages time and event processing.
@@ -174,6 +187,24 @@ impl SimWorld {
     #[must_use]
     pub fn new() -> Self {
         Self::create(None, 0)
+    }
+
+    /// Drain engine-recorded faults accumulated since the last call.
+    ///
+    /// The runner calls this after each `step()` to pump faults into the
+    /// observability timeline; tests can call it directly to assert on the
+    /// fault sequence.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
+    pub fn take_faults(&self) -> Vec<SimFaultRecord> {
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
+        std::mem::take(&mut inner.pending_faults)
     }
 
     /// Creates a new simulation world with a specific seed for deterministic randomness.
@@ -1002,13 +1033,13 @@ impl SimWorld {
                 {
                     conn.flags.set_is_cut(false);
                     conn.cut_expiry = None;
-                    SimInner::emit_fault(&SimFaultEvent::CutRestored { connection_id: id });
+                    inner.record_fault(SimFaultEvent::CutRestored { connection_id: id });
                     tracing::debug!("Connection {} restored via scheduled event", id);
                     Self::wake_all(&mut inner.wakers.cuts, connection_id);
                 }
             }
             ConnectionStateChange::HalfOpenError => {
-                SimInner::emit_fault(&SimFaultEvent::HalfOpenError { connection_id: id });
+                inner.record_fault(SimFaultEvent::HalfOpenError { connection_id: id });
                 tracing::debug!("Connection {} half-open error time reached", id);
                 if let Some(waker) = inner.wakers.reads.remove(&connection_id) {
                     waker.wake();
@@ -1251,7 +1282,7 @@ impl SimWorld {
             flipped_positions.len()
         );
 
-        SimInner::emit_fault(&SimFaultEvent::BitFlip {
+        inner.record_fault(SimFaultEvent::BitFlip {
             connection_id: connection_id.0,
             flip_count: flipped_positions.len(),
         });
@@ -2308,7 +2339,7 @@ impl SimWorld {
 
         inner.network.last_random_close_time = current_time;
 
-        SimInner::emit_fault(&SimFaultEvent::RandomClose {
+        inner.record_fault(SimFaultEvent::RandomClose {
             connection_id: connection_id.0,
         });
 
@@ -2542,7 +2573,7 @@ impl SimWorld {
         let scheduled_event = ScheduledEvent::new(expires_at, restore_event, sequence);
         inner.event_queue.schedule(scheduled_event);
 
-        SimInner::emit_fault(&SimFaultEvent::PartitionCreated {
+        inner.record_fault(SimFaultEvent::PartitionCreated {
             from: from_ip.to_string(),
             to: to_ip.to_string(),
         });
@@ -2587,7 +2618,7 @@ impl SimWorld {
         let scheduled_event = ScheduledEvent::new(expires_at, clear_event, sequence);
         inner.event_queue.schedule(scheduled_event);
 
-        SimInner::emit_fault(&SimFaultEvent::SendPartitionCreated { ip: ip.to_string() });
+        inner.record_fault(SimFaultEvent::SendPartitionCreated { ip: ip.to_string() });
         tracing::debug!("Partitioned sends from {} until {:?}", ip, expires_at);
         Ok(())
     }
@@ -2623,7 +2654,7 @@ impl SimWorld {
         let scheduled_event = ScheduledEvent::new(expires_at, clear_event, sequence);
         inner.event_queue.schedule(scheduled_event);
 
-        SimInner::emit_fault(&SimFaultEvent::RecvPartitionCreated { ip: ip.to_string() });
+        inner.record_fault(SimFaultEvent::RecvPartitionCreated { ip: ip.to_string() });
         tracing::debug!("Partitioned receives to {} until {:?}", ip, expires_at);
         Ok(())
     }
@@ -2647,7 +2678,7 @@ impl SimWorld {
             .write()
             .expect("RwLock poisoned: prior task panicked");
         inner.network.ip_partitions.remove(&(from_ip, to_ip));
-        SimInner::emit_fault(&SimFaultEvent::PartitionHealed {
+        inner.record_fault(SimFaultEvent::PartitionHealed {
             from: from_ip.to_string(),
             to: to_ip.to_string(),
         });
@@ -2774,9 +2805,15 @@ impl SimWorld {
                     .ip_partitions
                     .insert((to_ip, from_ip), PartitionState { expires_at });
 
-                SimInner::emit_fault(&SimFaultEvent::PartitionCreated {
-                    from: from_ip.to_string(),
-                    to: to_ip.to_string(),
+                // Disjoint-field push: `partition_config` still borrows
+                // `inner.network`, so go through `pending_faults` directly.
+                let time_ms = u64::try_from(inner.current_time.as_millis()).unwrap_or(u64::MAX);
+                inner.pending_faults.push(SimFaultRecord {
+                    time_ms,
+                    event: SimFaultEvent::PartitionCreated {
+                        from: from_ip.to_string(),
+                        to: to_ip.to_string(),
+                    },
                 });
 
                 tracing::debug!(
@@ -3035,63 +3072,39 @@ mod tests {
     }
 
     #[test]
-    fn emit_fault_without_layer_is_noop() {
-        // No SimulationLayer installed — emit_fault should still not panic.
-        SimInner::emit_fault(&SimFaultEvent::StorageCrash {
-            ip: "10.0.1.1".to_string(),
-        });
-    }
-
-    #[test]
-    fn emit_fault_with_layer_writes_to_trail() {
-        use crate::observability::SimulationLayer;
-        let layer = SimulationLayer::new();
-        let (handle, _guard) = layer.install();
-
-        // The layer stamps `time_ms` from its own clock, which the
-        // orchestrator advances after each `sim.step()`. In this unit test
-        // we push the time directly.
-        handle.set_sim_time_ms(500);
-
-        SimInner::emit_fault(&SimFaultEvent::StorageCrash {
+    fn record_fault_stamps_current_time() {
+        let mut inner = SimInner::new();
+        inner.current_time = Duration::from_millis(500);
+        inner.record_fault(SimFaultEvent::StorageCrash {
             ip: "10.0.1.1".to_string(),
         });
 
-        let entries = handle.trail::<SimFaultEvent>(SIM_FAULT_TRAIL);
-        assert_eq!(entries.len(), 1);
-        let entry = &entries[0];
-        assert_eq!(entry.time_ms, 500);
-        assert_eq!(entry.source, "sim");
-        assert!(matches!(entry.event, SimFaultEvent::StorageCrash { .. }));
+        assert_eq!(inner.pending_faults.len(), 1);
+        let record = &inner.pending_faults[0];
+        assert_eq!(record.time_ms, 500);
+        assert!(matches!(record.event, SimFaultEvent::StorageCrash { .. }));
     }
 
     #[test]
-    fn partition_pair_emits_fault_event() {
-        use crate::observability::SimulationLayer;
-        let layer = SimulationLayer::new();
-        let (handle, _guard) = layer.install();
-
+    fn partition_pair_records_fault() {
         let sim = SimWorld::new();
         let from: std::net::IpAddr = "10.0.1.1".parse().expect("valid ip");
         let to: std::net::IpAddr = "10.0.1.2".parse().expect("valid ip");
         sim.partition_pair(from, to, Duration::from_secs(10))
             .expect("partition should succeed");
 
-        let entries = handle.trail::<SimFaultEvent>(SIM_FAULT_TRAIL);
-        assert_eq!(entries.len(), 1);
+        let faults = sim.take_faults();
+        assert_eq!(faults.len(), 1);
         assert!(matches!(
-            &entries[0].event,
+            &faults[0].event,
             SimFaultEvent::PartitionCreated { from, to }
             if from == "10.0.1.1" && to == "10.0.1.2"
         ));
+        assert!(sim.take_faults().is_empty(), "drained on take");
     }
 
     #[test]
-    fn restore_partition_emits_fault_event() {
-        use crate::observability::SimulationLayer;
-        let layer = SimulationLayer::new();
-        let (handle, _guard) = layer.install();
-
+    fn restore_partition_records_fault() {
         let sim = SimWorld::new();
         let from: std::net::IpAddr = "10.0.1.1".parse().expect("valid ip");
         let to: std::net::IpAddr = "10.0.1.2".parse().expect("valid ip");
@@ -3099,14 +3112,14 @@ mod tests {
             .expect("partition");
         sim.restore_partition(from, to).expect("restore");
 
-        let entries = handle.trail::<SimFaultEvent>(SIM_FAULT_TRAIL);
-        assert_eq!(entries.len(), 2);
+        let faults = sim.take_faults();
+        assert_eq!(faults.len(), 2);
         assert!(matches!(
-            &entries[0].event,
+            &faults[0].event,
             SimFaultEvent::PartitionCreated { .. }
         ));
         assert!(matches!(
-            &entries[1].event,
+            &faults[1].event,
             SimFaultEvent::PartitionHealed { .. }
         ));
     }

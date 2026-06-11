@@ -15,9 +15,8 @@ moonpool-transport = { path = "../moonpool-transport", version = "0.7.0" }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros"] }
-tracing = { version = "0.1", features = ["valuable"] }
+tracing = "0.1"
 tracing-subscriber = "0.3"
-valuable = { version = "0.1", features = ["derive"] }
 
 [[bin]]
 name = "sim-transport"

@@ -1,22 +1,25 @@
-//! Simulator-emitted fault events for the fault trail.
+//! Simulator-emitted fault events for the timeline.
 //!
 //! When faults are injected (network partitions, process reboots, storage corruption, etc.),
-//! the simulator automatically emits [`SimFaultEvent`]s to the [`SIM_FAULT_TRAIL`] trail.
+//! the simulation engine records [`SimFaultEvent`]s and the runner drains them into the
+//! captured timeline under the [`SIM_FAULT_EVENT_NAME`] event name, with a `kind` field
+//! identifying the fault variant and the payload flattened into fields.
 //! Invariants can read these to correlate application behavior with infrastructure faults.
 //!
 //! # Usage
 //!
 //! ```ignore
 //! use std::cell::Cell;
-//! use moonpool_sim::{Invariant, SimFaultEvent, SIM_FAULT_TRAIL, TrailQuery, TrailQueryExt};
+//! use moonpool_sim::{Invariant, SIM_FAULT_EVENT_NAME, TraceQuery};
 //!
 //! struct FaultCounter { cursor: Cell<usize> }
 //!
 //! impl Invariant for FaultCounter {
 //!     fn name(&self) -> &str { "fault_counter" }
-//!     fn observe(&self, q: &dyn TrailQuery, _t: u64) {
-//!         for entry in q.since::<SimFaultEvent>(SIM_FAULT_TRAIL, &self.cursor) {
-//!             if let SimFaultEvent::ProcessForceKill { ip } = &entry.event {
+//!     fn observe(&self, q: &dyn TraceQuery, _t: u64) {
+//!         for e in q.since(SIM_FAULT_EVENT_NAME, &self.cursor) {
+//!             if e.str("kind") == Some("process_force_kill") {
+//!                 let ip = e.str("ip");
 //!                 // ...
 //!             }
 //!         }
@@ -24,17 +27,21 @@
 //! }
 //! ```
 
-use serde::{Deserialize, Serialize};
-use valuable::Valuable;
+use std::collections::BTreeMap;
 
-/// Well-known trail name for simulator-emitted fault events.
-pub const SIM_FAULT_TRAIL: &str = "sim:faults";
+use serde::Serialize;
 
-/// Fault events automatically emitted by the simulator.
+use crate::observability::FieldValue;
+
+/// Well-known event name for simulator-emitted fault events.
+pub const SIM_FAULT_EVENT_NAME: &str = "sim_fault";
+
+/// Fault events automatically recorded by the simulator.
 ///
-/// Invariants read these via the [`crate::TrailQuery`] / [`crate::TrailQueryExt`]
-/// API: `q.since::<SimFaultEvent>(SIM_FAULT_TRAIL, &cursor)`.
-#[derive(Debug, Clone, Valuable, Serialize, Deserialize)]
+/// Invariants read these from the timeline via [`crate::TraceQuery`]:
+/// `q.since(SIM_FAULT_EVENT_NAME, &cursor)`, matching on the `kind` field
+/// (see [`SimFaultEvent::kind`]).
+#[derive(Debug, Clone, Serialize)]
 pub enum SimFaultEvent {
     // -- Process lifecycle --
     /// Process graceful shutdown initiated.
@@ -130,7 +137,9 @@ pub enum SimFaultEvent {
         /// File identifier.
         file_id: u64,
         /// Kind of write fault: "phantom", "misdirected", or "corruption".
-        kind: String,
+        /// (Named `write_kind` to avoid colliding with the timeline's
+        /// variant-discriminator `kind` field.)
+        write_kind: String,
     },
     /// Sync failure injected.
     StorageSyncFault {
@@ -149,4 +158,69 @@ pub enum SimFaultEvent {
         /// IP of the wiped process.
         ip: String,
     },
+}
+
+impl SimFaultEvent {
+    /// Stable `snake_case` identifier for this fault variant, stored in the
+    /// timeline event's `kind` field.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::ProcessGracefulShutdown { .. } => "process_graceful_shutdown",
+            Self::ProcessForceKill { .. } => "process_force_kill",
+            Self::ProcessRestart { .. } => "process_restart",
+            Self::PartitionCreated { .. } => "partition_created",
+            Self::PartitionHealed { .. } => "partition_healed",
+            Self::ConnectionCut { .. } => "connection_cut",
+            Self::CutRestored { .. } => "cut_restored",
+            Self::HalfOpenError { .. } => "half_open_error",
+            Self::SendPartitionCreated { .. } => "send_partition_created",
+            Self::RecvPartitionCreated { .. } => "recv_partition_created",
+            Self::RandomClose { .. } => "random_close",
+            Self::PeerCrash { .. } => "peer_crash",
+            Self::BitFlip { .. } => "bit_flip",
+            Self::StorageReadFault { .. } => "storage_read_fault",
+            Self::StorageWriteFault { .. } => "storage_write_fault",
+            Self::StorageSyncFault { .. } => "storage_sync_fault",
+            Self::StorageCrash { .. } => "storage_crash",
+            Self::StorageWipe { .. } => "storage_wipe",
+        }
+    }
+
+    /// Flatten this fault's payload into timeline fields.
+    ///
+    /// Serializes via serde's external tagging (`{"Variant": {fields}}`) and
+    /// maps the inner object's scalars to [`FieldValue`]s. Returns an empty
+    /// map if serialization fails (it cannot for these variants).
+    pub(crate) fn to_fields(&self) -> BTreeMap<String, FieldValue> {
+        let mut fields = BTreeMap::new();
+        let Ok(serde_json::Value::Object(tagged)) = serde_json::to_value(self) else {
+            return fields;
+        };
+        for payload in tagged.into_values() {
+            let serde_json::Value::Object(entries) = payload else {
+                continue;
+            };
+            for (key, value) in entries {
+                let field = match value {
+                    serde_json::Value::Bool(b) => FieldValue::Bool(b),
+                    serde_json::Value::Number(n) => {
+                        if let Some(u) = n.as_u64() {
+                            FieldValue::U64(u)
+                        } else if let Some(i) = n.as_i64() {
+                            FieldValue::I64(i)
+                        } else if let Some(f) = n.as_f64() {
+                            FieldValue::F64(f)
+                        } else {
+                            continue;
+                        }
+                    }
+                    serde_json::Value::String(s) => FieldValue::Str(s),
+                    _ => continue,
+                };
+                fields.insert(key, field);
+            }
+        }
+        fields
+    }
 }

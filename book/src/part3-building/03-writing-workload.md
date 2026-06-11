@@ -169,7 +169,7 @@ The check phase is your last chance to validate. The system is quiet. No message
 
 ## Publishing State for Invariants
 
-Workloads can publish state that invariant functions read after every simulation event. This enables cross-workload validation:
+Workloads can publish state that invariant functions read after every simulation step. This enables cross-workload validation:
 
 ```rust
 // In run(), after each operation:
@@ -179,19 +179,19 @@ ctx.state().publish("kv_model", self.model.clone());
 An invariant function (registered on the builder) can then read this state:
 
 ```rust
-fn check_model_size(q: &dyn TrailQuery, _sim_time_ms: u64) {
+fn check_model_size(q: &dyn TraceQuery, _sim_time_ms: u64) {
     // Snapshot the latest size events; assert_always if any exceeds bounds.
-    let entries = q.snapshot::<usize>("kv_model_size");
+    let entries = q.snapshot("kv_model_size");
     if let Some(latest) = entries.last() {
         assert_always!(
-            latest.event <= 100,
+            latest.u64("size").is_some_and(|s| s <= 100),
             "model grew beyond expected bounds"
         );
     }
 }
 ```
 
-This is the publish-and-check pattern: the workload publishes its reference model, and invariants validate cross-workload properties after every event. The [events and invariants chapter](./17-events-and-invariants.md) covers this in depth.
+This is the publish-and-check pattern: the workload publishes its reference model, and invariants validate cross-workload properties after every step. The [events and invariants chapter](./17-events-and-invariants.md) covers this in depth.
 
 ## Patterns That Find Bugs
 
