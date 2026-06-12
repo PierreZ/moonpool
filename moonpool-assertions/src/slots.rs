@@ -1,14 +1,20 @@
 //! Rich assertion slot tracking for the Antithesis-style assertion suite.
 //!
-//! Maintains a fixed-size table of assertion slots in shared memory.
-//! Supports boolean assertions (always/sometimes/reachable/unreachable),
-//! numeric guidance assertions (with watermark tracking), and compound
-//! boolean assertions (sometimes-all with frontier tracking).
+//! Maintains a fixed-size table of assertion slots. Supports boolean assertions
+//! (always/sometimes/reachable/unreachable), numeric guidance assertions (with
+//! watermark tracking), and compound boolean assertions (sometimes-all with
+//! frontier tracking).
 //!
-//! Each slot is accessed via raw pointer arithmetic on `MAP_SHARED` memory.
-//! With `Parallelism::Cores(N)`, multiple fork children run concurrently,
-//! so `find_or_alloc_slot` claims slots by atomically writing `msg_hash`
-//! before re-scanning, ensuring concurrent allocators see each other.
+//! Each slot is accessed via raw pointer arithmetic on the assertion region
+//! (heap by default, or `MAP_SHARED` memory when an exploration backend installs
+//! one). With multiple fork children running concurrently, `find_or_alloc_slot`
+//! claims slots by atomically writing `msg_hash` before re-scanning, ensuring
+//! concurrent allocators see each other.
+//!
+//! On a "discovery" (first Sometimes/Reachable pass, numeric watermark
+//! improvement, or frontier advance) the accounting calls
+//! [`crate::hooks::on_slot_discovery`]. With no hook installed this is a no-op
+//! (pure accounting); the exploration backend wires it to coverage + forking.
 
 use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, Ordering};
 
@@ -78,9 +84,9 @@ pub enum AssertCmp {
     Le = 3,
 }
 
-/// A single assertion tracking slot in shared memory.
+/// A single assertion tracking slot.
 ///
-/// All fields are accessed via raw pointer arithmetic on `MAP_SHARED` memory.
+/// All fields are accessed via raw pointer arithmetic on the assertion region.
 #[repr(C)]
 pub struct AssertionSlot {
     /// FNV-1a hash of the assertion message (u32).
@@ -211,39 +217,15 @@ unsafe fn find_or_alloc_slot(
     }
 }
 
-/// Trigger forking for a slot that discovered something new.
-///
-/// Writes to coverage bitmap and explored map (if pointers are non-null),
-/// then calls `dispatch_split()` if exploration is active.
-fn assertion_split(slot_idx: usize, hash: u32) {
-    let bm_ptr = crate::context::COVERAGE_BITMAP_PTR.with(std::cell::Cell::get);
-    let vm_ptr = crate::context::EXPLORED_MAP_PTR.with(std::cell::Cell::get);
-
-    if !bm_ptr.is_null() {
-        // Safety: bm_ptr points to COVERAGE_MAP_SIZE bytes of shared memory set during init().
-        let bm = unsafe { crate::coverage::CoverageBitmap::new(bm_ptr) };
-        bm.set_bit(hash as usize);
-        if !vm_ptr.is_null() {
-            // Safety: vm_ptr points to COVERAGE_MAP_SIZE bytes of shared memory set during init().
-            let vm = unsafe { crate::coverage::ExploredMap::new(vm_ptr) };
-            vm.merge_from(&bm);
-        }
-    }
-
-    if crate::context::explorer_is_active() {
-        crate::split_loop::dispatch_split("", slot_idx % MAX_ASSERTION_SLOTS);
-    }
-}
-
 /// Boolean assertion backing function.
 ///
 /// Handles Always, `AlwaysOrUnreachable`, Sometimes, Reachable, and Unreachable.
-/// Gets or allocates a slot, increments pass/fail counts, and triggers forking
+/// Gets or allocates a slot, increments pass/fail counts, and signals a discovery
 /// for Sometimes/Reachable assertions on first success.
 ///
 /// This is a no-op if the assertion table is not initialized.
 pub fn assertion_bool(kind: AssertKind, must_hit: bool, condition: bool, msg: &str) {
-    let table_ptr = crate::context::assertion_table_ptr();
+    let table_ptr = crate::region::assertion_table_ptr();
     if table_ptr.is_null() {
         return;
     }
@@ -251,14 +233,14 @@ pub fn assertion_bool(kind: AssertKind, must_hit: bool, condition: bool, msg: &s
     let hash = msg_hash(msg);
     let must_hit_u8 = u8::from(must_hit);
 
-    // Safety: table_ptr points to ASSERTION_TABLE_MEM_SIZE bytes of shared memory.
+    // Safety: table_ptr points to ASSERTION_TABLE_MEM_SIZE bytes.
     let (slot, slot_idx) =
         unsafe { find_or_alloc_slot(table_ptr, hash, kind, must_hit_u8, 0, msg) };
     if slot.is_null() {
         return;
     }
 
-    // Safety: slot points to valid shared memory.
+    // Safety: slot points to valid memory.
     unsafe {
         match kind {
             AssertKind::Always | AssertKind::AlwaysOrUnreachable | AssertKind::NumericAlways => {
@@ -284,7 +266,7 @@ pub fn assertion_bool(kind: AssertKind, must_hit: bool, condition: bool, msg: &s
                         .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
                         .is_ok()
                     {
-                        assertion_split(slot_idx, hash);
+                        crate::hooks::on_slot_discovery(slot_idx, hash);
                     }
                 } else {
                     let fc = &*(&raw const (*slot).fail_count).cast::<AtomicI64>();
@@ -309,8 +291,8 @@ pub fn assertion_bool(kind: AssertKind, must_hit: bool, condition: bool, msg: &s
 ///
 /// Evaluates a comparison (left `cmp` right), tracks pass/fail counts,
 /// and maintains a watermark of the best observed value of `left`.
-/// For `NumericSometimes`, forks when the watermark improves past the
-/// last fork watermark.
+/// For `NumericSometimes`, signals a discovery when the watermark improves past
+/// the last fork watermark.
 ///
 /// `maximize` determines whether improving means getting larger (true) or smaller (false).
 ///
@@ -323,7 +305,7 @@ pub fn assertion_numeric(
     right: i64,
     msg: &str,
 ) {
-    let table_ptr = crate::context::assertion_table_ptr();
+    let table_ptr = crate::region::assertion_table_ptr();
     if table_ptr.is_null() {
         return;
     }
@@ -346,7 +328,7 @@ pub fn assertion_numeric(
         AssertCmp::Le => left <= right,
     };
 
-    // Safety: slot points to valid shared memory.
+    // Safety: slot points to valid memory.
     unsafe {
         if passes {
             let pc = &*(&raw const (*slot).pass_count).cast::<AtomicI64>();
@@ -379,7 +361,7 @@ pub fn assertion_numeric(
             }
         }
 
-        // For NumericSometimes: fork when watermark improves past split_watermark
+        // For NumericSometimes: signal discovery when watermark improves past split_watermark
         if kind == AssertKind::NumericSometimes {
             let fw = &*(&raw const (*slot).split_watermark).cast::<AtomicI64>();
             let mut fork_current = fw.load(Ordering::Relaxed);
@@ -399,7 +381,7 @@ pub fn assertion_numeric(
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => {
-                        assertion_split(slot_idx, hash);
+                        crate::hooks::on_slot_discovery(slot_idx, hash);
                         break;
                     }
                     Err(actual) => fork_current = actual,
@@ -412,11 +394,12 @@ pub fn assertion_numeric(
 /// Compound boolean assertion backing function (sometimes-all).
 ///
 /// Counts how many of the named booleans are simultaneously true.
-/// Maintains a frontier (max count seen). Forks when the frontier advances.
+/// Maintains a frontier (max count seen). Signals a discovery when the frontier
+/// advances.
 ///
 /// This is a no-op if the assertion table is not initialized.
 pub fn assertion_sometimes_all(msg: &str, named_bools: &[(&str, bool)]) {
-    let table_ptr = crate::context::assertion_table_ptr();
+    let table_ptr = crate::region::assertion_table_ptr();
     if table_ptr.is_null() {
         return;
     }
@@ -436,13 +419,13 @@ pub fn assertion_sometimes_all(msg: &str, named_bools: &[(&str, bool)]) {
     let true_count =
         u8::try_from(named_bools.iter().filter(|(_, v)| *v).count()).unwrap_or(u8::MAX);
 
-    // Safety: slot points to valid shared memory.
+    // Safety: slot points to valid memory.
     unsafe {
         // Increment pass_count (always, for statistics)
         let pc = &*(&raw const (*slot).pass_count).cast::<AtomicI64>();
         pc.fetch_add(1, Ordering::Relaxed);
 
-        // CAS loop on frontier — fork when it advances
+        // CAS loop on frontier — signal discovery when it advances
         let fr = &*(&raw const (*slot).frontier).cast::<AtomicU8>();
         let mut current = fr.load(Ordering::Relaxed);
         loop {
@@ -456,7 +439,7 @@ pub fn assertion_sometimes_all(msg: &str, named_bools: &[(&str, bool)]) {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    assertion_split(slot_idx, hash);
+                    crate::hooks::on_slot_discovery(slot_idx, hash);
                     break;
                 }
                 Err(actual) => current = actual,
@@ -465,17 +448,17 @@ pub fn assertion_sometimes_all(msg: &str, named_bools: &[(&str, bool)]) {
     }
 }
 
-/// Read all allocated assertion slots from shared memory.
+/// Read all allocated assertion slots from the region.
 ///
 /// Returns an empty vector if the assertion table is not initialized.
 #[must_use]
 pub fn assertion_read_all() -> Vec<AssertionSlotSnapshot> {
-    let table_ptr = crate::context::assertion_table_ptr();
+    let table_ptr = crate::region::assertion_table_ptr();
     if table_ptr.is_null() {
         return Vec::new();
     }
 
-    // Safety: table_ptr was allocated during init() with ASSERTION_TABLE_MEM_SIZE bytes.
+    // Safety: table_ptr was allocated with ASSERTION_TABLE_MEM_SIZE bytes.
     // - The first 4 bytes hold the slot count (u32), capped at MAX_ASSERTION_SLOTS.
     // - base = table_ptr + 8 is the start of the AssertionSlot array.
     // - Loop bound 0..count ensures base.add(i) stays within the allocated region.
@@ -579,13 +562,6 @@ mod tests {
             5,
             "test",
         );
-    }
-
-    #[test]
-    fn test_assertion_read_all_when_inactive() {
-        // Should return empty when not initialized.
-        let slots = assertion_read_all();
-        assert!(slots.is_empty());
     }
 
     #[test]

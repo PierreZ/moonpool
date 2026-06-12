@@ -558,10 +558,8 @@
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 
-pub mod assertion_slots;
 pub mod context;
 pub mod coverage;
-pub mod each_buckets;
 pub mod energy;
 pub mod replay;
 pub mod sancov;
@@ -570,14 +568,15 @@ pub mod shared_stats;
 pub mod simulations;
 pub mod split_loop;
 
-// Re-exports for the public API
-pub use assertion_slots::{
+// The assertion + each-bucket accounting now lives in the dependency-free,
+// wasm-able `moonpool-assertions` crate. Re-export its public surface so
+// `moonpool_explorer::assertion_bool` (and friends) keep resolving for callers.
+pub use context::{explorer_is_child, set_rng_hooks};
+pub use moonpool_assertions::{
     ASSERTION_TABLE_MEM_SIZE, AssertCmp, AssertKind, AssertionSlot, AssertionSlotSnapshot,
-    assertion_bool, assertion_numeric, assertion_read_all, assertion_sometimes_all, msg_hash,
-};
-pub use context::{assertion_table_ptr, explorer_is_child, set_rng_hooks};
-pub use each_buckets::{
-    EachBucket, assertion_sometimes_each, each_bucket_read_all, unpack_quality,
+    EACH_BUCKET_MEM_SIZE, EachBucket, MAX_ASSERTION_SLOTS, MAX_EACH_BUCKETS, assertion_bool,
+    assertion_numeric, assertion_read_all, assertion_sometimes_all, assertion_sometimes_each,
+    assertion_table_ptr, each_bucket_read_all, msg_hash, unpack_quality,
 };
 pub use replay::{ParseTimelineError, format_timeline, parse_timeline};
 pub use sancov::{sancov_edge_count, sancov_edges_covered, sancov_is_available};
@@ -585,9 +584,54 @@ pub use shared_stats::{ExplorationStats, bug_recipe, exploration_stats};
 pub use split_loop::{AdaptiveConfig, Parallelism, exit_child};
 
 use context::{
-    ASSERTION_TABLE, COVERAGE_BITMAP_PTR, EACH_BUCKET_PTR, ENERGY_BUDGET_PTR, EXPLORED_MAP_PTR,
-    SHARED_RECIPE, SHARED_STATS,
+    COVERAGE_BITMAP_PTR, ENERGY_BUDGET_PTR, EXPLORED_MAP_PTR, SHARED_RECIPE, SHARED_STATS,
 };
+
+/// Discovery hooks that wire `moonpool-assertions` accounting to this crate's
+/// coverage bitmap and fork dispatch. Installed by [`init_assertions`].
+///
+/// These reproduce exactly what the inline `assertion_split` / each-bucket code
+/// used to do: slot discoveries mark the bitmap, merge into the explored map, and
+/// dispatch a fork; each-bucket marks the bitmap on every call and dispatches a
+/// fork on discovery/improvement.
+fn install_discovery_hooks() {
+    fn on_slot_discovery(slot_idx: usize, hash: u32) {
+        let bm_ptr = COVERAGE_BITMAP_PTR.with(std::cell::Cell::get);
+        let vm_ptr = EXPLORED_MAP_PTR.with(std::cell::Cell::get);
+        if !bm_ptr.is_null() {
+            // Safety: bm_ptr is a COVERAGE_MAP_SIZE region set during init().
+            let bm = unsafe { coverage::CoverageBitmap::new(bm_ptr) };
+            bm.set_bit(hash as usize);
+            if !vm_ptr.is_null() {
+                // Safety: vm_ptr is a COVERAGE_MAP_SIZE region set during init().
+                let vm = unsafe { coverage::ExploredMap::new(vm_ptr) };
+                vm.merge_from(&bm);
+            }
+        }
+        if context::explorer_is_active() {
+            split_loop::dispatch_split("", slot_idx % MAX_ASSERTION_SLOTS);
+        }
+    }
+
+    fn on_bucket_mark(hash: u32) {
+        let bm_ptr = COVERAGE_BITMAP_PTR.with(std::cell::Cell::get);
+        if !bm_ptr.is_null() {
+            // Safety: bm_ptr is a COVERAGE_MAP_SIZE region set during init().
+            let bm = unsafe { coverage::CoverageBitmap::new(bm_ptr) };
+            bm.set_bit(hash as usize);
+        }
+    }
+
+    fn on_bucket_split(label: &str, slot_idx: usize) {
+        split_loop::dispatch_split(label, slot_idx);
+    }
+
+    moonpool_assertions::set_discovery_hooks(moonpool_assertions::DiscoveryHooks {
+        on_slot_discovery,
+        on_bucket_mark,
+        on_bucket_split,
+    });
+}
 
 /// Configuration for exploration.
 #[derive(Debug, Clone)]
@@ -618,16 +662,17 @@ pub struct ExplorationConfig {
 ///
 /// Returns an error if shared memory allocation fails.
 pub fn init_assertions() -> Result<(), std::io::Error> {
-    let current = ASSERTION_TABLE.with(std::cell::Cell::get);
-    if !current.is_null() {
+    if !assertion_table_ptr().is_null() {
         return Ok(()); // Already initialized
     }
 
-    let table_ptr = shared_mem::alloc_shared(assertion_slots::ASSERTION_TABLE_MEM_SIZE)?;
-    let each_bucket_ptr = shared_mem::alloc_shared(each_buckets::EACH_BUCKET_MEM_SIZE)?;
+    // Allocate the regions in MAP_SHARED so forked children share the counts,
+    // then hand them to moonpool-assertions and install the fork/coverage hooks.
+    let table_ptr = shared_mem::alloc_shared(ASSERTION_TABLE_MEM_SIZE)?;
+    let each_bucket_ptr = shared_mem::alloc_shared(EACH_BUCKET_MEM_SIZE)?;
 
-    ASSERTION_TABLE.with(|c| c.set(table_ptr));
-    EACH_BUCKET_PTR.with(|c| c.set(each_bucket_ptr));
+    moonpool_assertions::install_region(table_ptr, each_bucket_ptr);
+    install_discovery_hooks();
 
     Ok(())
 }
@@ -636,17 +681,17 @@ pub fn init_assertions() -> Result<(), std::io::Error> {
 ///
 /// Nulls the pointers after freeing. No-op if not initialized.
 pub fn cleanup_assertions() {
+    // Read the installed pointers, drop moonpool-assertions' view, then free the
+    // MAP_SHARED regions this crate allocated.
+    let table_ptr = assertion_table_ptr();
+    let each_bucket_ptr = moonpool_assertions::each_bucket_ptr();
+    moonpool_assertions::clear();
     unsafe {
-        let table_ptr = ASSERTION_TABLE.with(std::cell::Cell::get);
         if !table_ptr.is_null() {
-            shared_mem::free_shared(table_ptr, assertion_slots::ASSERTION_TABLE_MEM_SIZE);
-            ASSERTION_TABLE.with(|c| c.set(std::ptr::null_mut()));
+            shared_mem::free_shared(table_ptr, ASSERTION_TABLE_MEM_SIZE);
         }
-
-        let each_bucket_ptr = EACH_BUCKET_PTR.with(std::cell::Cell::get);
         if !each_bucket_ptr.is_null() {
-            shared_mem::free_shared(each_bucket_ptr, each_buckets::EACH_BUCKET_MEM_SIZE);
-            EACH_BUCKET_PTR.with(|c| c.set(std::ptr::null_mut()));
+            shared_mem::free_shared(each_bucket_ptr, EACH_BUCKET_MEM_SIZE);
         }
     }
 }
@@ -655,19 +700,7 @@ pub fn cleanup_assertions() {
 ///
 /// No-op if not initialized.
 pub fn reset_assertions() {
-    let table_ptr = ASSERTION_TABLE.with(std::cell::Cell::get);
-    if !table_ptr.is_null() {
-        unsafe {
-            std::ptr::write_bytes(table_ptr, 0, assertion_slots::ASSERTION_TABLE_MEM_SIZE);
-        }
-    }
-
-    let each_bucket_ptr = EACH_BUCKET_PTR.with(std::cell::Cell::get);
-    if !each_bucket_ptr.is_null() {
-        unsafe {
-            std::ptr::write_bytes(each_bucket_ptr, 0, each_buckets::EACH_BUCKET_MEM_SIZE);
-        }
-    }
+    moonpool_assertions::reset();
 }
 
 /// Prepare the exploration framework for the next seed in multi-seed exploration.
@@ -680,54 +713,10 @@ pub fn reset_assertions() {
 /// Call this between seeds instead of [`reset_assertions`] when you want
 /// coverage-preserving multi-seed exploration.
 pub fn prepare_next_seed(per_seed_energy: i64) {
-    // pass_count/fail_count accumulate across seeds — needed by
-    // validate_assertion_contracts() to avoid false "was never reached" when
-    // a seed doesn't reach a guarded assertion. Forking uses split_triggered,
-    // not counts. Same rationale for each-bucket pass_count.
-    let table_ptr = ASSERTION_TABLE.with(std::cell::Cell::get);
-    if !table_ptr.is_null() {
-        unsafe {
-            let count_ptr = table_ptr
-                .cast::<()>()
-                .cast::<std::sync::atomic::AtomicU32>();
-            // MAX_ASSERTION_SLOTS is a small const (128), so the cast is lossless.
-            let max_slots = u32::try_from(assertion_slots::MAX_ASSERTION_SLOTS).unwrap_or(u32::MAX);
-            let count = (*count_ptr)
-                .load(std::sync::atomic::Ordering::Relaxed)
-                .min(max_slots) as usize;
-            let base = table_ptr
-                .add(8)
-                .cast::<()>()
-                .cast::<assertion_slots::AssertionSlot>();
-            for i in 0..count {
-                let slot = &mut *base.add(i);
-                // Skip tombstones (msg_hash == 0) left by the duplicate-slot race fix.
-                if slot.msg_hash == 0 {
-                    continue;
-                }
-                slot.split_triggered = 0;
-            }
-        }
-    }
-
-    let each_ptr = EACH_BUCKET_PTR.with(std::cell::Cell::get);
-    if !each_ptr.is_null() {
-        unsafe {
-            let count_ptr = each_ptr.cast::<()>().cast::<std::sync::atomic::AtomicU32>();
-            // MAX_EACH_BUCKETS is a small const (256), so the cast is lossless.
-            let max_buckets = u32::try_from(each_buckets::MAX_EACH_BUCKETS).unwrap_or(u32::MAX);
-            let count = (*count_ptr)
-                .load(std::sync::atomic::Ordering::Relaxed)
-                .min(max_buckets) as usize;
-            let base = each_ptr
-                .add(8)
-                .cast::<()>()
-                .cast::<each_buckets::EachBucket>();
-            for i in 0..count {
-                (*base.add(i)).split_triggered = 0;
-            }
-        }
-    }
+    // Reset per-seed split triggers while preserving pass/fail counts and
+    // watermarks/frontiers (needed by validate_assertion_contracts to avoid a
+    // false "was never reached" when a seed doesn't reach a guarded assertion).
+    moonpool_assertions::prepare_next_seed_reset();
 
     // Per-timeline coverage bitmap (NOT the explored map, which is preserved).
     let bm_ptr = COVERAGE_BITMAP_PTR.with(std::cell::Cell::get);
@@ -941,7 +930,7 @@ mod tests {
         init_assertions().expect("init_assertions failed");
 
         // Table pointer should be set
-        let ptr = context::assertion_table_ptr();
+        let ptr = assertion_table_ptr();
         assert!(!ptr.is_null());
 
         // Idempotent — second call should be no-op
@@ -950,7 +939,7 @@ mod tests {
         cleanup_assertions();
 
         // Should be null after cleanup
-        let ptr = context::assertion_table_ptr();
+        let ptr = assertion_table_ptr();
         assert!(ptr.is_null());
     }
 
