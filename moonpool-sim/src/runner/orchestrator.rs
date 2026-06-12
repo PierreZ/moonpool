@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use super::wall_clock::Instant;
 
 use tracing::Instrument as _;
 
@@ -911,13 +913,13 @@ impl WorkloadOrchestrator {
     /// (all `Ok` results + no `assert_always!` violations) and 42 otherwise.
     /// Returns to the caller when not a forked child.
     fn maybe_exit_child(results: &[SimulationResult<()>]) {
-        if !moonpool_explorer::explorer_is_child() {
+        if !crate::chaos::exploration_glue::explorer_is_child() {
             return;
         }
         let success = results.iter().all(std::result::Result::is_ok)
             && !crate::chaos::has_always_violations();
         let code = if success { 0 } else { 42 };
-        moonpool_explorer::exit_child(code);
+        crate::chaos::exploration_glue::exit_child(code);
     }
 
     /// Run the entire check phase: build per-workload contexts, spawn
@@ -1850,9 +1852,7 @@ pub(crate) struct IterationManager {
 impl IterationManager {
     /// Create a new iteration manager with the given control strategy and initial seeds.
     pub(crate) fn new(control: super::builder::IterationControl, initial_seeds: Vec<u64>) -> Self {
-        let base_seed = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .map_or(12345, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+        let base_seed = super::wall_clock::default_base_seed();
 
         Self {
             control,

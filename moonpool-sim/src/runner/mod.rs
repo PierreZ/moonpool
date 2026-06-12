@@ -19,6 +19,7 @@ pub mod process;
 pub mod report;
 pub mod tags;
 pub mod topology;
+pub(crate) mod wall_clock;
 pub mod workload;
 
 // Re-export main types at module level

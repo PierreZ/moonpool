@@ -107,9 +107,13 @@
 pub use moonpool_core::{
     CodecError, Endpoint, JsonCodec, MessageCodec, NetworkAddress, NetworkAddressParseError,
     NetworkProvider, Providers, RandomProvider, SimulationError, SimulationResult, TaskProvider,
-    TcpListenerTrait, TimeError, TimeProvider, TokioNetworkProvider, TokioProviders,
-    TokioTaskProvider, TokioTimeProvider, UID, WELL_KNOWN_RESERVED_COUNT, WellKnownToken,
+    TcpListenerTrait, TimeError, TimeProvider, TokioTaskProvider, UID, WELL_KNOWN_RESERVED_COUNT,
+    WellKnownToken,
 };
+// Production provider bundle — only when the tokio-providers feature pulls core's
+// net/fs/time. A wasm-able sim (`--no-default-features`) omits these.
+#[cfg(feature = "tokio-providers")]
+pub use moonpool_core::{TokioNetworkProvider, TokioProviders, TokioTimeProvider};
 
 // =============================================================================
 // Core Modules
@@ -186,10 +190,12 @@ pub use storage::{
 // Provider exports
 pub use providers::{SimProviders, SimRandomProvider, SimTimeProvider};
 
-// Explorer re-exports
+// Assertion vocabulary — always available (dependency-free accounting layer).
+pub use moonpool_assertions::{AssertCmp, AssertKind};
+// Exploration-only re-exports (fork-based multiverse engine).
+#[cfg(feature = "exploration")]
 pub use moonpool_explorer::{
-    AdaptiveConfig, AssertCmp, AssertKind, ExplorationConfig, Parallelism, format_timeline,
-    parse_timeline,
+    AdaptiveConfig, ExplorationConfig, Parallelism, format_timeline, parse_timeline,
 };
 pub use runner::report::{BugRecipe, ExplorationReport};
 
