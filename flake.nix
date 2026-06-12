@@ -46,6 +46,9 @@
             cargo-nextest
 	    cargo-edit
 
+	    # wasm demo: generate JS/TS bindings for the cdylib
+	    wasm-bindgen-cli
+
 	    # mdbook
 	    mdbook
             mdbook-toc

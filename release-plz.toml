@@ -68,6 +68,11 @@ release = false
 publish = false
 
 [[package]]
+name = "moonpool-wasm-demo"
+release = false
+publish = false
+
+[[package]]
 name = "xtask"
 release = false
 publish = false
