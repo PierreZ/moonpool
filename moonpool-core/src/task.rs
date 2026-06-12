@@ -53,7 +53,7 @@ pub trait TaskProvider: Clone + Send + Sync + 'static {
 /// inside the sim runtime (`new_current_thread().build()`) the runtime runs
 /// every task on a single OS thread, preserving determinism while still
 /// requiring `Send + 'static` futures.
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-task")]
 #[derive(Clone, Debug)]
 pub struct TokioTaskProvider;
 
@@ -62,11 +62,11 @@ pub struct TokioTaskProvider;
 /// Wraps tokio's `JoinHandle<()>` and converts the runtime-specific
 /// `tokio::task::JoinError` into the runtime-agnostic [`JoinError`] variants
 /// when polled.
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-task")]
 #[derive(Debug)]
 pub struct TokioJoinHandle(tokio::task::JoinHandle<()>);
 
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-task")]
 impl Future for TokioJoinHandle {
     type Output = Result<(), JoinError>;
 
@@ -84,7 +84,7 @@ impl Future for TokioJoinHandle {
     }
 }
 
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-task")]
 impl TaskProvider for TokioTaskProvider {
     type JoinHandle = TokioJoinHandle;
 

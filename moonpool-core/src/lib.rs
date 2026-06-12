@@ -75,24 +75,43 @@ pub use error::{SimulationError, SimulationResult};
 
 // Provider trait exports
 pub use network::{NetworkProvider, TcpListenerTrait};
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-net")]
 pub use network::{TokioNetworkProvider, TokioTcpListener};
 pub use providers::Providers;
 #[cfg(feature = "tokio-providers")]
 pub use providers::TokioProviders;
 pub use random::RandomProvider;
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-random")]
 pub use random::TokioRandomProvider;
 pub use storage::{OpenOptions, StorageFile, StorageProvider};
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-fs")]
 pub use storage::{TokioStorageFile, TokioStorageProvider};
 pub use task::{JoinError, TaskProvider};
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-task")]
 pub use task::{TokioJoinHandle, TokioTaskProvider};
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-time")]
 pub use time::TokioTimeProvider;
 pub use time::{TimeError, TimeProvider};
 
 // Core type exports
 pub use types::{Endpoint, NetworkAddress, NetworkAddressParseError, UID, flags};
 pub use well_known::{WELL_KNOWN_RESERVED_COUNT, WellKnownToken};
+
+/// Common imports for writing code against the provider traits.
+///
+/// Bringing the provider traits into scope is the usual ergonomic need — their
+/// `async fn`s (RPIT) are only callable with the trait in scope. Glob-import this
+/// in production code:
+///
+/// ```
+/// use moonpool_core::prelude::*;
+/// ```
+pub mod prelude {
+    pub use crate::{
+        NetworkProvider, Providers, RandomProvider, StorageProvider, TaskProvider,
+        TcpListenerTrait, TimeProvider,
+    };
+
+    #[cfg(feature = "tokio-providers")]
+    pub use crate::TokioProviders;
+}
