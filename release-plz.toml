@@ -31,6 +31,12 @@ name = "moonpool-core"
 changelog_path = "moonpool-core/CHANGELOG.md"
 version_group = "moonpool"
 
+# Leaf accounting crate; moonpool-explorer depends on it, so it must publish first.
+[[package]]
+name = "moonpool-assertions"
+changelog_path = "moonpool-assertions/CHANGELOG.md"
+version_group = "moonpool"
+
 [[package]]
 name = "moonpool-explorer"
 changelog_path = "moonpool-explorer/CHANGELOG.md"

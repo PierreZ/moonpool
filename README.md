@@ -9,13 +9,17 @@ Inspired by [FoundationDB's simulation testing](https://apple.github.io/foundati
 ## Architecture
 
 ```text
-moonpool                          Facade crate, re-exports everything
+moonpool                          Facade crate (features: sim / tokio / transport)
 ├── moonpool-transport            RPC, peer connections, wire format
 │   └── moonpool-transport-derive #[service] proc-macro
-├── moonpool-sim                  Simulation engine, chaos testing, assertions
-│   └── moonpool-explorer         Fork-based multiverse exploration
+├── moonpool-sim                  Simulation engine, chaos testing, assertion wiring
+│   ├── moonpool-assertions       Assertion accounting (pure std, zero deps, wasm-able)
+│   └── moonpool-explorer         Fork-based multiverse exploration (optional, libc)
 └── moonpool-core                 Provider traits and core types
 ```
+
+The simulation runtime compiles to `wasm32-unknown-unknown` (build `moonpool-sim`
+with `--no-default-features`); only the fork-based explorer is Linux-first.
 
 ## Which Crate to Use
 
@@ -25,8 +29,27 @@ moonpool                          Facade crate, re-exports everything
 | Provider traits only | `moonpool-core` |
 | Simulation without transport | `moonpool-sim` |
 | Transport without simulation | `moonpool-transport` |
+| Assertion accounting only | `moonpool-assertions` |
 | Fork-based exploration internals | `moonpool-explorer` |
 | Proc-macro internals | `moonpool-transport-derive` |
+
+## Using in Production
+
+The code you test is the code you ship — write it once against the provider
+traits, then deploy on the real `TokioProviders` backend. Keep the simulation
+runtime and the fork-based explorer out of your release binary with a lean
+dependency stanza:
+
+```toml
+[dependencies]
+moonpool = { version = "0.8", default-features = false, features = ["tokio", "transport"] }
+```
+
+That pulls the provider contract, `TokioProviders`/`TokioTransport`, and the
+transport layer — no `moonpool-sim`, no `moonpool-explorer`, no `libc` fork
+machinery. See [`moonpool/examples/retrying_worker.rs`](moonpool/examples/retrying_worker.rs)
+for a worker that runs on Tokio in `main` and is driven through the simulator by
+its own `#[test]`, and the "Using Providers in Production" chapter of the book.
 
 ## Key Features
 

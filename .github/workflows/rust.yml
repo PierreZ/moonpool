@@ -44,6 +44,31 @@ jobs:
       - name: Run cargo nextest
         run: nix develop --command cargo nextest run
 
+  # The simulation must stay buildable without the fork-based explorer (libc) so
+  # it can compile to wasm. Guards the explorer-optional path + the wasm target.
+  portability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Clippy (no exploration, all targets)
+        run: nix develop --command cargo clippy -p moonpool-sim --no-default-features --all-targets -- --deny warnings
+      - name: Tests (no exploration)
+        run: nix develop --command cargo nextest run -p moonpool-sim --no-default-features
+      - name: Build for wasm32-unknown-unknown
+        run: |
+          nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-assertions
+          nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-sim --no-default-features
+      - name: Lean production dependency tree excludes sim/explorer
+        run: |
+          tree=$(nix develop --command cargo tree -p moonpool --no-default-features --features tokio,transport -e no-dev)
+          echo "$tree"
+          if echo "$tree" | grep -qE "moonpool-sim|moonpool-explorer|moonpool-assertions"; then
+            echo "::error::lean production build pulled in a sim/explorer crate"
+            exit 1
+          fi
+
   sim:
     runs-on: ubuntu-latest
     strategy:
