@@ -37,6 +37,8 @@ pub use interface_method::InterfaceMethod;
 pub use net_notified_queue::{
     NetNotifiedQueue, RecvFuture, ReplyQueueCloser, SharedNetNotifiedQueue,
 };
+#[cfg(feature = "tokio")]
+pub use net_transport::TokioTransport;
 pub use net_transport::{NetTransport, NetTransportBuilder};
 pub use reply_error::ReplyError;
 pub use reply_future::ReplyFuture;

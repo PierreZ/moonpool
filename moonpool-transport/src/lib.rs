@@ -56,10 +56,14 @@
 pub use moonpool_core::{
     CodecError, Endpoint, JsonCodec, MessageCodec, NetworkAddress, NetworkAddressParseError,
     NetworkProvider, OpenOptions, Providers, RandomProvider, SimulationError, SimulationResult,
-    StorageFile, StorageProvider, TaskProvider, TcpListenerTrait, TimeError, TimeProvider,
+    StorageFile, StorageProvider, TaskProvider, TcpListenerTrait, TimeError, TimeProvider, UID,
+    WELL_KNOWN_RESERVED_COUNT, WellKnownToken,
+};
+// Production provider bundle — only with the `tokio` feature (core/tokio-providers).
+#[cfg(feature = "tokio")]
+pub use moonpool_core::{
     TokioNetworkProvider, TokioProviders, TokioRandomProvider, TokioStorageFile,
-    TokioStorageProvider, TokioTaskProvider, TokioTimeProvider, UID, WELL_KNOWN_RESERVED_COUNT,
-    WellKnownToken,
+    TokioStorageProvider, TokioTaskProvider, TokioTimeProvider,
 };
 
 // =============================================================================
@@ -102,6 +106,10 @@ pub use rpc::{
     TransportHandle, get_reply, get_reply_unless_failed_for, make_decode_fn, make_encode_fn, send,
     send_request, try_get_reply,
 };
+
+// Production transport alias (TokioProviders + JsonCodec).
+#[cfg(feature = "tokio")]
+pub use rpc::TokioTransport;
 
 // Attribute macros
 pub use moonpool_transport_derive::service;
