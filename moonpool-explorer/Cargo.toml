@@ -13,6 +13,7 @@ name = "sim-adaptive-explore"
 path = "src/bin/sim/adaptive_explore.rs"
 
 [dependencies]
+moonpool-assertions = { path = "../moonpool-assertions", version = "0.7.0" }
 libc = "0.2"
 
 [lints]

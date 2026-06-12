@@ -9,3 +9,5 @@ Cargo.lock
 # mdbook
 book/output
 book/book
+# Generated wasm demo staged into the book (built by book/build-wasm-demo.sh)
+/book/src/wasm-demo/

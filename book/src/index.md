@@ -13,6 +13,8 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 - **"How do I use assertions?"** — [Assertions: Finding Bugs](./part3-building/12-assertions.md)
 - **"How does networking/RPC work?"** — [Simulating the Network](./part4-networking/01-simulating-network.md)
 - **"How do I test an existing app (e.g. axum)?"** — [Using moonpool-sim Standalone](./part4-integration/01-standalone-sim.md)
+- **"How do I ship this to production?"** — [Using Providers in Production](./part4-integration/05-production.md)
+- **"Can the simulation run in a browser?"** — [Simulation in the Browser](./part4-integration/06-wasm.md)
 - **"How does multiverse exploration work?"** — [Multiverse Exploration](./part5-building-on-top/01-exploration.md)
 - **"What assertions are available?"** — [Assertion Reference](./appendix/01-assertion-reference.md)
 - **"What configuration options exist?"** — [Configuration Reference](./appendix/03-configuration.md)
@@ -70,6 +72,8 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 - [Where to Draw the Line](./part4-integration/02-mock-boundaries.md) — Fakes vs test containers; binary failure limitations
 - [Wiring a Web Service](./part4-integration/03-wiring-a-web-service.md) — Worked example: axum service in simulation with Store trait fake, chaos, assertions
 - [What You're Testing (and What You're Not)](./part4-integration/04-scope-and-tradeoffs.md) — Tests handler logic and HTTP under chaos; doesn't test TLS, proxies, startup code
+- [Using Providers in Production](./part4-integration/05-production.md) — Deploying the same code on TokioProviders/TokioTransport; the lean dependency stanza; feature + platform matrices; the now() gotcha
+- [Simulation in the Browser](./part4-integration/06-wasm.md) — Why the sim compiles to wasm; whether block_on parks; building a wasm-able crate; the moonpool-wasm-demo example; the portability CI gate
 
 ## Part V: Networking and RPC
 

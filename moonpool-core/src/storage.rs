@@ -5,13 +5,13 @@
 
 use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use std::io;
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-fs")]
 use std::io::SeekFrom;
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-fs")]
 use std::pin::Pin;
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-fs")]
 use std::task::{Context, Poll};
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-fs")]
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
 /// Options for opening a file.
@@ -178,11 +178,11 @@ pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync 
 }
 
 /// Real Tokio storage implementation.
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-fs")]
 #[derive(Debug, Clone, Default)]
 pub struct TokioStorageProvider;
 
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-fs")]
 impl TokioStorageProvider {
     /// Create a new Tokio storage provider.
     #[must_use]
@@ -191,7 +191,7 @@ impl TokioStorageProvider {
     }
 }
 
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-fs")]
 impl StorageProvider for TokioStorageProvider {
     type File = TokioStorageFile;
 
@@ -235,13 +235,13 @@ impl StorageProvider for TokioStorageProvider {
 /// [`Compat::get_ref`] / [`Compat::get_mut`] to call tokio-specific APIs
 /// (`sync_all`, `sync_data`, `metadata`, `set_len`) that `Compat` itself
 /// does not expose.
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-fs")]
 #[derive(Debug)]
 pub struct TokioStorageFile {
     inner: Compat<tokio::fs::File>,
 }
 
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-fs")]
 impl StorageFile for TokioStorageFile {
     async fn sync_all(&self) -> io::Result<()> {
         self.inner.get_ref().sync_all().await
@@ -261,7 +261,7 @@ impl StorageFile for TokioStorageFile {
     }
 }
 
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-fs")]
 impl AsyncRead for TokioStorageFile {
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -272,7 +272,7 @@ impl AsyncRead for TokioStorageFile {
     }
 }
 
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-fs")]
 impl AsyncWrite for TokioStorageFile {
     fn poll_write(
         mut self: Pin<&mut Self>,
@@ -291,7 +291,7 @@ impl AsyncWrite for TokioStorageFile {
     }
 }
 
-#[cfg(feature = "tokio-providers")]
+#[cfg(feature = "tokio-fs")]
 impl AsyncSeek for TokioStorageFile {
     fn poll_seek(
         mut self: Pin<&mut Self>,

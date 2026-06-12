@@ -11,8 +11,8 @@
 use std::io;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use crate::assertion_slots::MAX_ASSERTION_SLOTS;
 use crate::shared_mem;
+use moonpool_assertions::MAX_ASSERTION_SLOTS;
 
 /// 3-level energy budget in shared memory.
 ///

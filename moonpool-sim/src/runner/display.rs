@@ -5,10 +5,11 @@
 
 use std::io::{IsTerminal, Write};
 
-use moonpool_explorer::AssertKind;
+use moonpool_assertions::AssertKind;
 
 use super::report::{
     AssertionDetail, AssertionStatus, BucketSiteSummary, ExplorationReport, SimulationReport,
+    format_recipe,
 };
 
 // ---------------------------------------------------------------------------
@@ -420,12 +421,7 @@ fn write_exploration(w: &mut impl Write, exp: &ExplorationReport, color: bool) {
             let _ = writeln!(w, "  Bug Recipes");
         }
         for br in &exp.bug_recipes {
-            let _ = writeln!(
-                w,
-                "    seed={}: {}",
-                br.seed,
-                moonpool_explorer::format_timeline(&br.recipe),
-            );
+            let _ = writeln!(w, "    seed={}: {}", br.seed, format_recipe(&br.recipe));
         }
     }
 }

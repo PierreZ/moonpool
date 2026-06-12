@@ -129,6 +129,7 @@
 
 pub mod assertions;
 pub mod buggify;
+pub mod exploration_glue;
 pub mod fault_events;
 pub mod state_handle;
 

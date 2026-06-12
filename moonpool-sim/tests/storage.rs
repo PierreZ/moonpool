@@ -20,5 +20,7 @@ mod latency;
 mod performance;
 #[path = "storage/recovery.rs"]
 mod recovery;
+// Exercises TokioStorageProvider — only available with the tokio-providers feature.
+#[cfg(feature = "tokio-providers")]
 #[path = "storage/tokio_provider.rs"]
 mod tokio_provider;

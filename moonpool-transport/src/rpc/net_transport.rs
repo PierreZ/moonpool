@@ -1073,6 +1073,25 @@ impl<P: Providers> NetTransportBuilder<P, crate::JsonCodec> {
     }
 }
 
+/// A [`NetTransport`] backed by the production [`TokioProviders`](moonpool_core::TokioProviders)
+/// bundle (and the default [`JsonCodec`](crate::JsonCodec)) — the typical
+/// production transport type.
+#[cfg(feature = "tokio")]
+pub type TokioTransport = NetTransport<moonpool_core::TokioProviders>;
+
+#[cfg(feature = "tokio")]
+impl NetTransportBuilder<moonpool_core::TokioProviders, crate::JsonCodec> {
+    /// Create a builder backed by the production
+    /// [`TokioProviders`](moonpool_core::TokioProviders) bundle.
+    ///
+    /// Shorthand for `NetTransportBuilder::new(TokioProviders::new())` — the
+    /// usual production entry point.
+    #[must_use]
+    pub fn tokio() -> Self {
+        Self::new(moonpool_core::TokioProviders::new())
+    }
+}
+
 impl<P: Providers + Send + Sync, C: MessageCodec> NetTransportBuilder<P, C> {
     /// Set the message codec for this transport.
     ///

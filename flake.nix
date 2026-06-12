@@ -22,10 +22,12 @@
         toolchainFile = builtins.fromTOML (builtins.readFile ./rust-toolchain.toml);
         rustVersion = toolchainFile.toolchain.channel;
         rustComponents = toolchainFile.toolchain.components or [];
-        
-        # Create rust toolchain with specified version and components
+        rustTargets = toolchainFile.toolchain.targets or [];
+
+        # Create rust toolchain with specified version, components, and targets
         rust-toolchain = pkgs.rust-bin.stable.${rustVersion}.default.override {
           extensions = rustComponents;
+          targets = rustTargets;
         };
         
       in
@@ -43,6 +45,9 @@
             openssl
             cargo-nextest
 	    cargo-edit
+
+	    # wasm demo: generate JS/TS bindings for the cdylib
+	    wasm-bindgen-cli
 
 	    # mdbook
 	    mdbook

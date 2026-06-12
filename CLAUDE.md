@@ -65,14 +65,33 @@ Types: `fix` (bugfix), `feat` (new feature), `build`, `chore`, `ci`, `docs`, `st
 
 ## Crate Architecture
 ```
-moonpool/                    - Facade crate, re-exports everything
-moonpool-core/               - Provider traits (Time, Task, Network, Random, Storage) and core types
-moonpool-sim/                - Simulation runtime, chaos testing, buggify, assertions
-moonpool-transport/          - Peer connections, wire format, FlowTransport, RPC
+moonpool/                    - Facade crate; features: sim/tokio/transport (default = all)
+moonpool-core/               - Provider traits (Time, Task, Network, Random, Storage) + core types.
+                               Granular tokio features: tokio-task/-time/-net/-fs/-random
+                               (umbrella `tokio-providers`). wasm-clean with all off.
+moonpool-assertions/         - Antithesis-style assertion accounting (pure std, ZERO deps, wasm-able).
+                               Heap table by default; explorer overlays MAP_SHARED + a discovery hook.
+moonpool-sim/                - Simulation runtime, chaos testing, buggify, assertions wiring.
+                               feature `exploration` (default ON) gates moonpool-explorer; without it
+                               the sim compiles to wasm32-unknown-unknown.
+moonpool-transport/          - Peer connections, wire format, FlowTransport, RPC. Generic over
+                               `P: Providers`; feature `tokio` adds TokioTransport + Builder::tokio().
 moonpool-transport-derive/   - Proc-macro: #[service]
-moonpool-explorer/           - Fork-based multiverse exploration, coverage, energy budgets
+moonpool-explorer/           - Fork-based multiverse exploration (libc/fork/mmap; never wasm).
+                               Depends on moonpool-assertions; optional dep of moonpool-sim.
 xtask/                       - Cargo xtask automation (simulation runner)
 ```
+
+**Dispatch**: providers stay **static-generic** (traits aren't object-safe: Clone supertrait,
+generic `random<T>`, RPIT futures, associated types; sim is test-only so no runtime selection).
+Where generics hurt, erase at a boundary (precedent: `Arc<dyn TransportHandle>`).
+
+**Production builds** keep sim/explorer out entirely:
+`moonpool = { default-features = false, features = ["tokio", "transport"] }`.
+
+**Portability checks** (must also pass when touching crate structure / features):
+- `nix develop --command cargo clippy -p moonpool-sim --no-default-features --all-targets -- -D warnings`
+- `nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-sim --no-default-features`
 
 ## Testing Philosophy
 **Goal**: 100% sometimes assertion coverage via chaos testing + comprehensive invariant validation

@@ -1,0 +1,18 @@
+[package]
+name = "moonpool-assertions"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Portable assertion accounting (Antithesis-style) for the moonpool framework"
+documentation = "https://docs.rs/moonpool-assertions"
+
+# Pure std, zero dependencies — compiles on wasm32-unknown-unknown, macOS, and Linux.
+# Assertion counts live in a heap-allocated table by default; moonpool-explorer
+# overrides the region with MAP_SHARED memory and installs a discovery hook so the
+# same accounting drives fork-based exploration.
+[dependencies]
+
+[lints]
+workspace = true

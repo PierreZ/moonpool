@@ -13,26 +13,50 @@ readme = "README.md"
 rustdoc-args = ["--cfg", "tokio_unstable"]
 rustc-args = ["--cfg", "tokio_unstable"]
 
+[features]
+# tokio-providers re-exports core's production provider bundle (TokioProviders,
+# TokioNetworkProvider, TokioTimeProvider) for examples/tests that drive the same
+# code under prod + sim. Default-on; disable for a wasm-able sim
+# (`--no-default-features`), which still keeps TokioTaskProvider via core/tokio-task.
+default = ["tokio-providers", "exploration"]
+tokio-providers = ["moonpool-core/tokio-providers"]
+# Fork-based multiverse exploration (libc/mmap — never wasm). When off, assertion
+# accounting still works via the in-process heap table from moonpool-assertions, so
+# UntilAllSometimesReached / CoveragePlateau / contract validation are unaffected.
+exploration = ["dep:moonpool-explorer"]
+
 [dependencies]
-moonpool-core = { path = "../moonpool-core", version = "0.7.0" }
-moonpool-explorer = { path = "../moonpool-explorer", version = "0.7.0" }
+# SimProviders always bundles the real TokioTaskProvider (single-thread executor),
+# so tokio-task is mandatory; net/fs/time come in only via the tokio-providers feature.
+moonpool-core = { path = "../moonpool-core", version = "0.7.0", default-features = false, features = ["tokio-task"] }
+# Assertion accounting (pure std, wasm-able) — always present. The fork-based
+# exploration backend below is optional and layers on top of it.
+moonpool-assertions = { path = "../moonpool-assertions", version = "0.7.0" }
+moonpool-explorer = { path = "../moonpool-explorer", version = "0.7.0", optional = true }
 
 async-trait = "0.1"
 crc32c = "0.6"
 futures = "0.3"
-rand = "0.10"
-rand_chacha = "0.10"
+# Seeded ChaCha8 only — no OS entropy, so no getrandom (keeps the sim wasm-clean).
+rand = { version = "0.10", default-features = false }
+rand_chacha = { version = "0.10", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
 parking_lot = "0.12"
-tokio = { version = "1", features = ["full", "tracing"] }
+# Library code uses tokio::spawn / task::JoinHandle / yield_now (rt),
+# Notify / mpsc (sync), select! (macros), and the named-task instrumentation
+# that TokioTaskProvider relies on (tracing + tokio_unstable). The per-seed
+# runtime uses runtime::Builder + RngSeed (rt). No net/fs/time in lib code.
+# Tests pull "full" via dev-dependencies.
+tokio = { version = "1", features = ["rt", "sync", "macros", "tracing"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 tracing = "0.1"
 
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 
 [dev-dependencies]
+tokio = { version = "1", features = ["full", "tracing"] }
 bytes = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server", "client"] }

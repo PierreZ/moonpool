@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>moonpool · ping-pong in the browser</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: #0d1117; color: #c9d1d9; padding: 24px;
+    display: flex; flex-direction: column; align-items: center; gap: 16px;
+  }
+  h1 { margin: 0; font-size: 20px; font-weight: 650; }
+  h1 small { color: #8b949e; font-weight: 400; font-size: 13px; }
+  .sub { color: #8b949e; max-width: 720px; text-align: center; margin: -8px 0 0; }
+  .panel { width: min(840px, 100%); background: #161b22; border: 1px solid #30363d;
+           border-radius: 12px; padding: 16px; }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  label { color: #8b949e; }
+  input[type=number] { width: 96px; background: #0d1117; color: #c9d1d9;
+    border: 1px solid #30363d; border-radius: 7px; padding: 7px 9px; font: inherit; }
+  input[type=range] { accent-color: #2f81f7; }
+  button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+    border-radius: 7px; padding: 7px 13px; font: inherit; cursor: pointer; }
+  button:hover { border-color: #8b949e; }
+  button.primary { background: #238636; border-color: #2ea043; color: #fff; font-weight: 600; }
+  button.preset { font-size: 13px; padding: 5px 10px; }
+  canvas { width: 100%; height: 300px; display: block; border-radius: 10px;
+    background: radial-gradient(120% 120% at 50% 0%, #131a24 0%, #0d1117 70%); margin-top: 4px; }
+  .stats { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 12px; font-variant-numeric: tabular-nums; }
+  .stat b { display: block; font-size: 20px; font-weight: 650; }
+  .stat .delivered { color: #3fb950; }
+  .stat .dropped { color: #f85149; }
+  .stat span { color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .status { margin-top: 8px; color: #8b949e; min-height: 1.4em; font-size: 13px; }
+  .legend { display: flex; gap: 16px; font-size: 12px; color: #8b949e; margin-top: 4px; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; vertical-align: middle; margin-right: 5px; }
+  a { color: #2f81f7; }
+</style>
+</head>
+<body>
+  <h1>moonpool <small>· deterministic ping-pong, in your browser tab</small></h1>
+  <p class="sub">Two nodes exchange ping/pong RPCs over moonpool's <b>real transport stack</b>,
+  driven by a <b>simulated network</b>. The whole simulation — server, client, RPC, seeded
+  chaos — runs as wasm. Same seed ⇒ same run, every time.</p>
+
+  <div class="panel">
+    <div class="controls">
+      <label for="seed">seed</label>
+      <input id="seed" type="number" value="42" min="0" />
+      <button id="run" class="primary">▶ Run</button>
+      <span style="flex:1 1 12px"></span>
+      <label for="speed">speed</label>
+      <input id="speed" type="range" min="0.4" max="6" step="0.2" value="2" />
+      <span id="speedval" style="color:#8b949e;width:2.4em">2×</span>
+    </div>
+    <div class="controls" style="margin-top:10px">
+      <span style="color:#8b949e;font-size:13px">try:</span>
+      <button class="preset" data-seed="42">42 · calm</button>
+      <button class="preset" data-seed="123">123 · some drops</button>
+      <button class="preset" data-seed="256">256 · chaotic</button>
+      <button class="preset" data-seed="7">7 · storm</button>
+      <button class="preset" id="rand">🎲 random</button>
+    </div>
+
+    <canvas id="court" width="808" height="300"></canvas>
+    <div class="legend">
+      <span><i class="dot" style="background:#58a6ff"></i>node A · client</span>
+      <span><i class="dot" style="background:#3fb950"></i>node B · server</span>
+      <span><i class="dot" style="background:#d29922"></i>ball in flight</span>
+      <span><i class="dot" style="background:#f85149"></i>dropped by chaos</span>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><b id="s-req">–</b><span>requests</span></div>
+      <div class="stat"><b id="s-del" class="delivered">–</b><span>delivered</span></div>
+      <div class="stat"><b id="s-drop" class="dropped">–</b><span>dropped</span></div>
+      <div class="stat"><b id="s-fault">–</b><span>net faults</span></div>
+      <div class="stat"><b id="s-rtt">–</b><span>slowest rtt</span></div>
+      <div class="stat"><b id="s-sim">–</b><span>sim time</span></div>
+    </div>
+    <div class="status" id="status">Loading wasm…</div>
+  </div>
+  <pre id="raw" style="display:none"></pre>
+
+<script type="module">
+import init, { runSeed } from './pkg/moonpool_wasm_demo.js';
+
+const $ = (id) => document.getElementById(id);
+const canvas = $('court'), ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const A = { x: 120, y: H / 2, label: 'A', sub: 'client', color: '#58a6ff' };
+const B = { x: W - 120, y: H / 2, label: 'B', sub: 'server', color: '#3fb950' };
+const nodes = [A, B];
+const NET_X = W / 2;
+
+let run = null;          // current RunResult
+let idx = 0;             // index into run.shots
+let animStart = null;    // ms timestamp the current shot began
+let shotMs = 0;          // wall duration of the current shot
+let live = { delivered: 0, dropped: 0, rtt: 0 };
+let flashes = [];        // active drop bursts
+let crosses = [];        // persistent ✗ marks (freeze-frame mode)
+let playing = false;
+
+// Optional URL params: ?seed=N picks the seed; ?still=K renders one frozen
+// frame (ball mid-flight at shot K, prior drops marked) instead of animating.
+const params = new URLSearchParams(location.search);
+if (params.has('seed')) $('seed').value = params.get('seed');
+const STILL = params.has('still') ? parseInt(params.get('still'), 10) : null;
+const DUMP = params.has('dump'); // ?dump puts raw runSeed JSON in #raw (repro checks)
+if (params.has('embed')) {       // ?embed hides the page title (e.g. inside the book)
+  document.querySelector('h1').style.display = 'none';
+  document.querySelector('.sub').style.display = 'none';
+  document.body.style.padding = '10px';
+}
+
+const lerp = (a, b, t) => a + (b - a) * t;
+const ease = (t) => t * t * (3 - 2 * t); // smoothstep
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+function drawScene(ball) {
+  ctx.clearRect(0, 0, W, H);
+
+  // net
+  ctx.strokeStyle = '#30363d'; ctx.lineWidth = 2; ctx.setLineDash([6, 7]);
+  ctx.beginPath(); ctx.moveTo(NET_X, 26); ctx.lineTo(NET_X, H - 26); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#484f58'; ctx.font = '11px system-ui'; ctx.textAlign = 'center';
+  ctx.fillText('simulated network · chaos', NET_X, H - 12);
+
+  // nodes
+  for (const n of nodes) {
+    ctx.beginPath(); ctx.arc(n.x, n.y, 34, 0, 7); ctx.fillStyle = n.color + '22';
+    ctx.fill(); ctx.lineWidth = 2.5; ctx.strokeStyle = n.color; ctx.stroke();
+    ctx.fillStyle = n.color; ctx.font = '600 22px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText(n.label, n.x, n.y + 7);
+    ctx.fillStyle = '#8b949e'; ctx.font = '12px system-ui';
+    ctx.fillText(n.sub, n.x, n.y + 54);
+  }
+
+  // drop bursts
+  const now = performance.now();
+  flashes = flashes.filter(f => now < f.until);
+  for (const f of flashes) {
+    const k = 1 - (f.until - now) / 600;
+    ctx.globalAlpha = 1 - k;
+    ctx.strokeStyle = '#f85149'; ctx.lineWidth = 3;
+    const r = 10 + k * 22;
+    ctx.beginPath(); ctx.moveTo(f.x - r, f.y - r); ctx.lineTo(f.x + r, f.y + r);
+    ctx.moveTo(f.x + r, f.y - r); ctx.lineTo(f.x - r, f.y + r); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // persistent ✗ marks (freeze-frame mode)
+  ctx.strokeStyle = '#f85149'; ctx.lineWidth = 3;
+  for (const c of crosses) {
+    ctx.beginPath(); ctx.moveTo(c.x - 11, c.y - 11); ctx.lineTo(c.x + 11, c.y + 11);
+    ctx.moveTo(c.x + 11, c.y - 11); ctx.lineTo(c.x - 11, c.y + 11); ctx.stroke();
+  }
+
+  // ball
+  if (ball) {
+    ctx.shadowColor = ball.color; ctx.shadowBlur = 14;
+    ctx.beginPath(); ctx.arc(ball.x, ball.y, 9, 0, 7); ctx.fillStyle = ball.color; ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+}
+
+// Render a single static frame: ball at the midpoint of shot K, with every
+// prior dropped shot marked ✗. Deterministic — used for screenshots and
+// ?still= links, no animation timing involved.
+function drawStill(k) {
+  k = clamp(k, 0, run.shots.length - 1);
+  crosses = [];
+  for (let i = 0; i < k; i++) {
+    const s = run.shots[i];
+    if (s.outcome === 'dropped') {
+      // Scatter deterministically by seq so multiple drops don't stack.
+      const f = 0.48 + ((s.seq * 17) % 30) / 100;            // 0.48..0.77 along the path
+      crosses.push({ x: lerp(nodes[s.from].x, nodes[s.to].x, f),
+                     y: nodes[s.from].y - 64 * Math.sin(Math.PI * f) + ((s.seq * 29) % 70 - 35) });
+    }
+  }
+  const shot = run.shots[k];
+  const reach = shot.outcome === 'dropped' ? 0.5 : 0.5;
+  const x = lerp(nodes[shot.from].x, nodes[shot.to].x, ease(reach));
+  const y = nodes[shot.from].y - 64 * Math.sin(Math.PI * reach);
+  drawScene({ x, y, color: shot.outcome === 'dropped' ? '#f85149' : '#d29922' });
+  setStats(run, false);
+  $('status').textContent =
+    `seed ${run.seed} · frame at request ${shot.seq} · ${run.delivered} delivered, ${run.dropped} dropped by chaos`;
+}
+
+function setStats(r, useLive) {
+  $('s-req').textContent = r.requests;
+  $('s-del').textContent = useLive ? live.delivered : r.delivered;
+  $('s-drop').textContent = useLive ? live.dropped : r.dropped;
+  $('s-fault').textContent = r.faults;
+  $('s-rtt').textContent = (useLive ? live.rtt : r.longest_rtt_ms) + ' ms';
+  $('s-sim').textContent = r.sim_duration_ms + ' ms';
+}
+
+function frame(ts) {
+  if (!playing) return;
+
+  if (idx >= run.shots.length) {
+    playing = false;
+    setStats(run, false);
+    $('status').textContent =
+      `done · seed ${run.seed} · ${run.delivered} delivered, ${run.dropped} dropped by chaos`;
+    drawScene(null);
+    return;
+  }
+
+  const shot = run.shots[idx];
+  if (animStart === null) {
+    animStart = ts;
+    const speed = parseFloat($('speed').value);
+    shotMs = clamp(shot.latency_ms / speed * 6 + 140, 150, 1700);
+    const dir = shot.from === 0 ? 'A → B' : 'B → A';
+    const kind = shot.outcome === 'dropped' ? 'request lost in the network ✗' : 'in flight';
+    $('status').textContent =
+      `request ${shot.seq} · ${dir} · ${shot.latency_ms} ms · ${kind}`;
+  }
+
+  const t = clamp((ts - animStart) / shotMs, 0, 1);
+  const from = nodes[shot.from], to = nodes[shot.to];
+  const dropping = shot.outcome === 'dropped';
+  // a dropped ball only travels ~62% of the way before it's lost
+  const reach = dropping ? 0.62 : 1;
+  const tt = t * reach;
+  const x = lerp(from.x, to.x, ease(tt));
+  const y = from.y - 64 * Math.sin(Math.PI * tt); // hop over the net
+  const fade = dropping ? clamp(1 - (t - 0.5) / 0.5, 0.15, 1) : 1;
+  const color = dropping ? '#f85149' : '#d29922';
+
+  ctx.globalAlpha = fade;
+  drawScene({ x, y, color });
+  ctx.globalAlpha = 1;
+
+  if (t >= 1) {
+    // shot resolved
+    if (dropping) {
+      const fx = lerp(from.x, to.x, 0.62), fy = from.y - 64 * Math.sin(Math.PI * 0.62);
+      flashes.push({ x: fx, y: fy, until: performance.now() + 600 });
+      live.dropped++;
+    } else if (shot.to === 0) {
+      // a B → A leg completing means a full round trip landed
+      live.delivered++;
+      live.rtt = Math.max(live.rtt, run.shots[idx - 1].latency_ms + shot.latency_ms);
+    }
+    setStats(run, true);
+    idx++; animStart = null;
+  }
+  requestAnimationFrame(frame);
+}
+
+function start() {
+  const seed = BigInt($('seed').value || '0');
+  $('status').textContent = `running seed ${seed} in wasm…`;
+  let json;
+  try {
+    json = runSeed(seed);          // <-- the whole sim runs here, in the browser
+  } catch (e) {
+    $('status').textContent = 'wasm panicked: ' + e + ' (see console)';
+    throw e;
+  }
+  if (DUMP) {                      // expose raw JSON for native↔browser repro checks
+    document.getElementById('raw').textContent = json;
+    $('status').textContent = `dumped seed ${$('seed').value}`;
+    return;
+  }
+
+  run = JSON.parse(json);
+  idx = 0; animStart = null;
+  live = { delivered: 0, dropped: 0, rtt: 0 };
+  flashes = []; crosses = [];
+
+  if (STILL !== null) {            // deterministic frozen frame (screenshots / links)
+    playing = false;
+    drawStill(STILL);
+    return;
+  }
+  playing = true;
+  setStats(run, true);
+  requestAnimationFrame(frame);
+}
+
+$('run').addEventListener('click', start);
+$('seed').addEventListener('keydown', (e) => { if (e.key === 'Enter') start(); });
+$('speed').addEventListener('input', () => { $('speedval').textContent = $('speed').value + '×'; });
+for (const b of document.querySelectorAll('.preset[data-seed]')) {
+  b.addEventListener('click', () => { $('seed').value = b.dataset.seed; start(); });
+}
+$('rand').addEventListener('click', () => {
+  $('seed').value = Math.floor(Math.random() * 100000); start();
+});
+
+drawScene(null);
+init().then(() => {
+  $('status').textContent = 'ready · press Run (or pick a seed above)';
+  start();
+}).catch((e) => { $('status').textContent = 'failed to load wasm: ' + e; });
+</script>
+</body>
+</html>

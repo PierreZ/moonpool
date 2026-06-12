@@ -15,7 +15,18 @@ rustc-args = ["--cfg", "tokio_unstable"]
 
 [features]
 default = ["tokio-providers"]
-tokio-providers = ["dep:tokio", "dep:tokio-util", "rand/thread_rng"]
+# Umbrella: the full production bundle (TokioProviders needs all five slots).
+tokio-providers = ["tokio-task", "tokio-time", "tokio-net", "tokio-fs", "tokio-random"]
+# Granular per-provider features. A consumer that only needs one provider (e.g.
+# moonpool-sim bundles the real TokioTaskProvider) enables just that one and stays
+# free of net/fs/time — keeping the crate wasm-clean where those aren't used.
+# tokio::task::Builder (named spawn) is behind cfg_trace! → needs tokio/tracing.
+tokio-task = ["dep:tokio", "tokio/rt", "tokio/tracing"]
+tokio-time = ["dep:tokio", "tokio/time"]
+tokio-net = ["dep:tokio", "tokio/net", "tokio/io-util", "dep:tokio-util"]
+tokio-fs = ["dep:tokio", "tokio/fs", "tokio/io-util", "dep:tokio-util"]
+# TokioRandomProvider uses rand's ThreadRng; no tokio involved.
+tokio-random = ["rand/thread_rng"]
 
 [dependencies]
 futures = "0.3"
@@ -23,7 +34,7 @@ rand = { version = "0.10", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2.0"
-tokio = { version = "1", features = ["fs", "io-util", "net", "rt", "time", "tracing"], optional = true }
+tokio = { version = "1", default-features = false, optional = true }
 tokio-util = { version = "0.7", features = ["compat"], optional = true }
 tracing = "0.1"
 

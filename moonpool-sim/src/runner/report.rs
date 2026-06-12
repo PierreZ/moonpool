@@ -6,10 +6,21 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
 
-use moonpool_explorer::AssertKind;
+use moonpool_assertions::AssertKind;
 
 use crate::SimulationResult;
 use crate::chaos::AssertionStats;
+
+/// Format a fork-recipe (`(rng_call_count, seed)` pairs) as a human-readable
+/// timeline: each segment `count@seed`, joined by ` -> ` (matches
+/// `moonpool_explorer::format_timeline`, but available without the backend).
+pub(crate) fn format_recipe(recipe: &[(u64, u64)]) -> String {
+    recipe
+        .iter()
+        .map(|(count, seed)| format!("{count}@{seed}"))
+        .collect::<Vec<_>>()
+        .join(" -> ")
+}
 
 /// Core metrics collected during a simulation run.
 #[derive(Debug, Clone, PartialEq)]
@@ -370,7 +381,7 @@ fn fmt_exploration(f: &mut fmt::Formatter<'_>, exp: &ExplorationReport) -> fmt::
             f,
             "  Bug recipe (seed={}): {}",
             br.seed,
-            moonpool_explorer::format_timeline(&br.recipe)
+            format_recipe(&br.recipe)
         )?;
     }
     Ok(())

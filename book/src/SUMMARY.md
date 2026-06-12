@@ -68,6 +68,8 @@
   - [Where to Draw the Line](./part4-integration/02-mock-boundaries.md)
   - [Wiring a Web Service](./part4-integration/03-wiring-a-web-service.md)
   - [What You're Testing (and What You're Not)](./part4-integration/04-scope-and-tradeoffs.md)
+- [Using Providers in Production](./part4-integration/05-production.md)
+- [Simulation in the Browser](./part4-integration/06-wasm.md)
 
 ---
 

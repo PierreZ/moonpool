@@ -9,10 +9,29 @@ repository.workspace = true
 edition.workspace = true
 readme = "README.md"
 
+[features]
+# Default = the full framework (what the crate's audience uses today). Lean
+# production builds opt out of sim/explorer entirely:
+#   moonpool = { version = "0.8", default-features = false, features = ["tokio", "transport"] }
+default = ["sim", "tokio", "transport"]
+sim = ["dep:moonpool-sim"]
+transport = ["dep:moonpool-transport"]
+# Production providers (TokioProviders) on core, and the transport tokio shortcut.
+tokio = ["moonpool-core/tokio-providers", "moonpool-transport?/tokio"]
+
 [dependencies]
-moonpool-core = { path = "../moonpool-core", version = "0.7.0" }
-moonpool-sim = { path = "../moonpool-sim", version = "0.7.0" }
-moonpool-transport = { path = "../moonpool-transport", version = "0.7.0" }
+moonpool-core = { path = "../moonpool-core", version = "0.7.0", default-features = false }
+moonpool-sim = { path = "../moonpool-sim", version = "0.7.0", optional = true }
+moonpool-transport = { path = "../moonpool-transport", version = "0.7.0", optional = true }
+
+[dev-dependencies]
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+
+# Production-usage example, also driven through the simulator by its #[test].
+[[example]]
+name = "retrying_worker"
+test = true
 
 [lints]
 workspace = true

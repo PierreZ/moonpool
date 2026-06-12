@@ -34,14 +34,8 @@ thread_local! {
     /// Pointer to per-child coverage bitmap.
     pub(crate) static COVERAGE_BITMAP_PTR: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
 
-    /// Pointer to shared assertion slot table (raw bytes, counter-based layout).
-    pub(crate) static ASSERTION_TABLE: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
-
     /// Pointer to shared energy budget (null when adaptive forking is disabled).
     pub(crate) static ENERGY_BUDGET_PTR: Cell<*mut EnergyBudget> = const { Cell::new(std::ptr::null_mut()) };
-
-    /// Pointer to shared EachBucket memory (null when not initialized).
-    pub(crate) static EACH_BUCKET_PTR: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
 
     /// Base pointer for per-process bitmap pool (null until first parallel split).
     pub(crate) static BITMAP_POOL: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
@@ -135,14 +129,6 @@ pub fn explorer_is_active() -> bool {
 #[must_use]
 pub fn explorer_is_child() -> bool {
     with_ctx(|ctx| ctx.is_child)
-}
-
-/// Get the raw pointer to the assertion table shared memory.
-///
-/// Returns null if the table is not initialized.
-#[must_use]
-pub fn assertion_table_ptr() -> *mut u8 {
-    ASSERTION_TABLE.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]

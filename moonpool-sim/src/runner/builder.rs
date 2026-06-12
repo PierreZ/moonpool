@@ -5,7 +5,9 @@
 
 use std::collections::HashMap;
 use std::ops::{Range, RangeInclusive};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use super::wall_clock::Instant;
 use tracing::instrument;
 
 use crate::SimulationError;
@@ -49,11 +51,16 @@ type OrchestrationOutcome = Result<OrchestrateOutput, (Vec<u64>, usize)>;
 
 /// Per-run accumulators passed into the final-report builder.
 struct FinalReportInputs {
-    total_exploration_timelines: u64,
-    total_exploration_fork_points: u64,
-    total_exploration_bugs: u64,
-    bug_recipes: Vec<super::report::BugRecipe>,
     converged: bool,
+    #[cfg(feature = "exploration")]
+    total_exploration_timelines: u64,
+    #[cfg(feature = "exploration")]
+    total_exploration_fork_points: u64,
+    #[cfg(feature = "exploration")]
+    total_exploration_bugs: u64,
+    #[cfg(feature = "exploration")]
+    bug_recipes: Vec<super::report::BugRecipe>,
+    #[cfg(feature = "exploration")]
     per_seed_timelines: Vec<u64>,
 }
 
@@ -82,10 +89,15 @@ impl RunState {
             metrics_collector: MetricsCollector::new(),
             progress_milestone,
             pending_return_map: Vec::new(),
+            #[cfg(feature = "exploration")]
             total_exploration_timelines: 0,
+            #[cfg(feature = "exploration")]
             total_exploration_fork_points: 0,
+            #[cfg(feature = "exploration")]
             total_exploration_bugs: 0,
+            #[cfg(feature = "exploration")]
             bug_recipes: Vec::new(),
+            #[cfg(feature = "exploration")]
             per_seed_timelines: Vec::new(),
             reached_sometimes: std::collections::HashSet::new(),
             prev_coverage_bits: 0,
@@ -106,11 +118,16 @@ struct RunState {
     /// stashed between [`SimulationBuilder::run_orchestrator_for_iteration`]
     /// and [`SimulationBuilder::handle_orchestration_result`].
     pending_return_map: Vec<Option<usize>>,
-    // Exploration accumulators.
+    // Exploration accumulators (only populated/read with the `exploration` feature).
+    #[cfg(feature = "exploration")]
     total_exploration_timelines: u64,
+    #[cfg(feature = "exploration")]
     total_exploration_fork_points: u64,
+    #[cfg(feature = "exploration")]
     total_exploration_bugs: u64,
+    #[cfg(feature = "exploration")]
     bug_recipes: Vec<super::report::BugRecipe>,
+    #[cfg(feature = "exploration")]
     per_seed_timelines: Vec<u64>,
     // Convergence + plateau tracking.
     reached_sometimes: std::collections::HashSet<String>,
@@ -324,7 +341,7 @@ pub struct SimulationBuilder {
     invariants: Vec<Box<dyn Invariant + Send>>,
     fault_injectors: Vec<Box<dyn FaultInjector>>,
     chaos_duration: Option<Duration>,
-    exploration_config: Option<moonpool_explorer::ExplorationConfig>,
+    exploration_config: Option<crate::chaos::exploration_glue::ExplorationConfig>,
     before_iteration_hooks: Vec<Box<dyn FnMut()>>,
     seed_warning_timeout: Option<Duration>,
     run_time_budget: Duration,
@@ -569,8 +586,9 @@ impl SimulationBuilder {
     /// Run until exploration has converged: all `assert_sometimes!` assertions
     /// have been reached and no new coverage was found on the last seed.
     ///
-    /// Requires `.enable_exploration()` to be configured.
-    /// `max_iterations` is a safety cap to prevent infinite loops.
+    /// Requires `.enable_exploration()` to be configured (and the `exploration`
+    /// feature). `max_iterations` is a safety cap to prevent infinite loops.
+    #[cfg(feature = "exploration")]
     #[must_use]
     pub fn until_converged(mut self, max_iterations: usize) -> Self {
         self.iteration_control = IterationControl::UntilConverged { max_iterations };
@@ -639,8 +657,13 @@ impl SimulationBuilder {
     ///
     /// When enabled, the simulation will fork child processes at assertion
     /// discovery points to explore alternate timelines with different seeds.
+    /// Requires the `exploration` feature.
+    #[cfg(feature = "exploration")]
     #[must_use]
-    pub fn enable_exploration(mut self, config: moonpool_explorer::ExplorationConfig) -> Self {
+    pub fn enable_exploration(
+        mut self,
+        config: crate::chaos::exploration_glue::ExplorationConfig,
+    ) -> Self {
         self.exploration_config = Some(config);
         self
     }
@@ -812,7 +835,7 @@ impl SimulationBuilder {
                 }
                 let all_reached =
                     all_sometimes_count > 0 && reached_sometimes.len() >= all_sometimes_count;
-                let current_bits = moonpool_explorer::explored_map_bits_set().unwrap_or(0);
+                let current_bits = crate::chaos::exploration_glue::explored_coverage_bits();
                 let no_new_coverage = current_bits == *prev_coverage_bits;
                 tracing::warn!(
                     "convergence: seed={} reached={}/{} coverage={}->{} delta={}",
@@ -918,8 +941,10 @@ impl SimulationBuilder {
         let mut seed_bytes = [0u8; 32];
         seed_bytes[..8].copy_from_slice(&seed.to_le_bytes());
         let rng_seed = tokio::runtime::RngSeed::from_bytes(&seed_bytes);
+        // No .enable_time(): the sim drives logical time via the event queue, not
+        // tokio's timer wheel. enable_time() also constructs a std::time::Instant
+        // at startup, which panics on wasm32-unknown-unknown.
         tokio::runtime::Builder::new_current_thread()
-            .enable_time()
             .rng_seed(rng_seed)
             .build()
             .expect("per-iteration runtime")
@@ -964,13 +989,14 @@ impl SimulationBuilder {
         }
     }
 
-    /// Initialise shared-memory state (assertion table, optionally explorer).
+    /// Initialise the assertion region (heap, or `MAP_SHARED` + explorer), and
+    /// activate exploration when a config is present.
     fn init_assertions_and_exploration(
-        exploration_config: Option<&moonpool_explorer::ExplorationConfig>,
+        exploration_config: Option<&crate::chaos::exploration_glue::ExplorationConfig>,
     ) {
-        if let Err(e) = moonpool_explorer::init_assertions() {
-            tracing::error!("Failed to initialize assertion table: {}", e);
-        }
+        crate::chaos::exploration_glue::init_assertion_region();
+        let _ = exploration_config;
+        #[cfg(feature = "exploration")]
         if let Some(config) = exploration_config {
             moonpool_explorer::set_rng_hooks(crate::sim::rng_call_count, |seed| {
                 crate::sim::set_sim_seed(seed);
@@ -984,6 +1010,7 @@ impl SimulationBuilder {
 
     /// Build the final `ExplorationReport` from the running totals collected
     /// across iterations.
+    #[cfg(feature = "exploration")]
     fn build_exploration_report(
         total_timelines: u64,
         total_fork_points: u64,
@@ -1014,6 +1041,7 @@ impl SimulationBuilder {
     /// Read the explorer's per-seed exploration stats and accumulate into
     /// the totals + per-seed timelines arrays. Captures any new bug recipe
     /// produced this seed.
+    #[cfg(feature = "exploration")]
     fn accumulate_exploration_stats(
         seed: u64,
         per_seed_timelines: &mut Vec<u64>,
@@ -1040,13 +1068,13 @@ impl SimulationBuilder {
     /// warning for every still-unreached slot, and return the count of
     /// unique Sometimes/Reachable message strings observed.
     fn scan_assertion_slots(reached: &mut std::collections::HashSet<String>) -> usize {
-        let slots = moonpool_explorer::assertion_read_all();
+        let slots = moonpool_assertions::assertion_read_all();
         for slot in &slots {
-            if let Some(kind) = moonpool_explorer::AssertKind::from_u8(slot.kind)
+            if let Some(kind) = moonpool_assertions::AssertKind::from_u8(slot.kind)
                 && matches!(
                     kind,
-                    moonpool_explorer::AssertKind::Sometimes
-                        | moonpool_explorer::AssertKind::Reachable
+                    moonpool_assertions::AssertKind::Sometimes
+                        | moonpool_assertions::AssertKind::Reachable
                 )
             {
                 if slot.pass_count > 0 {
@@ -1065,11 +1093,11 @@ impl SimulationBuilder {
         slots
             .iter()
             .filter(|s| {
-                moonpool_explorer::AssertKind::from_u8(s.kind).is_some_and(|k| {
+                moonpool_assertions::AssertKind::from_u8(s.kind).is_some_and(|k| {
                     matches!(
                         k,
-                        moonpool_explorer::AssertKind::Sometimes
-                            | moonpool_explorer::AssertKind::Reachable
+                        moonpool_assertions::AssertKind::Sometimes
+                            | moonpool_assertions::AssertKind::Reachable
                     )
                 })
             })
@@ -1147,12 +1175,17 @@ impl SimulationBuilder {
             &state.iteration_manager,
             self.exploration_config.as_ref(),
             &self.iteration_control,
-            FinalReportInputs {
-                total_exploration_timelines: state.total_exploration_timelines,
-                total_exploration_fork_points: state.total_exploration_fork_points,
-                total_exploration_bugs: state.total_exploration_bugs,
-                bug_recipes: state.bug_recipes,
+            &FinalReportInputs {
                 converged: state.converged,
+                #[cfg(feature = "exploration")]
+                total_exploration_timelines: state.total_exploration_timelines,
+                #[cfg(feature = "exploration")]
+                total_exploration_fork_points: state.total_exploration_fork_points,
+                #[cfg(feature = "exploration")]
+                total_exploration_bugs: state.total_exploration_bugs,
+                #[cfg(feature = "exploration")]
+                bug_recipes: state.bug_recipes,
+                #[cfg(feature = "exploration")]
                 per_seed_timelines: state.per_seed_timelines,
             },
         )
@@ -1200,6 +1233,7 @@ impl SimulationBuilder {
         // reflects all seeds, not just the last one. For exploration runs,
         // prepare_next_seed() also does a selective reset of coverage state.
         if iteration_count > 1 {
+            #[cfg(feature = "exploration")]
             if let Some(ref config) = self.exploration_config {
                 moonpool_explorer::prepare_next_seed(config.global_energy);
             }
@@ -1216,7 +1250,7 @@ impl SimulationBuilder {
             self.iteration_control,
             IterationControl::UntilConverged { .. }
         ) {
-            state.prev_coverage_bits = moonpool_explorer::explored_map_bits_set().unwrap_or(0);
+            state.prev_coverage_bits = crate::chaos::exploration_glue::explored_coverage_bits();
         }
     }
 
@@ -1330,6 +1364,10 @@ impl SimulationBuilder {
     /// Run all per-iteration cleanup steps after the orchestrator finished:
     /// accumulate exploration stats, run the convergence scan, reset buggify.
     fn finish_iteration(&self, state: &mut RunState, seed: u64, iteration_count: usize) {
+        // `seed` is only consumed by the exploration stats accumulation below.
+        #[cfg(not(feature = "exploration"))]
+        let _ = seed;
+        #[cfg(feature = "exploration")]
         if self.exploration_config.is_some() {
             Self::accumulate_exploration_stats(
                 seed,
@@ -1366,45 +1404,60 @@ impl SimulationBuilder {
     fn build_final_report(
         metrics_collector: MetricsCollector,
         iteration_manager: &IterationManager,
-        exploration_config: Option<&moonpool_explorer::ExplorationConfig>,
+        exploration_config: Option<&crate::chaos::exploration_glue::ExplorationConfig>,
         iteration_control: &IterationControl,
-        inputs: FinalReportInputs,
+        inputs: &FinalReportInputs,
     ) -> SimulationReport {
-        let FinalReportInputs {
-            total_exploration_timelines,
-            total_exploration_fork_points,
-            total_exploration_bugs,
-            bug_recipes,
-            converged,
-            per_seed_timelines,
-        } = inputs;
+        let converged = inputs.converged;
 
-        // 1. Read exploration-specific data (freed by cleanup).
+        // 1. Read exploration-specific data (freed by cleanup). Without the
+        // `exploration` feature there is none — the report's `exploration` field
+        // is simply `None`, keeping the public report shape identical. The two
+        // accumulator Vecs are cloned once here (report time only).
+        #[cfg(feature = "exploration")]
         let exploration_report = if exploration_config.is_some() {
             Some(Self::build_exploration_report(
-                total_exploration_timelines,
-                total_exploration_fork_points,
-                total_exploration_bugs,
-                bug_recipes,
+                inputs.total_exploration_timelines,
+                inputs.total_exploration_fork_points,
+                inputs.total_exploration_bugs,
+                inputs.bug_recipes.clone(),
                 converged,
-                per_seed_timelines,
+                inputs.per_seed_timelines.clone(),
             ))
         } else {
             None
         };
+        #[cfg(not(feature = "exploration"))]
+        let exploration_report: Option<super::report::ExplorationReport> = None;
 
         // 2. Read assertion + bucket data (freed by cleanup/cleanup_assertions).
         let assertion_results = crate::chaos::assertion_results();
         let (assertion_violations, coverage_violations) =
             crate::chaos::validate_assertion_contracts();
-        let raw_assertion_slots = moonpool_explorer::assertion_read_all();
-        let raw_each_buckets = moonpool_explorer::each_bucket_read_all();
+        let raw_assertion_slots = moonpool_assertions::assertion_read_all();
+        let raw_each_buckets = moonpool_assertions::each_bucket_read_all();
 
-        // 3. Now safe to free all shared memory.
-        if exploration_config.is_some() {
-            moonpool_explorer::cleanup();
-        } else {
-            moonpool_explorer::cleanup_assertions();
+        // 3. Now safe to free all shared memory. Under exploration `cleanup()`
+        // frees the exploration regions (the assertion table persists, as before);
+        // otherwise free the assertion region directly.
+        let did_exploration_cleanup = {
+            #[cfg(feature = "exploration")]
+            {
+                if exploration_config.is_some() {
+                    moonpool_explorer::cleanup();
+                    true
+                } else {
+                    false
+                }
+            }
+            #[cfg(not(feature = "exploration"))]
+            {
+                let _ = exploration_config;
+                false
+            }
+        };
+        if !did_exploration_cleanup {
+            crate::chaos::exploration_glue::cleanup_assertion_region();
         }
 
         let assertion_details = build_assertion_details(&raw_assertion_slots);
@@ -1435,10 +1488,10 @@ impl SimulationBuilder {
 
 /// Build [`AssertionDetail`] vec from raw assertion slot snapshots.
 fn build_assertion_details(
-    slots: &[moonpool_explorer::AssertionSlotSnapshot],
+    slots: &[moonpool_assertions::AssertionSlotSnapshot],
 ) -> Vec<super::report::AssertionDetail> {
     use super::report::{AssertionDetail, AssertionStatus};
-    use moonpool_explorer::AssertKind;
+    use moonpool_assertions::AssertKind;
 
     slots
         .iter()
@@ -1499,7 +1552,7 @@ fn build_assertion_details(
 
 /// Build [`BucketSiteSummary`] vec by grouping [`EachBucket`]s by site message.
 fn build_bucket_summaries(
-    buckets: &[moonpool_explorer::EachBucket],
+    buckets: &[moonpool_assertions::EachBucket],
 ) -> Vec<super::report::BucketSiteSummary> {
     use super::report::BucketSiteSummary;
     use std::collections::HashMap;

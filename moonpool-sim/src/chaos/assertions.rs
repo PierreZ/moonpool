@@ -1,8 +1,10 @@
 //! Antithesis-style assertion macros and result tracking for simulation testing.
 //!
 //! This module provides 15 assertion macros for testing distributed system
-//! properties. Assertions are tracked in shared memory via moonpool-explorer,
-//! enabling cross-process tracking across forked exploration timelines.
+//! properties. Assertions are tracked by `moonpool-assertions` (a dependency-free
+//! accounting layer). When the `exploration` feature is on, that table lives in
+//! `MAP_SHARED` memory so counts are visible across forked exploration timelines;
+//! otherwise it is a plain heap table — the macros behave identically either way.
 //!
 //! Following the Antithesis principle: **assertions never crash your program**.
 //! Always-type assertions log violations at ERROR level and record them via a
@@ -40,9 +42,9 @@ use std::collections::HashMap;
 thread_local! {
     static ALWAYS_VIOLATION_COUNT: Cell<u64> = const { Cell::new(0) };
     /// When set, the next call to [`reset_assertion_results`] is skipped.
-    /// Used by multi-seed exploration to prevent `SimWorld::create` from
-    /// zeroing assertion state that [`moonpool_explorer::prepare_next_seed`]
-    /// already selectively reset.
+    /// Used by multi-seed runs to prevent `SimWorld::create` from zeroing
+    /// assertion state that the between-seed reset already handled (a selective
+    /// reset under exploration, or accumulation without it).
     static SKIP_NEXT_ASSERTION_RESET: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -155,37 +157,37 @@ pub fn format_details(pairs: &[(&str, &dyn std::fmt::Display)]) -> String {
 
 /// Boolean assertion backing wrapper.
 ///
-/// Delegates to `moonpool_explorer::assertion_bool`.
+/// Delegates to `moonpool_assertions::assertion_bool`.
 /// Accepts both `&str` and `String` message arguments.
 pub fn on_assertion_bool(
     msg: impl AsRef<str>,
     condition: bool,
-    kind: moonpool_explorer::AssertKind,
+    kind: moonpool_assertions::AssertKind,
     must_hit: bool,
 ) {
-    moonpool_explorer::assertion_bool(kind, must_hit, condition, msg.as_ref());
+    moonpool_assertions::assertion_bool(kind, must_hit, condition, msg.as_ref());
 }
 
 /// Numeric assertion backing wrapper.
 ///
-/// Delegates to `moonpool_explorer::assertion_numeric`.
+/// Delegates to `moonpool_assertions::assertion_numeric`.
 /// Accepts both `&str` and `String` message arguments.
 pub fn on_assertion_numeric(
     msg: impl AsRef<str>,
     value: i64,
-    cmp: moonpool_explorer::AssertCmp,
+    cmp: moonpool_assertions::AssertCmp,
     threshold: i64,
-    kind: moonpool_explorer::AssertKind,
+    kind: moonpool_assertions::AssertKind,
     maximize: bool,
 ) {
-    moonpool_explorer::assertion_numeric(kind, cmp, maximize, value, threshold, msg.as_ref());
+    moonpool_assertions::assertion_numeric(kind, cmp, maximize, value, threshold, msg.as_ref());
 }
 
 /// Compound boolean assertion backing wrapper.
 ///
-/// Delegates to `moonpool_explorer::assertion_sometimes_all`.
+/// Delegates to `moonpool_assertions::assertion_sometimes_all`.
 pub fn on_assertion_sometimes_all(msg: impl AsRef<str>, named_bools: &[(&str, bool)]) {
-    moonpool_explorer::assertion_sometimes_all(msg.as_ref(), named_bools);
+    moonpool_assertions::assertion_sometimes_all(msg.as_ref(), named_bools);
 }
 
 /// Notify the exploration framework of a per-value bucketed assertion.
@@ -193,7 +195,7 @@ pub fn on_assertion_sometimes_all(msg: impl AsRef<str>, named_bools: &[(&str, bo
 /// This delegates to moonpool-explorer's `EachBucket` infrastructure for
 /// fork-based exploration with identity keys and quality watermarks.
 pub fn on_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&str, i64)]) {
-    moonpool_explorer::assertion_sometimes_each(msg, keys, quality);
+    moonpool_assertions::assertion_sometimes_each(msg, keys, quality);
 }
 
 // =============================================================================
@@ -206,7 +208,7 @@ pub fn on_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&str, i64)
 /// results for reporting and validation.
 #[must_use]
 pub fn assertion_results() -> HashMap<String, AssertionStats> {
-    let slots = moonpool_explorer::assertion_read_all();
+    let slots = moonpool_assertions::assertion_read_all();
     let mut results = HashMap::new();
 
     for slot in &slots {
@@ -229,9 +231,10 @@ pub fn assertion_results() -> HashMap<String, AssertionStats> {
 
 /// Request that the next call to [`reset_assertion_results`] be skipped.
 ///
-/// Used by multi-seed exploration: [`moonpool_explorer::prepare_next_seed`]
-/// does a selective reset (preserving explored map and watermarks), so the
-/// full zero in `SimWorld::create` must be suppressed.
+/// Used by multi-seed runs: the between-seed reset preserves pass/fail counts
+/// (selectively, under exploration, via the explorer's `prepare_next_seed`; or
+/// by accumulation without it), so the full zero in `SimWorld::create` must be
+/// suppressed.
 pub fn skip_next_assertion_reset() {
     SKIP_NEXT_ASSERTION_RESET.with(|c| c.set(true));
 }
@@ -248,7 +251,7 @@ pub fn reset_assertion_results() {
         v
     });
     if !skip {
-        moonpool_explorer::reset_assertions();
+        moonpool_assertions::reset();
     }
 }
 
@@ -264,14 +267,14 @@ pub fn reset_assertion_results() {
 pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
     let mut always_violations = Vec::new();
     let mut coverage_violations = Vec::new();
-    let slots = moonpool_explorer::assertion_read_all();
+    let slots = moonpool_assertions::assertion_read_all();
 
     for slot in &slots {
         let total = slot.pass_count.saturating_add(slot.fail_count);
-        let kind = moonpool_explorer::AssertKind::from_u8(slot.kind);
+        let kind = moonpool_assertions::AssertKind::from_u8(slot.kind);
 
         match kind {
-            Some(moonpool_explorer::AssertKind::Always) => {
+            Some(moonpool_assertions::AssertKind::Always) => {
                 if slot.fail_count > 0 {
                     always_violations.push(format!(
                         "assert_always!('{}') failed {} times out of {}",
@@ -283,7 +286,7 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
                         .push(format!("assert_always!('{}') was never reached", slot.msg));
                 }
             }
-            Some(moonpool_explorer::AssertKind::AlwaysOrUnreachable) => {
+            Some(moonpool_assertions::AssertKind::AlwaysOrUnreachable) => {
                 if slot.fail_count > 0 {
                     always_violations.push(format!(
                         "assert_always_or_unreachable!('{}') failed {} times out of {}",
@@ -291,7 +294,7 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
                     ));
                 }
             }
-            Some(moonpool_explorer::AssertKind::Sometimes) => {
+            Some(moonpool_assertions::AssertKind::Sometimes) => {
                 if total > 0 && slot.pass_count == 0 {
                     coverage_violations.push(format!(
                         "assert_sometimes!('{}') has 0% success rate ({} checks)",
@@ -299,7 +302,7 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
                     ));
                 }
             }
-            Some(moonpool_explorer::AssertKind::Reachable) => {
+            Some(moonpool_assertions::AssertKind::Reachable) => {
                 if slot.pass_count == 0 {
                     coverage_violations.push(format!(
                         "assert_reachable!('{}') was never reached",
@@ -307,7 +310,7 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
                     ));
                 }
             }
-            Some(moonpool_explorer::AssertKind::Unreachable) => {
+            Some(moonpool_assertions::AssertKind::Unreachable) => {
                 if slot.pass_count > 0 {
                     always_violations.push(format!(
                         "assert_unreachable!('{}') was reached {} times",
@@ -315,7 +318,7 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
                     ));
                 }
             }
-            Some(moonpool_explorer::AssertKind::NumericAlways) => {
+            Some(moonpool_assertions::AssertKind::NumericAlways) => {
                 if slot.fail_count > 0 {
                     always_violations.push(format!(
                         "numeric assert_always ('{}') failed {} times out of {}",
@@ -323,7 +326,7 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
                     ));
                 }
             }
-            Some(moonpool_explorer::AssertKind::NumericSometimes) => {
+            Some(moonpool_assertions::AssertKind::NumericSometimes) => {
                 if total > 0 && slot.pass_count == 0 {
                     coverage_violations.push(format!(
                         "numeric assert_sometimes ('{}') has 0% success rate ({} checks)",
@@ -331,7 +334,7 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
                     ));
                 }
             }
-            Some(moonpool_explorer::AssertKind::BooleanSometimesAll) | None => {
+            Some(moonpool_assertions::AssertKind::BooleanSometimesAll) | None => {
                 // BooleanSometimesAll: no simple pass/fail violation contract
                 // (the frontier tracking is the guidance mechanism)
             }
@@ -800,7 +803,7 @@ macro_rules! assert_sometimes_each {
 
 /// Re-exports for macro hygiene (`$crate::chaos::assertions::_re_export::*`).
 pub mod _re_export {
-    pub use moonpool_explorer::{AssertCmp, AssertKind};
+    pub use moonpool_assertions::{AssertCmp, AssertKind};
 }
 
 #[cfg(test)]

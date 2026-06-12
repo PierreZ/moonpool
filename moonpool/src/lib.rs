@@ -61,7 +61,34 @@
 #![deny(missing_docs)]
 #![allow(ambiguous_glob_reexports)]
 
-// Re-export all public items from sub-crates
+// Re-export all public items from sub-crates. `moonpool-core` is always present;
+// `sim` and `transport` are feature-gated so a lean production build pulls neither
+// the simulation runtime nor the explorer (no libc/mio in the prod dependency tree).
 pub use moonpool_core::*;
+#[cfg(feature = "sim")]
 pub use moonpool_sim::*;
+#[cfg(feature = "transport")]
 pub use moonpool_transport::*;
+
+/// Common imports for application code.
+///
+/// Production:
+///
+/// ```
+/// use moonpool::prelude::*;
+/// ```
+///
+/// Brings the provider traits into scope (needed to call their async methods),
+/// plus the transport entry points and, when the `sim` feature is on, the
+/// simulation builder/driver types.
+pub mod prelude {
+    pub use moonpool_core::prelude::*;
+
+    #[cfg(all(feature = "transport", feature = "tokio"))]
+    pub use moonpool_transport::TokioTransport;
+    #[cfg(feature = "transport")]
+    pub use moonpool_transport::{NetTransport, NetTransportBuilder, NetworkAddress};
+
+    #[cfg(feature = "sim")]
+    pub use moonpool_sim::{Process, SimContext, SimulationBuilder, Workload, WorkloadTopology};
+}

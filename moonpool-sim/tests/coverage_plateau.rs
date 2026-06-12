@@ -5,9 +5,9 @@
 //! both with and without fork-based exploration enabled.
 
 use async_trait::async_trait;
-use moonpool_sim::{
-    ExplorationConfig, SimContext, SimulationBuilder, SimulationReport, SimulationResult, Workload,
-};
+#[cfg(feature = "exploration")]
+use moonpool_sim::ExplorationConfig;
+use moonpool_sim::{SimContext, SimulationBuilder, SimulationReport, SimulationResult, Workload};
 
 fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
     builder.run()
@@ -79,6 +79,7 @@ fn test_plateau_no_exploration() {
 
 /// Same condition with exploration enabled — children write into the shared
 /// assertion table, so the plateau accumulator sees the full coverage too.
+#[cfg(feature = "exploration")]
 #[test]
 fn test_plateau_with_exploration() {
     let report = run_simulation(
