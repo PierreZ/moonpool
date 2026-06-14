@@ -23,7 +23,10 @@ fn main() {
         })
         .invariant(TransportIntegrityInvariant::new())
         .chaos_duration(Duration::from_secs(10))
-        .random_network()
+        // Swarm: each seed runs a random *subset* of both the network fault
+        // families and the workload's operation alphabet (the rest fully off),
+        // defeating passive/active suppression. Supersedes `.random_network()`.
+        .swarm()
         .set_iterations(20)
         .seed_warning_timeout(Duration::from_secs(15))
         .run();

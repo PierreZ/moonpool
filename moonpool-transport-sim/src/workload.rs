@@ -46,7 +46,7 @@ pub const EV_CLIENT_FAILED: &str = "client_failed";
 /// shutdown mid-await). Fields: `seq_id`.
 pub const EV_CLIENT_AMBIGUOUS: &str = "client_ambiguous";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Op {
     NormalAppend,
     EmptyBlock,
@@ -57,16 +57,64 @@ enum Op {
     SmallDelay,
 }
 
-fn random_op() -> Op {
-    match sim_random_range(0u32..100) {
-        0..70 => Op::NormalAppend,
-        70..78 => Op::EmptyBlock,
-        78..85 => Op::MaxSizeBlock,
-        85..91 => Op::AtMostOnceAppend,
-        91..96 => Op::AppendWithTimeout,
-        96..98 => Op::SendToWrongEndpoint,
-        _ => Op::SmallDelay,
+impl Op {
+    /// True for operations that issue a request the server turns into an
+    /// `append_block` (i.e. that can advance the hash chain).
+    fn is_append(self) -> bool {
+        matches!(
+            self,
+            Op::NormalAppend
+                | Op::EmptyBlock
+                | Op::MaxSizeBlock
+                | Op::AtMostOnceAppend
+                | Op::AppendWithTimeout
+        )
     }
+}
+
+/// The operation alphabet with its baseline weights (summing to 100). The array
+/// index is the stable operation id consulted by [`moonpool_sim::swarm_op_enabled`].
+const OP_ALPHABET: [(Op, u32); 7] = [
+    (Op::NormalAppend, 70),
+    (Op::EmptyBlock, 8),
+    (Op::MaxSizeBlock, 7),
+    (Op::AtMostOnceAppend, 6),
+    (Op::AppendWithTimeout, 5),
+    (Op::SendToWrongEndpoint, 2),
+    (Op::SmallDelay, 2),
+];
+
+/// This seed's enabled operation subset for swarm testing. Each operation is
+/// independently ~50% on (via the per-seed mask); with swarm disabled every
+/// operation is enabled, so the table is byte-identical to [`OP_ALPHABET`].
+/// Empty-mask fallback: if a seed disables everything, use the full alphabet so
+/// the workload always has something to do.
+fn swarm_enabled_ops() -> Vec<(Op, u32)> {
+    let enabled: Vec<(Op, u32)> = (0u8..)
+        .zip(OP_ALPHABET)
+        .filter(|&(id, _)| moonpool_sim::swarm_op_enabled(id))
+        .map(|(_, op)| op)
+        .collect();
+    if enabled.is_empty() {
+        OP_ALPHABET.to_vec()
+    } else {
+        enabled
+    }
+}
+
+/// Pick an operation from the enabled subset, weighted by `table`. Consumes
+/// exactly one `SIM_RNG` draw per call (the remapping into the subset adds no
+/// draws, so fork-explorer replay is unperturbed).
+fn weighted_op(table: &[(Op, u32)]) -> Op {
+    let total: u32 = table.iter().map(|&(_, w)| w).sum();
+    let mut roll = sim_random_range(0u32..total);
+    for &(op, w) in table {
+        if roll < w {
+            return op;
+        }
+        roll -= w;
+    }
+    table.last().expect("enabled op table is never empty").0
 }
 
 fn random_block(min: usize, max: usize) -> Vec<u8> {
@@ -144,6 +192,17 @@ impl Workload for TransportClientWorkload {
         let mut expected_h: u64 = INITIAL_DIGEST;
         let mut stopped_after_ambiguous = false;
 
+        // Per-seed operation-alphabet subset (swarm testing). Computed once;
+        // `swarm_op_enabled` is a pure function of the seed, so this is stable.
+        let op_table = swarm_enabled_ops();
+
+        // Demonstrator: this seed masked off every append-producing op, so the
+        // hash chain can never advance — only delays / wrong-endpoint probes run.
+        // Reachable under swarm (~(1/2)^5 per seed), impossible under all-on.
+        if !op_table.iter().any(|&(op, _)| op.is_append()) {
+            assert_sometimes!(true, "swarm: no append ops, chain cannot advance");
+        }
+
         tracing::info!(client_id, num_ops, "workload starting");
 
         for _ in 0..num_ops {
@@ -151,7 +210,7 @@ impl Workload for TransportClientWorkload {
                 break;
             }
 
-            let op = random_op();
+            let op = weighted_op(&op_table);
             seq_counter += 1;
             let seq_id = (client_id as u64) * 1_000_000 + seq_counter;
 

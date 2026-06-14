@@ -977,13 +977,16 @@ impl SimulationBuilder {
     }
 
     /// Reset per-iteration state: capture buffers, RNG, buggify, and chaos.
-    fn reset_per_iteration_state(seed: u64, obs_handle: &SimulationLayerHandle) {
+    fn reset_per_iteration_state(seed: u64, use_swarm: bool, obs_handle: &SimulationLayerHandle) {
         obs_handle.reset_for_seed();
         crate::sim::reset_sim_rng();
         crate::sim::set_sim_seed(seed);
         // Seed the independent config RNG that drives swarm-subset decisions.
         // Runs before `build_sim_for_iteration`, so `swarm_for_seed()` sees it.
         crate::sim::set_config_seed(seed);
+        // Per-seed base for the workload operation-alphabet swarm mask; `None`
+        // disables masking so workloads see the full alphabet.
+        crate::sim::set_swarm_op_seed(use_swarm.then_some(seed));
         crate::chaos::reset_always_violations();
         // Use moderate probabilities: 50% activation rate, 25% firing rate.
         crate::chaos::buggify_init(0.5, 0.25);
@@ -1273,7 +1276,7 @@ impl SimulationBuilder {
             hook();
         }
 
-        Self::reset_per_iteration_state(seed, obs_handle);
+        Self::reset_per_iteration_state(seed, self.use_swarm_config, obs_handle);
 
         if matches!(
             self.iteration_control,
