@@ -54,6 +54,43 @@ match roll {
 
 The percentages are tunable. Start with a heavy normal-operation bias and adjust based on what your `assert_sometimes!` statements tell you about coverage.
 
+## Swarm the Alphabet
+
+A complete alphabet has a hidden failure mode. Picking operations uniformly over the full set on every step means every operation is always slightly active, and they crowd each other out. The classic example is a bounded queue with a 50/50 push/pop mix. That is a one-dimensional random walk, and by the Hoeffding bound it takes tens of millions of operations to drift far enough to ever fill. The capacity-overflow bug is real, reachable, and never hit, because `pop` keeps undoing the progress `push` makes. This is **passive suppression**, the same effect we saw with network faults, now at the level of the workload's own operations.
+
+The fix is the same too. Instead of running every seed with the whole alphabet, enable a random **subset** per seed and turn the rest fully off. Disable `pop` for some runs and the queue fills on the first handful of steps. We call this swarming the alphabet, after the [Swarm Testing](10-network-faults.md#swarm-testing-less-is-more) paper.
+
+`moonpool_sim::swarm_op_enabled(op_id)` tells you whether operation `op_id` is in this seed's subset. Opt in with `SimulationBuilder::swarm()`. Without it, every operation reports enabled, so default runs use the full alphabet and nothing changes.
+
+```rust
+// Cache the subset once per run. Each operation is independently ~50% on,
+// a pure function of (seed, op_id), so this is the same answer every time.
+// Empty-mask fallback: if a seed disables everything, use the full alphabet
+// so the workload always has something to do.
+let enabled: Vec<u8> = (0..NUM_OPS).filter(|&i| swarm_op_enabled(i)).collect();
+let enabled = if enabled.is_empty() { (0..NUM_OPS).collect() } else { enabled };
+
+// Per step: take a single draw and remap it into the enabled subset.
+let raw = moonpool_sim::sim_random::<u64>();
+let op = enabled[(raw % enabled.len() as u64) as usize];
+```
+
+The remap matters. We draw **once** and fold the result into the subset rather than resampling in a loop until we land on an enabled operation. A resample loop would consume a variable number of `SIM_RNG` values per step, and the fork explorer keys its replay on the in-run RNG call count. Keep the per-step draw count fixed and replay stays exact. When the full alphabet is enabled, `enabled[raw % NUM_OPS] == raw % NUM_OPS`, so a non-swarm run is byte-identical to one with no swarm code at all.
+
+Like the fault-family version, these decisions never touch `SIM_RNG`. `swarm_op_enabled` is a pure hash of the seed and the operation id, so it consumes no randomness, the answer is independent of how often or in what order you ask, and the fault-family `CONFIG_RNG` stream is left untouched. The two swarm axes compose: a seed picks both a fault subset and an operation subset, independently.
+
+The payoff is a demonstrator assertion that only the swarm can reach. Emit it on the path where it holds, so it never records a check on the runs where the subset keeps it impossible:
+
+```rust
+// Reachable only when every movement operation was masked off this seed.
+// Under the always-on full alphabet, this can never happen.
+if !enabled.iter().any(|&i| i < NUM_MOVE_OPS) {
+    moonpool_sim::assert_sometimes!(true, "movement suppressed by swarm");
+}
+```
+
+The dungeon example in `moonpool-sim-examples/src/dungeon.rs` is the reference implementation, and `moonpool-sim/tests/swarm_op_alphabet.rs` shows the assertion firing under `.swarm()` and staying unreachable without it.
+
 ## Invariant Patterns
 
 Generating interesting operations is half the problem. The other half is knowing whether the system **behaved correctly** under those operations. Four patterns have proven reliable across many simulation workloads.

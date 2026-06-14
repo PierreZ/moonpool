@@ -152,7 +152,7 @@ pub use sim::{
     ConnectionStateChange, Event, EventQueue, NetworkOperation, ScheduledEvent, SimFaultRecord,
     SimWorld, SleepFuture, StorageOperation, WeakSimWorld, clear_rng_breakpoints, current_sim_seed,
     reset_rng_call_count, reset_sim_rng, rng_call_count, set_rng_breakpoints, set_sim_seed,
-    sim_random, sim_random_range, sim_random_range_or_default,
+    set_swarm_op_seed, sim_random, sim_random_range, sim_random_range_or_default, swarm_op_enabled,
 };
 
 // Runner module re-exports

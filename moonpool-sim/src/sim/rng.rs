@@ -46,6 +46,13 @@ thread_local! {
     /// no effect on the [`SIM_RNG`] call count or breakpoint replay — config
     /// decisions can never perturb in-run randomness or fork-explorer replay.
     static CONFIG_RNG: RefCell<ChaCha8Rng> = RefCell::new(ChaCha8Rng::seed_from_u64(0));
+
+    /// Thread-local per-seed base for workload operation-alphabet swarm masks.
+    ///
+    /// `Some(seed)` when `.swarm()` is enabled for the current iteration,
+    /// `None` otherwise. See [`swarm_op_enabled`] for how it is consumed; like
+    /// [`CONFIG_RNG`] it never touches the [`SIM_RNG`] call count.
+    static SWARM_OP_SEED: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
 /// Salt mixed into the iteration seed before seeding [`CONFIG_RNG`].
@@ -53,6 +60,13 @@ thread_local! {
 /// Decorrelates config (swarm-subset) decisions from the in-run [`SIM_RNG`]
 /// stream while keeping both fully reproducible from the same iteration seed.
 const CONFIG_RNG_SALT: u64 = 0x6D6F_6F6E_7377_726D; // "moonswrm"
+
+/// Salt mixed into the iteration seed when deriving operation-alphabet swarm
+/// masks.
+///
+/// Distinct from [`CONFIG_RNG_SALT`] so per-seed *operation* subset decisions
+/// are decorrelated from the *fault-family* subset decisions of the same seed.
+const SWARM_OP_SALT: u64 = 0x6F70_6D61_736B_7372; // "opmasksr"
 
 /// Increment the RNG call counter and check for breakpoints.
 ///
@@ -294,6 +308,53 @@ pub fn config_random_f64() -> f64 {
 #[must_use]
 pub fn config_random_bool(p: f64) -> bool {
     config_random_f64() < p
+}
+
+/// Set the per-seed base for workload operation-alphabet swarm masks.
+///
+/// Called once per iteration by the runner: `Some(seed)` when `.swarm()` is
+/// enabled, `None` otherwise. With `None`, [`swarm_op_enabled`] reports every
+/// operation as enabled (full alphabet — zero behavior change).
+pub fn set_swarm_op_seed(seed: Option<u64>) {
+    SWARM_OP_SEED.with(|s| s.set(seed));
+}
+
+/// 64-bit `SplitMix64` finalizer — a stateless, dependency-free mixing function.
+///
+/// Used to derive per-`(seed, op_id)` swarm decisions without consuming any RNG
+/// stream, so the result is idempotent and order-independent.
+fn splitmix64(mut x: u64) -> u64 {
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+/// Report whether operation `op_id` is enabled for the current iteration's
+/// operation-alphabet swarm subset.
+///
+/// When swarm is disabled (no [`set_swarm_op_seed`] with `Some`), every
+/// operation is enabled. When enabled, each operation is independently on with
+/// probability 0.5, derived as a **pure function** of `(seed, op_id)` via
+/// [`splitmix64`] — *not* by consuming the [`CONFIG_RNG`] stream. This makes the
+/// decision idempotent and order-independent: a workload may query the mask any
+/// number of times in any order and always sees the same subset, and the
+/// fault-family `CONFIG_RNG` draw sequence is left untouched. Like
+/// [`config_random_bool`], it never touches [`SIM_RNG`], so fork-explorer replay
+/// is unperturbed.
+///
+/// Callers own the empty-subset fallback: if a seed disables every operation in
+/// the alphabet, the workload should fall back to the full alphabet so it always
+/// has something to do.
+#[must_use]
+pub fn swarm_op_enabled(op_id: u8) -> bool {
+    match SWARM_OP_SEED.with(Cell::get) {
+        None => true,
+        Some(seed) => {
+            let mixed = splitmix64(seed ^ SWARM_OP_SALT ^ u64::from(op_id).rotate_left(32));
+            // Top bit gives a clean 50/50 split.
+            mixed & (1 << 63) != 0
+        }
+    }
 }
 
 #[cfg(test)]
@@ -616,5 +677,82 @@ mod tests {
         let _: f64 = sim_random();
         assert_eq!(rng_call_count(), 1);
         assert_eq!(current_sim_seed(), 42); // no breakpoint triggered
+    }
+
+    #[test]
+    fn swarm_op_disabled_enables_full_alphabet() {
+        // No swarm: every operation is enabled (zero behavior change).
+        set_swarm_op_seed(None);
+        for op in 0..32u8 {
+            assert!(
+                swarm_op_enabled(op),
+                "op {op} must be enabled when swarm is off"
+            );
+        }
+    }
+
+    #[test]
+    fn swarm_op_mask_is_idempotent_and_order_independent() {
+        const N: u8 = 16;
+        set_swarm_op_seed(Some(123));
+        let forward: Vec<bool> = (0..N).map(swarm_op_enabled).collect();
+
+        // Re-query in reverse, with repeats: a pure (seed, op) function must
+        // yield the identical mask regardless of call order or count.
+        set_swarm_op_seed(Some(123));
+        let mut reverse = vec![false; usize::from(N)];
+        for op in (0..N).rev() {
+            let _ = swarm_op_enabled(op);
+            reverse[usize::from(op)] = swarm_op_enabled(op);
+        }
+        assert_eq!(
+            forward, reverse,
+            "mask must be idempotent and order-independent"
+        );
+        set_swarm_op_seed(None);
+    }
+
+    #[test]
+    fn swarm_op_varies_across_seeds_and_reaches_extremes() {
+        const N: u8 = 10;
+        let mut min_enabled = usize::MAX;
+        let mut max_enabled = 0usize;
+        for seed in 0..4000u64 {
+            set_swarm_op_seed(Some(seed));
+            let count = (0..N).filter(|&op| swarm_op_enabled(op)).count();
+            min_enabled = min_enabled.min(count);
+            max_enabled = max_enabled.max(count);
+        }
+        // Deterministic across runs (pure hash), but spread across the alphabet:
+        // some seeds yield a near-empty subset, others the full alphabet.
+        assert!(
+            min_enabled <= 1,
+            "expected a near-empty subset; min was {min_enabled}"
+        );
+        assert_eq!(
+            max_enabled,
+            usize::from(N),
+            "expected a full subset; max was {max_enabled}"
+        );
+        set_swarm_op_seed(None);
+    }
+
+    #[test]
+    fn swarm_op_query_does_not_perturb_sim_rng() {
+        reset_sim_rng();
+        set_sim_seed(99);
+        let _: f64 = sim_random();
+        let before = rng_call_count();
+
+        set_swarm_op_seed(Some(5));
+        for op in 0..50u8 {
+            let _ = swarm_op_enabled(op);
+        }
+        assert_eq!(
+            rng_call_count(),
+            before,
+            "swarm_op_enabled must not touch the SIM_RNG call count"
+        );
+        set_swarm_op_seed(None);
     }
 }
