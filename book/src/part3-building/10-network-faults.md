@@ -18,6 +18,8 @@ Every network operation (bind, accept, connect, read, write) has a configurable 
 
 For tail latency testing, moonpool supports **bimodal latency distribution**, following FoundationDB's `halfLatency()` pattern. In bimodal mode, 99.9% of operations use normal latency, but 0.1% experience latencies multiplied by 5x to 20x. This is how real networks behave: most requests are fast, but a small fraction hit GC pauses, cross-datacenter hops, or congestion.
 
+Re-sampling latency per operation has a blind spot: no single connection ever stays slow. Real clusters break differently. One machine sits behind a degraded switch port and every message to it lags, run after run, while the rest of the fleet is healthy. That **stably-slow peer** is exactly what stalls a quorum or reorders a consensus round, and uniform per-operation jitter never produces it. So moonpool borrows FoundationDB's `SimClogging` trick: set `max_pair_latency` to a range and each ordered IP pair draws **one** fixed latency at first contact, then carries it for the whole run. Off by default (`ZERO..ZERO`), it adds nothing. Turn it on and some pairs are permanently sluggish while others are quick, which is how you find the bug where the slow replica is the one holding the lease.
+
 ### Connection Drops
 
 Random close injects spontaneous connection failures during I/O operations, at a configurable probability (default 0.001%). When triggered, 30% of closes are **explicit** (the caller gets an error) and 70% are **silent** (the connection just stops working). This ratio, taken from FoundationDB, tests both error-handling paths and timeout-based failure detection.

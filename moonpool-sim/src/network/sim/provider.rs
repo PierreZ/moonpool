@@ -129,6 +129,11 @@ impl NetworkProvider for SimNetworkProvider {
         // Create a connection pair for bidirectional communication
         let (client_id, server_id) = sim.create_connection_pair("client-addr", addr);
 
+        // FDB SimClogging: fix a permanent per-pair latency at first contact, for
+        // both directions. No-op (returns ZERO, no RNG) when max_pair_latency is off.
+        let _ = sim.connection_base_latency(client_id);
+        let _ = sim.connection_base_latency(server_id);
+
         // Store the server side for accept() to pick up later
         sim.store_pending_connection(addr, server_id);
 

@@ -1353,6 +1353,8 @@ impl SimWorld {
         let next_send_time = conn.next_send_time;
         let has_data = !conn.send_buffer.is_empty();
         let is_stable = conn.flags.is_stable(); // For stable connection checks
+        let local_ip = conn.local_ip;
+        let remote_ip = conn.remote_ip;
 
         let recv_delay = paired_id.and_then(|pid| {
             inner
@@ -1361,6 +1363,19 @@ impl SimWorld {
                 .get(&pid)
                 .and_then(|c| c.recv_delay)
         });
+
+        // Permanent per-pair latency, memoized at connect (FDB SimClogging). Pure
+        // map read on a field disjoint from `connections`; ZERO when the feature is
+        // off (map empty) or endpoints are unknown.
+        let pair_extra = match (local_ip, remote_ip) {
+            (Some(src), Some(dst)) => inner
+                .network
+                .pair_latencies
+                .get(&(src, dst))
+                .copied()
+                .unwrap_or(Duration::ZERO),
+            _ => Duration::ZERO,
+        };
 
         if !has_data {
             if let Some(conn) = inner.network.connections.get_mut(&connection_id) {
@@ -1420,7 +1435,7 @@ impl SimWorld {
 
         // Schedule data delivery to paired connection
         if let Some(paired_id) = paired_id {
-            let scheduled_time = earliest_time + recv_delay.unwrap_or(Duration::ZERO);
+            let scheduled_time = earliest_time + recv_delay.unwrap_or(Duration::ZERO) + pair_extra;
             let sequence = inner.next_sequence;
             inner.next_sequence += 1;
 
@@ -1976,39 +1991,46 @@ impl SimWorld {
             })
     }
 
-    /// Get the base latency for a connection based on its IP pair.
-    /// If not set, samples from config and sets it.
+    /// Get the permanent per-pair base latency for a connection, memoizing it on
+    /// first contact (FDB `SimClogging`).
+    ///
+    /// Returns [`Duration::ZERO`] — without drawing from the RNG or touching the
+    /// pair map — when the `max_pair_latency` range is disabled (its `end` is zero)
+    /// or the connection's endpoints are unknown. Otherwise samples a fixed latency
+    /// from `max_pair_latency` once per ordered IP pair and reuses it for the run.
     ///
     /// # Panics
     ///
     /// Panics if the simulation lock is poisoned by a prior task panic.
     #[must_use]
     pub fn connection_base_latency(&self, connection_id: ConnectionId) -> Duration {
+        let range = self.with_network_config(|config| config.chaos.max_pair_latency.clone());
+        if range.end.is_zero() {
+            return Duration::ZERO;
+        }
+
         let inner = self
             .inner
             .read()
             .expect("RwLock poisoned: prior task panicked");
-        let (local_ip, remote_ip) = inner
+        let endpoints = inner
             .network
             .connections
             .get(&connection_id)
-            .and_then(|conn| Some((conn.local_ip?, conn.remote_ip?)))
-            .unwrap_or({
-                (
-                    IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-                    IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-                )
-            });
+            .and_then(|conn| Some((conn.local_ip?, conn.remote_ip?)));
         drop(inner);
+
+        let Some((local_ip, remote_ip)) = endpoints else {
+            return Duration::ZERO;
+        };
 
         // Check if latency is already set
         if let Some(latency) = self.pair_latency(local_ip, remote_ip) {
             return latency;
         }
 
-        // Sample a new latency from config and set it
-        let latency = self
-            .with_network_config(|config| crate::network::sample_duration(&config.write_latency));
+        // Sample a fixed latency for this pair and memoize it for the whole run.
+        let latency = crate::network::sample_duration(&range);
         self.set_pair_latency_if_not_set(local_ip, remote_ip, latency)
     }
 
@@ -3005,6 +3027,59 @@ mod tests {
 
         assert_eq!(sim.current_time(), Duration::from_millis(300));
         assert!(!sim.has_pending_events());
+    }
+
+    #[test]
+    fn pair_latency_deterministic_per_seed() {
+        use crate::network::{ChaosConfiguration, NetworkConfiguration};
+
+        let client_ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 1, 1));
+        let server_ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 1, 2));
+        let range = Duration::from_millis(10)..Duration::from_millis(50);
+
+        // Build a fast-local config that only enables per-pair latency.
+        let on_config = || NetworkConfiguration {
+            chaos: ChaosConfiguration {
+                max_pair_latency: range.clone(),
+                ..ChaosConfiguration::disabled()
+            },
+            ..NetworkConfiguration::fast_local()
+        };
+
+        // Establish one connection pair and memoize both directions.
+        let assign = || {
+            let sim = SimWorld::new_with_network_config_and_seed(on_config(), 42);
+            let (client, server) = sim.create_connection_pair("10.0.1.1:0", "10.0.1.2:0");
+            let _ = sim.connection_base_latency(client);
+            let _ = sim.connection_base_latency(server);
+            (
+                sim.pair_latency(client_ip, server_ip),
+                sim.pair_latency(server_ip, client_ip),
+            )
+        };
+
+        let first = assign();
+        let second = assign();
+
+        // Same seed -> identical, fully-populated assignments.
+        assert_eq!(first, second, "pair latency must be deterministic per seed");
+        let c2s = first.0.expect("client->server pair latency assigned");
+        let s2c = first.1.expect("server->client pair latency assigned");
+        for latency in [c2s, s2c] {
+            assert!(
+                range.contains(&latency),
+                "pair latency {latency:?} must fall in the configured range {range:?}"
+            );
+        }
+
+        // Disabled range (default) -> no map writes at all.
+        let off =
+            SimWorld::new_with_network_config_and_seed(NetworkConfiguration::fast_local(), 42);
+        let (client, server) = off.create_connection_pair("10.0.1.1:0", "10.0.1.2:0");
+        let _ = off.connection_base_latency(client);
+        let _ = off.connection_base_latency(server);
+        assert_eq!(off.pair_latency(client_ip, server_ip), None);
+        assert_eq!(off.pair_latency(server_ip, client_ip), None);
     }
 
     #[test]

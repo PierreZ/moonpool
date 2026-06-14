@@ -208,6 +208,14 @@ pub struct ChaosConfiguration {
     /// Probability of connect failure when Probabilistic mode is enabled (default 50%)
     pub connect_failure_probability: f64,
 
+    /// Permanent per-IP-pair latency range (FDB `SimClogging::MAX_CLOGGING_LATENCY`).
+    /// Each ordered IP pair samples a fixed latency from this range at first contact
+    /// (via [`sample_duration`]), then adds it to every delivery on that pair for the
+    /// whole run — modelling a stably-slow link. An all-zero range (`end` is zero)
+    /// disables it, leaving behavior unchanged. FDB's `MAX * random01()` is the
+    /// `ZERO..MAX` case. FDB ref: `sim2.actor.cpp` ~294-299, 352-354.
+    pub max_pair_latency: Range<Duration>,
+
     /// Network partition strategy.
     /// Controls how nodes are selected for partitioning.
     /// `TigerBeetle` ref: `packet_simulator.zig` partition modes
@@ -242,6 +250,7 @@ impl Default for ChaosConfiguration {
             buggified_delay_probability: 0.25, // FDB: random01() < 0.25
             connect_failure_mode: ConnectFailureMode::Probabilistic, // FDB: SIM_CONNECT_ERROR_MODE = 2
             connect_failure_probability: 0.5,                        // FDB: random01() > 0.5
+            max_pair_latency: Duration::ZERO..Duration::ZERO, // FDB: MAX_CLOGGING_LATENCY default 0
             partition_strategy: PartitionStrategy::default(),
         }
     }
@@ -271,6 +280,7 @@ impl ChaosConfiguration {
             buggified_delay_probability: 0.25,
             connect_failure_mode: ConnectFailureMode::Disabled,
             connect_failure_probability: 0.5,
+            max_pair_latency: Duration::ZERO..Duration::ZERO,
             partition_strategy: PartitionStrategy::Random, // Default strategy
         }
     }
@@ -308,6 +318,10 @@ impl ChaosConfiguration {
                 1 => PartitionStrategy::UniformSize,
                 _ => PartitionStrategy::IsolateSingle,
             },
+            // Permanent per-pair latency, randomized upper bound up to 100ms (FDB
+            // buggifies MAX_CLOGGING_LATENCY to 0.1s). Kept last so existing RNG
+            // draws above are unaffected.
+            max_pair_latency: Duration::ZERO..Duration::from_millis(sim_random_range(0..100)),
         }
     }
 
@@ -329,7 +343,7 @@ impl ChaosConfiguration {
     /// Disable each fault family with ~50% probability using the `CONFIG_RNG`
     /// stream (see [`swarm_for_seed`](Self::swarm_for_seed)).
     ///
-    /// Draws exactly seven `config_random_bool` values (one per family) so the
+    /// Draws exactly eight `config_random_bool` values (one per family) so the
     /// `CONFIG_RNG` call sequence is fixed and reproducible per seed. Durations,
     /// cooldowns, and strategy stay as sampled — they are inert once their family
     /// is off.
@@ -352,6 +366,10 @@ impl ChaosConfiguration {
         }
         self.clock_drift_enabled = config_random_bool(0.5);
         self.buggified_delay_enabled = config_random_bool(0.5);
+        // Appended last: keeps the seven draws above stable across seeds.
+        if !config_random_bool(0.5) {
+            self.max_pair_latency = Duration::ZERO..Duration::ZERO;
+        }
     }
 }
 

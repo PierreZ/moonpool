@@ -139,6 +139,14 @@ All fault injection settings for the simulated network. Part of `NetworkConfigur
 | `clog_probability` | `f64` | 0.0 |
 | `clog_duration` | `Range<Duration>` | 100ms..300ms |
 
+### Per-Pair Permanent Latency
+
+| Field | Type | Default |
+|-------|------|---------|
+| `max_pair_latency` | `Range<Duration>` | `ZERO..ZERO` (off) |
+
+Each ordered IP pair samples one fixed latency from this range at first contact and adds it to every delivery on that pair for the whole run (FoundationDB's `SimClogging`). An all-zero range disables it. FDB's `MAX_CLOGGING_LATENCY * random01()` is the `ZERO..MAX` case.
+
 ### Network Partitions
 
 | Field | Type | Default |
