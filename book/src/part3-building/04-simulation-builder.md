@@ -173,6 +173,12 @@ For additional chaos, enable randomized network configuration:
 
 This varies latency, packet delay distributions, and other network parameters per iteration, based on the seed. Without this flag, the network uses default configuration (consistent, low-latency).
 
+For stronger coverage, use `.swarm()` instead. It enables a random **subset** of network fault families per seed, fully disabling the rest, rather than turning every fault slightly on at once. This defeats passive suppression, where active faults crowd each other out and the extreme single-family configs that surface bugs almost never occur. See [Network Faults](10-network-faults.md#swarm-testing-less-is-more) for the full reasoning.
+
+```rust
+.swarm()
+```
+
 ## Putting It All Together
 
 A production-grade simulation configuration looks like this:

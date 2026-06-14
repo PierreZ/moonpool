@@ -14,3 +14,5 @@ mod clock_drift;
 mod connect_failure;
 #[path = "chaos/random_close.rs"]
 mod random_close;
+#[path = "chaos/swarm.rs"]
+mod swarm;

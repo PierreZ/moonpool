@@ -102,3 +102,23 @@ config.chaos.partition_probability = 0.05;
 config.chaos.partition_strategy = PartitionStrategy::IsolateSingle;
 // Everything else at defaults
 ```
+
+## Swarm Testing: Less Is More
+
+There is a subtle trap hiding inside `random_for_seed()`. It sets **every** fault family to a random non-zero probability. Clogging is a little bit on, partitions are a little bit on, bit flips are a little bit on, all at once, on every seed. That sounds thorough. It is actually the opposite.
+
+The problem is called **passive suppression**, and it comes straight from the "Swarm Testing" paper by Groce and colleagues (ISSTA 2012), popularized by Will Wilson's Antithesis talks. When every feature is always slightly active, the features crowd each other out. To find a clogging bug you often need clogging cranked hard, for a sustained stretch, with nothing else interfering. If partitions keep tearing down the connection you were trying to clog, you never drive clogging deep enough to hit its bug. The undirected default explores a narrow band in the middle of the configuration space and never visits the extremes where bugs actually live. In the paper, undirected swarm testing found **42% more distinct compiler crashes** than a heavily hand-tuned default.
+
+The fix is counterintuitive: for each run, turn **off** a random subset of fault families entirely. Each seed enables roughly half the families and fully disables the rest. One seed is clogging-only. Another is partition-plus-bitflip. Another is the all-off no-fault baseline. Across many seeds you cover the single-family extremes that the all-on config can never reach.
+
+```rust
+SimulationBuilder::new()
+    .swarm() // each seed enables a random subset of fault families
+    // ...
+```
+
+`.swarm()` builds on `random_for_seed()`, then masks each of the seven network fault families to off with 50% probability: clog, partition, bit-flip, random-close, connect-failure, clock-drift, and buggified-delay. The all-off subset is allowed on purpose, because a pure no-fault run is a useful, valid config.
+
+The interesting engineering detail is **where the randomness comes from**. Swarm decisions must not perturb the in-run randomness, or they would shift every fault's timing and break fork-explorer replay. So the subset is drawn from a separate `CONFIG_RNG` stream, seeded from the iteration seed but salted to decorrelate it from the main `SIM_RNG`. The config RNG never advances the in-run call counter. Same seed, same subset, every time, with zero effect on the simulation that follows.
+
+You already met a tiny version of this idea earlier in the chapter. Connect failures have always had a one-in-three chance of being fully disabled per seed. Swarm testing simply generalizes that one disabled branch to every fault family at once.
