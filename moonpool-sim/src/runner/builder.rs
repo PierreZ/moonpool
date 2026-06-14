@@ -338,6 +338,7 @@ pub struct SimulationBuilder {
     attrition: Option<Attrition>,
     seeds: Vec<u64>,
     use_random_config: bool,
+    use_swarm_config: bool,
     invariants: Vec<Box<dyn Invariant + Send>>,
     fault_injectors: Vec<Box<dyn FaultInjector>>,
     chaos_duration: Option<Duration>,
@@ -364,6 +365,7 @@ impl SimulationBuilder {
             attrition: None,
             seeds: Vec::new(),
             use_random_config: false,
+            use_swarm_config: false,
             invariants: Vec::new(),
             fault_injectors: Vec::new(),
             chaos_duration: None,
@@ -653,6 +655,23 @@ impl SimulationBuilder {
         self
     }
 
+    /// Enable swarm testing: each seed enables a random *subset* of network
+    /// fault families (~50% each, the rest fully off), including the all-off
+    /// subset.
+    ///
+    /// This defeats passive suppression — when every fault is always slightly on
+    /// (as with [`random_network`](Self::random_network)) families crowd each
+    /// other out and the extreme single-family configs that surface bugs almost
+    /// never occur. Subset decisions are drawn from a dedicated `CONFIG_RNG`
+    /// stream, so they are reproducible per seed yet never perturb in-run
+    /// randomness or fork-explorer replay. Takes precedence over
+    /// `random_network`.
+    #[must_use]
+    pub fn swarm(mut self) -> Self {
+        self.use_swarm_config = true;
+        self
+    }
+
     /// Enable fork-based multiverse exploration.
     ///
     /// When enabled, the simulation will fork child processes at assertion
@@ -762,10 +781,17 @@ impl SimulationBuilder {
         })
     }
 
-    /// Build a `SimWorld` for the iteration, picking a randomised or default
-    /// network configuration.
-    fn build_sim_for_iteration(use_random: bool, seed: u64) -> crate::sim::SimWorld {
-        let network_config = if use_random {
+    /// Build a `SimWorld` for the iteration, picking a swarm-subset, randomised,
+    /// or default network configuration. `use_swarm` takes precedence over
+    /// `use_random`.
+    fn build_sim_for_iteration(
+        use_random: bool,
+        use_swarm: bool,
+        seed: u64,
+    ) -> crate::sim::SimWorld {
+        let network_config = if use_swarm {
+            crate::NetworkConfiguration::swarm_for_seed()
+        } else if use_random {
             crate::NetworkConfiguration::random_for_seed()
         } else {
             crate::NetworkConfiguration::default()
@@ -955,6 +981,9 @@ impl SimulationBuilder {
         obs_handle.reset_for_seed();
         crate::sim::reset_sim_rng();
         crate::sim::set_sim_seed(seed);
+        // Seed the independent config RNG that drives swarm-subset decisions.
+        // Runs before `build_sim_for_iteration`, so `swarm_for_seed()` sees it.
+        crate::sim::set_config_seed(seed);
         crate::chaos::reset_always_violations();
         // Use moderate probabilities: 50% activation rate, 25% firing rate.
         crate::chaos::buggify_init(0.5, 0.25);
@@ -1284,7 +1313,8 @@ impl SimulationBuilder {
             .as_ref()
             .map(Self::resolve_process_config);
 
-        let sim = Self::build_sim_for_iteration(self.use_random_config, seed);
+        let sim =
+            Self::build_sim_for_iteration(self.use_random_config, self.use_swarm_config, seed);
         let start_time = Instant::now();
         let fault_injectors =
             Self::collect_fault_injectors(&mut self.fault_injectors, self.attrition.as_ref());

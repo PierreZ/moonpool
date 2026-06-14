@@ -38,7 +38,21 @@ thread_local! {
     /// Each entry is `(target_count, new_seed)`. When the call count exceeds
     /// `target_count`, the RNG reseeds with `new_seed` and the count resets to 1.
     static RNG_BREAKPOINTS: RefCell<VecDeque<(u64, u64)>> = const { RefCell::new(VecDeque::new()) };
+
+    /// Thread-local configuration RNG, independent of [`SIM_RNG`].
+    ///
+    /// Drives swarm-testing subset decisions (which fault families are enabled
+    /// per seed). It deliberately does NOT go through [`pre_sample`], so it has
+    /// no effect on the [`SIM_RNG`] call count or breakpoint replay — config
+    /// decisions can never perturb in-run randomness or fork-explorer replay.
+    static CONFIG_RNG: RefCell<ChaCha8Rng> = RefCell::new(ChaCha8Rng::seed_from_u64(0));
 }
+
+/// Salt mixed into the iteration seed before seeding [`CONFIG_RNG`].
+///
+/// Decorrelates config (swarm-subset) decisions from the in-run [`SIM_RNG`]
+/// stream while keeping both fully reproducible from the same iteration seed.
+const CONFIG_RNG_SALT: u64 = 0x6D6F_6F6E_7377_726D; // "moonswrm"
 
 /// Increment the RNG call counter and check for breakpoints.
 ///
@@ -244,6 +258,42 @@ pub fn set_rng_breakpoints(breakpoints: Vec<(u64, u64)>) {
 /// Clear all RNG breakpoints.
 pub fn clear_rng_breakpoints() {
     RNG_BREAKPOINTS.with(|bp| bp.borrow_mut().clear());
+}
+
+/// Seed the thread-local configuration RNG from an iteration seed.
+///
+/// The seed is mixed with [`CONFIG_RNG_SALT`] so swarm-subset decisions are
+/// decorrelated from [`SIM_RNG`] yet remain reproducible per iteration seed.
+/// Unlike [`set_sim_seed`], this does not touch the call counter or breakpoints.
+pub fn set_config_seed(seed: u64) {
+    CONFIG_RNG.with(|rng| {
+        *rng.borrow_mut() = ChaCha8Rng::seed_from_u64(seed ^ CONFIG_RNG_SALT);
+    });
+}
+
+/// Reset the configuration RNG to its initial (seed 0) state.
+pub fn reset_config_rng() {
+    CONFIG_RNG.with(|rng| {
+        *rng.borrow_mut() = ChaCha8Rng::seed_from_u64(0);
+    });
+}
+
+/// Generate a random f64 in `[0.0, 1.0)` using the configuration RNG.
+///
+/// Independent of [`SIM_RNG`]: it does not increment the RNG call count and is
+/// invisible to breakpoint replay.
+#[must_use]
+pub fn config_random_f64() -> f64 {
+    CONFIG_RNG.with(|rng| rng.borrow_mut().sample(StandardUniform))
+}
+
+/// Return `true` with probability `p`, drawn from the configuration RNG.
+///
+/// Used for swarm-subset decisions (e.g. "enable this fault family?"). Always
+/// consumes exactly one [`CONFIG_RNG`] draw regardless of the outcome.
+#[must_use]
+pub fn config_random_bool(p: f64) -> bool {
+    config_random_f64() < p
 }
 
 #[cfg(test)]
@@ -500,6 +550,51 @@ mod tests {
 
         assert_f64_eq(post_fork_1, replay_1);
         assert_f64_eq(post_fork_2, replay_2);
+    }
+
+    #[test]
+    fn test_config_rng_does_not_perturb_sim_rng() {
+        // Control: SIM_RNG sequence with no CONFIG_RNG draws interleaved.
+        reset_sim_rng();
+        set_sim_seed(42);
+        let control: Vec<f64> = (0..5).map(|_| sim_random::<f64>()).collect();
+        let control_count = rng_call_count();
+
+        // Experiment: interleave CONFIG_RNG draws between every SIM_RNG draw.
+        reset_sim_rng();
+        set_sim_seed(42);
+        set_config_seed(42);
+        let mut experiment = Vec::new();
+        for _ in 0..5 {
+            let _ = config_random_bool(0.5);
+            let _ = config_random_f64();
+            experiment.push(sim_random::<f64>());
+        }
+
+        // CONFIG_RNG must not perturb the SIM_RNG sequence or its call count.
+        for (c, e) in control.iter().zip(experiment.iter()) {
+            assert_f64_eq(*c, *e);
+        }
+        assert_eq!(rng_call_count(), control_count);
+    }
+
+    #[test]
+    fn test_config_rng_determinism_and_independence_from_seed() {
+        // Same config seed -> same CONFIG_RNG sequence.
+        set_config_seed(7);
+        let a: Vec<f64> = (0..4).map(|_| config_random_f64()).collect();
+        set_config_seed(7);
+        let b: Vec<f64> = (0..4).map(|_| config_random_f64()).collect();
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_f64_eq(*x, *y);
+        }
+
+        // Salting decorrelates CONFIG_RNG from a same-numbered SIM_RNG seed.
+        set_sim_seed(7);
+        let sim_first: f64 = sim_random();
+        set_config_seed(7);
+        let config_first = config_random_f64();
+        assert_f64_ne(sim_first, config_first);
     }
 
     #[test]

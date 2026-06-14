@@ -79,7 +79,7 @@
 //! - Clock drift: FDB sim2.actor.cpp:1058-1064
 //! - Connect failures: FDB sim2.actor.cpp:1243-1250
 
-use crate::sim::rng::{sim_random_range, sim_random_range_or_default};
+use crate::sim::rng::{config_random_bool, sim_random_range, sim_random_range_or_default};
 use std::ops::Range;
 use std::time::Duration;
 
@@ -310,6 +310,49 @@ impl ChaosConfiguration {
             },
         }
     }
+
+    /// Create a swarm-testing chaos configuration for seed-based testing.
+    ///
+    /// Starts from [`random_for_seed`](Self::random_for_seed), then disables each
+    /// fault family with ~50% probability (drawn from the independent `CONFIG_RNG`
+    /// stream). This implements *swarm testing* (Groce et al., ISSTA 2012): each
+    /// seed exercises a random *subset* of fault families — including the all-off
+    /// subset — instead of every family being slightly on at once (which lets
+    /// families crowd each other out, the passive-suppression anti-pattern).
+    #[must_use]
+    pub fn swarm_for_seed() -> Self {
+        let mut chaos = Self::random_for_seed();
+        chaos.apply_swarm_mask();
+        chaos
+    }
+
+    /// Disable each fault family with ~50% probability using the `CONFIG_RNG`
+    /// stream (see [`swarm_for_seed`](Self::swarm_for_seed)).
+    ///
+    /// Draws exactly seven `config_random_bool` values (one per family) so the
+    /// `CONFIG_RNG` call sequence is fixed and reproducible per seed. Durations,
+    /// cooldowns, and strategy stay as sampled — they are inert once their family
+    /// is off.
+    fn apply_swarm_mask(&mut self) {
+        if !config_random_bool(0.5) {
+            self.clog_probability = 0.0;
+        }
+        if !config_random_bool(0.5) {
+            self.partition_probability = 0.0;
+        }
+        if !config_random_bool(0.5) {
+            self.bit_flip_probability = 0.0;
+        }
+        if !config_random_bool(0.5) {
+            self.random_close_probability = 0.0;
+        }
+        if !config_random_bool(0.5) {
+            self.connect_failure_mode = ConnectFailureMode::Disabled;
+            self.connect_failure_probability = 0.0;
+        }
+        self.clock_drift_enabled = config_random_bool(0.5);
+        self.buggified_delay_enabled = config_random_bool(0.5);
+    }
 }
 
 /// Configuration for network simulation parameters
@@ -377,6 +420,19 @@ impl NetworkConfiguration {
         }
     }
 
+    /// Create a swarm-testing network configuration for seed-based testing.
+    ///
+    /// Identical to [`random_for_seed`](Self::random_for_seed) for the baseline
+    /// latencies, but the embedded [`ChaosConfiguration`] enables only a random
+    /// *subset* of fault families per seed. See
+    /// [`ChaosConfiguration::swarm_for_seed`].
+    #[must_use]
+    pub fn swarm_for_seed() -> Self {
+        let mut config = Self::random_for_seed();
+        config.chaos.apply_swarm_mask();
+        config
+    }
+
     /// Create a configuration optimized for fast local testing
     #[must_use]
     pub fn fast_local() -> Self {
@@ -390,5 +446,97 @@ impl NetworkConfiguration {
             write_latency: one_us..one_us,
             chaos: ChaosConfiguration::disabled(),
         }
+    }
+}
+
+#[cfg(test)]
+mod swarm_tests {
+    use super::{ChaosConfiguration, ConnectFailureMode, NetworkConfiguration};
+    use crate::sim::rng::{reset_sim_rng, set_config_seed, set_sim_seed};
+
+    /// The on/off state of each swarmed fault family, in mask order.
+    fn enabled_families(chaos: &ChaosConfiguration) -> [bool; 7] {
+        [
+            chaos.clog_probability > 0.0,
+            chaos.partition_probability > 0.0,
+            chaos.bit_flip_probability > 0.0,
+            chaos.random_close_probability > 0.0,
+            chaos.connect_failure_mode != ConnectFailureMode::Disabled,
+            chaos.clock_drift_enabled,
+            chaos.buggified_delay_enabled,
+        ]
+    }
+
+    /// Build a swarm config the way the runner does: both streams seeded per iteration.
+    fn swarm_for(seed: u64) -> NetworkConfiguration {
+        reset_sim_rng();
+        set_sim_seed(seed);
+        set_config_seed(seed);
+        NetworkConfiguration::swarm_for_seed()
+    }
+
+    #[test]
+    fn swarm_subset_is_deterministic_per_seed() {
+        for seed in [0_u64, 1, 42, 12_345] {
+            let first = enabled_families(&swarm_for(seed).chaos);
+            let second = enabled_families(&swarm_for(seed).chaos);
+            assert_eq!(
+                first, second,
+                "swarm subset must be reproducible for seed {seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn swarm_reaches_all_off_and_mixed_subsets() {
+        let mut saw_all_off = false;
+        let mut saw_mixed = false;
+
+        for seed in 0..1000_u64 {
+            let families = enabled_families(&swarm_for(seed).chaos);
+            let on = families.iter().filter(|&&e| e).count();
+            if on == 0 {
+                saw_all_off = true;
+            }
+            if on > 0 && on < families.len() {
+                saw_mixed = true;
+            }
+            if saw_all_off && saw_mixed {
+                break;
+            }
+        }
+
+        assert!(
+            saw_all_off,
+            "no seed in 0..1000 produced the all-off subset"
+        );
+        assert!(saw_mixed, "no seed in 0..1000 produced a mixed subset");
+    }
+
+    #[test]
+    fn swarm_all_off_seed_has_zero_fault_probabilities() {
+        // Find a seed whose subset is entirely off, then assert every family is inert.
+        let seed = (0..1000_u64)
+            .find(|&s| enabled_families(&swarm_for(s).chaos).iter().all(|&e| !e))
+            .expect("expected an all-off seed within 0..1000");
+
+        let chaos = swarm_for(seed).chaos;
+        assert_zero(chaos.clog_probability);
+        assert_zero(chaos.partition_probability);
+        assert_zero(chaos.bit_flip_probability);
+        assert_zero(chaos.random_close_probability);
+        assert_eq!(chaos.connect_failure_mode, ConnectFailureMode::Disabled);
+        assert_zero(chaos.connect_failure_probability);
+        assert!(!chaos.clock_drift_enabled);
+        assert!(!chaos.buggified_delay_enabled);
+    }
+
+    /// Assert an f64 is exactly `+0.0` (bit-exact, avoiding the float-cmp lint).
+    fn assert_zero(value: f64) {
+        assert_eq!(
+            value.to_bits(),
+            0.0_f64.to_bits(),
+            "expected 0.0, got {value}"
+        );
     }
 }
