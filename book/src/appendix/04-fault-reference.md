@@ -30,6 +30,7 @@ Configured via `ChaosConfiguration` (nested under `NetworkConfiguration::chaos`)
 | Slow latency spike | `slow_latency_probability` | 0.1% (bimodal mode only) | GC pauses, cross-datacenter hops |
 | Slow latency multiplier | `slow_latency_multiplier` | 10x normal | Magnitude of tail latency spikes |
 | Write clogging | `clog_probability` / `clog_duration` | 0%, 100-300ms | Backpressure handling, flow control |
+| Per-pair permanent latency | `max_pair_latency` | `ZERO..ZERO` (off) | One stably-slow peer blocking quorum, asymmetric link delay |
 | Clock drift | `clock_drift_enabled` / `clock_drift_max` | enabled, 100ms | Lease expiration, distributed consensus, TTL handling |
 | Buggified delay | `buggified_delay_probability` / `buggified_delay_max` | 25%, 100ms | Race conditions, timing-dependent bugs |
 | Handshake delay | `handshake_delay_enabled` / `handshake_delay_max` | enabled, 10ms | TLS negotiation, connection startup overhead |
