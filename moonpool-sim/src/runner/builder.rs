@@ -330,15 +330,59 @@ enum WorkloadEntry {
     },
 }
 
+/// How an enabled chaos surface is sampled each seed.
+///
+/// This is the *sampling-strategy* axis, orthogonal to *which* surface is
+/// enabled (see [`Chaos`]). It does not apply to the workload operation-alphabet
+/// swarm, which is a test-driver concern with its own switch
+/// ([`SimulationBuilder::swarm_operations`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChaosMode {
+    /// Full surface every seed: all sub-families active, intensities seed-randomized.
+    ///
+    /// Network/storage use `random_for_seed`; attrition uses the configured regime
+    /// as written (reboot kinds still vary per seed via the in-run RNG).
+    Random,
+    /// Swarm testing (Groce et al., ISSTA 2012): a per-seed random *subset* of
+    /// sub-families is active, the rest fully off.
+    ///
+    /// Network/storage use `swarm_for_seed`; attrition randomizes the reboot regime
+    /// per seed, including the never-reboot and single-mode cases.
+    Swarm,
+}
+
+/// A chaos surface to enable, and how to sample it per seed.
+///
+/// Pass these to [`SimulationBuilder::enable_chaos`]. A surface absent from the
+/// enable list is **off**. The two axes are orthogonal: enabling a surface
+/// (which variant) is distinct from how it is sampled (its [`ChaosMode`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Chaos {
+    /// Network faults (clogging, partitions, bit-flips, random close, …).
+    Network(ChaosMode),
+    /// Storage faults (read/write/crash/misdirect/phantom/sync).
+    Storage(ChaosMode),
+    /// Process attrition (chaos reboots). Carries the base regime; requires
+    /// [`chaos_duration`](SimulationBuilder::chaos_duration) to actually run.
+    Attrition {
+        /// Base reboot regime (weights, `max_dead`, delays).
+        config: Attrition,
+        /// How the regime is sampled per seed.
+        mode: ChaosMode,
+    },
+}
+
 /// Builder pattern for configuring and running simulation experiments.
 pub struct SimulationBuilder {
     iteration_control: IterationControl,
     entries: Vec<WorkloadEntry>,
     process_entry: Option<ProcessEntry>,
     attrition: Option<Attrition>,
+    attrition_mode: ChaosMode,
     seeds: Vec<u64>,
-    use_random_config: bool,
-    use_swarm_config: bool,
+    network_chaos: Option<ChaosMode>,
+    storage_chaos: Option<ChaosMode>,
+    swarm_operations: bool,
     invariants: Vec<Box<dyn Invariant + Send>>,
     fault_injectors: Vec<Box<dyn FaultInjector>>,
     chaos_duration: Option<Duration>,
@@ -363,9 +407,11 @@ impl SimulationBuilder {
             entries: Vec::new(),
             process_entry: None,
             attrition: None,
+            attrition_mode: ChaosMode::Random,
             seeds: Vec::new(),
-            use_random_config: false,
-            use_swarm_config: false,
+            network_chaos: None,
+            storage_chaos: None,
+            swarm_operations: false,
             invariants: Vec::new(),
             fault_injectors: Vec::new(),
             chaos_duration: None,
@@ -648,27 +694,57 @@ impl SimulationBuilder {
         self
     }
 
-    /// Enable randomized network configuration for chaos testing.
+    /// Enable chaos surfaces and choose how each is sampled per seed.
+    ///
+    /// Each [`Chaos`] entry turns on one surface (network / storage / attrition)
+    /// in a given [`ChaosMode`] — `Random` (full surface every seed) or `Swarm`
+    /// (a per-seed random *subset* of sub-families, the rest fully off). A surface
+    /// not listed stays off. Later entries override earlier ones for the same
+    /// surface.
+    ///
+    /// `Swarm` mode defeats passive suppression: when every fault is always
+    /// slightly on (`Random`) families crowd each other out and the extreme
+    /// single-family configs that surface bugs almost never occur. Subset
+    /// decisions are drawn from a dedicated `CONFIG_RNG` stream, so they are
+    /// reproducible per seed yet never perturb in-run randomness or fork-explorer
+    /// replay.
+    ///
+    /// The workload operation-alphabet swarm is a separate, test-driver concern —
+    /// see [`swarm_operations`](Self::swarm_operations).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// builder.enable_chaos([
+    ///     Chaos::Network(ChaosMode::Swarm),
+    ///     Chaos::Storage(ChaosMode::Swarm),
+    /// ]);
+    /// ```
     #[must_use]
-    pub fn random_network(mut self) -> Self {
-        self.use_random_config = true;
+    pub fn enable_chaos(mut self, surfaces: impl IntoIterator<Item = Chaos>) -> Self {
+        for surface in surfaces {
+            match surface {
+                Chaos::Network(mode) => self.network_chaos = Some(mode),
+                Chaos::Storage(mode) => self.storage_chaos = Some(mode),
+                Chaos::Attrition { config, mode } => {
+                    self.attrition = Some(config);
+                    self.attrition_mode = mode;
+                }
+            }
+        }
         self
     }
 
-    /// Enable swarm testing: each seed enables a random *subset* of network
-    /// fault families (~50% each, the rest fully off), including the all-off
-    /// subset.
+    /// Enable per-seed swarm testing of the workload operation alphabet.
     ///
-    /// This defeats passive suppression — when every fault is always slightly on
-    /// (as with [`random_network`](Self::random_network)) families crowd each
-    /// other out and the extreme single-family configs that surface bugs almost
-    /// never occur. Subset decisions are drawn from a dedicated `CONFIG_RNG`
-    /// stream, so they are reproducible per seed yet never perturb in-run
-    /// randomness or fork-explorer replay. Takes precedence over
-    /// `random_network`.
+    /// When enabled, each seed exposes a random *subset* of each workload's
+    /// operation alphabet via [`swarm_op_enabled`](crate::swarm_op_enabled), so
+    /// bugs reachable only when whole operation groups are suppressed become
+    /// reachable across seeds. Decisions come from a dedicated per-seed stream and
+    /// are reproducible. Independent of [`enable_chaos`](Self::enable_chaos).
     #[must_use]
-    pub fn swarm(mut self) -> Self {
-        self.use_swarm_config = true;
+    pub fn swarm_operations(mut self) -> Self {
+        self.swarm_operations = true;
         self
     }
 
@@ -781,22 +857,30 @@ impl SimulationBuilder {
         })
     }
 
-    /// Build a `SimWorld` for the iteration, picking a swarm-subset, randomised,
-    /// or default network configuration. `use_swarm` takes precedence over
-    /// `use_random`.
+    /// Build a `SimWorld` for the iteration, picking each chaos surface's config
+    /// from its [`ChaosMode`]: `None` ⇒ default (off), `Random` ⇒ `random_for_seed`,
+    /// `Swarm` ⇒ `swarm_for_seed`.
+    ///
+    /// The network mask (if any) draws from `CONFIG_RNG` before the storage mask,
+    /// keeping the per-seed draw order fixed and reproducible.
     fn build_sim_for_iteration(
-        use_random: bool,
-        use_swarm: bool,
+        network_chaos: Option<ChaosMode>,
+        storage_chaos: Option<ChaosMode>,
         seed: u64,
     ) -> crate::sim::SimWorld {
-        let network_config = if use_swarm {
-            crate::NetworkConfiguration::swarm_for_seed()
-        } else if use_random {
-            crate::NetworkConfiguration::random_for_seed()
-        } else {
-            crate::NetworkConfiguration::default()
+        let network_config = match network_chaos {
+            Some(ChaosMode::Swarm) => crate::NetworkConfiguration::swarm_for_seed(),
+            Some(ChaosMode::Random) => crate::NetworkConfiguration::random_for_seed(),
+            None => crate::NetworkConfiguration::default(),
         };
-        crate::sim::SimWorld::new_with_network_config_and_seed(network_config, seed)
+        let storage_config = match storage_chaos {
+            Some(ChaosMode::Swarm) => crate::storage::StorageConfiguration::swarm_for_seed(),
+            Some(ChaosMode::Random) => crate::storage::StorageConfiguration::random_for_seed(),
+            None => crate::storage::StorageConfiguration::default(),
+        };
+        let mut sim = crate::sim::SimWorld::new_with_network_config_and_seed(network_config, seed);
+        sim.set_storage_config(storage_config);
+        sim
     }
 
     /// Drain user-provided fault injectors and, when present, append the
@@ -977,7 +1061,11 @@ impl SimulationBuilder {
     }
 
     /// Reset per-iteration state: capture buffers, RNG, buggify, and chaos.
-    fn reset_per_iteration_state(seed: u64, use_swarm: bool, obs_handle: &SimulationLayerHandle) {
+    fn reset_per_iteration_state(
+        seed: u64,
+        swarm_operations: bool,
+        obs_handle: &SimulationLayerHandle,
+    ) {
         obs_handle.reset_for_seed();
         crate::sim::reset_sim_rng();
         crate::sim::set_sim_seed(seed);
@@ -986,7 +1074,7 @@ impl SimulationBuilder {
         crate::sim::set_config_seed(seed);
         // Per-seed base for the workload operation-alphabet swarm mask; `None`
         // disables masking so workloads see the full alphabet.
-        crate::sim::set_swarm_op_seed(use_swarm.then_some(seed));
+        crate::sim::set_swarm_op_seed(swarm_operations.then_some(seed));
         crate::chaos::reset_always_violations();
         // Use moderate probabilities: 50% activation rate, 25% firing rate.
         crate::chaos::buggify_init(0.5, 0.25);
@@ -1276,7 +1364,7 @@ impl SimulationBuilder {
             hook();
         }
 
-        Self::reset_per_iteration_state(seed, self.use_swarm_config, obs_handle);
+        Self::reset_per_iteration_state(seed, self.swarm_operations, obs_handle);
 
         if matches!(
             self.iteration_control,
@@ -1316,11 +1404,18 @@ impl SimulationBuilder {
             .as_ref()
             .map(Self::resolve_process_config);
 
-        let sim =
-            Self::build_sim_for_iteration(self.use_random_config, self.use_swarm_config, seed);
+        let sim = Self::build_sim_for_iteration(self.network_chaos, self.storage_chaos, seed);
         let start_time = Instant::now();
+        // Derive the per-seed attrition regime: `Swarm` draws a fresh reboot regime
+        // from `CONFIG_RNG` (after the network/storage masks, keeping the draw order
+        // fixed); `Random` uses the configured weights as written.
+        let attrition = match (self.attrition.as_ref(), self.attrition_mode) {
+            (Some(base), ChaosMode::Swarm) => Some(base.swarm_for_seed()),
+            (Some(base), ChaosMode::Random) => Some(base.clone()),
+            (None, _) => None,
+        };
         let fault_injectors =
-            Self::collect_fault_injectors(&mut self.fault_injectors, self.attrition.as_ref());
+            Self::collect_fault_injectors(&mut self.fault_injectors, attrition.as_ref());
         let outcome = Self::run_orchestrator_blocking(RunOrchestratorInputs {
             seed,
             iteration_count,

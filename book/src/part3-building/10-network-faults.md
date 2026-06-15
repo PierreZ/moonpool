@@ -115,11 +115,12 @@ The fix is counterintuitive: for each run, turn **off** a random subset of fault
 
 ```rust
 SimulationBuilder::new()
-    .swarm() // each seed enables a random subset of fault families
+    // each seed enables a random subset of network fault families
+    .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
     // ...
 ```
 
-`.swarm()` builds on `random_for_seed()`, then masks each of the seven network fault families to off with 50% probability: clog, partition, bit-flip, random-close, connect-failure, clock-drift, and buggified-delay. The all-off subset is allowed on purpose, because a pure no-fault run is a useful, valid config.
+`ChaosMode::Swarm` builds on `random_for_seed()`, then masks each of the seven network fault families to off with 50% probability: clog, partition, bit-flip, random-close, connect-failure, clock-drift, and buggified-delay. The all-off subset is allowed on purpose, because a pure no-fault run is a useful, valid config. The same `enable_chaos` call swarms storage faults (`Chaos::Storage`) and the attrition reboot regime (`Chaos::Attrition`) the same way.
 
 The interesting engineering detail is **where the randomness comes from**. Swarm decisions must not perturb the in-run randomness, or they would shift every fault's timing and break fork-explorer replay. So the subset is drawn from a separate `CONFIG_RNG` stream, seeded from the iteration seed but salted to decorrelate it from the main `SIM_RNG`. The config RNG never advances the in-run call counter. Same seed, same subset, every time, with zero effect on the simulation that follows.
 

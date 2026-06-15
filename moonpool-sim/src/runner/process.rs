@@ -155,4 +155,100 @@ impl Attrition {
             RebootKind::CrashAndWipe
         }
     }
+
+    /// Derive a per-seed swarm reboot regime from this base configuration.
+    ///
+    /// Implements *swarm testing* (Groce et al., ISSTA 2012) for attrition: each
+    /// seed exercises a random reboot *regime* rather than the fixed configured
+    /// one. This surfaces bug classes that a single fixed regime hides — most
+    /// importantly the **never-reboot** case (needed to find slow leaks / timer
+    /// overflows) and single-mode cases ("always crash", "graceful-only").
+    ///
+    /// Draws exactly four `config_random_bool` values from the independent
+    /// `CONFIG_RNG` stream (fixed sequence ⇒ reproducible per seed, never
+    /// perturbs in-run randomness). The first draw, with ~50% probability, sets
+    /// `max_dead = 0` — the never-reboot regime, where the injector's
+    /// `dead_count() >= max_dead` gate is always true so it never reboots. The
+    /// remaining three each mask one reboot-kind weight to `0.0` with ~50%
+    /// probability.
+    ///
+    /// When all three kind weights are masked off, [`choose_kind`](Self::choose_kind)
+    /// falls back to [`RebootKind::Crash`] — the "always crash" single-mode regime.
+    #[must_use]
+    pub fn swarm_for_seed(&self) -> Attrition {
+        let mut regime = self.clone();
+        if !crate::sim::config_random_bool(0.5) {
+            regime.max_dead = 0;
+        }
+        if !crate::sim::config_random_bool(0.5) {
+            regime.prob_graceful = 0.0;
+        }
+        if !crate::sim::config_random_bool(0.5) {
+            regime.prob_crash = 0.0;
+        }
+        if !crate::sim::config_random_bool(0.5) {
+            regime.prob_wipe = 0.0;
+        }
+        regime
+    }
+}
+
+#[cfg(test)]
+mod swarm_tests {
+    use super::Attrition;
+    use crate::sim::rng::set_config_seed;
+
+    /// A representative base regime: all three reboot kinds enabled.
+    fn base() -> Attrition {
+        Attrition {
+            max_dead: 2,
+            prob_graceful: 0.3,
+            prob_crash: 0.5,
+            prob_wipe: 0.2,
+            recovery_delay_ms: None,
+            grace_period_ms: None,
+        }
+    }
+
+    /// Build a swarm regime the way the runner does: config stream seeded per iteration.
+    fn swarm_for(seed: u64) -> Attrition {
+        set_config_seed(seed);
+        base().swarm_for_seed()
+    }
+
+    #[test]
+    fn swarm_regime_is_deterministic_per_seed() {
+        for seed in [0_u64, 1, 42, 12_345] {
+            assert_eq!(
+                swarm_for(seed),
+                swarm_for(seed),
+                "swarm regime must be reproducible for seed {seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn swarm_reaches_never_reboot() {
+        let saw_never_reboot = (0..1000_u64).any(|s| swarm_for(s).max_dead == 0);
+        assert!(
+            saw_never_reboot,
+            "no seed in 0..1000 produced the never-reboot regime (max_dead == 0)"
+        );
+    }
+
+    #[test]
+    fn swarm_reaches_single_mode() {
+        let saw_single_mode = (0..1000_u64).any(|s| {
+            let r = swarm_for(s);
+            let on = [r.prob_graceful, r.prob_crash, r.prob_wipe]
+                .iter()
+                .filter(|&&w| w > 0.0)
+                .count();
+            on == 1
+        });
+        assert!(
+            saw_single_mode,
+            "no seed in 0..1000 produced a single-mode regime (one kind enabled)"
+        );
+    }
 }

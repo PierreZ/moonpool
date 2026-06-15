@@ -553,7 +553,7 @@ pub struct Dungeon {
     game: dungeon_game::Game,
     last_action_index: Option<u8>,
     /// Per-seed enabled subset of the action alphabet (swarm testing). Without
-    /// `.swarm()` this is the full alphabet, so behavior is unchanged.
+    /// `.swarm_operations()` this is the full alphabet, so behavior is unchanged.
     enabled_actions: Vec<u8>,
 }
 

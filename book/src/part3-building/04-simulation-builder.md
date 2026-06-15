@@ -132,20 +132,23 @@ Invariants read from the `StateHandle`, which workloads write to via `ctx.state(
 Real distributed systems do not just run cleanly. Servers crash, networks partition, and then things have to recover. The builder models this with `chaos_duration`:
 
 ```rust
-use moonpool_sim::Attrition;
+use moonpool_sim::{Attrition, Chaos, ChaosMode};
 
 SimulationBuilder::new()
     .processes(3, || Box::new(KvServer))
     .workload(KvWorkload::new(200, keys))
     .chaos_duration(Duration::from_secs(30))
-    .attrition(Attrition {
-        max_dead: 1,
-        prob_graceful: 0.3,
-        prob_crash: 0.5,
-        prob_wipe: 0.2,
-        recovery_delay_ms: Some(1000..5000),
-        grace_period_ms: Some(2000..4000),
-    })
+    .enable_chaos([Chaos::Attrition {
+        config: Attrition {
+            max_dead: 1,
+            prob_graceful: 0.3,
+            prob_crash: 0.5,
+            prob_wipe: 0.2,
+            recovery_delay_ms: Some(1000..5000),
+            grace_period_ms: Some(2000..4000),
+        },
+        mode: ChaosMode::Random,
+    }])
     .set_iterations(100)
     .run()
     .await;
@@ -163,21 +166,26 @@ The simulation lifecycle:
 
 `max_dead: 1` means at most one process is down at any time. The probability weights control the mix of graceful shutdowns (shutdown token fired, grace period) versus instant crashes (no warning, connections abort).
 
-## Randomized Network
+## Enabling Chaos
 
-For additional chaos, enable randomized network configuration:
-
-```rust
-.random_network()
-```
-
-This varies latency, packet delay distributions, and other network parameters per iteration, based on the seed. Without this flag, the network uses default configuration (consistent, low-latency).
-
-For stronger coverage, use `.swarm()` instead. It enables a random **subset** of network fault families per seed, fully disabling the rest, rather than turning every fault slightly on at once. This defeats passive suppression, where active faults crowd each other out and the extreme single-family configs that surface bugs almost never occur. See [Network Faults](10-network-faults.md#swarm-testing-less-is-more) for the full reasoning.
+For additional chaos, enable one or more fault surfaces and choose how each is sampled per seed:
 
 ```rust
-.swarm()
+.enable_chaos([Chaos::Network(ChaosMode::Random)])
 ```
+
+`ChaosMode::Random` varies latency, packet delay distributions, and other network parameters per iteration, based on the seed. A surface absent from the list stays off, using its default configuration (consistent, low-latency, no faults).
+
+For stronger coverage, use `ChaosMode::Swarm`. It enables a random **subset** of that surface's fault families per seed, fully disabling the rest, rather than turning every fault slightly on at once. This defeats passive suppression, where active faults crowd each other out and the extreme single-family configs that surface bugs almost never occur. See [Network Faults](10-network-faults.md#swarm-testing-less-is-more) for the full reasoning.
+
+```rust
+.enable_chaos([
+    Chaos::Network(ChaosMode::Swarm),
+    Chaos::Storage(ChaosMode::Swarm),
+])
+```
+
+The same call drives storage faults and the attrition reboot regime, each with its own `ChaosMode`. The workload operation-alphabet swarm is a separate, test-driver concern: opt in with `.swarm_operations()`.
 
 ## Putting It All Together
 
@@ -190,15 +198,21 @@ let report = SimulationBuilder::new()
     .workload(KvWorkload::new(500, keys.clone()))
     .invariant(ConservationLaw)
     .chaos_duration(Duration::from_secs(30))
-    .attrition(Attrition {
-        max_dead: 1,
-        prob_graceful: 0.3,
-        prob_crash: 0.5,
-        prob_wipe: 0.2,
-        recovery_delay_ms: None,
-        grace_period_ms: None,
-    })
-    .random_network()
+    .enable_chaos([
+        Chaos::Attrition {
+            config: Attrition {
+                max_dead: 1,
+                prob_graceful: 0.3,
+                prob_crash: 0.5,
+                prob_wipe: 0.2,
+                recovery_delay_ms: None,
+                grace_period_ms: None,
+            },
+            mode: ChaosMode::Swarm,
+        },
+        Chaos::Network(ChaosMode::Swarm),
+        Chaos::Storage(ChaosMode::Swarm),
+    ])
     .set_iterations(100)
     .run()
     .await;

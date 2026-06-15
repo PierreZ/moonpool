@@ -25,7 +25,8 @@ The builder pattern for configuring and running simulation experiments. Created 
 | `set_iteration_control(ctrl)` | `IterationControl` | Set the iteration control strategy |
 | `set_time_limit(dur)` | `Duration` | Run for a wall-clock time duration |
 | `set_debug_seeds(seeds)` | `Vec<u64>` | Use specific seeds for deterministic debugging |
-| `random_network()` | -- | Enable randomized `NetworkConfiguration` per iteration |
+| `enable_chaos(surfaces)` | `impl IntoIterator<Item = Chaos>` | Enable network/storage/attrition chaos per seed, each in a `ChaosMode` (`Random` or `Swarm`) |
+| `swarm_operations()` | -- | Enable per-seed swarm of each workload's operation alphabet |
 | `enable_exploration(config)` | `ExplorationConfig` | Enable fork-based multiverse exploration |
 | `replay_recipe(recipe)` | `BugRecipe` | Replay a specific bug recipe |
 | `run()` | -- | Execute the simulation, returns `SimulationReport` |
@@ -35,7 +36,8 @@ The builder pattern for configuring and running simulation experiments. Created 
 A freshly created `SimulationBuilder::new()` has:
 
 - **iteration_control**: `IterationControl::FixedCount(1)`
-- **use_random_config**: `false` (uses `NetworkConfiguration::default()`)
+- **chaos**: all surfaces off (network/storage use `default()`, no attrition)
+- **swarm_operations**: `false` (workloads see the full operation alphabet)
 - **exploration**: disabled
 - **seeds**: empty (auto-generated)
 - No workloads, processes, invariants, or fault injectors

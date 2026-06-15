@@ -23,7 +23,7 @@ pub(crate) mod wall_clock;
 pub mod workload;
 
 // Re-export main types at module level
-pub use builder::{ClientId, WorkloadCount};
+pub use builder::{Chaos, ChaosMode, ClientId, WorkloadCount};
 pub use builder::{IterationControl, SimulationBuilder};
 pub use context::SimContext;
 pub use fault_injector::{FaultContext, FaultInjector};

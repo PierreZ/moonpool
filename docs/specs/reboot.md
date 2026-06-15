@@ -140,12 +140,17 @@ SimulationBuilder::new()
     // Test driver: survives reboots
     .workload(TestDriver::new())
     // Built-in attrition (chaos phase only)
-    .attrition(Attrition {
-        max_dead: 1,
-        prob_graceful: 0.3,
-        prob_crash: 0.5,
-        prob_wipe: 0.2,
-    })
+    .enable_chaos([Chaos::Attrition {
+        config: Attrition {
+            max_dead: 1,
+            prob_graceful: 0.3,
+            prob_crash: 0.5,
+            prob_wipe: 0.2,
+            recovery_delay_ms: None,
+            grace_period_ms: None,
+        },
+        mode: ChaosMode::Random,
+    }])
     // OR custom fault injector
     .fault(MyCustomInjector::new())
     // Cross-system invariants (always run, even during recovery)
@@ -257,7 +262,11 @@ SimulationBuilder::new()
     .processes(5, || PaxosNode)
         .tags(&[("dc", &["east", "west", "eu"])])
     .workload(PaxosTest)
-    .attrition(Attrition { max_dead: 1, prob_graceful: 0.3, prob_crash: 0.5, prob_wipe: 0.2 })
+    .enable_chaos([Chaos::Attrition {
+        config: Attrition { max_dead: 1, prob_graceful: 0.3, prob_crash: 0.5, prob_wipe: 0.2,
+                            recovery_delay_ms: None, grace_period_ms: None },
+        mode: ChaosMode::Random,
+    }])
     .invariant(LinearizabilityCheck)
     .set_iterations(100)
     .run()
@@ -295,7 +304,11 @@ impl Workload for ActorTest {
 SimulationBuilder::new()
     .processes(3, || ActorHostProcess)
     .workload(ActorTest)
-    .attrition(Attrition { max_dead: 1, prob_graceful: 0.5, prob_crash: 0.5, prob_wipe: 0.0 })
+    .enable_chaos([Chaos::Attrition {
+        config: Attrition { max_dead: 1, prob_graceful: 0.5, prob_crash: 0.5, prob_wipe: 0.0,
+                            recovery_delay_ms: None, grace_period_ms: None },
+        mode: ChaosMode::Random,
+    }])
     .invariant(SingleActivation)
     .run()
 ```

@@ -58,16 +58,21 @@ Attrition {
 Attrition is configured on the simulation builder and requires a chaos duration:
 
 ```rust
+use moonpool_sim::{Attrition, Chaos, ChaosMode};
+
 SimulationBuilder::new()
     .processes(3, || Box::new(MyProcess::new()))
-    .attrition(Attrition {
-        max_dead: 1,
-        prob_graceful: 0.3,
-        prob_crash: 0.5,
-        prob_wipe: 0.2,
-        recovery_delay_ms: None,  // use defaults
-        grace_period_ms: None,    // use defaults
-    })
+    .enable_chaos([Chaos::Attrition {
+        config: Attrition {
+            max_dead: 1,
+            prob_graceful: 0.3,
+            prob_crash: 0.5,
+            prob_wipe: 0.2,
+            recovery_delay_ms: None,  // use defaults
+            grace_period_ms: None,    // use defaults
+        },
+        mode: ChaosMode::Random,
+    }])
     .chaos_duration(Duration::from_secs(60))
     .workload(MyWorkload::new())
     .run()
@@ -75,6 +80,8 @@ SimulationBuilder::new()
 ```
 
 The `.chaos_duration()` call is required because attrition runs only during the chaos phase. After the chaos duration elapses, fault injectors stop and the system continues until all workloads complete. A settle phase then drains remaining events before checks run, surfacing cleanup bugs rather than hiding them behind an arbitrary timer.
+
+`ChaosMode::Random` uses your configured weights as written every seed. Switch to `ChaosMode::Swarm` to swarm the reboot *regime* itself: each seed draws a random subset of the configuration, including the never-reboot case (which surfaces slow-leak and timer bugs that constant restarting hides) and single-mode cases like always-crash or graceful-only. Same reasoning as [swarming network faults](10-network-faults.md#swarm-testing-less-is-more).
 
 ## The max_dead Constraint
 

@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Attrition, FaultContext, FaultInjector, Invariant, NetworkProvider, Process, RebootKind,
-    SIM_FAULT_EVENT_NAME, SimContext, SimulationBuilder, SimulationResult, TcpListenerTrait,
-    TimeProvider, TraceQuery, Workload, assert_always,
+    Attrition, Chaos, ChaosMode, FaultContext, FaultInjector, Invariant, NetworkProvider, Process,
+    RebootKind, SIM_FAULT_EVENT_NAME, SimContext, SimulationBuilder, SimulationResult,
+    TcpListenerTrait, TimeProvider, TraceQuery, Workload, assert_always,
 };
 
 use std::cell::Cell;
@@ -213,14 +213,17 @@ fn test_builtin_attrition() {
     let report = SimulationBuilder::new()
         .processes(3, || Box::new(EchoProcess))
         .workload(TimedWorkload(Duration::from_secs(25)))
-        .attrition(Attrition {
-            max_dead: 1,
-            prob_graceful: 0.3,
-            prob_crash: 0.5,
-            prob_wipe: 0.2,
-            recovery_delay_ms: None,
-            grace_period_ms: None,
-        })
+        .enable_chaos([Chaos::Attrition {
+            config: Attrition {
+                max_dead: 1,
+                prob_graceful: 0.3,
+                prob_crash: 0.5,
+                prob_wipe: 0.2,
+                recovery_delay_ms: None,
+                grace_period_ms: None,
+            },
+            mode: ChaosMode::Random,
+        }])
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(3)
         .set_debug_seeds(vec![42, 123, 999])
@@ -553,14 +556,17 @@ fn test_attrition_timing_invariant() {
     let report = SimulationBuilder::new()
         .processes(3, || Box::new(EchoProcess))
         .workload(TimedWorkload(Duration::from_secs(25)))
-        .attrition(Attrition {
-            max_dead: 1,
-            prob_graceful: 0.5,
-            prob_crash: 0.3,
-            prob_wipe: 0.2,
-            recovery_delay_ms: Some(500..2000),
-            grace_period_ms: Some(1000..3000),
-        })
+        .enable_chaos([Chaos::Attrition {
+            config: Attrition {
+                max_dead: 1,
+                prob_graceful: 0.5,
+                prob_crash: 0.3,
+                prob_wipe: 0.2,
+                recovery_delay_ms: Some(500..2000),
+                grace_period_ms: Some(1000..3000),
+            },
+            mode: ChaosMode::Random,
+        }])
         .invariant(RebootTimingInvariant::new())
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(5)
@@ -580,14 +586,17 @@ fn test_max_dead_limits_concurrent_kills_via_attrition() {
     let report = SimulationBuilder::new()
         .processes(5, || Box::new(EchoProcess))
         .workload(TimedWorkload(Duration::from_secs(25)))
-        .attrition(Attrition {
-            max_dead: 1,
-            prob_graceful: 0.0,
-            prob_crash: 1.0,
-            prob_wipe: 0.0,
-            recovery_delay_ms: Some(500..2000),
-            grace_period_ms: None,
-        })
+        .enable_chaos([Chaos::Attrition {
+            config: Attrition {
+                max_dead: 1,
+                prob_graceful: 0.0,
+                prob_crash: 1.0,
+                prob_wipe: 0.0,
+                recovery_delay_ms: Some(500..2000),
+                grace_period_ms: None,
+            },
+            mode: ChaosMode::Random,
+        }])
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(5)
         .set_debug_seeds(vec![42, 123, 999, 7, 314])

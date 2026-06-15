@@ -85,7 +85,7 @@ The repository ships one:
 It runs a single seed of two nodes trading ping/pong RPCs over the **real
 transport stack**, driven by the **simulated** network, and animates the result.
 The client and server are ordinary `Process` and `Workload` code with no browser
-awareness. `.random_network()` injects seeded latency and connection drops, so
+awareness. `.enable_chaos([Chaos::Network(ChaosMode::Random)])` injects seeded latency and connection drops, so
 some round trips come back slow and some never come back at all. A generic
 recorder reads the same trace timeline your invariants read and turns it into the
 picture.

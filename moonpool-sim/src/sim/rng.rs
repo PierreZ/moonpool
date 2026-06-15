@@ -49,8 +49,8 @@ thread_local! {
 
     /// Thread-local per-seed base for workload operation-alphabet swarm masks.
     ///
-    /// `Some(seed)` when `.swarm()` is enabled for the current iteration,
-    /// `None` otherwise. See [`swarm_op_enabled`] for how it is consumed; like
+    /// `Some(seed)` when `.swarm_operations()` is enabled for the current
+    /// iteration, `None` otherwise. See [`swarm_op_enabled`] for how it is consumed; like
     /// [`CONFIG_RNG`] it never touches the [`SIM_RNG`] call count.
     static SWARM_OP_SEED: Cell<Option<u64>> = const { Cell::new(None) };
 }
@@ -312,8 +312,8 @@ pub fn config_random_bool(p: f64) -> bool {
 
 /// Set the per-seed base for workload operation-alphabet swarm masks.
 ///
-/// Called once per iteration by the runner: `Some(seed)` when `.swarm()` is
-/// enabled, `None` otherwise. With `None`, [`swarm_op_enabled`] reports every
+/// Called once per iteration by the runner: `Some(seed)` when `.swarm_operations()`
+/// is enabled, `None` otherwise. With `None`, [`swarm_op_enabled`] reports every
 /// operation as enabled (full alphabet — zero behavior change).
 pub fn set_swarm_op_seed(seed: Option<u64>) {
     SWARM_OP_SEED.with(|s| s.set(seed));
