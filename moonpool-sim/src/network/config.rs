@@ -38,11 +38,12 @@
 //! |-------|--------------|---------|---------------------|
 //! | Bit flip | `bit_flip_probability` + `bit_flip_min/max_bits` | 0.01%, 1-32 bits | CRC/checksum validation, data corruption detection |
 //!
-//! ## Partial Write Simulation
+//! ## Partial Write/Read Simulation
 //!
 //! | Feature | Config Field | Default | Real-World Scenario |
 //! |---------|--------------|---------|---------------------|
 //! | Short writes | `partial_write_max_bytes` | 1000 bytes | TCP fragmentation handling, message framing |
+//! | Short reads | `partial_read_max_bytes` | 1000 bytes | TCP short reads, message reassembly / framing |
 //!
 //! ## Configuration Examples
 //!
@@ -167,6 +168,12 @@ pub struct ChaosConfiguration {
     /// Following FDB's approach of truncating writes to test TCP backpressure handling
     pub partial_write_max_bytes: usize,
 
+    /// Maximum bytes for partial read simulation (BUGGIFY truncates reads to 1-max_bytes)
+    /// Mirrors FDB's `Sim2Conn` partial delivery on the receiver to test short reads
+    /// and message reassembly. Always delivers at least one byte so a partial read is
+    /// never mistaken for EOF.
+    pub partial_read_max_bytes: usize,
+
     /// Random connection close probability per I/O operation (0.0 - 1.0)
     /// FDB default: 0.00001 (0.001%) - see sim2.actor.cpp:584
     pub random_close_probability: f64,
@@ -240,6 +247,7 @@ impl Default for ChaosConfiguration {
             bit_flip_max_bits: 32,
             bit_flip_cooldown: Duration::ZERO, // No cooldown by default for maximum chaos
             partial_write_max_bytes: 1000,     // Matches FDB's randomInt(0, 1000)
+            partial_read_max_bytes: 1000,      // Symmetric with partial writes
             random_close_probability: 0.00001, // 0.001% - matches FDB's sim2.actor.cpp:584
             random_close_cooldown: Duration::from_secs(5), // Reasonable default
             random_close_explicit_ratio: 0.3,  // 30% explicit - matches FDB's sim2.actor.cpp:602
@@ -270,6 +278,7 @@ impl ChaosConfiguration {
             bit_flip_max_bits: 32,
             bit_flip_cooldown: Duration::ZERO,
             partial_write_max_bytes: 1000,
+            partial_read_max_bytes: 1000,
             random_close_probability: 0.0,
             random_close_cooldown: Duration::ZERO,
             random_close_explicit_ratio: 0.3,
@@ -322,6 +331,9 @@ impl ChaosConfiguration {
             // buggifies MAX_CLOGGING_LATENCY to 0.1s). Kept last so existing RNG
             // draws above are unaffected.
             max_pair_latency: Duration::ZERO..Duration::from_millis(sim_random_range(0..100)),
+            // Vary max bytes for different scenarios. Appended last (after
+            // max_pair_latency) so the RNG draws above keep their per-seed values.
+            partial_read_max_bytes: sim_random_range(100..2000),
         }
     }
 

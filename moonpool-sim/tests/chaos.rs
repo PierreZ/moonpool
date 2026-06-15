@@ -12,6 +12,8 @@ mod buggify;
 mod clock_drift;
 #[path = "chaos/connect_failure.rs"]
 mod connect_failure;
+#[path = "chaos/partial_read.rs"]
+mod partial_read;
 #[path = "chaos/random_close.rs"]
 mod random_close;
 #[path = "chaos/swarm.rs"]

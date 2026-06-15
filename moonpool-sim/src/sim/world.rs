@@ -561,12 +561,46 @@ impl SimWorld {
             .write()
             .expect("RwLock poisoned: prior task panicked");
 
+        // Read the config knob before borrowing the connection mutably (disjoint
+        // fields, but keeping it a local sidesteps any borrow friction).
+        let partial_read_max_bytes = inner.network.config.chaos.partial_read_max_bytes;
+
         if let Some(connection) = inner.network.connections.get_mut(&connection_id) {
+            let available = std::cmp::min(buf.len(), connection.receive_buffer.len());
+
+            // BUGGIFY: simulate a partial read by delivering fewer bytes than are
+            // available, leaving the remainder buffered for the next read (mirrors
+            // FDB's Sim2Conn receiver). Skip stable connections. Always deliver at
+            // least one byte so the caller never mistakes a partial read for EOF,
+            // which would leave poll_read waiting on data already in the buffer.
+            let limit = if available > 0 && !connection.flags.is_stable() && crate::buggify!() {
+                let max_read = std::cmp::min(available, partial_read_max_bytes);
+                if max_read >= 1 {
+                    let n = sim_random_range(1..max_read + 1);
+                    if n < available {
+                        tracing::debug!(
+                            "BUGGIFY: Partial read on connection {} - delivering {} of {} bytes",
+                            connection_id.0,
+                            n,
+                            available
+                        );
+                    }
+                    n
+                } else {
+                    available
+                }
+            } else {
+                available
+            };
+
             let mut bytes_read = 0;
-            while bytes_read < buf.len() && !connection.receive_buffer.is_empty() {
-                if let Some(byte) = connection.receive_buffer.pop_front() {
-                    buf[bytes_read] = byte;
-                    bytes_read += 1;
+            while bytes_read < limit {
+                match connection.receive_buffer.pop_front() {
+                    Some(byte) => {
+                        buf[bytes_read] = byte;
+                        bytes_read += 1;
+                    }
+                    None => break,
                 }
             }
             Ok(bytes_read)

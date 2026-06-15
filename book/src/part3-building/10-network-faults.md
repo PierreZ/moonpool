@@ -34,6 +34,10 @@ Write clogging stalls data delivery on a connection for a random duration (100-3
 
 Writes are truncated to a random length (0 to 1000 bytes by default), following FoundationDB's approach. This tests TCP fragmentation handling and message framing logic. If your wire protocol assumes that a single write delivers a complete message, partial writes will break that assumption immediately.
 
+### Partial Reads
+
+Reads are the mirror image: a read returns a random prefix of what is buffered (1 to 1000 bytes by default), and the rest stays buffered for the next read. FoundationDB's `Sim2Conn` does the same 50/50 split on the receiver. The one asymmetry with writes is that a partial read always delivers **at least one byte** when data is available, because a zero-byte read is how the stream signals end-of-file. This exercises the reassembly side of your wire protocol: code that calls `read` once and assumes it got a whole message will drop bytes the moment a short read splits a header or a length prefix.
+
 ### Bit Flips
 
 Packet data is corrupted with random bit flips at low probability (0.01% by default). The number of flipped bits follows a power-law distribution between 1 and 32. This tests checksum validation and corruption detection. Without bit-flip injection, corruption bugs only surface in production when cosmic rays or faulty NICs flip bits for you.
