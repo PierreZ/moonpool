@@ -21,7 +21,7 @@ Because it keys off that standard event contract, the *same* recorder visualizes
 any transport workload that emits it — swap in a consensus layer and you'd watch
 its messages and chaos with no recorder changes.
 
-`.random_network()` turns on seeded network chaos — variable latency, reordering,
+`.enable_chaos([Chaos::Network(ChaosMode::Random)])` turns on seeded network chaos — variable latency, reordering,
 connection drops — so a request comes back fast, slowly, or not at all. The
 front-end animates each round trip as a ball flying A→B→A; a dropped request is a
 ball lost at the net (red ✗). Nothing really waits: logical time is driven by the

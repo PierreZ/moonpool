@@ -35,7 +35,7 @@ fn main() {
             .processes(3, || Box::new(KvServer))
             .workload(KvWorkload::new(200, keys))
             .set_iterations(100)
-            .random_network()
+            .enable_chaos([Chaos::Network(ChaosMode::Random)])
             .run()
             .await
     });

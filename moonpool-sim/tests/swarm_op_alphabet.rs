@@ -1,6 +1,6 @@
 //! Integration test for workload operation-alphabet swarm testing (issue #129).
 //!
-//! Verifies the end-to-end wiring: with `.swarm()`, each seed enables a random
+//! Verifies the end-to-end wiring: with `.swarm_operations()`, each seed enables a random
 //! *subset* of a workload's operation alphabet (via [`swarm_op_enabled`]), so a
 //! demonstrator that only triggers when a whole operation sub-group is masked
 //! off becomes reachable across seeds — yet stays unreachable under the
@@ -60,7 +60,7 @@ fn seeds() -> Vec<u64> {
 #[test]
 fn swarm_makes_group_suppression_reachable() {
     let report = SimulationBuilder::new()
-        .swarm()
+        .swarm_operations()
         .set_debug_seeds(seeds())
         .set_iterations(400)
         .workload(OpAlphabetWorkload)

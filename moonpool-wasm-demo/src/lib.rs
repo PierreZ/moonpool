@@ -16,7 +16,7 @@
 //! recorder visualizes any transport workload that emits it (e.g. the
 //! hash-chain workload in `moonpool-transport-sim`) with no changes.
 //!
-//! `.random_network()` turns on seeded network chaos — variable latency,
+//! `.enable_chaos([Chaos::Network(ChaosMode::Random)])` turns on seeded network chaos — variable latency,
 //! reordering, connection drops — so a request comes back fast, slowly, or not
 //! at all. Each acknowledged request becomes two [`Shot`] legs (A→B then B→A)
 //! split over the observed round-trip time; a failed request becomes a single
@@ -31,9 +31,9 @@
 use async_trait::async_trait;
 use moonpool_sim::runner::builder::{ProcessCount, WorkloadCount};
 use moonpool_sim::{
-    Invariant, Process, SIM_FAULT_EVENT_NAME, SimContext, SimulationBuilder, SimulationError,
-    SimulationResult, TimeProvider, TraceQuery, Workload, assert_always, assert_reachable,
-    assert_sometimes,
+    Chaos, ChaosMode, Invariant, Process, SIM_FAULT_EVENT_NAME, SimContext, SimulationBuilder,
+    SimulationError, SimulationResult, TimeProvider, TraceQuery, Workload, assert_always,
+    assert_reachable, assert_sometimes,
 };
 use moonpool_transport::{
     Endpoint, JsonCodec, NetTransport, NetTransportBuilder, NetworkAddress, ReplyError,
@@ -431,7 +431,7 @@ pub fn run_seed(seed: u64) -> RunResult {
         .workloads(WorkloadCount::Fixed(1), |_| Box::new(PingClient))
         .invariant(TimelineRecorder { data: data.clone() })
         .chaos_duration(Duration::from_secs(CHAOS_SECS))
-        .random_network()
+        .enable_chaos([Chaos::Network(ChaosMode::Random)])
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
         .run();

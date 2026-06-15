@@ -14,7 +14,7 @@
 //! so it exercises the swarm-configured network provider without that coupling.
 
 use async_trait::async_trait;
-use moonpool_sim::{NetworkProvider, SimContext, SimulationBuilder, Workload};
+use moonpool_sim::{Chaos, ChaosMode, NetworkProvider, SimContext, SimulationBuilder, Workload};
 
 /// Minimal workload: touches the swarm-configured network provider via `bind`
 /// and fires a coverage gate. Always completes, regardless of fault subset.
@@ -41,7 +41,7 @@ impl Workload for SwarmSmokeWorkload {
 #[test]
 fn swarm_runs_clean_across_seeds() {
     let report = SimulationBuilder::new()
-        .swarm()
+        .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
         .set_iterations(50)
         .workload(SwarmSmokeWorkload)
         .run();

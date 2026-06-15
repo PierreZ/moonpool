@@ -50,7 +50,7 @@
 //! - Storage faults: TigerBeetle storage simulation
 //! - Crash consistency: FDB AsyncFileKAIO, TigerBeetle deterministic testing
 
-use crate::sim::rng::sim_random_range;
+use crate::sim::rng::{config_random_bool, sim_random_range};
 use std::ops::Range;
 use std::time::Duration;
 
@@ -215,6 +215,52 @@ impl StorageConfiguration {
         }
     }
 
+    /// Create a swarm-testing storage configuration for seed-based testing.
+    ///
+    /// Starts from [`random_for_seed`](Self::random_for_seed), then disables each
+    /// fault family with ~50% probability (drawn from the independent `CONFIG_RNG`
+    /// stream). This implements *swarm testing* (Groce et al., ISSTA 2012): each
+    /// seed exercises a random *subset* of storage fault families — including the
+    /// all-off subset — instead of every family being slightly on at once (which
+    /// lets families crowd each other out, the passive-suppression anti-pattern).
+    #[must_use]
+    pub fn swarm_for_seed() -> Self {
+        let mut config = Self::random_for_seed();
+        config.apply_swarm_mask();
+        config
+    }
+
+    /// Disable each fault family with ~50% probability using the `CONFIG_RNG`
+    /// stream (see [`swarm_for_seed`](Self::swarm_for_seed)).
+    ///
+    /// Draws exactly seven `config_random_bool` values (one per family) so the
+    /// `CONFIG_RNG` call sequence is fixed and reproducible per seed. Performance
+    /// parameters (IOPS, bandwidth, latencies) stay as sampled — only the fault
+    /// families are masked.
+    fn apply_swarm_mask(&mut self) {
+        if !config_random_bool(0.5) {
+            self.read_fault_probability = 0.0;
+        }
+        if !config_random_bool(0.5) {
+            self.write_fault_probability = 0.0;
+        }
+        if !config_random_bool(0.5) {
+            self.crash_fault_probability = 0.0;
+        }
+        if !config_random_bool(0.5) {
+            self.misdirect_read_probability = 0.0;
+        }
+        if !config_random_bool(0.5) {
+            self.misdirect_write_probability = 0.0;
+        }
+        if !config_random_bool(0.5) {
+            self.phantom_write_probability = 0.0;
+        }
+        if !config_random_bool(0.5) {
+            self.sync_failure_probability = 0.0;
+        }
+    }
+
     /// Create a configuration optimized for fast local testing.
     ///
     /// Minimal latencies and no fault injection for predictable,
@@ -238,5 +284,96 @@ impl StorageConfiguration {
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
         }
+    }
+}
+
+#[cfg(test)]
+mod swarm_tests {
+    use super::StorageConfiguration;
+    use crate::sim::rng::{reset_sim_rng, set_config_seed, set_sim_seed};
+
+    /// The on/off state of each swarmed fault family, in mask order.
+    fn enabled_families(config: &StorageConfiguration) -> [bool; 7] {
+        [
+            config.read_fault_probability > 0.0,
+            config.write_fault_probability > 0.0,
+            config.crash_fault_probability > 0.0,
+            config.misdirect_read_probability > 0.0,
+            config.misdirect_write_probability > 0.0,
+            config.phantom_write_probability > 0.0,
+            config.sync_failure_probability > 0.0,
+        ]
+    }
+
+    /// Build a swarm config the way the runner does: both streams seeded per iteration.
+    fn swarm_for(seed: u64) -> StorageConfiguration {
+        reset_sim_rng();
+        set_sim_seed(seed);
+        set_config_seed(seed);
+        StorageConfiguration::swarm_for_seed()
+    }
+
+    #[test]
+    fn swarm_subset_is_deterministic_per_seed() {
+        for seed in [0_u64, 1, 42, 12_345] {
+            let first = enabled_families(&swarm_for(seed));
+            let second = enabled_families(&swarm_for(seed));
+            assert_eq!(
+                first, second,
+                "swarm subset must be reproducible for seed {seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn swarm_reaches_all_off_and_mixed_subsets() {
+        let mut saw_all_off = false;
+        let mut saw_mixed = false;
+
+        for seed in 0..1000_u64 {
+            let families = enabled_families(&swarm_for(seed));
+            let on = families.iter().filter(|&&e| e).count();
+            if on == 0 {
+                saw_all_off = true;
+            }
+            if on > 0 && on < families.len() {
+                saw_mixed = true;
+            }
+            if saw_all_off && saw_mixed {
+                break;
+            }
+        }
+
+        assert!(
+            saw_all_off,
+            "no seed in 0..1000 produced the all-off subset"
+        );
+        assert!(saw_mixed, "no seed in 0..1000 produced a mixed subset");
+    }
+
+    #[test]
+    fn swarm_all_off_seed_has_zero_fault_probabilities() {
+        // Find a seed whose subset is entirely off, then assert every family is inert.
+        let seed = (0..1000_u64)
+            .find(|&s| enabled_families(&swarm_for(s)).iter().all(|&e| !e))
+            .expect("expected an all-off seed within 0..1000");
+
+        let config = swarm_for(seed);
+        assert_zero(config.read_fault_probability);
+        assert_zero(config.write_fault_probability);
+        assert_zero(config.crash_fault_probability);
+        assert_zero(config.misdirect_read_probability);
+        assert_zero(config.misdirect_write_probability);
+        assert_zero(config.phantom_write_probability);
+        assert_zero(config.sync_failure_probability);
+    }
+
+    /// Assert an f64 is exactly `+0.0` (bit-exact, avoiding the float-cmp lint).
+    fn assert_zero(value: f64) {
+        assert_eq!(
+            value.to_bits(),
+            0.0_f64.to_bits(),
+            "expected 0.0, got {value}"
+        );
     }
 }

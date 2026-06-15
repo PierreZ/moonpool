@@ -6,8 +6,8 @@
 use std::process;
 use std::time::Duration;
 
-use moonpool_sim::SimulationBuilder;
 use moonpool_sim::runner::builder::{ProcessCount, WorkloadCount};
+use moonpool_sim::{Chaos, ChaosMode, SimulationBuilder};
 
 use moonpool_transport_sim::invariants::TransportIntegrityInvariant;
 use moonpool_transport_sim::process::TransportServerProcess;
@@ -25,8 +25,9 @@ fn main() {
         .chaos_duration(Duration::from_secs(10))
         // Swarm: each seed runs a random *subset* of both the network fault
         // families and the workload's operation alphabet (the rest fully off),
-        // defeating passive/active suppression. Supersedes `.random_network()`.
-        .swarm()
+        // defeating passive/active suppression.
+        .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
+        .swarm_operations()
         .set_iterations(20)
         .seed_warning_timeout(Duration::from_secs(15))
         .run();

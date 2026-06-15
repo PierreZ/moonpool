@@ -60,7 +60,7 @@ A complete alphabet has a hidden failure mode. Picking operations uniformly over
 
 The fix is the same too. Instead of running every seed with the whole alphabet, enable a random **subset** per seed and turn the rest fully off. Disable `pop` for some runs and the queue fills on the first handful of steps. We call this swarming the alphabet, after the [Swarm Testing](10-network-faults.md#swarm-testing-less-is-more) paper.
 
-`moonpool_sim::swarm_op_enabled(op_id)` tells you whether operation `op_id` is in this seed's subset. Opt in with `SimulationBuilder::swarm()`. Without it, every operation reports enabled, so default runs use the full alphabet and nothing changes.
+`moonpool_sim::swarm_op_enabled(op_id)` tells you whether operation `op_id` is in this seed's subset. Opt in with `SimulationBuilder::swarm_operations()`. Without it, every operation reports enabled, so default runs use the full alphabet and nothing changes.
 
 ```rust
 // Cache the subset once per run. Each operation is independently ~50% on,
@@ -89,7 +89,7 @@ if !enabled.iter().any(|&i| i < NUM_MOVE_OPS) {
 }
 ```
 
-The dungeon example in `moonpool-sim-examples/src/dungeon.rs` is the reference implementation, and `moonpool-sim/tests/swarm_op_alphabet.rs` shows the assertion firing under `.swarm()` and staying unreachable without it.
+The dungeon example in `moonpool-sim-examples/src/dungeon.rs` is the reference implementation, and `moonpool-sim/tests/swarm_op_alphabet.rs` shows the assertion firing under `.swarm_operations()` and staying unreachable without it.
 
 ## Invariant Patterns
 
