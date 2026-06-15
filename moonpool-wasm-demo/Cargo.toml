@@ -30,7 +30,7 @@ tokio = { version = "1", features = ["macros"] }
 # wasm-only glue. Pinned to the flake's wasm-bindgen-cli (0.2.117) — a version
 # mismatch between the crate and the CLI is the #1 wasm-bindgen footgun.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "=0.2.117"
+wasm-bindgen = "=0.2.125"
 console_error_panic_hook = "0.1"
 
 [lints]
