@@ -50,8 +50,8 @@
 //! - Storage faults: TigerBeetle storage simulation
 //! - Crash consistency: FDB AsyncFileKAIO, TigerBeetle deterministic testing
 
+use crate::network::config::{LatencyDistribution, random_latency_for_seed};
 use crate::sim::rng::{config_random_bool, sim_random_range};
-use std::ops::Range;
 use std::time::Duration;
 
 /// Configuration for storage simulation parameters.
@@ -79,27 +79,27 @@ pub struct StorageConfiguration {
     /// - HDD: 100-200 MB/s
     pub bandwidth: u64,
 
-    /// Latency range for read operations.
+    /// Latency distribution for read operations.
     ///
     /// Typical values:
     /// - `NVMe` SSD: 20-100µs
     /// - SATA SSD: 50-200µs
     /// - HDD: 2-10ms
-    pub read_latency: Range<Duration>,
+    pub read_latency: LatencyDistribution,
 
-    /// Latency range for write operations.
+    /// Latency distribution for write operations.
     ///
     /// Typical values:
     /// - `NVMe` SSD: 20-100µs
     /// - SATA SSD: 100-500µs
     /// - HDD: 2-10ms
-    pub write_latency: Range<Duration>,
+    pub write_latency: LatencyDistribution,
 
-    /// Latency range for sync/flush operations.
+    /// Latency distribution for sync/flush operations.
     ///
     /// Sync operations ensure data durability and typically take
     /// longer than regular read/write operations.
-    pub sync_latency: Range<Duration>,
+    pub sync_latency: LatencyDistribution,
 
     // =========================================================================
     // Fault Injection Probabilities
@@ -160,9 +160,18 @@ impl Default for StorageConfiguration {
             // Performance parameters matching a typical SATA SSD
             iops: 25_000,
             bandwidth: 150_000_000, // 150 MB/s
-            read_latency: Duration::from_micros(50)..Duration::from_micros(200),
-            write_latency: Duration::from_micros(100)..Duration::from_micros(500),
-            sync_latency: Duration::from_millis(1)..Duration::from_millis(5),
+            read_latency: LatencyDistribution::Uniform {
+                start: Duration::from_micros(50),
+                end: Duration::from_micros(200),
+            },
+            write_latency: LatencyDistribution::Uniform {
+                start: Duration::from_micros(100),
+                end: Duration::from_micros(500),
+            },
+            sync_latency: LatencyDistribution::Uniform {
+                start: Duration::from_millis(1),
+                end: Duration::from_millis(5),
+            },
 
             // Fault probabilities - disabled by default for predictable behavior
             read_fault_probability: 0.0,
@@ -196,13 +205,19 @@ impl StorageConfiguration {
             // Randomize bandwidth between 50 MB/s and 500 MB/s
             bandwidth: sim_random_range(50_000_000..500_000_000),
 
-            // Randomize latencies
-            read_latency: Duration::from_micros(sim_random_range(20..100))
-                ..Duration::from_micros(sim_random_range(100..500)),
-            write_latency: Duration::from_micros(sim_random_range(50..200))
-                ..Duration::from_micros(sim_random_range(200..1000)),
-            sync_latency: Duration::from_micros(sim_random_range(500..2000))
-                ..Duration::from_micros(sim_random_range(2000..10000)),
+            // Randomize latencies, mixing distribution shapes per field
+            read_latency: random_latency_for_seed(
+                Duration::from_micros(sim_random_range(20..100))
+                    ..Duration::from_micros(sim_random_range(100..500)),
+            ),
+            write_latency: random_latency_for_seed(
+                Duration::from_micros(sim_random_range(50..200))
+                    ..Duration::from_micros(sim_random_range(200..1000)),
+            ),
+            sync_latency: random_latency_for_seed(
+                Duration::from_micros(sim_random_range(500..2000))
+                    ..Duration::from_micros(sim_random_range(2000..10000)),
+            ),
 
             // Low fault probabilities for chaos testing (0.001% to 0.1%)
             read_fault_probability: f64::from(sim_random_range(0..100)) / 100_000.0,
@@ -268,12 +283,16 @@ impl StorageConfiguration {
     #[must_use]
     pub fn fast_local() -> Self {
         let one_us = Duration::from_micros(1);
+        let uniform = LatencyDistribution::Uniform {
+            start: one_us,
+            end: one_us,
+        };
         Self {
             iops: 1_000_000,          // Very high IOPS
             bandwidth: 1_000_000_000, // 1 GB/s
-            read_latency: one_us..one_us,
-            write_latency: one_us..one_us,
-            sync_latency: one_us..one_us,
+            read_latency: uniform.clone(),
+            write_latency: uniform.clone(),
+            sync_latency: uniform,
 
             // All faults disabled
             read_fault_probability: 0.0,

@@ -49,7 +49,7 @@ impl NetworkProvider for SimNetworkProvider {
 
         // Get bind delay from network configuration and schedule bind completion event
         let delay =
-            sim.with_network_config(|config| crate::network::sample_duration(&config.bind_latency));
+            sim.with_network_config(|config| crate::network::sample_latency(&config.bind_latency));
 
         // Schedule bind completion event to advance simulation time
         let listener_id = sim.create_listener();
@@ -124,7 +124,7 @@ impl NetworkProvider for SimNetworkProvider {
 
         // Get connect delay from network configuration and schedule connection event
         let delay = sim
-            .with_network_config(|config| crate::network::sample_duration(&config.connect_latency));
+            .with_network_config(|config| crate::network::sample_latency(&config.connect_latency));
 
         // Create a connection pair for bidirectional communication
         let (client_id, server_id) = sim.create_connection_pair("client-addr", addr);

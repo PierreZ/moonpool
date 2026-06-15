@@ -80,7 +80,9 @@
 //! - Clock drift: FDB sim2.actor.cpp:1058-1064
 //! - Connect failures: FDB sim2.actor.cpp:1243-1250
 
-use crate::sim::rng::{config_random_bool, sim_random_range, sim_random_range_or_default};
+use crate::sim::rng::{
+    config_random_bool, sim_random_f64, sim_random_range, sim_random_range_or_default,
+};
 use std::ops::Range;
 use std::time::Duration;
 
@@ -388,16 +390,16 @@ impl ChaosConfiguration {
 /// Configuration for network simulation parameters
 #[derive(Debug, Clone)]
 pub struct NetworkConfiguration {
-    /// Latency range for bind operations
-    pub bind_latency: Range<Duration>,
-    /// Latency range for accept operations
-    pub accept_latency: Range<Duration>,
-    /// Latency range for connect operations
-    pub connect_latency: Range<Duration>,
-    /// Latency range for read operations
-    pub read_latency: Range<Duration>,
-    /// Latency range for write operations
-    pub write_latency: Range<Duration>,
+    /// Latency distribution for bind operations
+    pub bind_latency: LatencyDistribution,
+    /// Latency distribution for accept operations
+    pub accept_latency: LatencyDistribution,
+    /// Latency distribution for connect operations
+    pub connect_latency: LatencyDistribution,
+    /// Latency distribution for read operations
+    pub read_latency: LatencyDistribution,
+    /// Latency distribution for write operations
+    pub write_latency: LatencyDistribution,
 
     /// Chaos injection configuration
     pub chaos: ChaosConfiguration,
@@ -406,11 +408,26 @@ pub struct NetworkConfiguration {
 impl Default for NetworkConfiguration {
     fn default() -> Self {
         Self {
-            bind_latency: Duration::from_micros(50)..Duration::from_micros(150),
-            accept_latency: Duration::from_millis(1)..Duration::from_millis(6),
-            connect_latency: Duration::from_millis(1)..Duration::from_millis(11),
-            read_latency: Duration::from_micros(10)..Duration::from_micros(60),
-            write_latency: Duration::from_micros(100)..Duration::from_micros(600),
+            bind_latency: LatencyDistribution::Uniform {
+                start: Duration::from_micros(50),
+                end: Duration::from_micros(150),
+            },
+            accept_latency: LatencyDistribution::Uniform {
+                start: Duration::from_millis(1),
+                end: Duration::from_millis(6),
+            },
+            connect_latency: LatencyDistribution::Uniform {
+                start: Duration::from_millis(1),
+                end: Duration::from_millis(11),
+            },
+            read_latency: LatencyDistribution::Uniform {
+                start: Duration::from_micros(10),
+                end: Duration::from_micros(60),
+            },
+            write_latency: LatencyDistribution::Uniform {
+                start: Duration::from_micros(100),
+                end: Duration::from_micros(600),
+            },
             chaos: ChaosConfiguration::default(),
         }
     }
@@ -419,10 +436,161 @@ impl Default for NetworkConfiguration {
 /// Sample a random duration from a range
 #[must_use]
 pub fn sample_duration(range: &Range<Duration>) -> Duration {
-    let start_nanos = u64::try_from(range.start.as_nanos()).unwrap_or(u64::MAX);
-    let end_nanos = u64::try_from(range.end.as_nanos()).unwrap_or(u64::MAX);
-    let random_nanos = sim_random_range_or_default(start_nanos..end_nanos);
-    Duration::from_nanos(random_nanos)
+    uniform_nanos(range.start, range.end)
+}
+
+/// Sample a uniform duration in `[start, end)` using the simulation RNG.
+///
+/// Shared by [`sample_duration`] and [`LatencyDistribution::Uniform`] so both
+/// consume exactly one RNG draw with identical semantics. A degenerate range
+/// (`start >= end`) returns `start` and consumes no draw (see
+/// [`sim_random_range_or_default`]).
+fn uniform_nanos(start: Duration, end: Duration) -> Duration {
+    let start_nanos = u64::try_from(start.as_nanos()).unwrap_or(u64::MAX);
+    let end_nanos = u64::try_from(end.as_nanos()).unwrap_or(u64::MAX);
+    Duration::from_nanos(sim_random_range_or_default(start_nanos..end_nanos))
+}
+
+/// A pluggable latency distribution for per-operation latency sampling.
+///
+/// Replaces plain uniform `Range<Duration>` sampling so simulations can exercise
+/// the heavy P99 tail where timeout cascades, retry storms, and backpressure
+/// collapse live. All variants sample deterministically through the simulation
+/// RNG, so the same seed always yields the same sequence.
+///
+/// The default is [`Uniform`](Self::Uniform), which samples identically to the
+/// historical [`sample_duration`] (one RNG draw, no extra draws), keeping default
+/// behavior unchanged.
+///
+/// # References
+///
+/// - `Exponential` mirrors `TigerBeetle`'s `random_int_exponential` storage/network
+///   delay (`packet_simulator.zig`).
+/// - `Bimodal` mirrors `FoundationDB`'s `halfLatency` fast/slow split (`sim2.actor.cpp`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum LatencyDistribution {
+    /// Uniform latency in `[start, end)`. Equivalent to the historical
+    /// `Range<Duration>` sampling.
+    Uniform {
+        /// Inclusive lower bound.
+        start: Duration,
+        /// Exclusive upper bound.
+        end: Duration,
+    },
+    /// Exponential latency with a minimum floor, modelling a long tail.
+    ///
+    /// Samples `min + mean * (-ln(u))` with `u` drawn uniformly from `(0, 1]`,
+    /// giving a mean delay of roughly `min + mean`. Note this is the additive
+    /// form from the issue; `TigerBeetle` instead clamps with `max(min, exp(mean))`.
+    Exponential {
+        /// Minimum latency added to every sample.
+        min: Duration,
+        /// Mean of the exponential component (the tail scale).
+        mean: Duration,
+    },
+    /// Bimodal latency: a fast cluster most of the time, a slow tail rarely.
+    ///
+    /// With probability `slow_probability` the sample is drawn uniformly from
+    /// `slow_range`; otherwise from `fast_range`.
+    Bimodal {
+        /// Range sampled on the common, fast path.
+        fast_range: Range<Duration>,
+        /// Range sampled on the rare, slow path.
+        slow_range: Range<Duration>,
+        /// Probability in `[0, 1]` of taking the slow path.
+        slow_probability: f64,
+    },
+}
+
+impl Default for LatencyDistribution {
+    fn default() -> Self {
+        // Callers (config constructors) set real bounds per field; this
+        // type-level default is only a neutral fallback.
+        Self::Uniform {
+            start: Duration::ZERO,
+            end: Duration::ZERO,
+        }
+    }
+}
+
+impl LatencyDistribution {
+    /// Return the `(start, end)` bounds when this is a [`Uniform`](Self::Uniform)
+    /// distribution, otherwise `None`. Convenience for tests and reporting.
+    #[must_use]
+    pub fn uniform_bounds(&self) -> Option<(Duration, Duration)> {
+        match self {
+            Self::Uniform { start, end } => Some((*start, *end)),
+            _ => None,
+        }
+    }
+}
+
+/// Sample a latency from a [`LatencyDistribution`] using the simulation RNG.
+///
+/// Deterministic for a given seed. The [`Uniform`](LatencyDistribution::Uniform)
+/// variant consumes exactly one RNG draw (identical to [`sample_duration`]);
+/// `Exponential` consumes one `f64` draw; `Bimodal` consumes one `f64` draw to
+/// pick the branch plus one uniform draw.
+#[must_use]
+pub fn sample_latency(distribution: &LatencyDistribution) -> Duration {
+    match distribution {
+        LatencyDistribution::Uniform { start, end } => uniform_nanos(*start, *end),
+        LatencyDistribution::Exponential { min, mean } => {
+            // u in [0.0, 1.0); 1.0 - u in (0.0, 1.0] so -ln(.) in [0.0, +inf),
+            // never inf or NaN. Compute in f64 seconds via `Duration`'s own API
+            // to avoid lossy manual casts. A product that overflows `Duration`
+            // saturates to `Duration::MAX` instead of panicking.
+            let u = sim_random_f64();
+            let factor = -(1.0 - u).ln();
+            let extra_secs = mean.as_secs_f64() * factor;
+            let extra = Duration::try_from_secs_f64(extra_secs).unwrap_or(Duration::MAX);
+            min.saturating_add(extra)
+        }
+        LatencyDistribution::Bimodal {
+            fast_range,
+            slow_range,
+            slow_probability,
+        } => {
+            // Draw the branch selector unconditionally so the RNG call-count is
+            // stable regardless of which path is taken.
+            if sim_random_f64() < *slow_probability {
+                uniform_nanos(slow_range.start, slow_range.end)
+            } else {
+                uniform_nanos(fast_range.start, fast_range.end)
+            }
+        }
+    }
+}
+
+/// Pick a per-field [`LatencyDistribution`] for chaos seeds, mixing all three
+/// variants around a baseline uniform range.
+///
+/// One in three seeds keeps the field uniform; the others derive an exponential
+/// or bimodal shape from the same baseline so the mean stays comparable. Draws
+/// from the simulation RNG, so it is deterministic per seed.
+pub(crate) fn random_latency_for_seed(uniform: Range<Duration>) -> LatencyDistribution {
+    match sim_random_range(0..3) {
+        0 => LatencyDistribution::Uniform {
+            start: uniform.start,
+            end: uniform.end,
+        },
+        1 => LatencyDistribution::Exponential {
+            min: uniform.start,
+            // Mean tail scale of one baseline width above the floor.
+            mean: uniform.end.saturating_sub(uniform.start),
+        },
+        _ => {
+            // Slow path is one decade beyond the baseline upper bound.
+            let slow_start = uniform.end;
+            let slow_end = uniform.end.saturating_mul(10);
+            LatencyDistribution::Bimodal {
+                fast_range: uniform,
+                slow_range: slow_start..slow_end,
+                // 0.1% .. 1% slow tail.
+                slow_probability: f64::from(sim_random_range(1..10)) / 1000.0,
+            }
+        }
+    }
 }
 
 impl NetworkConfiguration {
@@ -436,16 +604,26 @@ impl NetworkConfiguration {
     #[must_use]
     pub fn random_for_seed() -> Self {
         Self {
-            bind_latency: Duration::from_micros(sim_random_range(10..200))
-                ..Duration::from_micros(sim_random_range(50..300)),
-            accept_latency: Duration::from_micros(sim_random_range(1000..10_000))
-                ..Duration::from_micros(sim_random_range(5000..15_000)),
-            connect_latency: Duration::from_micros(sim_random_range(1000..50_000))
-                ..Duration::from_micros(sim_random_range(10_000..100_000)),
-            read_latency: Duration::from_micros(sim_random_range(5..100))
-                ..Duration::from_micros(sim_random_range(50..200)),
-            write_latency: Duration::from_micros(sim_random_range(50..1000))
-                ..Duration::from_micros(sim_random_range(200..2000)),
+            bind_latency: random_latency_for_seed(
+                Duration::from_micros(sim_random_range(10..200))
+                    ..Duration::from_micros(sim_random_range(50..300)),
+            ),
+            accept_latency: random_latency_for_seed(
+                Duration::from_micros(sim_random_range(1000..10_000))
+                    ..Duration::from_micros(sim_random_range(5000..15_000)),
+            ),
+            connect_latency: random_latency_for_seed(
+                Duration::from_micros(sim_random_range(1000..50_000))
+                    ..Duration::from_micros(sim_random_range(10_000..100_000)),
+            ),
+            read_latency: random_latency_for_seed(
+                Duration::from_micros(sim_random_range(5..100))
+                    ..Duration::from_micros(sim_random_range(50..200)),
+            ),
+            write_latency: random_latency_for_seed(
+                Duration::from_micros(sim_random_range(50..1000))
+                    ..Duration::from_micros(sim_random_range(200..2000)),
+            ),
             chaos: ChaosConfiguration::random_for_seed(),
         }
     }
@@ -468,12 +646,13 @@ impl NetworkConfiguration {
     pub fn fast_local() -> Self {
         let one_us = Duration::from_micros(1);
         let ten_us = Duration::from_micros(10);
+        let uniform = |start, end| LatencyDistribution::Uniform { start, end };
         Self {
-            bind_latency: one_us..one_us,
-            accept_latency: ten_us..ten_us,
-            connect_latency: ten_us..ten_us,
-            read_latency: one_us..one_us,
-            write_latency: one_us..one_us,
+            bind_latency: uniform(one_us, one_us),
+            accept_latency: uniform(ten_us, ten_us),
+            connect_latency: uniform(ten_us, ten_us),
+            read_latency: uniform(one_us, one_us),
+            write_latency: uniform(one_us, one_us),
             chaos: ChaosConfiguration::disabled(),
         }
     }
@@ -568,5 +747,188 @@ mod swarm_tests {
             0.0_f64.to_bits(),
             "expected 0.0, got {value}"
         );
+    }
+}
+
+#[cfg(test)]
+mod latency_distribution_tests {
+    use super::{LatencyDistribution, NetworkConfiguration, sample_duration, sample_latency};
+    use crate::sim::rng::set_sim_seed;
+    use crate::storage::StorageConfiguration;
+    use std::time::Duration;
+
+    /// Collect `n` samples from a distribution under a fresh seed.
+    fn samples(seed: u64, dist: &LatencyDistribution, n: usize) -> Vec<Duration> {
+        set_sim_seed(seed);
+        (0..n).map(|_| sample_latency(dist)).collect()
+    }
+
+    /// The 99th percentile of a sample set, by sorted index.
+    fn p99(mut values: Vec<Duration>) -> Duration {
+        values.sort_unstable();
+        let idx = ((values.len() * 99) / 100).min(values.len() - 1);
+        values[idx]
+    }
+
+    #[test]
+    fn uniform_matches_sample_duration_byte_for_byte() {
+        // The Uniform variant must consume exactly the same RNG as the legacy
+        // `sample_duration`: identical value AND identical resulting RNG state
+        // (one draw, no extra). Two interleaved draws prove both.
+        let start = Duration::from_micros(100);
+        let end = Duration::from_micros(600);
+        let dist = LatencyDistribution::Uniform { start, end };
+        let range = start..end;
+
+        set_sim_seed(7);
+        let a1 = sample_latency(&dist);
+        let a2 = sample_duration(&range);
+
+        set_sim_seed(7);
+        let b1 = sample_duration(&range);
+        let b2 = sample_duration(&range);
+
+        assert_eq!((a1, a2), (b1, b2));
+    }
+
+    #[test]
+    fn each_variant_is_deterministic_per_seed() {
+        let variants = [
+            LatencyDistribution::Uniform {
+                start: Duration::from_micros(10),
+                end: Duration::from_micros(60),
+            },
+            LatencyDistribution::Exponential {
+                min: Duration::from_micros(10),
+                mean: Duration::from_micros(100),
+            },
+            LatencyDistribution::Bimodal {
+                fast_range: Duration::from_millis(1)..Duration::from_millis(2),
+                slow_range: Duration::from_millis(50)..Duration::from_millis(100),
+                slow_probability: 0.05,
+            },
+        ];
+        for dist in &variants {
+            let first = samples(42, dist, 64);
+            let second = samples(42, dist, 64);
+            assert_eq!(first, second, "distribution not deterministic: {dist:?}");
+        }
+    }
+
+    #[test]
+    fn default_configs_are_all_uniform() {
+        let net = NetworkConfiguration::default();
+        for dist in [
+            &net.bind_latency,
+            &net.accept_latency,
+            &net.connect_latency,
+            &net.read_latency,
+            &net.write_latency,
+        ] {
+            assert!(
+                dist.uniform_bounds().is_some(),
+                "network default not uniform: {dist:?}"
+            );
+        }
+        let storage = StorageConfiguration::default();
+        for dist in [
+            &storage.read_latency,
+            &storage.write_latency,
+            &storage.sync_latency,
+        ] {
+            assert!(
+                dist.uniform_bounds().is_some(),
+                "storage default not uniform: {dist:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exponential_has_heavier_tail_than_uniform_at_equal_mean() {
+        // Uniform [0, 2ms) and Exponential{min: 0, mean: 1ms} share a 1ms mean,
+        // but the exponential's tail pushes its p99 well above the uniform's.
+        let uniform = LatencyDistribution::Uniform {
+            start: Duration::ZERO,
+            end: Duration::from_millis(2),
+        };
+        let exponential = LatencyDistribution::Exponential {
+            min: Duration::ZERO,
+            mean: Duration::from_millis(1),
+        };
+        let uni_p99 = p99(samples(123, &uniform, 10_000));
+        let exp_p99 = p99(samples(123, &exponential, 10_000));
+        assert!(
+            exp_p99 > uni_p99,
+            "exponential p99 {exp_p99:?} should exceed uniform p99 {uni_p99:?}"
+        );
+    }
+
+    #[test]
+    fn bimodal_shows_fast_cluster_and_slow_tail() {
+        let fast = Duration::from_millis(1)..Duration::from_millis(2);
+        let slow = Duration::from_millis(50)..Duration::from_millis(100);
+        let dist = LatencyDistribution::Bimodal {
+            fast_range: fast.clone(),
+            slow_range: slow.clone(),
+            slow_probability: 0.05,
+        };
+        let values = samples(99, &dist, 10_000);
+        let fast_count = values.iter().filter(|d| fast.contains(d)).count();
+        let slow_count = values.iter().filter(|d| slow.contains(d)).count();
+        assert!(
+            fast_count > 8_000,
+            "expected a dominant fast cluster, got {fast_count}"
+        );
+        assert!(slow_count > 0, "expected a non-empty slow tail");
+        assert_eq!(fast_count + slow_count, values.len());
+    }
+
+    #[test]
+    fn exponential_with_zero_mean_returns_min() {
+        let dist = LatencyDistribution::Exponential {
+            min: Duration::from_micros(42),
+            mean: Duration::ZERO,
+        };
+        set_sim_seed(5);
+        for _ in 0..100 {
+            assert_eq!(sample_latency(&dist), Duration::from_micros(42));
+        }
+    }
+
+    #[test]
+    fn bimodal_probability_bounds_select_expected_range() {
+        let fast = Duration::from_millis(1)..Duration::from_millis(2);
+        let slow = Duration::from_millis(50)..Duration::from_millis(100);
+        let never_slow = LatencyDistribution::Bimodal {
+            fast_range: fast.clone(),
+            slow_range: slow.clone(),
+            slow_probability: 0.0,
+        };
+        let always_slow = LatencyDistribution::Bimodal {
+            fast_range: fast.clone(),
+            slow_range: slow.clone(),
+            slow_probability: 1.0,
+        };
+        for d in samples(1, &never_slow, 500) {
+            assert!(fast.contains(&d), "slow_probability 0.0 produced {d:?}");
+        }
+        for d in samples(2, &always_slow, 500) {
+            assert!(slow.contains(&d), "slow_probability 1.0 produced {d:?}");
+        }
+    }
+
+    #[test]
+    fn exponential_saturates_instead_of_panicking() {
+        // A mean near the Duration ceiling can overflow when scaled by the tail
+        // factor; sampling must saturate, never panic.
+        let dist = LatencyDistribution::Exponential {
+            min: Duration::from_secs(1),
+            mean: Duration::from_secs(u64::MAX / 2),
+        };
+        set_sim_seed(3);
+        for _ in 0..1_000 {
+            let sampled = sample_latency(&dist);
+            assert!(sampled >= Duration::from_secs(1));
+        }
     }
 }

@@ -1460,7 +1460,7 @@ impl SimWorld {
             Duration::from_nanos(1)
         } else {
             send_delay.unwrap_or_else(|| {
-                crate::network::sample_duration(&inner.network.config.write_latency)
+                crate::network::sample_latency(&inner.network.config.write_latency)
             })
         };
 

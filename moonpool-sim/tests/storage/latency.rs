@@ -5,9 +5,14 @@
 
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
-use moonpool_sim::{SimWorld, StorageConfiguration};
+use moonpool_sim::{LatencyDistribution, SimWorld, StorageConfiguration};
 use std::net::IpAddr;
 use std::time::Duration;
+
+/// Build a uniform latency distribution over `[start, end)` for test configs.
+fn uniform(start: Duration, end: Duration) -> LatencyDistribution {
+    LatencyDistribution::Uniform { start, end }
+}
 
 const TEST_IP_STR: &str = "127.0.0.1";
 
@@ -107,9 +112,9 @@ fn test_custom_latency_ranges() {
         let config = StorageConfiguration {
             iops: 1_000_000,          // Very high - minimal IOPS overhead
             bandwidth: 1_000_000_000, // Very high - minimal transfer time
-            read_latency: ten_ms..ten_ms,
-            write_latency: ten_ms..ten_ms,
-            sync_latency: ten_ms..ten_ms,
+            read_latency: uniform(ten_ms, ten_ms),
+            write_latency: uniform(ten_ms, ten_ms),
+            sync_latency: uniform(ten_ms, ten_ms),
             read_fault_probability: 0.0,
             write_fault_probability: 0.0,
             crash_fault_probability: 0.0,
@@ -155,9 +160,9 @@ fn test_latency_formula() {
         let config = StorageConfiguration {
             iops: 1000,           // 1ms per operation
             bandwidth: 1_000_000, // 1 MB/s = 1µs per byte
-            read_latency: Duration::from_micros(100)..Duration::from_micros(100),
-            write_latency: base_write..base_write,
-            sync_latency: Duration::from_micros(100)..Duration::from_micros(100),
+            read_latency: uniform(Duration::from_micros(100), Duration::from_micros(100)),
+            write_latency: uniform(base_write, base_write),
+            sync_latency: uniform(Duration::from_micros(100), Duration::from_micros(100)),
             read_fault_probability: 0.0,
             write_fault_probability: 0.0,
             crash_fault_probability: 0.0,
@@ -208,9 +213,9 @@ fn test_read_latency_scales_with_size() {
         let config = StorageConfiguration {
             iops: 1_000_000,
             bandwidth: 100_000, // 100 KB/s - slow to make size effect visible
-            read_latency: base..base,
-            write_latency: base..base,
-            sync_latency: base..base,
+            read_latency: uniform(base, base),
+            write_latency: uniform(base, base),
+            sync_latency: uniform(base, base),
             read_fault_probability: 0.0,
             write_fault_probability: 0.0,
             crash_fault_probability: 0.0,
@@ -309,9 +314,9 @@ fn test_write_latency_scales_with_size() {
         let config = StorageConfiguration {
             iops: 1_000_000,
             bandwidth: 100_000, // 100 KB/s - slow to make size effect visible
-            read_latency: base..base,
-            write_latency: base..base,
-            sync_latency: base..base,
+            read_latency: uniform(base, base),
+            write_latency: uniform(base, base),
+            sync_latency: uniform(base, base),
             read_fault_probability: 0.0,
             write_fault_probability: 0.0,
             crash_fault_probability: 0.0,
