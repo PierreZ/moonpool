@@ -174,6 +174,12 @@ Each ordered IP pair samples one fixed latency from this range at first contact 
 |-------|------|---------|
 | `partial_write_max_bytes` | `usize` | 1000 |
 
+### Partial Reads
+
+| Field | Type | Default |
+|-------|------|---------|
+| `partial_read_max_bytes` | `usize` | 1000 |
+
 ### Random Connection Close
 
 | Field | Type | Default |

@@ -53,6 +53,7 @@ Manual partition methods are also available on `SimWorld`: `partition_pair()`, `
 | Flip range | `bit_flip_min_bits` / `bit_flip_max_bits` | 1-32 bits | Power-law distribution of corruption severity |
 | Flip cooldown | `bit_flip_cooldown` | 0 (no cooldown) | Rate-limiting corruption events |
 | Partial writes | `partial_write_max_bytes` | 1000 bytes | TCP fragmentation, message framing |
+| Partial reads | `partial_read_max_bytes` | 1000 bytes | TCP short reads, message reassembly / framing |
 
 ### Half-Open Connections
 
