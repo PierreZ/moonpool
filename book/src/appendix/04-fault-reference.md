@@ -26,9 +26,9 @@ Configured via `ChaosConfiguration` (nested under `NetworkConfiguration::chaos`)
 
 | Fault | Config Field | Default | Real-World Scenario |
 |-------|-------------|---------|---------------------|
-| Latency distribution | `latency_distribution` | `Uniform` | P99/P99.9 tail latency testing |
-| Slow latency spike | `slow_latency_probability` | 0.1% (bimodal mode only) | GC pauses, cross-datacenter hops |
-| Slow latency multiplier | `slow_latency_multiplier` | 10x normal | Magnitude of tail latency spikes |
+| Operation latency shape | `bind/accept/connect/read/write_latency` | `Uniform` | P99/P99.9 tail latency testing |
+| Exponential tail | `LatencyDistribution::Exponential { min, mean }` | opt-in | Slow disks, GC pauses (TigerBeetle model) |
+| Bimodal tail | `LatencyDistribution::Bimodal { fast_range, slow_range, slow_probability }` | opt-in | Rare cross-datacenter hops, GC spikes (FoundationDB model) |
 | Write clogging | `clog_probability` / `clog_duration` | 0%, 100-300ms | Backpressure handling, flow control |
 | Per-pair permanent latency | `max_pair_latency` | `ZERO..ZERO` (off) | One stably-slow peer blocking quorum, asymmetric link delay |
 | Clock drift | `clock_drift_enabled` / `clock_drift_max` | enabled, 100ms | Lease expiration, distributed consensus, TTL handling |
@@ -94,9 +94,9 @@ Storage also simulates realistic performance characteristics independent of faul
 |-----------|-------------|---------|-------------|
 | IOPS | `iops` | 25,000 | I/O operations per second limit |
 | Bandwidth | `bandwidth` | 150 MB/s | Maximum throughput |
-| Read latency | `read_latency` | 50-200us | Per-read operation delay |
-| Write latency | `write_latency` | 100-500us | Per-write operation delay |
-| Sync latency | `sync_latency` | 1-5ms | Per-sync/flush delay |
+| Read latency | `read_latency` | `Uniform` 50-200us | Per-read operation delay (a `LatencyDistribution`) |
+| Write latency | `write_latency` | `Uniform` 100-500us | Per-write operation delay (a `LatencyDistribution`) |
+| Sync latency | `sync_latency` | `Uniform` 1-5ms | Per-sync/flush delay (a `LatencyDistribution`) |
 
 ## Process Lifecycle Faults
 

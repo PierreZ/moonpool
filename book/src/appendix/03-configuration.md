@@ -115,11 +115,11 @@ Top-level network simulation parameters.
 
 | Field | Type | Default |
 |-------|------|---------|
-| `bind_latency` | `Range<Duration>` | 50us..150us |
-| `accept_latency` | `Range<Duration>` | 1ms..6ms |
-| `connect_latency` | `Range<Duration>` | 1ms..11ms |
-| `read_latency` | `Range<Duration>` | 10us..60us |
-| `write_latency` | `Range<Duration>` | 100us..600us |
+| `bind_latency` | `LatencyDistribution` | `Uniform` 50us..150us |
+| `accept_latency` | `LatencyDistribution` | `Uniform` 1ms..6ms |
+| `connect_latency` | `LatencyDistribution` | `Uniform` 1ms..11ms |
+| `read_latency` | `LatencyDistribution` | `Uniform` 10us..60us |
+| `write_latency` | `LatencyDistribution` | `Uniform` 100us..600us |
 | `chaos` | `ChaosConfiguration` | See below |
 
 ### Constructor variants
@@ -129,6 +129,18 @@ Top-level network simulation parameters.
 | `NetworkConfiguration::default()` | Standard defaults with chaos enabled |
 | `NetworkConfiguration::random_for_seed()` | Randomized per seed for chaos testing |
 | `NetworkConfiguration::fast_local()` | Minimal latencies, all chaos disabled |
+
+### Latency distribution
+
+Each per-operation latency field above is a `LatencyDistribution`, not a plain range. This lets a simulation exercise the heavy P99 tail where timeout cascades and retry storms live. Every variant samples deterministically through the simulation RNG.
+
+| Variant | Shape | Models |
+|---------|-------|--------|
+| `Uniform { start, end }` | Flat over `[start, end)`, the default with unchanged behavior | Baseline jitter |
+| `Exponential { min, mean }` | `min + mean * (-ln u)`, a long right tail | Slow disks, GC pauses (TigerBeetle) |
+| `Bimodal { fast_range, slow_range, slow_probability }` | Fast cluster with a rare slow tail | Cross-datacenter hops, GC spikes (FoundationDB) |
+
+`default()` and `fast_local()` keep every field `Uniform`, so behavior is unchanged unless you opt in. `random_for_seed()` mixes all three shapes per field for chaos seeds. The same `LatencyDistribution` type configures storage `read_latency`, `write_latency`, and `sync_latency`.
 
 ## ChaosConfiguration
 
@@ -211,16 +223,6 @@ Each ordered IP pair samples one fixed latency from this range at first contact 
 | `connect_failure_probability` | `f64` | 0.5 (50%) |
 
 **ConnectFailureMode** variants: `Disabled`, `AlwaysFail`, `Probabilistic` (50% refused, 50% hang).
-
-### Latency Distribution
-
-| Field | Type | Default |
-|-------|------|---------|
-| `latency_distribution` | `LatencyDistribution` | `Uniform` |
-| `slow_latency_probability` | `f64` | 0.001 (0.1%) |
-| `slow_latency_multiplier` | `f64` | 10.0 |
-
-**LatencyDistribution** variants: `Uniform`, `Bimodal` (99.9% fast, 0.1% slow).
 
 ### Handshake Delay
 

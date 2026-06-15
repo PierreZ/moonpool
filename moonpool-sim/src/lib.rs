@@ -177,8 +177,8 @@ pub use observability::{
 
 // Network exports
 pub use network::{
-    ChaosConfiguration, ConnectFailureMode, NetworkConfiguration, SimNetworkProvider,
-    sample_duration,
+    ChaosConfiguration, ConnectFailureMode, LatencyDistribution, NetworkConfiguration,
+    SimNetworkProvider, sample_duration, sample_latency,
 };
 
 // Storage exports

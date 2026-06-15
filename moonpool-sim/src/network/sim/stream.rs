@@ -546,7 +546,7 @@ impl Future for AcceptFuture {
 
         // Get accept delay from network configuration
         let delay = sim
-            .with_network_config(|config| crate::network::sample_duration(&config.accept_latency));
+            .with_network_config(|config| crate::network::sample_latency(&config.accept_latency));
 
         // Schedule accept completion event to advance simulation time
         sim.schedule_event(

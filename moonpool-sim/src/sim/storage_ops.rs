@@ -656,7 +656,7 @@ impl SimWorld {
         // Use sync latency from per-process config
         let owner_ip = file_state.owner_ip;
         let config = inner.storage.config_for(owner_ip);
-        let latency = crate::network::sample_duration(&config.sync_latency);
+        let latency = crate::network::sample_latency(&config.sync_latency);
         let scheduled_time = inner.current_time + latency;
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
@@ -714,7 +714,7 @@ impl SimWorld {
         // Use write latency from per-process config
         let owner_ip = file_state.owner_ip;
         let config = inner.storage.config_for(owner_ip);
-        let latency = crate::network::sample_duration(&config.write_latency);
+        let latency = crate::network::sample_latency(&config.write_latency);
         let scheduled_time = inner.current_time + latency;
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
@@ -869,7 +869,7 @@ impl SimWorld {
         } else {
             &config.read_latency
         };
-        let base = crate::network::sample_duration(base_range);
+        let base = crate::network::sample_latency(base_range);
 
         // IOPS overhead: 1/iops seconds per operation.
         // Precision loss is acceptable: iops is typically << 2^52.

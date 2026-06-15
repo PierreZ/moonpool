@@ -1,8 +1,14 @@
 use futures::io::AsyncWriteExt;
 use moonpool_sim::{
-    ChaosConfiguration, NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait,
+    ChaosConfiguration, LatencyDistribution, NetworkConfiguration, NetworkProvider, SimWorld,
+    TcpListenerTrait,
 };
 use std::time::Duration;
+
+/// Build a uniform latency distribution over `[start, end)` for test configs.
+fn uniform(start: Duration, end: Duration) -> LatencyDistribution {
+    LatencyDistribution::Uniform { start, end }
+}
 
 // Simple networking test that measures bind + connect + accept latency
 async fn simple_network_test<P>(provider: P, addr: &str) -> std::io::Result<()>
@@ -93,11 +99,11 @@ fn test_custom_latency_configuration() {
     local_runtime.block_on(async move {
         // Create custom configuration with specific latency ranges
         let config = NetworkConfiguration {
-            bind_latency: Duration::from_millis(5)..Duration::from_millis(5),
-            accept_latency: Duration::from_millis(10)..Duration::from_millis(10),
-            connect_latency: Duration::from_millis(1)..Duration::from_millis(1),
-            read_latency: Duration::from_micros(10)..Duration::from_micros(10),
-            write_latency: Duration::from_millis(2)..Duration::from_millis(2),
+            bind_latency: uniform(Duration::from_millis(5), Duration::from_millis(5)),
+            accept_latency: uniform(Duration::from_millis(10), Duration::from_millis(10)),
+            connect_latency: uniform(Duration::from_millis(1), Duration::from_millis(1)),
+            read_latency: uniform(Duration::from_micros(10), Duration::from_micros(10)),
+            write_latency: uniform(Duration::from_millis(2), Duration::from_millis(2)),
             chaos: ChaosConfiguration::disabled(),
         };
 
@@ -136,11 +142,11 @@ fn test_latency_range_sampling() {
     local_runtime.block_on(async move {
         // Test multiple runs to verify latency variance with jitter
         let config = NetworkConfiguration {
-            bind_latency: Duration::from_millis(1)..Duration::from_millis(6), // 1-6ms range
-            accept_latency: Duration::from_millis(1)..Duration::from_millis(6),
-            connect_latency: Duration::from_millis(1)..Duration::from_millis(6),
-            read_latency: Duration::from_micros(10)..Duration::from_micros(10),
-            write_latency: Duration::from_millis(1)..Duration::from_millis(6),
+            bind_latency: uniform(Duration::from_millis(1), Duration::from_millis(6)), // 1-6ms range
+            accept_latency: uniform(Duration::from_millis(1), Duration::from_millis(6)),
+            connect_latency: uniform(Duration::from_millis(1), Duration::from_millis(6)),
+            read_latency: uniform(Duration::from_micros(10), Duration::from_micros(10)),
+            write_latency: uniform(Duration::from_millis(1), Duration::from_millis(6)),
             chaos: ChaosConfiguration::disabled(),
         };
 
@@ -190,11 +196,11 @@ fn test_network_randomization_ranges() {
     local_runtime.block_on(async move {
         // Create custom configuration with predictable latencies
         let config = NetworkConfiguration {
-            bind_latency: Duration::from_millis(1)..Duration::from_millis(1),
-            accept_latency: Duration::from_millis(2)..Duration::from_millis(2),
-            connect_latency: Duration::from_millis(3)..Duration::from_millis(3),
-            read_latency: Duration::from_micros(100)..Duration::from_micros(100),
-            write_latency: Duration::from_micros(500)..Duration::from_micros(500),
+            bind_latency: uniform(Duration::from_millis(1), Duration::from_millis(1)),
+            accept_latency: uniform(Duration::from_millis(2), Duration::from_millis(2)),
+            connect_latency: uniform(Duration::from_millis(3), Duration::from_millis(3)),
+            read_latency: uniform(Duration::from_micros(100), Duration::from_micros(100)),
+            write_latency: uniform(Duration::from_micros(500), Duration::from_micros(500)),
             chaos: ChaosConfiguration::disabled(),
         };
 

@@ -6,9 +6,14 @@
 
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
-use moonpool_sim::{SimWorld, StorageConfiguration};
+use moonpool_sim::{LatencyDistribution, SimWorld, StorageConfiguration};
 use std::net::IpAddr;
 use std::time::Duration;
+
+/// Build a uniform latency distribution over `[start, end)` for test configs.
+fn uniform(start: Duration, end: Duration) -> LatencyDistribution {
+    LatencyDistribution::Uniform { start, end }
+}
 
 const TEST_IP_STR: &str = "127.0.0.1";
 
@@ -55,9 +60,9 @@ fn test_low_iops_increases_latency() {
         let high_iops_config = StorageConfiguration {
             iops: 1_000_000, // 1µs per IOPS
             bandwidth: 1_000_000_000,
-            read_latency: base..base,
-            write_latency: base..base,
-            sync_latency: base..base,
+            read_latency: uniform(base, base),
+            write_latency: uniform(base, base),
+            sync_latency: uniform(base, base),
             ..StorageConfiguration::fast_local()
         };
 
@@ -65,9 +70,9 @@ fn test_low_iops_increases_latency() {
         let low_iops_config = StorageConfiguration {
             iops: 100, // 10ms per IOPS
             bandwidth: 1_000_000_000,
-            read_latency: base..base,
-            write_latency: base..base,
-            sync_latency: base..base,
+            read_latency: uniform(base, base),
+            write_latency: uniform(base, base),
+            sync_latency: uniform(base, base),
             ..StorageConfiguration::fast_local()
         };
 
@@ -130,9 +135,9 @@ fn test_low_bandwidth_increases_latency() {
         let high_bw_config = StorageConfiguration {
             iops: 1_000_000,
             bandwidth: 1_000_000_000, // 1 GB/s
-            read_latency: base..base,
-            write_latency: base..base,
-            sync_latency: base..base,
+            read_latency: uniform(base, base),
+            write_latency: uniform(base, base),
+            sync_latency: uniform(base, base),
             ..StorageConfiguration::fast_local()
         };
 
@@ -140,9 +145,9 @@ fn test_low_bandwidth_increases_latency() {
         let low_bw_config = StorageConfiguration {
             iops: 1_000_000,
             bandwidth: 10_000, // 10 KB/s - very slow
-            read_latency: base..base,
-            write_latency: base..base,
-            sync_latency: base..base,
+            read_latency: uniform(base, base),
+            write_latency: uniform(base, base),
+            sync_latency: uniform(base, base),
             ..StorageConfiguration::fast_local()
         };
 
@@ -200,9 +205,9 @@ fn test_large_file_bandwidth_constraint() {
         let config = StorageConfiguration {
             iops: 1_000_000,
             bandwidth: 100_000, // 100 KB/s
-            read_latency: base..base,
-            write_latency: base..base,
-            sync_latency: base..base,
+            read_latency: uniform(base, base),
+            write_latency: uniform(base, base),
+            sync_latency: uniform(base, base),
             ..StorageConfiguration::fast_local()
         };
 
@@ -245,9 +250,9 @@ fn test_iops_and_bandwidth_combine() {
         let config = StorageConfiguration {
             iops: 100,         // 10ms per op
             bandwidth: 10_000, // 10KB/s
-            read_latency: base..base,
-            write_latency: base..base,
-            sync_latency: base..base,
+            read_latency: uniform(base, base),
+            write_latency: uniform(base, base),
+            sync_latency: uniform(base, base),
             ..StorageConfiguration::fast_local()
         };
 
@@ -285,9 +290,9 @@ fn test_read_bandwidth_constraint() {
         let config = StorageConfiguration {
             iops: 1_000_000,
             bandwidth: 50_000, // 50 KB/s
-            read_latency: base..base,
-            write_latency: base..base,
-            sync_latency: base..base,
+            read_latency: uniform(base, base),
+            write_latency: uniform(base, base),
+            sync_latency: uniform(base, base),
             ..StorageConfiguration::fast_local()
         };
 
@@ -355,9 +360,9 @@ fn test_sequential_small_ops_iops_limited() {
         let config = StorageConfiguration {
             iops: 50, // 20ms per operation
             bandwidth: 1_000_000_000,
-            read_latency: base..base,
-            write_latency: base..base,
-            sync_latency: base..base,
+            read_latency: uniform(base, base),
+            write_latency: uniform(base, base),
+            sync_latency: uniform(base, base),
             ..StorageConfiguration::fast_local()
         };
 
@@ -424,9 +429,9 @@ fn test_hdd_vs_ssd_performance() {
         let hdd_config = StorageConfiguration {
             iops: 150,
             bandwidth: 150_000_000, // 150 MB/s sequential
-            read_latency: Duration::from_millis(5)..Duration::from_millis(5),
-            write_latency: Duration::from_millis(5)..Duration::from_millis(5),
-            sync_latency: Duration::from_millis(10)..Duration::from_millis(10),
+            read_latency: uniform(Duration::from_millis(5), Duration::from_millis(5)),
+            write_latency: uniform(Duration::from_millis(5), Duration::from_millis(5)),
+            sync_latency: uniform(Duration::from_millis(10), Duration::from_millis(10)),
             ..StorageConfiguration::fast_local()
         };
 
@@ -434,9 +439,9 @@ fn test_hdd_vs_ssd_performance() {
         let ssd_config = StorageConfiguration {
             iops: 50_000,
             bandwidth: 500_000_000, // 500 MB/s
-            read_latency: Duration::from_micros(100)..Duration::from_micros(100),
-            write_latency: Duration::from_micros(100)..Duration::from_micros(100),
-            sync_latency: Duration::from_millis(1)..Duration::from_millis(1),
+            read_latency: uniform(Duration::from_micros(100), Duration::from_micros(100)),
+            write_latency: uniform(Duration::from_micros(100), Duration::from_micros(100)),
+            sync_latency: uniform(Duration::from_millis(1), Duration::from_millis(1)),
             ..StorageConfiguration::fast_local()
         };
 

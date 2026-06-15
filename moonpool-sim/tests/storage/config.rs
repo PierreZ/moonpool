@@ -3,8 +3,13 @@
 //! These tests verify that `StorageConfiguration` presets and customization
 //! work correctly, following the same pattern as network configuration tests.
 
-use moonpool_sim::{SimWorld, StorageConfiguration, set_sim_seed};
+use moonpool_sim::{LatencyDistribution, SimWorld, StorageConfiguration, set_sim_seed};
 use std::time::Duration;
+
+/// Build a uniform latency distribution over `[start, end)` for test configs.
+fn uniform(start: Duration, end: Duration) -> LatencyDistribution {
+    LatencyDistribution::Uniform { start, end }
+}
 
 /// Assert two f64 values are bit-identical.
 fn assert_f64_eq(left: f64, right: f64) {
@@ -35,12 +40,9 @@ fn test_fast_local_configuration_values() {
 
     // Minimal latencies (1µs)
     let one_us = Duration::from_micros(1);
-    assert_eq!(config.read_latency.start, one_us);
-    assert_eq!(config.read_latency.end, one_us);
-    assert_eq!(config.write_latency.start, one_us);
-    assert_eq!(config.write_latency.end, one_us);
-    assert_eq!(config.sync_latency.start, one_us);
-    assert_eq!(config.sync_latency.end, one_us);
+    assert_eq!(config.read_latency, uniform(one_us, one_us));
+    assert_eq!(config.write_latency, uniform(one_us, one_us));
+    assert_eq!(config.sync_latency, uniform(one_us, one_us));
 
     // All faults disabled
     assert_f64_eq(config.read_fault_probability, 0.0);
@@ -62,12 +64,18 @@ fn test_default_configuration_values() {
     assert_eq!(config.bandwidth, 150_000_000); // 150 MB/s
 
     // Realistic latency ranges
-    assert_eq!(config.read_latency.start, Duration::from_micros(50));
-    assert_eq!(config.read_latency.end, Duration::from_micros(200));
-    assert_eq!(config.write_latency.start, Duration::from_micros(100));
-    assert_eq!(config.write_latency.end, Duration::from_micros(500));
-    assert_eq!(config.sync_latency.start, Duration::from_millis(1));
-    assert_eq!(config.sync_latency.end, Duration::from_millis(5));
+    assert_eq!(
+        config.read_latency,
+        uniform(Duration::from_micros(50), Duration::from_micros(200))
+    );
+    assert_eq!(
+        config.write_latency,
+        uniform(Duration::from_micros(100), Duration::from_micros(500))
+    );
+    assert_eq!(
+        config.sync_latency,
+        uniform(Duration::from_millis(1), Duration::from_millis(5))
+    );
 
     // All faults disabled by default
     assert_f64_eq(config.read_fault_probability, 0.0);
@@ -228,9 +236,9 @@ fn test_custom_configuration() {
     let custom = StorageConfiguration {
         iops: 50_000,
         bandwidth: 200_000_000,
-        read_latency: Duration::from_micros(30)..Duration::from_micros(100),
-        write_latency: Duration::from_micros(50)..Duration::from_micros(200),
-        sync_latency: Duration::from_millis(2)..Duration::from_millis(8),
+        read_latency: uniform(Duration::from_micros(30), Duration::from_micros(100)),
+        write_latency: uniform(Duration::from_micros(50), Duration::from_micros(200)),
+        sync_latency: uniform(Duration::from_millis(2), Duration::from_millis(8)),
         read_fault_probability: 0.01,
         write_fault_probability: 0.02,
         crash_fault_probability: 0.001,
@@ -243,8 +251,10 @@ fn test_custom_configuration() {
     // Verify all fields are set correctly
     assert_eq!(custom.iops, 50_000);
     assert_eq!(custom.bandwidth, 200_000_000);
-    assert_eq!(custom.read_latency.start, Duration::from_micros(30));
-    assert_eq!(custom.read_latency.end, Duration::from_micros(100));
+    assert_eq!(
+        custom.read_latency,
+        uniform(Duration::from_micros(30), Duration::from_micros(100))
+    );
     assert_f64_eq(custom.read_fault_probability, 0.01);
     assert_f64_eq(custom.write_fault_probability, 0.02);
     assert_f64_eq(custom.crash_fault_probability, 0.001);
@@ -282,9 +292,9 @@ fn test_hdd_like_configuration() {
     let hdd_config = StorageConfiguration {
         iops: 150,              // HDDs are very slow on random I/O
         bandwidth: 150_000_000, // Sequential is decent (~150 MB/s)
-        read_latency: Duration::from_millis(5)..Duration::from_millis(15),
-        write_latency: Duration::from_millis(5)..Duration::from_millis(15),
-        sync_latency: Duration::from_millis(10)..Duration::from_millis(50),
+        read_latency: uniform(Duration::from_millis(5), Duration::from_millis(15)),
+        write_latency: uniform(Duration::from_millis(5), Duration::from_millis(15)),
+        sync_latency: uniform(Duration::from_millis(10), Duration::from_millis(50)),
         read_fault_probability: 0.0,
         write_fault_probability: 0.0,
         crash_fault_probability: 0.0,
@@ -295,7 +305,11 @@ fn test_hdd_like_configuration() {
     };
 
     assert_eq!(hdd_config.iops, 150);
-    assert!(hdd_config.read_latency.start >= Duration::from_millis(1));
+    let (hdd_read_start, _) = hdd_config
+        .read_latency
+        .uniform_bounds()
+        .expect("read_latency is uniform");
+    assert!(hdd_read_start >= Duration::from_millis(1));
 }
 
 /// Test NVMe-like configuration
@@ -304,9 +318,9 @@ fn test_nvme_like_configuration() {
     let nvme_config = StorageConfiguration {
         iops: 500_000,            // NVMe can do 500K+ IOPS
         bandwidth: 3_500_000_000, // ~3.5 GB/s
-        read_latency: Duration::from_micros(10)..Duration::from_micros(50),
-        write_latency: Duration::from_micros(10)..Duration::from_micros(50),
-        sync_latency: Duration::from_micros(100)..Duration::from_micros(500),
+        read_latency: uniform(Duration::from_micros(10), Duration::from_micros(50)),
+        write_latency: uniform(Duration::from_micros(10), Duration::from_micros(50)),
+        sync_latency: uniform(Duration::from_micros(100), Duration::from_micros(500)),
         read_fault_probability: 0.0,
         write_fault_probability: 0.0,
         crash_fault_probability: 0.0,
@@ -317,7 +331,11 @@ fn test_nvme_like_configuration() {
     };
 
     assert_eq!(nvme_config.iops, 500_000);
-    assert!(nvme_config.read_latency.start < Duration::from_micros(100));
+    let (nvme_read_start, _) = nvme_config
+        .read_latency
+        .uniform_bounds()
+        .expect("read_latency is uniform");
+    assert!(nvme_read_start < Duration::from_micros(100));
 }
 
 /// Test fault probability boundaries
