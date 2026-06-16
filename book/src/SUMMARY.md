@@ -69,7 +69,8 @@
   - [Wiring a Web Service](./part4-integration/03-wiring-a-web-service.md)
   - [What You're Testing (and What You're Not)](./part4-integration/04-scope-and-tradeoffs.md)
 - [Using Providers in Production](./part4-integration/05-production.md)
-- [Simulation in the Browser](./part4-integration/06-wasm.md)
+- [Migrating Existing Code to Providers](./part4-integration/06-migrating-existing-code.md)
+- [Simulation in the Browser](./part4-integration/07-wasm.md)
 
 ---
 
