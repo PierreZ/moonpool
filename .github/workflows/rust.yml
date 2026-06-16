@@ -86,3 +86,18 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Run simulation ${{ matrix.sim }}
         run: nix develop --command cargo xtask sim run ${{ matrix.sim }}
+
+  # Build the full book (wasm demo + mdbook) on every PR/push. pages.yml only
+  # deploys from main, so without this a wasm-bindgen drift or a broken demo/doc
+  # lands on main before anyone notices. Mirrors pages.yml's build steps minus
+  # the deploy.
+  book:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Build and stage the wasm demo embedded in the book
+        run: nix develop --command book/build-wasm-demo.sh
+      - name: Build book
+        run: nix develop --command mdbook build

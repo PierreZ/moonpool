@@ -8,6 +8,12 @@ updates:
       rust-dependencies:
         patterns:
           - "*"
+    ignore:
+      # wasm-bindgen must match the flake's wasm-bindgen-cli exactly (see
+      # moonpool-wasm-demo/Cargo.toml). dependabot can't update the flake in
+      # lockstep, so a bump here breaks the wasm demo build. Bump manually
+      # alongside `nix flake update`.
+      - dependency-name: "wasm-bindgen*"
 
   - package-ecosystem: "github-actions"
     directory: "/"
