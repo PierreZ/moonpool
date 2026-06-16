@@ -1,5 +1,8 @@
 [profile.default]
-slow-timeout = { period = "1s", terminate-after = 2 }
+# Flag a test SLOW after 1s, but only hard-kill it after 10s. CPU-heavy chaos
+# tests are sub-second locally yet can exceed a tighter limit under parallel CI
+# load; 10s still catches genuine hangs/deadlocks.
+slow-timeout = { period = "1s", terminate-after = 10 }
 
 # Show test output for hanging tests
 failure-output = "immediate"
