@@ -27,10 +27,14 @@ tracing = "0.1"
 # comes from moonpool-sim.
 tokio = { version = "1", features = ["macros"] }
 
-# wasm-only glue. Pinned to the flake's wasm-bindgen-cli (0.2.117) — a version
-# mismatch between the crate and the CLI is the #1 wasm-bindgen footgun.
+# wasm-only glue. The crate version MUST exactly match the flake's
+# wasm-bindgen-cli (0.2.121) — a mismatch is the #1 wasm-bindgen footgun and
+# produces an opaque "schema version" error at bindgen time. dependabot is told
+# to ignore `wasm-bindgen*` (see .github/dependabot.yml) so it can't bump this
+# out of sync with the CLI; bump both together when `nix flake update` moves the
+# CLI (run `nix develop --command wasm-bindgen --version` and match it here).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "=0.2.125"
+wasm-bindgen = "=0.2.121"
 console_error_panic_hook = "0.1"
 
 [lints]
