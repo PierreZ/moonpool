@@ -18,7 +18,9 @@ use std::io;
 #[cfg(unix)]
 pub fn alloc_shared(size: usize) -> Result<*mut u8, io::Error> {
     // Safety: FFI call to libc::mmap.
-    // - MAP_ANONYMOUS: no file descriptor required (fd = -1).
+    // - MAP_ANONYMOUS: no file descriptor required (fd = -1). On Darwin the
+    //   native flag is spelled MAP_ANON; the libc crate aliases MAP_ANONYMOUS
+    //   to it, so this exact call is correct on both Linux and macOS.
     // - MAP_SHARED: memory visible across fork() boundaries.
     // - Kernel guarantees: returned memory is zeroed and page-aligned.
     // - We check for MAP_FAILED before returning the pointer.

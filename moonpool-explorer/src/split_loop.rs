@@ -17,6 +17,26 @@
 //!
 //! Each child returns from this function and continues the simulation with
 //! reseeded randomness. The parent waits for each child sequentially.
+//!
+//! # Platform notes
+//!
+//! This is an AFL-style fork server: the child returns from `fork()` and keeps
+//! running the simulation in-process — it never calls `exec()`. On Linux that
+//! is routine. On macOS, Apple officially considers `fork()`-without-`exec()`
+//! unsupported: a child can abort if it re-enters Objective-C, libdispatch, or
+//! Core Foundation state that another thread left mid-update across the fork
+//! (the `__THE_PROCESS_HAS_FORKED_AND_YOU_CANNOT_USE_THIS_COREFOUNDATION_...`
+//! crash).
+//!
+//! What makes the model safe here is that the simulation runtime is
+//! **single-threaded** (`tokio::runtime::Builder::new_current_thread()`): there
+//! are no sibling threads holding locks at fork time, and a pure-Rust child
+//! does not touch the Apple frameworks that trip the fork-safety checks. The
+//! single-thread precondition is therefore load-bearing, not incidental — see
+//! the guard at the entry of [`split_on_discovery`]. Operators who do pull in
+//! framework code can fall back to setting
+//! `OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES` in the environment (it is read at
+//! process start, so it cannot be set from inside this crate).
 
 use std::sync::atomic::Ordering;
 
@@ -45,6 +65,29 @@ fn compute_child_seed(parent_seed: u64, mark_name: &str, child_idx: u32) -> u64 
     hash ^= u64::from(child_idx);
     hash = hash.wrapping_mul(0x0100_0000_01b3);
     hash
+}
+
+/// Debug-only guard that the explorer is always driven from one thread.
+///
+/// The fork-without-exec model (see module docs) is only sound while the sim
+/// runtime is single-threaded — that is the precondition that makes it safe on
+/// macOS in particular. This records the first thread to reach a split point
+/// and asserts every later split happens on that same thread, catching
+/// accidental multi-threaded driving in debug builds. It compiles to nothing in
+/// release, so it never touches fork throughput.
+#[cfg(unix)]
+fn assert_single_fork_thread() {
+    use std::sync::OnceLock;
+    use std::thread::ThreadId;
+
+    static FORK_THREAD: OnceLock<ThreadId> = OnceLock::new();
+    let current = std::thread::current().id();
+    let first = *FORK_THREAD.get_or_init(|| current);
+    debug_assert_eq!(
+        first, current,
+        "explorer fork loop entered from a second thread; the fork-without-exec \
+         model requires the single-threaded sim runtime (see module docs)"
+    );
 }
 
 /// Controls how many children can run in parallel during splitting.
@@ -523,6 +566,7 @@ fn read_adaptive_batch_config() -> (u32, u32, u32) {
 /// capped at the resolved slot count. Otherwise falls back to sequential forking.
 #[cfg(unix)]
 fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
+    assert_single_fork_thread();
     // Read context for guard checks
     let (ctx_active, depth, max_depth, current_seed) =
         context::with_ctx(|ctx| (ctx.active, ctx.depth, ctx.max_depth, ctx.current_seed));
@@ -649,8 +693,13 @@ fn adaptive_split_on_discovery(mark_name: &str, slot_idx: usize) {
 ///
 /// When parallelism is configured, uses a sliding window of concurrent children.
 /// Otherwise falls back to sequential fork→wait→fork→wait.
+///
+/// Must be called from the single-threaded sim runtime: the fork-without-exec
+/// model relies on there being no sibling threads at fork time (see module-level
+/// `# Platform notes`). A debug guard enforces this.
 #[cfg(unix)]
 pub fn split_on_discovery(mark_name: &str) {
+    assert_single_fork_thread();
     let (ctx_active, depth, max_depth, timelines_per_split, current_seed) =
         context::with_ctx(|ctx| {
             (
