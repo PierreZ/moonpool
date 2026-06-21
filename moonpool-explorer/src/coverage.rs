@@ -79,11 +79,10 @@ impl ExploredMap {
     pub fn merge_from(&self, other: &CoverageBitmap) {
         // Safety: both pointers are valid for COVERAGE_MAP_SIZE bytes
         // (constructor invariants of ExploredMap and CoverageBitmap).
-        // Loop bound 0..COVERAGE_MAP_SIZE ensures all ptr.add(i) are in bounds.
-        unsafe {
-            for i in 0..COVERAGE_MAP_SIZE {
-                *self.ptr.add(i) |= *other.as_ptr().add(i);
-            }
+        let explored = unsafe { std::slice::from_raw_parts_mut(self.ptr, COVERAGE_MAP_SIZE) };
+        let child = unsafe { std::slice::from_raw_parts(other.as_ptr(), COVERAGE_MAP_SIZE) };
+        for (e, c) in explored.iter_mut().zip(child) {
+            *e |= *c;
         }
     }
 
@@ -93,15 +92,9 @@ impl ExploredMap {
     /// all timelines.
     #[must_use]
     pub fn count_bits_set(&self) -> u32 {
-        let mut count: u32 = 0;
         // Safety: self.ptr points to COVERAGE_MAP_SIZE bytes (constructor invariant).
-        // Loop bound 0..COVERAGE_MAP_SIZE ensures ptr.add(i) is in bounds.
-        unsafe {
-            for i in 0..COVERAGE_MAP_SIZE {
-                count += (*self.ptr.add(i)).count_ones();
-            }
-        }
-        count
+        let explored = unsafe { std::slice::from_raw_parts(self.ptr, COVERAGE_MAP_SIZE) };
+        explored.iter().map(|b| b.count_ones()).sum()
     }
 
     /// Check if a timeline's bitmap contains any bits not yet in the explored map.
@@ -109,18 +102,9 @@ impl ExploredMap {
     pub fn has_new_bits(&self, other: &CoverageBitmap) -> bool {
         // Safety: both pointers are valid for COVERAGE_MAP_SIZE bytes
         // (constructor invariants of ExploredMap and CoverageBitmap).
-        // Loop bound 0..COVERAGE_MAP_SIZE ensures all ptr.add(i) are in bounds.
-        unsafe {
-            for i in 0..COVERAGE_MAP_SIZE {
-                let explored = *self.ptr.add(i);
-                let child = *other.as_ptr().add(i);
-                // Child has bits that explored map doesn't
-                if (child & !explored) != 0 {
-                    return true;
-                }
-            }
-        }
-        false
+        let explored = unsafe { std::slice::from_raw_parts(self.ptr, COVERAGE_MAP_SIZE) };
+        let child = unsafe { std::slice::from_raw_parts(other.as_ptr(), COVERAGE_MAP_SIZE) };
+        explored.iter().zip(child).any(|(e, c)| (c & !e) != 0)
     }
 }
 

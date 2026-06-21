@@ -78,43 +78,36 @@ flag_setters! {
     append => FLAG_APPEND,
 }
 
-impl OpenOptions {
+macro_rules! flag_getters {
+    ($($(#[$attr:meta])* $name:ident => $flag:ident),* $(,)?) => {
+        impl OpenOptions {
+            $(
+                $(#[$attr])*
+                #[must_use]
+                pub fn $name(&self) -> bool {
+                    self.flags & Self::$flag != 0
+                }
+            )*
+        }
+    };
+}
+
+flag_getters! {
     /// Returns true if the file will be opened for reading.
-    #[must_use]
-    pub fn is_read(&self) -> bool {
-        self.flags & Self::FLAG_READ != 0
-    }
-
+    is_read => FLAG_READ,
     /// Returns true if the file will be opened for writing.
-    #[must_use]
-    pub fn is_write(&self) -> bool {
-        self.flags & Self::FLAG_WRITE != 0
-    }
-
+    is_write => FLAG_WRITE,
     /// Returns true if the file will be created if it does not exist.
-    #[must_use]
-    pub fn is_create(&self) -> bool {
-        self.flags & Self::FLAG_CREATE != 0
-    }
-
+    is_create => FLAG_CREATE,
     /// Returns true if the file must be created new (failing if it exists).
-    #[must_use]
-    pub fn is_create_new(&self) -> bool {
-        self.flags & Self::FLAG_CREATE_NEW != 0
-    }
-
+    is_create_new => FLAG_CREATE_NEW,
     /// Returns true if the file will be truncated to zero length on open.
-    #[must_use]
-    pub fn is_truncate(&self) -> bool {
-        self.flags & Self::FLAG_TRUNCATE != 0
-    }
-
+    is_truncate => FLAG_TRUNCATE,
     /// Returns true if writes will be appended to the end of the file.
-    #[must_use]
-    pub fn is_append(&self) -> bool {
-        self.flags & Self::FLAG_APPEND != 0
-    }
+    is_append => FLAG_APPEND,
+}
 
+impl OpenOptions {
     /// Create options for read-only access.
     #[must_use]
     pub fn read_only() -> Self {

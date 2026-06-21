@@ -107,17 +107,11 @@ impl TopologyFactory {
             shutdown_signal,
         } = inputs;
 
-        let peer_ips = all_entities
+        let (peer_ips, peer_names): (Vec<_>, Vec<_>) = all_entities
             .iter()
             .filter(|(_, peer_ip)| peer_ip != ip)
-            .map(|(_, peer_ip)| peer_ip.clone())
-            .collect();
-
-        let peer_names = all_entities
-            .iter()
-            .filter(|(_, peer_ip)| peer_ip != ip)
-            .map(|(name, _)| name.clone())
-            .collect();
+            .map(|(name, peer_ip)| (peer_ip.clone(), name.clone()))
+            .unzip();
 
         WorkloadTopology {
             my_ip: ip.to_string(),
