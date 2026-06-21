@@ -44,6 +44,22 @@ jobs:
       - name: Run cargo nextest
         run: nix develop --command cargo nextest run
 
+  # Verify the workspace compiles on macOS ARM (aarch64-apple-darwin). All
+  # platform code is #[cfg(unix)]-gated and macOS satisfies `unix`, so the only
+  # Darwin-specific risk is the explorer's fork-without-exec at runtime — hence
+  # we also run the explorer tests here to exercise fork()/mmap/waitpid on
+  # Apple Silicon, not just compile them.
+  macos:
+    runs-on: macos-14 # Apple Silicon (aarch64-apple-darwin)
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Clippy (full workspace, macOS ARM)
+        run: nix develop --command cargo clippy --all-targets -- --deny warnings
+      - name: Explorer tests exercise fork on Darwin
+        run: nix develop --command cargo nextest run -p moonpool-explorer
+
   # The simulation must stay buildable without the fork-based explorer (libc) so
   # it can compile to wasm. Guards the explorer-optional path + the wasm target.
   portability:
