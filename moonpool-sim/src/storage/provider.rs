@@ -34,16 +34,21 @@ impl SimStorageProvider {
     pub fn new(sim: WeakSimWorld, owner_ip: IpAddr) -> Self {
         Self { sim, owner_ip }
     }
+
+    /// Upgrade the weak simulation handle, mapping a dropped simulation to an
+    /// I/O error so storage operations can propagate it with `?`.
+    fn sim(&self) -> io::Result<crate::sim::SimWorld> {
+        self.sim
+            .upgrade()
+            .map_err(|_| io::Error::other("simulation shutdown"))
+    }
 }
 
 impl StorageProvider for SimStorageProvider {
     type File = SimStorageFile;
 
     async fn open(&self, path: &str, options: OpenOptions) -> io::Result<Self::File> {
-        let sim = self
-            .sim
-            .upgrade()
-            .map_err(|_| io::Error::other("simulation shutdown"))?;
+        let sim = self.sim()?;
 
         let file_id = sim.open_file(path, options, 0, self.owner_ip)?;
 
@@ -51,27 +56,18 @@ impl StorageProvider for SimStorageProvider {
     }
 
     async fn exists(&self, path: &str) -> io::Result<bool> {
-        let sim = self
-            .sim
-            .upgrade()
-            .map_err(|_| io::Error::other("simulation shutdown"))?;
+        let sim = self.sim()?;
         Ok(sim.file_exists(path))
     }
 
     async fn delete(&self, path: &str) -> io::Result<()> {
-        let sim = self
-            .sim
-            .upgrade()
-            .map_err(|_| io::Error::other("simulation shutdown"))?;
+        let sim = self.sim()?;
         sim.delete_file(path)?;
         Ok(())
     }
 
     async fn rename(&self, from: &str, to: &str) -> io::Result<()> {
-        let sim = self
-            .sim
-            .upgrade()
-            .map_err(|_| io::Error::other("simulation shutdown"))?;
+        let sim = self.sim()?;
         sim.rename_file(from, to)?;
         Ok(())
     }
