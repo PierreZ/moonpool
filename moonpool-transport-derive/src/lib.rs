@@ -528,14 +528,10 @@ fn extract_result_ok_type(ty: &Type) -> syn::Result<Type> {
 fn to_snake_case(s: &str) -> String {
     let mut result = String::new();
     for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() {
-            if i > 0 {
-                result.push('_');
-            }
-            result.push(c.to_ascii_lowercase());
-        } else {
-            result.push(c);
+        if c.is_uppercase() && i > 0 {
+            result.push('_');
         }
+        result.push(c.to_ascii_lowercase());
     }
     result
 }
