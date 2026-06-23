@@ -142,24 +142,22 @@ The debugging workflow:
 
 ## Stop Conditions
 
-How long should a chaos run last? Moonpool exposes four answers via `IterationControl`, each suited to a different question.
+How long should a chaos run last? Any fixed seed count is wrong: too small misses bugs, too large burns time. The right answer is to **stop on a signal, not a count** — when the run has nothing left to discover. Moonpool exposes three answers via `IterationControl`.
 
-**`FixedCount(n)`** is the workhorse for CI. You commit to running exactly `n` seeds, the duration is bounded, and the report is reproducible across machines. Reach for this when budgets are predictable.
-
-**`TimeLimit(d)`** is the answer when "as much chaos as we have time for" is the right framing. Long-running soak runs and overnight loops use this. The seed count is unbounded but the wall clock is.
-
-**`UntilConverged { max_iterations }`** stops when every `assert_sometimes!` has fired at least once **and** the explorer's coverage bitmap stopped growing on the latest seed. It requires `.enable_exploration()` because it reads the fork-aware coverage map. Use it when you have configured exploration and want the run to end as soon as it has nothing left to discover.
-
-**`CoveragePlateau { plateau_seeds, require_all_sometimes, max_iterations }`** is the more general plateau detector. It tracks the set of `assert_sometimes!` / `assert_reachable!` messages that have ever fired and stops once that set has not grown for `plateau_seeds` consecutive seeds. The signal lives in moonpool-sim, so this works **with or without** fork-based exploration. Set `require_all_sometimes=true` if you want to refuse to stop until every observed sometimes assertion has fired at least once.
+**`UntilCoverageStable { plateau_seeds, max_iterations }`** is the default, and the one you want most of the time. It stops when every observed `assert_sometimes!` / `assert_reachable!` has fired at least once **and** code coverage has not grown for `plateau_seeds` consecutive seeds. The `max_iterations` field is a safety cap. Under `cargo xtask sim run` the binaries are sancov-instrumented, so the progress signal is **real code coverage** — the count of distinct edges the seeds have exercised. Under plain `cargo nextest run` there is no instrumentation, so it falls back to **assertion coverage** — the set of sometimes/reachable messages that have fired. The report names which signal it used, so the fallback is never silent. This works **with or without** fork-based exploration; no fork happens unless you call `.enable_exploration()`.
 
 ```rust
 SimulationBuilder::new()
     .workload(KvWorkload::new(200, keys))
-    .until_coverage_plateau(50, 5_000)
+    .until_coverage_stable(10, 5_000)  // 10 quiet seeds, 5_000 safety cap
     .run();
 ```
 
-Both `UntilConverged` and `CoveragePlateau` set `report.convergence_timeout = true` when the safety cap is hit before the run converges, so CI can fail loudly instead of silently treating "we ran out of seeds" as success.
+**`FixedCount(n)`** is the workhorse for reproducible replay. You commit to running exactly `n` seeds, the duration is bounded, and the report is identical across machines. Reach for this when debugging a specific seed or when budgets must be predictable.
+
+**`TimeLimit(d)`** is the answer when "as much chaos as we have time for" is the right framing. Long-running soak runs and overnight loops use this. The seed count is unbounded but the wall clock is.
+
+`UntilCoverageStable` sets `report.convergence_timeout = true` when the safety cap is hit before the run saturates, so CI can fail loudly instead of silently treating "we ran out of seeds" as success.
 
 ## cargo nextest vs cargo xtask sim
 

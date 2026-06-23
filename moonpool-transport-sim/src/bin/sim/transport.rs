@@ -28,7 +28,9 @@ fn main() {
         // defeating passive/active suppression.
         .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
         .swarm_operations()
-        .set_iterations(20)
+        // No fixed seed count: run adaptively until every sometimes/reachable
+        // has fired and code coverage plateaus (real sancov edges under
+        // `cargo xtask sim run`; assertion-coverage fallback otherwise).
         .seed_warning_timeout(Duration::from_secs(15))
         .run();
 

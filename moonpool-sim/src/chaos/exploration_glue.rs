@@ -37,16 +37,46 @@ pub fn cleanup_assertion_region() {
     moonpool_assertions::clear();
 }
 
-/// Number of bits set in the explored coverage map (0 without exploration).
+/// Cumulative real code-coverage edge count, or `None` when unavailable.
+///
+/// Returns `None` without the `exploration` feature, or when the binary was
+/// not sancov-instrumented (i.e. not built via `cargo xtask sim run`). When
+/// `exploration_active`, reads the fork-aggregated history; otherwise reads the
+/// live BSS counters of the current process (no fork).
 #[must_use]
-pub fn explored_coverage_bits() -> u32 {
+pub fn code_coverage_edges(exploration_active: bool) -> Option<usize> {
     #[cfg(feature = "exploration")]
     {
-        moonpool_explorer::explored_map_bits_set().unwrap_or(0)
+        if !moonpool_explorer::sancov_is_available() {
+            return None;
+        }
+        Some(if exploration_active {
+            moonpool_explorer::sancov_edges_covered()
+        } else {
+            moonpool_explorer::sancov_edges_covered_live()
+        })
     }
     #[cfg(not(feature = "exploration"))]
     {
-        0
+        let _ = exploration_active;
+        None
+    }
+}
+
+/// Total number of instrumented code edges, or `None` when unavailable.
+#[must_use]
+pub fn code_coverage_total() -> Option<usize> {
+    #[cfg(feature = "exploration")]
+    {
+        if moonpool_explorer::sancov_is_available() {
+            Some(moonpool_explorer::sancov_edge_count())
+        } else {
+            None
+        }
+    }
+    #[cfg(not(feature = "exploration"))]
+    {
+        None
     }
 }
 

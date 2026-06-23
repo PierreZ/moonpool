@@ -62,7 +62,7 @@ Less total energy, faster wall-clock time, comparable bug discovery. The multi-s
 
 Five times faster with 20% less total energy. The two seeds happen to cover the state space from different angles, and each seed's warm start avoids re-exploring the other's territory.
 
-These speedups come from the coverage-preserving reset. Without it, multi-seed exploration would be N independent runs with no shared knowledge, which is what plain `UntilAllSometimesReached` already does. The explored map is the innovation that makes multi-seed better than the sum of its parts.
+These speedups come from the coverage-preserving reset. Without it, multi-seed exploration would be N independent runs with no shared knowledge, which is what a plain multi-seed loop already does. The explored map is the innovation that makes multi-seed better than the sum of its parts.
 
 ## The Builder Loop
 
