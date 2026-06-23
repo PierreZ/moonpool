@@ -5,6 +5,7 @@
 
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
+use moonpool_sim::sim::state::DiskEpisodeKind;
 use moonpool_sim::{LatencyDistribution, SimWorld, StorageConfiguration};
 use std::net::IpAddr;
 use std::time::Duration;
@@ -20,13 +21,13 @@ fn test_ip() -> IpAddr {
     TEST_IP_STR.parse().expect("valid IP")
 }
 
-/// Run a storage test and return the simulation time elapsed.
-async fn run_and_measure_time<F, Fut>(mut sim: SimWorld, f: F) -> Duration
+/// Run a storage test for files owned by `ip` and return the simulation time elapsed.
+async fn run_and_measure_time_on<F, Fut>(mut sim: SimWorld, ip: IpAddr, f: F) -> Duration
 where
     F: FnOnce(moonpool_sim::SimStorageProvider) -> Fut,
     Fut: std::future::Future<Output = std::io::Result<()>> + Send + 'static,
 {
-    let provider = sim.storage_provider(test_ip());
+    let provider = sim.storage_provider(ip);
     let handle = tokio::spawn(f(provider));
 
     while !handle.is_finished() {
@@ -38,6 +39,15 @@ where
 
     handle.await.expect("task panicked").expect("io error");
     sim.current_time()
+}
+
+/// Run a storage test on the default test IP and return the simulation time elapsed.
+async fn run_and_measure_time<F, Fut>(sim: SimWorld, f: F) -> Duration
+where
+    F: FnOnce(moonpool_sim::SimStorageProvider) -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<()>> + Send + 'static,
+{
+    run_and_measure_time_on(sim, test_ip(), f).await
 }
 
 /// Create a local tokio runtime for tests.
@@ -456,6 +466,129 @@ fn test_disk_episodes_off_by_default() {
         assert!(
             elapsed < Duration::from_millis(10),
             "disabled episodes should not inflate timing, got {elapsed:?}"
+        );
+    });
+}
+
+// =============================================================================
+// Correlated disk episodes across a machine's disks (issue #147)
+// =============================================================================
+
+/// An episode is scoped per owning process: a single stall window governs *all*
+/// of that machine's open files, and another machine is unaffected.
+#[test]
+fn test_disk_episode_correlated_per_owner() {
+    local_runtime().block_on(async {
+        let ip_a: IpAddr = "10.0.1.1".parse().expect("valid IP");
+        let ip_b: IpAddr = "10.0.1.2".parse().expect("valid IP");
+
+        // Machine A stalls on every op, with a long window so the episode stays
+        // active across both files. Machine B keeps the off-by-default config.
+        let mut sim = SimWorld::new();
+        sim.set_storage_config_for(
+            ip_a,
+            StorageConfiguration {
+                disk_stall_probability: 1.0,
+                disk_stall_duration: Duration::from_secs(10),
+                ..StorageConfiguration::fast_local()
+            },
+        );
+
+        let provider_a = sim.storage_provider(ip_a);
+        let handle = tokio::spawn(async move {
+            let mut a1 = provider_a
+                .open("a1.txt", OpenOptions::create_write())
+                .await?;
+            let mut a2 = provider_a
+                .open("a2.txt", OpenOptions::create_write())
+                .await?;
+            // Write both files concurrently: both ops are scheduled in the same
+            // window, so they share the owner's single episode.
+            futures::future::try_join(async { a1.write_all(b"x").await }, async {
+                a2.write_all(b"x").await
+            })
+            .await?;
+            Ok::<_, std::io::Error>(())
+        });
+
+        // Capture machine A's episode while it is still active (before the
+        // stalled writes complete) and confirm machine B never enters one.
+        let mut active_a = None;
+        let mut b_ever_episode = false;
+        while !handle.is_finished() {
+            if let Some(episode) = sim.disk_episode_for(ip_a)
+                && sim.current_time() < episode.expires_at
+            {
+                active_a = Some(episode);
+            }
+            if sim.disk_episode_for(ip_b).is_some() {
+                b_ever_episode = true;
+            }
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+        handle.await.expect("task panicked").expect("io error");
+
+        let episode = active_a.expect("machine A should enter a disk episode");
+        assert_eq!(
+            episode.kind,
+            DiskEpisodeKind::Stall,
+            "machine A entered a stall episode"
+        );
+        assert!(
+            !b_ever_episode,
+            "machine B must not enter an episode (episodes are per-owner)"
+        );
+        // Both files waited out the *same* shared window: total elapsed is
+        // bounded by one episode duration, not one per file.
+        let elapsed = sim.current_time();
+        assert!(
+            elapsed >= Duration::from_secs(10),
+            "both files waited out the shared stall window, got {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(20),
+            "files on one machine share ONE episode window, not one each, got {elapsed:?}"
+        );
+    });
+}
+
+/// Episodes are keyed by owner IP: the same per-process config makes the
+/// configured machine stall while another machine stays in steady-state timing.
+#[test]
+fn test_disk_episode_isolated_across_machines() {
+    local_runtime().block_on(async {
+        let ip_a: IpAddr = "10.0.1.1".parse().expect("valid IP");
+        let ip_b: IpAddr = "10.0.1.2".parse().expect("valid IP");
+        let stall = || StorageConfiguration {
+            disk_stall_probability: 1.0,
+            disk_stall_duration: Duration::from_millis(50),
+            ..StorageConfiguration::fast_local()
+        };
+
+        // Both machines share a fast (episode-free) global config; only A gets a
+        // per-process override that enables stalls.
+        let mut sim_a = SimWorld::new();
+        sim_a.set_storage_config(StorageConfiguration::fast_local());
+        sim_a.set_storage_config_for(ip_a, stall());
+        let elapsed_a = run_and_measure_time_on(sim_a, ip_a, |p| write_sync_workload(p, 5)).await;
+
+        // Same per-process config for A, but the workload runs on B's IP, which
+        // resolves to the fast global config (no episodes).
+        let mut sim_b = SimWorld::new();
+        sim_b.set_storage_config(StorageConfiguration::fast_local());
+        sim_b.set_storage_config_for(ip_a, stall());
+        let elapsed_b = run_and_measure_time_on(sim_b, ip_b, |p| write_sync_workload(p, 5)).await;
+
+        assert!(
+            elapsed_a >= Duration::from_millis(200),
+            "machine A (episodes on) should stall, got {elapsed_a:?}"
+        );
+        assert!(
+            elapsed_b < Duration::from_millis(10),
+            "machine B (off-by-default config) should be unaffected, got {elapsed_b:?}"
         );
     });
 }

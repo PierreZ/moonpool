@@ -514,6 +514,50 @@ impl SimWorld {
             .config = config;
     }
 
+    /// Set the storage configuration for a single process IP.
+    ///
+    /// Overrides the default ([`set_storage_config`](Self::set_storage_config))
+    /// for files owned by `ip`, letting different machines run with different
+    /// storage timing and fault profiles in the same simulation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    pub fn set_storage_config_for(
+        &mut self,
+        ip: std::net::IpAddr,
+        config: crate::storage::StorageConfiguration,
+    ) {
+        self.inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked")
+            .storage
+            .per_process_configs
+            .insert(ip, config);
+    }
+
+    /// Active disk-degradation episode for a process IP, if any.
+    ///
+    /// Episodes are scoped per owner: one stall/throttle window applies to every
+    /// file the process owns. Observability accessor for tests and diagnostics.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
+    pub fn disk_episode_for(
+        &self,
+        ip: std::net::IpAddr,
+    ) -> Option<super::state::DiskDegradationState> {
+        self.inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .storage
+            .disk_episodes
+            .get(&ip)
+            .copied()
+    }
+
     /// Access network configuration for latency calculations using thread-local RNG.
     ///
     /// This method provides access to the network configuration for calculating

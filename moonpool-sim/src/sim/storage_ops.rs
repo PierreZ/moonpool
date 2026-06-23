@@ -4,6 +4,7 @@
 //! `world.rs` to improve code organization. It handles file operations like
 //! open, read, write, sync, and provides fault injection for testing storage reliability.
 
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::task::Waker;
 use std::time::Duration;
@@ -17,10 +18,7 @@ use crate::chaos::fault_events::SimFaultEvent;
 use super::{
     events::{Event, ScheduledEvent, StorageOperation},
     rng::{sim_random, sim_random_range},
-    state::{
-        DiskDegradationState, DiskEpisodeKind, FileId, PendingOpType, PendingStorageOp,
-        StorageFileState,
-    },
+    state::{DiskDegradationState, DiskEpisodeKind, FileId, PendingOpType, PendingStorageOp},
     world::{SimInner, SimWorld},
 };
 
@@ -48,8 +46,12 @@ fn take_pending_op(
     Some((op_seq, op))
 }
 
-/// Advance a file's disk-degradation episode state machine and return the
-/// episode (if any) active for the operation now being scheduled.
+/// Advance an owning process's disk-degradation episode state machine and return
+/// the episode (if any) active for the operation now being scheduled.
+///
+/// Episodes are scoped per owner (keyed by process IP): a single stall/throttle
+/// window applies to every file that process owns, modelling device-level
+/// degradation that hits all of a machine's disks together (issue #147).
 ///
 /// On each call: expire an episode whose window has elapsed, keep an episode
 /// that is still active, or — when none is active and a family is enabled —
@@ -59,7 +61,8 @@ fn take_pending_op(
 /// without drawing any simulation RNG, keeping the RNG stream byte-identical to
 /// steady-state runs (so existing latency/determinism tests are unaffected).
 fn update_disk_episode(
-    file_state: &mut StorageFileState,
+    episodes: &mut HashMap<IpAddr, DiskDegradationState>,
+    owner_ip: IpAddr,
     now: Duration,
     stall_probability: f64,
     stall_duration: Duration,
@@ -67,14 +70,14 @@ fn update_disk_episode(
     throttle_duration: Duration,
 ) -> Option<DiskDegradationState> {
     // Expire an episode whose window has elapsed.
-    if let Some(episode) = file_state.disk_episode
+    if let Some(episode) = episodes.get(&owner_ip).copied()
         && now >= episode.expires_at
     {
-        file_state.disk_episode = None;
+        episodes.remove(&owner_ip);
     }
 
     // An episode is still active: keep it, drawing no new randomness.
-    if let Some(episode) = file_state.disk_episode {
+    if let Some(episode) = episodes.get(&owner_ip).copied() {
         return Some(episode);
     }
 
@@ -100,13 +103,15 @@ fn update_disk_episode(
     } else {
         None
     };
-    file_state.disk_episode = episode;
+    if let Some(episode) = episode {
+        episodes.insert(owner_ip, episode);
+    }
     episode
 }
 
-/// Read the disk-episode knobs for a file's owning process into a copyable
-/// tuple, so the borrow of `inner.storage` ends before `file_state` is
-/// re-borrowed mutably for the episode update.
+/// Read the disk-episode knobs for an owning process into a copyable tuple, so
+/// the immutable borrow of `inner.storage` ends before `inner.storage.disk_episodes`
+/// is re-borrowed mutably for the episode update.
 fn disk_episode_knobs(inner: &SimInner, owner_ip: IpAddr) -> (f64, Duration, f64, Duration) {
     let config = inner.storage.config_for(owner_ip);
     (
@@ -601,11 +606,8 @@ impl SimWorld {
         let now = inner.current_time;
         let (stall_p, stall_dur, throttle_p, throttle_dur) = disk_episode_knobs(&inner, owner_ip);
         let episode = update_disk_episode(
-            inner
-                .storage
-                .files
-                .get_mut(&file_id)
-                .ok_or(StorageError::InvalidFileHandle { file_id })?,
+            &mut inner.storage.disk_episodes,
+            owner_ip,
             now,
             stall_p,
             stall_dur,
@@ -683,11 +685,8 @@ impl SimWorld {
         let now = inner.current_time;
         let (stall_p, stall_dur, throttle_p, throttle_dur) = disk_episode_knobs(&inner, owner_ip);
         let episode = update_disk_episode(
-            inner
-                .storage
-                .files
-                .get_mut(&file_id)
-                .ok_or(StorageError::InvalidFileHandle { file_id })?,
+            &mut inner.storage.disk_episodes,
+            owner_ip,
             now,
             stall_p,
             stall_dur,
@@ -761,11 +760,8 @@ impl SimWorld {
         let now = inner.current_time;
         let (stall_p, stall_dur, throttle_p, throttle_dur) = disk_episode_knobs(&inner, owner_ip);
         let episode = update_disk_episode(
-            inner
-                .storage
-                .files
-                .get_mut(&file_id)
-                .ok_or(StorageError::InvalidFileHandle { file_id })?,
+            &mut inner.storage.disk_episodes,
+            owner_ip,
             now,
             stall_p,
             stall_dur,

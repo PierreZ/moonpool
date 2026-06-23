@@ -399,7 +399,7 @@ pub struct PendingStorageOp {
     pub data: Option<Vec<u8>>,
 }
 
-/// Kind of dynamic disk-degradation episode currently affecting a file.
+/// Kind of dynamic disk-degradation episode currently affecting a process's disk.
 ///
 /// Models `FoundationDB`'s `DiskFailureInjector` (`getDiskDelay()`): real disks
 /// degrade episodically rather than at a fixed steady-state rate.
@@ -411,11 +411,12 @@ pub enum DiskEpisodeKind {
     Throttle,
 }
 
-/// Active disk-degradation episode on a file (stall or throttle), with expiry.
+/// Active disk-degradation episode (stall or throttle) on a process's disk, with expiry.
 ///
-/// Per-file state, evaluated before each latency calculation in
-/// `schedule_{read,write,sync}`. Mirrors the existing [`ClogState`] /
-/// [`PartitionState`] expiry pattern.
+/// Per-owner state (keyed by owning process IP in [`StorageState::disk_episodes`]),
+/// evaluated before each latency calculation in `schedule_{read,write,sync}`: a
+/// single episode applies to every file owned by that process for its duration.
+/// Mirrors the existing [`ClogState`] / [`PartitionState`] expiry pattern.
 #[derive(Debug, Clone, Copy)]
 pub struct DiskDegradationState {
     /// Which kind of degradation is active.
@@ -445,8 +446,6 @@ pub struct StorageFileState {
     pub next_op_seq: u64,
     /// IP address of the process that owns this file.
     pub owner_ip: IpAddr,
-    /// Active dynamic disk-degradation episode, if any.
-    pub disk_episode: Option<DiskDegradationState>,
 }
 
 impl StorageFileState {
@@ -469,7 +468,6 @@ impl StorageFileState {
             pending_ops: BTreeMap::new(),
             next_op_seq: 0,
             owner_ip,
-            disk_episode: None,
         }
     }
 }
@@ -486,6 +484,12 @@ pub struct StorageState {
     /// When a file's owner IP has an entry here, that config is used for
     /// fault injection and latency calculations instead of the global default.
     pub per_process_configs: HashMap<IpAddr, StorageConfiguration>,
+    /// Active disk-degradation episode per owning process IP.
+    ///
+    /// Real disks degrade at the device level: a stall/throttle window applies
+    /// to every file owned by the process for the episode's duration, modelling
+    /// the correlated backpressure a per-file episode cannot (issue #147).
+    pub disk_episodes: HashMap<IpAddr, DiskDegradationState>,
     /// Active files indexed by their ID
     pub files: BTreeMap<FileId, StorageFileState>,
     /// Mapping from path to file ID for quick lookup
@@ -504,6 +508,7 @@ impl StorageState {
             next_file_id: 0,
             config,
             per_process_configs: HashMap::new(),
+            disk_episodes: HashMap::new(),
             files: BTreeMap::new(),
             path_to_file: BTreeMap::new(),
             deleted_paths: HashSet::new(),
