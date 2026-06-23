@@ -9,6 +9,7 @@ use std::task::Waker;
 use std::time::Duration;
 use tracing::instrument;
 
+use crate::assert_reachable;
 use crate::storage::StorageError;
 
 use crate::chaos::fault_events::SimFaultEvent;
@@ -16,7 +17,10 @@ use crate::chaos::fault_events::SimFaultEvent;
 use super::{
     events::{Event, ScheduledEvent, StorageOperation},
     rng::{sim_random, sim_random_range},
-    state::{FileId, PendingOpType, PendingStorageOp},
+    state::{
+        DiskDegradationState, DiskEpisodeKind, FileId, PendingOpType, PendingStorageOp,
+        StorageFileState,
+    },
     world::{SimInner, SimWorld},
 };
 
@@ -42,6 +46,75 @@ fn take_pending_op(
 
     let op = file_state.pending_ops.remove(&op_seq)?;
     Some((op_seq, op))
+}
+
+/// Advance a file's disk-degradation episode state machine and return the
+/// episode (if any) active for the operation now being scheduled.
+///
+/// On each call: expire an episode whose window has elapsed, keep an episode
+/// that is still active, or — when none is active and a family is enabled —
+/// probabilistically enter a stall or throttle episode (stall takes precedence).
+///
+/// **Off-by-default guarantee:** when both probabilities are zero this returns
+/// without drawing any simulation RNG, keeping the RNG stream byte-identical to
+/// steady-state runs (so existing latency/determinism tests are unaffected).
+fn update_disk_episode(
+    file_state: &mut StorageFileState,
+    now: Duration,
+    stall_probability: f64,
+    stall_duration: Duration,
+    throttle_probability: f64,
+    throttle_duration: Duration,
+) -> Option<DiskDegradationState> {
+    // Expire an episode whose window has elapsed.
+    if let Some(episode) = file_state.disk_episode
+        && now >= episode.expires_at
+    {
+        file_state.disk_episode = None;
+    }
+
+    // An episode is still active: keep it, drawing no new randomness.
+    if let Some(episode) = file_state.disk_episode {
+        return Some(episode);
+    }
+
+    // Off by default: never perturb the RNG stream when both families are disabled.
+    if stall_probability <= 0.0 && throttle_probability <= 0.0 {
+        return None;
+    }
+
+    // Probabilistically enter a new episode using a single draw.
+    let roll = sim_random::<f64>();
+    let episode = if roll < stall_probability {
+        assert_reachable!("disk: stall episode entered");
+        Some(DiskDegradationState {
+            kind: DiskEpisodeKind::Stall,
+            expires_at: now + stall_duration,
+        })
+    } else if roll < stall_probability + throttle_probability {
+        assert_reachable!("disk: throttle episode entered");
+        Some(DiskDegradationState {
+            kind: DiskEpisodeKind::Throttle,
+            expires_at: now + throttle_duration,
+        })
+    } else {
+        None
+    };
+    file_state.disk_episode = episode;
+    episode
+}
+
+/// Read the disk-episode knobs for a file's owning process into a copyable
+/// tuple, so the borrow of `inner.storage` ends before `file_state` is
+/// re-borrowed mutably for the episode update.
+fn disk_episode_knobs(inner: &SimInner, owner_ip: IpAddr) -> (f64, Duration, f64, Duration) {
+    let config = inner.storage.config_for(owner_ip);
+    (
+        config.disk_stall_probability,
+        config.disk_stall_duration,
+        config.disk_throttle_probability,
+        config.disk_throttle_duration,
+    )
 }
 
 /// Handle storage I/O events.
@@ -523,11 +596,25 @@ impl SimWorld {
             },
         );
 
-        // Calculate latency using per-process config
+        // Advance the disk-degradation episode, then compute latency.
         let owner_ip = file_state.owner_ip;
+        let now = inner.current_time;
+        let (stall_p, stall_dur, throttle_p, throttle_dur) = disk_episode_knobs(&inner, owner_ip);
+        let episode = update_disk_episode(
+            inner
+                .storage
+                .files
+                .get_mut(&file_id)
+                .ok_or(StorageError::InvalidFileHandle { file_id })?,
+            now,
+            stall_p,
+            stall_dur,
+            throttle_p,
+            throttle_dur,
+        );
         let config = inner.storage.config_for(owner_ip);
-        let latency = Self::calculate_storage_latency(config, len, false);
-        let scheduled_time = inner.current_time + latency;
+        let latency = Self::calculate_storage_latency(config, len, false, episode, now);
+        let scheduled_time = now + latency;
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
 
@@ -591,11 +678,25 @@ impl SimWorld {
             },
         );
 
-        // Calculate latency using per-process config
+        // Advance the disk-degradation episode, then compute latency.
         let owner_ip = file_state.owner_ip;
+        let now = inner.current_time;
+        let (stall_p, stall_dur, throttle_p, throttle_dur) = disk_episode_knobs(&inner, owner_ip);
+        let episode = update_disk_episode(
+            inner
+                .storage
+                .files
+                .get_mut(&file_id)
+                .ok_or(StorageError::InvalidFileHandle { file_id })?,
+            now,
+            stall_p,
+            stall_dur,
+            throttle_p,
+            throttle_dur,
+        );
         let config = inner.storage.config_for(owner_ip);
-        let latency = Self::calculate_storage_latency(config, len, true);
-        let scheduled_time = inner.current_time + latency;
+        let latency = Self::calculate_storage_latency(config, len, true, episode, now);
+        let scheduled_time = now + latency;
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
 
@@ -653,11 +754,34 @@ impl SimWorld {
             },
         );
 
-        // Use sync latency from per-process config
+        // Advance the disk-degradation episode, then compute sync latency. Sync
+        // is affected by stalls (the disk is frozen until expiry); a throttle
+        // scales IOPS/bandwidth, which sync latency does not use.
         let owner_ip = file_state.owner_ip;
+        let now = inner.current_time;
+        let (stall_p, stall_dur, throttle_p, throttle_dur) = disk_episode_knobs(&inner, owner_ip);
+        let episode = update_disk_episode(
+            inner
+                .storage
+                .files
+                .get_mut(&file_id)
+                .ok_or(StorageError::InvalidFileHandle { file_id })?,
+            now,
+            stall_p,
+            stall_dur,
+            throttle_p,
+            throttle_dur,
+        );
         let config = inner.storage.config_for(owner_ip);
-        let latency = crate::network::sample_latency(&config.sync_latency);
-        let scheduled_time = inner.current_time + latency;
+        let mut latency = crate::network::sample_latency(&config.sync_latency);
+        if let Some(DiskDegradationState {
+            kind: DiskEpisodeKind::Stall,
+            expires_at,
+        }) = episode
+        {
+            latency += expires_at.saturating_sub(now);
+        }
+        let scheduled_time = now + latency;
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
 
@@ -855,13 +979,19 @@ impl SimWorld {
             .ok_or(StorageError::InvalidFileHandle { file_id })
     }
 
-    /// Calculate storage latency using FDB formula.
+    /// Calculate storage latency using FDB formula, adjusted for any active
+    /// disk-degradation episode.
     ///
-    /// Latency = `base_latency` + `iops_overhead` + `transfer_time`
+    /// Latency = `base_latency` + `iops_overhead` + `transfer_time`, where a
+    /// **throttle** episode divides effective IOPS/bandwidth by the configured
+    /// multipliers and a **stall** episode adds the time remaining until the
+    /// stall expires (the disk is frozen until then).
     fn calculate_storage_latency(
         config: &crate::storage::StorageConfiguration,
         size: usize,
         is_write: bool,
+        episode: Option<DiskDegradationState>,
+        now: Duration,
     ) -> Duration {
         // Sample base latency from config range
         let base_range = if is_write {
@@ -871,18 +1001,41 @@ impl SimWorld {
         };
         let base = crate::network::sample_latency(base_range);
 
-        // IOPS overhead: 1/iops seconds per operation.
+        // During a throttle episode, effective IOPS/bandwidth are divided by the
+        // configured multipliers (>= 1.0); otherwise the divisors are 1.0.
+        let (iops_divisor, bandwidth_divisor) = match episode {
+            Some(DiskDegradationState {
+                kind: DiskEpisodeKind::Throttle,
+                ..
+            }) => (
+                config.disk_throttle_iops_multiplier.max(1.0),
+                config.disk_throttle_bandwidth_multiplier.max(1.0),
+            ),
+            _ => (1.0, 1.0),
+        };
+
+        // IOPS overhead: divisor/iops seconds per operation.
         // Precision loss is acceptable: iops is typically << 2^52.
         let iops_f64 = u32::try_from(config.iops).map_or(f64::from(u32::MAX), f64::from);
-        let iops_overhead = Duration::from_secs_f64(1.0 / iops_f64);
+        let iops_overhead = Duration::from_secs_f64(iops_divisor / iops_f64);
 
-        // Transfer time: size / bandwidth seconds.
+        // Transfer time: size * divisor / bandwidth seconds.
         // Precision loss is acceptable: simulated sizes/bandwidths fit in 2^52.
         let size_f64 = u32::try_from(size).map_or(f64::from(u32::MAX), f64::from);
         let bandwidth_f64 = u32::try_from(config.bandwidth).map_or(f64::from(u32::MAX), f64::from);
-        let transfer = Duration::from_secs_f64(size_f64 / bandwidth_f64);
+        let transfer = Duration::from_secs_f64(size_f64 * bandwidth_divisor / bandwidth_f64);
 
-        base + iops_overhead + transfer
+        let steady = base + iops_overhead + transfer;
+
+        // During a stall the disk is frozen until expiry: the op waits out the
+        // remaining window, then takes its normal steady-state latency.
+        match episode {
+            Some(DiskDegradationState {
+                kind: DiskEpisodeKind::Stall,
+                expires_at,
+            }) => steady + expires_at.saturating_sub(now),
+            _ => steady,
+        }
     }
 
     /// Simulate a crash affecting storage for a specific process.
