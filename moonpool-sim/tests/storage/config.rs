@@ -246,6 +246,7 @@ fn test_custom_configuration() {
         misdirect_read_probability: 0.0005,
         phantom_write_probability: 0.001,
         sync_failure_probability: 0.005,
+        ..StorageConfiguration::default()
     };
 
     // Verify all fields are set correctly
@@ -302,6 +303,7 @@ fn test_hdd_like_configuration() {
         misdirect_read_probability: 0.0,
         phantom_write_probability: 0.0,
         sync_failure_probability: 0.0,
+        ..StorageConfiguration::default()
     };
 
     assert_eq!(hdd_config.iops, 150);
@@ -328,6 +330,7 @@ fn test_nvme_like_configuration() {
         misdirect_read_probability: 0.0,
         phantom_write_probability: 0.0,
         sync_failure_probability: 0.0,
+        ..StorageConfiguration::default()
     };
 
     assert_eq!(nvme_config.iops, 500_000);

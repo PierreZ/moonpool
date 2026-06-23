@@ -122,6 +122,7 @@ fn test_custom_latency_ranges() {
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
+            ..StorageConfiguration::default()
         };
 
         let mut sim = SimWorld::new();
@@ -170,6 +171,7 @@ fn test_latency_formula() {
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
+            ..StorageConfiguration::default()
         };
 
         let mut sim = SimWorld::new();
@@ -223,6 +225,7 @@ fn test_read_latency_scales_with_size() {
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
+            ..StorageConfiguration::default()
         };
 
         // First, write test data
@@ -324,6 +327,7 @@ fn test_write_latency_scales_with_size() {
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
+            ..StorageConfiguration::default()
         };
 
         let sizes = [100, 1000, 5000];
@@ -360,6 +364,98 @@ fn test_write_latency_scales_with_size() {
         assert!(
             write_times[2].1 > write_times[1].1,
             "5KB write should take longer than 1KB write"
+        );
+    });
+}
+
+// =============================================================================
+// Dynamic disk stall/throttle episodes (issue #126)
+// =============================================================================
+
+/// Workload: open a file and perform `n` write+sync cycles.
+async fn write_sync_workload(
+    provider: moonpool_sim::SimStorageProvider,
+    n: usize,
+) -> std::io::Result<()> {
+    let mut file = provider
+        .open("episodes.txt", OpenOptions::create_write())
+        .await?;
+    for _ in 0..n {
+        file.write_all(b"x").await?;
+        file.sync_all().await?;
+    }
+    Ok(())
+}
+
+/// Disk stalls during an episode should freeze I/O and inflate elapsed time,
+/// surfacing the backpressure that steady-state timing never produces.
+#[test]
+fn test_disk_stall_inflates_elapsed_time() {
+    local_runtime().block_on(async {
+        // Baseline: episodes off (fast_local), the same workload is negligible.
+        let mut baseline_sim = SimWorld::new();
+        baseline_sim.set_storage_config(StorageConfiguration::fast_local());
+        let baseline = run_and_measure_time(baseline_sim, |p| write_sync_workload(p, 5)).await;
+
+        // A stall on every I/O: each op waits out a 50ms freeze window.
+        let stall_config = StorageConfiguration {
+            disk_stall_probability: 1.0,
+            disk_stall_duration: Duration::from_millis(50),
+            ..StorageConfiguration::fast_local()
+        };
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(stall_config);
+        let stalled = run_and_measure_time(sim, |p| write_sync_workload(p, 5)).await;
+
+        assert!(
+            baseline < Duration::from_millis(10),
+            "fast_local baseline should be negligible, got {baseline:?}"
+        );
+        assert!(
+            stalled >= Duration::from_millis(200),
+            "disk stalls should inflate elapsed time (backpressure), got {stalled:?}"
+        );
+        assert!(
+            stalled > baseline * 50,
+            "stalled run ({stalled:?}) should dwarf baseline ({baseline:?})"
+        );
+    });
+}
+
+/// Stall timing is deterministic: the same seed replays the same episodes.
+#[test]
+fn test_disk_stall_deterministic_per_seed() {
+    local_runtime().block_on(async {
+        let make_config = || StorageConfiguration {
+            disk_stall_probability: 0.5,
+            disk_stall_duration: Duration::from_millis(30),
+            ..StorageConfiguration::fast_local()
+        };
+
+        let mut sim_a = SimWorld::new_with_seed(12_345);
+        sim_a.set_storage_config(make_config());
+        let a = run_and_measure_time(sim_a, |p| write_sync_workload(p, 8)).await;
+
+        let mut sim_b = SimWorld::new_with_seed(12_345);
+        sim_b.set_storage_config(make_config());
+        let b = run_and_measure_time(sim_b, |p| write_sync_workload(p, 8)).await;
+
+        assert_eq!(a, b, "same seed must produce identical stall timing");
+    });
+}
+
+/// With episodes disabled (the default), no stall inflation occurs and the RNG
+/// stream is untouched — the workload stays in steady-state timing.
+#[test]
+fn test_disk_episodes_off_by_default() {
+    local_runtime().block_on(async {
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(StorageConfiguration::fast_local());
+        let elapsed = run_and_measure_time(sim, |p| write_sync_workload(p, 10)).await;
+
+        assert!(
+            elapsed < Duration::from_millis(10),
+            "disabled episodes should not inflate timing, got {elapsed:?}"
         );
     });
 }

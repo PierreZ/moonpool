@@ -98,6 +98,16 @@ Storage also simulates realistic performance characteristics independent of faul
 | Write latency | `write_latency` | `Uniform` 100-500us | Per-write operation delay (a `LatencyDistribution`) |
 | Sync latency | `sync_latency` | `Uniform` 1-5ms | Per-sync/flush delay (a `LatencyDistribution`) |
 
+### Dynamic Disk Degradation Episodes
+
+Episodic degradation layered on top of steady-state timing (FoundationDB's `DiskFailureInjector`). Off by default and scoped per file. While disabled, the episode state machine never draws from the RNG stream, so steady-state runs stay deterministic.
+
+| Episode | Config Field | Default | While active |
+|---------|-------------|---------|--------------|
+| Stall | `disk_stall_probability` / `disk_stall_duration` | 0%, 0ms | Disk frozen until expiry; I/O waits out the window |
+| Throttle | `disk_throttle_probability` / `disk_throttle_duration` | 0%, 0ms | Effective IOPS/bandwidth divided by the multipliers |
+| Throttle factor | `disk_throttle_iops_multiplier` / `disk_throttle_bandwidth_multiplier` | 1.0 | Divisor applied to IOPS / bandwidth during a throttle |
+
 ## Process Lifecycle Faults
 
 Configured via [`Attrition`](../part3-building/attrition.md) (built-in) or custom [`FaultInjector`](../part3-building/chaos.md) implementations.

@@ -26,6 +26,20 @@
 //! | Phantom write | `phantom_write_probability` | 0% | Write appears to succeed but doesn't persist |
 //! | Sync failure | `sync_failure_probability` | 0% | fsync fails |
 //!
+//! ## Dynamic Disk Degradation Episodes
+//!
+//! Real disks degrade *episodically* rather than at a fixed steady-state rate.
+//! These knobs are off by default (probabilities 0, no-op multipliers); when
+//! enabled they make a file enter a stall or throttle episode for a duration,
+//! surfacing timeout cascades and backpressure collapse. FDB ref:
+//! `DiskFailureInjector` / `getDiskDelay()`.
+//!
+//! | Episode | Config Field | Default | Effect while active |
+//! |---------|--------------|---------|---------------------|
+//! | Stall | `disk_stall_probability` / `disk_stall_duration` | 0% | Disk frozen until expiry; I/O waits out the window |
+//! | Throttle | `disk_throttle_probability` / `disk_throttle_duration` | 0% | Effective IOPS/bandwidth divided by the multipliers |
+//! | Throttle factor | `disk_throttle_iops_multiplier` / `disk_throttle_bandwidth_multiplier` | 1.0 | Divisor applied to IOPS / bandwidth |
+//!
 //! ## Configuration Examples
 //!
 //! ### Fast Local Testing (No Chaos)
@@ -152,6 +166,40 @@ pub struct StorageConfiguration {
     /// Simulates fsync failures which can indicate serious storage issues.
     /// Tests error handling in durability-critical code paths.
     pub sync_failure_probability: f64,
+
+    // =========================================================================
+    // Dynamic Disk Degradation Episodes
+    // =========================================================================
+    // Real disks degrade *episodically* rather than at a fixed steady-state rate:
+    // brief full stalls (GC/thermal/firmware pauses) and longer throttle periods
+    // (reduced IOPS/bandwidth). These surface timeout cascades and backpressure
+    // collapse that steady-state timing never produces. Off by default (all 0).
+    // FDB ref: `DiskFailureInjector` / `getDiskDelay()`.
+    /// Per-operation probability of entering a *stall* episode (0.0 - 1.0).
+    ///
+    /// During a stall the disk is frozen until the episode expires; any I/O
+    /// scheduled in that window waits out the remaining time before completing.
+    pub disk_stall_probability: f64,
+
+    /// How long a stall episode freezes the disk once entered.
+    pub disk_stall_duration: Duration,
+
+    /// Per-operation probability of entering a *throttle* episode (0.0 - 1.0).
+    ///
+    /// During a throttle the effective IOPS/bandwidth are divided by the
+    /// configured multipliers for the duration of the episode.
+    pub disk_throttle_probability: f64,
+
+    /// How long a throttle episode reduces throughput once entered.
+    pub disk_throttle_duration: Duration,
+
+    /// Divisor applied to effective IOPS during a throttle episode (>= 1.0).
+    ///
+    /// E.g. `10.0` makes the disk handle one tenth its normal IOPS.
+    pub disk_throttle_iops_multiplier: f64,
+
+    /// Divisor applied to effective bandwidth during a throttle episode (>= 1.0).
+    pub disk_throttle_bandwidth_multiplier: f64,
 }
 
 impl Default for StorageConfiguration {
@@ -181,6 +229,14 @@ impl Default for StorageConfiguration {
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
+
+            // Dynamic disk degradation - disabled by default (no-op multipliers)
+            disk_stall_probability: 0.0,
+            disk_stall_duration: Duration::ZERO,
+            disk_throttle_probability: 0.0,
+            disk_throttle_duration: Duration::ZERO,
+            disk_throttle_iops_multiplier: 1.0,
+            disk_throttle_bandwidth_multiplier: 1.0,
         }
     }
 }
@@ -227,6 +283,15 @@ impl StorageConfiguration {
             misdirect_read_probability: f64::from(sim_random_range(0..10)) / 100_000.0,
             phantom_write_probability: f64::from(sim_random_range(0..20)) / 100_000.0,
             sync_failure_probability: f64::from(sim_random_range(0..50)) / 100_000.0,
+
+            // Low-rate disk-degradation episodes (drawn after the faults so the
+            // existing per-field RNG sub-sequence is unchanged).
+            disk_stall_probability: f64::from(sim_random_range(0..100)) / 100_000.0,
+            disk_stall_duration: Duration::from_millis(sim_random_range(50..500)),
+            disk_throttle_probability: f64::from(sim_random_range(0..100)) / 100_000.0,
+            disk_throttle_duration: Duration::from_millis(sim_random_range(500..5000)),
+            disk_throttle_iops_multiplier: f64::from(sim_random_range(2..20)),
+            disk_throttle_bandwidth_multiplier: f64::from(sim_random_range(2..20)),
         }
     }
 
@@ -248,7 +313,8 @@ impl StorageConfiguration {
     /// Disable each fault family with ~50% probability using the `CONFIG_RNG`
     /// stream (see [`swarm_for_seed`](Self::swarm_for_seed)).
     ///
-    /// Draws exactly seven `config_random_bool` values (one per family) so the
+    /// Draws exactly nine `config_random_bool` values (one per family: the seven
+    /// per-op faults plus the stall and throttle episode families) so the
     /// `CONFIG_RNG` call sequence is fixed and reproducible per seed. Performance
     /// parameters (IOPS, bandwidth, latencies) stay as sampled — only the fault
     /// families are masked.
@@ -274,6 +340,12 @@ impl StorageConfiguration {
         if !config_random_bool(0.5) {
             self.sync_failure_probability = 0.0;
         }
+        if !config_random_bool(0.5) {
+            self.disk_stall_probability = 0.0;
+        }
+        if !config_random_bool(0.5) {
+            self.disk_throttle_probability = 0.0;
+        }
     }
 
     /// Spike selected disk knob *magnitudes* under buggify (FDB's
@@ -290,6 +362,17 @@ impl StorageConfiguration {
         self.bandwidth = crate::buggify_knob!(self.bandwidth, 1_000_000..20_000_000);
         self.sync_failure_probability =
             crate::buggify_knob!(self.sync_failure_probability, 0.05..0.2);
+        self.disk_stall_probability = crate::buggify_knob!(self.disk_stall_probability, 0.1..0.5);
+        self.disk_stall_duration = crate::buggify_knob!(
+            self.disk_stall_duration,
+            Duration::from_millis(100)..Duration::from_millis(500)
+        );
+        self.disk_throttle_probability =
+            crate::buggify_knob!(self.disk_throttle_probability, 0.1..0.5);
+        self.disk_throttle_duration = crate::buggify_knob!(
+            self.disk_throttle_duration,
+            Duration::from_secs(1)..Duration::from_secs(5)
+        );
     }
 
     /// Create a configuration optimized for fast local testing.
@@ -318,6 +401,14 @@ impl StorageConfiguration {
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
+
+            // Disk degradation disabled (no-op multipliers)
+            disk_stall_probability: 0.0,
+            disk_stall_duration: Duration::ZERO,
+            disk_throttle_probability: 0.0,
+            disk_throttle_duration: Duration::ZERO,
+            disk_throttle_iops_multiplier: 1.0,
+            disk_throttle_bandwidth_multiplier: 1.0,
         }
     }
 }
@@ -328,7 +419,7 @@ mod swarm_tests {
     use crate::sim::rng::{reset_sim_rng, set_config_seed, set_sim_seed};
 
     /// The on/off state of each swarmed fault family, in mask order.
-    fn enabled_families(config: &StorageConfiguration) -> [bool; 7] {
+    fn enabled_families(config: &StorageConfiguration) -> [bool; 9] {
         [
             config.read_fault_probability > 0.0,
             config.write_fault_probability > 0.0,
@@ -337,6 +428,8 @@ mod swarm_tests {
             config.misdirect_write_probability > 0.0,
             config.phantom_write_probability > 0.0,
             config.sync_failure_probability > 0.0,
+            config.disk_stall_probability > 0.0,
+            config.disk_throttle_probability > 0.0,
         ]
     }
 
@@ -401,6 +494,8 @@ mod swarm_tests {
         assert_zero(config.misdirect_write_probability);
         assert_zero(config.phantom_write_probability);
         assert_zero(config.sync_failure_probability);
+        assert_zero(config.disk_stall_probability);
+        assert_zero(config.disk_throttle_probability);
     }
 
     /// Assert an f64 is exactly `+0.0` (bit-exact, avoiding the float-cmp lint).
@@ -421,8 +516,8 @@ mod buggify_knob_tests {
 
     /// Sample the buggify-spiked knobs the way the runner does: seed both RNG
     /// streams and enable buggify before perturbing. Returns the spiked knobs
-    /// (`sync_failure_probability` as bits for exact comparison).
-    fn buggified_knobs(seed: u64) -> (u64, u64, u64) {
+    /// (f64/`Duration` knobs as bits/nanos for exact comparison).
+    fn buggified_knobs(seed: u64) -> [u64; 5] {
         reset_sim_rng();
         set_sim_seed(seed);
         set_config_seed(seed);
@@ -430,11 +525,13 @@ mod buggify_knob_tests {
         let mut config = StorageConfiguration::swarm_for_seed();
         config.apply_buggify_knobs();
         buggify_reset();
-        (
+        [
             config.iops,
             config.bandwidth,
             config.sync_failure_probability.to_bits(),
-        )
+            config.disk_stall_probability.to_bits(),
+            u64::try_from(config.disk_throttle_duration.as_nanos()).unwrap_or(u64::MAX),
+        ]
     }
 
     #[test]

@@ -399,6 +399,31 @@ pub struct PendingStorageOp {
     pub data: Option<Vec<u8>>,
 }
 
+/// Kind of dynamic disk-degradation episode currently affecting a file.
+///
+/// Models `FoundationDB`'s `DiskFailureInjector` (`getDiskDelay()`): real disks
+/// degrade episodically rather than at a fixed steady-state rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskEpisodeKind {
+    /// Disk is frozen until the episode expires; I/O waits out the remaining window.
+    Stall,
+    /// Effective IOPS/bandwidth are reduced for the duration of the episode.
+    Throttle,
+}
+
+/// Active disk-degradation episode on a file (stall or throttle), with expiry.
+///
+/// Per-file state, evaluated before each latency calculation in
+/// `schedule_{read,write,sync}`. Mirrors the existing [`ClogState`] /
+/// [`PartitionState`] expiry pattern.
+#[derive(Debug, Clone, Copy)]
+pub struct DiskDegradationState {
+    /// Which kind of degradation is active.
+    pub kind: DiskEpisodeKind,
+    /// When the episode expires (in simulation time).
+    pub expires_at: Duration,
+}
+
 /// State of an individual simulated file.
 #[derive(Debug)]
 pub struct StorageFileState {
@@ -420,6 +445,8 @@ pub struct StorageFileState {
     pub next_op_seq: u64,
     /// IP address of the process that owns this file.
     pub owner_ip: IpAddr,
+    /// Active dynamic disk-degradation episode, if any.
+    pub disk_episode: Option<DiskDegradationState>,
 }
 
 impl StorageFileState {
@@ -442,6 +469,7 @@ impl StorageFileState {
             pending_ops: BTreeMap::new(),
             next_op_seq: 0,
             owner_ip,
+            disk_episode: None,
         }
     }
 }

@@ -70,6 +70,30 @@ Beyond faults, moonpool simulates realistic storage performance characteristics:
 
 These parameters ensure that storage-heavy code paths experience realistic timing, which is important for testing timeout logic and concurrent I/O patterns.
 
+## Dynamic Disk Degradation Episodes
+
+Steady-state timing is a lie of a different kind. Real disks do not degrade at a fixed rate. They degrade **episodically**: a garbage-collection pause freezes I/O for 100-500ms, a thermal event throttles throughput for seconds, firmware stalls under load. These episodes are what trigger the interesting failures: timeout cascades, backpressure collapse, and recovery bottlenecks that a constant 150 MB/s never produces. FoundationDB models this with its `DiskFailureInjector`, and moonpool borrows the idea.
+
+Two episode kinds sit on top of the steady-state formula, both off by default and scoped per file:
+
+| Episode | Config | While active |
+|---------|--------|--------------|
+| Stall | `disk_stall_probability` / `disk_stall_duration` | The disk is frozen until the window expires. Any I/O scheduled during the stall waits out the remaining time, then takes its normal latency. |
+| Throttle | `disk_throttle_probability` / `disk_throttle_duration` | Effective IOPS and bandwidth are divided by `disk_throttle_iops_multiplier` and `disk_throttle_bandwidth_multiplier`. |
+
+Before each read, write, or sync, the file's episode state machine runs: an expired episode clears, an active one stays, and an idle disk rolls the dice to enter a new episode. A stall makes the next handful of operations all complete at roughly the same moment the freeze lifts, which is exactly the backpressure spike that overflows queues in real systems.
+
+```rust
+// A disk that stalls on every operation for 50ms
+let stalling = StorageConfiguration {
+    disk_stall_probability: 1.0,
+    disk_stall_duration: Duration::from_millis(50),
+    ..StorageConfiguration::fast_local()
+};
+```
+
+The key property is that **a disabled disk never touches the random number stream**. When both probabilities are zero, the state machine returns before drawing any randomness, so steady-state runs stay byte-for-byte deterministic. Chaos runs enable low-rate episodes through `random_for_seed()`, swarm masking, and buggify knob spikes, the same machinery every other storage fault family uses.
+
 ## The Step Loop Pattern
 
 Storage operations in moonpool differ from network operations in one critical way: **storage operations return `Poll::Pending` and require simulation stepping**. Network operations buffer data and return `Poll::Ready` immediately. Storage operations need the simulation engine to advance time and process the I/O.
