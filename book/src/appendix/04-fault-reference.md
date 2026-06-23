@@ -100,7 +100,7 @@ Storage also simulates realistic performance characteristics independent of faul
 
 ### Dynamic Disk Degradation Episodes
 
-Episodic degradation layered on top of steady-state timing (FoundationDB's `DiskFailureInjector`). Off by default and scoped per file. While disabled, the episode state machine never draws from the RNG stream, so steady-state runs stay deterministic.
+Episodic degradation layered on top of steady-state timing (FoundationDB's `DiskFailureInjector`). Off by default and scoped per process (per owning IP): one episode freezes or throttles every file that process owns together, modelling device-level degradation, while other machines stay unaffected. While disabled, the episode state machine never draws from the RNG stream, so steady-state runs stay deterministic.
 
 | Episode | Config Field | Default | While active |
 |---------|-------------|---------|--------------|
