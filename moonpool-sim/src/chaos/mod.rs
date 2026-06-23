@@ -139,6 +139,6 @@ pub use assertions::{
     on_assertion_numeric, on_assertion_sometimes_all, on_sometimes_each, record_always_violation,
     reset_always_violations, reset_assertion_results, validate_assertion_contracts,
 };
-pub use buggify::{buggify_init, buggify_internal, buggify_reset};
+pub use buggify::{buggify_init, buggify_internal, buggify_knob_internal, buggify_reset};
 pub use fault_events::{SIM_FAULT_EVENT_NAME, SimFaultEvent};
 pub use state_handle::StateHandle;

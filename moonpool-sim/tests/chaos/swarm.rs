@@ -53,3 +53,29 @@ fn swarm_runs_clean_across_seeds() {
     );
     assert_eq!(report.iterations, 50, "expected all 50 seeds to run");
 }
+
+/// `Chaos::BuggifyKnobs` layered on top of swarm must build a per-seed config
+/// (with occasional knob-value spikes applied in `build_sim_for_iteration`) and
+/// complete every seed cleanly. Exercises both the network and storage
+/// `apply_buggify_knobs` wiring. The buggify network spikes (clog/partition/
+/// random-close magnitudes) never touch `connect_failure_mode`, so the bind-only
+/// workload still can't deadlock.
+#[test]
+fn buggify_knobs_runs_clean_across_seeds() {
+    let report = SimulationBuilder::new()
+        .enable_chaos([
+            Chaos::Network(ChaosMode::Swarm),
+            Chaos::Storage(ChaosMode::Swarm),
+            Chaos::BuggifyKnobs,
+        ])
+        .set_iterations(50)
+        .workload(SwarmSmokeWorkload)
+        .run();
+
+    assert_eq!(
+        report.failed_runs, 0,
+        "buggify-knobs run had {} failed seeds",
+        report.failed_runs
+    );
+    assert_eq!(report.iterations, 50, "expected all 50 seeds to run");
+}
