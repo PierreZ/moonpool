@@ -15,6 +15,7 @@ The builder pattern for configuring and running simulation experiments. Created 
 | `workloads(count, factory)` | `WorkloadCount`, `Fn(usize) -> Box<dyn Workload>` | Add factory-created workload instances |
 | `workloads_with_client_id(count, cid, factory)` | `WorkloadCount`, `ClientId`, factory | Factory workloads with custom client IDs |
 | `processes(count, factory)` | `impl Into<ProcessCount>`, `Fn() -> Box<dyn Process>` | Add server processes (system under test) |
+| `cluster(config, factory)` | `LocalityConfig`, `Fn() -> Box<dyn Process>` | Add processes laid out across a datacenter/zone/machine topology (replaces `processes`) |
 | `tags(dimensions)` | `&[(&str, &[&str])]` | Attach round-robin tag distribution to processes |
 | `attrition(config)` | `Attrition` | Enable automatic process reboots during chaos phase |
 | `invariant(i)` | `impl Invariant` | Add an invariant checked after every simulation event |
@@ -96,8 +97,19 @@ Built-in configuration for automatic process reboots during the chaos phase. Req
 | `prob_wipe` | `f64` | -- | Weight for crash + storage wipe reboots |
 | `recovery_delay_ms` | `Option<Range<usize>>` | `1000..10000` | Delay before restarting a killed process (ms) |
 | `grace_period_ms` | `Option<Range<usize>>` | `2000..5000` | Time allowed for graceful shutdown before force-kill (ms) |
+| `scope` | `AttritionScope` | `PerProcess` | Failure domain each reboot targets (see below) |
 
 The `prob_*` fields are **weights**, not probabilities. They are normalized internally and do not need to sum to 1.0.
+
+### AttritionScope
+
+Which failure domain a reboot kills. `PerMachine` and `PerZone` require a [`.cluster()`](../part3-building/09-attrition.md#failure-domains-correlated-reboots) topology; without locality they are a no-op.
+
+| Variant | Behavior |
+|---------|----------|
+| `PerProcess` | Reboot one random process at a time (the default) |
+| `PerMachine` | Reboot every process on a random machine together, atomically against `max_dead` |
+| `PerZone` | Reboot every process in a random zone together, atomically against `max_dead` |
 
 ### RebootKind
 

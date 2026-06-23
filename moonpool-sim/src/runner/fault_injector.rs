@@ -41,7 +41,8 @@ use moonpool_core::TimeProvider;
 
 use crate::SimulationResult;
 use crate::providers::{SimRandomProvider, SimTimeProvider};
-use crate::runner::process::RebootKind;
+use crate::runner::locality::{DomainLevel, MachineRegistry};
+use crate::runner::process::{AttritionScope, RebootKind};
 use crate::runner::tags::TagRegistry;
 use crate::sim::SimWorld;
 use crate::{assert_reachable, assert_sometimes_each};
@@ -52,6 +53,8 @@ pub struct ProcessInfo {
     pub process_ips: Vec<String>,
     /// Tag registry mapping process IPs to their resolved tags.
     pub tag_registry: TagRegistry,
+    /// Machine registry mapping process IPs to their failure-domain locality.
+    pub machine_registry: MachineRegistry,
     /// Shared count of currently dead (killed but not yet restarted) processes.
     pub dead_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -300,6 +303,56 @@ impl FaultContext {
 
         Ok(matching_ips)
     }
+
+    /// The machine registry, for failure-domain queries during fault injection.
+    #[must_use]
+    pub fn machine_registry(&self) -> &MachineRegistry {
+        &self.process_info.machine_registry
+    }
+
+    /// Reboot every process collocated on a single machine — modeling correlated
+    /// (shared-fate) failure.
+    ///
+    /// Returns the IPs that were rebooted (empty if the machine is unknown).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation is rejected by the simulator.
+    pub fn reboot_machine(
+        &self,
+        machine_id: &str,
+        kind: RebootKind,
+    ) -> SimulationResult<Vec<String>> {
+        self.reboot_domain(DomainLevel::Machine, machine_id, kind)
+    }
+
+    /// Reboot every process in a failure domain (`level` + `id`) together.
+    ///
+    /// Returns the IPs that were rebooted (empty if the domain is unknown).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation is rejected by the simulator.
+    pub fn reboot_domain(
+        &self,
+        level: DomainLevel,
+        id: &str,
+        kind: RebootKind,
+    ) -> SimulationResult<Vec<String>> {
+        let ips: Vec<String> = self
+            .process_info
+            .machine_registry
+            .ips_in_domain(level, id)
+            .into_iter()
+            .map(|ip| ip.to_string())
+            .collect();
+
+        for ip in &ips {
+            self.reboot(ip, kind)?;
+        }
+
+        Ok(ips)
+    }
 }
 
 /// A fault injector that introduces failures during the chaos phase.
@@ -332,6 +385,76 @@ impl AttritionInjector {
     pub(crate) fn new(config: super::process::Attrition) -> Self {
         Self { config }
     }
+
+    /// Draw a reboot kind by weighted probability and record coverage.
+    fn choose_kind(&self) -> RebootKind {
+        let rand_val = f64::from(crate::sim::sim_random_range(0..10000)) / 10000.0;
+        let kind = self.config.choose_kind(rand_val);
+        assert_sometimes_each!("attrition_reboot_kind", [("kind", kind as i64)]);
+        kind
+    }
+
+    /// Configured recovery / grace-period delay ranges, with defaults.
+    fn delay_ranges(&self) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
+        (
+            self.config.recovery_delay_ms.clone().unwrap_or(1000..10000),
+            self.config.grace_period_ms.clone().unwrap_or(2000..5000),
+        )
+    }
+
+    /// Reboot a single random process, respecting the `max_dead` budget.
+    fn inject_process(&self, ctx: &FaultContext) -> SimulationResult<()> {
+        if ctx.dead_count() >= self.config.max_dead {
+            assert_reachable!("attrition: max_dead limit enforced");
+            return Ok(());
+        }
+        let kind = self.choose_kind();
+        let (recovery_range, grace_range) = self.delay_ranges();
+        let idx = crate::sim::sim_random_range(0..ctx.process_ips().len());
+        let ip = ctx.process_ips()[idx].clone();
+        assert_sometimes_each!(
+            "attrition_process_targeted",
+            [("process_idx", i64::try_from(idx).unwrap_or(i64::MAX))]
+        );
+        ctx.reboot_with_delays(&ip, kind, &recovery_range, &grace_range)
+    }
+
+    /// Reboot every process in a random failure domain *together*, only if the
+    /// whole group fits within the `max_dead` budget. A no-op when no locality
+    /// topology is configured (`domains` empty).
+    fn inject_domain(
+        &self,
+        ctx: &FaultContext,
+        level: DomainLevel,
+        domains: &[String],
+    ) -> SimulationResult<()> {
+        if domains.is_empty() {
+            return Ok(());
+        }
+        let di = crate::sim::sim_random_range(0..domains.len());
+        let ips: Vec<String> = ctx
+            .machine_registry()
+            .ips_in_domain(level, &domains[di])
+            .into_iter()
+            .map(|ip| ip.to_string())
+            .collect();
+        // Whole-group gate: reboot the group atomically only if all of its
+        // processes fit within the remaining budget.
+        if ctx.dead_count() + ips.len() > self.config.max_dead {
+            assert_reachable!("attrition: max_dead limit enforced (group)");
+            return Ok(());
+        }
+        let kind = self.choose_kind();
+        let (recovery_range, grace_range) = self.delay_ranges();
+        assert_sometimes_each!(
+            "attrition_domain_targeted",
+            [("group_size", i64::try_from(ips.len()).unwrap_or(i64::MAX))]
+        );
+        for ip in &ips {
+            ctx.reboot_with_delays(ip, kind, &recovery_range, &grace_range)?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -359,31 +482,17 @@ impl FaultInjector for AttritionInjector {
                 continue;
             }
 
-            // Respect max_dead: skip this cycle if already at the limit
-            if ctx.dead_count() >= self.config.max_dead {
-                assert_reachable!("attrition: max_dead limit enforced");
-                continue;
+            match self.config.scope {
+                AttritionScope::PerProcess => self.inject_process(ctx)?,
+                AttritionScope::PerMachine => {
+                    let machines = ctx.machine_registry().all_machines();
+                    self.inject_domain(ctx, DomainLevel::Machine, &machines)?;
+                }
+                AttritionScope::PerZone => {
+                    let zones = ctx.machine_registry().all_zones();
+                    self.inject_domain(ctx, DomainLevel::Zone, &zones)?;
+                }
             }
-
-            // Choose reboot kind by weighted probability
-            let rand_val = f64::from(crate::sim::sim_random_range(0..10000)) / 10000.0;
-            let kind = self.config.choose_kind(rand_val);
-            assert_sometimes_each!("attrition_reboot_kind", [("kind", kind as i64)]);
-
-            // Use configured delay ranges (or defaults)
-            let recovery_range = self.config.recovery_delay_ms.clone().unwrap_or(1000..10000);
-            let grace_range = self.config.grace_period_ms.clone().unwrap_or(2000..5000);
-
-            if ctx.process_ips().is_empty() {
-                continue;
-            }
-            let idx = crate::sim::sim_random_range(0..ctx.process_ips().len());
-            let ip = ctx.process_ips()[idx].clone();
-            assert_sometimes_each!(
-                "attrition_process_targeted",
-                [("process_idx", i64::try_from(idx).unwrap_or(i64::MAX))]
-            );
-            ctx.reboot_with_delays(&ip, kind, &recovery_range, &grace_range)?;
         }
         Ok(())
     }

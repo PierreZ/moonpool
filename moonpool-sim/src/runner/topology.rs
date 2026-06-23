@@ -3,6 +3,7 @@
 //! This module provides types for configuring topology and
 //! creating topology information for workloads and processes.
 
+use super::locality::{DomainLevel, LocalityInfo, MachineRegistry};
 use super::tags::{ProcessTags, TagRegistry};
 
 /// Topology information provided to workloads and processes.
@@ -26,6 +27,11 @@ pub struct WorkloadTopology {
     pub my_tags: ProcessTags,
     /// Tag registry for querying process tags.
     pub tag_registry: TagRegistry,
+    /// Failure-domain locality of this process (`None` for workloads and for
+    /// processes registered without [`.cluster()`](super::builder::SimulationBuilder::cluster)).
+    pub my_locality: Option<LocalityInfo>,
+    /// Machine registry for querying failure-domain membership.
+    pub machine_registry: MachineRegistry,
     /// Shutdown signal that gets triggered when the first workload exits with Ok.
     pub shutdown_signal: tokio_util::sync::CancellationToken,
 }
@@ -68,6 +74,46 @@ impl WorkloadTopology {
     pub fn my_tags(&self) -> &ProcessTags {
         &self.my_tags
     }
+
+    /// Get this process's failure-domain locality, if it was assigned via
+    /// [`.cluster()`](super::builder::SimulationBuilder::cluster).
+    #[must_use]
+    pub fn my_locality(&self) -> Option<&LocalityInfo> {
+        self.my_locality.as_ref()
+    }
+
+    /// Get the locality of a specific process IP.
+    #[must_use]
+    pub fn locality_for(&self, ip: &str) -> Option<&LocalityInfo> {
+        let ip_addr: std::net::IpAddr = ip.parse().ok()?;
+        self.machine_registry.locality_for(ip_addr)
+    }
+
+    /// Get the IPs of the other processes collocated on this process's machine.
+    ///
+    /// Returns an empty vector for workloads or processes without locality.
+    #[must_use]
+    pub fn peers_on_my_machine(&self) -> Vec<String> {
+        let Some(machine) = self.my_locality.as_ref().map(LocalityInfo::machine) else {
+            return Vec::new();
+        };
+        self.machine_registry
+            .ips_on_machine(machine)
+            .into_iter()
+            .map(|ip| ip.to_string())
+            .filter(|ip| ip != &self.my_ip)
+            .collect()
+    }
+
+    /// Get the IPs of all processes in a failure domain (`level` + `id`).
+    #[must_use]
+    pub fn ips_in_domain(&self, level: DomainLevel, id: &str) -> Vec<String> {
+        self.machine_registry
+            .ips_in_domain(level, id)
+            .into_iter()
+            .map(|ip| ip.to_string())
+            .collect()
+    }
 }
 
 /// Inputs needed to construct a [`WorkloadTopology`].
@@ -86,6 +132,10 @@ pub(crate) struct TopologyInputs<'a> {
     pub(crate) my_tags: ProcessTags,
     /// Tag registry for cross-process queries.
     pub(crate) tag_registry: TagRegistry,
+    /// Failure-domain locality of this process (`None` for workloads).
+    pub(crate) my_locality: Option<LocalityInfo>,
+    /// Machine registry for failure-domain queries.
+    pub(crate) machine_registry: MachineRegistry,
     /// Shutdown signal observed by this workload/process.
     pub(crate) shutdown_signal: tokio_util::sync::CancellationToken,
 }
@@ -104,6 +154,8 @@ impl TopologyFactory {
             process_ips,
             my_tags,
             tag_registry,
+            my_locality,
+            machine_registry,
             shutdown_signal,
         } = inputs;
 
@@ -122,6 +174,8 @@ impl TopologyFactory {
             process_ips: process_ips.iter().filter(|p| *p != ip).cloned().collect(),
             my_tags,
             tag_registry,
+            my_locality,
+            machine_registry,
             shutdown_signal,
         }
     }

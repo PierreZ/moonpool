@@ -157,7 +157,8 @@ pub use sim::{
 
 // Runner module re-exports
 pub use runner::{
-    Attrition, Chaos, ChaosMode, ClientId, FaultContext, FaultInjector, IterationControl, Process,
+    Attrition, AttritionScope, Chaos, ChaosMode, ClientId, DomainLevel, FaultContext,
+    FaultInjector, IterationControl, LocalityConfig, LocalityInfo, MachineRegistry, Process,
     ProcessTags, RebootKind, SimContext, SimulationBuilder, SimulationMetrics, SimulationReport,
     TagRegistry, Workload, WorkloadCount, WorkloadTopology,
 };

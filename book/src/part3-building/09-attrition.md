@@ -42,6 +42,7 @@ Attrition {
     prob_wipe: 0.2,
     recovery_delay_ms: Some(1000..10000),
     grace_period_ms: Some(2000..5000),
+    scope: AttritionScope::PerProcess,
 }
 ```
 
@@ -52,6 +53,8 @@ Attrition {
 **`recovery_delay_ms`** controls how long a dead process stays dead before restarting. The actual delay is drawn randomly from this range, so different seeds test different recovery timings. The default is 1 to 10 seconds of simulated time.
 
 **`grace_period_ms`** controls how long a graceful shutdown has to complete. Again, drawn randomly from the range. The default is 2 to 5 seconds.
+
+**`scope`** decides which failure domain each reboot targets. The default, `AttritionScope::PerProcess`, kills one random process at a time. `PerMachine` and `PerZone` kill **all collocated processes together**, which is the subject of the next section.
 
 ## Using Attrition
 
@@ -70,6 +73,7 @@ SimulationBuilder::new()
             prob_wipe: 0.2,
             recovery_delay_ms: None,  // use defaults
             grace_period_ms: None,    // use defaults
+            scope: AttritionScope::PerProcess,
         },
         mode: ChaosMode::Random,
     }])
@@ -88,6 +92,57 @@ The `.chaos_duration()` call is required because attrition runs only during the 
 `max_dead` deserves special attention because it is the bridge between chaos and correctness. Without it, attrition could kill all your nodes simultaneously, which is technically chaos but not useful chaos. No distributed system survives simultaneous failure of all replicas.
 
 Set `max_dead` to match your system's fault tolerance. A system with replication factor 3 can tolerate 1 failure, so `max_dead: 1`. A system that needs 3 of 5 nodes alive should use `max_dead: 2`. This ensures attrition tests failures your system **should** survive, not failures that are inherently unrecoverable.
+
+## Failure Domains: Correlated Reboots
+
+`max_dead: 1` protects you from killing two random nodes at once. But real outages are rarely random and rarely one node at a time. A rack loses power and takes ten machines with it. A datacenter link cuts and a whole region goes dark. A host reboots and every process pinned to it dies together. These are **correlated failures**, and they are exactly the failures that break quorum logic, because the nodes that die were never independent to begin with.
+
+Flat IPs cannot express this. `10.0.1.{1..N}` is a list of peers with no notion of which ones share fate. So moonpool borrows FoundationDB's model: a cluster is a hierarchy of **Datacenter → Zone → Machine → Process**, and processes on the same machine fail together because they share a machine.
+
+You describe that hierarchy with `.cluster()` instead of `.processes()`:
+
+```rust
+use moonpool_sim::{LocalityConfig, SimulationBuilder};
+
+SimulationBuilder::new()
+    .cluster(
+        // 3 datacenters × 3 zones × 3 machines × 2 processes = 54 processes.
+        // Ranges like 1..=3 are sampled per seed, so every seed runs a
+        // different cluster shape, the way FoundationDB generates topology.
+        LocalityConfig::new(3, 3, 3, 2),
+        || Box::new(MyProcess::new()),
+    )
+    .workload(MyWorkload::new());
+```
+
+The topology, not a flat count, decides how many processes exist. Each one is assigned a globally unique datacenter, zone, and machine id (`dc1`, `dc1-z1`, `dc1-z1-m1`), and processes read their own placement plus query the cluster through their topology:
+
+```rust
+let me = ctx.topology().my_locality().expect("clustered process");
+let machine_mates = ctx.topology().peers_on_my_machine();
+let same_dc = ctx.topology().ips_in_domain(DomainLevel::Datacenter, me.datacenter());
+```
+
+Now `scope` earns its keep. With `AttritionScope::PerMachine`, attrition picks a machine instead of a process and reboots **every process on it in the same instant**. The two processes that share `dc1-z1-m1` die together and recover together, exactly as they would when their host kernel panics. `PerZone` does the same one level up.
+
+```rust
+.enable_chaos([Chaos::Attrition {
+    config: Attrition {
+        max_dead: 2,  // one machine's worth of processes
+        prob_graceful: 0.3,
+        prob_crash: 0.5,
+        prob_wipe: 0.2,
+        recovery_delay_ms: None,
+        grace_period_ms: None,
+        scope: AttritionScope::PerMachine,
+    },
+    mode: ChaosMode::Random,
+}])
+```
+
+`max_dead` still counts dead **processes**, and a machine reboot is atomic against that budget: attrition only kills a machine when the whole group fits within the remaining budget. With two processes per machine, `max_dead: 2` lets exactly one machine be down at a time and never leaves a machine half-dead. Set it to a multiple of your machine size that matches how many machines your replication can lose.
+
+For targeted correlated faults, `FaultContext` exposes the group reboots directly. `ctx.reboot_machine("dc1-z1-m1", RebootKind::Crash)` kills a named machine and returns the IPs it took down, and `ctx.reboot_domain(DomainLevel::Datacenter, "dc1", kind)` blacks out a whole datacenter. Combined with `ctx.ips_in_domain(...)`, the same domain ids drive network partitions across a zone or datacenter boundary, so you can model a region cut as cleanly as a host reboot.
 
 ## Custom Fault Injection
 

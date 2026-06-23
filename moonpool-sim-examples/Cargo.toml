@@ -41,5 +41,9 @@ path = "src/bin/sim/dungeon_explore.rs"
 name = "sim-axum-web"
 path = "src/bin/sim/axum_web.rs"
 
+[[bin]]
+name = "sim-topology"
+path = "src/bin/sim/topology.rs"
+
 [lints]
 workspace = true
