@@ -34,7 +34,7 @@ attribute is not an acceptable resolution.
 - `cargo xtask sim run-all` — run all simulation binaries
 
 **Debug testing**:
-- Default: `UntilAllSometimesReached(1000)` for comprehensive chaos testing
+- Default: `UntilCoverageStable { plateau_seeds: 10, max_iterations: 1000 }` — runs adaptively until every `assert_sometimes!`/`assert_reachable!` has fired AND code coverage plateaus (real sancov edges under `cargo xtask sim run`; assertion-coverage fallback otherwise)
 - Debug faulty seeds: `FixedCount(1)` with specific seed and ERROR log level
 
 ## Commit Messages
@@ -97,7 +97,7 @@ Where generics hurt, erase at a boundary (precedent: `Arc<dyn TransportHandle>`)
 **Goal**: 100% sometimes assertion coverage via chaos testing + comprehensive invariant validation
 **Target**: 100% success rate - no deadlocks/hangs acceptable
 
-**Multi-seed testing**: Default `UntilAllSometimesReached(1000)` runs until all assert_sometimes! statements have triggered
+**Multi-seed testing**: Default `UntilCoverageStable` runs adaptively until all assert_sometimes! statements have triggered and code coverage plateaus (`.until_coverage_stable(plateau_seeds, max_iterations)` to tune)
 **Failing seeds**: Debug with `SimulationBuilder::set_seed(failing_seed)` → fix root cause → verify → re-enable chaos
 **Infrastructure events**: Tests terminate early when only ConnectionRestore events remain
 **Invariant checking**: Cross-workload properties validated after every simulation step

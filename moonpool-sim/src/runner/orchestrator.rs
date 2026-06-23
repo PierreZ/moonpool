@@ -1905,10 +1905,7 @@ impl IterationManager {
     pub(crate) fn should_continue(&self) -> bool {
         match &self.control {
             super::builder::IterationControl::FixedCount(count)
-            | super::builder::IterationControl::UntilConverged {
-                max_iterations: count,
-            }
-            | super::builder::IterationControl::CoveragePlateau {
+            | super::builder::IterationControl::UntilCoverageStable {
                 max_iterations: count,
                 ..
             } => self.iteration_count < *count,
@@ -1943,11 +1940,9 @@ impl IterationManager {
             match &self.control {
                 super::builder::IterationControl::FixedCount(count) => *count,
                 super::builder::IterationControl::TimeLimit(_) => 0,
-                super::builder::IterationControl::UntilConverged { max_iterations } => {
-                    *max_iterations
-                }
-                super::builder::IterationControl::CoveragePlateau { max_iterations, .. } =>
-                    *max_iterations,
+                super::builder::IterationControl::UntilCoverageStable {
+                    max_iterations, ..
+                } => *max_iterations,
             }
         );
 
@@ -1963,10 +1958,7 @@ impl IterationManager {
     pub(crate) fn max_iterations(&self) -> Option<usize> {
         match &self.control {
             super::builder::IterationControl::FixedCount(count)
-            | super::builder::IterationControl::UntilConverged {
-                max_iterations: count,
-            }
-            | super::builder::IterationControl::CoveragePlateau {
+            | super::builder::IterationControl::UntilCoverageStable {
                 max_iterations: count,
                 ..
             } => Some(*count),
@@ -2073,6 +2065,7 @@ impl MetricsCollector {
             assertion_details,
             bucket_summaries,
             convergence_timeout,
+            saturation,
         } = inputs;
         super::report::SimulationReport {
             iterations: iteration_count,
@@ -2089,6 +2082,7 @@ impl MetricsCollector {
             assertion_details,
             bucket_summaries,
             convergence_timeout,
+            saturation,
         }
     }
 }
@@ -2114,4 +2108,6 @@ pub(crate) struct GenerateReportInputs {
     pub(crate) bucket_summaries: Vec<super::report::BucketSiteSummary>,
     /// Whether the simulation stopped due to a convergence timeout.
     pub(crate) convergence_timeout: bool,
+    /// Saturation outcome for an `UntilCoverageStable` run.
+    pub(crate) saturation: Option<super::report::SaturationReport>,
 }

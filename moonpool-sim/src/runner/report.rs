@@ -81,6 +81,39 @@ pub struct ExplorationReport {
     pub per_seed_timelines: Vec<u64>,
 }
 
+/// Which progress signal an [`UntilCoverageStable`] run plateaued on.
+///
+/// [`UntilCoverageStable`]: crate::IterationControl::UntilCoverageStable
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaturationSignal {
+    /// Real LLVM sancov edge coverage (binary built via `cargo xtask sim run`).
+    CodeCoverage,
+    /// Count of distinct reached sometimes/reachable assertion slots
+    /// (fallback when the binary is not sancov-instrumented).
+    AssertionCoverage,
+}
+
+/// Outcome of an [`UntilCoverageStable`] run: which signal it plateaued on and
+/// the final coverage numbers, so the report can name the stop reason
+/// explicitly.
+///
+/// [`UntilCoverageStable`]: crate::IterationControl::UntilCoverageStable
+#[derive(Debug, Clone)]
+pub struct SaturationReport {
+    /// The progress signal counted toward the plateau.
+    pub signal: SaturationSignal,
+    /// Code edges covered (meaningful only when `signal == CodeCoverage`).
+    pub edges_covered: usize,
+    /// Total instrumented code edges (meaningful only when `signal == CodeCoverage`).
+    pub edges_total: usize,
+    /// Number of observed sometimes/reachable assertions that fired.
+    pub sometimes_hit: usize,
+    /// Total number of observed sometimes/reachable assertions.
+    pub sometimes_total: usize,
+    /// Consecutive quiet seeds required to declare saturation.
+    pub plateau_seeds: usize,
+}
+
 /// Pass/fail/miss status for an assertion in the report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AssertionStatus {
@@ -151,8 +184,11 @@ pub struct SimulationReport {
     pub assertion_details: Vec<AssertionDetail>,
     /// Per-site summaries of `assert_sometimes_each!` buckets.
     pub bucket_summaries: Vec<BucketSiteSummary>,
-    /// True when `UntilConverged` hit its iteration cap without converging.
+    /// True when `UntilCoverageStable` hit its iteration cap without saturating.
     pub convergence_timeout: bool,
+    /// Saturation outcome for an `UntilCoverageStable` run (signal + coverage
+    /// numbers); `None` for other iteration-control modes.
+    pub saturation: Option<SaturationReport>,
 }
 
 impl SimulationReport {
@@ -334,6 +370,43 @@ fn fmt_timing(f: &mut fmt::Formatter<'_>, report: &SimulationReport) -> fmt::Res
         "  Avg Events:        {}",
         fmt_num(f64_to_u64_saturating(report.average_events_processed()))
     )
+}
+
+/// Render the `UntilCoverageStable` saturation outcome: which signal it
+/// plateaued on, the coverage numbers, and whether the cap was hit first.
+fn fmt_saturation(f: &mut fmt::Formatter<'_>, report: &SimulationReport) -> fmt::Result {
+    let Some(sat) = &report.saturation else {
+        return Ok(());
+    };
+    writeln!(f)?;
+    let status = if report.convergence_timeout {
+        "NOT saturated"
+    } else {
+        "saturated"
+    };
+    match sat.signal {
+        SaturationSignal::CodeCoverage => writeln!(
+            f,
+            "  {status}: {}/{} sometimes hit · code coverage stable at {}/{} edges for {} seeds",
+            sat.sometimes_hit,
+            sat.sometimes_total,
+            sat.edges_covered,
+            sat.edges_total,
+            sat.plateau_seeds,
+        )?,
+        SaturationSignal::AssertionCoverage => writeln!(
+            f,
+            "  {status}: {}/{} sometimes hit · assertion coverage stable for {} seeds (no sancov — run via 'cargo xtask sim run' for code-coverage-driven stop)",
+            sat.sometimes_hit, sat.sometimes_total, sat.plateau_seeds,
+        )?,
+    }
+    if report.convergence_timeout {
+        writeln!(
+            f,
+            "  UntilCoverageStable hit the iteration cap without saturating."
+        )?;
+    }
+    Ok(())
 }
 
 fn fmt_exploration(f: &mut fmt::Formatter<'_>, exp: &ExplorationReport) -> fmt::Result {
@@ -529,11 +602,14 @@ impl fmt::Display for SimulationReport {
             }
         }
 
-        // === Convergence Timeout ===
-        if self.convergence_timeout {
+        // === Saturation (UntilCoverageStable) ===
+        fmt_saturation(f, self)?;
+        if self.saturation.is_none() && self.convergence_timeout {
             writeln!(f)?;
-            writeln!(f, "--- Convergence FAILED ---")?;
-            writeln!(f, "  UntilConverged hit iteration cap without converging.")?;
+            writeln!(
+                f,
+                "  UntilCoverageStable hit the iteration cap without saturating."
+            )?;
         }
 
         // === Per-Seed Metrics ===

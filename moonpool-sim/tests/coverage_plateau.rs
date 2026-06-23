@@ -1,8 +1,10 @@
-//! Integration tests for the `IterationControl::CoveragePlateau` stop condition.
+//! Integration tests for the `IterationControl::UntilCoverageStable` stop condition.
 //!
-//! These exercise the runner's ability to terminate early when
-//! `assert_sometimes!` / `assert_reachable!` coverage stops growing,
-//! both with and without fork-based exploration enabled.
+//! These exercise the runner's ability to terminate early when every observed
+//! `assert_sometimes!` / `assert_reachable!` has fired and coverage stops
+//! growing, both with and without fork-based exploration enabled. Under
+//! `cargo nextest` the binary is not sancov-instrumented, so these run on the
+//! assertion-coverage fallback signal.
 
 use async_trait::async_trait;
 #[cfg(feature = "exploration")]
@@ -32,7 +34,7 @@ impl Workload for ThreeAlwaysHitWorkload {
 }
 
 /// Workload whose third assertion only fires in roughly 1-in-5 seeds.
-/// `require_all_sometimes=true` should refuse to stop until it has hit.
+/// Saturation must refuse to stop until every sometimes has hit.
 struct RareGateWorkload;
 
 #[async_trait]
@@ -50,13 +52,13 @@ impl Workload for RareGateWorkload {
     }
 }
 
-/// With no exploration enabled, plateau detection should still fire because
-/// the assertion table is initialised unconditionally.
+/// With no exploration enabled, saturation should still fire because the
+/// assertion table is initialised unconditionally.
 #[test]
 fn test_plateau_no_exploration() {
     let report = run_simulation(
         SimulationBuilder::new()
-            .until_coverage_plateau(3, 100)
+            .until_coverage_stable(3, 100)
             .workload(ThreeAlwaysHitWorkload),
     );
 
@@ -91,7 +93,7 @@ fn test_plateau_with_exploration() {
                 adaptive: None,
                 parallelism: None,
             })
-            .until_coverage_plateau(3, 100)
+            .until_coverage_stable(3, 100)
             .workload(ThreeAlwaysHitWorkload),
     );
 
@@ -107,13 +109,13 @@ fn test_plateau_with_exploration() {
     assert_eq!(report.failed_runs, 0);
 }
 
-/// With `require_all_sometimes=true`, the runner must keep going until the
+/// All-sometimes is always required, so the runner must keep going until the
 /// rare gate has fired even if the other two assertions plateaued early.
 #[test]
 fn test_plateau_requires_all_sometimes() {
     let report = run_simulation(
         SimulationBuilder::new()
-            .until_coverage_plateau_with(2, true, 200)
+            .until_coverage_stable(2, 200)
             .workload(RareGateWorkload),
     );
 

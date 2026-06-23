@@ -36,7 +36,7 @@ The builder pattern for configuring and running simulation experiments. Created 
 
 A freshly created `SimulationBuilder::new()` has:
 
-- **iteration_control**: `IterationControl::FixedCount(1)`
+- **iteration_control**: `IterationControl::UntilCoverageStable { plateau_seeds: 10, max_iterations: 1000 }`
 - **chaos**: all surfaces off (network/storage use `default()`, no attrition)
 - **swarm_operations**: `false` (workloads see the full operation alphabet)
 - **exploration**: disabled
@@ -49,10 +49,11 @@ Controls how many iterations a simulation runs.
 
 | Variant | Type | Description |
 |---------|------|-------------|
+| `UntilCoverageStable { plateau_seeds, max_iterations }` | `usize`, `usize` | **Default.** Stop once every observed `assert_sometimes!` / `assert_reachable!` has fired AND code coverage has not grown for `plateau_seeds` consecutive seeds. `max_iterations` is a safety cap. |
 | `FixedCount(n)` | `usize` | Run exactly `n` iterations |
 | `TimeLimit(duration)` | `Duration` | Run for a wall-clock time duration |
 
-**Note**: The `UntilAllSometimesReached(N)` pattern mentioned in CLAUDE.md is implemented at the test level by checking assertion coverage, not as a variant of `IterationControl`.
+**Note**: `UntilCoverageStable` uses real LLVM sancov code coverage when the binary is instrumented (built via `cargo xtask sim run`) and falls back to assertion-slot coverage otherwise. The report names the signal it used.
 
 ## ProcessCount
 

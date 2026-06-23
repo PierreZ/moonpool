@@ -269,7 +269,7 @@
 //!   └── cleanup_sancov_shared()      free transfer + history + pool
 //! ```
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -307,6 +307,12 @@ thread_local! {
     ///
     /// Public so `setup_child()` can reset for nested splits.
     pub static SANCOV_POOL_SLOTS: Cell<usize> = const { Cell::new(0) };
+
+    /// Cumulative "ever non-zero" mask over the BSS counter array (one byte per
+    /// edge), for the fork-free live coverage reader. Lets the reader survive
+    /// 8-bit counter wraparound: once an edge has been seen non-zero it stays
+    /// counted, so the result is monotonic across seeds.
+    static SANCOV_SEEN: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 // ---------------------------------------------------------------------------
@@ -519,6 +525,46 @@ pub fn sancov_edges_covered() -> usize {
         }
     }
     count
+}
+
+/// Cumulative count of edges ever observed non-zero in the live BSS array.
+///
+/// Unlike [`sancov_edges_covered`], this reads the LLVM-instrumented counters
+/// directly in the current process — no `SANCOV_HISTORY`, no fork. Each call
+/// folds the current counters into a persistent "seen" mask ([`SANCOV_SEEN`])
+/// and returns the size of the union. Folding (rather than counting raw
+/// non-zero bytes) is essential: the 8-bit counters wrap at 256 and are not
+/// reset between seeds in the sequential path, so a hot edge whose cumulative
+/// count momentarily lands on a multiple of 256 would otherwise drop out of a
+/// raw count. The union is monotonic across seeds, so it can plateau.
+///
+/// Returns 0 when sancov is unavailable.
+pub fn sancov_edges_covered_live() -> usize {
+    if !sancov_is_available() {
+        return 0;
+    }
+    let ptr = COUNTERS_PTR.load(Ordering::Relaxed);
+    if ptr.is_null() {
+        return 0;
+    }
+    let len = COUNTERS_LEN.load(Ordering::Relaxed);
+    SANCOV_SEEN.with_borrow_mut(|seen| {
+        if seen.len() != len {
+            seen.clear();
+            seen.resize(len, 0);
+        }
+        let mut count = 0usize;
+        for (i, slot) in seen.iter_mut().enumerate() {
+            // Safety: the LLVM ctor registered `len` bytes starting at `ptr`.
+            if unsafe { *ptr.add(i) } != 0 {
+                *slot = 1;
+            }
+            if *slot != 0 {
+                count += 1;
+            }
+        }
+        count
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -806,6 +852,7 @@ mod tests {
         assert!(!sancov_is_available());
         assert_eq!(sancov_edge_count(), 0);
         assert_eq!(sancov_edges_covered(), 0);
+        assert_eq!(sancov_edges_covered_live(), 0);
         assert!(!has_new_sancov_coverage());
         assert!(!has_new_sancov_coverage_from(std::ptr::null_mut()));
 

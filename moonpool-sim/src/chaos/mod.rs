@@ -100,8 +100,9 @@
 //! }
 //! ```
 //!
-//! Multi-seed testing with `UntilAllSometimesReached(1000)` ensures all
-//! `assert_sometimes!` statements fire across the seed space.
+//! Multi-seed testing with the default `UntilCoverageStable` stop condition
+//! ensures all `assert_sometimes!` statements fire across the seed space and
+//! code coverage plateaus before stopping.
 //!
 //! # Strategic Placement
 //!

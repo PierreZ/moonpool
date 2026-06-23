@@ -139,4 +139,4 @@ The reason these strategies matter in moonpool is that **simulation testing will
 
 A process that uses `get_reply` for a non-idempotent request will see duplicate processing when the chaos engine severs and restores connections. A process that uses `try_get_reply` without handling `MaybeDelivered` will silently drop operations when the chaos engine triggers disconnects. A fire-and-forget heartbeat that should have been reliable will cause false failure detection when the chaos engine delays messages.
 
-The simulation does not know which strategy is "correct" for your use case. But it generates the failure patterns that expose incorrect choices. Run with `UntilAllSometimesReached(1000)` and let the chaos engine prove that your RPC strategy handles every failure mode your system will encounter in production.
+The simulation does not know which strategy is "correct" for your use case. But it generates the failure patterns that expose incorrect choices. Run with the default `UntilCoverageStable` stop condition and let the chaos engine prove that your RPC strategy handles every failure mode your system will encounter in production.

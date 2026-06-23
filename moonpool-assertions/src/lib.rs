@@ -15,7 +15,8 @@
 //! children, and installs a [`DiscoveryHooks`] that turns "a new assertion state
 //! was reached" into coverage marking and fork dispatch. With no hooks installed
 //! the accounting is pure: assertions still record pass/fail/watermark/frontier,
-//! which is all `UntilAllSometimesReached` and contract validation need.
+//! which is all the `UntilCoverageStable` stop condition and contract
+//! validation need.
 //!
 //! See [`hooks`] for the coupling surface and [`region`] for the storage model.
 

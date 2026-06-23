@@ -8,8 +8,8 @@ use std::io::{IsTerminal, Write};
 use moonpool_assertions::AssertKind;
 
 use super::report::{
-    AssertionDetail, AssertionStatus, BucketSiteSummary, ExplorationReport, SimulationReport,
-    format_recipe,
+    AssertionDetail, AssertionStatus, BucketSiteSummary, ExplorationReport, SaturationSignal,
+    SimulationReport, format_recipe,
 };
 
 // ---------------------------------------------------------------------------
@@ -327,19 +327,46 @@ fn write_report(w: &mut impl Write, report: &SimulationReport, color: bool) {
         write_buckets(w, &report.bucket_summaries, color);
     }
 
-    // === Convergence Timeout ===
-    if report.convergence_timeout {
-        section_header(w, "Convergence FAILED", color, ansi::BOLD_RED);
-        if color {
+    // === Saturation (UntilCoverageStable) ===
+    if let Some(sat) = &report.saturation {
+        let (title, style) = if report.convergence_timeout {
+            ("Saturation FAILED", ansi::BOLD_RED)
+        } else {
+            ("Saturated", ansi::BOLD)
+        };
+        section_header(w, title, color, style);
+        match sat.signal {
+            SaturationSignal::CodeCoverage => {
+                let _ = writeln!(
+                    w,
+                    "  {} / {} sometimes hit · code coverage stable at {} / {} edges for {} seeds",
+                    sat.sometimes_hit,
+                    sat.sometimes_total,
+                    fmt_num(u64::try_from(sat.edges_covered).unwrap_or(u64::MAX)),
+                    fmt_num(u64::try_from(sat.edges_total).unwrap_or(u64::MAX)),
+                    sat.plateau_seeds,
+                );
+            }
+            SaturationSignal::AssertionCoverage => {
+                let _ = writeln!(
+                    w,
+                    "  {} / {} sometimes hit · assertion coverage stable for {} seeds (no sancov — run via 'cargo xtask sim run' for code-coverage-driven stop)",
+                    sat.sometimes_hit, sat.sometimes_total, sat.plateau_seeds,
+                );
+            }
+        }
+        if report.convergence_timeout {
             let _ = writeln!(
                 w,
-                "  {}UntilConverged hit iteration cap without converging.{}",
-                ansi::BOLD_RED,
-                ansi::RESET,
+                "  UntilCoverageStable hit the iteration cap without saturating.",
             );
-        } else {
-            let _ = writeln!(w, "  UntilConverged hit iteration cap without converging.");
         }
+    } else if report.convergence_timeout {
+        section_header(w, "Saturation FAILED", color, ansi::BOLD_RED);
+        let _ = writeln!(
+            w,
+            "  UntilCoverageStable hit the iteration cap without saturating.",
+        );
     }
 
     // === Per-Seed Metrics ===

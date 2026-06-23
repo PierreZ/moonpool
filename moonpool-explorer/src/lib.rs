@@ -579,7 +579,9 @@ pub use moonpool_assertions::{
     assertion_table_ptr, each_bucket_read_all, msg_hash, unpack_quality,
 };
 pub use replay::{ParseTimelineError, format_timeline, parse_timeline};
-pub use sancov::{sancov_edge_count, sancov_edges_covered, sancov_is_available};
+pub use sancov::{
+    sancov_edge_count, sancov_edges_covered, sancov_edges_covered_live, sancov_is_available,
+};
 pub use shared_stats::{ExplorationStats, bug_recipe, exploration_stats};
 pub use split_loop::{AdaptiveConfig, Parallelism, exit_child};
 

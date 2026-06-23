@@ -45,7 +45,7 @@ If your error handling code exists but `assert_sometimes!` never fires, you have
 
 ## Multi-Seed Testing
 
-Different seeds explore different execution orderings. `UntilAllSometimesReached(N)` runs simulations with different seeds until all `assert_sometimes!` statements have triggered at least once, up to N iterations.
+Different seeds explore different execution orderings. The default `UntilCoverageStable` stop condition runs simulations with different seeds until every `assert_sometimes!` / `assert_reachable!` has triggered at least once **and** code coverage has plateaued (capped at `max_iterations`). Tune it with `.until_coverage_stable(plateau_seeds, max_iterations)`.
 
 This transforms testing from "check known behaviors" to "explore the unknown until confident."
 

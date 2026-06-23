@@ -53,6 +53,8 @@ type OrchestrationOutcome = Result<OrchestrateOutput, (Vec<u64>, usize)>;
 /// Per-run accumulators passed into the final-report builder.
 struct FinalReportInputs {
     converged: bool,
+    /// Saturation outcome captured during the last scan (`UntilCoverageStable`).
+    saturation: Option<super::report::SaturationReport>,
     #[cfg(feature = "exploration")]
     total_exploration_timelines: u64,
     #[cfg(feature = "exploration")]
@@ -71,9 +73,13 @@ struct ConvergenceState<'a> {
     iteration_count: usize,
     reached_sometimes: &'a std::collections::HashSet<String>,
     all_sometimes_count: usize,
-    prev_coverage_bits: &'a mut u32,
+    /// Whether fork-based exploration is active (selects sancov history vs
+    /// the live BSS counter reader for the code-coverage signal).
+    exploration_active: bool,
+    prev_signal: &'a mut usize,
     plateau_count: &'a mut usize,
-    prev_reached_count: &'a mut usize,
+    /// Captures the saturation outcome (signal source + coverage numbers).
+    saturation: &'a mut Option<super::report::SaturationReport>,
     already_converged: bool,
 }
 
@@ -101,10 +107,10 @@ impl RunState {
             #[cfg(feature = "exploration")]
             per_seed_timelines: Vec::new(),
             reached_sometimes: std::collections::HashSet::new(),
-            prev_coverage_bits: 0,
+            prev_signal: 0,
             converged: false,
             plateau_count: 0,
-            prev_reached_count: 0,
+            saturation: None,
         }
     }
 }
@@ -130,12 +136,15 @@ struct RunState {
     bug_recipes: Vec<super::report::BugRecipe>,
     #[cfg(feature = "exploration")]
     per_seed_timelines: Vec<u64>,
-    // Convergence + plateau tracking.
+    // Saturation tracking (`UntilCoverageStable`).
     reached_sometimes: std::collections::HashSet<String>,
-    prev_coverage_bits: u32,
+    /// Previous progress-signal value (code edges, or reached-assertion count
+    /// in the no-sancov fallback). Both signals are monotonic non-decreasing.
+    prev_signal: usize,
     converged: bool,
     plateau_count: usize,
-    prev_reached_count: usize,
+    /// Saturation outcome captured during the last scan, surfaced in the report.
+    saturation: Option<super::report::SaturationReport>,
 }
 
 /// Resolved workload entries for a single iteration.
@@ -158,23 +167,18 @@ pub enum IterationControl {
     FixedCount(usize),
     /// Run for a specific duration of wall-clock time
     TimeLimit(Duration),
-    /// Stop when all `assert_sometimes!` have been reached AND a new seed
-    /// produces no new code coverage. Requires exploration to be enabled.
-    /// The `max_iterations` field is a safety cap.
-    UntilConverged {
-        /// Maximum number of seeds before stopping regardless.
-        max_iterations: usize,
-    },
-    /// Stop after `plateau_seeds` consecutive seeds have added no new
-    /// `assert_sometimes!` / `assert_reachable!` coverage. Works with or
-    /// without [`SimulationBuilder::enable_exploration`]: the underlying
-    /// assertion table is initialised unconditionally.
-    CoveragePlateau {
+    /// Stop when the system is saturated: every observed
+    /// `assert_sometimes!` / `assert_reachable!` has fired **and** code
+    /// coverage has not grown for `plateau_seeds` consecutive seeds.
+    ///
+    /// Uses real LLVM sancov code coverage when the binary is instrumented
+    /// (i.e. built via `cargo xtask sim run`); otherwise falls back to the
+    /// count of distinct reached sometimes/reachable assertion slots. Works
+    /// with or without [`SimulationBuilder::enable_exploration`]; no fork
+    /// occurs unless exploration is explicitly enabled.
+    UntilCoverageStable {
         /// Number of consecutive seeds without coverage growth required to stop.
         plateau_seeds: usize,
-        /// If true, additionally require every observed sometimes/reachable
-        /// assertion to have fired at least once before stopping.
-        require_all_sometimes: bool,
         /// Maximum number of seeds before stopping regardless (safety cap).
         max_iterations: usize,
     },
@@ -417,7 +421,10 @@ impl SimulationBuilder {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            iteration_control: IterationControl::FixedCount(1),
+            iteration_control: IterationControl::UntilCoverageStable {
+                plateau_seeds: 10,
+                max_iterations: 1000,
+            },
             entries: Vec::new(),
             process_entry: None,
             attrition: None,
@@ -687,47 +694,20 @@ impl SimulationBuilder {
         self
     }
 
-    /// Run until exploration has converged: all `assert_sometimes!` assertions
-    /// have been reached and no new coverage was found on the last seed.
+    /// Run until the system is saturated: every observed
+    /// `assert_sometimes!` / `assert_reachable!` assertion has fired **and**
+    /// code coverage has not grown for `plateau_seeds` consecutive seeds
+    /// (capped at `max_iterations`).
     ///
-    /// Requires `.enable_exploration()` to be configured (and the `exploration`
-    /// feature). `max_iterations` is a safety cap to prevent infinite loops.
-    #[cfg(feature = "exploration")]
+    /// Uses real LLVM sancov code coverage when the binary is instrumented
+    /// (built via `cargo xtask sim run`); otherwise falls back to assertion-slot
+    /// coverage. Works with or without [`SimulationBuilder::enable_exploration`];
+    /// no fork occurs unless exploration is explicitly enabled.
+    /// e.g. `until_coverage_stable(10, 5000)`.
     #[must_use]
-    pub fn until_converged(mut self, max_iterations: usize) -> Self {
-        self.iteration_control = IterationControl::UntilConverged { max_iterations };
-        self
-    }
-
-    /// Run until `assert_sometimes!` / `assert_reachable!` coverage has not
-    /// grown for `plateau_seeds` consecutive seeds.
-    ///
-    /// Works with or without [`SimulationBuilder::enable_exploration`].
-    /// `max_iterations` is a safety cap to prevent infinite loops when the
-    /// plateau is never reached.
-    #[must_use]
-    pub fn until_coverage_plateau(mut self, plateau_seeds: usize, max_iterations: usize) -> Self {
-        self.iteration_control = IterationControl::CoveragePlateau {
+    pub fn until_coverage_stable(mut self, plateau_seeds: usize, max_iterations: usize) -> Self {
+        self.iteration_control = IterationControl::UntilCoverageStable {
             plateau_seeds,
-            require_all_sometimes: false,
-            max_iterations,
-        };
-        self
-    }
-
-    /// Like [`Self::until_coverage_plateau`] but also lets the caller require
-    /// every observed sometimes/reachable assertion to have fired before the
-    /// plateau is allowed to terminate the run.
-    #[must_use]
-    pub fn until_coverage_plateau_with(
-        mut self,
-        plateau_seeds: usize,
-        require_all_sometimes: bool,
-        max_iterations: usize,
-    ) -> Self {
-        self.iteration_control = IterationControl::CoveragePlateau {
-            plateau_seeds,
-            require_all_sometimes,
             max_iterations,
         };
         self
@@ -989,90 +969,91 @@ impl SimulationBuilder {
             assertion_details: Vec::new(),
             bucket_summaries: Vec::new(),
             convergence_timeout: false,
+            saturation: None,
         })
     }
 
-    /// Check whether the user's convergence / plateau condition has been
+    /// Check whether the `UntilCoverageStable` saturation condition has been
     /// met this iteration. Returns the new `converged` flag.
+    ///
+    /// Saturation = every observed sometimes/reachable assertion has fired AND
+    /// the progress signal (real code coverage when sancov is available, else
+    /// the reached-assertion count) has not grown for `plateau_seeds`
+    /// consecutive seeds. Both signals are monotonic non-decreasing, so
+    /// `current == prev` marks a quiet seed.
     fn check_convergence_or_plateau(state: ConvergenceState<'_>) -> bool {
         let ConvergenceState {
             iteration_control,
             iteration_count,
             reached_sometimes,
             all_sometimes_count,
-            prev_coverage_bits,
+            exploration_active,
+            prev_signal,
             plateau_count,
-            prev_reached_count,
+            saturation,
             already_converged,
         } = state;
         if already_converged {
             return true;
         }
-        match iteration_control {
-            IterationControl::UntilConverged { .. } => {
-                if iteration_count < 2 {
-                    return false;
-                }
-                let all_reached =
-                    all_sometimes_count > 0 && reached_sometimes.len() >= all_sometimes_count;
-                let current_bits = crate::chaos::exploration_glue::explored_coverage_bits();
-                let no_new_coverage = current_bits == *prev_coverage_bits;
-                tracing::warn!(
-                    "convergence: seed={} reached={}/{} coverage={}->{} delta={}",
-                    iteration_count,
-                    reached_sometimes.len(),
-                    all_sometimes_count,
-                    *prev_coverage_bits,
-                    current_bits,
-                    current_bits.saturating_sub(*prev_coverage_bits),
-                );
-                if all_reached && no_new_coverage {
-                    tracing::info!(
-                        "Converged after {} seeds: all {} sometimes reached, no new coverage",
-                        iteration_count,
-                        all_sometimes_count
-                    );
-                    return true;
-                }
-                false
-            }
-            IterationControl::CoveragePlateau {
-                plateau_seeds,
-                require_all_sometimes,
-                ..
-            } => {
-                let current_count = reached_sometimes.len();
-                if iteration_count == 1 {
-                    *prev_reached_count = current_count;
-                } else if current_count == *prev_reached_count {
-                    *plateau_count += 1;
-                } else {
-                    *plateau_count = 0;
-                    *prev_reached_count = current_count;
-                }
-                let all_reached = !*require_all_sometimes
-                    || (all_sometimes_count > 0 && reached_sometimes.len() >= all_sometimes_count);
-                tracing::warn!(
-                    "plateau: seed={} reached={}/{} consecutive_no_growth={}/{}",
-                    iteration_count,
-                    current_count,
-                    all_sometimes_count,
-                    *plateau_count,
-                    plateau_seeds,
-                );
-                if *plateau_count >= *plateau_seeds && all_reached {
-                    tracing::info!(
-                        "Coverage plateau after {} seeds: {} consecutive without growth, {} sometimes reached",
-                        iteration_count,
-                        *plateau_count,
-                        current_count
-                    );
-                    return true;
-                }
-                false
-            }
-            _ => false,
+        let IterationControl::UntilCoverageStable { plateau_seeds, .. } = iteration_control else {
+            return false;
+        };
+
+        // Pick the progress signal: real code coverage when instrumented, else
+        // the count of distinct reached sometimes/reachable slots.
+        let edges = crate::chaos::exploration_glue::code_coverage_edges(exploration_active);
+        let (signal, current) = match edges {
+            Some(n) => (super::report::SaturationSignal::CodeCoverage, n),
+            None => (
+                super::report::SaturationSignal::AssertionCoverage,
+                reached_sometimes.len(),
+            ),
+        };
+
+        if iteration_count == 1 {
+            *prev_signal = current;
+        } else if current == *prev_signal {
+            *plateau_count += 1;
+        } else {
+            *plateau_count = 0;
+            *prev_signal = current;
         }
+
+        let all_reached = all_sometimes_count > 0 && reached_sometimes.len() >= all_sometimes_count;
+
+        let edges_total = crate::chaos::exploration_glue::code_coverage_total().unwrap_or_default();
+        *saturation = Some(super::report::SaturationReport {
+            signal,
+            edges_covered: edges.unwrap_or_default(),
+            edges_total,
+            sometimes_hit: reached_sometimes.len(),
+            sometimes_total: all_sometimes_count,
+            plateau_seeds: *plateau_seeds,
+        });
+
+        tracing::warn!(
+            "saturation: seed={} sometimes={}/{} signal={:?}={} quiet_seeds={}/{}",
+            iteration_count,
+            reached_sometimes.len(),
+            all_sometimes_count,
+            signal,
+            current,
+            *plateau_count,
+            plateau_seeds,
+        );
+        if *plateau_count >= *plateau_seeds && all_reached {
+            tracing::info!(
+                "Saturated after {} seeds: all {} sometimes reached, {:?} stable ({}) for {} seeds",
+                iteration_count,
+                all_sometimes_count,
+                signal,
+                current,
+                *plateau_count,
+            );
+            return true;
+        }
+        false
     }
 
     /// Emit a `warn!` when an iteration exceeded the configured threshold.
@@ -1327,6 +1308,7 @@ impl SimulationBuilder {
             assertion_details: Vec::new(),
             bucket_summaries: Vec::new(),
             convergence_timeout: false,
+            saturation: None,
         }
     }
 
@@ -1355,14 +1337,6 @@ impl SimulationBuilder {
 
         Self::init_assertions_and_exploration(self.exploration_config.as_ref());
 
-        assert!(
-            !matches!(
-                self.iteration_control,
-                IterationControl::UntilConverged { .. }
-            ) || self.exploration_config.is_some(),
-            "IterationControl::UntilConverged requires enable_exploration() to be configured"
-        );
-
         let mut state = RunState::new(&self);
 
         while state.iteration_manager.should_continue() {
@@ -1381,6 +1355,7 @@ impl SimulationBuilder {
             &self.iteration_control,
             &FinalReportInputs {
                 converged: state.converged,
+                saturation: state.saturation,
                 #[cfg(feature = "exploration")]
                 total_exploration_timelines: state.total_exploration_timelines,
                 #[cfg(feature = "exploration")]
@@ -1405,7 +1380,7 @@ impl SimulationBuilder {
         let seed = state.iteration_manager.next_iteration();
         let iteration_count = state.iteration_manager.current_iteration();
 
-        self.prepare_iteration(state, obs_handle, seed, iteration_count);
+        self.prepare_iteration(obs_handle, seed, iteration_count);
 
         let (orchestration_result, start_time) =
             self.run_orchestrator_for_iteration(state, obs_handle, seed, iteration_count);
@@ -1425,10 +1400,9 @@ impl SimulationBuilder {
     }
 
     /// Run all per-iteration setup steps before the orchestrator starts:
-    /// prepare-next-seed, user hooks, reset state, snapshot coverage.
+    /// prepare-next-seed, user hooks, reset state.
     fn prepare_iteration(
         &mut self,
-        state: &mut RunState,
         obs_handle: &SimulationLayerHandle,
         seed: u64,
         iteration_count: usize,
@@ -1449,13 +1423,6 @@ impl SimulationBuilder {
         }
 
         Self::reset_per_iteration_state(seed, self.swarm_operations, obs_handle);
-
-        if matches!(
-            self.iteration_control,
-            IterationControl::UntilConverged { .. }
-        ) {
-            state.prev_coverage_bits = crate::chaos::exploration_glue::explored_coverage_bits();
-        }
     }
 
     /// Resolve workload entries, build the per-iteration sim/fault-injectors,
@@ -1598,7 +1565,7 @@ impl SimulationBuilder {
 
         let needs_assertion_scan = matches!(
             self.iteration_control,
-            IterationControl::UntilConverged { .. } | IterationControl::CoveragePlateau { .. }
+            IterationControl::UntilCoverageStable { .. }
         );
         if needs_assertion_scan {
             let all_sometimes_count = Self::scan_assertion_slots(&mut state.reached_sometimes);
@@ -1607,9 +1574,10 @@ impl SimulationBuilder {
                 iteration_count,
                 reached_sometimes: &state.reached_sometimes,
                 all_sometimes_count,
-                prev_coverage_bits: &mut state.prev_coverage_bits,
+                exploration_active: self.exploration_config.is_some(),
+                prev_signal: &mut state.prev_signal,
                 plateau_count: &mut state.plateau_count,
-                prev_reached_count: &mut state.prev_reached_count,
+                saturation: &mut state.saturation,
                 already_converged: state.converged,
             });
         }
@@ -1681,10 +1649,10 @@ impl SimulationBuilder {
         let bucket_summaries = build_bucket_summaries(&raw_each_buckets);
         let iteration_count = iteration_manager.current_iteration();
 
-        // Detect convergence timeout.
+        // Detect saturation timeout: the cap was hit without saturating.
         let convergence_timeout = matches!(
             iteration_control,
-            IterationControl::UntilConverged { .. } | IterationControl::CoveragePlateau { .. }
+            IterationControl::UntilCoverageStable { .. }
         ) && !converged;
 
         crate::chaos::buggify_reset();
@@ -1699,6 +1667,7 @@ impl SimulationBuilder {
             assertion_details,
             bucket_summaries,
             convergence_timeout,
+            saturation: inputs.saturation.clone(),
         })
     }
 }
