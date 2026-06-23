@@ -79,6 +79,23 @@ pub enum RebootKind {
     CrashAndWipe,
 }
 
+/// The failure domain a reboot targets.
+///
+/// Controls how [`AttritionInjector`](super::fault_injector) selects victims.
+/// `PerMachine` / `PerZone` reboot all collocated processes *together* — modeling
+/// correlated failure — and require a [`.cluster()`](super::builder::SimulationBuilder::cluster)
+/// topology. Without locality they are a no-op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AttritionScope {
+    /// Reboot a single random process (the historical behavior).
+    #[default]
+    PerProcess,
+    /// Reboot every process on a single random machine atomically.
+    PerMachine,
+    /// Reboot every process in a single random zone atomically.
+    PerZone,
+}
+
 /// Built-in attrition configuration for automatic process reboots.
 ///
 /// Provides a default chaos mechanism that randomly kills and restarts server
@@ -100,6 +117,7 @@ pub enum RebootKind {
 ///     prob_wipe: 0.2,
 ///     recovery_delay_ms: None,
 ///     grace_period_ms: None,
+///     scope: AttritionScope::PerProcess,
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq)]
@@ -135,6 +153,15 @@ pub struct Attrition {
     ///
     /// Defaults to `2000..5000` (2-5 seconds) if not set.
     pub grace_period_ms: Option<Range<usize>>,
+
+    /// The failure domain each reboot targets.
+    ///
+    /// [`AttritionScope::PerProcess`] (the default) kills one random process at
+    /// a time. [`AttritionScope::PerMachine`] / [`AttritionScope::PerZone`] kill
+    /// all collocated processes together, modeling correlated failure; they
+    /// require a [`.cluster()`](super::builder::SimulationBuilder::cluster)
+    /// topology and respect `max_dead` as a whole-group budget.
+    pub scope: AttritionScope,
 }
 
 impl Attrition {
@@ -195,7 +222,7 @@ impl Attrition {
 
 #[cfg(test)]
 mod swarm_tests {
-    use super::Attrition;
+    use super::{Attrition, AttritionScope};
     use crate::sim::rng::set_config_seed;
 
     /// A representative base regime: all three reboot kinds enabled.
@@ -207,6 +234,7 @@ mod swarm_tests {
             prob_wipe: 0.2,
             recovery_delay_ms: None,
             grace_period_ms: None,
+            scope: AttritionScope::PerProcess,
         }
     }
 

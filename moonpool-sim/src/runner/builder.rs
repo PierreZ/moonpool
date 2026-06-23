@@ -13,6 +13,7 @@ use tracing::instrument;
 use crate::SimulationError;
 use crate::observability::{Invariant, SimulationLayer, SimulationLayerHandle, TraceQuery};
 use crate::runner::fault_injector::FaultInjector;
+use crate::runner::locality::{LocalityConfig, MachineRegistry};
 use crate::runner::process::{Attrition, Process};
 use crate::runner::tags::TagDistribution;
 use crate::runner::workload::Workload;
@@ -283,7 +284,7 @@ pub enum ProcessCount {
 
 impl ProcessCount {
     /// Resolve the count for the current iteration.
-    fn resolve(&self) -> usize {
+    pub(crate) fn resolve(&self) -> usize {
         match self {
             ProcessCount::Fixed(n) => *n,
             ProcessCount::Range(range) => {
@@ -316,6 +317,9 @@ pub(crate) struct ProcessEntry {
     pub(crate) factory: Box<dyn Fn() -> Box<dyn Process>>,
     pub(crate) tags: TagDistribution,
     pub(crate) name: String,
+    /// Failure-domain topology. When `Some`, it determines the process count
+    /// (sampled per seed) and `count` is ignored.
+    pub(crate) locality: Option<LocalityConfig>,
 }
 
 /// Internal storage for workload entries in the builder.
@@ -470,6 +474,47 @@ impl SimulationBuilder {
             factory: Box::new(factory),
             tags: TagDistribution::new(),
             name,
+            locality: None,
+        });
+        self
+    }
+
+    /// Register server processes laid out across a failure-domain topology.
+    ///
+    /// Unlike [`processes`](Self::processes), the [`LocalityConfig`] *is* the
+    /// spawn spec: it determines the process count (sampled per seed), assigns
+    /// each process a datacenter / zone / machine, and lets machine- and
+    /// zone-scoped attrition reboot collocated processes together. Calling this
+    /// replaces any prior `.processes()` / `.cluster()` registration.
+    ///
+    /// Tags ([`tags`](Self::tags)) remain orthogonal and may still be chained.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // 3 datacenters × 3 zones × 3 machines × 1 process = 27 processes,
+    /// // with the datacenter count randomized per seed.
+    /// builder.cluster(
+    ///     LocalityConfig::new(1..=3, 3, 3, 1),
+    ///     || Box::new(MyNode::new()),
+    /// )
+    /// ```
+    #[must_use]
+    pub fn cluster(
+        mut self,
+        config: LocalityConfig,
+        factory: impl Fn() -> Box<dyn Process> + 'static,
+    ) -> Self {
+        let sample = factory();
+        let name = sample.name().to_string();
+        drop(sample);
+        self.process_entry = Some(ProcessEntry {
+            // `count` is unused when locality is present; the topology decides it.
+            count: ProcessCount::Fixed(0),
+            factory: Box::new(factory),
+            tags: TagDistribution::new(),
+            name,
+            locality: Some(config),
         });
         self
     }
@@ -1083,8 +1128,18 @@ impl SimulationBuilder {
     /// Resolve a process entry into a `ProcessConfig` for the current
     /// iteration, sampling the count/tags from the sim RNG (already seeded).
     fn resolve_process_config(entry: &ProcessEntry) -> super::orchestrator::ProcessConfig<'_> {
-        let count = entry.count.resolve();
+        // When a topology is configured it owns the process count (sampled per
+        // seed); otherwise fall back to the flat `.processes()` count.
+        let localities = entry
+            .locality
+            .as_ref()
+            .map(LocalityConfig::resolve_topology);
+        let count = localities
+            .as_ref()
+            .map_or_else(|| entry.count.resolve(), Vec::len);
+
         let mut registry = crate::runner::tags::TagRegistry::new();
+        let mut machine_registry = MachineRegistry::new();
         let mut ips = Vec::with_capacity(count);
         let mut info = Vec::with_capacity(count);
         let base_name = &entry.name;
@@ -1093,6 +1148,9 @@ impl SimulationBuilder {
             let ip_addr: std::net::IpAddr = ip.parse().expect("valid process IP");
             let tags = entry.tags.resolve(i);
             registry.register(ip_addr, tags);
+            if let Some(localities) = &localities {
+                machine_registry.register(ip_addr, localities[i].clone());
+            }
             ips.push(ip.clone());
             let name = if count == 1 {
                 base_name.clone()
@@ -1106,6 +1164,7 @@ impl SimulationBuilder {
             info,
             ips,
             tag_registry: registry,
+            machine_registry,
         }
     }
 
