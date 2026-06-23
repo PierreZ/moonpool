@@ -374,6 +374,12 @@ pub enum Chaos {
         /// How the regime is sampled per seed.
         mode: ChaosMode,
     },
+    /// Buggify-driven knob value-perturbation. An additive *modifier*, not a
+    /// surface of its own: on enabled network/storage surfaces it occasionally
+    /// spikes individual knob *values* (latencies, IOPS, fault rates) to an
+    /// extreme within bounds, per FDB's `if (randomize && BUGGIFY) KNOB =
+    /// random(lo, hi)`. Composes with [`ChaosMode::Random`]/[`ChaosMode::Swarm`].
+    BuggifyKnobs,
 }
 
 /// Builder pattern for configuring and running simulation experiments.
@@ -386,6 +392,10 @@ pub struct SimulationBuilder {
     seeds: Vec<u64>,
     network_chaos: Option<ChaosMode>,
     storage_chaos: Option<ChaosMode>,
+    /// Buggify-driven knob value-perturbation, enabled via [`Chaos::BuggifyKnobs`].
+    /// Internal flag (not a public builder method) so the opt-in stays inside the
+    /// `enable_chaos`/`Chaos` model.
+    buggify_knobs: bool,
     swarm_operations: bool,
     invariants: Vec<Box<dyn Invariant + Send>>,
     fault_injectors: Vec<Box<dyn FaultInjector>>,
@@ -415,6 +425,7 @@ impl SimulationBuilder {
             seeds: Vec::new(),
             network_chaos: None,
             storage_chaos: None,
+            buggify_knobs: false,
             swarm_operations: false,
             invariants: Vec::new(),
             fault_injectors: Vec::new(),
@@ -775,6 +786,7 @@ impl SimulationBuilder {
                     self.attrition = Some(config);
                     self.attrition_mode = mode;
                 }
+                Chaos::BuggifyKnobs => self.buggify_knobs = true,
             }
         }
         self
@@ -911,18 +923,31 @@ impl SimulationBuilder {
     fn build_sim_for_iteration(
         network_chaos: Option<ChaosMode>,
         storage_chaos: Option<ChaosMode>,
+        buggify_knobs: bool,
         seed: u64,
     ) -> crate::sim::SimWorld {
-        let network_config = match network_chaos {
+        let mut network_config = match network_chaos {
             Some(ChaosMode::Swarm) => crate::NetworkConfiguration::swarm_for_seed(),
             Some(ChaosMode::Random) => crate::NetworkConfiguration::random_for_seed(),
             None => crate::NetworkConfiguration::default(),
         };
-        let storage_config = match storage_chaos {
+        let mut storage_config = match storage_chaos {
             Some(ChaosMode::Swarm) => crate::storage::StorageConfiguration::swarm_for_seed(),
             Some(ChaosMode::Random) => crate::storage::StorageConfiguration::random_for_seed(),
             None => crate::storage::StorageConfiguration::default(),
         };
+        // Buggify value-perturbation is a modifier layered on top of an enabled
+        // surface — only spike knobs where chaos is actually on, so it never
+        // silently switches on a fault family that wasn't enabled. Draws from
+        // `SIM_RNG` (buggify is live by now; see `reset_per_iteration_state`).
+        if buggify_knobs {
+            if network_chaos.is_some() {
+                network_config.chaos.apply_buggify_knobs();
+            }
+            if storage_chaos.is_some() {
+                storage_config.apply_buggify_knobs();
+            }
+        }
         let mut sim = crate::sim::SimWorld::new_with_network_config_and_seed(network_config, seed);
         sim.set_storage_config(storage_config);
         sim
@@ -1463,7 +1488,12 @@ impl SimulationBuilder {
             .as_ref()
             .map(Self::resolve_process_config);
 
-        let sim = Self::build_sim_for_iteration(self.network_chaos, self.storage_chaos, seed);
+        let sim = Self::build_sim_for_iteration(
+            self.network_chaos,
+            self.storage_chaos,
+            self.buggify_knobs,
+            seed,
+        );
         let start_time = Instant::now();
         // Derive the per-seed attrition regime: `Swarm` draws a fresh reboot regime
         // from `CONFIG_RNG` (after the network/storage masks, keeping the draw order

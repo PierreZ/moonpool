@@ -103,6 +103,37 @@ if buggify_with_prob!(0.01) {
 }
 ```
 
+## Spiking Config Knobs
+
+The patterns above scatter `buggify!()` through your own code. But the simulation has its own knobs: network latencies, disk IOPS, partition durations, fault probabilities. FoundationDB randomizes these the same way it randomizes everything else, with a one-liner at config construction:
+
+```cpp
+if (randomize && BUGGIFY) KNOB = deterministicRandom()->random(lo, hi);
+```
+
+Moonpool gives us `buggify_knob!(default, lo..hi)`. It returns `default` on most seeds, but when its call site activates and fires it returns a random value inside the range:
+
+```rust
+// Most seeds keep the sampled IOPS. A few push the disk to a crawl.
+self.iops = buggify_knob!(self.iops, 100..5_000);
+```
+
+This is a different coverage axis from swarm testing. **Swarm decides which fault families are on. Buggify-knobs decides how hard an enabled knob gets pushed.** A seed might run with only storage faults active, and within that, a disk throttled to 100 IOPS instead of the usual 25,000. The two compose, multiplying the configurations a night of seeds explores.
+
+We opt in through the same `enable_chaos` list we use for everything else:
+
+```rust
+SimulationBuilder::new()
+    .enable_chaos([
+        Chaos::Storage(ChaosMode::Swarm),
+        Chaos::BuggifyKnobs,
+    ])
+    .workload(MyWorkload)
+    .run();
+```
+
+`Chaos::BuggifyKnobs` is a modifier, not a surface of its own. It only perturbs knobs on surfaces we already enabled, so it never silently switches on a fault family we left off. Like every other buggify decision, each spike is deterministic per seed, so a failing seed replays exactly.
+
 ## Probability Calibration
 
 Not all buggify points should fire at the same rate. FoundationDB uses a three-tier calibration:

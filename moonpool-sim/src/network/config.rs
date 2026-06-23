@@ -385,6 +385,21 @@ impl ChaosConfiguration {
             self.max_pair_latency = Duration::ZERO..Duration::ZERO;
         }
     }
+
+    /// Spike selected fault *magnitudes* under buggify (FDB's
+    /// `if (randomize && BUGGIFY) KNOB = random(lo, hi)`).
+    ///
+    /// Composes on top of [`random_for_seed`](Self::random_for_seed) /
+    /// [`swarm_for_seed`](Self::swarm_for_seed): each knob keeps its sampled value
+    /// unless its own [`buggify_knob!`](crate::buggify_knob) call site fires for the
+    /// seed, in which case it jumps to an aggressive value within bounds. A
+    /// representative subset — extend by adding more `buggify_knob!` lines.
+    pub fn apply_buggify_knobs(&mut self) {
+        self.clog_probability = crate::buggify_knob!(self.clog_probability, 0.5..1.0);
+        self.partition_probability = crate::buggify_knob!(self.partition_probability, 0.3..0.8);
+        self.random_close_probability =
+            crate::buggify_knob!(self.random_close_probability, 0.01..0.1);
+    }
 }
 
 /// Configuration for network simulation parameters

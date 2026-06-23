@@ -276,6 +276,22 @@ impl StorageConfiguration {
         }
     }
 
+    /// Spike selected disk knob *magnitudes* under buggify (FDB's
+    /// `if (randomize && BUGGIFY) KNOB = random(lo, hi)`).
+    ///
+    /// Composes on top of [`random_for_seed`](Self::random_for_seed) /
+    /// [`swarm_for_seed`](Self::swarm_for_seed): each knob keeps its sampled value
+    /// unless its own [`buggify_knob!`](crate::buggify_knob) call site fires for the
+    /// seed. Demonstrates both throttling *down* (IOPS/bandwidth → extreme-slow
+    /// disk) and spiking a fault rate *up*. A representative subset — extend by
+    /// adding more `buggify_knob!` lines.
+    pub fn apply_buggify_knobs(&mut self) {
+        self.iops = crate::buggify_knob!(self.iops, 100..5_000);
+        self.bandwidth = crate::buggify_knob!(self.bandwidth, 1_000_000..20_000_000);
+        self.sync_failure_probability =
+            crate::buggify_knob!(self.sync_failure_probability, 0.05..0.2);
+    }
+
     /// Create a configuration optimized for fast local testing.
     ///
     /// Minimal latencies and no fault injection for predictable,
@@ -393,6 +409,51 @@ mod swarm_tests {
             value.to_bits(),
             0.0_f64.to_bits(),
             "expected 0.0, got {value}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod buggify_knob_tests {
+    use super::StorageConfiguration;
+    use crate::chaos::{buggify_init, buggify_reset};
+    use crate::sim::rng::{reset_sim_rng, set_config_seed, set_sim_seed};
+
+    /// Sample the buggify-spiked knobs the way the runner does: seed both RNG
+    /// streams and enable buggify before perturbing. Returns the spiked knobs
+    /// (`sync_failure_probability` as bits for exact comparison).
+    fn buggified_knobs(seed: u64) -> (u64, u64, u64) {
+        reset_sim_rng();
+        set_sim_seed(seed);
+        set_config_seed(seed);
+        buggify_init(0.8, 0.8);
+        let mut config = StorageConfiguration::swarm_for_seed();
+        config.apply_buggify_knobs();
+        buggify_reset();
+        (
+            config.iops,
+            config.bandwidth,
+            config.sync_failure_probability.to_bits(),
+        )
+    }
+
+    #[test]
+    fn buggify_knobs_deterministic_per_seed() {
+        for seed in [0_u64, 1, 42, 12_345] {
+            assert_eq!(
+                buggified_knobs(seed),
+                buggified_knobs(seed),
+                "buggify knob spikes must be reproducible for seed {seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn buggify_knobs_vary_across_seeds() {
+        let distinct: std::collections::HashSet<_> = (0..50_u64).map(buggified_knobs).collect();
+        assert!(
+            distinct.len() > 1,
+            "buggify knob spikes should vary across seeds"
         );
     }
 }
