@@ -23,8 +23,8 @@ tokio = ["moonpool-core/tokio-providers"]
 [dependencies]
 # Transport is generic over `P: Providers`; it doesn't need core's production
 # providers unless the `tokio` feature is on (TokioTransport / Builder::tokio()).
-moonpool-core = { path = "../moonpool-core", version = "0.7.0", default-features = false }
-moonpool-transport-derive = { path = "../moonpool-transport-derive", version = "0.7.0" }
+moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false }
+moonpool-transport-derive = { path = "../moonpool-transport-derive", version = "0.8.0" }
 
 async-trait = "0.1"
 crc32c = "0.6"
