@@ -17,6 +17,9 @@ edition = "2024"
 
 [workspace.lints.rust]
 async_fn_in_trait = "allow"
+# `tokio_unstable` is set via .cargo/config.toml for named-task / tokio-console
+# support; declare it so `#[cfg(tokio_unstable)]` does not trip `unexpected_cfgs`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
