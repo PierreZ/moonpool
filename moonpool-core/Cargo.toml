@@ -14,7 +14,7 @@ rustdoc-args = ["--cfg", "tokio_unstable"]
 rustc-args = ["--cfg", "tokio_unstable"]
 
 [features]
-default = ["tokio-providers"]
+default = ["tokio-providers", "select"]
 # Umbrella: the full production bundle (TokioProviders needs all five slots).
 tokio-providers = ["tokio-task", "tokio-time", "tokio-net", "tokio-fs", "tokio-random"]
 # Granular per-provider features. A consumer that only needs one provider (e.g.
@@ -27,6 +27,12 @@ tokio-net = ["dep:tokio", "tokio/net", "tokio/io-util", "dep:tokio-util"]
 tokio-fs = ["dep:tokio", "tokio/fs", "tokio/io-util", "dep:tokio-util"]
 # TokioRandomProvider uses rand's ThreadRng; no tokio involved.
 tokio-random = ["rand/thread_rng"]
+# `moonpool_core::select!` as a verbatim re-export of tokio's macro (production).
+select = ["dep:tokio", "tokio/macros"]
+# Deterministic `select!`: replaces the passthrough with the seeded rotation
+# combinator. Enabled by moonpool-sim; production graphs without moonpool-sim
+# keep tokio's macro verbatim via `select`.
+deterministic-select = ["select"]
 
 [dependencies]
 futures = "0.3"
@@ -39,6 +45,7 @@ tokio-util = { version = "0.7", features = ["compat"], optional = true }
 tracing = "0.1"
 
 [dev-dependencies]
+futures = "0.3"
 
 [lints]
 workspace = true

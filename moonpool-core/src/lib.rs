@@ -61,11 +61,29 @@ mod error;
 mod network;
 mod providers;
 mod random;
+#[cfg(feature = "deterministic-select")]
+mod select;
+#[cfg(feature = "deterministic-select")]
+pub mod select_support;
 mod storage;
 mod task;
 mod time;
 mod types;
 mod well_known;
+
+/// `select!` as tokio's macro, verbatim (production passthrough).
+///
+/// With the `deterministic-select` feature enabled (moonpool-sim does this),
+/// this re-export is replaced by the seeded rotation combinator defined in
+/// [`select`](crate::select!); the grammar is identical either way.
+#[cfg(all(feature = "select", not(feature = "deterministic-select")))]
+pub use tokio::select;
+
+/// tokio re-export used by `select!` expansions so downstream crates never
+/// need a direct tokio dependency for the macro to resolve. Not public API.
+#[cfg(feature = "select")]
+#[doc(hidden)]
+pub use tokio as __tokio;
 
 // Codec exports
 pub use codec::{CodecError, JsonCodec, MessageCodec};
