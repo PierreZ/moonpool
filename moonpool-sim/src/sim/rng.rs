@@ -56,7 +56,7 @@ thread_local! {
 
     /// Thread-local `select!` branch-offset RNG, independent of [`SIM_RNG`].
     ///
-    /// Drives the branch rotation offsets of `moonpool_core::select!` (installed
+    /// Drives the branch start offsets of `moonpool_core::select!` (installed
     /// via [`set_select_seed`]). Like [`CONFIG_RNG`] it deliberately does NOT go
     /// through [`pre_sample`], so select polling order can never perturb the
     /// [`SIM_RNG`] call count or fork-explorer breakpoint replay.
@@ -78,7 +78,7 @@ const SWARM_OP_SALT: u64 = 0x6F70_6D61_736B_7372; // "opmasksr"
 
 /// Salt mixed into the iteration seed before seeding [`SELECT_RNG`].
 ///
-/// Decorrelates `select!` branch-rotation offsets from the in-run [`SIM_RNG`]
+/// Decorrelates `select!` branch start offsets from the in-run [`SIM_RNG`]
 /// stream (and from the other salted streams) while keeping them fully
 /// reproducible from the same iteration seed.
 const SELECT_RNG_SALT: u64 = 0x7365_6C62_726E_6368; // "selbrnch"
@@ -311,7 +311,7 @@ pub fn reset_config_rng() {
 /// install it as the branch-offset source for `moonpool_core::select!` on
 /// this thread.
 ///
-/// The seed is mixed with [`SELECT_RNG_SALT`] so branch-rotation offsets are
+/// The seed is mixed with [`SELECT_RNG_SALT`] so branch start offsets are
 /// decorrelated from [`SIM_RNG`] yet remain reproducible per iteration seed.
 /// Like [`set_config_seed`], this stream is uncounted: select polling order
 /// never perturbs the call counter or fork-explorer breakpoint replay.

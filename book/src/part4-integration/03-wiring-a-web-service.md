@@ -110,20 +110,14 @@ impl Process for WebProcess {
                     // TowerToHyperService bridges axum's tower::Service to hyper's Service
                     let service = TowerToHyperService::new(app.clone());
 
-                    // .boxed(): select! duplicates this handler once per rotation,
-                    // and each copy's async block is a distinct anonymous type.
-                    // Boxing gives `connections` one named element type.
-                    connections.push(
-                        async move {
-                            if let Err(e) = hyper::server::conn::http1::Builder::new()
-                                .serve_connection(io, service)
-                                .await
-                            {
-                                tracing::debug!("hyper error (expected under chaos): {e}");
-                            }
+                    connections.push(async move {
+                        if let Err(e) = hyper::server::conn::http1::Builder::new()
+                            .serve_connection(io, service)
+                            .await
+                        {
+                            tracing::debug!("hyper error (expected under chaos): {e}");
                         }
-                        .boxed(),
-                    );
+                    });
                 }
                 Some(()) = connections.next(), if !connections.is_empty() => {}
                 _ = ctx.shutdown().cancelled() => return Ok(()),

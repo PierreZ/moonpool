@@ -235,7 +235,6 @@ impl Process for WebProcess {
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        use futures::FutureExt;
         use futures::stream::{FuturesUnordered, StreamExt};
 
         let store = InMemoryStore::new();
@@ -253,8 +252,8 @@ impl Process for WebProcess {
         loop {
             // Deliberately NOT `biased;`: accept (new connection) and
             // connections.next() (progress on in-flight connections) are peer
-            // data sources; the seeded rotation lets different seeds explore
-            // both orderings when both are ready.
+            // data sources; the seeded start offset lets different seeds
+            // explore both orderings when both are ready.
             moonpool_sim::select! {
                 accept = listener.accept() => {
                     let (stream, addr) = accept?;
@@ -266,25 +265,18 @@ impl Process for WebProcess {
                     let io = TokioIo::new(stream.compat());
                     let service = TowerToHyperService::new(app.clone());
 
-                    // boxed_local: select! duplicates this handler once per
-                    // rotation, and each copy's async block is a distinct
-                    // anonymous type; boxing gives `connections` one named
-                    // element type shared by all copies.
-                    connections.push(
-                        async move {
-                            tracing::info!("serve_connection starting");
-                            if let Err(e) = hyper::server::conn::http1::Builder::new()
-                                .serve_connection(io, service)
-                                .await
-                            {
-                                tracing::warn!(
-                                    "hyper serve_connection error (expected under chaos): {e}"
-                                );
-                            }
-                            tracing::info!("serve_connection finished");
+                    connections.push(async move {
+                        tracing::info!("serve_connection starting");
+                        if let Err(e) = hyper::server::conn::http1::Builder::new()
+                            .serve_connection(io, service)
+                            .await
+                        {
+                            tracing::warn!(
+                                "hyper serve_connection error (expected under chaos): {e}"
+                            );
                         }
-                        .boxed(),
-                    );
+                        tracing::info!("serve_connection finished");
+                    });
                 }
                 Some(()) = connections.next(), if !connections.is_empty() => {}
                 () = ctx.shutdown().cancelled() => {

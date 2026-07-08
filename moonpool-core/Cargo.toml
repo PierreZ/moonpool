@@ -25,9 +25,9 @@ tokio-fs = ["dep:tokio", "tokio/fs", "tokio/io-util", "dep:tokio-util"]
 tokio-random = ["rand/thread_rng"]
 # `moonpool_core::select!` as a verbatim re-export of tokio's macro (production).
 select = ["dep:tokio", "tokio/macros"]
-# Deterministic `select!`: replaces the passthrough with the seeded rotation
-# combinator. Enabled by moonpool-sim; production graphs without moonpool-sim
-# keep tokio's macro verbatim via `select`.
+# Deterministic `select!`: replaces the passthrough with tokio's expansion
+# driven by a seeded start offset. Enabled by moonpool-sim; production graphs
+# without moonpool-sim keep tokio's macro verbatim via `select`.
 deterministic-select = ["select"]
 
 [dependencies]

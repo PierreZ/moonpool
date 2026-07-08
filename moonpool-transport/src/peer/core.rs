@@ -673,8 +673,8 @@ async fn connection_task<P: Providers>(
 
         // Deliberately NOT `biased;`: data_to_send (outbound) and read (inbound)
         // are peer data sources that can be ready in the same poll; the seeded
-        // rotation lets different seeds explore both send-first and read-first
-        // interleavings instead of pinning one winner forever.
+        // start offset lets different seeds explore both send-first and
+        // read-first interleavings instead of pinning one winner forever.
         moonpool_core::select! {
             // Check for shutdown
             _ = shutdown_rx.recv() => {

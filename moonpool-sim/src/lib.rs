@@ -110,7 +110,8 @@ pub use moonpool_core::{
     TcpListenerTrait, TimeError, TimeProvider, UID, WELL_KNOWN_RESERVED_COUNT, WellKnownToken,
 };
 // The deterministic select! (moonpool-sim always enables core's
-// deterministic-select, so this is the seeded rotation combinator). Process and
+// deterministic-select, so this is tokio's expansion with a seeded start
+// offset). Process and
 // workload code must use this instead of tokio::select!, whose branch offset is
 // entropy-drawn outside a seeded tokio runtime.
 pub use moonpool_core::select;

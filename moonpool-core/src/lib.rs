@@ -74,8 +74,9 @@ mod well_known;
 /// `select!` as tokio's macro, verbatim (production passthrough).
 ///
 /// With the `deterministic-select` feature enabled (moonpool-sim does this),
-/// this re-export is replaced by the seeded rotation combinator defined in
-/// [`select`](crate::select!); the grammar is identical either way.
+/// this re-export is replaced by the seeded-offset macro defined in
+/// [`select`](crate::select!); both are tokio's expansion, so the grammar
+/// and limits are identical either way.
 #[cfg(all(feature = "select", not(feature = "deterministic-select")))]
 pub use tokio::select;
 

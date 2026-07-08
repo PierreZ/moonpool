@@ -1,8 +1,8 @@
 //! Runtime support for the deterministic [`select!`](crate::select) macro.
 //!
-//! The rotation combinator emitted by `select!` draws one branch offset per
-//! execution from [`select_offset`]. Where that offset comes from decides the
-//! determinism story:
+//! The expansion emitted by `select!` draws a branch offset from
+//! [`select_offset`] on every poll, exactly like tokio's fair mode. Where
+//! that offset comes from decides the determinism story:
 //!
 //! - **Simulation**: moonpool-sim installs an override per iteration via
 //!   [`set_select_offset_override`], backed by a seeded RNG stream. Same seed,

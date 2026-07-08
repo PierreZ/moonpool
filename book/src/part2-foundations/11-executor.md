@@ -109,7 +109,7 @@ through `TaskProvider`) already expected from tokio:
 | dropping a `JoinHandle` | same: detaches, task keeps running |
 | task panics | caught, handle yields `Err(JoinError::Panicked)`, siblings unaffected |
 | dropping the `Runtime` | dropping the `Executor` cancels every live task |
-| `tokio::select!` | `moonpool::select!` (seeded rotation, see the select chapter) |
+| `tokio::select!` | `moonpool::select!` (tokio's own expansion, seeded start offset) |
 
 Spawned futures stay `Send + 'static`, exactly as before: execution is one
 OS thread, but the bounds let application code use `Arc<RwLock<...>>`,

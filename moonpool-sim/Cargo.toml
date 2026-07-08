@@ -25,7 +25,7 @@ exploration = ["dep:moonpool-explorer"]
 # SimProviders bundles SimTaskProvider on the moonpool deterministic executor,
 # so no core tokio feature is mandatory; net/fs/time (and TokioTaskProvider for
 # conformance testing) come in only via the tokio-providers feature.
-# deterministic-select flips moonpool_core::select! to the seeded rotation combinator
+# deterministic-select flips moonpool_core::select! to the seeded-offset expansion
 # for every crate in a sim-linking build graph (cargo feature unification).
 moonpool-core = { path = "../moonpool-core", version = "0.7.0", default-features = false, features = ["deterministic-select"] }
 # Assertion accounting (pure std, wasm-able) — always present. The fork-based

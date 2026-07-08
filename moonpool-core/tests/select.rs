@@ -1,8 +1,9 @@
-//! Behavior tests for the deterministic `select!` rotation combinator.
+//! Behavior tests for the deterministic `select!` macro (tokio's expansion
+//! with a moonpool-controlled start offset).
 //!
 //! These run WITHOUT any async runtime (`futures::executor::block_on`), which
-//! is itself part of the proof: the combinator must work on a foreign
-//! executor, where tokio's own fair `select!` would fall back to OS entropy.
+//! is itself part of the proof: the macro must work on a foreign executor,
+//! where tokio's own fair `select!` would fall back to OS entropy.
 #![cfg(feature = "deterministic-select")]
 
 use std::cell::Cell;
@@ -11,7 +12,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use futures::executor::block_on;
 use moonpool_core::select_support::set_select_offset_override;
 
-/// Three always-ready branches returning their own index: with rotation
+/// Three always-ready branches returning their own index: with start
 /// offset `k`, branch `k` is polled first and wins.
 fn three_way() -> u32 {
     block_on(async {
@@ -30,7 +31,7 @@ fn three_way_offset(_branches: u32) -> u32 {
 }
 
 #[test]
-fn rotation_offset_picks_the_winner() {
+fn start_offset_picks_the_winner() {
     set_select_offset_override(Some(three_way_offset));
     for k in 0..3 {
         THREE_WAY_OFFSET.store(k, Ordering::Relaxed);
@@ -93,7 +94,7 @@ fn else_offset(_branches: u32) -> u32 {
 
 #[test]
 fn else_fires_when_all_branches_are_disabled() {
-    // The else handler must be present (and last) in EVERY rotation.
+    // The else handler must fire whatever the drawn offset is.
     set_select_offset_override(Some(else_offset));
     for k in 0..2 {
         ELSE_OFFSET.store(k, Ordering::Relaxed);
@@ -211,6 +212,98 @@ fn sixteen_branches_at_every_offset() {
         });
         assert_eq!(winner, k, "offset {k} must make branch {k} win");
     }
+    set_select_offset_override(None);
+}
+
+static TWENTY_OFFSET: AtomicU32 = AtomicU32::new(0);
+
+fn twenty_offset(_branches: u32) -> u32 {
+    TWENTY_OFFSET.load(Ordering::Relaxed)
+}
+
+#[test]
+fn twenty_branches_beyond_the_former_cap() {
+    // The rotation combinator this macro replaced capped out at 16 branches;
+    // tokio's own expansion (which we now enter directly) allows 64.
+    set_select_offset_override(Some(twenty_offset));
+    for k in 0..20 {
+        TWENTY_OFFSET.store(k, Ordering::Relaxed);
+        let winner = block_on(async {
+            moonpool_core::select! {
+                v = async { 0_u32 } => v,
+                v = async { 1_u32 } => v,
+                v = async { 2_u32 } => v,
+                v = async { 3_u32 } => v,
+                v = async { 4_u32 } => v,
+                v = async { 5_u32 } => v,
+                v = async { 6_u32 } => v,
+                v = async { 7_u32 } => v,
+                v = async { 8_u32 } => v,
+                v = async { 9_u32 } => v,
+                v = async { 10_u32 } => v,
+                v = async { 11_u32 } => v,
+                v = async { 12_u32 } => v,
+                v = async { 13_u32 } => v,
+                v = async { 14_u32 } => v,
+                v = async { 15_u32 } => v,
+                v = async { 16_u32 } => v,
+                v = async { 17_u32 } => v,
+                v = async { 18_u32 } => v,
+                v = async { 19_u32 } => v,
+            }
+        });
+        assert_eq!(winner, k, "offset {k} must make branch {k} win");
+    }
+    set_select_offset_override(None);
+}
+
+/// Future that returns `Pending` (self-waking) a fixed number of times, then
+/// `Ready`.
+struct ReadyAfter {
+    pending_polls: u32,
+}
+
+impl std::future::Future for ReadyAfter {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self.pending_polls == 0 {
+            std::task::Poll::Ready(())
+        } else {
+            self.pending_polls -= 1;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
+}
+
+static DRAW_COUNT: AtomicU32 = AtomicU32::new(0);
+
+fn counting_offset(_branches: u32) -> u32 {
+    DRAW_COUNT.fetch_add(1, Ordering::Relaxed);
+    0
+}
+
+#[test]
+fn offset_is_redrawn_on_every_poll() {
+    // tokio's fair mode redraws the start offset on each poll of the same
+    // select execution; the injected expression must inherit that.
+    set_select_offset_override(Some(counting_offset));
+    DRAW_COUNT.store(0, Ordering::Relaxed);
+    block_on(async {
+        moonpool_core::select! {
+            () = ReadyAfter { pending_polls: 2 } => {},
+            () = std::future::pending::<()>() => {},
+        }
+    });
+    assert_eq!(
+        DRAW_COUNT.load(Ordering::Relaxed),
+        3,
+        "three polls of one execution must draw three offsets"
+    );
     set_select_offset_override(None);
 }
 
