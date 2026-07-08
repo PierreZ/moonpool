@@ -64,7 +64,7 @@ impl Calculator for CalculatorImpl {
 }
 ```
 
-Note the `#[async_trait]` attribute on the `impl` block. Service handler traits are dyn-stored, so the macro emits `#[async_trait]` with `Send + Sync + 'static` supertraits on the generated trait. The simulation runtime still uses a single OS thread via `new_current_thread().build()`, but our handlers are **Send-bounded** so customer code can hold `Arc<RwLock<…>>`, `DashMap`, or any other `Send + Sync` state naturally. You re-apply `#[async_trait]` (without `?Send`) on the `impl`, and the compiler enforces that your handler state stays `Send + Sync + 'static`.
+Note the `#[async_trait]` attribute on the `impl` block. Service handler traits are dyn-stored, so the macro emits `#[async_trait]` with `Send + Sync + 'static` supertraits on the generated trait. The simulation still runs on a single OS thread (the [moonpool deterministic executor](../part2-foundations/11-executor.md)), but our handlers are **Send-bounded** so customer code can hold `Arc<RwLock<…>>`, `DashMap`, or any other `Send + Sync` state naturally. You re-apply `#[async_trait]` (without `?Send`) on the `impl`, and the compiler enforces that your handler state stays `Send + Sync + 'static`.
 
 ## Serialization
 

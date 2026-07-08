@@ -9,10 +9,6 @@ description = "Core abstractions for the moonpool simulation framework"
 documentation = "https://docs.rs/moonpool-core"
 readme = "README.md"
 
-[package.metadata.docs.rs]
-rustdoc-args = ["--cfg", "tokio_unstable"]
-rustc-args = ["--cfg", "tokio_unstable"]
-
 [features]
 default = ["tokio-providers", "select"]
 # Umbrella: the full production bundle (TokioProviders needs all five slots).

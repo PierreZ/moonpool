@@ -19,9 +19,12 @@ The `TimeProvider` trait gives us a single seam. In simulation `sleep` advances 
 |-----------|-------------|
 | `std::thread::spawn`, raw OS threads | `task.spawn_task(name, fut)` |
 | `tokio::task::spawn_local`, `tokio::task::LocalSet` | `task.spawn_task(name, fut)` (Send-bounded) |
-| Untracked `tokio::spawn` that bypasses `TaskProvider` | `task.spawn_task(name, fut)` |
+| `tokio::spawn` | `task.spawn_task(name, fut)`, or `moonpool_sim::executor::spawn(name, fut)` in sim-only code |
+| Bare `tokio::select!` | `moonpool_sim::select!` / `moonpool::select!` (same grammar) |
 
-`tokio::spawn` directly is acceptable only when we genuinely need a `Send + 'static` driver task and we accept that it does not flow through `TaskProvider` (no naming, no fault injection seam). Default to `spawn_task` so the simulation can see the work.
+There is no tokio runtime inside a simulation: everything runs on the [moonpool deterministic executor](../part2-foundations/11-executor.md), so a direct `tokio::spawn` panics. `moonpool_sim::executor::spawn(name, fut)` is the escape hatch when we genuinely need a raw driver task, but default to `spawn_task` so the same code runs against production providers.
+
+The same goes for branch selection. Bare `tokio::select!` draws its polling offset from OS entropy off a tokio runtime, which breaks seed replay. Moonpool's `select!` keeps the exact tokio grammar but draws the offset from the seed. Write guard-style selects (work vs shutdown or timeout) as `select! { biased; ... }` with the work branch first, and leave peer races (two data sources that can be ready together) in the default form so the seed explores both orders.
 
 ## 3. Network
 
@@ -64,7 +67,7 @@ Every random decision must be seeded by the simulation. A single ungoverned `thr
 
 ## 7. Type bounds
 
-- Trait-crossing futures must be **`Send + 'static`**. The sim runtime is `new_current_thread().build()` but spawned futures are Send-bounded.
+- Trait-crossing futures must be **`Send + 'static`**. The sim runs on the single-threaded moonpool executor, but spawned futures are Send-bounded.
 - Shared mutable state: **`Arc<RwLock<…>>`**, `Arc<AtomicBool>`, `DashMap`, and similar. Not `Rc<RefCell<…>>`.
 - `Process`, `Workload`, `FaultInjector`, and `#[service]` handlers are dyn-stored. Use `#[async_trait]` with `Send + Sync + 'static` supertraits.
 - Provider traits (`TimeProvider`, `TaskProvider`, `NetworkProvider`, `RandomProvider`, `StorageProvider`) use native AFIT with `-> impl Future<…> + Send`. No `#[async_trait]`.

@@ -36,7 +36,10 @@ impl Process for HyperServer {
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let listener = ctx.network().bind(ctx.my_ip()).await?;
 
-        let (stream, _addr) = tokio::select! {
+        // moonpool's select!, not tokio's: `biased;` because shutdown is a
+        // guard on the accept work, not a peer racing it.
+        let (stream, _addr) = moonpool_sim::select! {
+            biased;
             result = listener.accept() => result?,
             _ = ctx.shutdown().cancelled() => return Ok(()),
         };
@@ -60,22 +63,22 @@ The client side follows the same pattern. Connect via `ctx.network().connect()`,
 
 ## Spawning Inside a Simulation
 
-The sim runtime is **single-threaded by construction**. We build it with `tokio::runtime::Builder::new_current_thread().build()`, so every spawned task runs on the one OS thread that drives simulation events. Determinism depends on it.
+The sim is **single-threaded by construction**. Every iteration runs on the [moonpool deterministic executor](../part2-foundations/11-executor.md), so every spawned task runs on the one OS thread that drives simulation events. Determinism depends on it.
 
-What changed compared to earlier moonpool versions: the types crossing trait boundaries are now `Send + 'static`. Provider traits, `SimTcpStream`, `Process`, `Workload`, the `SimContext` you get handed, all of them. That means **`tokio::spawn` is the right tool** when you want to spawn a task from inside simulated code, and customer state can use `Arc<RwLock<…>>`, `DashMap`, `Arc<AtomicBool>` without ceremony.
+What changed compared to earlier moonpool versions: the types crossing trait boundaries are now `Send + 'static`. Provider traits, `SimTcpStream`, `Process`, `Workload`, the `SimContext` you get handed, all of them. Spawning goes through the executor, either directly with **`moonpool_sim::executor::spawn`** (named tasks, the name shows up when debugging a seed) or through the provider seam, and customer state can use `Arc<RwLock<…>>`, `DashMap`, `Arc<AtomicBool>` without ceremony.
 
 ```rust
-// Works: SimTcpStream is Send, the future is Send, tokio::spawn accepts it.
-let handle = tokio::spawn(async move {
+// Works: SimTcpStream is Send, the future is Send, the executor accepts it.
+let handle = moonpool_sim::executor::spawn("serve-one", async move {
     serve_one(stream).await
 });
 ```
 
-If you want to keep the provider seam (so the same code runs against a real tokio runtime later), reach for `TaskProvider::spawn_task` from `ctx.task()` instead. Same semantics, an injectable interface.
+If you want to keep the provider seam (so the same code runs against a real tokio runtime later), reach for `TaskProvider::spawn_task` from `ctx.task()` instead. Same semantics, an injectable interface, and inside the sim it lands on the same executor.
 
-**Do not use `tokio::task::spawn_local` or build a `LocalSet`**. The simulation runtime is `new_current_thread().build()`, not `build_local()`, so there is no `LocalSet` for `spawn_local` to attach to and the spawn would never poll. Whenever you reach for a `!Send` workaround, you have probably wandered off the supported path.
+**Do not use `tokio::task::spawn_local` or build a `LocalSet`**. There is no tokio runtime inside a simulation, so there is no `LocalSet` for `spawn_local` to attach to and the spawn would never poll. Whenever you reach for a `!Send` workaround, you have probably wandered off the supported path.
 
-The one case that still bites people: some third-party connection futures (hyper's `Connection` is the canonical example) are themselves `!Send` for reasons unrelated to moonpool. They hold internal state that isn't `Send`. You cannot `tokio::spawn` *those* either, regardless of runtime. The fix is to **drive them inline** alongside your other work:
+The one case that still bites people: some third-party connection futures (hyper's `Connection` is the canonical example) are themselves `!Send` for reasons unrelated to moonpool. They hold internal state that isn't `Send`. You cannot spawn *those* on any Send-bounded executor, moonpool's included. The fix is to **drive them inline** alongside your other work:
 
 ```rust
 let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
@@ -86,7 +89,8 @@ let driver = async move {
     let _ = conn.await;
 };
 
-tokio::select! {
+moonpool_sim::select! {
+    biased;
     result = send_requests(&mut sender) => result?,
     _ = driver => {}
     _ = ctx.shutdown().cancelled() => {}

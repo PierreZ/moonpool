@@ -31,7 +31,7 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 ## Part II: Foundations
 
 - [Determinism as a Foundation](./part2-foundations/01-determinism.md) — Three non-determinism sources: threads, I/O, randomness; why reproducibility matters
-- [The Single-Core Constraint](./part2-foundations/02-single-core.md) — Single-threaded execution guarantees one legal ordering; tokio local runtime
+- [The Single-Core Constraint](./part2-foundations/02-single-core.md) — Single-threaded execution guarantees one legal ordering; the moonpool executor
 - [Seed-Driven Reproducibility](./part2-foundations/03-seeds.md) — One u64 seed controls entire simulation; ChaCha8Rng; cross-platform determinism
 - [The Deterministic Executor](./part2-foundations/11-executor.md) — Moonpool's own single-threaded executor; seeded-random task scheduling; no reactor needed
 - [The Provider Pattern](./part2-foundations/04-provider-pattern.md) — Five traits (Time, Network, Task, Random, Storage) abstract all I/O; swap real vs simulated

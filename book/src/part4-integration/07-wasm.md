@@ -15,20 +15,21 @@ In simulation the network and the disk are not devices. `SimNetwork` is an
 in-memory state machine that schedules "deliver this packet at logical time T"
 events on a queue. `SimStorage` is the same idea for reads and writes. Time is a
 counter the engine advances. Randomness is a seeded ChaCha8 stream. The scheduler
-is tokio's current-thread runtime. Add those up and there is no syscall anywhere
-on the path.
+is the [moonpool deterministic executor](../part2-foundations/11-executor.md),
+plain library code. Add those up and there is no syscall anywhere on the path.
 
 The production providers are the opposite. `TokioProviders` is real TCP, real
 files, and OS randomness, every one of them a trip into the kernel. That single
 difference is why the simulator crosses over to `wasm32-unknown-unknown` and the
 production backend does not.
 
-One piece is shared rather than derived, and it is the key to the whole thing.
-`SimProviders` spawns tasks through the real `TokioTaskProvider`, not a simulated
-one, so the executor primitive is literally tokio in both worlds. tokio's `rt`,
-`sync`, and `macros` features compile to wasm. Its `net` and `fs` features do
-not. The simulator brings the half of tokio that crosses over and leaves the
-half that cannot.
+One piece used to be borrowed rather than owned. `SimProviders` once spawned
+tasks through the real `TokioTaskProvider`, which meant shipping tokio's `rt`
+feature to the browser. Not anymore: `SimTaskProvider` spawns onto the moonpool
+deterministic executor, so the wasm build no longer needs core's `tokio-task`
+feature at all. What remains of tokio in the graph is a thin, syscall-free
+slice: `sync` for shutdown tokens and `macros` for the `select!` expansion.
+The `net` and `fs` halves never cross over.
 
 ## What had to change
 
@@ -39,24 +40,25 @@ Getting there was four narrow fixes, not a rewrite.
 - Three wall-clock call sites the harness uses for reporting got a shim, because
   `Instant::now()` and `SystemTime::now()` compile on wasm and then **panic the
   moment you call them**.
-- The `tokio` dependency narrowed to `rt`, `sync`, and `macros`.
+- The `tokio` dependency narrowed to `sync` and `macros`. The deterministic
+  executor owns the scheduling, so not even `rt` crosses over.
 - `rand` dropped its default features so it never reaches for `getrandom` and the
   OS entropy that a browser has no answer for. The sim never needed it: its RNG
   is seeded ChaCha8.
 
 ## Does `block_on` park?
 
-Compiling is necessary, not sufficient. A current-thread runtime that runs out of
+Compiling is necessary, not sufficient. A conventional runtime that runs out of
 ready work tries to **park** the thread, and parking panics on
 `wasm32-unknown-unknown`. So the real question was whether `block_on` ever parks
 while driving a simulation.
 
-It does not. The simulation is ready-driven. Every wakeup fires inline as the
-orchestrator steps the event queue, and there is no external reactor sitting on a
-socket or a timer to wake the thread later. The runtime always has the next step
-in front of it until the run ends. (If an engine change ever broke that, the
-fallback is a hand-rolled poll loop with a no-op waker in place of `block_on`. We
-have not needed it.)
+It does not. The moonpool executor never parks at all: the simulation is
+ready-driven, every wakeup fires inline as the orchestrator steps the event
+queue, and there is no external reactor sitting on a socket or a timer to wake
+the thread later. The executor always has the next step in front of it until
+the run ends, and if nothing is runnable it treats that as a genuine deadlock
+and panics with the seed instead of parking.
 
 ## Building a wasm-able crate
 

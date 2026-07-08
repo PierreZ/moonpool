@@ -38,10 +38,11 @@ let response = iface.balance
     .await?;
 ```
 
-Under the hood, this is a `tokio::select!`:
+Under the hood, this is a moonpool `select!`, written `biased;` with the reply branch first. The disconnect signal is a guard, not a peer: if both are ready, the reply wins, matching FDB's reply-wins-if-resolved semantics.
 
 ```rust
 select! {
+    biased;
     result = reply_future => result,
     () = failure_monitor.on_disconnect_or_failure(&endpoint) => Err(MaybeDelivered),
 }

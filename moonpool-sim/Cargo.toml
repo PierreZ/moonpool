@@ -9,15 +9,11 @@ description = "Simulation engine for the moonpool framework"
 documentation = "https://docs.rs/moonpool-sim"
 readme = "README.md"
 
-[package.metadata.docs.rs]
-rustdoc-args = ["--cfg", "tokio_unstable"]
-rustc-args = ["--cfg", "tokio_unstable"]
-
 [features]
 # tokio-providers re-exports core's production provider bundle (TokioProviders,
-# TokioNetworkProvider, TokioTimeProvider) for examples/tests that drive the same
-# code under prod + sim. Default-on; disable for a wasm-able sim
-# (`--no-default-features`), which still keeps TokioTaskProvider via core/tokio-task.
+# TokioNetworkProvider, TokioTaskProvider, TokioTimeProvider) for examples/tests
+# that drive the same code under prod + sim. Default-on; disable for a wasm-able
+# sim (`--no-default-features`), which runs tasks on the moonpool executor.
 default = ["tokio-providers", "exploration"]
 tokio-providers = ["moonpool-core/tokio-providers"]
 # Fork-based multiverse exploration (libc/mmap — never wasm). When off, assertion

@@ -16,7 +16,7 @@ cargo xtask sim run-all      # Run everything
 
 The `run` subcommand matches against binary names. `cargo xtask sim run transport` would run both `sim-transport-e2e` and `sim-transport-messaging`.
 
-Each simulation binary is a standalone Rust binary that constructs a `SimulationBuilder`, calls `.run().await`, and prints the report. A typical `main` function:
+Each simulation binary is a standalone Rust binary that constructs a `SimulationBuilder`, calls `.run()`, and prints the report. A typical `main` function:
 
 ```rust
 fn main() {
@@ -24,21 +24,12 @@ fn main() {
         .with_max_level(tracing::Level::WARN)
         .try_init();
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build runtime");
-
-    let report = runtime.block_on(async move {
-        SimulationBuilder::new()
-            .processes(3, || Box::new(KvServer))
-            .workload(KvWorkload::new(200, keys))
-            .set_iterations(100)
-            .enable_chaos([Chaos::Network(ChaosMode::Random)])
-            .run()
-            .await
-    });
+    let report = SimulationBuilder::new()
+        .processes(3, || Box::new(KvServer))
+        .workload(KvWorkload::new(200, keys))
+        .set_iterations(100)
+        .enable_chaos([Chaos::Network(ChaosMode::Random)])
+        .run();
 
     report.eprint();
 
@@ -48,7 +39,7 @@ fn main() {
 }
 ```
 
-Notice `new_current_thread().build()`. Determinism still demands a single OS thread, so we keep the current-thread scheduler. What changed is that every moonpool trait and future is now `Send + 'static`, which means the standard `.build()` is the correct API. Customer code can hold `Arc<RwLock<…>>`, `DashMap`, and call `tokio::spawn` naturally, while the runtime still polls everything on one thread for reproducibility.
+Notice what is missing: there is no runtime to build. `run()` drives each iteration on a fresh [moonpool deterministic executor](../part2-foundations/11-executor.md), `Executor::new(seed)` plus `executor.block_on(...)` under the hood. Determinism still demands a single OS thread, and every moonpool trait and future is still `Send + 'static`, so customer code can hold `Arc<RwLock<…>>` and `DashMap` naturally while the executor polls everything on one thread. Which ready task runs next is a seeded-random pick, so each seed also explores a different task interleaving. And because nothing here needs a tokio runtime, simulation binaries build on plain stable Rust with no special rustflags.
 
 ## Reading the SimulationReport
 

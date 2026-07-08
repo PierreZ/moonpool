@@ -127,7 +127,7 @@ reply.send(AddResponse { result: req.a + req.b });
 
 `ReplyFuture` implements `Drop` to close its queue when the future is cancelled or goes out of scope. This prevents leaked wakers and ensures the temporary endpoint is cleaned up even if the caller abandons the request. Without this, a killed process would leave orphaned reply queues that hang forever.
 
-Both types are `Send + Sync + 'static`. Internally they hold `Arc<RwLock<...>>` (or `Arc<NetNotifiedQueue<...>>` for the future's reply channel), so you can move them across `tokio::spawn` boundaries, store them in `Arc`-shared state, and compose them with the broader Rust async ecosystem without contortions. The simulation runtime still runs on a single OS thread for determinism (`new_current_thread().build()`), but the **Send bounds are a compile-time API contract, not a runtime cost**. With only one task ever holding a given lock at a time on a single-thread runtime, there is no measurable contention.
+Both types are `Send + Sync + 'static`. Internally they hold `Arc<RwLock<...>>` (or `Arc<NetNotifiedQueue<...>>` for the future's reply channel), so you can move them across `tokio::spawn` boundaries, store them in `Arc`-shared state, and compose them with the broader Rust async ecosystem without contortions. The simulation still runs on a single OS thread for determinism (the [moonpool deterministic executor](../part2-foundations/11-executor.md)), but the **Send bounds are a compile-time API contract, not a runtime cost**. With only one task ever holding a given lock at a time on a single-thread runtime, there is no measurable contention.
 
 ## ReplyError
 

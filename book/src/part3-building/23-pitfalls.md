@@ -45,9 +45,9 @@ Calling `tokio::time::sleep()`, `tokio::time::timeout()`, or `tokio::spawn()` by
 
 ## Wrong Runtime Flavor
 
-Moonpool runs on a **single OS thread** for determinism. Building a `new_multi_thread()` runtime or using `#[tokio::main]` (which defaults to multi-thread) introduces real parallelism and destroys reproducibility, even though traits are `Send`-bounded.
+Moonpool runs on a **single OS thread** for determinism. Wrapping a simulation in `#[tokio::main]` or building a tokio runtime around it hands scheduling to tokio: at best redundant, at worst (multi-thread) real parallelism that destroys reproducibility, even though traits are `Send`-bounded.
 
-**Fix**: Build the runtime with `tokio::runtime::Builder::new_current_thread().build()`. Do not use `LocalSet`, `spawn_local`, or `build_local()` — they are gone from the model.
+**Fix**: Drive the simulation with the moonpool executor. `SimulationBuilder::run()` does this for you, and standalone code uses `Executor::new(seed)` plus `executor.block_on(...)` (see [The Deterministic Executor](../part2-foundations/11-executor.md)). Do not use `LocalSet`, `spawn_local`, or `build_local()`: they are gone from the model.
 
 ## Using `?Send` on Dyn Traits
 

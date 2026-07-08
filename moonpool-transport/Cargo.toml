@@ -9,10 +9,6 @@ description = "FDB-style transport layer for the moonpool framework"
 documentation = "https://docs.rs/moonpool-transport"
 readme = "README.md"
 
-[package.metadata.docs.rs]
-rustdoc-args = ["--cfg", "tokio_unstable"]
-rustc-args = ["--cfg", "tokio_unstable"]
-
 [features]
 # Production convenience: the TokioTransport alias + NetTransportBuilder::tokio()
 # shortcut, which need core's TokioProviders. Default-on so examples/tests build;

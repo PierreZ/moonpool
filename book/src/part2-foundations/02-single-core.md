@@ -12,18 +12,18 @@ With a single thread, there is exactly one legal execution order for any given s
 
 ## How We Get There
 
-Moonpool uses tokio's **current-thread runtime**:
+Moonpool runs every simulation on its own **deterministic executor**:
 
-```rust
-tokio::runtime::Builder::new_current_thread()
-    .enable_io()
-    .enable_time()
-    .build()
+```rust,ignore
+let mut executor = moonpool_sim::executor::Executor::new(seed);
+executor.block_on(async move {
+    // the entire simulation runs here
+});
 ```
 
-One OS thread drives the entire simulation. No work-stealing pool. No preemption between yield points. When a future resumes, it resumes on the same thread that suspended it, in an order our scheduler chose deterministically from the seed.
+One OS thread drives the entire simulation. No work-stealing pool. No preemption between yield points. When a future resumes, it resumes on the same thread that suspended it. And which ready task runs **next** is a seeded-random pick from the ready queue: same seed, same order, bit for bit, while a different seed explores a different task interleaving. A FIFO scheduler would run ready tasks in registration order on every seed forever, structurally hiding any race between them. [The Deterministic Executor](./11-executor.md) covers the machinery in depth.
 
-This is the **whole** mechanism. The runtime gives us determinism. Nothing fancier is needed.
+This is the **whole** mechanism. The executor gives us determinism. Nothing fancier is needed.
 
 ## Send-Bounded Traits
 
@@ -48,7 +48,7 @@ The runtime still runs on one thread. Futures and types are never actually moved
 - `Arc<RwLock<State>>` for shared state
 - `DashMap` for concurrent maps
 - `Arc<AtomicBool>` for flags
-- `tokio::spawn` to fan out work
+- Send-bounded spawning to fan out work: `task.spawn_task(...)` in the sim, plain `tokio::spawn` in production
 
 A team adopting moonpool to test an existing service should not have to rewrite their type hierarchy. If their production code uses `Arc<RwLock<…>>` (it does), moonpool wraps it without contortions. The simulation runtime drives those types on one thread, but the types themselves look exactly like the production ones.
 

@@ -60,6 +60,12 @@ jobs:
         run: |
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-assertions
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-sim --no-default-features
+          nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-transport --no-default-features
+      - name: Build without any rustflags (no tokio_unstable required)
+        run: |
+          # Issue #151 acceptance: a consumer on stable with no .cargo/config.toml
+          # rustflags must be able to build every published crate.
+          RUSTFLAGS="" nix develop --command cargo check -p moonpool-core -p moonpool-sim -p moonpool-transport
       - name: Lean production dependency tree excludes sim/explorer
         run: |
           tree=$(nix develop --command cargo tree -p moonpool --no-default-features --features tokio,transport -e no-dev)

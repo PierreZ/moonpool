@@ -85,20 +85,21 @@ impl Process for WebProcess {
     fn name(&self) -> &str { "web" }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        use futures::stream::{FuturesUnordered, StreamExt};
+        use futures::{FutureExt, stream::{FuturesUnordered, StreamExt}};
 
         let store = InMemoryStore::new();
         let app = build_router(store);
         let listener = ctx.network().bind(ctx.my_ip()).await?;
 
         // hyper's serve_connection future is !Send (the HTTP1 state machine
-        // holds internal Rc<…>), so it cannot be handed to tokio::spawn on
-        // the Send-bounded sim runtime. Drive multiple in-flight connections
-        // inline via FuturesUnordered instead.
+        // holds internal Rc<…>), so no Send-bounded spawn will accept it.
+        // Drive multiple in-flight connections inline via FuturesUnordered.
         let mut connections = FuturesUnordered::new();
 
         loop {
-            tokio::select! {
+            // Deliberately NOT `biased;`: accept and connection progress are
+            // peer data sources, so the seed picks which branch wins.
+            moonpool_sim::select! {
                 accept = listener.accept() => {
                     let (stream, _addr) = accept?;
 
@@ -109,14 +110,20 @@ impl Process for WebProcess {
                     // TowerToHyperService bridges axum's tower::Service to hyper's Service
                     let service = TowerToHyperService::new(app.clone());
 
-                    connections.push(async move {
-                        if let Err(e) = hyper::server::conn::http1::Builder::new()
-                            .serve_connection(io, service)
-                            .await
-                        {
-                            tracing::debug!("hyper error (expected under chaos): {e}");
+                    // .boxed(): select! duplicates this handler once per rotation,
+                    // and each copy's async block is a distinct anonymous type.
+                    // Boxing gives `connections` one named element type.
+                    connections.push(
+                        async move {
+                            if let Err(e) = hyper::server::conn::http1::Builder::new()
+                                .serve_connection(io, service)
+                                .await
+                            {
+                                tracing::debug!("hyper error (expected under chaos): {e}");
+                            }
                         }
-                    });
+                        .boxed(),
+                    );
                 }
                 Some(()) = connections.next(), if !connections.is_empty() => {}
                 _ = ctx.shutdown().cancelled() => return Ok(()),
@@ -128,7 +135,7 @@ impl Process for WebProcess {
 
 Two things to note. First, we use `hyper::server::conn::http1::serve_connection`, **not** `axum::serve()`. `axum::serve` takes `tokio::net::TcpListener` directly, so it can't accept our simulated listener. `serve_connection` takes any tokio `AsyncRead + AsyncWrite`. `SimTcpStream` implements `futures::io::AsyncRead + AsyncWrite` (the runtime-agnostic traits) and is itself `Send + Sync`, so we route it through `tokio_util::compat::Compat` via `.compat()` before handing it to `TokioIo`.
 
-Second, **`FuturesUnordered` instead of `tokio::spawn`**. Customer code on the sim runtime is `Send + Sync`, and `SimTcpStream` is `Send`. The blocker is **hyper itself**: `http1::serve_connection` returns a future that is `!Send` because the HTTP1 state machine holds internal `Rc<…>` cells. That future cannot cross `tokio::spawn`, but it polls perfectly well from the accept loop. `FuturesUnordered` lets one task drive any number of in-flight connections concurrently. The accept loop pushes new connections in, the `connections.next()` arm drains completed ones, and shutdown cancels both.
+Second, **`FuturesUnordered` instead of spawning**. Customer code in the sim is `Send + Sync`, and `SimTcpStream` is `Send`. The blocker is **hyper itself**: `http1::serve_connection` returns a future that is `!Send` because the HTTP1 state machine holds internal `Rc<…>` cells. That future cannot cross any Send-bounded spawn, but it polls perfectly well from the accept loop. `FuturesUnordered` lets one task drive any number of in-flight connections concurrently. The accept loop pushes new connections in, the `connections.next()` arm drains completed ones, and shutdown cancels both. The `select!` is moonpool's and stays in its **default form** on purpose: accepting a new connection and progressing an in-flight one are peers that can be ready in the same simulation step, so the seed decides which branch wins and different seeds explore both orders.
 
 ## Step 5: The Workload
 
@@ -170,10 +177,10 @@ let driver = async move {
         tracing::warn!("client conn driver error: {e}");
     }
 };
-tokio::pin!(driver);
+let driver = std::pin::pin!(driver);
 
-// sender.send_request(...) below — the surrounding tokio::select!
-// in send_round polls `driver` concurrently.
+// sender.send_request(...) runs below. The surrounding moonpool
+// select! in send_round polls `driver` concurrently.
 ```
 
 Assertions split into two kinds:
