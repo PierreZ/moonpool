@@ -1812,8 +1812,13 @@ mod tests {
 
     #[test]
     fn test_simulation_builder_with_failures() {
+        // Pinned seeds: without them, iteration seeds derive from the wall
+        // clock and this test demands both outcomes across 10 fair coin
+        // flips, a ~0.2% spontaneous failure rate. Each seed's outcome is a
+        // pure function of the seed, so pinning makes it deterministic.
         let report = SimulationBuilder::new()
             .workload(FailingWorkload)
+            .set_debug_seeds((1..=10).collect())
             .set_iterations(10)
             .run();
 
