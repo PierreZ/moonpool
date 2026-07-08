@@ -36,7 +36,7 @@ use crate::{
     Endpoint, NetworkAddress, NetworkProvider, Peer, PeerConfig, Providers, TaskProvider,
     TcpListenerTrait, UID, WellKnownToken,
 };
-use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 use super::endpoint_map::{EndpointMap, MessageReceiver};
 use super::request_stream::RequestStream;
@@ -147,9 +147,11 @@ pub struct NetTransport<P: Providers, C: MessageCodec = crate::JsonCodec> {
     /// Set via `set_weak_self()` after wrapping in `Arc`.
     weak_self: RwLock<Option<Weak<Self>>>,
 
-    /// Shutdown signal sender. When set to `true`, background tasks (`listen_task`) should exit.
-    /// Uses watch channel so multiple receivers can observe the same signal.
-    shutdown_tx: watch::Sender<bool>,
+    /// Shutdown signal. Cancelled on drop so background tasks (`listen_task`)
+    /// exit. `CancellationToken` has deterministic FIFO wake order, unlike
+    /// `tokio::sync::watch` whose shard pick draws from tokio's runtime RNG
+    /// (entropy-seeded outside a tokio runtime).
+    shutdown: CancellationToken,
 
     /// Weak reference as `dyn TransportHandle` for codec-erased types.
     /// Set by the builder alongside `weak_self`.
@@ -186,7 +188,6 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     /// transport.set_weak_self(Arc::downgrade(&transport));
     /// ```
     pub fn new(local_address: NetworkAddress, providers: P, codec: C) -> Self {
-        let (shutdown_tx, _) = watch::channel(false);
         let data = TransportData::new(&providers);
         Self {
             data: RwLock::new(data),
@@ -195,7 +196,7 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
             codec,
             peer_config: PeerConfig::default(),
             weak_self: RwLock::new(None),
-            shutdown_tx,
+            shutdown: CancellationToken::new(),
             weak_handle: RwLock::new(None),
         }
     }
@@ -468,7 +469,7 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
     /// );
     ///
     /// loop {
-    ///     tokio::select! {
+    ///     moonpool_core::select! {
     ///         Some((req, reply)) = add_stream.recv() => {
     ///             reply.send(AddResponse { result: req.a + req.b });
     ///         }
@@ -889,12 +890,12 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
         tracing::info!("NetTransport: listening on {}", addr_str);
 
         // Spawn listen task (FDB: listen() actor)
-        // Pass shutdown receiver so the task can exit when transport is dropped
+        // Pass a shutdown token clone so the task can exit when transport is dropped
         let transport_weak = self.weak_self();
-        let shutdown_rx = self.shutdown_tx.subscribe();
+        let shutdown = self.shutdown.clone();
         drop(self.providers.task().spawn_task(
             "listen",
-            listen_task(transport_weak, listener, addr_str, shutdown_rx),
+            listen_task(transport_weak, listener, addr_str, shutdown),
         ));
 
         Ok(())
@@ -908,8 +909,7 @@ impl<P: Providers + Send + Sync, C: MessageCodec> NetTransport<P, C> {
 impl<P: Providers, C: MessageCodec> Drop for NetTransport<P, C> {
     fn drop(&mut self) {
         tracing::debug!("NetTransport: signaling shutdown to background tasks");
-        // Signal shutdown - ignore error if no receivers
-        let _ = self.shutdown_tx.send(true);
+        self.shutdown.cancel();
     }
 }
 
@@ -1275,32 +1275,20 @@ async fn listen_task<P: Providers + Send + Sync, C: MessageCodec>(
     transport: Weak<NetTransport<P, C>>,
     listener: <P::Network as NetworkProvider>::TcpListener,
     listen_addr: String,
-    mut shutdown_rx: watch::Receiver<bool>,
+    shutdown: CancellationToken,
 ) {
     tracing::debug!("listen_task: started on {}", listen_addr);
 
     loop {
         // Use select! to race between accept and shutdown signal
-        tokio::select! {
+        moonpool_core::select! {
             // Bias toward shutdown to ensure timely exit
             biased;
 
             // Check shutdown signal first
-            result = shutdown_rx.changed() => {
-                match result {
-                    Ok(()) if *shutdown_rx.borrow() => {
-                        tracing::debug!("listen_task: shutdown signal received, exiting for {}", listen_addr);
-                        break;
-                    }
-                    Err(_) => {
-                        // Channel closed means transport was dropped
-                        tracing::debug!("listen_task: shutdown channel closed, exiting for {}", listen_addr);
-                        break;
-                    }
-                    _ => {
-                        // Value changed but not to true - continue
-                    }
-                }
+            () = shutdown.cancelled() => {
+                tracing::debug!("listen_task: shutdown signal received, exiting for {}", listen_addr);
+                break;
             }
 
             // Accept next connection

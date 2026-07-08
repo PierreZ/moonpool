@@ -235,6 +235,7 @@ impl Process for WebProcess {
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        use futures::FutureExt;
         use futures::stream::{FuturesUnordered, StreamExt};
 
         let store = InMemoryStore::new();
@@ -250,7 +251,11 @@ impl Process for WebProcess {
         let mut connections = FuturesUnordered::new();
 
         loop {
-            tokio::select! {
+            // Deliberately NOT `biased;`: accept (new connection) and
+            // connections.next() (progress on in-flight connections) are peer
+            // data sources; the seeded rotation lets different seeds explore
+            // both orderings when both are ready.
+            moonpool_sim::select! {
                 accept = listener.accept() => {
                     let (stream, addr) = accept?;
                     tracing::info!(%addr, "accepted connection");
@@ -261,16 +266,25 @@ impl Process for WebProcess {
                     let io = TokioIo::new(stream.compat());
                     let service = TowerToHyperService::new(app.clone());
 
-                    connections.push(async move {
-                        tracing::info!("serve_connection starting");
-                        if let Err(e) = hyper::server::conn::http1::Builder::new()
-                            .serve_connection(io, service)
-                            .await
-                        {
-                            tracing::warn!("hyper serve_connection error (expected under chaos): {e}");
+                    // boxed_local: select! duplicates this handler once per
+                    // rotation, and each copy's async block is a distinct
+                    // anonymous type; boxing gives `connections` one named
+                    // element type shared by all copies.
+                    connections.push(
+                        async move {
+                            tracing::info!("serve_connection starting");
+                            if let Err(e) = hyper::server::conn::http1::Builder::new()
+                                .serve_connection(io, service)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "hyper serve_connection error (expected under chaos): {e}"
+                                );
+                            }
+                            tracing::info!("serve_connection finished");
                         }
-                        tracing::info!("serve_connection finished");
-                    });
+                        .boxed(),
+                    );
                 }
                 Some(()) = connections.next(), if !connections.is_empty() => {}
                 () = ctx.shutdown().cancelled() => {
@@ -308,7 +322,8 @@ impl Workload for WebWorkload {
         // a chaos-induced connect hang is detected as no-progress).
         for round in 0..5 {
             tracing::info!(round, "starting round");
-            let result = tokio::select! {
+            let result = moonpool_sim::select! {
+                biased;
                 result = self.send_round(ctx, &server_ip, round) => result,
                 () = ctx.shutdown().cancelled() => {
                     tracing::info!(round, "shutdown during round, exiting");
@@ -341,7 +356,8 @@ impl WebWorkload {
         round: u32,
     ) -> SimulationResult<()> {
         tracing::info!(round, "connecting to server");
-        let stream = tokio::select! {
+        let stream = moonpool_sim::select! {
+            biased;
             result = ctx.network().connect(server_ip) => result?,
             () = ctx.shutdown().cancelled() => return Ok(()),
         };
@@ -360,7 +376,7 @@ impl WebWorkload {
             }
             tracing::info!("client conn driver finished");
         };
-        tokio::pin!(driver);
+        let _driver = std::pin::pin!(driver);
 
         Self::check_health(&mut sender, server_ip, round).await?;
         Self::create_and_read_item(&mut sender, server_ip, round).await?;

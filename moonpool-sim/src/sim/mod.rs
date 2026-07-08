@@ -26,9 +26,9 @@ pub use events::{
 };
 pub use rng::{
     clear_rng_breakpoints, config_random_bool, config_random_f64, current_sim_seed,
-    reset_config_rng, reset_rng_call_count, reset_sim_rng, rng_call_count, set_config_seed,
-    set_rng_breakpoints, set_sim_seed, set_swarm_op_seed, sim_random, sim_random_range,
-    sim_random_range_or_default, swarm_op_enabled,
+    reset_config_rng, reset_rng_call_count, reset_select_rng, reset_sim_rng, rng_call_count,
+    set_config_seed, set_rng_breakpoints, set_select_seed, set_sim_seed, set_swarm_op_seed,
+    sim_random, sim_random_range, sim_random_range_or_default, swarm_op_enabled,
 };
 pub use sleep::SleepFuture;
 pub use world::{SimFaultRecord, SimWorld, WeakSimWorld};

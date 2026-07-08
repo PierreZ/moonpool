@@ -110,6 +110,11 @@ pub use moonpool_core::{
     TcpListenerTrait, TimeError, TimeProvider, TokioTaskProvider, UID, WELL_KNOWN_RESERVED_COUNT,
     WellKnownToken,
 };
+// The deterministic select! (moonpool-sim always enables core's
+// deterministic-select, so this is the seeded rotation combinator). Process and
+// workload code must use this instead of tokio::select!, whose branch offset is
+// entropy-drawn outside a seeded tokio runtime.
+pub use moonpool_core::select;
 // Production provider bundle — only when the tokio-providers feature pulls core's
 // net/fs/time. A wasm-able sim (`--no-default-features`) omits these.
 #[cfg(feature = "tokio-providers")]

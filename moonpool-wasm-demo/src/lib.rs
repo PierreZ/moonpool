@@ -215,7 +215,8 @@ impl Process for PongServer {
 
         let shutdown = ctx.shutdown().clone();
         loop {
-            tokio::select! {
+            moonpool_sim::select! {
+                biased;
                 Some((req, reply)) = ping_stream.recv() => {
                     reply.send(Pong { seq: req.seq });
                 }
@@ -273,7 +274,8 @@ impl Workload for PingClient {
                 &encode,
                 decode.clone(),
             ) {
-                Ok(fut) => tokio::select! {
+                Ok(fut) => moonpool_sim::select! {
+                    biased;
                     r = fut => Some(r),
                     () = shutdown.cancelled() => None,
                     _ = time.sleep(Duration::from_millis(TIMEOUT_MS)) => None,

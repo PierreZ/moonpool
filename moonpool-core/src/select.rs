@@ -40,6 +40,11 @@
 //!   iteration) draws fresh.
 //! - At most 16 branches (the expansion emits one rotated copy per branch);
 //!   tokio allows 64.
+//! - Handler code is duplicated once per rotation, and no two copies of an
+//!   anonymous type (async block, closure) are the same type. If a handler
+//!   feeds such a value into a container whose element type is inferred
+//!   (e.g. `FuturesUnordered`), name the type instead: `.boxed()` /
+//!   `.boxed_local()` the future, or construct it through a shared `fn`.
 
 /// Waits on multiple concurrent branches, returning when the **first**
 /// completes, with a deterministic, seed-controlled polling order.

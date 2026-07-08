@@ -100,8 +100,9 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("Waiting for ping requests...\n");
 
+    // Two peer streams (ping, heartbeat): fair rotated polling, not `biased;`.
     loop {
-        tokio::select! {
+        moonpool_core::select! {
             maybe_ping = ping_server.ping.recv() => {
                 if let Some((request, reply)) = maybe_ping {
                     println!("Received ping seq={}: {:?}", request.seq, request.message);

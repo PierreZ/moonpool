@@ -23,9 +23,6 @@ serde_json = "1"
 # The workload emits standard `client_*` observability events; the generic
 # recorder reconstructs the timeline from them.
 tracing = "0.1"
-# `macros` for `tokio::select!` in the workload/server loops. The runtime itself
-# comes from moonpool-sim.
-tokio = { version = "1", features = ["macros"] }
 
 # wasm-only glue. The crate version MUST exactly match the flake's
 # wasm-bindgen-cli (0.2.121) — a mismatch is the #1 wasm-bindgen footgun and

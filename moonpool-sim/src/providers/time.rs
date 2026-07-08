@@ -45,9 +45,12 @@ impl TimeProvider for SimTimeProvider {
     {
         let sleep_future = self.sim.sleep(duration).map_err(|_| TimeError::Shutdown)?;
 
-        // Race the future against the timeout using tokio::select!
-        // Both futures respect simulation time through the event system
-        tokio::select! {
+        // Race the future against the timeout. Both become ready via distinct
+        // simulation events, so the event queue's deterministic ordering (not
+        // branch order) decides the winner; `biased;` makes that explicit and
+        // keeps the select free of any offset draw.
+        moonpool_core::select! {
+            biased;
             result = future => Ok(result),
             _ = sleep_future => Err(TimeError::Elapsed),
         }

@@ -1123,6 +1123,9 @@ impl SimulationBuilder {
         // Seed the independent config RNG that drives swarm-subset decisions.
         // Runs before `build_sim_for_iteration`, so `swarm_for_seed()` sees it.
         crate::sim::set_config_seed(seed);
+        // Seed the independent select! branch-offset stream and install it as
+        // moonpool_core::select!'s offset source for this iteration.
+        crate::sim::set_select_seed(seed);
         // Per-seed base for the workload operation-alphabet swarm mask; `None`
         // disables masking so workloads see the full alphabet.
         crate::sim::set_swarm_op_seed(swarm_operations.then_some(seed));
