@@ -45,6 +45,19 @@
 //!   feeds such a value into a container whose element type is inferred
 //!   (e.g. `FuturesUnordered`), name the type instead: `.boxed()` /
 //!   `.boxed_local()` the future, or construct it through a shared `fn`.
+//!
+//! ## The build-vs-test asymmetry
+//!
+//! Which macro you get is decided by cargo feature unification, not by the
+//! code you compile. Without `deterministic-select` this crate re-exports
+//! tokio's `select!` verbatim (64 branches, no duplication). The moment
+//! moonpool-sim enters the build graph, even as a dev-dependency, the
+//! combinator replaces it for EVERY crate in that graph, including your
+//! library code compiled for tests. Code that only compiles under the
+//! passthrough (17+ branches, or handlers relying on anonymous-type
+//! identity) therefore passes `cargo build` and fails `cargo test`. Write
+//! selects within the combinator's limits everywhere to stay portable
+//! across both worlds.
 
 /// Waits on multiple concurrent branches, returning when the **first**
 /// completes, with a deterministic, seed-controlled polling order.
@@ -119,7 +132,7 @@ macro_rules! __select_split {
         compile_error!("select! must contain at least one branch besides `else`")
     };
     // Input exhausted: rotate with no else branch. The branch groups double
-    // as unary counters (`remaining`, `total`): each group is one token tree.
+    // as a unary counter (`remaining`): each group is one token tree.
     (acc = [$($branch:tt)+] ; ) => {
         $crate::__select_rotate! {
             index = []
@@ -127,7 +140,6 @@ macro_rules! __select_split {
             order = [$($branch)+]
             arms = []
             els = []
-            total = [$($branch)+]
         }
     };
     // Trailing `else` (block or expression handler): must be last.
@@ -138,7 +150,6 @@ macro_rules! __select_split {
             order = [$($branch)+]
             arms = []
             els = [$handler]
-            total = [$($branch)+]
         }
     };
     (acc = [$($branch:tt)+] ; else => $handler:expr $(,)?) => {
@@ -148,7 +159,6 @@ macro_rules! __select_split {
             order = [$($branch)+]
             arms = []
             els = [{ $handler }]
-            total = [$($branch)+]
         }
     };
 
@@ -200,7 +210,6 @@ macro_rules! __select_rotate {
         order = [$first:tt $($rest:tt)*]
         arms = [$($arms:tt)*]
         els = [$($els:tt)*]
-        total = [$($total:tt)*]
     ) => {
         $crate::__select_rotate! {
             index = [$($i)* _]
@@ -212,7 +221,6 @@ macro_rules! __select_rotate {
                     $crate::__select_emit! { branches = [$first $($rest)*] els = [$($els)*] },
             ]
             els = [$($els)*]
-            total = [$($total)*]
         }
     };
     // Last rotation: close with the wildcard arm and emit the dispatch.
@@ -222,9 +230,10 @@ macro_rules! __select_rotate {
         order = [$($order:tt)*]
         arms = [$($arms:tt)*]
         els = [$($els:tt)*]
-        total = [$($total:tt)*]
     ) => {
-        match $crate::select_support::select_offset($crate::__select_count!($($total)*)) {
+        // `order` always holds all N branch groups (left rotation preserves
+        // count), so it doubles as the branch-count source for the draw.
+        match $crate::select_support::select_offset($crate::__select_count!($($order)*)) {
             $($arms)*
             _ => $crate::__select_emit! { branches = [$($order)*] els = [$($els)*] },
         }

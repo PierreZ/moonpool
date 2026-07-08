@@ -8,16 +8,19 @@
 //!   [`set_select_offset_override`], backed by a seeded RNG stream. Same seed,
 //!   same offsets, exact replay; different seeds explore different branch
 //!   orderings.
-//! - **Production** (no override installed): a thread-local xorshift64* lazily
-//!   seeded from [`std::collections::hash_map::RandomState`] (the same entropy
-//!   trick tokio's own `FastRand` uses). Behaviorally equivalent to tokio's
-//!   fair `select!`, and wasm-clean: no `getrandom`, no OS calls beyond what
-//!   `std` already does for hashers.
+//! - **Production** (no override installed): a thread-local [`SmallRng`]
+//!   lazily seeded from [`std::collections::hash_map::RandomState`] (the same
+//!   entropy trick tokio's own `FastRand` uses). Behaviorally equivalent to
+//!   tokio's fair `select!`, and wasm-clean: seeding from a `u64` pulls no
+//!   `getrandom`, no OS calls beyond what `std` already does for hashers.
 //!
 //! The hook detects the *simulation*, not tokio: the expansion is identical
 //! everywhere, only the number source changes.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+
+use rand::rngs::SmallRng;
+use rand::{RngExt, SeedableRng};
 
 /// A branch-offset source for [`select!`](crate::select): receives the branch
 /// count `n` and returns the index of the branch to poll first (values are
@@ -27,8 +30,8 @@ pub type SelectOffsetFn = fn(u32) -> u32;
 thread_local! {
     /// Offset source installed by the simulation runtime (None in production).
     static OFFSET_OVERRIDE: Cell<Option<SelectOffsetFn>> = const { Cell::new(None) };
-    /// Lazily seeded xorshift64* state for the entropy fallback (0 = unseeded).
-    static FALLBACK_STATE: Cell<u64> = const { Cell::new(0) };
+    /// Lazily seeded entropy fallback (None until first fair-mode draw).
+    static FALLBACK_RNG: RefCell<Option<SmallRng>> = const { RefCell::new(None) };
 }
 
 /// Install (or clear, with `None`) the branch-offset source used by
@@ -55,22 +58,18 @@ pub fn select_offset(branches: u32) -> u32 {
     }
 }
 
-/// Entropy fallback: xorshift64* over a `RandomState`-seeded thread-local.
+/// Entropy fallback: a `RandomState`-seeded thread-local [`SmallRng`].
 fn entropy_offset(branches: u32) -> u32 {
-    FALLBACK_STATE.with(|state| {
-        let mut s = state.get();
-        if s == 0 {
+    FALLBACK_RNG.with(|cell| {
+        let mut rng = cell.borrow_mut();
+        let rng = rng.get_or_insert_with(|| {
             use std::hash::{BuildHasher, Hasher};
-            let hasher = std::collections::hash_map::RandomState::new().build_hasher();
-            // `| 1` keeps the state nonzero (xorshift's fixed point is 0).
-            s = hasher.finish() | 1;
-        }
-        s ^= s >> 12;
-        s ^= s << 25;
-        s ^= s >> 27;
-        state.set(s);
-        let value = (s.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) % u64::from(branches);
-        u32::try_from(value).expect("value is < branches, which is a u32")
+            let seed = std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish();
+            SmallRng::seed_from_u64(seed)
+        });
+        rng.random_range(0..branches)
     })
 }
 

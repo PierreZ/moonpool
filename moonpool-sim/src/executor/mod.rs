@@ -127,13 +127,16 @@ use rand_chacha::ChaCha8Rng;
 /// uncounted: scheduling never perturbs fork-explorer breakpoint replay.
 const EXEC_RNG_SALT: u64 = 0x6578_6563_7363_6864; // "execschd"
 
-/// Debug-build ceiling on polls within one `run_until_stalled` drain.
+/// Ceiling on polls within one `run_until_stalled` drain (all builds).
 ///
-/// A task that unconditionally re-wakes itself forever (e.g. a busy
-/// `yield_now` loop with no exit) would make drain-until-empty spin
-/// endlessly; in debug builds we panic with the offending task's name
-/// instead of hanging.
-#[cfg(debug_assertions)]
+/// A task that unconditionally re-wakes itself forever (a busy `yield_now`
+/// loop with no exit, or a select over a source it synchronously re-readies,
+/// which tokio's cooperative budget used to interrupt) would make
+/// drain-until-empty spin endlessly and starve the driver, so `sim.step()`
+/// and every deadlock detector become unreachable. Panicking with the task's
+/// name and the seed beats hanging, and one counter increment per poll is
+/// noise next to the poll itself, so the bound is unconditional rather than
+/// debug-only: release CI is exactly where a silent hang hurts most.
 const DRAIN_POLL_BOUND: u64 = 1_000_000;
 
 /// Per-task metadata attached through `async_task::Builder::metadata`.
@@ -198,11 +201,15 @@ struct DriverWaker {
 
 impl Wake for DriverWaker {
     fn wake(self: Arc<Self>) {
-        self.woken.store(true, Ordering::Relaxed);
+        self.wake_by_ref();
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
-        self.woken.store(true, Ordering::Relaxed);
+        // Release pairs with the Acquire load in block_on's stall check, so a
+        // wake fired just before the check is never missed on ordering
+        // grounds. Wakes are expected from this thread only (the executor is
+        // single-threaded); see the stall panic message for the contract.
+        self.woken.store(true, Ordering::Release);
     }
 }
 
@@ -229,12 +236,16 @@ impl Handle {
         let caught = AssertUnwindSafe(future).catch_unwind();
         // The guard unregisters the task's waker whenever the future is
         // dropped, keeping the kill-on-drop registry bounded by live tasks.
-        let guard_shared = Arc::clone(&self.shared);
+        // Constructed HERE (not inside the async block) so it lives in the
+        // future's captures: a task aborted before its first poll drops the
+        // capture and still unregisters; a guard built inside the block would
+        // never exist for a never-polled future and leak the entry.
+        let unregister = Unregister {
+            id,
+            shared: Arc::clone(&self.shared),
+        };
         let wrapped = async move {
-            let _unregister = Unregister {
-                id,
-                shared: guard_shared,
-            };
+            let _unregister = unregister;
             caught.await
         };
 
@@ -375,10 +386,12 @@ impl Executor {
             self.run_until_stalled();
 
             assert!(
-                driver_waker.woken.load(Ordering::Relaxed) || !self.shared.queue.lock().is_empty(),
+                driver_waker.woken.load(Ordering::Acquire) || !self.shared.queue.lock().is_empty(),
                 "deterministic executor stalled (seed {}): the driver future is not \
                  woken and no task is runnable, so every remaining future awaits a \
-                 wake that can never arrive",
+                 wake that can never arrive (note: the executor is single-threaded; \
+                 a wake signaled from another OS thread is unsupported and can race \
+                 this check)",
                 self.seed
             );
         }
@@ -389,7 +402,6 @@ impl Executor {
     /// The queue lock is released around every `runnable.run()` (fork
     /// safety; wakes fired during a poll re-acquire it to enqueue).
     fn run_until_stalled(&mut self) {
-        #[cfg(debug_assertions)]
         let mut polls: u64 = 0;
 
         loop {
@@ -398,22 +410,26 @@ impl Executor {
                 if queue.is_empty() {
                     break;
                 }
-                let index = self.rng.random_range(0..queue.len());
+                // A single runnable is a forced choice: skip the RNG draw on
+                // the dominant one-event-wakes-one-task path (the stream is
+                // uncounted, so draw counts are not a stability contract).
+                let index = if queue.len() == 1 {
+                    0
+                } else {
+                    self.rng.random_range(0..queue.len())
+                };
                 queue.swap_remove(index)
             };
 
-            #[cfg(debug_assertions)]
-            {
-                polls += 1;
-                assert!(
-                    polls < DRAIN_POLL_BOUND,
-                    "executor drain exceeded {} polls (seed {}): task '{}' appears to \
-                     busy-yield forever without an external wake",
-                    DRAIN_POLL_BOUND,
-                    self.seed,
-                    runnable.metadata().name,
-                );
-            }
+            polls += 1;
+            assert!(
+                polls < DRAIN_POLL_BOUND,
+                "executor drain exceeded {} polls (seed {}): task '{}' appears to \
+                 busy-yield forever without an external wake",
+                DRAIN_POLL_BOUND,
+                self.seed,
+                runnable.metadata().name,
+            );
 
             tracing::trace!(
                 task_id = runnable.metadata().id,
@@ -430,6 +446,24 @@ impl Executor {
 
 impl Drop for Executor {
     fn drop(&mut self) {
+        // Re-install this executor as CURRENT for the drain (block_on's guard
+        // is long gone): a task future whose Drop spawns through the provider
+        // then gets a valid, immediately-cancelled task (tokio's shutdown
+        // behavior) instead of a panic inside async-task's abort-on-panic
+        // destructor guard, which would abort the whole process. Skip if some
+        // executor is already installed (dropping mid-block_on of another).
+        let installed = CURRENT.with(|current| {
+            let mut current = current.borrow_mut();
+            if current.is_none() {
+                *current = Some(Handle {
+                    shared: Arc::clone(&self.shared),
+                });
+                true
+            } else {
+                false
+            }
+        });
+
         // Wake every live task: completed tasks ignore it, parked tasks get
         // their Runnable scheduled into the queue.
         let wakers: Vec<Waker> = self
@@ -444,14 +478,19 @@ impl Drop for Executor {
         }
 
         // Drop Runnables until the queue is empty: dropping one cancels its
-        // task and drops the future; if that wakes further tasks they are
-        // scheduled into the queue and consumed by this same loop.
+        // task and drops the future; if that wakes further tasks (or spawns
+        // new, instantly-doomed ones) they are scheduled into the queue and
+        // consumed by this same loop.
         loop {
             let runnable = self.shared.queue.lock().pop();
             match runnable {
                 Some(runnable) => drop(runnable),
                 None => break,
             }
+        }
+
+        if installed {
+            CURRENT.with(|current| current.borrow_mut().take());
         }
     }
 }

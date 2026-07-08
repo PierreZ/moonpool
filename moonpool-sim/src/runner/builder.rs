@@ -1305,8 +1305,9 @@ impl SimulationBuilder {
     #[instrument(skip_all)]
     /// Run the simulation and generate a report.
     ///
-    /// Creates a fresh tokio `LocalRuntime` per iteration for full isolation —
-    /// all tasks are killed when the runtime is dropped at iteration end.
+    /// Creates a fresh deterministic [`Executor`](crate::executor::Executor)
+    /// per iteration for full isolation — all tasks are killed when the
+    /// executor is dropped at iteration end.
     ///
     /// # Panics
     ///
@@ -1315,6 +1316,19 @@ impl SimulationBuilder {
         if self.entries.is_empty() {
             return Self::empty_report();
         }
+
+        // Uninstall the select! offset override on every exit path (normal,
+        // early return, panic): without this, the seeded source installed by
+        // set_select_seed would leak past run() and later selects on this
+        // thread would silently keep drawing from the stale sim stream
+        // instead of the documented entropy fallback.
+        struct SelectOverrideReset;
+        impl Drop for SelectOverrideReset {
+            fn drop(&mut self) {
+                crate::sim::reset_select_rng();
+            }
+        }
+        let _select_reset = SelectOverrideReset;
 
         // Install the observability layer once for the entire run. The guard
         // is dropped when run() returns, restoring the previous subscriber.

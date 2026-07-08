@@ -38,6 +38,42 @@ fn abort_cancels_and_reports_cancelled() {
 }
 
 #[test]
+fn abort_after_completion_still_yields_the_output() {
+    // tokio parity: abort racing an already-finished task loses, and the
+    // output stays harvestable.
+    let mut executor = Executor::new(1);
+    let value = executor.block_on(async {
+        let handle = spawn("done-then-aborted", async { 11 });
+        until_stalled().await;
+        assert!(handle.is_finished());
+        handle.abort();
+        handle.await.expect("completed before abort: output kept")
+    });
+    assert_eq!(value, 11);
+}
+
+#[test]
+fn abort_before_first_poll_unregisters_the_task() {
+    // A task cancelled before it was ever polled must still leave the
+    // kill-on-drop registry (its future's captures hold the guard).
+    let mut executor = Executor::new(1);
+    executor.block_on(async {
+        let handle: JoinHandle<()> = spawn("never-polled", std::future::pending());
+        handle.abort();
+        until_stalled().await;
+        match handle.await {
+            Err(JoinError::Cancelled) => {}
+            other => panic!("expected Cancelled, got {other:?}"),
+        }
+    });
+    let debug = format!("{executor:?}");
+    assert!(
+        debug.contains("live_tasks: 0"),
+        "registry must be empty after the aborted task is reaped, got {debug}"
+    );
+}
+
+#[test]
 fn panicking_task_is_isolated() {
     let mut executor = Executor::new(1);
     let sibling_output = executor.block_on(async {

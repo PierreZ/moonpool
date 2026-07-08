@@ -26,11 +26,11 @@ way it explores message latencies and fault timings.
 
 ## Randomized AND deterministic
 
-Those two properties sound contradictory; they are not. Deterministic means
-"same seed, same execution, bit for bit", not "one fixed schedule". The
-executor keeps its ready tasks in a `Vec` and picks the next one with a
-`swap_remove` at a seeded-random index (madsim uses the same distribution;
-FoundationDB's sim2 randomizes the same way):
+Those two properties sound contradictory, but they are not. Deterministic
+means "same seed, same execution, bit for bit", not "one fixed schedule".
+The executor keeps its ready tasks in a `Vec` and picks the next one with a
+`swap_remove` at a seeded-random index. madsim uses the same distribution,
+and FoundationDB's sim2 randomizes the same way:
 
 ```text
 seed 42:  task-3, task-0, task-2, task-1, ...
@@ -80,14 +80,21 @@ crate::executor::until_stalled().await;  // let every woken task run
 Because the driver is only re-polled after a complete drain, resuming from
 `until_stalled().await` guarantees that every task that was runnable has
 been polled to `Pending` or completion. Under tokio this guarantee was
-approximated by `yield_now` plus FIFO ordering; under randomized scheduling
+approximated by `yield_now` plus FIFO ordering. Under randomized scheduling
 "the back of the queue" does not exist, so the executor provides the
 contract directly.
 
 Inside a task, use `executor::yield_now()` instead: it reschedules the task
-at a seeded-random position. `until_stalled()` is driver-only and
-debug-asserted, a task awaiting "run until nothing is runnable" would be
-waiting for itself.
+at a seeded-random position. `until_stalled()` is driver-only and asserts
+it, in every build profile, because a task awaiting "run until nothing is
+runnable" would be waiting for itself.
+
+One consequence deserves a warning sign: a task must not busy-wait on
+progress only the driver can make. A `loop { yield_now().await }` polling
+for a flag that a simulation event sets keeps the ready queue non-empty
+forever, so the drain never finishes and `sim.step()` never runs. The
+executor kills such a loop with a poll-bound panic naming the task and the
+seed. Park on a real wake instead: a sleep, a `Notify`, a channel.
 
 ## Coming from tokio
 
@@ -100,7 +107,7 @@ through `TaskProvider`) already expected from tokio:
 | `JoinHandle::is_finished()` | same |
 | `JoinHandle::abort()` | same (await yields `Err(JoinError::Cancelled)`) |
 | dropping a `JoinHandle` | same: detaches, task keeps running |
-| task panics | caught; handle yields `Err(JoinError::Panicked)`, siblings unaffected |
+| task panics | caught, handle yields `Err(JoinError::Panicked)`, siblings unaffected |
 | dropping the `Runtime` | dropping the `Executor` cancels every live task |
 | `tokio::select!` | `moonpool::select!` (seeded rotation, see the select chapter) |
 
@@ -108,19 +115,21 @@ Spawned futures stay `Send + 'static`, exactly as before: execution is one
 OS thread, but the bounds let application code use `Arc<RwLock<...>>`,
 `DashMap`, and friends without contortion.
 
-Two behaviors are deliberately *better* than tokio's:
+Two behaviors are deliberately **better** than tokio's:
 
 - A genuine deadlock (driver not woken, nothing runnable) panics with the
   seed in the message instead of parking the thread forever.
-- In debug builds, a task that busy-yields forever trips a poll-bound panic
-  naming the task, instead of hanging the drain loop.
+- A task that stays runnable forever, whether a busy-yield loop or a select
+  over a source it synchronously re-readies (something tokio's cooperative
+  budget used to interrupt), trips a poll-bound panic naming the task and
+  the seed, in every build profile, instead of hanging the drain loop.
 
 ## Kill-on-drop
 
 Simulation iterations must be hermetic: a task leaked by seed N must never
 run during seed N+1. Dropping the per-iteration tokio runtime used to
-guarantee that; the executor replicates it with a waker registry (the same
-pattern `async-executor` uses). Every live task registers one waker;
+guarantee that, and the executor replicates it with a waker registry (the
+same pattern `async-executor` uses). Every live task registers one waker.
 `Drop` wakes them all, which schedules every parked task, then pops and
 drops `Runnable`s until the queue is empty. Dropping a `Runnable` cancels
 the task and drops its future, and any tasks that drop wakes land in the

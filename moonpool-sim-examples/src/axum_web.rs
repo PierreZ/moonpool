@@ -376,11 +376,22 @@ impl WebWorkload {
             }
             tracing::info!("client conn driver finished");
         };
-        let _driver = std::pin::pin!(driver);
 
-        Self::check_health(&mut sender, server_ip, round).await?;
-        Self::create_and_read_item(&mut sender, server_ip, round).await?;
-        Self::check_not_found(&mut sender, server_ip, round).await?;
+        // hyper's SendRequest only makes progress while the Connection future
+        // is polled, so the driver MUST be raced alongside the requests (a
+        // merely pinned-but-never-polled driver leaves every request pending
+        // forever). Same idiom as the hyper_http integration test.
+        moonpool_sim::select! {
+            biased;
+            result = async {
+                Self::check_health(&mut sender, server_ip, round).await?;
+                Self::create_and_read_item(&mut sender, server_ip, round).await?;
+                Self::check_not_found(&mut sender, server_ip, round).await?;
+                Ok::<(), moonpool_sim::SimulationError>(())
+            } => result?,
+            // Connection died first (expected under chaos): give up the round.
+            () = driver => {}
+        }
 
         Ok(())
     }

@@ -45,9 +45,12 @@ Format: `<type>(<crate>): <description>`
 Types: `fix` (bugfix), `feat` (new feature), `build`, `chore`, `ci`, `docs`, `style`, `refactor`, `perf`, `test`
 
 ## Core Constraints
-- Single-thread execution via `tokio::runtime::Builder::new_current_thread().build()`,
-  but traits are Send-bounded so customer code can use `Arc<RwLock<…>>`, `DashMap`,
-  `Arc<AtomicBool>`, and `tokio::spawn` naturally
+- Single-thread execution via the moonpool deterministic executor
+  (`moonpool_sim::executor::Executor`, seeded-random task scheduling), but traits
+  are Send-bounded so customer code can use `Arc<RwLock<…>>`, `DashMap`, and
+  `Arc<AtomicBool>` naturally. There is NO tokio runtime inside a simulation:
+  a bare `tokio::spawn` panics at runtime — spawn via `ctx.task().spawn_task()`
+  or `moonpool_sim::executor::spawn()`
 - No `unwrap()` - use `Result<T, E>` with `?`; for `RwLock` poison, use
   `.expect("RwLock poisoned: prior task panicked")` (poisoning means a prior panic)
 - Document all public items
@@ -57,10 +60,11 @@ Types: `fix` (bugfix), `feat` (new feature), `build`, `chore`, `ci`, `docs`, `st
   use `#[async_trait]` (no `?Send`) with `Send + Sync + 'static` supertraits
 - Use traits, not concrete types
 - KISS principle
-- **No LocalSet, no `spawn_local`, no `build_local`**: the sim runtime uses
-  `new_current_thread().build()` — single OS thread, but futures must be `Send + 'static`
+- **No LocalSet, no `spawn_local`, no `build_local`**: the executor runs on a
+  single OS thread, but futures must be `Send + 'static`
 - **No direct tokio calls**: Use Provider traits
-  - Forbidden: `tokio::time::sleep()`, `tokio::time::timeout()`, `tokio::spawn()`
+  - Forbidden: `tokio::time::sleep()`, `tokio::time::timeout()`, `tokio::spawn()`,
+    `tokio::select!` (entropy branch offsets — use `moonpool_sim::select!`)
   - Required: `time.sleep()`, `time.timeout()`, `task_provider.spawn_task()`
 
 ## Crate Architecture

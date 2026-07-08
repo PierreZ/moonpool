@@ -27,12 +27,10 @@ impl TaskProvider for SimTaskProvider {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let task_name = name.to_string();
-        crate::executor::spawn(name, async move {
-            tracing::trace!("Task {} starting", task_name);
-            future.await;
-            tracing::trace!("Task {} completed", task_name);
-        })
+        // No lifecycle-trace wrapper (unlike TokioTaskProvider, where the
+        // name would otherwise be lost): the executor stores the name in
+        // TaskMeta and traces every poll of the task with it.
+        crate::executor::spawn(name, future)
     }
 
     async fn yield_now(&self) {

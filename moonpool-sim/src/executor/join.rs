@@ -55,9 +55,17 @@ impl<T> JoinHandle<T> {
     /// Abort the task: it will never be polled again and its future is
     /// dropped. Awaiting the handle afterwards yields
     /// `Err(JoinError::Cancelled)`.
+    ///
+    /// Aborting a task that already finished is a no-op and awaiting the
+    /// handle still yields the task's output (tokio parity: abort racing
+    /// completion loses).
     pub fn abort(&self) {
-        // Dropping the FallibleTask cancels the task (async-task semantics).
-        drop(self.inner.lock().take());
+        let mut inner = self.inner.lock();
+        // A finished task keeps its output harvestable; only a live task is
+        // cancelled (dropping the FallibleTask cancels, async-task semantics).
+        if inner.as_ref().is_some_and(|task| !task.is_finished()) {
+            drop(inner.take());
+        }
     }
 }
 
@@ -132,12 +140,14 @@ pub fn yield_now() -> YieldNow {
 ///
 /// # Panics
 ///
-/// Debug builds panic when called from inside a task: a task awaiting
-/// "drain until nothing is runnable" would deadlock against itself. Tasks
-/// yield with [`yield_now`].
+/// Panics when called from inside a task (all builds): a task awaiting
+/// "drain until nothing is runnable" would silently degrade to plain
+/// [`yield_now`] semantics, resuming mid-drain while believing every
+/// runnable task quiesced. That contract violation must not survive only
+/// in release. Tasks yield with [`yield_now`].
 #[must_use = "futures do nothing unless awaited"]
 pub fn until_stalled() -> YieldNow {
-    debug_assert!(
+    assert!(
         !super::in_task(),
         "until_stalled() is driver-only; tasks must use executor::yield_now()"
     );
