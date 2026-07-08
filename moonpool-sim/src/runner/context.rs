@@ -22,7 +22,7 @@ use crate::observability::SimulationLayerHandle;
 use crate::providers::{SimProviders, SimRandomProvider, SimTimeProvider};
 use crate::storage::SimStorageProvider;
 
-use moonpool_core::{Providers, TokioTaskProvider};
+use moonpool_core::Providers;
 
 use super::topology::WorkloadTopology;
 
@@ -74,7 +74,7 @@ impl SimContext {
 
     /// Get the task provider.
     #[must_use]
-    pub fn task(&self) -> &TokioTaskProvider {
+    pub fn task(&self) -> &crate::providers::SimTaskProvider {
         self.providers.task()
     }
 

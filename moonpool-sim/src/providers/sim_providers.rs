@@ -2,13 +2,13 @@
 
 use std::net::IpAddr;
 
-use moonpool_core::{TokioTaskProvider, impl_providers_bundle};
+use moonpool_core::impl_providers_bundle;
 
 use crate::network::SimNetworkProvider;
 use crate::sim::WeakSimWorld;
 use crate::storage::SimStorageProvider;
 
-use super::{SimRandomProvider, SimTimeProvider};
+use super::{SimRandomProvider, SimTaskProvider, SimTimeProvider};
 
 /// Simulation providers bundle for deterministic testing.
 ///
@@ -34,14 +34,14 @@ use super::{SimRandomProvider, SimTimeProvider};
 ///
 /// - Uses `SimNetworkProvider` for simulated TCP connections
 /// - Uses `SimTimeProvider` for logical/simulated time
-/// - Uses `TokioTaskProvider` for task spawning (same as production)
+/// - Uses `SimTaskProvider` for task spawning on the deterministic executor
 /// - Uses `SimRandomProvider` for seeded deterministic randomness
 /// - Uses `SimStorageProvider` for simulated file I/O with per-process fault injection
 #[derive(Clone)]
 pub struct SimProviders {
     network: SimNetworkProvider,
     time: SimTimeProvider,
-    task: TokioTaskProvider,
+    task: SimTaskProvider,
     random: SimRandomProvider,
     storage: SimStorageProvider,
 }
@@ -59,7 +59,7 @@ impl SimProviders {
         Self {
             network: SimNetworkProvider::new(sim.clone()),
             time: SimTimeProvider::new(sim.clone()),
-            task: TokioTaskProvider,
+            task: SimTaskProvider,
             random: SimRandomProvider::new(seed),
             storage: SimStorageProvider::new(sim, ip),
         }
@@ -69,7 +69,7 @@ impl SimProviders {
 impl_providers_bundle!(SimProviders {
     network: SimNetworkProvider,
     time: SimTimeProvider,
-    task: TokioTaskProvider,
+    task: SimTaskProvider,
     random: SimRandomProvider,
     storage: SimStorageProvider,
 });

@@ -859,8 +859,8 @@ impl SimulationBuilder {
         }
     }
 
-    /// Spin up a fresh tokio runtime, run the orchestrator on it, and
-    /// return its outcome.
+    /// Spin up a fresh deterministic executor, run the orchestrator on it,
+    /// and return its outcome.
     fn run_orchestrator_blocking(inputs: RunOrchestratorInputs<'_>) -> OrchestrationOutcome {
         let RunOrchestratorInputs {
             seed,
@@ -875,8 +875,11 @@ impl SimulationBuilder {
             obs_handle,
             run_time_budget,
         } = inputs;
-        let local_runtime = Self::build_local_runtime_for_seed(seed);
-        local_runtime.block_on(async move {
+        // Fresh executor per iteration: dropping it cancels every task that
+        // leaked past the settle phase, so no state crosses into the next seed
+        // (the same contract dropping the per-iteration tokio runtime gave).
+        let mut executor = crate::executor::Executor::new(seed);
+        executor.block_on(async move {
             WorkloadOrchestrator::orchestrate_workloads(OrchestrateInputs {
                 workloads,
                 fault_injectors,
@@ -1093,22 +1096,6 @@ impl SimulationBuilder {
                 pct,
             );
         }
-    }
-
-    /// Build a fresh single-threaded tokio runtime seeded for this iteration.
-    /// When dropped, ALL tasks are killed — no orphan tasks leak between
-    /// iterations.
-    fn build_local_runtime_for_seed(seed: u64) -> tokio::runtime::Runtime {
-        let mut seed_bytes = [0u8; 32];
-        seed_bytes[..8].copy_from_slice(&seed.to_le_bytes());
-        let rng_seed = tokio::runtime::RngSeed::from_bytes(&seed_bytes);
-        // No .enable_time(): the sim drives logical time via the event queue, not
-        // tokio's timer wheel. enable_time() also constructs a std::time::Instant
-        // at startup, which panics on wasm32-unknown-unknown.
-        tokio::runtime::Builder::new_current_thread()
-            .rng_seed(rng_seed)
-            .build()
-            .expect("per-iteration runtime")
     }
 
     /// Reset per-iteration state: capture buffers, RNG, buggify, and chaos.

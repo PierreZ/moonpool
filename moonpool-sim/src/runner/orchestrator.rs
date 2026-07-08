@@ -107,7 +107,7 @@ pub(crate) struct ProcessConfig<'a> {
 /// events fire in the simulation event queue.
 struct ProcessManager<'a> {
     factory: Option<&'a dyn Fn() -> Box<dyn Process>>,
-    handles: Vec<Option<tokio::task::JoinHandle<()>>>,
+    handles: Vec<Option<crate::executor::JoinHandle<()>>>,
     /// Per-process shutdown tokens (child of the global `shutdown_signal`).
     /// Cancelling a child signals only that process; cancelling the parent
     /// signals all processes.
@@ -138,7 +138,7 @@ impl<'a> ProcessManager<'a> {
     /// Create a process manager from config and booted process handles.
     fn new(
         factory: &'a dyn Fn() -> Box<dyn Process>,
-        handles: Vec<Option<tokio::task::JoinHandle<()>>>,
+        handles: Vec<Option<crate::executor::JoinHandle<()>>>,
         process_tokens: Vec<Option<tokio_util::sync::CancellationToken>>,
         ips: Vec<String>,
         tag_registry: TagRegistry,
@@ -256,7 +256,8 @@ impl<'a> ProcessManager<'a> {
         let providers = crate::SimProviders::new(sim.clone(), seed, ip);
         let ctx = SimContext::new(providers, topology, state.clone(), obs.clone());
         let ip_for_log = ip_str.clone();
-        let handle = tokio::spawn(
+        let handle = crate::executor::spawn(
+            &format!("process@{ip_str}"),
             async move {
                 if let Err(e) = process.run(&ctx).await {
                     tracing::debug!("Restarted process at {} exited: {}", ip_for_log, e);
@@ -295,19 +296,19 @@ type WorkloadResult = (Box<dyn Workload>, SimulationResult<()>);
 type SetupTaskOutput = (Box<dyn Workload>, SimContext, SimulationResult<()>);
 
 /// Handle to a spawned `setup()` task.
-type SetupHandle = tokio::task::JoinHandle<SetupTaskOutput>;
+type SetupHandle = crate::executor::JoinHandle<SetupTaskOutput>;
 
 /// Per-process join handles (in option slots so they can be drained).
-type ProcessHandleSlots = Vec<Option<tokio::task::JoinHandle<()>>>;
+type ProcessHandleSlots = Vec<Option<crate::executor::JoinHandle<()>>>;
 
 /// Per-process cancellation tokens (in option slots so they can be drained).
 type ProcessTokenSlots = Vec<Option<tokio_util::sync::CancellationToken>>;
 
 /// Per-injector join handles (in option slots so they can be drained).
-type InjectorHandleSlots = Vec<Option<tokio::task::JoinHandle<InjectorResult>>>;
+type InjectorHandleSlots = Vec<Option<crate::executor::JoinHandle<InjectorResult>>>;
 
 /// Per-workload join handles (in option slots so they can be drained).
-type WorkloadHandleSlots = Vec<Option<tokio::task::JoinHandle<WorkloadResult>>>;
+type WorkloadHandleSlots = Vec<Option<crate::executor::JoinHandle<WorkloadResult>>>;
 
 /// Inputs needed to run the check phase.
 struct CheckPhaseInputs<'a> {
@@ -909,7 +910,7 @@ impl WorkloadOrchestrator {
         // suffices to flush them into the timeline.
         Self::pump_observability(sim, obs);
 
-        // === 7. CHECK PHASE (tokio::spawn + cooperative stepping) ===
+        // === 7. CHECK PHASE (executor spawn + cooperative stepping) ===
         let final_workloads = Self::do_check_phase(CheckPhaseInputs {
             sim,
             workloads: returned_workloads,
@@ -1024,7 +1025,8 @@ impl WorkloadOrchestrator {
         let mut setup_handles = Vec::with_capacity(workloads.len());
         for (workload, ctx) in workloads.into_iter().zip(contexts) {
             let ip = ctx.my_ip().to_string();
-            let handle = tokio::spawn(
+            let handle = crate::executor::spawn(
+                &format!("workload-setup@{ip}"),
                 async move {
                     let mut w = workload;
                     let result = w.setup(&ctx).await;
@@ -1046,7 +1048,8 @@ impl WorkloadOrchestrator {
         let mut workload_handles = Vec::with_capacity(workloads.len());
         for (workload, ctx) in workloads.into_iter().zip(contexts) {
             let ip = ctx.my_ip().to_string();
-            let handle = tokio::spawn(
+            let handle = crate::executor::spawn(
+                &format!("workload-run@{ip}"),
                 async move {
                     let mut w = workload;
                     let result = w.run(&ctx).await;
@@ -1172,7 +1175,7 @@ impl WorkloadOrchestrator {
             }
 
             if current_active > 0 {
-                tokio::task::yield_now().await;
+                crate::executor::until_stalled().await;
             }
         }
         // Final pump: capture events emitted after the last step.
@@ -1369,7 +1372,7 @@ impl WorkloadOrchestrator {
                     sim.time_provider(),
                     chaos_shutdown.clone(),
                 );
-                let handle = tokio::spawn(async move {
+                let handle = crate::executor::spawn("fault-injector", async move {
                     let mut injector = fi;
                     let result = injector.inject(&fault_ctx).await;
                     (injector, result)
@@ -1468,7 +1471,8 @@ impl WorkloadOrchestrator {
             let ctx = SimContext::new(providers, topology, state.clone(), obs.clone());
             let ip_for_log = ip.clone();
             let span_ip = ip.clone();
-            let handle = tokio::spawn(
+            let handle = crate::executor::spawn(
+                &format!("process@{span_ip}"),
                 async move {
                     if let Err(e) = process.run(&ctx).await {
                         tracing::debug!("Process at {} exited: {}", ip_for_log, e);
@@ -1494,7 +1498,8 @@ impl WorkloadOrchestrator {
         let mut check_handles = Vec::with_capacity(workloads.len());
         for (workload, ctx) in workloads.into_iter().zip(contexts) {
             let ip = ctx.my_ip().to_string();
-            let handle = tokio::spawn(
+            let handle = crate::executor::spawn(
+                &format!("workload-check@{ip}"),
                 async move {
                     let mut w = workload;
                     let result = w.check(&ctx).await;
@@ -1512,7 +1517,7 @@ impl WorkloadOrchestrator {
         loop {
             if check_handles
                 .iter()
-                .all(tokio::task::JoinHandle::is_finished)
+                .all(crate::executor::JoinHandle::is_finished)
             {
                 break;
             }
@@ -1520,7 +1525,7 @@ impl WorkloadOrchestrator {
                 sim.step();
                 Self::pump_observability(sim, obs);
             }
-            tokio::task::yield_now().await;
+            crate::executor::until_stalled().await;
         }
         Self::pump_observability(sim, obs);
 
@@ -1584,14 +1589,14 @@ impl WorkloadOrchestrator {
     /// `workload_collected`. Returns `true` if at least one handle finished
     /// during this call.
     async fn collect_finished_workloads(
-        workload_handles: &mut [Option<tokio::task::JoinHandle<WorkloadResult>>],
+        workload_handles: &mut [Option<crate::executor::JoinHandle<WorkloadResult>>],
         workload_collected: &mut [Option<WorkloadResult>],
     ) -> bool {
         let mut any_finished = false;
         for i in 0..workload_handles.len() {
             let finished = workload_handles[i]
                 .as_ref()
-                .is_some_and(tokio::task::JoinHandle::is_finished);
+                .is_some_and(crate::executor::JoinHandle::is_finished);
             if finished {
                 let handle = workload_handles[i]
                     .take()
@@ -1614,12 +1619,12 @@ impl WorkloadOrchestrator {
     /// Reap any fault-injector handles that have finished, discarding the
     /// injectors. The remaining live handles are returned in-place.
     async fn reap_finished_injectors(
-        injector_handles: &mut [Option<tokio::task::JoinHandle<InjectorResult>>],
+        injector_handles: &mut [Option<crate::executor::JoinHandle<InjectorResult>>],
     ) {
         for handle_opt in injector_handles {
             let finished = handle_opt
                 .as_ref()
-                .is_some_and(tokio::task::JoinHandle::is_finished);
+                .is_some_and(crate::executor::JoinHandle::is_finished);
             if finished {
                 let handle = handle_opt.take().expect("injector handle is finished");
                 match handle.await {
@@ -1638,7 +1643,7 @@ impl WorkloadOrchestrator {
     /// are still running.
     async fn collect_injector_results(
         mut returned: Vec<Box<dyn FaultInjector>>,
-        mut injector_handles: Vec<Option<tokio::task::JoinHandle<InjectorResult>>>,
+        mut injector_handles: Vec<Option<crate::executor::JoinHandle<InjectorResult>>>,
     ) -> Vec<Box<dyn FaultInjector>> {
         for handle_opt in &mut injector_handles {
             if let Some(handle) = handle_opt.take() {
@@ -1688,10 +1693,10 @@ impl WorkloadOrchestrator {
         state: &StateHandle,
         obs: &SimulationLayerHandle,
         shutdown_signal: &tokio_util::sync::CancellationToken,
-        handles: &[tokio::task::JoinHandle<T>],
+        handles: &[crate::executor::JoinHandle<T>],
     ) {
         loop {
-            if handles.iter().all(tokio::task::JoinHandle::is_finished) {
+            if handles.iter().all(crate::executor::JoinHandle::is_finished) {
                 break;
             }
             if sim.pending_event_count() > 0 {
@@ -1706,7 +1711,7 @@ impl WorkloadOrchestrator {
                 );
                 Self::pump_observability(sim, obs);
             }
-            tokio::task::yield_now().await;
+            crate::executor::until_stalled().await;
         }
         Self::pump_observability(sim, obs);
     }
