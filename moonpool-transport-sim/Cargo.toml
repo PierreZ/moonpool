@@ -9,8 +9,8 @@ repository.workspace = true
 description = "Simulation workloads for moonpool-transport"
 
 [dependencies]
-moonpool-sim = { path = "../moonpool-sim", version = "0.7.0" }
-moonpool-transport = { path = "../moonpool-transport", version = "0.7.0" }
+moonpool-sim = { path = "../moonpool-sim", version = "0.8.0" }
+moonpool-transport = { path = "../moonpool-transport", version = "0.8.0" }
 
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }

@@ -27,11 +27,11 @@ exploration = ["dep:moonpool-explorer"]
 # conformance testing) come in only via the tokio-providers feature.
 # deterministic-select flips moonpool_core::select! to the seeded-offset expansion
 # for every crate in a sim-linking build graph (cargo feature unification).
-moonpool-core = { path = "../moonpool-core", version = "0.7.0", default-features = false, features = ["deterministic-select"] }
+moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false, features = ["deterministic-select"] }
 # Assertion accounting (pure std, wasm-able) — always present. The fork-based
 # exploration backend below is optional and layers on top of it.
-moonpool-assertions = { path = "../moonpool-assertions", version = "0.7.0" }
-moonpool-explorer = { path = "../moonpool-explorer", version = "0.7.0", optional = true }
+moonpool-assertions = { path = "../moonpool-assertions", version = "0.8.0" }
+moonpool-explorer = { path = "../moonpool-explorer", version = "0.8.0", optional = true }
 
 # Runnable/Task split, waker wiring, join + cancellation for the deterministic
 # executor (same backbone as madsim); no_std-able, no runtime of its own.

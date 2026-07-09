@@ -4,7 +4,7 @@ members = ["moonpool", "moonpool-assertions", "moonpool-core", "moonpool-explore
 resolver = "2"
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 repository = "https://github.com/PierreZ/moonpool"
 license = "Apache-2.0"
 authors = ["Pierre Zemb <contact@pierrezemb.fr>"]
