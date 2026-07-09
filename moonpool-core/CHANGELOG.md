@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-07-09
+
+### 🚀 Features
+
+- **moonpool-core**: Deterministic select! rotation combinator
+- **moonpool-core**: Granular tokio provider features and prelude
+
+### 🐛 Bug Fixes
+
+- Address review findings on the executor branch
+- **moonpool-core**: Gate named-task Builder behind cfg(tokio_unstable)
+
+### 🚜 Refactor
+
+- **moonpool-core**: Remove task naming from TokioTaskProvider
+- **moonpool-core**: Select! enters tokio's expansion with a seeded offset
+- Migrate select!/pin!/watch off tokio entropy
+- **core**: Generate OpenOptions flag getters with a macro
+
+### 📦 Other
+
+- Drop the tokio_unstable requirement
+
+
 ## [0.7.0] - 2026-06-05
 
 ### 🚀 Features

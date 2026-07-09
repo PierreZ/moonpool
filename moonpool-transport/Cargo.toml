@@ -21,8 +21,8 @@ tokio = ["moonpool-core/tokio-providers"]
 # providers unless the `tokio` feature is on (TokioTransport / Builder::tokio()).
 # "select" provides moonpool_core::select! (tokio passthrough here; sim-linking
 # build graphs flip it to the deterministic combinator via feature unification).
-moonpool-core = { path = "../moonpool-core", version = "0.7.0", default-features = false, features = ["select"] }
-moonpool-transport-derive = { path = "../moonpool-transport-derive", version = "0.7.0" }
+moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false, features = ["select"] }
+moonpool-transport-derive = { path = "../moonpool-transport-derive", version = "0.8.0" }
 
 async-trait = "0.1"
 crc32c = "0.6"

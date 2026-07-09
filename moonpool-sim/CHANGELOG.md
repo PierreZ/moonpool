@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-07-09
+
+### 🚀 Features
+
+- **moonpool-sim**: Deterministic executor replaces the tokio runtime
+- **moonpool-sim**: Correlate disk stall/throttle episodes per process ([#147](https://github.com/PierreZ/moonpool/pull/147))
+- **moonpool-sim**: Dynamic disk stall/throttle episodes ([#126](https://github.com/PierreZ/moonpool/pull/126))
+- **moonpool-sim**: Consolidate stop conditions into UntilCoverageStable ([#135](https://github.com/PierreZ/moonpool/pull/135))
+- **moonpool-sim**: Buggify-driven config-knob value-perturbation ([#125](https://github.com/PierreZ/moonpool/pull/125))
+- **moonpool-sim**: Topology/locality failure domains ([#121](https://github.com/PierreZ/moonpool/pull/121))
+- **moonpool-sim**: Long-tail latency distribution (exponential/bimodal) for network + storage ([#67](https://github.com/PierreZ/moonpool/pull/67))
+- **moonpool-sim**: Partial read delivery in simulated connections ([#66](https://github.com/PierreZ/moonpool/pull/66))
+- **moonpool-sim**: Declarative enable_chaos with per-surface swarm/random modes ([#130](https://github.com/PierreZ/moonpool/pull/130))
+- **moonpool-sim**: Swarm testing — workload operation-alphabet subsets
+- **moonpool-sim**: Per-pair permanent latency (FDB SimClogging)
+- **moonpool-sim**: Swarm testing — per-seed fault-family subsets (core)
+
+### 🐛 Bug Fixes
+
+- Address review findings on the executor branch
+
+### 🚜 Refactor
+
+- **moonpool-core**: Select! enters tokio's expansion with a seeded offset
+- Migrate select!/pin!/watch off tokio entropy
+- **sim**: Extract sim-upgrade helper in SimStorageProvider
+- **sim**: Build peer lists in a single pass
+- **moonpool-sim**: Make explorer optional and compile the sim to wasm
+- **moonpool-sim**: Cross-validate invariants with plain tracing events
+
+### 🧪 Testing
+
+- **moonpool-sim**: Pin seeds in the flaky failure-accounting test
+- **moonpool-sim**: Add Tokio provider conformance suite + migration guide
+
+### 📦 Other
+
+- Drop the tokio_unstable requirement
+
+
 ## [0.7.0] - 2026-06-05
 
 ### 🚀 Features

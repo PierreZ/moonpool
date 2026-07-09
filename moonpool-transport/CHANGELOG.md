@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-07-09
+
+### 🚀 Features
+
+- Production DX (TokioTransport, facade features, prelude, example)
+
+### 🚜 Refactor
+
+- **moonpool-core**: Select! enters tokio's expansion with a seeded offset
+- Migrate select!/pin!/watch off tokio entropy
+
+### 📦 Other
+
+- Drop the tokio_unstable requirement
+
+
 ## [0.7.0] - 2026-06-05
 
 ### 🚀 Features
