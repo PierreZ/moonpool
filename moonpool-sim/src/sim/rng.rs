@@ -53,6 +53,14 @@ thread_local! {
     /// iteration, `None` otherwise. See [`swarm_op_enabled`] for how it is consumed; like
     /// [`CONFIG_RNG`] it never touches the [`SIM_RNG`] call count.
     static SWARM_OP_SEED: Cell<Option<u64>> = const { Cell::new(None) };
+
+    /// Thread-local `select!` branch-offset RNG, independent of [`SIM_RNG`].
+    ///
+    /// Drives the branch start offsets of `moonpool_core::select!` (installed
+    /// via [`set_select_seed`]). Like [`CONFIG_RNG`] it deliberately does NOT go
+    /// through [`pre_sample`], so select polling order can never perturb the
+    /// [`SIM_RNG`] call count or fork-explorer breakpoint replay.
+    static SELECT_RNG: RefCell<ChaCha8Rng> = RefCell::new(ChaCha8Rng::seed_from_u64(0));
 }
 
 /// Salt mixed into the iteration seed before seeding [`CONFIG_RNG`].
@@ -67,6 +75,13 @@ const CONFIG_RNG_SALT: u64 = 0x6D6F_6F6E_7377_726D; // "moonswrm"
 /// Distinct from [`CONFIG_RNG_SALT`] so per-seed *operation* subset decisions
 /// are decorrelated from the *fault-family* subset decisions of the same seed.
 const SWARM_OP_SALT: u64 = 0x6F70_6D61_736B_7372; // "opmasksr"
+
+/// Salt mixed into the iteration seed before seeding [`SELECT_RNG`].
+///
+/// Decorrelates `select!` branch start offsets from the in-run [`SIM_RNG`]
+/// stream (and from the other salted streams) while keeping them fully
+/// reproducible from the same iteration seed.
+const SELECT_RNG_SALT: u64 = 0x7365_6C62_726E_6368; // "selbrnch"
 
 /// Increment the RNG call counter and check for breakpoints.
 ///
@@ -290,6 +305,36 @@ pub fn reset_config_rng() {
     CONFIG_RNG.with(|rng| {
         *rng.borrow_mut() = ChaCha8Rng::seed_from_u64(0);
     });
+}
+
+/// Seed the thread-local `select!` offset RNG from an iteration seed and
+/// install it as the branch-offset source for `moonpool_core::select!` on
+/// this thread.
+///
+/// The seed is mixed with [`SELECT_RNG_SALT`] so branch start offsets are
+/// decorrelated from [`SIM_RNG`] yet remain reproducible per iteration seed.
+/// Like [`set_config_seed`], this stream is uncounted: select polling order
+/// never perturbs the call counter or fork-explorer breakpoint replay.
+pub fn set_select_seed(seed: u64) {
+    SELECT_RNG.with(|rng| {
+        *rng.borrow_mut() = ChaCha8Rng::seed_from_u64(seed ^ SELECT_RNG_SALT);
+    });
+    moonpool_core::select_support::set_select_offset_override(Some(select_offset_from_stream));
+}
+
+/// Reset the `select!` offset RNG and uninstall the override, restoring
+/// moonpool-core's entropy fallback (production behavior).
+pub fn reset_select_rng() {
+    SELECT_RNG.with(|rng| {
+        *rng.borrow_mut() = ChaCha8Rng::seed_from_u64(0);
+    });
+    moonpool_core::select_support::set_select_offset_override(None);
+}
+
+/// The offset source registered with moonpool-core: one uncounted
+/// [`SELECT_RNG`] draw per `select!` execution.
+fn select_offset_from_stream(branches: u32) -> u32 {
+    SELECT_RNG.with(|rng| rng.borrow_mut().random_range(0..branches))
 }
 
 /// Generate a random f64 in `[0.0, 1.0)` using the configuration RNG.
@@ -677,6 +722,44 @@ mod tests {
         let _: f64 = sim_random();
         assert_eq!(rng_call_count(), 1);
         assert_eq!(current_sim_seed(), 42); // no breakpoint triggered
+    }
+
+    #[test]
+    fn select_rng_does_not_perturb_sim_rng_and_replays() {
+        // Control: SIM_RNG sequence with no SELECT_RNG draws interleaved.
+        reset_sim_rng();
+        set_sim_seed(42);
+        let control: Vec<f64> = (0..5).map(|_| sim_random::<f64>()).collect();
+        let control_count = rng_call_count();
+
+        // Experiment: interleave select-offset draws between SIM_RNG draws.
+        reset_sim_rng();
+        set_sim_seed(42);
+        set_select_seed(42);
+        let mut offsets_a = Vec::new();
+        let mut experiment = Vec::new();
+        for _ in 0..5 {
+            offsets_a.push(select_offset_from_stream(8));
+            experiment.push(sim_random::<f64>());
+        }
+        for (c, e) in control.iter().zip(experiment.iter()) {
+            assert_f64_eq(*c, *e);
+        }
+        assert_eq!(
+            rng_call_count(),
+            control_count,
+            "select offsets must not touch the SIM_RNG call count"
+        );
+
+        // Same select seed replays the same offset stream.
+        set_select_seed(42);
+        let offsets_b: Vec<u32> = (0..5).map(|_| select_offset_from_stream(8)).collect();
+        assert_eq!(offsets_a, offsets_b);
+        assert!(
+            offsets_a.iter().any(|&o| o != offsets_a[0]),
+            "offset stream should vary"
+        );
+        reset_select_rng();
     }
 
     #[test]

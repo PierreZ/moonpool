@@ -72,7 +72,8 @@ impl Process for TopologyProcess {
 
         let listener = ctx.network().bind(ctx.my_ip()).await?;
         loop {
-            let accepted = tokio::select! {
+            let accepted = moonpool_sim::select! {
+                biased;
                 r = listener.accept() => r,
                 () = ctx.shutdown().cancelled() => return Ok(()),
             };

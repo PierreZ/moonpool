@@ -58,7 +58,8 @@ impl Process for LocalityProcess {
         // Bind so the workload can connect, then idle until shutdown.
         let listener = ctx.network().bind(ctx.my_ip()).await?;
         loop {
-            tokio::select! {
+            moonpool_sim::select! {
+                biased;
                 _ = listener.accept() => {}
                 () = ctx.shutdown().cancelled() => return Ok(()),
             }

@@ -261,7 +261,8 @@ impl Workload for TransportClientWorkload {
                 Op::NormalAppend | Op::EmptyBlock | Op::MaxSizeBlock => {
                     match get_reply(&*transport, &endpoint, req, &encode, decode.clone()) {
                         Ok(fut) => {
-                            let drained: Option<Result<AppendBlockResponse, ReplyError>> = tokio::select! {
+                            let drained: Option<Result<AppendBlockResponse, ReplyError>> = moonpool_sim::select! {
+                                biased;
                                 r = fut => Some(r),
                                 () = shutdown.cancelled() => None,
                                 _ = time.sleep(Duration::from_secs(10)) => None,

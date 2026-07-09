@@ -9,15 +9,11 @@ description = "Simulation engine for the moonpool framework"
 documentation = "https://docs.rs/moonpool-sim"
 readme = "README.md"
 
-[package.metadata.docs.rs]
-rustdoc-args = ["--cfg", "tokio_unstable"]
-rustc-args = ["--cfg", "tokio_unstable"]
-
 [features]
 # tokio-providers re-exports core's production provider bundle (TokioProviders,
-# TokioNetworkProvider, TokioTimeProvider) for examples/tests that drive the same
-# code under prod + sim. Default-on; disable for a wasm-able sim
-# (`--no-default-features`), which still keeps TokioTaskProvider via core/tokio-task.
+# TokioNetworkProvider, TokioTaskProvider, TokioTimeProvider) for examples/tests
+# that drive the same code under prod + sim. Default-on; disable for a wasm-able
+# sim (`--no-default-features`), which runs tasks on the moonpool executor.
 default = ["tokio-providers", "exploration"]
 tokio-providers = ["moonpool-core/tokio-providers"]
 # Fork-based multiverse exploration (libc/mmap — never wasm). When off, assertion
@@ -26,14 +22,20 @@ tokio-providers = ["moonpool-core/tokio-providers"]
 exploration = ["dep:moonpool-explorer"]
 
 [dependencies]
-# SimProviders always bundles the real TokioTaskProvider (single-thread executor),
-# so tokio-task is mandatory; net/fs/time come in only via the tokio-providers feature.
-moonpool-core = { path = "../moonpool-core", version = "0.7.0", default-features = false, features = ["tokio-task"] }
+# SimProviders bundles SimTaskProvider on the moonpool deterministic executor,
+# so no core tokio feature is mandatory; net/fs/time (and TokioTaskProvider for
+# conformance testing) come in only via the tokio-providers feature.
+# deterministic-select flips moonpool_core::select! to the seeded-offset expansion
+# for every crate in a sim-linking build graph (cargo feature unification).
+moonpool-core = { path = "../moonpool-core", version = "0.7.0", default-features = false, features = ["deterministic-select"] }
 # Assertion accounting (pure std, wasm-able) — always present. The fork-based
 # exploration backend below is optional and layers on top of it.
 moonpool-assertions = { path = "../moonpool-assertions", version = "0.7.0" }
 moonpool-explorer = { path = "../moonpool-explorer", version = "0.7.0", optional = true }
 
+# Runnable/Task split, waker wiring, join + cancellation for the deterministic
+# executor (same backbone as madsim); no_std-able, no runtime of its own.
+async-task = "4.7"
 async-trait = "0.1"
 crc32c = "0.6"
 futures = "0.3"
@@ -44,12 +46,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
 parking_lot = "0.12"
-# Library code uses tokio::spawn / task::JoinHandle / yield_now (rt),
-# Notify / mpsc (sync), select! (macros), and the named-task instrumentation
-# that TokioTaskProvider relies on (tracing + tokio_unstable). The per-seed
-# runtime uses runtime::Builder + RngSeed (rt). No net/fs/time in lib code.
-# Tests pull "full" via dev-dependencies.
-tokio = { version = "1", features = ["rt", "sync", "macros", "tracing"] }
+# No tokio in library code: tasks run on the moonpool deterministic executor
+# (async-task) and select! comes from moonpool-core. Tests pull tokio "full"
+# via dev-dependencies for #[tokio::test]-style SimWorld unit tests.
+# tokio-util: CancellationToken (shutdown signalling) + compat (io bridging).
 tokio-util = { version = "0.7", features = ["compat"] }
 tracing = "0.1"
 

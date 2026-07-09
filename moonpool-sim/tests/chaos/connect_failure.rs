@@ -199,7 +199,8 @@ fn test_connect_failure_mode_probabilistic_with_timeout() {
         // This simulates how production code should handle potential hangs
         let timeout_duration = Duration::from_millis(100);
 
-        let connect_result = tokio::select! {
+        let connect_result = moonpool_sim::select! {
+            biased;
             result = provider.connect(addr) => {
                 Some(result)
             }

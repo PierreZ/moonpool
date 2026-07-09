@@ -859,8 +859,8 @@ impl SimulationBuilder {
         }
     }
 
-    /// Spin up a fresh tokio runtime, run the orchestrator on it, and
-    /// return its outcome.
+    /// Spin up a fresh deterministic executor, run the orchestrator on it,
+    /// and return its outcome.
     fn run_orchestrator_blocking(inputs: RunOrchestratorInputs<'_>) -> OrchestrationOutcome {
         let RunOrchestratorInputs {
             seed,
@@ -875,8 +875,11 @@ impl SimulationBuilder {
             obs_handle,
             run_time_budget,
         } = inputs;
-        let local_runtime = Self::build_local_runtime_for_seed(seed);
-        local_runtime.block_on(async move {
+        // Fresh executor per iteration: dropping it cancels every task that
+        // leaked past the settle phase, so no state crosses into the next seed
+        // (the same contract dropping the per-iteration tokio runtime gave).
+        let mut executor = crate::executor::Executor::new(seed);
+        executor.block_on(async move {
             WorkloadOrchestrator::orchestrate_workloads(OrchestrateInputs {
                 workloads,
                 fault_injectors,
@@ -1095,22 +1098,6 @@ impl SimulationBuilder {
         }
     }
 
-    /// Build a fresh single-threaded tokio runtime seeded for this iteration.
-    /// When dropped, ALL tasks are killed — no orphan tasks leak between
-    /// iterations.
-    fn build_local_runtime_for_seed(seed: u64) -> tokio::runtime::Runtime {
-        let mut seed_bytes = [0u8; 32];
-        seed_bytes[..8].copy_from_slice(&seed.to_le_bytes());
-        let rng_seed = tokio::runtime::RngSeed::from_bytes(&seed_bytes);
-        // No .enable_time(): the sim drives logical time via the event queue, not
-        // tokio's timer wheel. enable_time() also constructs a std::time::Instant
-        // at startup, which panics on wasm32-unknown-unknown.
-        tokio::runtime::Builder::new_current_thread()
-            .rng_seed(rng_seed)
-            .build()
-            .expect("per-iteration runtime")
-    }
-
     /// Reset per-iteration state: capture buffers, RNG, buggify, and chaos.
     fn reset_per_iteration_state(
         seed: u64,
@@ -1123,6 +1110,9 @@ impl SimulationBuilder {
         // Seed the independent config RNG that drives swarm-subset decisions.
         // Runs before `build_sim_for_iteration`, so `swarm_for_seed()` sees it.
         crate::sim::set_config_seed(seed);
+        // Seed the independent select! branch-offset stream and install it as
+        // moonpool_core::select!'s offset source for this iteration.
+        crate::sim::set_select_seed(seed);
         // Per-seed base for the workload operation-alphabet swarm mask; `None`
         // disables masking so workloads see the full alphabet.
         crate::sim::set_swarm_op_seed(swarm_operations.then_some(seed));
@@ -1315,8 +1305,9 @@ impl SimulationBuilder {
     #[instrument(skip_all)]
     /// Run the simulation and generate a report.
     ///
-    /// Creates a fresh tokio `LocalRuntime` per iteration for full isolation —
-    /// all tasks are killed when the runtime is dropped at iteration end.
+    /// Creates a fresh deterministic [`Executor`](crate::executor::Executor)
+    /// per iteration for full isolation — all tasks are killed when the
+    /// executor is dropped at iteration end.
     ///
     /// # Panics
     ///
@@ -1325,6 +1316,19 @@ impl SimulationBuilder {
         if self.entries.is_empty() {
             return Self::empty_report();
         }
+
+        // Uninstall the select! offset override on every exit path (normal,
+        // early return, panic): without this, the seeded source installed by
+        // set_select_seed would leak past run() and later selects on this
+        // thread would silently keep drawing from the stale sim stream
+        // instead of the documented entropy fallback.
+        struct SelectOverrideReset;
+        impl Drop for SelectOverrideReset {
+            fn drop(&mut self) {
+                crate::sim::reset_select_rng();
+            }
+        }
+        let _select_reset = SelectOverrideReset;
 
         // Install the observability layer once for the entire run. The guard
         // is dropped when run() returns, restoring the previous subscriber.
@@ -1822,8 +1826,13 @@ mod tests {
 
     #[test]
     fn test_simulation_builder_with_failures() {
+        // Pinned seeds: without them, iteration seeds derive from the wall
+        // clock and this test demands both outcomes across 10 fair coin
+        // flips, a ~0.2% spontaneous failure rate. Each seed's outcome is a
+        // pure function of the seed, so pinning makes it deterministic.
         let report = SimulationBuilder::new()
             .workload(FailingWorkload)
+            .set_debug_seeds((1..=10).collect())
             .set_iterations(10)
             .run();
 

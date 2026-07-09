@@ -4,7 +4,7 @@
 
 Moonpool abstracts every interaction between your code and the outside world into five provider traits. Each trait covers one category of I/O. Together, they form a complete boundary around your application, giving the simulator full control over every source of non-determinism.
 
-The sim runtime is single-threaded (`tokio::runtime::Builder::new_current_thread().build()`), but every provider trait is **`Send + Sync + 'static`**. One OS thread runs everything for determinism, yet the **types** are Send-bounded so customer code stays normal: `Arc<RwLock<…>>`, `DashMap`, `Arc<AtomicBool>`, and plain `tokio::spawn` all just work. The async methods use **native AFIT** (`async fn` in trait) with explicit `-> impl Future<…> + Send` desugarings to propagate the Send bound, so no `#[async_trait]` and no `?Send` anywhere in the provider layer.
+The sim runs single-threaded on the [moonpool deterministic executor](./11-executor.md), but every provider trait is **`Send + Sync + 'static`**. One OS thread runs everything for determinism, yet the **types** are Send-bounded so customer code stays normal: `Arc<RwLock<…>>`, `DashMap`, `Arc<AtomicBool>`, and Send-bounded task spawning all just work. The async methods use **native AFIT** (`async fn` in trait) with explicit `-> impl Future<…> + Send` desugarings to propagate the Send bound, so no `#[async_trait]` and no `?Send` anywhere in the provider layer.
 
 ## TimeProvider
 
@@ -102,9 +102,9 @@ pub trait TaskProvider: Clone + Send + Sync + 'static {
 
 Spawned futures are **`Send + 'static`**. The runtime still pins everything to one OS thread for determinism, but the bound matches what `tokio::spawn` expects, so customer code reads exactly like normal tokio code. The `name` parameter shows up in event logs so you can trace which task generated which event.
 
-**Production**: `TokioTaskProvider` uses `tokio::task::Builder::new().name(...).spawn(...)`, which is plain `tokio::spawn` with a name attached.
+**Production**: `TokioTaskProvider` uses plain `tokio::spawn`. The name only feeds the trace spans around the task.
 
-**Simulation**: The simulator controls task scheduling order, making it deterministic and seed-dependent.
+**Simulation**: `SimTaskProvider` spawns onto the [deterministic executor](./11-executor.md), so scheduling order is a seeded-random, fully reproducible function of the iteration seed.
 
 ## RandomProvider
 

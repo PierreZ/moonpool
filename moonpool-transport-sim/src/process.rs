@@ -52,7 +52,8 @@ impl Process for TransportServerProcess {
         let shutdown = ctx.shutdown().clone();
 
         loop {
-            tokio::select! {
+            moonpool_sim::select! {
+                biased;
                 Some((req, reply)) = append_stream.recv() => {
                     handle_append(&mut h, &mut n, &req, reply, my_ip);
                 }

@@ -24,6 +24,7 @@
 - [Determinism as a Foundation](./part2-foundations/01-determinism.md)
   - [The Single-Core Constraint](./part2-foundations/02-single-core.md)
   - [Seed-Driven Reproducibility](./part2-foundations/03-seeds.md)
+  - [The Deterministic Executor](./part2-foundations/11-executor.md)
 - [The Provider Pattern](./part2-foundations/04-provider-pattern.md)
   - [Quick Start: Swapping Implementations](./part2-foundations/05-providers-quickstart.md)
   - [Deep Dive: Why Providers Exist](./part2-foundations/06-providers-deepdive.md)

@@ -489,8 +489,8 @@ impl SimWorld {
 
     /// Create a task provider for this simulation
     #[must_use]
-    pub fn task_provider(&self) -> crate::TokioTaskProvider {
-        crate::TokioTaskProvider
+    pub fn task_provider(&self) -> crate::providers::SimTaskProvider {
+        crate::providers::SimTaskProvider
     }
 
     /// Create a storage provider for this simulation scoped to a process IP.

@@ -16,8 +16,10 @@ readme = "README.md"
 default = ["sim", "tokio", "transport"]
 sim = ["dep:moonpool-sim"]
 transport = ["dep:moonpool-transport"]
-# Production providers (TokioProviders) on core, and the transport tokio shortcut.
-tokio = ["moonpool-core/tokio-providers", "moonpool-transport?/tokio"]
+# Production providers (TokioProviders) on core, the transport tokio shortcut,
+# and moonpool::select! (core's tokio passthrough) so the documented lean
+# config `default-features = false, features = ["tokio"]` has the macro too.
+tokio = ["moonpool-core/tokio-providers", "moonpool-core/select", "moonpool-transport?/tokio"]
 
 [dependencies]
 moonpool-core = { path = "../moonpool-core", version = "0.7.0", default-features = false }

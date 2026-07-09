@@ -9,10 +9,6 @@ description = "FDB-style transport layer for the moonpool framework"
 documentation = "https://docs.rs/moonpool-transport"
 readme = "README.md"
 
-[package.metadata.docs.rs]
-rustdoc-args = ["--cfg", "tokio_unstable"]
-rustc-args = ["--cfg", "tokio_unstable"]
-
 [features]
 # Production convenience: the TokioTransport alias + NetTransportBuilder::tokio()
 # shortcut, which need core's TokioProviders. Default-on so examples/tests build;
@@ -23,7 +19,9 @@ tokio = ["moonpool-core/tokio-providers"]
 [dependencies]
 # Transport is generic over `P: Providers`; it doesn't need core's production
 # providers unless the `tokio` feature is on (TokioTransport / Builder::tokio()).
-moonpool-core = { path = "../moonpool-core", version = "0.7.0", default-features = false }
+# "select" provides moonpool_core::select! (tokio passthrough here; sim-linking
+# build graphs flip it to the deterministic combinator via feature unification).
+moonpool-core = { path = "../moonpool-core", version = "0.7.0", default-features = false, features = ["select"] }
 moonpool-transport-derive = { path = "../moonpool-transport-derive", version = "0.7.0" }
 
 async-trait = "0.1"
@@ -32,9 +30,12 @@ futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
-# Library code only uses tokio::sync (Notify/mpsc/watch) and the select!/pin! macros.
-# spawn/runtime/time live in #[cfg(test)] mods and pull "full" via dev-dependencies.
-tokio = { version = "1", features = ["sync", "macros"] }
+# Library code only uses tokio::sync (Notify/mpsc); select! comes from
+# moonpool-core and pin! from std. spawn/runtime/time live in #[cfg(test)] mods
+# and pull "full" via dev-dependencies.
+tokio = { version = "1", features = ["sync"] }
+# CancellationToken for shutdown signalling (deterministic FIFO wake order).
+tokio-util = { version = "0.7", default-features = false }
 tracing = "0.1"
 
 [dev-dependencies]

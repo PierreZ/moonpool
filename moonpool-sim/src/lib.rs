@@ -107,13 +107,20 @@
 pub use moonpool_core::{
     CodecError, Endpoint, JsonCodec, MessageCodec, NetworkAddress, NetworkAddressParseError,
     NetworkProvider, Providers, RandomProvider, SimulationError, SimulationResult, TaskProvider,
-    TcpListenerTrait, TimeError, TimeProvider, TokioTaskProvider, UID, WELL_KNOWN_RESERVED_COUNT,
-    WellKnownToken,
+    TcpListenerTrait, TimeError, TimeProvider, UID, WELL_KNOWN_RESERVED_COUNT, WellKnownToken,
 };
+// The deterministic select! (moonpool-sim always enables core's
+// deterministic-select, so this is tokio's expansion with a seeded start
+// offset). Process and
+// workload code must use this instead of tokio::select!, whose branch offset is
+// entropy-drawn outside a seeded tokio runtime.
+pub use moonpool_core::select;
 // Production provider bundle — only when the tokio-providers feature pulls core's
 // net/fs/time. A wasm-able sim (`--no-default-features`) omits these.
 #[cfg(feature = "tokio-providers")]
-pub use moonpool_core::{TokioNetworkProvider, TokioProviders, TokioTimeProvider};
+pub use moonpool_core::{
+    TokioNetworkProvider, TokioProviders, TokioTaskProvider, TokioTimeProvider,
+};
 
 // =============================================================================
 // Core Modules
@@ -121,6 +128,9 @@ pub use moonpool_core::{TokioNetworkProvider, TokioProviders, TokioTimeProvider}
 
 /// Core simulation engine for deterministic testing.
 pub mod sim;
+
+/// The deterministic single-threaded executor (seeded-random scheduling).
+pub mod executor;
 
 /// Simulation runner and orchestration framework.
 pub mod runner;
@@ -189,7 +199,7 @@ pub use storage::{
 };
 
 // Provider exports
-pub use providers::{SimProviders, SimRandomProvider, SimTimeProvider};
+pub use providers::{SimProviders, SimRandomProvider, SimTaskProvider, SimTimeProvider};
 
 // Assertion vocabulary — always available (dependency-free accounting layer).
 pub use moonpool_assertions::{AssertCmp, AssertKind};

@@ -85,14 +85,16 @@ impl Process for HyperServer {
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let listener = ctx.network().bind(ctx.my_ip()).await?;
 
-        let (stream, _addr) = tokio::select! {
+        let (stream, _addr) = moonpool_sim::select! {
+            biased;
             result = listener.accept() => result?,
             () = ctx.shutdown().cancelled() => return Ok(()),
         };
 
         let io = TokioIo::new(stream.compat());
 
-        tokio::select! {
+        moonpool_sim::select! {
+            biased;
             result = hyper::server::conn::http1::Builder::new()
                 .serve_connection(io, service_fn(handle_request)) => {
                 // Ignore hyper errors during shutdown (connection reset, incomplete message)
@@ -125,7 +127,8 @@ impl Workload for HyperClient {
         })?;
 
         // Connect with shutdown awareness (connect may hang forever under chaos)
-        let stream = tokio::select! {
+        let stream = moonpool_sim::select! {
+            biased;
             result = ctx.network().connect(&server_ip) => result?,
             () = ctx.shutdown().cancelled() => return Ok(()),
         };
@@ -146,7 +149,8 @@ impl Workload for HyperClient {
             }
         };
 
-        tokio::select! {
+        moonpool_sim::select! {
+            biased;
             result = send_requests(&mut sender, &server_ip) => result?,
             () = driver => {}
             () = ctx.shutdown().cancelled() => {}

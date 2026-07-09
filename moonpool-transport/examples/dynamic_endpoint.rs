@@ -143,9 +143,11 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Waiting for requests...\n");
 
-    // Handle requests (only from the first server for this demo)
+    // Handle requests (only from the first server for this demo).
+    // Four peer method queues: moonpool's select! keeps fair (rotated) polling
+    // between them, so a burst on one queue cannot starve the others.
     loop {
-        tokio::select! {
+        moonpool_core::select! {
             Some((req, reply)) = calc.add.recv() => {
                 let result = req.a + req.b;
                 println!("ADD: {} + {} = {}", req.a, req.b, result);

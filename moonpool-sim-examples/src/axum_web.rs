@@ -250,7 +250,11 @@ impl Process for WebProcess {
         let mut connections = FuturesUnordered::new();
 
         loop {
-            tokio::select! {
+            // Deliberately NOT `biased;`: accept (new connection) and
+            // connections.next() (progress on in-flight connections) are peer
+            // data sources; the seeded start offset lets different seeds
+            // explore both orderings when both are ready.
+            moonpool_sim::select! {
                 accept = listener.accept() => {
                     let (stream, addr) = accept?;
                     tracing::info!(%addr, "accepted connection");
@@ -267,7 +271,9 @@ impl Process for WebProcess {
                             .serve_connection(io, service)
                             .await
                         {
-                            tracing::warn!("hyper serve_connection error (expected under chaos): {e}");
+                            tracing::warn!(
+                                "hyper serve_connection error (expected under chaos): {e}"
+                            );
                         }
                         tracing::info!("serve_connection finished");
                     });
@@ -308,7 +314,8 @@ impl Workload for WebWorkload {
         // a chaos-induced connect hang is detected as no-progress).
         for round in 0..5 {
             tracing::info!(round, "starting round");
-            let result = tokio::select! {
+            let result = moonpool_sim::select! {
+                biased;
                 result = self.send_round(ctx, &server_ip, round) => result,
                 () = ctx.shutdown().cancelled() => {
                     tracing::info!(round, "shutdown during round, exiting");
@@ -341,7 +348,8 @@ impl WebWorkload {
         round: u32,
     ) -> SimulationResult<()> {
         tracing::info!(round, "connecting to server");
-        let stream = tokio::select! {
+        let stream = moonpool_sim::select! {
+            biased;
             result = ctx.network().connect(server_ip) => result?,
             () = ctx.shutdown().cancelled() => return Ok(()),
         };
@@ -360,11 +368,22 @@ impl WebWorkload {
             }
             tracing::info!("client conn driver finished");
         };
-        tokio::pin!(driver);
 
-        Self::check_health(&mut sender, server_ip, round).await?;
-        Self::create_and_read_item(&mut sender, server_ip, round).await?;
-        Self::check_not_found(&mut sender, server_ip, round).await?;
+        // hyper's SendRequest only makes progress while the Connection future
+        // is polled, so the driver MUST be raced alongside the requests (a
+        // merely pinned-but-never-polled driver leaves every request pending
+        // forever). Same idiom as the hyper_http integration test.
+        moonpool_sim::select! {
+            biased;
+            result = async {
+                Self::check_health(&mut sender, server_ip, round).await?;
+                Self::create_and_read_item(&mut sender, server_ip, round).await?;
+                Self::check_not_found(&mut sender, server_ip, round).await?;
+                Ok::<(), moonpool_sim::SimulationError>(())
+            } => result?,
+            // Connection died first (expected under chaos): give up the round.
+            () = driver => {}
+        }
 
         Ok(())
     }

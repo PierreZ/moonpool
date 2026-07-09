@@ -45,8 +45,12 @@ where
     Resp: DeserializeOwned + Send + Sync + 'static,
     S: Future<Output = ()>,
 {
-    tokio::pin!(signal);
-    tokio::select! {
+    let mut signal = std::pin::pin!(signal);
+    // Reply and signal become ready via distinct simulation events, so the
+    // event queue decides the winner; `biased;` (reply first, matching FDB's
+    // reply-wins-if-resolved semantics) keeps this select offset-free.
+    moonpool_core::select! {
+        biased;
         result = reply_future => match result {
             Ok(resp) => Ok(resp),
             Err(ReplyError::BrokenPromise) => {

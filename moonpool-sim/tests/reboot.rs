@@ -31,7 +31,8 @@ impl Process for EchoProcess {
         tracing::debug!("EchoProcess bound to {}", ctx.my_ip());
 
         loop {
-            let result = tokio::select! {
+            let result = moonpool_sim::select! {
+                biased;
                 r = listener.accept() => r,
                 () = ctx.shutdown().cancelled() => return Ok(()),
             };
@@ -339,7 +340,8 @@ impl Process for GracefulProcess {
         tracing::info!("GracefulProcess bound to {}", ctx.my_ip());
 
         loop {
-            tokio::select! {
+            moonpool_sim::select! {
+                biased;
                 result = listener.accept() => {
                     if let Ok((mut stream, _)) = result {
                         use futures::io::{AsyncReadExt, AsyncWriteExt};

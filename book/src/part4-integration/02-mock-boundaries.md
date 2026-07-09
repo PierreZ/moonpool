@@ -63,7 +63,7 @@ Not every dependency needs full simulation. Think of fakes on a spectrum:
 
 **BTreeMap, not HashMap**. Deterministic iteration order matters for reproducibility. A HashMap iterating in different order across runs makes your simulation non-deterministic.
 
-**Send + Sync for axum State**. Axum requires `State` to be `Send + Sync`. Reach for `Arc<RwLock<BTreeMap<...>>>`, not `Rc<RefCell<...>>`. Everything in moonpool is Send-bounded now, so `Arc<RwLock<…>>` is the natural shape and plugs straight into axum without contortions. The runtime still happens to be a single OS thread (`new_current_thread().build()`), so in practice the lock is never contended, but it's the Send bounds that make the type fit, not the thread count.
+**Send + Sync for axum State**. Axum requires `State` to be `Send + Sync`. Reach for `Arc<RwLock<BTreeMap<...>>>`, not `Rc<RefCell<...>>`. Everything in moonpool is Send-bounded now, so `Arc<RwLock<…>>` is the natural shape and plugs straight into axum without contortions. Execution still happens on a single OS thread (the moonpool deterministic executor), so in practice the lock is never contended, but it's the Send bounds that make the type fit, not the thread count.
 
 **The Oxide convention**. Oxide's [omicron](https://github.com/oxidecomputer/omicron) and [crucible](https://github.com/oxidecomputer/crucible) projects keep fakes in a `fakes/` module alongside the real implementation. The trait and the fake ship together. When you change the trait, you update the fake in the same PR. This keeps fakes from drifting.
 
