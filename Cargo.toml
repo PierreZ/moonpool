@@ -17,10 +17,6 @@ edition = "2024"
 
 [workspace.lints.rust]
 async_fn_in_trait = "allow"
-# moonpool never requires `tokio_unstable`, but production users may opt into
-# it themselves (named tasks for tokio-console; see TokioTaskProvider). Declare
-# the cfg so `#[cfg(tokio_unstable)]` does not trip `unexpected_cfgs`.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

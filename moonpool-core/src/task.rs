@@ -49,10 +49,9 @@ pub trait TaskProvider: Clone + Send + Sync + 'static {
 
 /// Tokio-based task provider.
 ///
-/// This provider creates tasks via `tokio::task::Builder::spawn`. When used
-/// inside the sim runtime (`new_current_thread().build()`) the runtime runs
-/// every task on a single OS thread, preserving determinism while still
-/// requiring `Send + 'static` futures.
+/// This provider creates tasks via `tokio::spawn`. The task name is emitted
+/// in `tracing::trace!` spans around the future rather than attached to the
+/// tokio task itself.
 #[cfg(feature = "tokio-task")]
 #[derive(Clone, Debug)]
 pub struct TokioTaskProvider;
@@ -98,19 +97,7 @@ impl TaskProvider for TokioTaskProvider {
             future.await;
             tracing::trace!("Task {} completed", task_name);
         };
-        // `tokio::task::Builder` gives the task a name for tokio-console, but it is
-        // only available under `--cfg tokio_unstable`. Gate it so the crate still
-        // builds on stable toolchains without requiring that flag workspace-wide
-        // (which would force every downstream consumer to set it too). The task
-        // name is preserved in the trace spans above regardless of the runtime.
-        #[cfg(tokio_unstable)]
-        let inner = tokio::task::Builder::new()
-            .name(name)
-            .spawn(fut)
-            .expect("Failed to spawn task");
-        #[cfg(not(tokio_unstable))]
-        let inner = tokio::spawn(fut);
-        TokioJoinHandle(inner)
+        TokioJoinHandle(tokio::spawn(fut))
     }
 
     async fn yield_now(&self) {

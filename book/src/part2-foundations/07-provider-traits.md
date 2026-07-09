@@ -102,7 +102,7 @@ pub trait TaskProvider: Clone + Send + Sync + 'static {
 
 Spawned futures are **`Send + 'static`**. The runtime still pins everything to one OS thread for determinism, but the bound matches what `tokio::spawn` expects, so customer code reads exactly like normal tokio code. The `name` parameter shows up in event logs so you can trace which task generated which event.
 
-**Production**: `TokioTaskProvider` uses `tokio::task::Builder::new().name(...).spawn(...)`, which is plain `tokio::spawn` with a name attached.
+**Production**: `TokioTaskProvider` uses plain `tokio::spawn`. The name only feeds the trace spans around the task.
 
 **Simulation**: `SimTaskProvider` spawns onto the [deterministic executor](./11-executor.md), so scheduling order is a seeded-random, fully reproducible function of the iteration seed.
 
