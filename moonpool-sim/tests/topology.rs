@@ -235,6 +235,44 @@ fn per_machine_attrition_respects_group_budget() {
 }
 
 // ============================================================================
+// Test: datacenter-scoped attrition blacks out a whole region and recovers.
+// ============================================================================
+
+#[test]
+fn per_datacenter_attrition_reboots_a_whole_region() {
+    let report = SimulationBuilder::new()
+        // 2 dc × 1 zone × 2 machines × 1 proc = 4 processes, 2 per datacenter.
+        .cluster(LocalityConfig::new(2, 1, 2, 1), || {
+            Box::new(LocalityProcess {
+                expected_collocated: 0,
+            })
+        })
+        .workload(TimedWorkload(Duration::from_secs(25)))
+        .enable_chaos([Chaos::Attrition {
+            config: Attrition {
+                // Exactly one datacenter's worth of processes may be dead.
+                max_dead: 2,
+                prob_graceful: 0.3,
+                prob_crash: 0.5,
+                prob_wipe: 0.2,
+                recovery_delay_ms: None,
+                grace_period_ms: None,
+                scope: AttritionScope::PerDatacenter,
+            },
+            mode: ChaosMode::Random,
+        }])
+        .chaos_duration(Duration::from_secs(10))
+        .set_iterations(5)
+        .set_debug_seeds(vec![1, 2, 3, 4, 5])
+        .run();
+
+    assert_eq!(
+        report.failed_runs, 0,
+        "datacenter-scoped attrition should not deadlock or fail"
+    );
+}
+
+// ============================================================================
 // Test: per-seed range topology (randomized cluster shape) runs clean.
 // ============================================================================
 

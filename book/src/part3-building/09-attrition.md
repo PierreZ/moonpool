@@ -54,7 +54,7 @@ Attrition {
 
 **`grace_period_ms`** controls how long a graceful shutdown has to complete. Again, drawn randomly from the range. The default is 2 to 5 seconds.
 
-**`scope`** decides which failure domain each reboot targets. The default, `AttritionScope::PerProcess`, kills one random process at a time. `PerMachine` and `PerZone` kill **all collocated processes together**, which is the subject of the next section.
+**`scope`** decides which failure domain each reboot targets. The default, `AttritionScope::PerProcess`, kills one random process at a time. `PerMachine`, `PerZone`, and `PerDatacenter` kill **all collocated processes together**, which is the subject of the next section.
 
 ## Using Attrition
 
@@ -123,7 +123,7 @@ let machine_mates = ctx.topology().peers_on_my_machine();
 let same_dc = ctx.topology().ips_in_domain(DomainLevel::Datacenter, me.datacenter());
 ```
 
-Now `scope` earns its keep. With `AttritionScope::PerMachine`, attrition picks a machine instead of a process and reboots **every process on it in the same instant**. The two processes that share `dc1-z1-m1` die together and recover together, exactly as they would when their host kernel panics. `PerZone` does the same one level up.
+Now `scope` earns its keep. With `AttritionScope::PerMachine`, attrition picks a machine instead of a process and reboots **every process on it in the same instant**. The two processes that share `dc1-z1-m1` die together and recover together, exactly as they would when their host kernel panics. `PerZone` does the same one level up, and `PerDatacenter` one level above that, for the region-wide blackout that only a replication scheme spanning datacenters is supposed to survive.
 
 ```rust
 .enable_chaos([Chaos::Attrition {
@@ -141,6 +141,8 @@ Now `scope` earns its keep. With `AttritionScope::PerMachine`, attrition picks a
 ```
 
 `max_dead` still counts dead **processes**, and a machine reboot is atomic against that budget: attrition only kills a machine when the whole group fits within the remaining budget. With two processes per machine, `max_dead: 2` lets exactly one machine be down at a time and never leaves a machine half-dead. Set it to a multiple of your machine size that matches how many machines your replication can lose.
+
+The same topology also shapes the network, not just the reboots. `PartitionStrategy::IsolateZone` and `IsolateDatacenter` cut a whole domain off the rest of the cluster, and `LinkLatencyConfig` gives cross-datacenter links their real cost. Both are covered in [Network Faults](10-network-faults.md).
 
 For targeted correlated faults, `FaultContext` exposes the group reboots directly. `ctx.reboot_machine("dc1-z1-m1", RebootKind::Crash)` kills a named machine and returns the IPs it took down, and `ctx.reboot_domain(DomainLevel::Datacenter, "dc1", kind)` blacks out a whole datacenter. Combined with `ctx.ips_in_domain(...)`, the same domain ids drive network partitions across a zone or datacenter boundary, so you can model a region cut as cleanly as a host reboot.
 

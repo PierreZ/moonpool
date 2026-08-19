@@ -40,8 +40,9 @@ use async_trait::async_trait;
 use moonpool_core::TimeProvider;
 
 use crate::SimulationResult;
+use crate::locality::DomainLevel;
 use crate::providers::{SimRandomProvider, SimTimeProvider};
-use crate::runner::locality::{DomainLevel, MachineRegistry};
+use crate::runner::locality::MachineRegistry;
 use crate::runner::process::{AttritionScope, RebootKind};
 use crate::runner::tags::TagRegistry;
 use crate::sim::SimWorld;
@@ -491,6 +492,10 @@ impl FaultInjector for AttritionInjector {
                 AttritionScope::PerZone => {
                     let zones = ctx.machine_registry().all_zones();
                     self.inject_domain(ctx, DomainLevel::Zone, &zones)?;
+                }
+                AttritionScope::PerDatacenter => {
+                    let datacenters = ctx.machine_registry().all_datacenters();
+                    self.inject_domain(ctx, DomainLevel::Datacenter, &datacenters)?;
                 }
             }
         }

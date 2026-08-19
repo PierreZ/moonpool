@@ -20,6 +20,17 @@ For tail latency testing, moonpool supports **bimodal latency distribution**, fo
 
 Re-sampling latency per operation has a blind spot: no single connection ever stays slow. Real clusters break differently. One machine sits behind a degraded switch port and every message to it lags, run after run, while the rest of the fleet is healthy. That **stably-slow peer** is exactly what stalls a quorum or reorders a consensus round, and uniform per-operation jitter never produces it. So moonpool borrows FoundationDB's `SimClogging` trick: set `max_pair_latency` to a range and each ordered IP pair draws **one** fixed latency at first contact, then carries it for the whole run. Off by default (`ZERO..ZERO`), it adds nothing. Turn it on and some pairs are permanently sluggish while others are quick, which is how you find the bug where the slow replica is the one holding the lease.
 
+There is a second blind spot, and it is not a fault at all. A message between two processes on the same machine and a message between Paris and Montreal are both "one network operation" to the simulator, drawn from the same range. Real deployments do not work that way: loopback is tens of microseconds, a rack hop is hundreds, a cross-region hop is tens of milliseconds. If a replication protocol only ever sees uniform links, its cross-datacenter behavior is untested. `NetworkConfiguration::link_latency` fixes that. Give it a `LinkLatencyConfig` and each locality distance gets its own distribution:
+
+```rust
+SimulationBuilder::new()
+    .cluster(LocalityConfig::new(2, 2, 2, 1), || Box::new(MyNode::new()))
+    // Same machine, same zone, same datacenter, cross datacenter.
+    .link_latency(LinkLatencyConfig::default())
+```
+
+The engine classifies every IP pair through the [`.cluster()`](09-attrition.md#failure-domains-correlated-reboots) topology, samples the matching distribution once at first contact, and keeps that value for the whole run, in the same per-pair budget as `max_pair_latency` (when both are on, the two samples are summed). A pair where either side has no locality, a workload client for instance, gets nothing extra, so plain `.processes()` runs are unaffected. FoundationDB does not model this at all, it runs a single global latency distribution, but a library that wants to find cross-region replication bugs needs the distance to be visible in the timing.
+
 ### Connection Drops
 
 Random close injects spontaneous connection failures during I/O operations, at a configurable probability (default 0.001%). When triggered, 30% of closes are **explicit** (the caller gets an error) and 70% are **silent** (the connection just stops working). This ratio, taken from FoundationDB, tests both error-handling paths and timeout-based failure detection.
@@ -48,15 +59,23 @@ Simulated clocks can drift by up to 100ms (configurable) between nodes. This tes
 
 ### Network Partitions
 
-Moonpool supports three partition strategies:
+Moonpool supports seven partition strategies:
 
 | Strategy | Behavior | Tests |
 |----------|----------|-------|
 | Random | Random IP pairs partitioned | General chaos |
 | UniformSize | Partition of random size (1 to n-1 nodes) | Various quorum scenarios |
 | IsolateSingle | One node isolated from all others | Common production failure |
+| IsolateZone | Every process of one random zone cut from the rest | Rack or availability-zone loss |
+| IsolateDatacenter | Every process of one random datacenter cut from the rest | Region loss, cross-datacenter replication |
+| AsymmetricSend | One node's outgoing traffic blocked, incoming still flows | Half-reachable node, failure detectors |
+| AsymmetricRecv | One node's incoming traffic blocked, outgoing still flows | The mirror case |
 
 Partitions have configurable probability and duration. They can be programmatic (via `FaultContext::partition`) or automatic (via `partition_probability` in the chaos config).
+
+The first three strategies are IP-blind: they pick nodes out of a hat. `IsolateZone` and `IsolateDatacenter` read the [`.cluster()`](09-attrition.md#failure-domains-correlated-reboots) topology instead, so the cut lands exactly where a real one would, on the boundary that shares a switch or a region. Without a topology they fall back to `Random` selection, which keeps them safe to draw for any seed.
+
+The asymmetric pair is worth dwelling on. A node whose sends are blocked still hears every heartbeat from the cluster, so it happily believes it is healthy while everyone else marks it dead. Systems that infer liveness from "I can see you" rather than "you can see me" split brains here. Both arms record their own fault events (`SendPartitionCreated`, `RecvPartitionCreated`) on the timeline, so an invariant can correlate application behavior with the exact one-way cut that caused it.
 
 ### Connect Failures
 

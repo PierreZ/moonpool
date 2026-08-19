@@ -31,6 +31,8 @@
 //! | Send-only block | `partition_send_from()` | Manual | Asymmetric network failures |
 //! | Recv-only block | `partition_recv_to()` | Manual | Asymmetric network failures |
 //! | Partition strategy | `partition_strategy` | Random | Different failure patterns (uniform, isolate) |
+//! | Zone / datacenter cut | `partition_strategy = IsolateZone` / `IsolateDatacenter` | Random | Rack or region loss (needs a locality topology) |
+//! | One-way cut | `partition_strategy = AsymmetricSend` / `AsymmetricRecv` | Random | Half-reachable node, failure detector confusion |
 //!
 //! ## Data Integrity Faults
 //!
@@ -80,6 +82,7 @@
 //! - Clock drift: FDB sim2.actor.cpp:1058-1064
 //! - Connect failures: FDB sim2.actor.cpp:1243-1250
 
+use crate::locality::LinkClass;
 use crate::sim::rng::{
     config_random_bool, sim_random_f64, sim_random_range, sim_random_range_or_default,
 };
@@ -97,6 +100,10 @@ use std::time::Duration;
 /// - Random: General chaos, unpredictable failures
 /// - `UniformSize`: Tests various quorum sizes and split scenarios
 /// - `IsolateSingle`: Tests single-node isolation (common in production)
+/// - `IsolateZone` / `IsolateDatacenter`: Tests correlated, topology-shaped cuts
+///   (rack or region loss)
+/// - `AsymmetricSend` / `AsymmetricRecv`: Tests one-way reachability, where a node
+///   still hears the cluster but cannot answer (or the reverse)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PartitionStrategy {
     /// Random IP pairs selected for partitioning.
@@ -112,6 +119,35 @@ pub enum PartitionStrategy {
     /// Isolate single node - always partition exactly one node from the rest.
     /// Tests the common production scenario where a single node becomes unreachable.
     IsolateSingle,
+
+    /// Isolate a whole zone - cut every process of one random zone from the rest.
+    ///
+    /// Models a rack or availability-zone loss, where collocated processes fail
+    /// together. Requires a locality topology
+    /// ([`SimWorld::set_localities`](crate::SimWorld::set_localities), installed by
+    /// [`.cluster()`](crate::SimulationBuilder::cluster)); without one it degrades
+    /// to [`Random`](Self::Random) selection.
+    IsolateZone,
+
+    /// Isolate a whole datacenter - cut every process of one random datacenter
+    /// from the rest.
+    ///
+    /// Models a region-level network cut, the classic cross-datacenter replication
+    /// test. Degrades to [`Random`](Self::Random) without a locality topology.
+    IsolateDatacenter,
+
+    /// Block all *outgoing* traffic from one random node (one-way cut).
+    ///
+    /// The node still receives, so it keeps seeing cluster traffic while its own
+    /// replies vanish (the failure mode that breaks naive failure detectors).
+    /// FDB models the same asymmetry with its send-side clogging.
+    AsymmetricSend,
+
+    /// Block all *incoming* traffic to one random node (one-way cut).
+    ///
+    /// The mirror of [`AsymmetricSend`](Self::AsymmetricSend): the node keeps
+    /// sending, but hears nothing back.
+    AsymmetricRecv,
 }
 
 /// Connection establishment failure mode for fault injection.
@@ -323,11 +359,17 @@ impl ChaosConfiguration {
             buggified_delay_probability: f64::from(sim_random_range(20..30)) / 100.0, // 20-30%
             connect_failure_mode: ConnectFailureMode::random_for_seed(),
             connect_failure_probability: f64::from(sim_random_range(40..60)) / 100.0, // 40-60%
-            // Randomly choose partition strategy
-            partition_strategy: match sim_random_range(0..3) {
+            // Randomly choose partition strategy. The locality-shaped arms
+            // degrade to `Random` selection when the run has no topology, so
+            // they are safe to draw for every seed.
+            partition_strategy: match sim_random_range(0..7) {
                 0 => PartitionStrategy::Random,
                 1 => PartitionStrategy::UniformSize,
-                _ => PartitionStrategy::IsolateSingle,
+                2 => PartitionStrategy::IsolateSingle,
+                3 => PartitionStrategy::IsolateZone,
+                4 => PartitionStrategy::IsolateDatacenter,
+                5 => PartitionStrategy::AsymmetricSend,
+                _ => PartitionStrategy::AsymmetricRecv,
             },
             // Permanent per-pair latency, randomized upper bound up to 100ms (FDB
             // buggifies MAX_CLOGGING_LATENCY to 0.1s). Kept last so existing RNG
@@ -402,6 +444,60 @@ impl ChaosConfiguration {
     }
 }
 
+/// Distance-based latency, one [`LatencyDistribution`] per locality class.
+///
+/// This is *realism*, not chaos: a cross-datacenter hop is slow on a healthy
+/// day. Attach it to [`NetworkConfiguration::link_latency`] and the engine
+/// classifies every IP pair through the installed locality topology
+/// ([`SimWorld::set_localities`](crate::SimWorld::set_localities)), samples the
+/// matching distribution once at first contact, and applies that fixed extra to
+/// every delivery on the pair (it lands in the same per-pair budget as
+/// [`ChaosConfiguration::max_pair_latency`], summed with it).
+///
+/// A pair where either endpoint has no locality gets no distance latency, so
+/// plain `.processes()` runs are unaffected.
+///
+/// `FoundationDB` does not model this (a single global latency distribution),
+/// but it is what makes cross-datacenter replication testing meaningful.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkLatencyConfig {
+    /// Processes collocated on one machine (loopback).
+    pub same_machine: LatencyDistribution,
+    /// Different machines in the same zone (rack-local).
+    pub same_zone: LatencyDistribution,
+    /// Different zones in the same datacenter.
+    pub same_datacenter: LatencyDistribution,
+    /// Different datacenters (wide area).
+    pub cross_datacenter: LatencyDistribution,
+}
+
+impl Default for LinkLatencyConfig {
+    /// Rough real-world one-way link delays: microseconds on loopback, tens of
+    /// milliseconds between regions.
+    fn default() -> Self {
+        let uniform = |start, end| LatencyDistribution::Uniform { start, end };
+        Self {
+            same_machine: uniform(Duration::from_micros(10), Duration::from_micros(50)),
+            same_zone: uniform(Duration::from_micros(100), Duration::from_micros(500)),
+            same_datacenter: uniform(Duration::from_micros(500), Duration::from_millis(2)),
+            cross_datacenter: uniform(Duration::from_millis(20), Duration::from_millis(80)),
+        }
+    }
+}
+
+impl LinkLatencyConfig {
+    /// The distribution to sample for a given locality distance.
+    #[must_use]
+    pub fn distribution_for(&self, class: LinkClass) -> &LatencyDistribution {
+        match class {
+            LinkClass::SameMachine => &self.same_machine,
+            LinkClass::SameZone => &self.same_zone,
+            LinkClass::SameDatacenter => &self.same_datacenter,
+            LinkClass::CrossDatacenter => &self.cross_datacenter,
+        }
+    }
+}
+
 /// Configuration for network simulation parameters
 #[derive(Debug, Clone)]
 pub struct NetworkConfiguration {
@@ -415,6 +511,12 @@ pub struct NetworkConfiguration {
     pub read_latency: LatencyDistribution,
     /// Latency distribution for write operations
     pub write_latency: LatencyDistribution,
+
+    /// Distance-based per-pair latency, resolved through the locality topology.
+    ///
+    /// `None` (the default) keeps every link equally fast, whatever the
+    /// topology. See [`LinkLatencyConfig`].
+    pub link_latency: Option<LinkLatencyConfig>,
 
     /// Chaos injection configuration
     pub chaos: ChaosConfiguration,
@@ -443,6 +545,8 @@ impl Default for NetworkConfiguration {
                 start: Duration::from_micros(100),
                 end: Duration::from_micros(600),
             },
+            // Realism knob, opt-in: distance-blind by default.
+            link_latency: None,
             chaos: ChaosConfiguration::default(),
         }
     }
@@ -639,6 +743,9 @@ impl NetworkConfiguration {
                 Duration::from_micros(sim_random_range(50..1000))
                     ..Duration::from_micros(sim_random_range(200..2000)),
             ),
+            // Distance latency models the deployment, not the seed, so chaos
+            // runs leave it to the caller (and draw no RNG for it).
+            link_latency: None,
             chaos: ChaosConfiguration::random_for_seed(),
         }
     }
@@ -668,6 +775,7 @@ impl NetworkConfiguration {
             connect_latency: uniform(ten_us, ten_us),
             read_latency: uniform(one_us, one_us),
             write_latency: uniform(one_us, one_us),
+            link_latency: None,
             chaos: ChaosConfiguration::disabled(),
         }
     }
@@ -762,6 +870,48 @@ mod swarm_tests {
             0.0_f64.to_bits(),
             "expected 0.0, got {value}"
         );
+    }
+}
+
+#[cfg(test)]
+mod partition_strategy_tests {
+    use super::{ChaosConfiguration, PartitionStrategy};
+    use crate::sim::rng::{reset_sim_rng, set_sim_seed};
+    use std::collections::BTreeSet;
+
+    fn strategy_for(seed: u64) -> PartitionStrategy {
+        reset_sim_rng();
+        set_sim_seed(seed);
+        ChaosConfiguration::random_for_seed().partition_strategy
+    }
+
+    #[test]
+    fn random_for_seed_reaches_every_strategy() {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for seed in 0..500_u64 {
+            seen.insert(format!("{:?}", strategy_for(seed)));
+        }
+        for expected in [
+            PartitionStrategy::Random,
+            PartitionStrategy::UniformSize,
+            PartitionStrategy::IsolateSingle,
+            PartitionStrategy::IsolateZone,
+            PartitionStrategy::IsolateDatacenter,
+            PartitionStrategy::AsymmetricSend,
+            PartitionStrategy::AsymmetricRecv,
+        ] {
+            assert!(
+                seen.contains(&format!("{expected:?}")),
+                "no seed in 0..500 selected {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn strategy_selection_is_reproducible_per_seed() {
+        for seed in [0_u64, 1, 42, 12_345] {
+            assert_eq!(strategy_for(seed), strategy_for(seed));
+        }
     }
 }
 

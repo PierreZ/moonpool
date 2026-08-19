@@ -3,7 +3,9 @@
 //! This module provides types for configuring topology and
 //! creating topology information for workloads and processes.
 
-use super::locality::{DomainLevel, LocalityInfo, MachineRegistry};
+use crate::locality::{DomainLevel, LocalityInfo};
+
+use super::locality::MachineRegistry;
 use super::tags::{ProcessTags, TagRegistry};
 
 /// Topology information provided to workloads and processes.

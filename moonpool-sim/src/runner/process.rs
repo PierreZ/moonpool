@@ -82,9 +82,10 @@ pub enum RebootKind {
 /// The failure domain a reboot targets.
 ///
 /// Controls how [`AttritionInjector`](super::fault_injector) selects victims.
-/// `PerMachine` / `PerZone` reboot all collocated processes *together* — modeling
-/// correlated failure — and require a [`.cluster()`](super::builder::SimulationBuilder::cluster)
-/// topology. Without locality they are a no-op.
+/// `PerMachine` / `PerZone` / `PerDatacenter` reboot all collocated processes
+/// *together* (modeling correlated failure) and require a
+/// [`.cluster()`](super::builder::SimulationBuilder::cluster) topology. Without
+/// locality they are a no-op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AttritionScope {
     /// Reboot a single random process (the historical behavior).
@@ -94,6 +95,12 @@ pub enum AttritionScope {
     PerMachine,
     /// Reboot every process in a single random zone atomically.
     PerZone,
+    /// Reboot every process in a single random datacenter atomically.
+    ///
+    /// The widest correlated failure: a whole region going down. Only fires when
+    /// the entire datacenter fits in the remaining `max_dead` budget, so a
+    /// datacenter-sized budget is needed for it to ever trigger.
+    PerDatacenter,
 }
 
 /// Built-in attrition configuration for automatic process reboots.
@@ -157,10 +164,11 @@ pub struct Attrition {
     /// The failure domain each reboot targets.
     ///
     /// [`AttritionScope::PerProcess`] (the default) kills one random process at
-    /// a time. [`AttritionScope::PerMachine`] / [`AttritionScope::PerZone`] kill
-    /// all collocated processes together, modeling correlated failure; they
-    /// require a [`.cluster()`](super::builder::SimulationBuilder::cluster)
-    /// topology and respect `max_dead` as a whole-group budget.
+    /// a time. [`AttritionScope::PerMachine`], [`AttritionScope::PerZone`], and
+    /// [`AttritionScope::PerDatacenter`] kill all collocated processes together,
+    /// modeling correlated failure; they require a
+    /// [`.cluster()`](super::builder::SimulationBuilder::cluster) topology and
+    /// respect `max_dead` as a whole-group budget.
     pub scope: AttritionScope,
 }
 

@@ -16,6 +16,7 @@ The builder pattern for configuring and running simulation experiments. Created 
 | `workloads_with_client_id(count, cid, factory)` | `WorkloadCount`, `ClientId`, factory | Factory workloads with custom client IDs |
 | `processes(count, factory)` | `impl Into<ProcessCount>`, `Fn() -> Box<dyn Process>` | Add server processes (system under test) |
 | `cluster(config, factory)` | `LocalityConfig`, `Fn() -> Box<dyn Process>` | Add processes laid out across a datacenter/zone/machine topology (replaces `processes`) |
+| `link_latency(config)` | `LinkLatencyConfig` | Give links a distance-dependent latency, resolved through the `cluster` topology |
 | `tags(dimensions)` | `&[(&str, &[&str])]` | Attach round-robin tag distribution to processes |
 | `attrition(config)` | `Attrition` | Enable automatic process reboots during chaos phase |
 | `invariant(i)` | `impl Invariant` | Add an invariant checked after every simulation event |
@@ -104,13 +105,14 @@ The `prob_*` fields are **weights**, not probabilities. They are normalized inte
 
 ### AttritionScope
 
-Which failure domain a reboot kills. `PerMachine` and `PerZone` require a [`.cluster()`](../part3-building/09-attrition.md#failure-domains-correlated-reboots) topology; without locality they are a no-op.
+Which failure domain a reboot kills. `PerMachine`, `PerZone`, and `PerDatacenter` require a [`.cluster()`](../part3-building/09-attrition.md#failure-domains-correlated-reboots) topology; without locality they are a no-op.
 
 | Variant | Behavior |
 |---------|----------|
 | `PerProcess` | Reboot one random process at a time (the default) |
 | `PerMachine` | Reboot every process on a random machine together, atomically against `max_dead` |
 | `PerZone` | Reboot every process in a random zone together, atomically against `max_dead` |
+| `PerDatacenter` | Reboot every process in a random datacenter together, atomically against `max_dead` |
 
 ### RebootKind
 
@@ -133,6 +135,7 @@ Top-level network simulation parameters.
 | `connect_latency` | `LatencyDistribution` | `Uniform` 1ms..11ms |
 | `read_latency` | `LatencyDistribution` | `Uniform` 10us..60us |
 | `write_latency` | `LatencyDistribution` | `Uniform` 100us..600us |
+| `link_latency` | `Option<LinkLatencyConfig>` | `None` (distance-blind) |
 | `chaos` | `ChaosConfiguration` | See below |
 
 ### Constructor variants
@@ -154,6 +157,17 @@ Each per-operation latency field above is a `LatencyDistribution`, not a plain r
 | `Bimodal { fast_range, slow_range, slow_probability }` | Fast cluster with a rare slow tail | Cross-datacenter hops, GC spikes (FoundationDB) |
 
 `default()` and `fast_local()` keep every field `Uniform`, so behavior is unchanged unless you opt in. `random_for_seed()` mixes all three shapes per field for chaos seeds. The same `LatencyDistribution` type configures storage `read_latency`, `write_latency`, and `sync_latency`.
+
+### Link latency (distance-based)
+
+`link_latency` is realism, not chaos: it lives on `NetworkConfiguration` and is applied whatever the chaos mode. Each ordered IP pair is classified through the installed locality topology, samples its class distribution once at first contact, and keeps that value for the run. The result lands in the same per-pair budget as `max_pair_latency` and is summed with it. A pair where either endpoint has no locality gets nothing.
+
+| Field | Type | Default |
+|-------|------|---------|
+| `same_machine` | `LatencyDistribution` | `Uniform` 10us..50us |
+| `same_zone` | `LatencyDistribution` | `Uniform` 100us..500us |
+| `same_datacenter` | `LatencyDistribution` | `Uniform` 500us..2ms |
+| `cross_datacenter` | `LatencyDistribution` | `Uniform` 20ms..80ms |
 
 ## ChaosConfiguration
 
@@ -182,7 +196,7 @@ Each ordered IP pair samples one fixed latency from this range at first contact 
 | `partition_duration` | `Range<Duration>` | 200ms..2s |
 | `partition_strategy` | `PartitionStrategy` | `Random` |
 
-**PartitionStrategy** variants: `Random`, `UniformSize`, `IsolateSingle`.
+**PartitionStrategy** variants: `Random`, `UniformSize`, `IsolateSingle`, `IsolateZone`, `IsolateDatacenter`, `AsymmetricSend`, `AsymmetricRecv`. The two `Isolate{Zone,Datacenter}` arms need a [`.cluster()`](../part3-building/09-attrition.md#failure-domains-correlated-reboots) topology and degrade to `Random` selection without one. The two `Asymmetric*` arms cut a single node one way, using the same primitives as `partition_send_from()` / `partition_recv_to()`.
 
 ### Bit Flips
 

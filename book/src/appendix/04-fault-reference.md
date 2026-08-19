@@ -31,6 +31,7 @@ Configured via `ChaosConfiguration` (nested under `NetworkConfiguration::chaos`)
 | Bimodal tail | `LatencyDistribution::Bimodal { fast_range, slow_range, slow_probability }` | opt-in | Rare cross-datacenter hops, GC spikes (FoundationDB model) |
 | Write clogging | `clog_probability` / `clog_duration` | 0%, 100-300ms | Backpressure handling, flow control |
 | Per-pair permanent latency | `max_pair_latency` | `ZERO..ZERO` (off) | One stably-slow peer blocking quorum, asymmetric link delay |
+| Distance-based link latency | `link_latency` (`LinkLatencyConfig`) | `None` (off) | Loopback vs rack vs region hops, cross-datacenter replication cost |
 | Clock drift | `clock_drift_enabled` / `clock_drift_max` | enabled, 100ms | Lease expiration, distributed consensus, TTL handling |
 | Buggified delay | `buggified_delay_probability` / `buggified_delay_max` | 25%, 100ms | Race conditions, timing-dependent bugs |
 | Handshake delay | `handshake_delay_enabled` / `handshake_delay_max` | enabled, 10ms | TLS negotiation, connection startup overhead |
@@ -42,6 +43,8 @@ Configured via `ChaosConfiguration` (nested under `NetworkConfiguration::chaos`)
 | Random partition | `partition_probability` | 0% | Split-brain, quorum loss, leader election |
 | Partition duration | `partition_duration` | 200ms-2s | Recovery time after network heal |
 | Partition strategy | `partition_strategy` | `Random` | `Random` / `UniformSize` / `IsolateSingle` patterns |
+| Failure-domain partition | `partition_strategy = IsolateZone` / `IsolateDatacenter` | `Random` | Rack or region cut (needs a `cluster` topology, else falls back to `Random`) |
+| One-way partition | `partition_strategy = AsymmetricSend` / `AsymmetricRecv` | `Random` | Half-reachable node, failure detectors that infer liveness from the wrong direction |
 
 Manual partition methods are also available on `SimWorld`: `partition_pair()`, `partition_send_from()`, `partition_recv_to()`.
 
@@ -118,6 +121,7 @@ Configured via [`Attrition`](../part3-building/attrition.md) (built-in) or custo
 | Crash reboot | `RebootKind::Crash` | Immediate task abort, all connections reset, restart after recovery delay |
 | Crash + wipe | `RebootKind::CrashAndWipe` | Crash behavior + immediate wipe of all persistent storage owned by the process (scoped by IP) |
 | Continuous attrition | `Attrition` config | Random reboots during chaos phase with weighted `prob_graceful`/`prob_crash`/`prob_wipe` and `max_dead` limit |
+| Correlated reboot | `AttritionScope::PerMachine` / `PerZone` / `PerDatacenter` | Reboot every process of one failure domain together; only fires when the whole group fits in `max_dead` |
 
 ## Configuration Presets
 
