@@ -25,6 +25,23 @@ pub enum DomainLevel {
     Machine,
 }
 
+/// How far apart two processes are in the locality hierarchy.
+///
+/// Derived by [`LocalityInfo::link_class`] and used by the engine to pick a
+/// distance-appropriate latency distribution
+/// ([`LinkLatencyConfig`](crate::network::LinkLatencyConfig)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkClass {
+    /// Both processes run on the same machine (loopback).
+    SameMachine,
+    /// Same zone, different machines (rack-local).
+    SameZone,
+    /// Same datacenter, different zones.
+    SameDatacenter,
+    /// Different datacenters (wide area).
+    CrossDatacenter,
+}
+
 /// Resolved failure-domain locality for a single process instance.
 ///
 /// Identifiers are globally unique and hierarchical (`dc1`, `dc1-z1`,
@@ -79,11 +96,29 @@ impl LocalityInfo {
             DomainLevel::Machine => &self.machine,
         }
     }
+
+    /// Classify the network distance between this process and `other`.
+    ///
+    /// Walks the hierarchy from the innermost level outwards, so a shared
+    /// machine wins over a shared zone, and a shared zone over a shared
+    /// datacenter. Symmetric by construction.
+    #[must_use]
+    pub fn link_class(&self, other: &Self) -> LinkClass {
+        if self.machine == other.machine {
+            LinkClass::SameMachine
+        } else if self.zone == other.zone {
+            LinkClass::SameZone
+        } else if self.datacenter == other.datacenter {
+            LinkClass::SameDatacenter
+        } else {
+            LinkClass::CrossDatacenter
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DomainLevel, LocalityInfo};
+    use super::{DomainLevel, LinkClass, LocalityInfo};
 
     #[test]
     fn id_for_matches_accessors() {
@@ -91,5 +126,34 @@ mod tests {
         assert_eq!(loc.id_for(DomainLevel::Datacenter), loc.datacenter());
         assert_eq!(loc.id_for(DomainLevel::Zone), loc.zone());
         assert_eq!(loc.id_for(DomainLevel::Machine), loc.machine());
+    }
+
+    #[test]
+    fn link_class_walks_the_hierarchy_inside_out() {
+        let reference = LocalityInfo::new("dc1", "dc1-z1", "dc1-z1-m1");
+        let same_machine = LocalityInfo::new("dc1", "dc1-z1", "dc1-z1-m1");
+        let same_zone = LocalityInfo::new("dc1", "dc1-z1", "dc1-z1-m2");
+        let same_datacenter = LocalityInfo::new("dc1", "dc1-z2", "dc1-z2-m1");
+        let cross_datacenter = LocalityInfo::new("dc2", "dc2-z1", "dc2-z1-m1");
+
+        assert_eq!(
+            reference.link_class(&same_machine),
+            LinkClass::SameMachine,
+            "same machine id must win over every outer level"
+        );
+        assert_eq!(reference.link_class(&same_zone), LinkClass::SameZone);
+        assert_eq!(
+            reference.link_class(&same_datacenter),
+            LinkClass::SameDatacenter
+        );
+        assert_eq!(
+            reference.link_class(&cross_datacenter),
+            LinkClass::CrossDatacenter
+        );
+        assert_eq!(
+            cross_datacenter.link_class(&reference),
+            LinkClass::CrossDatacenter,
+            "classification must be symmetric"
+        );
     }
 }

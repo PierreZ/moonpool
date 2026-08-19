@@ -2126,18 +2126,28 @@ impl SimWorld {
     /// Get the permanent per-pair base latency for a connection, memoizing it on
     /// first contact (FDB `SimClogging`).
     ///
-    /// Returns [`Duration::ZERO`] — without drawing from the RNG or touching the
-    /// pair map — when the `max_pair_latency` range is disabled (its `end` is zero)
-    /// or the connection's endpoints are unknown. Otherwise samples a fixed latency
-    /// from `max_pair_latency` once per ordered IP pair and reuses it for the run.
+    /// Two independent extras share this one per-pair budget and are summed:
+    /// - the chaos `max_pair_latency` sample (a stably-slow link);
+    /// - the distance-based [`LinkLatencyConfig`](crate::network::LinkLatencyConfig)
+    ///   sample, classified through the installed locality topology.
+    ///
+    /// Returns [`Duration::ZERO`] without drawing from the RNG or touching the
+    /// pair map when both are off, or when the connection's endpoints are
+    /// unknown. Otherwise the sum is sampled once per ordered IP pair and reused
+    /// for the whole run.
     ///
     /// # Panics
     ///
     /// Panics if the simulation lock is poisoned by a prior task panic.
     #[must_use]
     pub fn connection_base_latency(&self, connection_id: ConnectionId) -> Duration {
-        let range = self.with_network_config(|config| config.chaos.max_pair_latency.clone());
-        if range.end.is_zero() {
+        let (range, link_latency) = self.with_network_config(|config| {
+            (
+                config.chaos.max_pair_latency.clone(),
+                config.link_latency.clone(),
+            )
+        });
+        if range.end.is_zero() && link_latency.is_none() {
             return Duration::ZERO;
         }
 
@@ -2162,8 +2172,52 @@ impl SimWorld {
         }
 
         // Sample a fixed latency for this pair and memoize it for the whole run.
-        let latency = crate::network::sample_duration(&range);
+        // The chaos draw comes first so runs without distance latency keep their
+        // historical RNG sequence.
+        let mut latency = if range.end.is_zero() {
+            Duration::ZERO
+        } else {
+            crate::network::sample_duration(&range)
+        };
+        if let Some(link_latency) = &link_latency {
+            latency =
+                latency.saturating_add(self.sample_link_latency(link_latency, local_ip, remote_ip));
+        }
         self.set_pair_latency_if_not_set(local_ip, remote_ip, latency)
+    }
+
+    /// Sample the distance-based extra for an IP pair.
+    ///
+    /// Returns [`Duration::ZERO`] (drawing nothing) when either endpoint has no
+    /// locality, which is the case for every run without a `.cluster()`
+    /// topology, and for workload/client IPs inside one.
+    fn sample_link_latency(
+        &self,
+        link_latency: &crate::network::LinkLatencyConfig,
+        local_ip: IpAddr,
+        remote_ip: IpAddr,
+    ) -> Duration {
+        let class = {
+            let inner = self
+                .inner
+                .read()
+                .expect("RwLock poisoned: prior task panicked");
+            let local = inner.localities.get(&local_ip);
+            let remote = inner.localities.get(&remote_ip);
+            local.zip(remote).map(|(l, r)| l.link_class(r))
+        };
+        let Some(class) = class else {
+            return Duration::ZERO;
+        };
+        let sampled = crate::network::sample_latency(link_latency.distribution_for(class));
+        tracing::debug!(
+            "Distance latency for {} -> {}: {:?} ({:?})",
+            local_ip,
+            remote_ip,
+            sampled,
+            class
+        );
+        sampled
     }
 
     // Per-connection asymmetric delay methods

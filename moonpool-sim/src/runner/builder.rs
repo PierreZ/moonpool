@@ -396,6 +396,8 @@ pub struct SimulationBuilder {
     seeds: Vec<u64>,
     network_chaos: Option<ChaosMode>,
     storage_chaos: Option<ChaosMode>,
+    /// Distance-based link latency, applied to every iteration's network config.
+    link_latency: Option<crate::network::LinkLatencyConfig>,
     /// Buggify-driven knob value-perturbation, enabled via [`Chaos::BuggifyKnobs`].
     /// Internal flag (not a public builder method) so the opt-in stays inside the
     /// `enable_chaos`/`Chaos` model.
@@ -432,6 +434,7 @@ impl SimulationBuilder {
             seeds: Vec::new(),
             network_chaos: None,
             storage_chaos: None,
+            link_latency: None,
             buggify_knobs: false,
             swarm_operations: false,
             invariants: Vec::new(),
@@ -534,6 +537,27 @@ impl SimulationBuilder {
             name,
             locality: Some(config),
         });
+        self
+    }
+
+    /// Give links a distance-dependent latency, resolved through the
+    /// [`.cluster()`](Self::cluster) topology.
+    ///
+    /// Realism rather than chaos: a cross-datacenter hop stays slow even on a
+    /// healthy seed. Each ordered IP pair samples its class distribution once at
+    /// first contact and keeps it for the run. Pairs where either side has no
+    /// locality (workload clients, plain `.processes()` runs) are unaffected.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// SimulationBuilder::new()
+    ///     .cluster(LocalityConfig::new(2, 2, 2, 1), || Box::new(MyNode::new()))
+    ///     .link_latency(LinkLatencyConfig::default())
+    /// ```
+    #[must_use]
+    pub fn link_latency(mut self, config: crate::network::LinkLatencyConfig) -> Self {
+        self.link_latency = Some(config);
         self
     }
 
@@ -906,6 +930,7 @@ impl SimulationBuilder {
     fn build_sim_for_iteration(
         network_chaos: Option<ChaosMode>,
         storage_chaos: Option<ChaosMode>,
+        link_latency: Option<crate::network::LinkLatencyConfig>,
         buggify_knobs: bool,
         seed: u64,
     ) -> crate::sim::SimWorld {
@@ -931,6 +956,9 @@ impl SimulationBuilder {
                 storage_config.apply_buggify_knobs();
             }
         }
+        // Distance latency is deployment shape, not a per-seed fault: it is
+        // applied verbatim, whatever the chaos mode.
+        network_config.link_latency = link_latency;
         let mut sim = crate::sim::SimWorld::new_with_network_config_and_seed(network_config, seed);
         sim.set_storage_config(storage_config);
         sim
@@ -1462,6 +1490,7 @@ impl SimulationBuilder {
         let mut sim = Self::build_sim_for_iteration(
             self.network_chaos,
             self.storage_chaos,
+            self.link_latency.clone(),
             self.buggify_knobs,
             seed,
         );

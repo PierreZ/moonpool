@@ -1,8 +1,10 @@
 use futures::io::AsyncWriteExt;
 use moonpool_sim::{
-    ChaosConfiguration, LatencyDistribution, NetworkConfiguration, NetworkProvider, SimWorld,
-    TcpListenerTrait,
+    ChaosConfiguration, LatencyDistribution, LinkLatencyConfig, LocalityInfo, NetworkConfiguration,
+    NetworkProvider, SimWorld, TcpListenerTrait,
 };
+use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::time::Duration;
 
 /// Build a uniform latency distribution over `[start, end)` for test configs.
@@ -104,6 +106,7 @@ fn test_custom_latency_configuration() {
             connect_latency: uniform(Duration::from_millis(1), Duration::from_millis(1)),
             read_latency: uniform(Duration::from_micros(10), Duration::from_micros(10)),
             write_latency: uniform(Duration::from_millis(2), Duration::from_millis(2)),
+            link_latency: None,
             chaos: ChaosConfiguration::disabled(),
         };
 
@@ -147,6 +150,7 @@ fn test_latency_range_sampling() {
             connect_latency: uniform(Duration::from_millis(1), Duration::from_millis(6)),
             read_latency: uniform(Duration::from_micros(10), Duration::from_micros(10)),
             write_latency: uniform(Duration::from_millis(1), Duration::from_millis(6)),
+            link_latency: None,
             chaos: ChaosConfiguration::disabled(),
         };
 
@@ -201,6 +205,7 @@ fn test_network_randomization_ranges() {
             connect_latency: uniform(Duration::from_millis(3), Duration::from_millis(3)),
             read_latency: uniform(Duration::from_micros(100), Duration::from_micros(100)),
             write_latency: uniform(Duration::from_micros(500), Duration::from_micros(500)),
+            link_latency: None,
             chaos: ChaosConfiguration::disabled(),
         };
 
@@ -283,4 +288,163 @@ fn test_client_initiated_connection_records_pair_latency() {
             "latency {latency:?} outside configured max_pair_latency range"
         );
     });
+}
+
+// ---------------------------------------------------------------------------
+// Distance-based link latency (LinkLatencyConfig)
+// ---------------------------------------------------------------------------
+
+/// Per-class distributions with disjoint ranges, so a sampled value alone
+/// identifies which class the engine picked.
+fn distinct_link_latencies() -> LinkLatencyConfig {
+    LinkLatencyConfig {
+        same_machine: uniform(Duration::from_millis(1), Duration::from_millis(2)),
+        same_zone: uniform(Duration::from_millis(10), Duration::from_millis(11)),
+        same_datacenter: uniform(Duration::from_millis(100), Duration::from_millis(101)),
+        cross_datacenter: uniform(Duration::from_millis(1000), Duration::from_millis(1001)),
+    }
+}
+
+/// Locality map for the two IPs used by [`memoized_pair_latency`], each given as
+/// `(datacenter, zone, machine)`.
+fn two_process_localities(
+    client: (&str, &str, &str),
+    server: (&str, &str, &str),
+) -> BTreeMap<IpAddr, LocalityInfo> {
+    BTreeMap::from([
+        (
+            "10.0.1.1".parse().expect("valid ip"),
+            LocalityInfo::new(client.0, client.1, client.2),
+        ),
+        (
+            "10.0.1.2".parse().expect("valid ip"),
+            LocalityInfo::new(server.0, server.1, server.2),
+        ),
+    ])
+}
+
+/// Connect `10.0.1.1 -> 10.0.1.2` under `config` with `localities` installed,
+/// and return the per-pair latency the engine memoized for that direction.
+fn memoized_pair_latency(
+    config: NetworkConfiguration,
+    localities: BTreeMap<IpAddr, LocalityInfo>,
+) -> Option<Duration> {
+    let local_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("Failed to build local runtime");
+
+    local_runtime.block_on(async move {
+        let mut sim = SimWorld::new_with_network_config_and_seed(config, 42);
+        sim.set_localities(localities);
+
+        let client_ip: IpAddr = "10.0.1.1".parse().expect("valid ip");
+        let server_ip: IpAddr = "10.0.1.2".parse().expect("valid ip");
+        let server_addr = "10.0.1.2:8080";
+
+        let provider = sim.network_provider(client_ip);
+        let listener = provider.bind(server_addr).await.expect("bind");
+        let _client = provider.connect(server_addr).await.expect("connect");
+        let (_server, _) = listener.accept().await.expect("accept");
+
+        sim.run_until_empty();
+        sim.pair_latency(client_ip, server_ip)
+    })
+}
+
+/// Each locality distance selects its own distribution.
+#[test]
+fn link_latency_classifies_the_pair_by_distance() {
+    let config = || {
+        let mut config = NetworkConfiguration::fast_local();
+        config.link_latency = Some(distinct_link_latencies());
+        config
+    };
+
+    let cases = [
+        (
+            ("dc1", "dc1-z1", "dc1-z1-m1"),
+            ("dc1", "dc1-z1", "dc1-z1-m1"),
+            Duration::from_millis(1)..Duration::from_millis(2),
+            "same machine",
+        ),
+        (
+            ("dc1", "dc1-z1", "dc1-z1-m1"),
+            ("dc1", "dc1-z1", "dc1-z1-m2"),
+            Duration::from_millis(10)..Duration::from_millis(11),
+            "same zone",
+        ),
+        (
+            ("dc1", "dc1-z1", "dc1-z1-m1"),
+            ("dc1", "dc1-z2", "dc1-z2-m1"),
+            Duration::from_millis(100)..Duration::from_millis(101),
+            "same datacenter",
+        ),
+        (
+            ("dc1", "dc1-z1", "dc1-z1-m1"),
+            ("dc2", "dc2-z1", "dc2-z1-m1"),
+            Duration::from_millis(1000)..Duration::from_millis(1001),
+            "cross datacenter",
+        ),
+    ];
+
+    for (client, server, expected, label) in cases {
+        let latency = memoized_pair_latency(config(), two_process_localities(client, server))
+            .unwrap_or_else(|| panic!("{label}: no per-pair latency recorded"));
+        assert!(
+            expected.contains(&latency),
+            "{label}: latency {latency:?} outside {expected:?}"
+        );
+    }
+}
+
+/// The distance sample and the chaos `max_pair_latency` sample share one
+/// per-pair budget: the memoized value is their sum.
+#[test]
+fn link_latency_sums_with_max_pair_latency() {
+    let mut config = NetworkConfiguration::fast_local();
+    config.chaos.max_pair_latency = Duration::from_millis(5)..Duration::from_millis(6);
+    config.link_latency = Some(distinct_link_latencies());
+
+    let localities = two_process_localities(
+        ("dc1", "dc1-z1", "dc1-z1-m1"),
+        ("dc2", "dc2-z1", "dc2-z1-m1"),
+    );
+    let latency =
+        memoized_pair_latency(config, localities).expect("per-pair latency should be recorded");
+
+    // 5..6ms of chaos plus 1000..1001ms of distance.
+    let expected = Duration::from_millis(1005)..Duration::from_millis(1007);
+    assert!(
+        expected.contains(&latency),
+        "latency {latency:?} is not the sum of both extras ({expected:?})"
+    );
+}
+
+/// Without locality for both endpoints there is no distance to speak of, so the
+/// pair gets no extra latency (and the engine must not panic).
+#[test]
+fn link_latency_is_inert_without_locality() {
+    let mut config = NetworkConfiguration::fast_local();
+    config.link_latency = Some(distinct_link_latencies());
+
+    // Empty topology: the plain `.processes()` case.
+    assert_eq!(
+        memoized_pair_latency(config.clone(), BTreeMap::new()),
+        Some(Duration::ZERO),
+        "an unlocalized pair must get no distance latency"
+    );
+
+    // Half-known topology: only the server has a locality, as when a workload
+    // client talks to a clustered process.
+    let partial = BTreeMap::from([(
+        "10.0.1.2".parse::<IpAddr>().expect("valid ip"),
+        LocalityInfo::new("dc1", "dc1-z1", "dc1-z1-m1"),
+    )]);
+    assert_eq!(
+        memoized_pair_latency(config, partial),
+        Some(Duration::ZERO),
+        "a pair with one unlocalized endpoint must get no distance latency"
+    );
 }

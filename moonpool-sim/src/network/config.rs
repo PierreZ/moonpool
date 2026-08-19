@@ -82,6 +82,7 @@
 //! - Clock drift: FDB sim2.actor.cpp:1058-1064
 //! - Connect failures: FDB sim2.actor.cpp:1243-1250
 
+use crate::locality::LinkClass;
 use crate::sim::rng::{
     config_random_bool, sim_random_f64, sim_random_range, sim_random_range_or_default,
 };
@@ -443,6 +444,60 @@ impl ChaosConfiguration {
     }
 }
 
+/// Distance-based latency, one [`LatencyDistribution`] per locality class.
+///
+/// This is *realism*, not chaos: a cross-datacenter hop is slow on a healthy
+/// day. Attach it to [`NetworkConfiguration::link_latency`] and the engine
+/// classifies every IP pair through the installed locality topology
+/// ([`SimWorld::set_localities`](crate::SimWorld::set_localities)), samples the
+/// matching distribution once at first contact, and applies that fixed extra to
+/// every delivery on the pair (it lands in the same per-pair budget as
+/// [`ChaosConfiguration::max_pair_latency`], summed with it).
+///
+/// A pair where either endpoint has no locality gets no distance latency, so
+/// plain `.processes()` runs are unaffected.
+///
+/// `FoundationDB` does not model this (a single global latency distribution),
+/// but it is what makes cross-datacenter replication testing meaningful.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkLatencyConfig {
+    /// Processes collocated on one machine (loopback).
+    pub same_machine: LatencyDistribution,
+    /// Different machines in the same zone (rack-local).
+    pub same_zone: LatencyDistribution,
+    /// Different zones in the same datacenter.
+    pub same_datacenter: LatencyDistribution,
+    /// Different datacenters (wide area).
+    pub cross_datacenter: LatencyDistribution,
+}
+
+impl Default for LinkLatencyConfig {
+    /// Rough real-world one-way link delays: microseconds on loopback, tens of
+    /// milliseconds between regions.
+    fn default() -> Self {
+        let uniform = |start, end| LatencyDistribution::Uniform { start, end };
+        Self {
+            same_machine: uniform(Duration::from_micros(10), Duration::from_micros(50)),
+            same_zone: uniform(Duration::from_micros(100), Duration::from_micros(500)),
+            same_datacenter: uniform(Duration::from_micros(500), Duration::from_millis(2)),
+            cross_datacenter: uniform(Duration::from_millis(20), Duration::from_millis(80)),
+        }
+    }
+}
+
+impl LinkLatencyConfig {
+    /// The distribution to sample for a given locality distance.
+    #[must_use]
+    pub fn distribution_for(&self, class: LinkClass) -> &LatencyDistribution {
+        match class {
+            LinkClass::SameMachine => &self.same_machine,
+            LinkClass::SameZone => &self.same_zone,
+            LinkClass::SameDatacenter => &self.same_datacenter,
+            LinkClass::CrossDatacenter => &self.cross_datacenter,
+        }
+    }
+}
+
 /// Configuration for network simulation parameters
 #[derive(Debug, Clone)]
 pub struct NetworkConfiguration {
@@ -456,6 +511,12 @@ pub struct NetworkConfiguration {
     pub read_latency: LatencyDistribution,
     /// Latency distribution for write operations
     pub write_latency: LatencyDistribution,
+
+    /// Distance-based per-pair latency, resolved through the locality topology.
+    ///
+    /// `None` (the default) keeps every link equally fast, whatever the
+    /// topology. See [`LinkLatencyConfig`].
+    pub link_latency: Option<LinkLatencyConfig>,
 
     /// Chaos injection configuration
     pub chaos: ChaosConfiguration,
@@ -484,6 +545,8 @@ impl Default for NetworkConfiguration {
                 start: Duration::from_micros(100),
                 end: Duration::from_micros(600),
             },
+            // Realism knob, opt-in: distance-blind by default.
+            link_latency: None,
             chaos: ChaosConfiguration::default(),
         }
     }
@@ -680,6 +743,9 @@ impl NetworkConfiguration {
                 Duration::from_micros(sim_random_range(50..1000))
                     ..Duration::from_micros(sim_random_range(200..2000)),
             ),
+            // Distance latency models the deployment, not the seed, so chaos
+            // runs leave it to the caller (and draw no RNG for it).
+            link_latency: None,
             chaos: ChaosConfiguration::random_for_seed(),
         }
     }
@@ -709,6 +775,7 @@ impl NetworkConfiguration {
             connect_latency: uniform(ten_us, ten_us),
             read_latency: uniform(one_us, one_us),
             write_latency: uniform(one_us, one_us),
+            link_latency: None,
             chaos: ChaosConfiguration::disabled(),
         }
     }

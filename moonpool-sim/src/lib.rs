@@ -169,7 +169,7 @@ pub use sim::{
 };
 
 // Locality vocabulary re-exports (shared by engine and runner)
-pub use locality::{DomainLevel, LocalityInfo};
+pub use locality::{DomainLevel, LinkClass, LocalityInfo};
 
 // Runner module re-exports
 pub use runner::{
@@ -194,8 +194,8 @@ pub use observability::{
 
 // Network exports
 pub use network::{
-    ChaosConfiguration, ConnectFailureMode, LatencyDistribution, NetworkConfiguration,
-    SimNetworkProvider, sample_duration, sample_latency,
+    ChaosConfiguration, ConnectFailureMode, LatencyDistribution, LinkLatencyConfig,
+    NetworkConfiguration, PartitionStrategy, SimNetworkProvider, sample_duration, sample_latency,
 };
 
 // Storage exports
