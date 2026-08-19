@@ -301,7 +301,7 @@ fn distinct_link_latencies() -> LinkLatencyConfig {
         same_machine: uniform(Duration::from_millis(1), Duration::from_millis(2)),
         same_zone: uniform(Duration::from_millis(10), Duration::from_millis(11)),
         same_datacenter: uniform(Duration::from_millis(100), Duration::from_millis(101)),
-        cross_datacenter: uniform(Duration::from_millis(1000), Duration::from_millis(1001)),
+        cross_datacenter: uniform(Duration::from_millis(900), Duration::from_millis(950)),
     }
 }
 
@@ -384,7 +384,7 @@ fn link_latency_classifies_the_pair_by_distance() {
         (
             ("dc1", "dc1-z1", "dc1-z1-m1"),
             ("dc2", "dc2-z1", "dc2-z1-m1"),
-            Duration::from_millis(1000)..Duration::from_millis(1001),
+            Duration::from_millis(900)..Duration::from_millis(950),
             "cross datacenter",
         ),
     ];
@@ -414,8 +414,8 @@ fn link_latency_sums_with_max_pair_latency() {
     let latency =
         memoized_pair_latency(config, localities).expect("per-pair latency should be recorded");
 
-    // 5..6ms of chaos plus 1000..1001ms of distance.
-    let expected = Duration::from_millis(1005)..Duration::from_millis(1007);
+    // 5..6ms of chaos plus 900..950ms of distance.
+    let expected = Duration::from_millis(905)..Duration::from_millis(956);
     assert!(
         expected.contains(&latency),
         "latency {latency:?} is not the sum of both extras ({expected:?})"
