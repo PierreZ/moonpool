@@ -27,7 +27,7 @@ async fn drain_with_partial_reads(seed: u64, max_bytes: usize, payload: &[u8]) -
     config.chaos.partial_read_max_bytes = max_bytes;
 
     let mut sim = SimWorld::new_with_network_config_and_seed(config, seed);
-    let provider = sim.network_provider();
+    let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
     let addr = "partial-read-server";
     let listener = provider.bind(addr).await.unwrap();
@@ -125,7 +125,7 @@ fn test_partial_read_disabled_without_buggify() {
 
         let config = NetworkConfiguration::fast_local();
         let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "no-partial-read-server";
         let listener = provider.bind(addr).await.unwrap();

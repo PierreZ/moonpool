@@ -12,7 +12,7 @@ fn test_basic_simulation_bind() {
 
     local_runtime.block_on(async move {
         let sim = SimWorld::new();
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         // Test basic binding functionality
         let listener = provider.bind("test-addr").await.unwrap();
@@ -52,7 +52,7 @@ fn test_simple_echo_simulation() {
         // Use fast local config for integration tests to avoid timeouts
         let config = NetworkConfiguration::fast_local(); // Deterministic, fast
         let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         // Test simple echo server with simulation
         simple_echo_server(provider, "echo-server").await.unwrap();
@@ -83,7 +83,7 @@ fn test_deterministic_simulation_behavior() {
             // Use fast local config for deterministic integration tests
             let config = NetworkConfiguration::fast_local();
             let mut sim = SimWorld::new_with_network_config(config);
-            let provider = sim.network_provider();
+            let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
             simple_echo_server(provider, "deterministic-test")
                 .await
@@ -130,7 +130,7 @@ fn test_network_provider_trait_usage() {
 
     local_runtime.block_on(async move {
         let sim = SimWorld::new();
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = use_provider_generically(provider, "dynamic-test")
             .await

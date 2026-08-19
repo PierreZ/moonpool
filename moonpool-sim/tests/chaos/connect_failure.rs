@@ -30,7 +30,7 @@ fn test_connect_failure_mode_disabled() {
         config.chaos.connect_failure_mode = ConnectFailureMode::Disabled;
 
         let sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "test-server";
         let _listener = provider.bind(addr).await.unwrap();
@@ -67,7 +67,7 @@ fn test_connect_failure_mode_always_fail() {
         config.chaos.connect_failure_mode = ConnectFailureMode::AlwaysFail;
 
         let sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "fail-server";
         let _listener = provider.bind(addr).await.unwrap();
@@ -110,7 +110,7 @@ fn test_connect_failure_mode_probabilistic_error() {
         config.chaos.connect_failure_probability = 0.0;
 
         let sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "prob-server";
         let _listener = provider.bind(addr).await.unwrap();
@@ -152,7 +152,7 @@ fn test_connect_failure_requires_buggify() {
         config.chaos.connect_failure_mode = ConnectFailureMode::AlwaysFail; // Would fail if buggify active
 
         let sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "no-buggify-server";
         let _listener = provider.bind(addr).await.unwrap();
@@ -190,7 +190,7 @@ fn test_connect_failure_mode_probabilistic_with_timeout() {
         config.chaos.connect_failure_probability = 1.0; // 100% hang (not error)
 
         let sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "hang-server";
         let _listener = provider.bind(addr).await.unwrap();
@@ -238,7 +238,7 @@ fn test_connect_failure_deterministic() {
             config.chaos.connect_failure_mode = ConnectFailureMode::AlwaysFail;
 
             let sim = SimWorld::new_with_network_config(config);
-            let provider = sim.network_provider();
+            let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
             let addr = "det-server";
             let _listener = provider.bind(addr).await.unwrap();
@@ -281,7 +281,7 @@ fn test_connect_failure_existing_connections() {
         config.chaos.connect_failure_mode = ConnectFailureMode::Disabled; // Start with disabled
 
         let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "existing-conn-server";
         let _listener = provider.bind(addr).await.unwrap();
@@ -321,7 +321,7 @@ fn test_connect_failure_error_message_always_fail() {
         config.chaos.connect_failure_mode = ConnectFailureMode::AlwaysFail;
 
         let sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "error-msg-server";
         let _listener = provider.bind(addr).await.unwrap();
@@ -362,7 +362,7 @@ fn test_connect_failure_error_message_probabilistic() {
         config.chaos.connect_failure_probability = 0.0; // Force error path, not hang
 
         let sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "error-msg-server-2";
         let _listener = provider.bind(addr).await.unwrap();
@@ -412,7 +412,7 @@ fn test_connect_failure_random_config() {
         );
 
         let sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "random-config-server";
         let _listener = provider.bind(addr).await.unwrap();

@@ -475,10 +475,14 @@ impl SimWorld {
             .len()
     }
 
-    /// Create a network provider for this simulation
+    /// Create a network provider for this simulation scoped to a process IP.
+    ///
+    /// The IP is used as the local address for connections this provider
+    /// initiates via [`NetworkProvider::connect`](crate::NetworkProvider::connect),
+    /// so per-pair chaos (e.g. `max_pair_latency`) can key off it.
     #[must_use]
-    pub fn network_provider(&self) -> SimNetworkProvider {
-        SimNetworkProvider::new(self.downgrade())
+    pub fn network_provider(&self, ip: std::net::IpAddr) -> SimNetworkProvider {
+        SimNetworkProvider::new(self.downgrade(), ip)
     }
 
     /// Create a time provider for this simulation
@@ -3013,7 +3017,7 @@ impl WeakSimWorld {
     weak_forward!(pass #[doc = "Read data from connection's receive buffer."] read_from_connection(&self, connection_id: ConnectionId, buf: &mut [u8]) -> usize);
     weak_forward!(pass #[doc = "Write data to connection's receive buffer."] write_to_connection(&self, connection_id: ConnectionId, data: &[u8]) -> ());
     weak_forward!(pass #[doc = "Buffer data for ordered sending on a connection."] buffer_send(&self, connection_id: ConnectionId, data: Vec<u8>) -> ());
-    weak_forward!(wrap #[doc = "Get a network provider for the simulation."] network_provider(&self) -> SimNetworkProvider);
+    weak_forward!(wrap #[doc = "Get a network provider for the simulation scoped to a process IP."] network_provider(&self, ip: std::net::IpAddr) -> SimNetworkProvider);
     weak_forward!(wrap #[doc = "Get a time provider for the simulation."] time_provider(&self) -> crate::providers::SimTimeProvider);
     weak_forward!(wrap #[doc = "Sleep for the specified duration in simulation time."] sleep(&self, duration: Duration) -> SleepFuture);
 

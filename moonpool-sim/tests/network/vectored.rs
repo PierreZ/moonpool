@@ -23,7 +23,7 @@ fn vectored_write_preserves_slice_boundaries_as_delivery_events() {
 
     local_runtime.block_on(async move {
         let mut sim = SimWorld::new_with_network_config(NetworkConfiguration::fast_local());
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
         let addr = "vectored-write-test";
 
         let listener = provider.bind(addr).await.expect("bind should succeed");
