@@ -15,6 +15,7 @@ use tracing::instrument;
 use crate::{
     SimulationError, SimulationResult,
     chaos::fault_events::SimFaultEvent,
+    locality::{DomainLevel, LocalityInfo},
     network::{
         NetworkConfiguration, PartitionStrategy,
         sim::{ConnectionId, ListenerId, SimNetworkProvider},
@@ -44,6 +45,12 @@ pub(crate) struct SimInner {
 
     // Network management
     pub(crate) network: NetworkState,
+
+    /// Read-only failure-domain locality per process IP, installed once at setup
+    /// by [`SimWorld::set_localities`]. Empty for runs without a topology
+    /// (plain `.processes()`), which makes every locality-driven behavior
+    /// degrade to its flat equivalent.
+    pub(crate) localities: BTreeMap<IpAddr, LocalityInfo>,
 
     // Storage management
     pub(crate) storage: StorageState,
@@ -77,6 +84,7 @@ impl SimInner {
             event_queue: EventQueue::new(),
             next_sequence: 0,
             network: NetworkState::new(NetworkConfiguration::default()),
+            localities: BTreeMap::new(),
             storage: StorageState::default(),
             wakers: WakerRegistry::default(),
             next_task_id: 0,
@@ -95,6 +103,7 @@ impl SimInner {
             event_queue: EventQueue::new(),
             next_sequence: 0,
             network: NetworkState::new(network_config),
+            localities: BTreeMap::new(),
             storage: StorageState::default(),
             wakers: WakerRegistry::default(),
             next_task_id: 0,
@@ -516,6 +525,47 @@ impl SimWorld {
             .expect("RwLock poisoned: prior task panicked")
             .storage
             .config = config;
+    }
+
+    /// Install the failure-domain locality of every process IP.
+    ///
+    /// Called once at setup by the runner (from the `.cluster()` topology it
+    /// already resolves) and directly by tests. The engine treats the map as
+    /// read-only plain data: it never sees the runner's `MachineRegistry`.
+    ///
+    /// The map shapes two behaviors:
+    /// - locality-aware partition strategies
+    ///   ([`PartitionStrategy::IsolateZone`] / [`IsolateDatacenter`](PartitionStrategy::IsolateDatacenter));
+    /// - distance-based link latency
+    ///   ([`LinkLatencyConfig`](crate::network::config::NetworkConfiguration)).
+    ///
+    /// An empty map (the default, and what plain `.processes()` runs get) makes
+    /// both degrade to their flat, topology-blind behavior.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(skip(self, localities), fields(count = localities.len()))]
+    pub fn set_localities(&mut self, localities: BTreeMap<IpAddr, LocalityInfo>) {
+        self.inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked")
+            .localities = localities;
+    }
+
+    /// The failure-domain locality of a process IP, if a topology is installed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
+    pub fn locality_for(&self, ip: IpAddr) -> Option<LocalityInfo> {
+        self.inner
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .localities
+            .get(&ip)
+            .cloned()
     }
 
     /// Set the storage configuration for a single process IP.
@@ -2709,22 +2759,60 @@ impl SimWorld {
             .inner
             .write()
             .expect("RwLock poisoned: prior task panicked");
-        let expires_at = inner.current_time + duration;
+        Self::insert_send_partition(&mut inner, ip, duration);
+        Ok(())
+    }
 
-        inner.network.send_partitions.insert(ip, expires_at);
-
-        let clear_event = Event::Connection {
-            id: 0,
-            state: ConnectionStateChange::SendPartitionClear,
-        };
+    /// Schedule a partition-expiry event at `expires_at`.
+    ///
+    /// Shared by every directional partition path so the clear event and the
+    /// sequence bookkeeping stay in one place.
+    fn schedule_partition_clear(
+        inner: &mut SimInner,
+        state: ConnectionStateChange,
+        expires_at: Duration,
+    ) {
+        let clear_event = Event::Connection { id: 0, state };
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
-        let scheduled_event = ScheduledEvent::new(expires_at, clear_event, sequence);
-        inner.event_queue.schedule(scheduled_event);
+        inner
+            .event_queue
+            .schedule(ScheduledEvent::new(expires_at, clear_event, sequence));
+    }
 
+    /// Block outgoing traffic from `ip` for `duration` on an already-locked
+    /// simulation, scheduling its expiry and recording the fault event.
+    ///
+    /// Shared by [`partition_send_from`](Self::partition_send_from) and the
+    /// automatic [`PartitionStrategy::AsymmetricSend`] rotation, so both surface
+    /// identically on the fault timeline.
+    fn insert_send_partition(inner: &mut SimInner, ip: IpAddr, duration: Duration) {
+        let expires_at = inner.current_time + duration;
+        inner.network.send_partitions.insert(ip, expires_at);
+        Self::schedule_partition_clear(
+            inner,
+            ConnectionStateChange::SendPartitionClear,
+            expires_at,
+        );
         inner.record_fault(SimFaultEvent::SendPartitionCreated { ip: ip.to_string() });
         tracing::debug!("Partitioned sends from {} until {:?}", ip, expires_at);
-        Ok(())
+    }
+
+    /// Block incoming traffic to `ip` for `duration` on an already-locked
+    /// simulation, scheduling its expiry and recording the fault event.
+    ///
+    /// Mirror of [`insert_send_partition`](Self::insert_send_partition), shared
+    /// with the [`PartitionStrategy::AsymmetricRecv`] rotation.
+    fn insert_recv_partition(inner: &mut SimInner, ip: IpAddr, duration: Duration) {
+        let expires_at = inner.current_time + duration;
+        inner.network.recv_partitions.insert(ip, expires_at);
+        Self::schedule_partition_clear(
+            inner,
+            ConnectionStateChange::RecvPartitionClear,
+            expires_at,
+        );
+        inner.record_fault(SimFaultEvent::RecvPartitionCreated { ip: ip.to_string() });
+        tracing::debug!("Partitioned receives to {} until {:?}", ip, expires_at);
     }
 
     /// Block all incoming communication to an IP address
@@ -2745,21 +2833,7 @@ impl SimWorld {
             .inner
             .write()
             .expect("RwLock poisoned: prior task panicked");
-        let expires_at = inner.current_time + duration;
-
-        inner.network.recv_partitions.insert(ip, expires_at);
-
-        let clear_event = Event::Connection {
-            id: 0,
-            state: ConnectionStateChange::RecvPartitionClear,
-        };
-        let sequence = inner.next_sequence;
-        inner.next_sequence += 1;
-        let scheduled_event = ScheduledEvent::new(expires_at, clear_event, sequence);
-        inner.event_queue.schedule(scheduled_event);
-
-        inner.record_fault(SimFaultEvent::RecvPartitionCreated { ip: ip.to_string() });
-        tracing::debug!("Partitioned receives to {} until {:?}", ip, expires_at);
+        Self::insert_recv_partition(&mut inner, ip, duration);
         Ok(())
     }
 
@@ -2819,19 +2893,27 @@ impl SimWorld {
     /// - Random: randomly partition individual IP pairs
     /// - `UniformSize`: create uniform-sized partition groups
     /// - `IsolateSingle`: isolate exactly one node from the rest
+    /// - `IsolateZone` / `IsolateDatacenter`: isolate a whole failure domain
+    ///   (degrades to `Random` selection without a locality topology)
+    /// - `AsymmetricSend` / `AsymmetricRecv`: one-way cut on a single node
     fn randomly_trigger_partitions_with_inner(inner: &mut SimInner) {
-        let partition_config = &inner.network.config;
+        let chaos = &inner.network.config.chaos;
 
-        if partition_config.chaos.partition_probability == 0.0 {
+        if chaos.partition_probability == 0.0 {
             return;
         }
 
         // Check if we should trigger a partition this step
-        if sim_random::<f64>() >= partition_config.chaos.partition_probability {
+        if sim_random::<f64>() >= chaos.partition_probability {
             return;
         }
 
-        // Collect unique IPs from connections
+        let strategy = chaos.partition_strategy;
+        let duration_range = chaos.partition_duration.clone();
+
+        // Collect unique IPs from connections. `HashSet` iteration order is not
+        // stable across processes, so sort before any RNG-driven selection:
+        // determinism depends on the candidate list being canonical.
         let unique_ips: HashSet<IpAddr> = inner
             .network
             .connections
@@ -2843,26 +2925,56 @@ impl SimWorld {
             return; // Need at least 2 IPs to partition
         }
 
-        let ip_list: Vec<IpAddr> = unique_ips.into_iter().collect();
-        let partition_duration =
-            crate::network::sample_duration(&partition_config.chaos.partition_duration);
-        let expires_at = inner.current_time + partition_duration;
+        let mut ip_list: Vec<IpAddr> = unique_ips.into_iter().collect();
+        ip_list.sort_unstable();
 
-        // Select IPs to partition based on strategy
-        let partitioned_ips: Vec<IpAddr> = match partition_config.chaos.partition_strategy {
-            PartitionStrategy::Random => {
-                // Original behavior: randomly decide for each IP
-                ip_list
-                    .iter()
-                    .filter(|_| sim_random::<f64>() < 0.5)
-                    .copied()
-                    .collect()
+        let partition_duration = crate::network::sample_duration(&duration_range);
+
+        // One-way strategies cut a single node's send or receive side; they use
+        // the directional primitives instead of a group cut.
+        if matches!(
+            strategy,
+            PartitionStrategy::AsymmetricSend | PartitionStrategy::AsymmetricRecv
+        ) {
+            let idx = sim_random_range(0..ip_list.len());
+            let ip = ip_list[idx];
+            if strategy == PartitionStrategy::AsymmetricSend {
+                Self::insert_send_partition(inner, ip, partition_duration);
+            } else {
+                Self::insert_recv_partition(inner, ip, partition_duration);
             }
+            return;
+        }
+
+        let partitioned_ips = Self::select_partition_group(inner, &ip_list, strategy);
+
+        // Don't partition if we selected all IPs or none
+        if partitioned_ips.is_empty() || partitioned_ips.len() == ip_list.len() {
+            return;
+        }
+
+        let expires_at = inner.current_time + partition_duration;
+        Self::cut_groups_bidirectionally(inner, &ip_list, &partitioned_ips, expires_at, strategy);
+
+        // Schedule restoration event
+        Self::schedule_partition_clear(inner, ConnectionStateChange::PartitionRestore, expires_at);
+    }
+
+    /// Select the IPs to cut off from the rest, per partition strategy.
+    ///
+    /// Every branch draws only from the seeded simulation RNG and only from the
+    /// canonically ordered `ip_list`, so the selection is reproducible.
+    fn select_partition_group(
+        inner: &SimInner,
+        ip_list: &[IpAddr],
+        strategy: PartitionStrategy,
+    ) -> Vec<IpAddr> {
+        match strategy {
             PartitionStrategy::UniformSize => {
                 // TigerBeetle-style: random partition size from 1 to n-1
                 let partition_size = sim_random_range(1..ip_list.len());
                 // Shuffle and take first N IPs
-                let mut shuffled = ip_list.clone();
+                let mut shuffled = ip_list.to_vec();
                 // Simple Fisher-Yates shuffle
                 for i in (1..shuffled.len()).rev() {
                     let j = sim_random_range(0..i + 1);
@@ -2875,21 +2987,83 @@ impl SimWorld {
                 let idx = sim_random_range(0..ip_list.len());
                 vec![ip_list[idx]]
             }
-        };
+            PartitionStrategy::IsolateZone => {
+                Self::select_domain_group(inner, ip_list, DomainLevel::Zone)
+                    .unwrap_or_else(|| Self::select_random_group(ip_list))
+            }
+            PartitionStrategy::IsolateDatacenter => {
+                Self::select_domain_group(inner, ip_list, DomainLevel::Datacenter)
+                    .unwrap_or_else(|| Self::select_random_group(ip_list))
+            }
+            // `Random`, plus the one-way arms which never reach here.
+            _ => Self::select_random_group(ip_list),
+        }
+    }
 
-        // Don't partition if we selected all IPs or none
-        if partitioned_ips.is_empty() || partitioned_ips.len() == ip_list.len() {
-            return;
+    /// Flip a coin per IP (the historical `Random` selection).
+    fn select_random_group(ip_list: &[IpAddr]) -> Vec<IpAddr> {
+        ip_list
+            .iter()
+            .filter(|_| sim_random::<f64>() < 0.5)
+            .copied()
+            .collect()
+    }
+
+    /// Select every connected IP that shares one randomly chosen failure domain
+    /// at `level`, modelling a rack or region loss.
+    ///
+    /// Returns `None` when no connected IP has a locality (no `.cluster()`
+    /// topology), which makes the caller degrade to flat random selection. The
+    /// candidate domain ids are deduplicated and sorted before the draw, so the
+    /// choice depends only on the seed.
+    fn select_domain_group(
+        inner: &SimInner,
+        ip_list: &[IpAddr],
+        level: DomainLevel,
+    ) -> Option<Vec<IpAddr>> {
+        let mut domain_ids: Vec<&str> = ip_list
+            .iter()
+            .filter_map(|ip| inner.localities.get(ip))
+            .map(|locality| locality.id_for(level))
+            .collect();
+        domain_ids.sort_unstable();
+        domain_ids.dedup();
+
+        if domain_ids.is_empty() {
+            return None;
         }
 
-        // Create bi-directional partitions between partitioned and non-partitioned groups
+        let chosen = domain_ids[sim_random_range(0..domain_ids.len())];
+        Some(
+            ip_list
+                .iter()
+                .filter(|ip| {
+                    inner
+                        .localities
+                        .get(ip)
+                        .is_some_and(|locality| locality.id_for(level) == chosen)
+                })
+                .copied()
+                .collect(),
+        )
+    }
+
+    /// Cut `partitioned_ips` off from the rest of `ip_list` in both directions,
+    /// recording one fault event per new directed pair.
+    fn cut_groups_bidirectionally(
+        inner: &mut SimInner,
+        ip_list: &[IpAddr],
+        partitioned_ips: &[IpAddr],
+        expires_at: Duration,
+        strategy: PartitionStrategy,
+    ) {
         let non_partitioned: Vec<IpAddr> = ip_list
             .iter()
             .filter(|ip| !partitioned_ips.contains(ip))
             .copied()
             .collect();
 
-        for &from_ip in &partitioned_ips {
+        for &from_ip in partitioned_ips {
             for &to_ip in &non_partitioned {
                 // Skip if already partitioned
                 if inner
@@ -2909,15 +3083,9 @@ impl SimWorld {
                     .ip_partitions
                     .insert((to_ip, from_ip), PartitionState { expires_at });
 
-                // Disjoint-field push: `partition_config` still borrows
-                // `inner.network`, so go through `pending_faults` directly.
-                let time_ms = u64::try_from(inner.current_time.as_millis()).unwrap_or(u64::MAX);
-                inner.pending_faults.push(SimFaultRecord {
-                    time_ms,
-                    event: SimFaultEvent::PartitionCreated {
-                        from: from_ip.to_string(),
-                        to: to_ip.to_string(),
-                    },
+                inner.record_fault(SimFaultEvent::PartitionCreated {
+                    from: from_ip.to_string(),
+                    to: to_ip.to_string(),
                 });
 
                 tracing::debug!(
@@ -2925,20 +3093,10 @@ impl SimWorld {
                     from_ip,
                     to_ip,
                     expires_at,
-                    partition_config.chaos.partition_strategy
+                    strategy
                 );
             }
         }
-
-        // Schedule restoration event
-        let restore_event = Event::Connection {
-            id: 0,
-            state: ConnectionStateChange::PartitionRestore,
-        };
-        let sequence = inner.next_sequence;
-        inner.next_sequence += 1;
-        let scheduled_event = ScheduledEvent::new(expires_at, restore_event, sequence);
-        inner.event_queue.schedule(scheduled_event);
     }
 }
 

@@ -31,6 +31,8 @@
 //! | Send-only block | `partition_send_from()` | Manual | Asymmetric network failures |
 //! | Recv-only block | `partition_recv_to()` | Manual | Asymmetric network failures |
 //! | Partition strategy | `partition_strategy` | Random | Different failure patterns (uniform, isolate) |
+//! | Zone / datacenter cut | `partition_strategy = IsolateZone` / `IsolateDatacenter` | Random | Rack or region loss (needs a locality topology) |
+//! | One-way cut | `partition_strategy = AsymmetricSend` / `AsymmetricRecv` | Random | Half-reachable node, failure detector confusion |
 //!
 //! ## Data Integrity Faults
 //!
@@ -97,6 +99,10 @@ use std::time::Duration;
 /// - Random: General chaos, unpredictable failures
 /// - `UniformSize`: Tests various quorum sizes and split scenarios
 /// - `IsolateSingle`: Tests single-node isolation (common in production)
+/// - `IsolateZone` / `IsolateDatacenter`: Tests correlated, topology-shaped cuts
+///   (rack or region loss)
+/// - `AsymmetricSend` / `AsymmetricRecv`: Tests one-way reachability, where a node
+///   still hears the cluster but cannot answer (or the reverse)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PartitionStrategy {
     /// Random IP pairs selected for partitioning.
@@ -112,6 +118,35 @@ pub enum PartitionStrategy {
     /// Isolate single node - always partition exactly one node from the rest.
     /// Tests the common production scenario where a single node becomes unreachable.
     IsolateSingle,
+
+    /// Isolate a whole zone - cut every process of one random zone from the rest.
+    ///
+    /// Models a rack or availability-zone loss, where collocated processes fail
+    /// together. Requires a locality topology
+    /// ([`SimWorld::set_localities`](crate::SimWorld::set_localities), installed by
+    /// [`.cluster()`](crate::SimulationBuilder::cluster)); without one it degrades
+    /// to [`Random`](Self::Random) selection.
+    IsolateZone,
+
+    /// Isolate a whole datacenter - cut every process of one random datacenter
+    /// from the rest.
+    ///
+    /// Models a region-level network cut, the classic cross-datacenter replication
+    /// test. Degrades to [`Random`](Self::Random) without a locality topology.
+    IsolateDatacenter,
+
+    /// Block all *outgoing* traffic from one random node (one-way cut).
+    ///
+    /// The node still receives, so it keeps seeing cluster traffic while its own
+    /// replies vanish (the failure mode that breaks naive failure detectors).
+    /// FDB models the same asymmetry with its send-side clogging.
+    AsymmetricSend,
+
+    /// Block all *incoming* traffic to one random node (one-way cut).
+    ///
+    /// The mirror of [`AsymmetricSend`](Self::AsymmetricSend): the node keeps
+    /// sending, but hears nothing back.
+    AsymmetricRecv,
 }
 
 /// Connection establishment failure mode for fault injection.
@@ -323,11 +358,17 @@ impl ChaosConfiguration {
             buggified_delay_probability: f64::from(sim_random_range(20..30)) / 100.0, // 20-30%
             connect_failure_mode: ConnectFailureMode::random_for_seed(),
             connect_failure_probability: f64::from(sim_random_range(40..60)) / 100.0, // 40-60%
-            // Randomly choose partition strategy
-            partition_strategy: match sim_random_range(0..3) {
+            // Randomly choose partition strategy. The locality-shaped arms
+            // degrade to `Random` selection when the run has no topology, so
+            // they are safe to draw for every seed.
+            partition_strategy: match sim_random_range(0..7) {
                 0 => PartitionStrategy::Random,
                 1 => PartitionStrategy::UniformSize,
-                _ => PartitionStrategy::IsolateSingle,
+                2 => PartitionStrategy::IsolateSingle,
+                3 => PartitionStrategy::IsolateZone,
+                4 => PartitionStrategy::IsolateDatacenter,
+                5 => PartitionStrategy::AsymmetricSend,
+                _ => PartitionStrategy::AsymmetricRecv,
             },
             // Permanent per-pair latency, randomized upper bound up to 100ms (FDB
             // buggifies MAX_CLOGGING_LATENCY to 0.1s). Kept last so existing RNG
@@ -762,6 +803,48 @@ mod swarm_tests {
             0.0_f64.to_bits(),
             "expected 0.0, got {value}"
         );
+    }
+}
+
+#[cfg(test)]
+mod partition_strategy_tests {
+    use super::{ChaosConfiguration, PartitionStrategy};
+    use crate::sim::rng::{reset_sim_rng, set_sim_seed};
+    use std::collections::BTreeSet;
+
+    fn strategy_for(seed: u64) -> PartitionStrategy {
+        reset_sim_rng();
+        set_sim_seed(seed);
+        ChaosConfiguration::random_for_seed().partition_strategy
+    }
+
+    #[test]
+    fn random_for_seed_reaches_every_strategy() {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for seed in 0..500_u64 {
+            seen.insert(format!("{:?}", strategy_for(seed)));
+        }
+        for expected in [
+            PartitionStrategy::Random,
+            PartitionStrategy::UniformSize,
+            PartitionStrategy::IsolateSingle,
+            PartitionStrategy::IsolateZone,
+            PartitionStrategy::IsolateDatacenter,
+            PartitionStrategy::AsymmetricSend,
+            PartitionStrategy::AsymmetricRecv,
+        ] {
+            assert!(
+                seen.contains(&format!("{expected:?}")),
+                "no seed in 0..500 selected {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn strategy_selection_is_reproducible_per_seed() {
+        for seed in [0_u64, 1, 42, 12_345] {
+            assert_eq!(strategy_for(seed), strategy_for(seed));
+        }
     }
 }
 

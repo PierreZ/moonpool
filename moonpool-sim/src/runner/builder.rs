@@ -1459,12 +1459,18 @@ impl SimulationBuilder {
             .as_ref()
             .map(Self::resolve_process_config);
 
-        let sim = Self::build_sim_for_iteration(
+        let mut sim = Self::build_sim_for_iteration(
             self.network_chaos,
             self.storage_chaos,
             self.buggify_knobs,
             seed,
         );
+        // Hand the engine the resolved topology as plain data so locality-aware
+        // network faults and distance-based latency can see it. Empty (and thus
+        // inert) for plain `.processes()` runs.
+        if let Some(config) = &process_config {
+            sim.set_localities(config.machine_registry.locality_map());
+        }
         let start_time = Instant::now();
         // Derive the per-seed attrition regime: `Swarm` draws a fresh reboot regime
         // from `CONFIG_RNG` (after the network/storage masks, keeping the draw order

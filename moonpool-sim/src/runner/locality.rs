@@ -18,7 +18,7 @@
 //! .cluster(LocalityConfig::new(3, 3, 3, 1), || Box::new(MyNode::new()))
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 
 use crate::locality::{DomainLevel, LocalityInfo};
@@ -125,6 +125,19 @@ impl MachineRegistry {
     #[must_use]
     pub fn locality_for(&self, ip: IpAddr) -> Option<&LocalityInfo> {
         self.ip_locality.get(&ip)
+    }
+
+    /// Export the registry as plain, deterministically ordered data for the
+    /// simulation engine ([`SimWorld::set_localities`](crate::SimWorld::set_localities)).
+    ///
+    /// The engine only needs `ip -> LocalityInfo`; keeping the registry itself
+    /// runner-side preserves the layering (the engine never imports the runner).
+    #[must_use]
+    pub fn locality_map(&self) -> BTreeMap<IpAddr, LocalityInfo> {
+        self.ip_locality
+            .iter()
+            .map(|(ip, locality)| (*ip, locality.clone()))
+            .collect()
     }
 
     /// Find all IPs whose domain at `level` matches `id`.
