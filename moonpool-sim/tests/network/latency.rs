@@ -37,7 +37,7 @@ fn test_fast_local_configuration() {
     local_runtime.block_on(async move {
         let fast_config = NetworkConfiguration::fast_local();
         let mut sim = SimWorld::new_with_network_config(fast_config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let start_time = std::time::Instant::now();
         simple_network_test(provider, "fast-test").await.unwrap();
@@ -68,7 +68,7 @@ fn test_default_simulation_configuration() {
     local_runtime.block_on(async move {
         let wan_config = NetworkConfiguration::default(); // Use default config with reasonable delays
         let mut sim = SimWorld::new_with_network_config(wan_config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let start_time = std::time::Instant::now();
         simple_network_test(provider, "wan-test").await.unwrap();
@@ -108,7 +108,7 @@ fn test_custom_latency_configuration() {
         };
 
         let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         simple_network_test(provider, "custom-test").await.unwrap();
 
@@ -154,7 +154,7 @@ fn test_latency_range_sampling() {
 
         for _run in 0..5 {
             let mut sim = SimWorld::new_with_network_config(config.clone());
-            let provider = sim.network_provider();
+            let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
             simple_network_test(provider, "jitter-test").await.unwrap();
 
@@ -205,7 +205,7 @@ fn test_network_randomization_ranges() {
         };
 
         let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         simple_network_test(provider, "custom-ranges-test")
             .await
@@ -229,5 +229,58 @@ fn test_network_randomization_ranges() {
         );
 
         println!("Custom ranges test completed in sim time: {sim_time:?}");
+    });
+}
+
+/// Regression test for the client-initiated connection's local IP.
+///
+/// `SimNetworkProvider::connect()` used to call `create_connection_pair` with a
+/// literal placeholder address for the client side, so the client connection's
+/// `local_ip` stayed `None` forever. `connection_base_latency()` requires both
+/// endpoint IPs to activate `max_pair_latency`, so per-pair latency was a
+/// silent no-op on every connection made through `NetworkProvider::connect()`.
+///
+/// This test fails without the fix: `sim.pair_latency(client_ip, server_ip)`
+/// stays `None` because the client's `local_ip` never resolves, so
+/// `connection_base_latency` bails out before touching the pair map.
+#[test]
+fn test_client_initiated_connection_records_pair_latency() {
+    let local_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("Failed to build local runtime");
+
+    local_runtime.block_on(async move {
+        let mut config = NetworkConfiguration::fast_local();
+        // Enable the "stably slow link" chaos feature: a nonzero range means
+        // connection_base_latency() should memoize a latency for the pair.
+        config.chaos.max_pair_latency = Duration::from_millis(5)..Duration::from_millis(10);
+
+        let mut sim = SimWorld::new_with_network_config(config);
+
+        let client_ip: std::net::IpAddr = "10.0.1.1".parse().expect("valid ip");
+        let server_ip: std::net::IpAddr = "10.0.1.2".parse().expect("valid ip");
+        let server_addr = "10.0.1.2:8080";
+
+        let provider = sim.network_provider(client_ip);
+        let listener = provider.bind(server_addr).await.unwrap();
+        let _client = provider.connect(server_addr).await.unwrap();
+        let (_server, _peer_addr) = listener.accept().await.unwrap();
+
+        sim.run_until_empty();
+
+        let latency = sim.pair_latency(client_ip, server_ip);
+        assert!(
+            latency.is_some(),
+            "expected a per-pair base latency to be recorded for the \
+             client-initiated connection ({client_ip} -> {server_ip}); this is \
+             None when the client's local_ip never resolves"
+        );
+        let latency = latency.expect("checked above");
+        assert!(
+            latency >= Duration::from_millis(5) && latency < Duration::from_millis(10),
+            "latency {latency:?} outside configured max_pair_latency range"
+        );
     });
 }
