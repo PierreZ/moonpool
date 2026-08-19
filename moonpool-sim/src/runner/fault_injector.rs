@@ -493,6 +493,10 @@ impl FaultInjector for AttritionInjector {
                     let zones = ctx.machine_registry().all_zones();
                     self.inject_domain(ctx, DomainLevel::Zone, &zones)?;
                 }
+                AttritionScope::PerDatacenter => {
+                    let datacenters = ctx.machine_registry().all_datacenters();
+                    self.inject_domain(ctx, DomainLevel::Datacenter, &datacenters)?;
+                }
             }
         }
         Ok(())
