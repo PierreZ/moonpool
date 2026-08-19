@@ -27,7 +27,7 @@ fn test_bit_flip_disabled_with_zero_probability() {
         config.chaos.bit_flip_probability = 0.0; // Explicitly disable
 
         let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         // Send multiple messages
         let addr = "test-server";
@@ -71,7 +71,7 @@ fn test_bit_flip_injection_with_high_probability() {
         config.chaos.bit_flip_cooldown = Duration::ZERO;
 
         let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "chaos-server";
         let listener = provider.bind(addr).await.unwrap();
@@ -115,7 +115,7 @@ fn test_bit_flip_cooldown() {
         config.chaos.bit_flip_cooldown = Duration::from_secs(10); // Long cooldown
 
         let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "cooldown-server";
         let listener = provider.bind(addr).await.unwrap();
@@ -153,7 +153,7 @@ fn test_peer_checksum_error_recovery() {
         config.chaos.bit_flip_cooldown = Duration::ZERO;
 
         let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "recovery-server";
         let listener = provider.bind(addr).await.unwrap();
@@ -191,7 +191,7 @@ fn test_bit_flip_with_message_exchange() {
         config.chaos.bit_flip_cooldown = Duration::ZERO;
 
         let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "message-exchange";
         let listener = provider.bind(addr).await.unwrap();

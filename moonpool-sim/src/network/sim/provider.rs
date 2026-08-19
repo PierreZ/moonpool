@@ -5,19 +5,28 @@ use crate::network::ConnectFailureMode;
 use crate::sim::rng::sim_random;
 use crate::{Event, WeakSimWorld};
 use std::io;
+use std::net::IpAddr;
 use tracing::instrument;
 
 /// Simulated networking implementation
+///
+/// Scoped to the IP of the process that owns it: [`connect`](Self::connect)
+/// uses this IP as the local address for the connections it initiates, so
+/// per-pair chaos (e.g. `max_pair_latency`) can key off the real client IP
+/// instead of a placeholder.
 #[derive(Debug, Clone)]
 pub struct SimNetworkProvider {
     sim: WeakSimWorld,
+    /// IP address of the process that owns connections initiated through
+    /// this provider.
+    local_ip: IpAddr,
 }
 
 impl SimNetworkProvider {
-    /// Create a new simulated network provider
+    /// Create a new simulated network provider scoped to a process IP.
     #[must_use]
-    pub fn new(sim: WeakSimWorld) -> Self {
-        Self { sim }
+    pub fn new(sim: WeakSimWorld, local_ip: IpAddr) -> Self {
+        Self { sim, local_ip }
     }
 
     /// Sleep in simulation time.
@@ -126,8 +135,11 @@ impl NetworkProvider for SimNetworkProvider {
         let delay = sim
             .with_network_config(|config| crate::network::sample_latency(&config.connect_latency));
 
-        // Create a connection pair for bidirectional communication
-        let (client_id, server_id) = sim.create_connection_pair("client-addr", addr);
+        // Create a connection pair for bidirectional communication, using this
+        // process's real IP as the client's local address (port is irrelevant,
+        // only the IP is parsed out) so per-pair chaos can key off it.
+        let client_addr = std::net::SocketAddr::new(self.local_ip, 0).to_string();
+        let (client_id, server_id) = sim.create_connection_pair(&client_addr, addr);
 
         // FDB SimClogging: fix a permanent per-pair latency at first contact, for
         // both directions. No-op (returns ZERO, no RNG) when max_pair_latency is off.

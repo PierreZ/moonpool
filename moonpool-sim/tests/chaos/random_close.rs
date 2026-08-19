@@ -28,7 +28,7 @@ fn test_random_close_disabled_with_zero_probability() {
         config.chaos.random_close_probability = 0.0; // Explicitly disable
 
         let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         // Send multiple messages
         let addr = "test-server";
@@ -71,7 +71,7 @@ fn test_random_close_injection_with_high_probability() {
         config.chaos.random_close_cooldown = Duration::ZERO;
 
         let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "chaos-server";
         let listener = provider.bind(addr).await.unwrap();
@@ -112,7 +112,7 @@ fn test_random_close_asymmetric_behavior() {
         config.chaos.random_close_probability = 0.0; // We'll trigger manually
 
         let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "asymmetric-test";
         let listener = provider.bind(addr).await.unwrap();
@@ -168,7 +168,7 @@ fn test_random_close_cooldown() {
         config.chaos.random_close_cooldown = Duration::from_secs(100); // Very long cooldown
 
         let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "cooldown-server";
         let listener = provider.bind(addr).await.unwrap();
@@ -214,7 +214,7 @@ fn test_random_close_explicit_vs_silent() {
         config.chaos.random_close_explicit_ratio = 0.3; // 30% explicit
 
         let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "explicit-test";
         let listener = provider.bind(addr).await.unwrap();
@@ -255,7 +255,7 @@ fn test_random_close_paired_connection_coordination() {
         config.chaos.random_close_probability = 0.0; // Manual control
 
         let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "paired-test";
         let listener = provider.bind(addr).await.unwrap();
@@ -292,7 +292,7 @@ fn test_random_close_buffer_clearing() {
         config.chaos.random_close_probability = 0.0;
 
         let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "buffer-test";
         let listener = provider.bind(addr).await.unwrap();
@@ -330,7 +330,7 @@ fn test_random_close_bidirectional_communication() {
         config.chaos.random_close_cooldown = Duration::from_millis(10);
 
         let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "bidirectional-test";
         let listener = provider.bind(addr).await.unwrap();
@@ -389,7 +389,7 @@ fn test_random_close_with_partitions() {
         config.chaos.partition_probability = 0.05;
 
         let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider();
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "partition-test";
         let listener = provider.bind(addr).await.unwrap();
