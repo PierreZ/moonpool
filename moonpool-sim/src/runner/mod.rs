@@ -28,7 +28,7 @@ pub use builder::{Chaos, ChaosMode, ClientId, WorkloadCount};
 pub use builder::{IterationControl, SimulationBuilder};
 pub use context::SimContext;
 pub use fault_injector::{FaultContext, FaultInjector};
-pub use locality::{DomainLevel, LocalityConfig, LocalityInfo, MachineRegistry};
+pub use locality::{LocalityConfig, MachineRegistry};
 pub use process::{Attrition, AttritionScope, Process, RebootKind};
 pub use report::{SimulationMetrics, SimulationReport};
 pub use tags::{ProcessTags, TagRegistry};

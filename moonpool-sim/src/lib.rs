@@ -129,6 +129,9 @@ pub use moonpool_core::{
 /// Core simulation engine for deterministic testing.
 pub mod sim;
 
+/// Failure-domain locality vocabulary shared by the engine and the runner.
+pub mod locality;
+
 /// The deterministic single-threaded executor (seeded-random scheduling).
 pub mod executor;
 
@@ -165,12 +168,15 @@ pub use sim::{
     set_swarm_op_seed, sim_random, sim_random_range, sim_random_range_or_default, swarm_op_enabled,
 };
 
+// Locality vocabulary re-exports (shared by engine and runner)
+pub use locality::{DomainLevel, LocalityInfo};
+
 // Runner module re-exports
 pub use runner::{
-    Attrition, AttritionScope, Chaos, ChaosMode, ClientId, DomainLevel, FaultContext,
-    FaultInjector, IterationControl, LocalityConfig, LocalityInfo, MachineRegistry, Process,
-    ProcessTags, RebootKind, SimContext, SimulationBuilder, SimulationMetrics, SimulationReport,
-    TagRegistry, Workload, WorkloadCount, WorkloadTopology,
+    Attrition, AttritionScope, Chaos, ChaosMode, ClientId, FaultContext, FaultInjector,
+    IterationControl, LocalityConfig, MachineRegistry, Process, ProcessTags, RebootKind,
+    SimContext, SimulationBuilder, SimulationMetrics, SimulationReport, TagRegistry, Workload,
+    WorkloadCount, WorkloadTopology,
 };
 
 // Chaos module re-exports

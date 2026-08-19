@@ -40,8 +40,9 @@ use async_trait::async_trait;
 use moonpool_core::TimeProvider;
 
 use crate::SimulationResult;
+use crate::locality::DomainLevel;
 use crate::providers::{SimRandomProvider, SimTimeProvider};
-use crate::runner::locality::{DomainLevel, MachineRegistry};
+use crate::runner::locality::MachineRegistry;
 use crate::runner::process::{AttritionScope, RebootKind};
 use crate::runner::tags::TagRegistry;
 use crate::sim::SimWorld;
