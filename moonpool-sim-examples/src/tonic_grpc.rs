@@ -12,9 +12,11 @@
 //!
 //! - **IO**: `SimTcpStream` (futures-io) → `Compat` (tokio-io) → `TokioIo`
 //!   (hyper-io), the same bridge as the axum example.
-//! - **Spawning**: [`ProviderExecutor`] implements `hyper::rt::Executor` on
-//!   top of moonpool's `TaskProvider`, so hyper's h2 internals spawn onto the
-//!   deterministic sim executor.
+//! - **Spawning**: `moonpool_sim::HyperExecutor` (feature `hyper`) routes
+//!   hyper's internal h2 spawns onto the deterministic sim executor.
+//! - **Timers**: `moonpool_sim::HyperTimer` answers hyper's clock reads and
+//!   sleeps from the sim time provider, so h2 keepalive ping/pong (enabled
+//!   on both sides below) runs on deterministic sim time.
 //! - **gRPC**: the generated `EchoServer`/`EchoClient` from
 //!   `proto/echo.proto` — the exact same codegen output production uses.
 //!
@@ -38,7 +40,6 @@
 //! # Architecture
 //!
 //! - **[`proto`]**: protoc/prost-generated messages and stubs
-//! - **[`ProviderExecutor`]**: `hyper::rt::Executor` over any `TaskProvider`
 //! - **[`EchoProcess`]**: accepts TCP, serves the generated `EchoServer`
 //!   over hyper h2
 //! - **[`EchoWorkload`]**: drives the RPC mix, validates responses under
@@ -59,8 +60,9 @@ use tonic::metadata::MetadataValue;
 use tonic::{Code, Request, Response, Status};
 
 use moonpool_sim::{
-    Detach, NetworkProvider, Process, SimContext, SimTimeProvider, SimulationError,
-    SimulationResult, TaskProvider, TcpListenerTrait, TimeError, TimeProvider, Workload,
+    HyperExecutor, HyperTimer, NetworkProvider, Process, SimContext, SimTimeProvider,
+    SimulationError, SimulationResult, TaskProvider, TcpListenerTrait, TimeError, TimeProvider,
+    Workload,
 };
 
 /// Protobuf messages and gRPC stubs generated from `proto/echo.proto` by
@@ -86,50 +88,22 @@ type BoxFut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 const ROUND_METADATA_KEY: &str = "x-moonpool-round";
 
 /// Per-RPC deadline. Generous against ordinary chaos delays, short enough to
-/// cut through clogged connections and dead servers.
-const RPC_DEADLINE: Duration = Duration::from_secs(5);
+/// cut through clogged connections and dead servers — and shorter than the
+/// keepalive detection window (interval + timeout), so a mid-RPC clog trips
+/// the deadline while keepalive covers idle connections.
+const RPC_DEADLINE: Duration = Duration::from_secs(4);
 
 /// Items requested per streaming call.
 const STREAM_COUNT: u64 = 4;
 
-// ============================================================================
-// hyper executor shim — the moonpool/hyper integration point
-// ============================================================================
+/// h2 keepalive ping interval. With `HyperTimer` on the sim clock, pings
+/// fire on deterministic sim time; a clogged connection that swallows the
+/// ping ACK longer than [`KEEP_ALIVE_TIMEOUT`] is torn down by hyper.
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(3);
 
-/// A `hyper::rt::Executor` backed by a moonpool [`TaskProvider`].
-///
-/// hyper's HTTP/2 implementation requires an executor to spawn internal
-/// tasks (per-request service futures on the server, stream bookkeeping on
-/// the client). In production that is `hyper_util::rt::TokioExecutor`; inside
-/// the simulation this shim routes those spawns onto the deterministic sim
-/// executor instead.
-#[derive(Clone, Debug)]
-pub struct ProviderExecutor<T> {
-    tasks: T,
-}
-
-impl<T: TaskProvider> ProviderExecutor<T> {
-    /// Create an executor that spawns via the given task provider.
-    pub fn new(tasks: T) -> Self {
-        Self { tasks }
-    }
-}
-
-impl<T, Fut> hyper::rt::Executor<Fut> for ProviderExecutor<T>
-where
-    T: TaskProvider,
-    Fut: Future + Send + 'static,
-{
-    fn execute(&self, fut: Fut) {
-        // Fire-and-forget, matching hyper's TokioExecutor: hyper manages the
-        // lifetime of its internal futures itself.
-        self.tasks
-            .spawn_task("hyper-h2", async move {
-                let _ = fut.await;
-            })
-            .detach();
-    }
-}
+/// How long hyper waits for a keepalive ACK before declaring the
+/// connection dead.
+const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(2);
 
 // ============================================================================
 // Server side — the generated Echo trait, implemented + served
@@ -213,7 +187,8 @@ impl Process for EchoProcess {
             served: AtomicU64::new(0),
         });
         let listener = ctx.network().bind(ctx.my_ip()).await?;
-        let executor = ProviderExecutor::new(ctx.task().clone());
+        let executor = HyperExecutor::new(ctx.task().clone());
+        let timer = HyperTimer::new(ctx.time().clone());
         tracing::info!("grpc server listening");
 
         loop {
@@ -225,6 +200,9 @@ impl Process for EchoProcess {
                     let io = TokioIo::new(stream.compat());
                     let service = TowerToHyperService::new(echo.clone());
                     let conn = hyper::server::conn::http2::Builder::new(executor.clone())
+                        .timer(timer.clone())
+                        .keep_alive_interval(Some(KEEP_ALIVE_INTERVAL))
+                        .keep_alive_timeout(KEEP_ALIVE_TIMEOUT)
                         .serve_connection(io, service);
 
                     // Unlike hyper's HTTP/1 connection (which is !Send and must
@@ -349,8 +327,11 @@ impl EchoWorkload {
         let stream = connected?;
 
         let io = TokioIo::new(stream.compat());
-        let executor = ProviderExecutor::new(ctx.task().clone());
+        let executor = HyperExecutor::new(ctx.task().clone());
         let (send_request, conn) = hyper::client::conn::http2::Builder::new(executor)
+            .timer(HyperTimer::new(time.clone()))
+            .keep_alive_interval(KEEP_ALIVE_INTERVAL)
+            .keep_alive_timeout(KEEP_ALIVE_TIMEOUT)
             .handshake(io)
             .await
             .map_err(|e| SimulationError::InvalidState(format!("h2 handshake: {e}")))?;

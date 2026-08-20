@@ -20,6 +20,9 @@ tokio-providers = ["moonpool-core/tokio-providers"]
 # accounting still works via the in-process heap table from moonpool-assertions, so
 # UntilAllSometimesReached / CoveragePlateau / contract validation are unaffected.
 exploration = ["dep:moonpool-explorer"]
+# hyper 1.x runtime adapters (HyperExecutor/HyperTimer) for hosting hyper/h2
+# stacks (tonic gRPC, axum) inside the simulation. Forwards to moonpool-core.
+hyper = ["moonpool-core/hyper"]
 
 [dependencies]
 # SimProviders bundles SimTaskProvider on the moonpool deterministic executor,

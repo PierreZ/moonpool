@@ -58,6 +58,8 @@
 
 mod codec;
 mod error;
+#[cfg(feature = "hyper")]
+mod hyper_rt;
 mod network;
 mod providers;
 mod random;
@@ -93,6 +95,8 @@ pub use codec::{CodecError, JsonCodec, MessageCodec};
 pub use error::{SimulationError, SimulationResult};
 
 // Provider trait exports
+#[cfg(feature = "hyper")]
+pub use hyper_rt::{HyperExecutor, HyperTimer};
 pub use network::{NetworkProvider, TcpListenerTrait};
 #[cfg(feature = "tokio-net")]
 pub use network::{TokioNetworkProvider, TokioTcpListener};

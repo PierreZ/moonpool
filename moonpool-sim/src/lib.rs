@@ -110,6 +110,8 @@ pub use moonpool_core::{
     SimulationResult, TaskProvider, TcpListenerTrait, TimeError, TimeProvider, UID,
     WELL_KNOWN_RESERVED_COUNT, WellKnownToken,
 };
+#[cfg(feature = "hyper")]
+pub use moonpool_core::{HyperExecutor, HyperTimer};
 // The deterministic select! (moonpool-sim always enables core's
 // deterministic-select, so this is tokio's expansion with a seeded start
 // offset). Process and

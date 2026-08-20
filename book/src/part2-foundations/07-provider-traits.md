@@ -16,7 +16,7 @@ pub trait TimeProvider: Clone + Send + Sync + 'static {
     fn sleep(
         &self,
         duration: Duration,
-    ) -> impl Future<Output = Result<(), TimeError>> + Send;
+    ) -> impl Future<Output = Result<(), TimeError>> + Send + Sync;
 
     /// Get exact current time.
     fn now(&self) -> Duration;
