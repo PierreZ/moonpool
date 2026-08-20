@@ -43,7 +43,7 @@ use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tonic::{Code, Request, Response, Status};
 
 use moonpool_sim::{
-    NetworkProvider, Process, SimContext, SimulationResult, TaskProvider, TcpListenerTrait,
+    Detach, NetworkProvider, Process, SimContext, SimulationResult, TaskProvider, TcpListenerTrait,
     Workload,
 };
 
@@ -94,12 +94,13 @@ where
     Fut: Future + Send + 'static,
 {
     fn execute(&self, fut: Fut) {
-        // Fire-and-forget, matching hyper's TokioExecutor: the JoinHandle
-        // detaches on drop (tokio parity) and hyper manages the lifetime of
-        // its internal futures itself.
-        let _handle = self.tasks.spawn_task("hyper-h2", async move {
-            let _ = fut.await;
-        });
+        // Fire-and-forget, matching hyper's TokioExecutor: hyper manages the
+        // lifetime of its internal futures itself.
+        self.tasks
+            .spawn_task("hyper-h2", async move {
+                let _ = fut.await;
+            })
+            .detach();
     }
 }
 
@@ -164,11 +165,13 @@ impl Process for EchoProcess {
                     // Unlike hyper's HTTP/1 connection (which is !Send and must
                     // be driven inline), the h2 connection future is Send, so it
                     // runs as an ordinary spawned sim task.
-                    ctx.task().spawn_task("grpc-server-conn", async move {
-                        if let Err(e) = conn.await {
-                            tracing::warn!("h2 connection error (expected under chaos): {e}");
-                        }
-                    });
+                    ctx.task()
+                        .spawn_task("grpc-server-conn", async move {
+                            if let Err(e) = conn.await {
+                                tracing::warn!("h2 connection error (expected under chaos): {e}");
+                            }
+                        })
+                        .detach();
                 }
                 () = ctx.shutdown().cancelled() => {
                     tracing::info!("grpc server shutting down");
@@ -272,11 +275,13 @@ impl EchoWorkload {
         // SendRequest only makes progress while the connection future is
         // polled. The h2 client connection is Send, so spawn it as the
         // connection driver (no inline select! dance needed as with HTTP/1).
-        ctx.task().spawn_task("grpc-client-conn", async move {
-            if let Err(e) = conn.await {
-                tracing::warn!("client conn error (expected under chaos): {e}");
-            }
-        });
+        ctx.task()
+            .spawn_task("grpc-client-conn", async move {
+                if let Err(e) = conn.await {
+                    tracing::warn!("client conn error (expected under chaos): {e}");
+                }
+            })
+            .detach();
 
         let channel = H2Channel {
             inner: send_request,

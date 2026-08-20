@@ -87,8 +87,10 @@ The API deliberately matches what you would expect from tokio networking. `bind`
 
 ```rust
 pub trait TaskProvider: Clone + Send + Sync + 'static {
-    /// Join handle returned by `spawn_task`.
-    type JoinHandle: Future<Output = Result<(), JoinError>> + Send + Sync + 'static;
+    /// Join handle returned by `spawn_task`. `Detach` provides explicit
+    /// fire-and-forget: `spawn_task(...).detach()` leaves the task running
+    /// without keeping the handle.
+    type JoinHandle: Future<Output = Result<(), JoinError>> + Detach + Send + Sync + 'static;
 
     /// Spawn a named task.
     fn spawn_task<F>(&self, name: &str, future: F) -> Self::JoinHandle

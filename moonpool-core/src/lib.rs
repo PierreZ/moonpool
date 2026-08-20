@@ -105,7 +105,7 @@ pub use random::TokioRandomProvider;
 pub use storage::{OpenOptions, StorageFile, StorageProvider};
 #[cfg(feature = "tokio-fs")]
 pub use storage::{TokioStorageFile, TokioStorageProvider};
-pub use task::{JoinError, TaskProvider};
+pub use task::{Detach, JoinError, TaskProvider};
 #[cfg(feature = "tokio-task")]
 pub use task::{TokioJoinHandle, TokioTaskProvider};
 #[cfg(feature = "tokio-time")]

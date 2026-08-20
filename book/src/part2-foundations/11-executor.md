@@ -107,6 +107,7 @@ through `TaskProvider`) already expected from tokio:
 | `JoinHandle::is_finished()` | same |
 | `JoinHandle::abort()` | same (await yields `Err(JoinError::Cancelled)`) |
 | dropping a `JoinHandle` | same: detaches, task keeps running |
+| fire-and-forget | `JoinHandle::detach()` — explicit form of the above |
 | task panics | caught, handle yields `Err(JoinError::Panicked)`, siblings unaffected |
 | dropping the `Runtime` | dropping the `Executor` cancels every live task |
 | `tokio::select!` | `moonpool::select!` (tokio's own expansion, seeded start offset) |

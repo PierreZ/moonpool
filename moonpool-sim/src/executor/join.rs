@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use async_task::FallibleTask;
-use moonpool_core::JoinError;
+use moonpool_core::{Detach, JoinError};
 use parking_lot::Mutex;
 
 use super::TaskMeta;
@@ -52,6 +52,17 @@ impl<T> JoinHandle<T> {
         }
     }
 
+    /// Detach the task explicitly: it keeps running to completion in the
+    /// background, and its output is discarded.
+    ///
+    /// Dropping the handle has the same effect (tokio parity); `detach()`
+    /// makes the fire-and-forget intent visible at the call site.
+    pub fn detach(self) {
+        if let Some(task) = self.inner.lock().take() {
+            task.detach();
+        }
+    }
+
     /// Abort the task: it will never be polled again and its future is
     /// dropped. Awaiting the handle afterwards yields
     /// `Err(JoinError::Cancelled)`.
@@ -66,6 +77,12 @@ impl<T> JoinHandle<T> {
         if inner.as_ref().is_some_and(|task| !task.is_finished()) {
             drop(inner.take());
         }
+    }
+}
+
+impl<T> Detach for JoinHandle<T> {
+    fn detach(self) {
+        JoinHandle::detach(self);
     }
 }
 
