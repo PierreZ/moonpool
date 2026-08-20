@@ -7,6 +7,9 @@ package moonpool.sim;
 service Echo {
   // Returns the request payload unchanged.
   rpc Echo(EchoRequest) returns (EchoResponse);
+
+  // Streams `count` copies of the payload back, sequenced 0..count.
+  rpc EchoStream(EchoStreamRequest) returns (stream EchoResponse);
 }
 
 // A service the example server deliberately does NOT register. The workload
@@ -22,6 +25,14 @@ message EchoRequest {
   string text = 1;
   // Client-chosen sequence number.
   uint64 seq = 2;
+}
+
+// Request payload for the server-streaming method.
+message EchoStreamRequest {
+  // Payload to echo back in every stream item.
+  string text = 1;
+  // Number of stream items to send.
+  uint64 count = 2;
 }
 
 // Response payload.

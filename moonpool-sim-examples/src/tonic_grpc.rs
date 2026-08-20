@@ -22,29 +22,45 @@
 //! be driven inline — see `axum_web.rs`), h2 connections are `Send`, so both
 //! server and client connection futures are spawned as ordinary sim tasks.
 //!
+//! What the workload exercises per round, all over one multiplexed h2
+//! connection:
+//!
+//! - **Concurrent unary RPCs** (cloned clients, joined futures) with
+//!   metadata round-tripping and per-call deadlines via the time provider
+//! - **Server streaming** with in-order delivery checks and buggified
+//!   mid-stream aborts
+//! - **Unknown-service probe** against the unmounted `Shout` service
+//!   (expects `UNIMPLEMENTED`)
+//!
+//! The sim binary adds Attrition chaos (server crash/reboot) on top of the
+//! default network chaos, so rounds also see dead servers and reconnects.
+//!
 //! # Architecture
 //!
 //! - **[`proto`]**: protoc/prost-generated messages and stubs
 //! - **[`ProviderExecutor`]**: `hyper::rt::Executor` over any `TaskProvider`
 //! - **[`EchoProcess`]**: accepts TCP, serves the generated `EchoServer`
 //!   over hyper h2
-//! - **[`EchoWorkload`]**: drives unary RPCs through the generated
-//!   `EchoClient`, validates echoes under chaos
+//! - **[`EchoWorkload`]**: drives the RPC mix, validates responses under
+//!   chaos
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::Stream;
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
+use tonic::metadata::MetadataValue;
 use tonic::{Code, Request, Response, Status};
 
 use moonpool_sim::{
-    Detach, NetworkProvider, Process, SimContext, SimulationResult, TaskProvider, TcpListenerTrait,
-    Workload,
+    Detach, NetworkProvider, Process, SimContext, SimTimeProvider, SimulationError,
+    SimulationResult, TaskProvider, TcpListenerTrait, TimeError, TimeProvider, Workload,
 };
 
 /// Protobuf messages and gRPC stubs generated from `proto/echo.proto` by
@@ -60,10 +76,21 @@ pub mod proto {
 use proto::echo_client::EchoClient;
 use proto::echo_server::{Echo, EchoServer};
 use proto::shout_client::ShoutClient;
-use proto::{EchoRequest, EchoResponse};
+use proto::{EchoRequest, EchoResponse, EchoStreamRequest};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type BoxFut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+
+/// Metadata key the client stamps on each request; the server must echo it
+/// back on the response.
+const ROUND_METADATA_KEY: &str = "x-moonpool-round";
+
+/// Per-RPC deadline. Generous against ordinary chaos delays, short enough to
+/// cut through clogged connections and dead servers.
+const RPC_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Items requested per streaming call.
+const STREAM_COUNT: u64 = 4;
 
 // ============================================================================
 // hyper executor shim — the moonpool/hyper integration point
@@ -121,13 +148,51 @@ impl Echo for EchoService {
             return Err(Status::unavailable("buggified echo failure"));
         }
 
+        let round_meta = request.metadata().get(ROUND_METADATA_KEY).cloned();
         let msg = request.into_inner();
         let served = self.served.fetch_add(1, Ordering::Relaxed) + 1;
         tracing::info!(seq = msg.seq, served, "echo_served");
-        Ok(Response::new(EchoResponse {
+
+        let mut response = Response::new(EchoResponse {
             text: msg.text,
             seq: msg.seq,
-        }))
+        });
+        // Echo the client's round marker back so the workload can verify
+        // metadata survives the full request/response path.
+        if let Some(round) = round_meta {
+            response.metadata_mut().insert(ROUND_METADATA_KEY, round);
+        }
+        Ok(response)
+    }
+
+    type EchoStreamStream = Pin<Box<dyn Stream<Item = Result<EchoResponse, Status>> + Send>>;
+
+    async fn echo_stream(
+        &self,
+        request: Request<EchoStreamRequest>,
+    ) -> Result<Response<Self::EchoStreamStream>, Status> {
+        if moonpool_sim::buggify!() {
+            return Err(Status::unavailable("buggified stream refusal"));
+        }
+
+        let msg = request.into_inner();
+        tracing::info!(count = msg.count, "echo_stream_started");
+
+        // Precompute the items so per-item fault decisions are made inside
+        // the request task (deterministic per seed): the stream can abort
+        // partway, but items delivered before the abort stay in order.
+        let mut items = Vec::new();
+        for seq in 0..msg.count {
+            if moonpool_sim::buggify_with_prob!(0.05) {
+                items.push(Err(Status::aborted("buggified stream abort")));
+                break;
+            }
+            items.push(Ok(EchoResponse {
+                text: msg.text.clone(),
+                seq,
+            }));
+        }
+        Ok(Response::new(Box::pin(futures::stream::iter(items))))
     }
 }
 
@@ -210,7 +275,8 @@ impl tower_service::Service<http::Request<tonic::body::Body>> for H2Channel {
     }
 }
 
-/// Test driver that sends unary echo RPCs and validates responses.
+/// Test driver that sends concurrent unary, streaming, and unknown-service
+/// RPCs and validates responses.
 pub struct EchoWorkload;
 
 #[async_trait]
@@ -220,9 +286,9 @@ impl Workload for EchoWorkload {
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let server_ip = ctx.peer("grpc").ok_or_else(|| {
-            moonpool_sim::SimulationError::InvalidState("grpc process not found".into())
-        })?;
+        let server_ip = ctx
+            .peer("grpc")
+            .ok_or_else(|| SimulationError::InvalidState("grpc process not found".into()))?;
         tracing::info!(%server_ip, "workload starting");
 
         for round in 0..5u32 {
@@ -240,11 +306,24 @@ impl Workload for EchoWorkload {
                     tracing::info!(round, "round completed successfully");
                 }
                 Err(e) => {
-                    // Under chaos (connection resets, clogs, bit flips), RPCs
-                    // fail. That's expected — we're testing resilience.
+                    // Under chaos (connection resets, clogs, bit flips, server
+                    // reboots), RPCs fail. That's expected — we're testing
+                    // resilience.
                     moonpool_sim::assert_sometimes!(true, "grpc_round_failed");
                     tracing::warn!(round, "round failed (expected under chaos): {e}");
                 }
+            }
+
+            // Spread rounds across sim time so Attrition chaos (server
+            // crash/reboot windows) overlaps the workload instead of firing
+            // after it already finished.
+            let pause = moonpool_sim::select! {
+                biased;
+                result = ctx.time().sleep(Duration::from_secs(2)) => result,
+                () = ctx.shutdown().cancelled() => break,
+            };
+            if pause.is_err() {
+                break;
             }
         }
 
@@ -255,21 +334,26 @@ impl Workload for EchoWorkload {
 
 impl EchoWorkload {
     async fn run_round(ctx: &SimContext, server_ip: &str, round: u32) -> SimulationResult<()> {
+        let time = ctx.time().clone();
+
         tracing::info!(round, "connecting to server");
-        let stream = moonpool_sim::select! {
-            biased;
-            result = ctx.network().connect(server_ip) => result?,
-            () = ctx.shutdown().cancelled() => return Ok(()),
+        // Deadline on connect: with Attrition chaos the server may simply be
+        // dead, and a connect to a dead process hangs rather than erroring.
+        let Ok(connected) = time
+            .timeout(RPC_DEADLINE, ctx.network().connect(server_ip))
+            .await
+        else {
+            moonpool_sim::assert_sometimes!(true, "grpc_connect_timed_out");
+            return Err(SimulationError::InvalidState("connect timed out".into()));
         };
+        let stream = connected?;
 
         let io = TokioIo::new(stream.compat());
         let executor = ProviderExecutor::new(ctx.task().clone());
         let (send_request, conn) = hyper::client::conn::http2::Builder::new(executor)
             .handshake(io)
             .await
-            .map_err(|e| {
-                moonpool_sim::SimulationError::InvalidState(format!("h2 handshake: {e}"))
-            })?;
+            .map_err(|e| SimulationError::InvalidState(format!("h2 handshake: {e}")))?;
         tracing::info!(round, "h2 handshake complete");
 
         // SendRequest only makes progress while the connection future is
@@ -286,44 +370,55 @@ impl EchoWorkload {
         let channel = H2Channel {
             inner: send_request,
         };
-        let origin = format!("http://{server_ip}");
-        let mut echo_client = EchoClient::with_origin(
-            channel.clone(),
-            http::Uri::try_from(&origin).map_err(|e| {
-                moonpool_sim::SimulationError::InvalidState(format!("bad origin: {e}"))
-            })?,
-        );
-        // Both generated clients multiplex over the same h2 connection.
-        let mut shout_client = ShoutClient::with_origin(
-            channel,
-            http::Uri::try_from(&origin).map_err(|e| {
-                moonpool_sim::SimulationError::InvalidState(format!("bad origin: {e}"))
-            })?,
-        );
+        let origin = http::Uri::try_from(format!("http://{server_ip}"))
+            .map_err(|e| SimulationError::InvalidState(format!("bad origin: {e}")))?;
+        let echo_client = EchoClient::with_origin(channel.clone(), origin.clone());
+        // The generated clients are Clone over a Clone channel: everything
+        // below multiplexes over the single h2 connection made above.
+        let mut shout_client = ShoutClient::with_origin(channel, origin);
 
-        for seq in 0..3u64 {
-            Self::echo_once(&mut echo_client, round, seq).await?;
+        // Concurrent unary RPCs: h2 stream multiplexing under chaos. Each
+        // seed interleaves the frames differently.
+        let batch =
+            (0..3u64).map(|seq| Self::echo_once(echo_client.clone(), time.clone(), round, seq));
+        for outcome in futures::future::join_all(batch).await {
+            outcome?;
         }
-        Self::probe_unimplemented(&mut shout_client).await?;
+
+        Self::stream_once(echo_client, time.clone(), round).await?;
+        Self::probe_unimplemented(&mut shout_client, &time).await?;
         Ok(())
     }
 
     async fn echo_once(
-        client: &mut EchoClient<H2Channel>,
+        mut client: EchoClient<H2Channel>,
+        time: SimTimeProvider,
         round: u32,
         seq: u64,
     ) -> SimulationResult<()> {
         let text = format!("hello-{round}-{seq}");
+        let mut request = Request::new(EchoRequest {
+            text: text.clone(),
+            seq,
+        });
+        let round_value = MetadataValue::try_from(round.to_string())
+            .map_err(|e| SimulationError::InvalidState(format!("metadata value: {e}")))?;
+        request
+            .metadata_mut()
+            .insert(ROUND_METADATA_KEY, round_value.clone());
         tracing::info!(round, seq, "sending echo rpc");
 
-        match client
-            .echo(EchoRequest {
-                text: text.clone(),
-                seq,
-            })
-            .await
-        {
-            Ok(response) => {
+        match time.timeout(RPC_DEADLINE, client.echo(request)).await {
+            Err(TimeError::Elapsed | TimeError::Shutdown) => {
+                moonpool_sim::assert_sometimes!(true, "grpc_rpc_timed_out");
+                Err(SimulationError::InvalidState("echo rpc timed out".into()))
+            }
+            Ok(Ok(response)) => {
+                // Metadata must survive the full request/response round trip.
+                moonpool_sim::assert_always!(
+                    response.metadata().get(ROUND_METADATA_KEY) == Some(&round_value),
+                    "response must echo request metadata"
+                );
                 let reply = response.into_inner();
                 // What we sent must come back unchanged — end-to-end through
                 // protobuf, gRPC framing, h2, and the simulated network.
@@ -335,39 +430,123 @@ impl EchoWorkload {
                 tracing::info!(round, seq, "echo rpc ok");
                 Ok(())
             }
-            Err(status) if status.code() == Code::Unavailable => {
+            Ok(Err(status)) if status.code() == Code::Unavailable => {
                 // Server-side buggify — the RPC failed cleanly, the channel
                 // stays usable.
                 moonpool_sim::assert_sometimes!(true, "grpc_echo_unavailable");
                 tracing::info!(round, seq, "echo unavailable (buggified server)");
                 Ok(())
             }
-            Err(status) => Err(moonpool_sim::SimulationError::InvalidState(format!(
+            Ok(Err(status)) => Err(SimulationError::InvalidState(format!(
                 "echo rpc failed: {status}"
             ))),
         }
     }
 
-    async fn probe_unimplemented(client: &mut ShoutClient<H2Channel>) -> SimulationResult<()> {
-        tracing::info!("calling unmounted Shout service");
+    async fn stream_once(
+        mut client: EchoClient<H2Channel>,
+        time: SimTimeProvider,
+        round: u32,
+    ) -> SimulationResult<()> {
+        let text = format!("stream-{round}");
+        let request = EchoStreamRequest {
+            text: text.clone(),
+            count: STREAM_COUNT,
+        };
+        tracing::info!(round, "starting echo stream");
 
-        match client
-            .shout(EchoRequest {
-                text: "probe".to_string(),
-                seq: 0,
-            })
+        let mut stream = match time
+            .timeout(RPC_DEADLINE, client.echo_stream(request))
             .await
         {
-            Ok(_) => {
+            Err(TimeError::Elapsed | TimeError::Shutdown) => {
+                moonpool_sim::assert_sometimes!(true, "grpc_rpc_timed_out");
+                return Err(SimulationError::InvalidState("stream rpc timed out".into()));
+            }
+            Ok(Ok(response)) => response.into_inner(),
+            Ok(Err(status)) if status.code() == Code::Unavailable => {
+                moonpool_sim::assert_sometimes!(true, "grpc_echo_unavailable");
+                tracing::info!(round, "stream refused (buggified server)");
+                return Ok(());
+            }
+            Ok(Err(status)) => {
+                return Err(SimulationError::InvalidState(format!(
+                    "stream rpc failed: {status}"
+                )));
+            }
+        };
+
+        let mut next_seq = 0u64;
+        loop {
+            match time.timeout(RPC_DEADLINE, stream.message()).await {
+                Err(TimeError::Elapsed | TimeError::Shutdown) => {
+                    moonpool_sim::assert_sometimes!(true, "grpc_rpc_timed_out");
+                    return Err(SimulationError::InvalidState(
+                        "stream item timed out".into(),
+                    ));
+                }
+                Ok(Ok(Some(item))) => {
+                    // In-order, gap-free delivery: h2 preserves stream order
+                    // even while the sim chops the connection into partial
+                    // reads and delayed segments.
+                    moonpool_sim::assert_always!(
+                        item.seq == next_seq && item.text == text,
+                        "stream items must arrive in order and unchanged"
+                    );
+                    next_seq += 1;
+                }
+                Ok(Ok(None)) => {
+                    // Clean end-of-stream: the server only ends early via an
+                    // explicit error, so a clean end means full delivery.
+                    moonpool_sim::assert_always!(
+                        next_seq == STREAM_COUNT,
+                        "clean stream end must deliver every item"
+                    );
+                    moonpool_sim::assert_sometimes!(true, "grpc_stream_completed");
+                    tracing::info!(round, "stream completed");
+                    return Ok(());
+                }
+                Ok(Err(status)) if status.code() == Code::Aborted => {
+                    // Buggified mid-stream abort: partial delivery is fine —
+                    // every item that did arrive was already validated above.
+                    moonpool_sim::assert_sometimes!(true, "grpc_stream_aborted");
+                    tracing::info!(round, delivered = next_seq, "stream aborted (buggified)");
+                    return Ok(());
+                }
+                Ok(Err(status)) => {
+                    return Err(SimulationError::InvalidState(format!(
+                        "stream failed: {status}"
+                    )));
+                }
+            }
+        }
+    }
+
+    async fn probe_unimplemented(
+        client: &mut ShoutClient<H2Channel>,
+        time: &SimTimeProvider,
+    ) -> SimulationResult<()> {
+        tracing::info!("calling unmounted Shout service");
+
+        let request = EchoRequest {
+            text: "probe".to_string(),
+            seq: 0,
+        };
+        match time.timeout(RPC_DEADLINE, client.shout(request)).await {
+            Err(TimeError::Elapsed | TimeError::Shutdown) => {
+                moonpool_sim::assert_sometimes!(true, "grpc_rpc_timed_out");
+                Err(SimulationError::InvalidState("probe rpc timed out".into()))
+            }
+            Ok(Ok(_)) => {
                 moonpool_sim::assert_always!(false, "unmounted service must not succeed");
                 Ok(())
             }
-            Err(status) if status.code() == Code::Unimplemented => {
+            Ok(Err(status)) if status.code() == Code::Unimplemented => {
                 moonpool_sim::assert_sometimes!(true, "grpc_unimplemented_detected");
                 tracing::info!("unmounted service correctly rejected");
                 Ok(())
             }
-            Err(status) => Err(moonpool_sim::SimulationError::InvalidState(format!(
+            Ok(Err(status)) => Err(SimulationError::InvalidState(format!(
                 "probe rpc failed: {status}"
             ))),
         }
