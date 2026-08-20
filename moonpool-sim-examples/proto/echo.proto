@@ -1,0 +1,33 @@
+// Echo service definition for the tonic gRPC simulation example.
+syntax = "proto3";
+
+package moonpool.sim;
+
+// The service under test: echoes requests back to the caller.
+service Echo {
+  // Returns the request payload unchanged.
+  rpc Echo(EchoRequest) returns (EchoResponse);
+}
+
+// A service the example server deliberately does NOT register. The workload
+// calls it to verify that unknown services are rejected with UNIMPLEMENTED.
+service Shout {
+  // Would return the payload uppercased, if anyone implemented it.
+  rpc Shout(EchoRequest) returns (EchoResponse);
+}
+
+// Request payload.
+message EchoRequest {
+  // Payload to echo back.
+  string text = 1;
+  // Client-chosen sequence number.
+  uint64 seq = 2;
+}
+
+// Response payload.
+message EchoResponse {
+  // Echoed payload.
+  string text = 1;
+  // Echoed sequence number.
+  uint64 seq = 2;
+}

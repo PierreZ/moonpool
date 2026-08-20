@@ -39,7 +39,10 @@
             
             # Build tools
             gcc
-            
+
+            # gRPC example: tonic-prost-build shells out to protoc
+            protobuf
+
             # Development tools
             pkg-config
             openssl

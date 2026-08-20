@@ -20,14 +20,24 @@ tracing-subscriber = "0.3"
 
 axum = "0.8"
 bytes = "1"
+http = "1"
 http-body-util = "0.1"
-hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper = { version = "1", features = ["http1", "http2", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
+# Runtime-free tonic core: gRPC framing + codegen support without
+# tonic::transport (which hard-codes tokio::spawn / TokioExecutor / TokioTimer).
+prost = "0.14"
+tonic = { version = "0.14", default-features = false, features = ["codegen"] }
+tonic-prost = "0.14"
+tower-service = "0.3"
+
+[build-dependencies]
+tonic-prost-build = "0.14"
 
 [[bin]]
 name = "sim-maze-explore"
@@ -44,6 +54,10 @@ path = "src/bin/sim/axum_web.rs"
 [[bin]]
 name = "sim-topology"
 path = "src/bin/sim/topology.rs"
+
+[[bin]]
+name = "sim-tonic-grpc"
+path = "src/bin/sim/tonic_grpc.rs"
 
 [lints]
 workspace = true

@@ -35,6 +35,8 @@ The same goes for branch selection. Bare `tokio::select!` draws its polling offs
 
 `NetworkProvider::TcpStream` implements `futures::io::AsyncRead + AsyncWrite`. For libraries that expect tokio I/O traits (hyper, axum), wrap with `tokio_util::compat::Compat` and `hyper_util::rt::TokioIo`. See the axum example for the bridge.
 
+For gRPC via tonic, skip `tonic::transport` entirely — it hard-codes `tokio::spawn`, `TokioExecutor`, and `TokioTimer` with no override hooks. Use tonic with `default-features = false` (the runtime-free gRPC framing core) and drive `hyper::{server,client}::conn::http2` yourself, with a `hyper::rt::Executor` implemented over `TaskProvider`. hyper's h2 connections are `Send`, so unlike the HTTP/1 case they can be spawned as ordinary sim tasks. The tonic example in `moonpool-sim-examples/src/tonic_grpc.rs` (`cargo xtask sim run tonic`) shows the full pattern, including the executor shim.
+
 The simulated stream overrides `poll_write_vectored`: each `IoSlice` becomes its own ordered delivery event (so the chaos pack can act on individual segments), and it follows `writev(2)` partial-accept semantics — under send-buffer pressure it accepts the bytes that fit and reports a short count rather than blocking all-or-nothing. `SimTcpStream::is_write_vectored()` returns `true`.
 
 ## 4. Filesystem and storage

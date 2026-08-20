@@ -36,6 +36,10 @@ const SIM_BINARIES: &[SimBinary] = &[
         sancov_crates: "moonpool_sim_examples",
     },
     SimBinary {
+        name: "sim-tonic-grpc",
+        sancov_crates: "moonpool_sim_examples",
+    },
+    SimBinary {
         name: "sim-transport",
         sancov_crates: "moonpool_transport",
     },
