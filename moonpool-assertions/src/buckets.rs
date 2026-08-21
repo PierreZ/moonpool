@@ -4,7 +4,7 @@
 //! discovery the accounting calls [`crate::hooks::on_bucket_split`]; on every
 //! call it calls [`crate::hooks::on_bucket_mark`]. With no hook installed both
 //! are no-ops (pure accounting); the exploration backend wires them to coverage
-//! marking and fork dispatch. Optional quality watermarks allow re-signalling
+//! journaling. Optional quality watermarks allow re-signalling
 //! when the packed quality score improves.
 //!
 //! # Memory Layout
@@ -14,7 +14,7 @@
 //! ```
 //!
 //! The `next_bucket` counter is incremented atomically (via `AtomicU32::fetch_add`)
-//! to allocate new buckets safely across fork boundaries.
+//! to allocate new buckets safely across process boundaries.
 
 use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, Ordering};
 
@@ -41,8 +41,8 @@ pub struct EachBucket {
     pub site_hash: u32,
     /// Hash of (`site_hash` + identity key values) — uniquely identifies this bucket.
     pub bucket_hash: u32,
-    /// CAS guard: 0 = no fork yet, 1 = first fork triggered.
-    pub split_triggered: u8,
+    /// CAS guard: 0 = not yet discovered, 1 = first discovery signalled.
+    pub discovered: u8,
     /// Number of identity keys stored in `key_values`.
     pub num_keys: u8,
     /// Number of quality keys (0-4). 0 means no quality tracking.
@@ -126,7 +126,7 @@ unsafe fn find_or_alloc_each_bucket(
             EachBucket {
                 site_hash,
                 bucket_hash,
-                split_triggered: 0,
+                discovered: 0,
                 num_keys: u8::try_from(num_keys).expect("num_keys capped at MAX_EACH_KEYS=6"),
                 has_quality,
                 pad: 0,
@@ -223,15 +223,14 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
     }
 
     // Safety: bucket points to valid memory. Atomic operations are used for
-    // cross-fork safety (parent waits on child via waitpid, but atomics ensure
-    // correct visibility for recursive fork scenarios).
+    // cross-process safety when concurrent worker processes share the region.
     unsafe {
         // Increment pass count.
         let count_atomic = &*(&raw const (*bucket).pass_count).cast::<AtomicU32>();
         count_atomic.fetch_add(1, Ordering::Relaxed);
 
-        // Signal discovery on first hit: CAS split_triggered from 0 → 1.
-        let ft = &*(&raw const (*bucket).split_triggered).cast::<AtomicU8>();
+        // Signal discovery on first hit: CAS discovered from 0 → 1.
+        let ft = &*(&raw const (*bucket).discovered).cast::<AtomicU8>();
         let first_discovery = ft
             .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok();
