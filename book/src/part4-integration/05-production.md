@@ -95,20 +95,22 @@ testable.
 ## Where it runs
 
 The provider contract and the production backend compile broadly. The sim
-runtime is portable too, with one boundary: the fork-based explorer is POSIX and
-Linux-first.
+runtime is portable too, with one boundary: the fork-based explorer needs a
+POSIX process model.
 
 | Target | core + tokio | transport | sim runtime | explorer (fork) |
 |--------|:---:|:---:|:---:|:---:|
 | Linux | yes | yes | yes | yes |
-| macOS | yes | yes | yes | best-effort |
+| macOS | yes | yes | yes | yes |
 | `wasm32-unknown-unknown` | task/time only | no (no sockets) | yes, `--no-default-features` | no |
 
 The simulation engine compiles to `wasm32-unknown-unknown` because it derives
 everything from a seeded RNG, a logical clock, and a cooperative scheduler — no
-operating system required. The explorer cannot follow it there, and on macOS its
-`fork`-without-`exec` model is fragile, so treat exploration as a Linux
-amplifier. Everywhere else the full simulator runs via the in-process assertion
-table; you lose multiverse forking, not correctness checking. If a build refuses
-to include the explorer, the fallback is one line:
+operating system required. The explorer cannot follow it there: it is built on
+`fork()`, `waitpid()`, and `MAP_SHARED` memory, which both Linux and macOS
+provide (the explorer stays single-threaded and never touches Apple frameworks,
+so darwin's usual fork-without-exec hazards don't apply — CI runs the fork-based
+exploration suite on macOS). On wasm the full simulator runs via the in-process
+assertion table; you lose multiverse forking, not correctness checking. If a
+build refuses to include the explorer, the fallback is one line:
 `moonpool-sim = { default-features = false }`.

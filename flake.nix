@@ -36,9 +36,6 @@
           buildInputs = with pkgs; [
             # Rust toolchain from oxalica
             rust-toolchain
-            
-            # Build tools
-            gcc
 
             # gRPC example: tonic-prost-build shells out to protoc
             protobuf
@@ -47,18 +44,25 @@
             pkg-config
             openssl
             cargo-nextest
-	    cargo-edit
+            cargo-edit
 
-	    # wasm demo: generate JS/TS bindings for the cdylib. Its version (from
-	    # nixpkgs) MUST match the `wasm-bindgen` crate pin in
-	    # moonpool-wasm-demo/Cargo.toml exactly — a mismatch breaks the bindgen
-	    # step with an opaque "schema version" error. When `nix flake update`
-	    # moves this, re-pin the crate to `wasm-bindgen --version`.
-	    wasm-bindgen-cli
+            # wasm demo: generate JS/TS bindings for the cdylib. Its version (from
+            # nixpkgs) MUST match the `wasm-bindgen` crate pin in
+            # moonpool-wasm-demo/Cargo.toml exactly — a mismatch breaks the bindgen
+            # step with an opaque "schema version" error. When `nix flake update`
+            # moves this, re-pin the crate to `wasm-bindgen --version`.
+            wasm-bindgen-cli
 
-	    # mdbook
-	    mdbook
+            # mdbook
+            mdbook
             mdbook-toc
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            # C toolchain for linking. Linux-only: darwin's stdenv already
+            # provides clang, and GNU gcc is a heavy, fragile build there.
+            gcc
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+            # Crate build scripts link against iconv on darwin.
+            libiconv
           ];
 
           shellHook = ''

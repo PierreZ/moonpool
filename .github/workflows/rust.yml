@@ -79,6 +79,23 @@ jobs:
             exit 1
           fi
 
+  # The fork-based explorer must keep working on macOS, not just Linux: same
+  # POSIX surface (fork/waitpid/mmap MAP_SHARED), but darwin is the platform
+  # where fork-without-exec and Mach-O sancov sections would regress silently.
+  # Runs the explorer + sim unit tests and one real fork-based exploration
+  # binary (adaptive-explore instruments moonpool_explorer itself, so it also
+  # covers the sancov wrapper pipeline on darwin).
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Run explorer and sim tests
+        run: nix develop --command cargo nextest run -p moonpool-explorer -p moonpool-sim
+      - name: Run fork-based exploration simulation
+        run: nix develop --command cargo xtask sim run adaptive-explore
+
   sim:
     runs-on: ubuntu-latest
     strategy:

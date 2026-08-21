@@ -20,7 +20,7 @@ moonpool                          Facade crate (features: sim / tokio / transpor
 ```
 
 The simulation runtime compiles to `wasm32-unknown-unknown` (build `moonpool-sim`
-with `--no-default-features`); only the fork-based explorer is Linux-first.
+with `--no-default-features`); the fork-based explorer runs on Linux and macOS.
 
 ## Which Crate to Use
 
