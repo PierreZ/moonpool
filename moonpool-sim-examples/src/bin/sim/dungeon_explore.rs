@@ -14,7 +14,7 @@ fn main() {
         .workload(moonpool_sim_examples::dungeon::DungeonWorkload::default())
         .enable_exploration(moonpool_sim::ExplorationConfig {
             workers: 4,
-            max_runs_per_seed: 8000,
+            max_runs_per_seed: 24_000,
             branching_factor: 4,
             max_frontier: 1024,
             max_recipe_len: 64,
