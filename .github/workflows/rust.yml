@@ -104,7 +104,7 @@ jobs:
         sim:
           - maze-explore
           - dungeon-explore
-          - adaptive-explore
+          - frontier-explore
           - transport
           - axum-web
           - tonic-grpc
