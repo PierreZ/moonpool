@@ -257,6 +257,26 @@ where
     }
 
     fn poll_connection(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), ChannelError>> {
+        // Readiness once granted is never taken back. Tower forbids returning
+        // Pending after a Ready(Ok), and middleware that polls again before
+        // calling (a balancer picking among ready services, say) would see
+        // exactly that if a connection died in between. So a clone holding a
+        // reservation stays ready, and touches no shared state: it starts no
+        // attempt and consumes no stored error. Calling through a reservation
+        // whose connection died fails fast in the request future instead,
+        // which the contract does allow.
+        if self.ready.is_some() {
+            let inner = self.shared.lock();
+            if let Conn::Connected(channel) = &inner.conn
+                && !channel.is_closed()
+            {
+                // A live connection exists, so hand the caller that one rather
+                // than a reservation that may already be stale.
+                self.ready = Some(channel.clone());
+            }
+            return Poll::Ready(Ok(()));
+        }
+
         // Everything that touches shared state happens in here, and the guard
         // is gone before anything is spawned: the channel lock is never held
         // while the task provider takes its own.
@@ -268,8 +288,9 @@ where
                 // rather than waited on, so the reconnect starts in this very
                 // poll. It is not a failed attempt: neither the failure count
                 // nor the backoff is touched, and no error is surfaced.
+                // (No reservation to clear: the early return above owns that
+                // case.)
                 inner.conn = Conn::Disconnected;
-                self.ready = None;
             } else if let Conn::Connected(channel) = &inner.conn {
                 // Reserve a handle for the call that follows.
                 self.ready = Some(channel.clone());
@@ -630,9 +651,10 @@ fn wake_all(wakers: Vec<Waker>) {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::task::Waker;
+    use std::task::{Context, Poll, Waker};
     use std::time::Duration;
 
     use bytes::Bytes;
@@ -641,8 +663,8 @@ mod tests {
     use tower_service::Service as _;
 
     use super::{
-        AttemptGuard, ChannelConfig, Conn, Inner, ReconnectingChannel, Shared, backoff_delay,
-        next_failures,
+        AttemptGuard, ChannelConfig, Conn, H2Channel, Inner, Providers as _, ReconnectingChannel,
+        Shared, backoff_delay, next_failures,
     };
     use crate::ChannelError;
 
@@ -701,6 +723,182 @@ mod tests {
         };
         assert_eq!(backoff_delay(1, &config), Duration::from_secs(30));
         assert_eq!(backoff_delay(5, &config), Duration::from_secs(30));
+    }
+
+    // ===== readiness reservations =====
+
+    /// Just enough of an h2 server for a client handshake to finish: it answers
+    /// the connection preface with an empty SETTINGS frame and then goes quiet,
+    /// swallowing everything written to it.
+    ///
+    /// This exists because `H2Channel` wraps a `SendRequest`, which hyper only
+    /// hands out from a real handshake. With one, the reservation arms of
+    /// `poll_ready` can be tested against genuine channels rather than stand-ins.
+    struct HandshakePeer {
+        settings_sent: bool,
+    }
+
+    /// A SETTINGS frame with an empty payload: length 0, type 0x04, no flags,
+    /// stream 0.
+    const EMPTY_SETTINGS: [u8; 9] = [0, 0, 0, 0x04, 0, 0, 0, 0, 0];
+
+    impl futures::io::AsyncRead for HandshakePeer {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if self.settings_sent {
+                // Not EOF: an EOF would close the connection and with it the
+                // sender we are trying to obtain.
+                return Poll::Pending;
+            }
+            self.settings_sent = true;
+            let n = EMPTY_SETTINGS.len().min(buf.len());
+            buf[..n].copy_from_slice(&EMPTY_SETTINGS[..n]);
+            Poll::Ready(Ok(n))
+        }
+    }
+
+    impl futures::io::AsyncWrite for HandshakePeer {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// The driver half of a handshake. Holding it keeps the sender open;
+    /// dropping it closes the connection, which is how a dead channel is made.
+    type TestConnection = hyper::client::conn::http2::Connection<
+        crate::io::HyperIo<HandshakePeer>,
+        Full<Bytes>,
+        crate::rt::HyperExecutor<moonpool_core::TokioTaskProvider>,
+    >;
+
+    /// Hand-shake against [`HandshakePeer`] and return both halves.
+    ///
+    /// Needs a tokio runtime because hyper's h2 handshake spawns an internal
+    /// task, which is also why the tests using it are `#[tokio::test]`. The
+    /// timeout keeps a handshake that never completes from hanging the suite.
+    async fn handshake() -> (H2Channel<Full<Bytes>>, TestConnection) {
+        let providers = TokioProviders::new();
+        let executor = crate::rt::HyperExecutor::new(providers.task().clone());
+        let io = crate::io::HyperIo::new(HandshakePeer {
+            settings_sent: false,
+        });
+
+        let (sender, connection) = tokio::time::timeout(
+            Duration::from_secs(5),
+            hyper::client::conn::http2::Builder::new(executor).handshake(io),
+        )
+        .await
+        .expect("handshake against the fake peer timed out")
+        .expect("handshake against the fake peer failed");
+
+        (H2Channel::new(sender), connection)
+    }
+
+    /// A channel whose shared state and reservation are set up by hand.
+    fn channel_with(
+        conn: Conn<Full<Bytes>>,
+        reservation: Option<H2Channel<Full<Bytes>>>,
+        last_error: Option<ChannelError>,
+    ) -> TestChannel {
+        ReconnectingChannel {
+            shared: Arc::new(Shared {
+                providers: TokioProviders::new(),
+                addr: "10.0.0.9:50051".to_owned(),
+                config: ChannelConfig::default(),
+                inner: Mutex::new(Inner {
+                    conn,
+                    failures: 0,
+                    generation: 1,
+                    last_error,
+                    wakers: Vec::new(),
+                }),
+            }),
+            ready: reservation,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_granted_readiness_is_never_revoked() {
+        let (live, connection) = handshake().await;
+        assert!(!live.is_closed());
+
+        let mut channel = channel_with(Conn::Connected(live), None, None);
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+
+        // First poll grants readiness and takes a reservation.
+        assert!(matches!(channel.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert!(channel.ready.is_some());
+
+        // The connection dies before the caller gets around to calling.
+        drop(connection);
+        channel.shared.lock().conn = Conn::Disconnected;
+
+        // Tower forbids taking readiness back, so this must still be Ready.
+        assert!(
+            matches!(channel.poll_ready(&mut cx), Poll::Ready(Ok(()))),
+            "poll_ready revoked a readiness it had already granted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_reservation_is_upgraded_to_the_live_connection() {
+        let (stale, stale_connection) = handshake().await;
+        drop(stale_connection);
+        assert!(
+            stale.is_closed(),
+            "dropping the driver must close the sender"
+        );
+
+        let (live, _live_connection) = handshake().await;
+        let mut channel = channel_with(Conn::Connected(live), Some(stale), None);
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+
+        assert!(matches!(channel.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let reserved = channel.ready.as_ref().expect("reservation must survive");
+        assert!(
+            !reserved.is_closed(),
+            "a live connection must replace a dead reservation"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reserved_clone_touches_no_shared_state() {
+        let (reservation, connection) = handshake().await;
+        drop(connection);
+
+        // Disconnected with an error waiting: if the reserved clone consumed
+        // the error or started an attempt, the assertions below would see it.
+        let mut channel = channel_with(
+            Conn::Disconnected,
+            Some(reservation),
+            Some(ChannelError::NotReady),
+        );
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+
+        assert!(matches!(channel.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        let inner = channel.shared.lock();
+        assert!(inner.last_error.is_some(), "stored error must not be taken");
+        assert!(
+            matches!(inner.conn, Conn::Disconnected),
+            "no attempt started"
+        );
+        assert!(inner.wakers.is_empty(), "a ready caller must not park");
     }
 
     #[test]

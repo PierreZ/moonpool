@@ -43,6 +43,9 @@ http-body-util = "0.1"
 # concrete Providers bundle: that is what proves hyper's sealed
 # Http2ClientConnExec bound is satisfiable through our generics.
 moonpool-core = { path = "../moonpool-core", version = "0.8.0", features = ["tokio-providers"] }
+# A runtime for the tests that need one: hyper's h2 handshake spawns an internal
+# task, so obtaining a real SendRequest takes a live executor.
+tokio = { version = "1", features = ["rt", "macros", "time"] }
 
 [lints]
 workspace = true
