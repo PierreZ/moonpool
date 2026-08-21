@@ -37,6 +37,8 @@ mod config;
 mod error;
 mod io;
 mod rt;
+#[cfg(feature = "server")]
+mod server;
 mod service;
 
 #[cfg(feature = "client")]
@@ -46,4 +48,6 @@ pub use config::KeepAlive;
 pub use error::ChannelError;
 pub use io::HyperIo;
 pub use rt::{HyperExecutor, HyperTimer};
+#[cfg(feature = "server")]
+pub use server::{H2Server, H2ServerConfig};
 pub use service::{TowerToHyperService, TowerToHyperServiceFuture};
