@@ -65,10 +65,16 @@ pub struct DiscoveryHooks {
     /// A globally new discovery was made (see [`DiscoveryKind`]). Fires at
     /// most once per distinct discovery across all processes sharing the
     /// accounting region.
-    pub on_discovery: fn(kind: DiscoveryKind),
+    ///
+    /// `state_id` identifies the semantic state that was discovered: the
+    /// assertion message hash for slot assertions, or the bucket hash
+    /// (message plus identity keys) for `sometimes_each` buckets. Watermark
+    /// and quality improvements reuse their site's id: the id names the
+    /// *place* in the semantic state space, the kind says how it advanced.
+    pub on_discovery: fn(kind: DiscoveryKind, state_id: u64),
 }
 
-fn noop_discovery(_: DiscoveryKind) {}
+fn noop_discovery(_: DiscoveryKind, _: u64) {}
 
 impl DiscoveryHooks {
     /// Hooks that do nothing — pure accounting, no exploration.
@@ -98,6 +104,6 @@ pub fn clear_discovery_hooks() {
     HOOKS.with(|h| h.set(DiscoveryHooks::NOOP));
 }
 
-pub(crate) fn on_discovery(kind: DiscoveryKind) {
-    HOOKS.with(|h| (h.get().on_discovery)(kind));
+pub(crate) fn on_discovery(kind: DiscoveryKind, state_id: u64) {
+    HOOKS.with(|h| (h.get().on_discovery)(kind, state_id));
 }

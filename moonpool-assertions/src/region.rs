@@ -12,8 +12,8 @@
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::cell::Cell;
 
-use crate::buckets::{EACH_BUCKET_MEM_SIZE, EachBucket, MAX_EACH_BUCKETS};
-use crate::slots::{ASSERTION_TABLE_MEM_SIZE, AssertionSlot, MAX_ASSERTION_SLOTS};
+use crate::buckets::EACH_BUCKET_MEM_SIZE;
+use crate::slots::ASSERTION_TABLE_MEM_SIZE;
 
 /// Alignment for both regions. `AssertionSlot`/`EachBucket` contain `u64`/`i64`
 /// fields and the layout places the slot array at offset 8, so 8-byte alignment

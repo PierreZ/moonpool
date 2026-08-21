@@ -268,7 +268,10 @@ pub fn assertion_bool(kind: AssertKind, must_hit: bool, condition: bool, msg: &s
                         .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
                         .is_ok()
                     {
-                        crate::hooks::on_discovery(crate::hooks::DiscoveryKind::SometimesPass);
+                        crate::hooks::on_discovery(
+                            crate::hooks::DiscoveryKind::SometimesPass,
+                            u64::from(hash),
+                        );
                     }
                 } else {
                     let fc = &*(&raw const (*slot).fail_count).cast::<AtomicI64>();
@@ -385,6 +388,7 @@ pub fn assertion_numeric(
                     Ok(_) => {
                         crate::hooks::on_discovery(
                             crate::hooks::DiscoveryKind::WatermarkImprovement,
+                            u64::from(hash),
                         );
                         break;
                     }
@@ -443,7 +447,10 @@ pub fn assertion_sometimes_all(msg: &str, named_bools: &[(&str, bool)]) {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    crate::hooks::on_discovery(crate::hooks::DiscoveryKind::FrontierAdvance);
+                    crate::hooks::on_discovery(
+                        crate::hooks::DiscoveryKind::FrontierAdvance,
+                        u64::from(hash),
+                    );
                     break;
                 }
                 Err(actual) => current = actual,
