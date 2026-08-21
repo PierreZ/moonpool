@@ -10,8 +10,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
-use tokio_util::compat::FuturesAsyncReadCompatExt;
+use moonpool_hyper::HyperIo;
 
 use moonpool_sim::{
     NetworkProvider, Process, SimContext, SimulationBuilder, SimulationReport, SimulationResult,
@@ -91,7 +90,7 @@ impl Process for HyperServer {
             () = ctx.shutdown().cancelled() => return Ok(()),
         };
 
-        let io = TokioIo::new(stream.compat());
+        let io = HyperIo::new(stream);
 
         moonpool_sim::select! {
             biased;
@@ -133,7 +132,7 @@ impl Workload for HyperClient {
             () = ctx.shutdown().cancelled() => return Ok(()),
         };
 
-        let io = TokioIo::new(stream.compat());
+        let io = HyperIo::new(stream);
 
         let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
             .await
