@@ -21,6 +21,20 @@ pub enum JoinError {
     Panicked,
 }
 
+/// Explicit fire-and-forget for spawned tasks.
+///
+/// Consuming a join handle with [`detach`](Self::detach) leaves the task
+/// running to completion in the background; its completion can no longer be
+/// observed through the handle. Dropping the handle has the same runtime
+/// behavior (tokio parity: tasks are never cancelled implicitly), but
+/// `detach()` states the intent at the call site — and satisfies the
+/// `must_use` lint that a discarded generic [`TaskProvider::JoinHandle`]
+/// (an `impl Future`) would otherwise trigger.
+pub trait Detach {
+    /// Detach the task behind this handle, leaving it running.
+    fn detach(self);
+}
+
 /// Provider for spawning tasks.
 ///
 /// This trait abstracts task spawning to enable both real tokio tasks
@@ -32,8 +46,9 @@ pub trait TaskProvider: Clone + Send + Sync + 'static {
     /// Future returned by [`Self::spawn_task`].
     ///
     /// Resolves with `Ok(())` on normal completion, or a [`JoinError`] if the
-    /// task was cancelled or panicked.
-    type JoinHandle: Future<Output = Result<(), JoinError>> + Send + Sync + 'static;
+    /// task was cancelled or panicked. Consume it with [`Detach::detach`] for
+    /// explicit fire-and-forget.
+    type JoinHandle: Future<Output = Result<(), JoinError>> + Detach + Send + Sync + 'static;
 
     /// Spawn a named task.
     fn spawn_task<F>(&self, name: &str, future: F) -> Self::JoinHandle
@@ -80,6 +95,14 @@ impl Future for TokioJoinHandle {
             Poll::Ready(Err(_)) => Poll::Ready(Err(JoinError::Panicked)),
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+#[cfg(feature = "tokio-task")]
+impl Detach for TokioJoinHandle {
+    fn detach(self) {
+        // tokio join handles already detach on drop; consuming self is all
+        // that is needed.
     }
 }
 

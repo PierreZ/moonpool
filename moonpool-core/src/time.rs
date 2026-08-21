@@ -39,7 +39,7 @@ pub trait TimeProvider: Clone + Send + Sync + 'static {
     fn sleep(
         &self,
         duration: Duration,
-    ) -> impl std::future::Future<Output = Result<(), TimeError>> + Send;
+    ) -> impl std::future::Future<Output = Result<(), TimeError>> + Send + Sync;
 
     /// Get exact current time.
     ///

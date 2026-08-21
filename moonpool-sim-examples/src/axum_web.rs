@@ -4,8 +4,12 @@
 //! moonpool-sim's deterministic simulation with chaos injection.
 //!
 //! The key insight: `SimTcpStream` implements `futures::io::AsyncRead + AsyncWrite`,
-//! and `tokio_util::compat::Compat` bridges those to tokio's IO traits so hyper
-//! (and therefore axum) works **unchanged** over simulated TCP.
+//! and `moonpool_hyper::HyperIo` presents that shape as hyper's own IO traits,
+//! so hyper (and therefore axum) works **unchanged** over simulated TCP.
+//!
+//! Vectored writes are switched on here: `SimTcpStream` applies its chaos per
+//! `IoSlice`, a path that stays unreachable while the IO layer reports no
+//! vectored support.
 //!
 //! # Architecture
 //!
@@ -27,10 +31,8 @@ use axum::routing::{get, post};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::Request;
-use hyper_util::rt::TokioIo;
-use hyper_util::service::TowerToHyperService;
+use moonpool_hyper::{HyperIo, TowerToHyperService};
 use serde::{Deserialize, Serialize};
-use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tracing::instrument;
 
 use moonpool_sim::{
@@ -259,10 +261,11 @@ impl Process for WebProcess {
                     let (stream, addr) = accept?;
                     tracing::info!(%addr, "accepted connection");
 
-                    // SimTcpStream implements futures::io traits; .compat() bridges
-                    // them back to tokio::io so TokioIo (and therefore hyper)
-                    // accepts the stream.
-                    let io = TokioIo::new(stream.compat());
+                    // SimTcpStream implements the futures-io traits, which is all
+                    // HyperIo needs to present it as hyper's own IO. Vectored
+                    // writes on: the sim delivers each IoSlice separately, with
+                    // its own chance of chaos.
+                    let io = HyperIo::new(stream).with_vectored_writes(true);
                     let service = TowerToHyperService::new(app.clone());
 
                     connections.push(async move {
@@ -355,7 +358,7 @@ impl WebWorkload {
         };
         tracing::info!(round, "connected, starting handshake");
 
-        let io = TokioIo::new(stream.compat());
+        let io = HyperIo::new(stream).with_vectored_writes(true);
         let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
             .await
             .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("handshake: {e}")))?;

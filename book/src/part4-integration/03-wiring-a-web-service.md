@@ -103,10 +103,11 @@ impl Process for WebProcess {
                 accept = listener.accept() => {
                     let (stream, _addr) = accept?;
 
-                    // SimTcpStream implements futures::io traits; .compat() bridges
-                    // them back to tokio::io so TokioIo (and therefore hyper) accepts
-                    // the stream.
-                    let io = TokioIo::new(stream.compat());
+                    // SimTcpStream implements the futures-io traits, which is all
+                    // HyperIo needs to present it as hyper's own IO. Vectored
+                    // writes on: the sim delivers each IoSlice separately, with
+                    // its own chance of chaos.
+                    let io = HyperIo::new(stream).with_vectored_writes(true);
                     // TowerToHyperService bridges axum's tower::Service to hyper's Service
                     let service = TowerToHyperService::new(app.clone());
 
@@ -127,7 +128,7 @@ impl Process for WebProcess {
 }
 ```
 
-Two things to note. First, we use `hyper::server::conn::http1::serve_connection`, **not** `axum::serve()`. `axum::serve` takes `tokio::net::TcpListener` directly, so it can't accept our simulated listener. `serve_connection` takes any tokio `AsyncRead + AsyncWrite`. `SimTcpStream` implements `futures::io::AsyncRead + AsyncWrite` (the runtime-agnostic traits) and is itself `Send + Sync`, so we route it through `tokio_util::compat::Compat` via `.compat()` before handing it to `TokioIo`.
+Two things to note. First, we use `hyper::server::conn::http1::serve_connection`, **not** `axum::serve()`. `axum::serve` takes `tokio::net::TcpListener` directly, so it can't accept our simulated listener. `serve_connection` takes anything implementing hyper's own IO traits. `SimTcpStream` implements `futures::io::AsyncRead + AsyncWrite` (the runtime-agnostic traits) and is itself `Send + Sync`, so we wrap it in `moonpool_hyper::HyperIo`, which is exactly that adapter. `TowerToHyperService` comes from the same crate, so the axum example needs neither `tokio-util` nor `hyper-util`.
 
 Second, **`FuturesUnordered` instead of spawning**. Customer code in the sim is `Send + Sync`, and `SimTcpStream` is `Send`. The blocker is **hyper itself**: `http1::serve_connection` returns a future that is `!Send` because the HTTP1 state machine holds internal `Rc<…>` cells. That future cannot cross any Send-bounded spawn, but it polls perfectly well from the accept loop. `FuturesUnordered` lets one task drive any number of in-flight connections concurrently. The accept loop pushes new connections in, the `connections.next()` arm drains completed ones, and shutdown cancels both. The `select!` is moonpool's and stays in its **default form** on purpose: accepting a new connection and progressing an in-flight one are peers that can be ready in the same simulation step, so the seed decides which branch wins and different seeds explore both orders.
 
@@ -163,7 +164,7 @@ impl Workload for WebWorkload {
 Inside `send_round`, the workload opens a hyper client connection. The client side has the same `!Send` problem: `hyper::client::conn::http1::handshake` hands back a `conn` driver future that is `!Send`. Rather than spawn it, we **pin it on the stack** and let the request/response future race against it:
 
 ```rust
-let io = TokioIo::new(stream.compat());
+let io = HyperIo::new(stream).with_vectored_writes(true);
 let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
 
 let driver = async move {

@@ -9,12 +9,13 @@ Inspired by [FoundationDB's simulation testing](https://apple.github.io/foundati
 ## Architecture
 
 ```text
-moonpool                          Facade crate (features: sim / tokio / transport)
+moonpool                          Facade crate (features: sim / tokio / transport / hyper)
 ├── moonpool-transport            RPC, peer connections, wire format
 │   └── moonpool-transport-derive #[service] proc-macro
 ├── moonpool-sim                  Simulation engine, chaos testing, assertion wiring
 │   ├── moonpool-assertions       Assertion accounting (pure std, zero deps, wasm-able)
 │   └── moonpool-explorer         Fork-based multiverse exploration (optional, libc)
+├── moonpool-hyper                hyper 1.x: runtime adapters, h2 channel, serve helper (opt-in)
 └── moonpool-core                 Provider traits and core types
 ```
 
@@ -29,6 +30,7 @@ with `--no-default-features`); only the fork-based explorer is Linux-first.
 | Provider traits only | `moonpool-core` |
 | Simulation without transport | `moonpool-sim` |
 | Transport without simulation | `moonpool-transport` |
+| An HTTP/2 stack (tonic, axum, hyper) on the providers | `moonpool` with feature `hyper`, or `moonpool-hyper` |
 | Assertion accounting only | `moonpool-assertions` |
 | Fork-based exploration internals | `moonpool-explorer` |
 | Proc-macro internals | `moonpool-transport-derive` |

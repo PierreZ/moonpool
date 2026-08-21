@@ -23,6 +23,10 @@
 //! │    (via transport-derive)│       • Multiverse exploration   │
 //! │                          │         (via moonpool-explorer)  │
 //! ├──────────────────────────┴──────────────────────────────────┤
+//! │       moonpool-hyper (feature "hyper", opt-in)              │
+//! │  • hyper runtime adapters   • HyperIo over provider streams │
+//! │  • Reconnecting h2 channel  • Per-connection serve helper   │
+//! ├─────────────────────────────────────────────────────────────┤
 //! │                     moonpool-core                           │
 //! │  Provider traits: Time, Task, Network, Random, Storage      │
 //! │  Core types: UID, Endpoint, NetworkAddress                  │
@@ -49,6 +53,7 @@
 //! | Provider traits only | `moonpool-core` |
 //! | Simulation without transport | `moonpool-sim` |
 //! | Transport without simulation | `moonpool-transport` |
+//! | An HTTP/2 stack (tonic, axum, hyper) on the providers | `moonpool` with feature `hyper`, or `moonpool-hyper` |
 //! | Fork-based exploration internals | `moonpool-explorer` |
 //! | Proc-macro internals | `moonpool-transport-derive` |
 //!
@@ -57,6 +62,7 @@
 //! - [`moonpool_core`] - Provider traits and core types
 //! - [`moonpool_sim`] - Simulation runtime and chaos testing
 //! - [`moonpool_transport`] - Network transport layer
+//! - `moonpool::hyper` - hyper 1.x integration, behind the `hyper` feature
 
 #![deny(missing_docs)]
 #![allow(ambiguous_glob_reexports)]
@@ -69,6 +75,26 @@ pub use moonpool_core::*;
 pub use moonpool_sim::*;
 #[cfg(feature = "transport")]
 pub use moonpool_transport::*;
+
+/// hyper 1.x integration, from [`moonpool_hyper`].
+///
+/// A namespaced module rather than a fourth glob re-export at the root: the
+/// three globs above already collide in places (hence
+/// `allow(ambiguous_glob_reexports)`), and hyper names like `H2Channel` or
+/// `KeepAlive` read better qualified anyway.
+///
+/// ```ignore
+/// use moonpool::hyper::{ChannelConfig, ReconnectingChannel};
+/// ```
+///
+/// Contains the runtime adapters hyper needs (executor and timer over the task
+/// and time providers), `HyperIo` to present a provider stream as hyper IO, a
+/// reconnecting h2 client channel in the shape tower and tonic expect, and a
+/// per-connection serve helper. Requires the `hyper` feature.
+#[cfg(feature = "hyper")]
+pub mod hyper {
+    pub use moonpool_hyper::*;
+}
 
 /// Common imports for application code.
 ///

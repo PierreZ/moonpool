@@ -2,33 +2,31 @@
 
 <!-- toc -->
 
-Moonpool is organized as a workspace of eight crates. The dependency graph is deliberately layered: lower crates know nothing about higher ones, and the leaf crate (`moonpool-explorer`) has no moonpool dependencies at all.
+Moonpool is organized as a workspace of nine crates. The dependency graph is deliberately layered: lower crates know nothing about higher ones, and the leaf crate (`moonpool-explorer`) has no moonpool dependencies at all.
 
 ## Dependency Diagram
 
 ```text
-                        moonpool
-                     (facade crate)
-                   /         |         \
-                  /          |          \
-  moonpool-transport    moonpool-sim    moonpool-core
-  (peer, wire, RPC)     (simulation)   (provider traits)
-        |      \            |
-        |       \           |
-        |   moonpool-       |
-        |   transport-      |
-        |   derive          |
-        |   (proc macros)   |
-        |                   |
-        +---> moonpool-core |
-        +---> moonpool-sim  |
-                   |        |
-                   v        v
-             moonpool-explorer
-          (fork-based exploration)
-                   |
-                   v
-                 libc
+                            moonpool
+                         (facade crate)
+              /          /        |         \
+             /          /         |          \
+  moonpool-hyper  moonpool-   moonpool-sim   moonpool-core
+  (hyper 1.x,     transport   (simulation)  (provider traits)
+   feature-gated) (peer, wire,      |
+        |          RPC)             |
+        |             |   \         |
+        |             |    moonpool-transport-derive
+        |             |    (proc macros)
+        |             |             |
+        |             |             v
+        |             |       moonpool-explorer
+        |             |    (fork-based exploration)
+        |             |             |
+        |             |             v
+        |             |           libc
+        |             |
+        +-------------+-------------> moonpool-core
 
   moonpool-sim-examples (example simulation binaries)
   xtask (cargo automation, not a library dependency)
@@ -40,9 +38,9 @@ Moonpool is organized as a workspace of eight crates. The dependency graph is de
 
 **Role**: Facade crate. Re-exports everything from the lower crates so users only need one dependency.
 
-**Dependencies**: moonpool-core, moonpool-sim, moonpool-transport
+**Dependencies**: moonpool-core, moonpool-sim, moonpool-transport, moonpool-hyper (optional, feature `hyper`)
 
-**Key types**: Re-exports all types from moonpool-core, moonpool-sim, and moonpool-transport.
+**Key types**: Re-exports all types from moonpool-core, moonpool-sim, and moonpool-transport at the root. With the `hyper` feature, moonpool-hyper is exposed as the namespaced `moonpool::hyper` module rather than a fourth glob.
 
 ---
 
@@ -129,6 +127,26 @@ Moonpool is organized as a workspace of eight crates. The dependency graph is de
 - `#[service]` -- derive macro for RPC service definitions
 
 This is a proc-macro crate and cannot export regular types or functions.
+
+---
+
+### moonpool-hyper
+
+**Role**: hyper 1.x integration over the provider traits, so an HTTP/2 stack (tonic gRPC, axum, plain hyper) runs unchanged in production and in simulation. Optional everywhere: the facade gates it behind the `hyper` feature, and the lean production tree contains no hyper at all.
+
+**Dependencies**: moonpool-core, futures, hyper, pin-project-lite, thiserror, tower-service, tracing
+
+**Key types**:
+- `HyperExecutor` -- a `hyper::rt::Executor` over `TaskProvider`
+- `HyperTimer` -- a `hyper::rt::Timer` over `TimeProvider`, so h2 keepalive runs on provider time
+- `HyperIo` -- hyper's `rt::Read` and `rt::Write` over any futures-io stream, with opt-in vectored writes
+- `TowerToHyperService` -- adapts a tower service to hyper's `Service`
+- `ReconnectingChannel` / `ChannelConfig` -- the `tonic::transport::Channel` role: lazy connect, jitter-free backoff, one multiplexed h2 connection
+- `H2Server` / `H2ServerConfig` -- per-connection serve helper with graceful drain
+- `ChannelError` -- typed, `Clone` channel failures
+- `KeepAlive` -- h2 PING settings shared by both sides
+
+**Features**: `client` and `server`, both on by default; the featureless build is just the adapters.
 
 ---
 

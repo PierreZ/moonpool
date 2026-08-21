@@ -31,6 +31,12 @@ name = "moonpool-core"
 changelog_path = "moonpool-core/CHANGELOG.md"
 version_group = "moonpool"
 
+# hyper 1.x integration over the provider traits; depends only on moonpool-core.
+[[package]]
+name = "moonpool-hyper"
+changelog_path = "moonpool-hyper/CHANGELOG.md"
+version_group = "moonpool"
+
 # Leaf accounting crate; moonpool-explorer depends on it, so it must publish first.
 [[package]]
 name = "moonpool-assertions"

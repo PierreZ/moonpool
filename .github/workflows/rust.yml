@@ -74,6 +74,10 @@ jobs:
             echo "::error::lean production build pulled in a sim/explorer crate"
             exit 1
           fi
+          if echo "$tree" | grep -qE "moonpool-hyper|hyper v|h2 v"; then
+            echo "::error::lean production build pulled in hyper"
+            exit 1
+          fi
 
   sim:
     runs-on: ubuntu-latest
@@ -86,6 +90,7 @@ jobs:
           - adaptive-explore
           - transport
           - axum-web
+          - tonic-grpc
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main

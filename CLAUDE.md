@@ -80,6 +80,10 @@ moonpool-sim/                - Simulation runtime, chaos testing, buggify, asser
                                the sim compiles to wasm32-unknown-unknown.
 moonpool-transport/          - Peer connections, wire format, FlowTransport, RPC. Generic over
                                `P: Providers`; feature `tokio` adds TokioTransport + Builder::tokio().
+moonpool-hyper/              - hyper 1.x integration: runtime adapters (HyperExecutor/HyperTimer),
+                               HyperIo, TowerToHyperService, ReconnectingChannel, H2Server. Generic
+                               over `P: Providers`; features `client`/`server` (both default on).
+                               Facade exposes it as `moonpool::hyper` behind feature `hyper`.
 moonpool-transport-derive/   - Proc-macro: #[service]
 moonpool-explorer/           - Fork-based multiverse exploration (libc/fork/mmap; never wasm).
                                Depends on moonpool-assertions; optional dep of moonpool-sim.

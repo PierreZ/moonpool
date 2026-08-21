@@ -49,8 +49,9 @@ parking_lot = "0.12"
 # No tokio in library code: tasks run on the moonpool deterministic executor
 # (async-task) and select! comes from moonpool-core. Tests pull tokio "full"
 # via dev-dependencies for #[tokio::test]-style SimWorld unit tests.
-# tokio-util: CancellationToken (shutdown signalling) + compat (io bridging).
-tokio-util = { version = "0.7", features = ["compat"] }
+# tokio-util: CancellationToken (shutdown signalling). No compat feature: the
+# only io bridging left in this crate's tests goes through moonpool-hyper.
+tokio-util = { version = "0.7", default-features = false }
 tracing = "0.1"
 
 tracing-subscriber = { version = "0.3", features = ["registry"] }
@@ -60,7 +61,9 @@ tokio = { version = "1", features = ["full", "tracing"] }
 bytes = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server", "client"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+# Dev-only, for the hyper integration test's IO bridge. Not a cycle:
+# moonpool-hyper depends on moonpool-core, never on moonpool-sim.
+moonpool-hyper = { path = "../moonpool-hyper", version = "0.8.0" }
 tempfile = "3"
 
 [lints]
