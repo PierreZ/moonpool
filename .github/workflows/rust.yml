@@ -74,6 +74,10 @@ jobs:
             echo "::error::lean production build pulled in a sim/explorer crate"
             exit 1
           fi
+          if echo "$tree" | grep -qE "moonpool-hyper|hyper v|h2 v"; then
+            echo "::error::lean production build pulled in hyper"
+            exit 1
+          fi
 
   sim:
     runs-on: ubuntu-latest
