@@ -66,8 +66,9 @@ const MAX_TRACKED_STATES: usize = 512;
 /// exemplar is not enough — but this stays small and bounded by design.
 const MAX_EXEMPLARS_PER_STATE: usize = 3;
 
-/// Maximum bug recipes retained per seed.
-const MAX_BUG_RECIPES: usize = 16;
+/// Maximum bug recipes retained per seed. Failing runs cluster around the
+/// same frontier state, so a handful of reproducers is enough.
+const MAX_BUG_RECIPES: usize = 4;
 
 /// Configuration for frontier-based exploration.
 #[derive(Debug, Clone)]
@@ -142,6 +143,8 @@ struct StateEntry {
     /// Continuation batches scheduled from this state.
     visits: u64,
     exemplars: Vec<Exemplar>,
+    /// Rotating eviction cursor once `exemplars` is full.
+    next_exemplar: usize,
 }
 
 /// The exploration controller. See the [module docs](self).
@@ -321,7 +324,11 @@ impl Explorer {
     }
 
     /// In-process execution (workers == 0): sequential and fully deterministic.
-    fn run_job_in_process(&mut self, job: &ExploreJob, run_one: &mut impl FnMut(&ExploreJob) -> bool) {
+    fn run_job_in_process(
+        &mut self,
+        job: &ExploreJob,
+        run_one: &mut impl FnMut(&ExploreJob) -> bool,
+    ) {
         journal::clear();
         crate::sancov::reset_bss_counters();
         let failed = run_one(job);
@@ -366,7 +373,8 @@ impl Explorer {
             }
             child_pid => {
                 self.active.insert(child_pid, (slot, job));
-                self.stats.max_active_workers = self.stats.max_active_workers.max(self.active.len());
+                self.stats.max_active_workers =
+                    self.stats.max_active_workers.max(self.active.len());
             }
         }
     }
@@ -441,7 +449,12 @@ impl Explorer {
         // just past the deepest one.
         if job.recipe.len() < self.config.max_recipe_len {
             self.stats.expansions += 1;
-            self.expand_from(&job.recipe, anchor_event.call_count, anchor_event.state_id, 0);
+            self.expand_from(
+                &job.recipe,
+                anchor_event.call_count,
+                anchor_event.state_id,
+                0,
+            );
             if let Some(&idx) = self.state_index.get(&anchor_event.state_id) {
                 self.states[idx].visits += 1;
             }
@@ -462,17 +475,26 @@ impl Explorer {
                 progress: false,
                 visits: 0,
                 exemplars: Vec::new(),
+                next_exemplar: 0,
             });
             self.state_index.insert(event.state_id, idx);
             idx
         };
         let state = &mut self.states[idx];
         state.progress |= event.is_progress();
+        let exemplar = Exemplar {
+            recipe: recipe.clone(),
+            anchor: event.call_count,
+        };
         if state.exemplars.len() < MAX_EXEMPLARS_PER_STATE {
-            state.exemplars.push(Exemplar {
-                recipe: recipe.clone(),
-                anchor: event.call_count,
-            });
+            state.exemplars.push(exemplar);
+        } else {
+            // Evict the oldest exemplar. Re-discoveries of a known state only
+            // arrive through watermark/quality improvements, so recency
+            // correlates with better starting points (e.g. "floor 4 at full
+            // health" replaces "floor 4 about to die").
+            state.exemplars[state.next_exemplar % MAX_EXEMPLARS_PER_STATE] = exemplar;
+            state.next_exemplar = state.next_exemplar.wrapping_add(1);
         }
     }
 
@@ -508,9 +530,19 @@ impl Explorer {
                     .map(|e| e.recipe.len())
                     .max()
                     .unwrap_or(0);
-                // Least visited first; ties prefer progress states, then
-                // deeper recipes, then registration order (deterministic).
-                (s.visits, u8::from(!s.progress), usize::MAX - deepest, *idx)
+                // Depth-weighted visit count: a state whose exemplars sit N
+                // replay segments deep gets ~N+1 times the continuation
+                // budget of a shallow one, so effort concentrates on the
+                // frontier instead of spreading uniformly. Ties prefer
+                // progress states, then deeper recipes, then registration
+                // order (deterministic).
+                let depth = u64::try_from(deepest).unwrap_or(u64::MAX);
+                (
+                    s.visits / (depth + 1),
+                    u8::from(!s.progress),
+                    usize::MAX - deepest,
+                    *idx,
+                )
             })
             .map(|(idx, _)| idx);
         let Some(idx) = pick else {

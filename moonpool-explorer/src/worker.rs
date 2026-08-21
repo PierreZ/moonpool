@@ -109,9 +109,11 @@ impl SlotPool {
         // Safety: the slot is SLOT_SIZE bytes: an 8-byte header followed by
         // MAX_JOURNAL_ENTRIES RawEvents; len is capped to that entry count.
         unsafe {
-            *ptr.cast::<()>().cast::<u32>() = u32::try_from(len).expect("len capped at MAX_JOURNAL_ENTRIES");
-            *ptr.add(4).cast::<()>().cast::<u32>() = u32::try_from(overflow.min(u64::from(u32::MAX)))
-                .expect("overflow clamped to u32::MAX");
+            *ptr.cast::<()>().cast::<u32>() =
+                u32::try_from(len).expect("len capped at MAX_JOURNAL_ENTRIES");
+            *ptr.add(4).cast::<()>().cast::<u32>() =
+                u32::try_from(overflow.min(u64::from(u32::MAX)))
+                    .expect("overflow clamped to u32::MAX");
             let entries = ptr.add(8).cast::<()>().cast::<RawEvent>();
             for (i, event) in journal.iter().take(len).enumerate() {
                 entries.add(i).write(RawEvent {
@@ -135,7 +137,9 @@ impl SlotPool {
             (0..len)
                 .filter_map(|i| {
                     let raw = entries.add(i).read();
-                    let kind = u8::try_from(raw.kind).ok().and_then(DiscoveryKind::from_u8)?;
+                    let kind = u8::try_from(raw.kind)
+                        .ok()
+                        .and_then(DiscoveryKind::from_u8)?;
                     Some(DiscoveryEvent {
                         call_count: raw.call_count,
                         kind,

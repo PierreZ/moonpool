@@ -1,11 +1,11 @@
 //! Thin shim over the optional `moonpool-explorer` backend (feature `exploration`).
 //!
 //! Keeps the rest of the runner free of `#[cfg]` for the common lifecycle calls:
-//! assertion-region init/cleanup, the forked-child checks, and the explored
-//! coverage count. The exploration-only entry points (full `init`, RNG hooks,
-//! per-seed energy reset, stats, recipes) stay behind `#[cfg(feature =
-//! "exploration")]` at their call sites since they have no meaning without the
-//! backend.
+//! assertion-region init/cleanup, the worker-process check, and the code
+//! coverage readers. The exploration-only entry points (the `Explorer`
+//! controller, the RNG count hook, per-seed stats and recipes) stay behind
+//! `#[cfg(feature = "exploration")]` at their call sites since they have no
+//! meaning without the backend.
 
 /// Configuration for exploration. Re-exported from the backend when present; an
 /// uninhabited stand-in otherwise so `SimulationBuilder`'s
@@ -18,8 +18,9 @@ pub use moonpool_explorer::ExplorationConfig;
 #[derive(Debug, Clone)]
 pub enum ExplorationConfig {}
 
-/// Initialise the assertion region: `MAP_SHARED` + discovery hooks under the
-/// explorer, or a plain heap table without it.
+/// Initialise the assertion region: `MAP_SHARED` under the explorer (so
+/// forked workers share counts and discovery latches), or a plain heap table
+/// without it.
 pub fn init_assertion_region() {
     #[cfg(feature = "exploration")]
     if let Err(e) = moonpool_explorer::init_assertions() {
@@ -41,8 +42,8 @@ pub fn cleanup_assertion_region() {
 ///
 /// Returns `None` without the `exploration` feature, or when the binary was
 /// not sancov-instrumented (i.e. not built via `cargo xtask sim run`). When
-/// `exploration_active`, reads the fork-aggregated history; otherwise reads the
-/// live BSS counters of the current process (no fork).
+/// `exploration_active`, reads the controller-merged history; otherwise reads
+/// the live BSS counters of the current process (no fork).
 #[must_use]
 pub fn code_coverage_edges(exploration_active: bool) -> Option<usize> {
     #[cfg(feature = "exploration")]
@@ -80,7 +81,8 @@ pub fn code_coverage_total() -> Option<usize> {
     }
 }
 
-/// Whether this process is a forked exploration child (always false without it).
+/// Whether this process is a forked exploration worker (always false without
+/// the backend).
 #[must_use]
 pub fn explorer_is_child() -> bool {
     #[cfg(feature = "exploration")]
@@ -90,19 +92,5 @@ pub fn explorer_is_child() -> bool {
     #[cfg(not(feature = "exploration"))]
     {
         false
-    }
-}
-
-/// Exit a forked exploration child. Only reachable when [`explorer_is_child`]
-/// returned true, which never happens without the backend.
-pub fn exit_child(code: i32) -> ! {
-    #[cfg(feature = "exploration")]
-    {
-        moonpool_explorer::exit_child(code)
-    }
-    #[cfg(not(feature = "exploration"))]
-    {
-        let _ = code;
-        unreachable!("exit_child called without the `exploration` feature")
     }
 }

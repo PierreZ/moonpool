@@ -48,29 +48,26 @@ impl Default for SimulationMetrics {
 pub struct BugRecipe {
     /// The root seed that was active when this bug was discovered.
     pub seed: u64,
-    /// Fork path: `(rng_call_count, child_seed)` pairs.
+    /// Replay breakpoints: `(rng_call_count, seed)` pairs.
     pub recipe: Vec<(u64, u64)>,
 }
 
-/// Report from fork-based exploration.
+/// Report from frontier-based exploration.
 #[derive(Debug, Clone)]
 pub struct ExplorationReport {
-    /// Total timelines explored across all forks.
+    /// Total timelines executed (root runs + exploration runs).
     pub total_timelines: u64,
-    /// Total fork points triggered.
-    pub fork_points: u64,
-    /// Number of bugs found (children exiting with code 42).
+    /// Productive runs expanded into follow-up jobs.
+    pub expansions: u64,
+    /// Globally-new discovery events observed (assertion firsts, new buckets,
+    /// watermark/frontier/quality improvements).
+    pub discoveries: u64,
+    /// Number of failing exploration runs.
     pub bugs_found: u64,
-    /// Bug recipes captured during exploration (one per seed that found bugs).
+    /// Bug recipes captured during exploration.
     pub bug_recipes: Vec<BugRecipe>,
-    /// Remaining global energy after exploration.
-    pub energy_remaining: i64,
-    /// Energy in the reallocation pool.
-    pub realloc_pool_remaining: i64,
-    /// Number of bits set in the explored coverage map.
-    pub coverage_bits: u32,
-    /// Total number of bits in the coverage map (8192).
-    pub coverage_total: u32,
+    /// Peak number of simultaneously live worker processes.
+    pub max_active_workers: usize,
     /// Total instrumented code edges (from LLVM sancov). 0 when sancov unavailable.
     pub sancov_edges_total: usize,
     /// Code edges covered across all timelines. 0 when sancov unavailable.
@@ -285,15 +282,6 @@ fn fmt_num(n: u64) -> String {
     result.chars().rev().collect()
 }
 
-/// Format an `i64` with comma separators (handles negatives).
-fn fmt_i64(n: i64) -> String {
-    if n < 0 {
-        format!("-{}", fmt_num(n.unsigned_abs()))
-    } else {
-        fmt_num(n.unsigned_abs())
-    }
-}
-
 /// Format a duration as a human-readable string.
 fn fmt_duration(d: Duration) -> String {
     let total_ms = d.as_millis();
@@ -420,16 +408,17 @@ fn fmt_exploration(f: &mut fmt::Formatter<'_>, exp: &ExplorationReport) -> fmt::
     )?;
     writeln!(
         f,
-        "  Fork points:  {:<18}Coverage:       {} / {} bits ({:.1}%)",
-        fmt_num(exp.fork_points),
-        fmt_num(u64::from(exp.coverage_bits)),
-        fmt_num(u64::from(exp.coverage_total)),
-        if exp.coverage_total > 0 {
-            (f64::from(exp.coverage_bits) / f64::from(exp.coverage_total)) * 100.0
-        } else {
-            0.0
-        }
+        "  Expansions:   {:<18}Discoveries:    {}",
+        fmt_num(exp.expansions),
+        fmt_num(exp.discoveries)
     )?;
+    if exp.max_active_workers > 0 {
+        writeln!(
+            f,
+            "  Peak workers: {}",
+            fmt_num(u64::try_from(exp.max_active_workers).unwrap_or(u64::MAX))
+        )?;
+    }
     if exp.sancov_edges_total > 0 {
         let covered = u64::try_from(exp.sancov_edges_covered).unwrap_or(u64::MAX);
         let total = u64::try_from(exp.sancov_edges_total).unwrap_or(u64::MAX);
@@ -443,12 +432,6 @@ fn fmt_exploration(f: &mut fmt::Formatter<'_>, exp: &ExplorationReport) -> fmt::
             (f64::from(covered_u32) / f64::from(total_u32)) * 100.0
         )?;
     }
-    writeln!(
-        f,
-        "  Energy left:  {:<18}Realloc pool:   {}",
-        fmt_i64(exp.energy_remaining),
-        fmt_i64(exp.realloc_pool_remaining)
-    )?;
     for br in &exp.bug_recipes {
         writeln!(
             f,

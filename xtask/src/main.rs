@@ -24,7 +24,7 @@ const SIM_BINARIES: &[SimBinary] = &[
         sancov_crates: "moonpool_sim_examples",
     },
     SimBinary {
-        name: "sim-adaptive-explore",
+        name: "sim-frontier-explore",
         sancov_crates: "moonpool_explorer",
     },
     SimBinary {

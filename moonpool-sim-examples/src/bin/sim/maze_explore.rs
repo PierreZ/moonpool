@@ -1,6 +1,6 @@
 //! Binary target for maze exploration simulation.
 //!
-//! Runs the maze workload with fork-based exploration, producing coverage
+//! Runs the maze workload under the frontier explorer, producing coverage
 //! data visible to sancov instrumentation.
 
 use std::process;
@@ -11,17 +11,11 @@ fn main() {
     let report = moonpool_sim::SimulationBuilder::new()
         .workload(moonpool_sim_examples::maze::MazeWorkload::default())
         .enable_exploration(moonpool_sim::ExplorationConfig {
-            max_depth: 30,
-            timelines_per_split: 4,
-            global_energy: 20_000,
-            adaptive: Some(moonpool_sim::AdaptiveConfig {
-                batch_size: 20,
-                min_timelines: 60,
-                max_timelines: 150,
-                per_mark_energy: 600,
-                warm_min_timelines: Some(20),
-            }),
-            parallelism: None,
+            workers: 0,
+            max_runs_per_seed: 600,
+            branching_factor: 4,
+            max_frontier: 512,
+            max_recipe_len: 32,
         })
         .set_iterations(2)
         .run();

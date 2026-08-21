@@ -1,7 +1,9 @@
 //! Binary target for dungeon exploration simulation.
 //!
-//! Runs the dungeon workload with fork-based exploration, producing coverage
-//! data visible to sancov instrumentation.
+//! Runs the dungeon workload under the frontier explorer, producing coverage
+//! data visible to sancov instrumentation. Process usage stays bounded at
+//! 1 controller + `workers` short-lived worker processes, however deep the
+//! dungeon exploration goes.
 
 use std::process;
 
@@ -11,17 +13,11 @@ fn main() {
     let report = moonpool_sim::SimulationBuilder::new()
         .workload(moonpool_sim_examples::dungeon::DungeonWorkload::default())
         .enable_exploration(moonpool_sim::ExplorationConfig {
-            max_depth: 120,
-            timelines_per_split: 4,
-            global_energy: 400_000,
-            adaptive: Some(moonpool_sim::AdaptiveConfig {
-                batch_size: 30,
-                min_timelines: 400,
-                max_timelines: 1000,
-                per_mark_energy: 10_000,
-                warm_min_timelines: Some(30),
-            }),
-            parallelism: Some(moonpool_sim::Parallelism::HalfCores),
+            workers: 4,
+            max_runs_per_seed: 8000,
+            branching_factor: 4,
+            max_frontier: 1024,
+            max_recipe_len: 64,
         })
         .set_iterations(3)
         .run();

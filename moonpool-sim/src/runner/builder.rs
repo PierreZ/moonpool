@@ -58,13 +58,21 @@ struct FinalReportInputs {
     #[cfg(feature = "exploration")]
     total_exploration_timelines: u64,
     #[cfg(feature = "exploration")]
-    total_exploration_fork_points: u64,
+    total_exploration_expansions: u64,
+    #[cfg(feature = "exploration")]
+    total_exploration_discoveries: u64,
     #[cfg(feature = "exploration")]
     total_exploration_bugs: u64,
+    #[cfg(feature = "exploration")]
+    max_active_workers: usize,
     #[cfg(feature = "exploration")]
     bug_recipes: Vec<super::report::BugRecipe>,
     #[cfg(feature = "exploration")]
     per_seed_timelines: Vec<u64>,
+    /// `(covered, total)` sancov edge counts, read before the explorer (which
+    /// owns the sancov shared memory) is dropped.
+    #[cfg(feature = "exploration")]
+    sancov_edges: (usize, usize),
 }
 
 /// Aggregated state passed into the convergence / plateau check helper.
@@ -97,11 +105,17 @@ impl RunState {
             progress_milestone,
             pending_return_map: Vec::new(),
             #[cfg(feature = "exploration")]
+            explorer: None,
+            #[cfg(feature = "exploration")]
             total_exploration_timelines: 0,
             #[cfg(feature = "exploration")]
-            total_exploration_fork_points: 0,
+            total_exploration_expansions: 0,
+            #[cfg(feature = "exploration")]
+            total_exploration_discoveries: 0,
             #[cfg(feature = "exploration")]
             total_exploration_bugs: 0,
+            #[cfg(feature = "exploration")]
+            max_active_workers: 0,
             #[cfg(feature = "exploration")]
             bug_recipes: Vec::new(),
             #[cfg(feature = "exploration")]
@@ -125,13 +139,21 @@ struct RunState {
     /// stashed between [`SimulationBuilder::run_orchestrator_for_iteration`]
     /// and [`SimulationBuilder::handle_orchestration_result`].
     pending_return_map: Vec<Option<usize>>,
-    // Exploration accumulators (only populated/read with the `exploration` feature).
+    // Exploration state (only populated/read with the `exploration` feature).
+    /// The frontier controller; lives across iterations so cumulative novelty
+    /// (discovery latches, sancov history) spans the whole run.
+    #[cfg(feature = "exploration")]
+    explorer: Option<moonpool_explorer::Explorer>,
     #[cfg(feature = "exploration")]
     total_exploration_timelines: u64,
     #[cfg(feature = "exploration")]
-    total_exploration_fork_points: u64,
+    total_exploration_expansions: u64,
+    #[cfg(feature = "exploration")]
+    total_exploration_discoveries: u64,
     #[cfg(feature = "exploration")]
     total_exploration_bugs: u64,
+    #[cfg(feature = "exploration")]
+    max_active_workers: usize,
     #[cfg(feature = "exploration")]
     bug_recipes: Vec<super::report::BugRecipe>,
     #[cfg(feature = "exploration")]
@@ -407,6 +429,12 @@ pub struct SimulationBuilder {
     fault_injectors: Vec<Box<dyn FaultInjector>>,
     chaos_duration: Option<Duration>,
     exploration_config: Option<crate::chaos::exploration_glue::ExplorationConfig>,
+    /// Replay breakpoints staged for the next orchestration run. Installed
+    /// *after* `SimWorld` construction (whose RNG reset would clear them);
+    /// set by the exploration phase before executing a job.
+    pending_replay: Option<Vec<(u64, u64)>>,
+    /// Recipe installed for every iteration (set by [`Self::replay_timeline`]).
+    replay_recipe: Option<Vec<(u64, u64)>>,
     before_iteration_hooks: Vec<Box<dyn FnMut()>>,
     seed_warning_timeout: Option<Duration>,
     run_time_budget: Duration,
@@ -441,6 +469,8 @@ impl SimulationBuilder {
             fault_injectors: Vec::new(),
             chaos_duration: None,
             exploration_config: None,
+            pending_replay: None,
+            replay_recipe: None,
             before_iteration_hooks: Vec::new(),
             seed_warning_timeout: None,
             run_time_budget: super::orchestrator::DEFAULT_RUN_TIME_BUDGET,
@@ -751,6 +781,17 @@ impl SimulationBuilder {
     #[must_use]
     pub fn set_debug_seeds(mut self, seeds: Vec<u64>) -> Self {
         self.seeds = seeds;
+        self
+    }
+
+    /// Replay one explored timeline: run a single iteration with `seed` and
+    /// install the recipe's RNG breakpoints, reproducing the exact timeline
+    /// an exploration bug recipe describes (`BugRecipe { seed, recipe }`).
+    #[must_use]
+    pub fn replay_timeline(mut self, seed: u64, recipe: Vec<(u64, u64)>) -> Self {
+        self.seeds = vec![seed];
+        self.iteration_control = IterationControl::FixedCount(1);
+        self.replay_recipe = Some(recipe);
         self
     }
 
@@ -1193,76 +1234,69 @@ impl SimulationBuilder {
     }
 
     /// Initialise the assertion region (heap, or `MAP_SHARED` + explorer), and
-    /// activate exploration when a config is present.
+    /// create the frontier controller when an exploration config is present.
+    #[cfg(feature = "exploration")]
     fn init_assertions_and_exploration(
         exploration_config: Option<&crate::chaos::exploration_glue::ExplorationConfig>,
-    ) {
+    ) -> Option<moonpool_explorer::Explorer> {
         crate::chaos::exploration_glue::init_assertion_region();
-        let _ = exploration_config;
-        #[cfg(feature = "exploration")]
-        if let Some(config) = exploration_config {
-            moonpool_explorer::set_rng_hooks(crate::sim::rng_call_count, |seed| {
-                crate::sim::set_sim_seed(seed);
-                crate::sim::reset_rng_call_count();
-            });
-            if let Err(e) = moonpool_explorer::init(config) {
+        let config = exploration_config?;
+        moonpool_explorer::set_rng_count_hook(crate::sim::rng_call_count);
+        match moonpool_explorer::Explorer::new(config.clone()) {
+            Ok(explorer) => Some(explorer),
+            Err(e) => {
                 tracing::error!("Failed to initialize exploration: {}", e);
+                None
             }
         }
+    }
+
+    /// Initialise the assertion region (heap table without the explorer).
+    #[cfg(not(feature = "exploration"))]
+    fn init_assertions_and_exploration(
+        _exploration_config: Option<&crate::chaos::exploration_glue::ExplorationConfig>,
+    ) {
+        crate::chaos::exploration_glue::init_assertion_region();
     }
 
     /// Build the final `ExplorationReport` from the running totals collected
     /// across iterations.
     #[cfg(feature = "exploration")]
-    fn build_exploration_report(
-        total_timelines: u64,
-        total_fork_points: u64,
-        total_bugs: u64,
-        bug_recipes: Vec<super::report::BugRecipe>,
-        converged: bool,
-        per_seed_timelines: Vec<u64>,
-    ) -> super::report::ExplorationReport {
-        let final_stats = moonpool_explorer::exploration_stats();
-        let coverage_bits = moonpool_explorer::explored_map_bits_set().unwrap_or(0);
+    fn build_exploration_report(inputs: &FinalReportInputs) -> super::report::ExplorationReport {
         super::report::ExplorationReport {
-            total_timelines,
-            fork_points: total_fork_points,
-            bugs_found: total_bugs,
-            bug_recipes,
-            energy_remaining: final_stats.as_ref().map_or(0, |s| s.global_energy),
-            realloc_pool_remaining: final_stats.as_ref().map_or(0, |s| s.realloc_pool_remaining),
-            coverage_bits,
-            coverage_total: u32::try_from(moonpool_explorer::coverage::COVERAGE_MAP_SIZE * 8)
-                .expect("coverage map size fits in u32"),
-            sancov_edges_total: final_stats.as_ref().map_or(0, |s| s.sancov_edges_total),
-            sancov_edges_covered: final_stats.as_ref().map_or(0, |s| s.sancov_edges_covered),
-            converged,
-            per_seed_timelines,
+            total_timelines: inputs.total_exploration_timelines,
+            expansions: inputs.total_exploration_expansions,
+            discoveries: inputs.total_exploration_discoveries,
+            bugs_found: inputs.total_exploration_bugs,
+            bug_recipes: inputs.bug_recipes.clone(),
+            max_active_workers: inputs.max_active_workers,
+            sancov_edges_covered: inputs.sancov_edges.0,
+            sancov_edges_total: inputs.sancov_edges.1,
+            converged: inputs.converged,
+            per_seed_timelines: inputs.per_seed_timelines.clone(),
         }
     }
 
-    /// Read the explorer's per-seed exploration stats and accumulate into
-    /// the totals + per-seed timelines arrays. Captures any new bug recipe
-    /// produced this seed.
+    /// Read the controller's per-seed exploration stats and accumulate them
+    /// into the run totals. Captures the bug recipes produced this seed.
     #[cfg(feature = "exploration")]
-    fn accumulate_exploration_stats(
-        seed: u64,
-        per_seed_timelines: &mut Vec<u64>,
-        total_timelines: &mut u64,
-        total_fork_points: &mut u64,
-        total_bugs: &mut u64,
-        bug_recipes: &mut Vec<super::report::BugRecipe>,
-    ) {
-        if let Some(stats) = moonpool_explorer::exploration_stats() {
-            per_seed_timelines.push(stats.total_timelines);
-            *total_timelines += stats.total_timelines;
-            *total_fork_points += stats.fork_points;
-            *total_bugs += stats.bug_found;
-        } else {
-            per_seed_timelines.push(0);
-        }
-        if let Some(recipe) = moonpool_explorer::bug_recipe() {
-            bug_recipes.push(super::report::BugRecipe { seed, recipe });
+    fn accumulate_exploration_stats(state: &mut RunState, seed: u64) {
+        let Some(explorer) = state.explorer.as_ref() else {
+            state.per_seed_timelines.push(0);
+            return;
+        };
+        let seed_stats = explorer.seed_stats();
+        state.per_seed_timelines.push(seed_stats.total_timelines);
+        state.total_exploration_timelines += seed_stats.total_timelines;
+        state.total_exploration_expansions += seed_stats.expansions;
+        state.total_exploration_discoveries += seed_stats.discoveries;
+        state.total_exploration_bugs += seed_stats.bug_found;
+        state.max_active_workers = state.max_active_workers.max(seed_stats.max_active_workers);
+        for recipe in explorer.bug_recipes() {
+            state.bug_recipes.push(super::report::BugRecipe {
+                seed,
+                recipe: recipe.clone(),
+            });
         }
     }
 
@@ -1367,9 +1401,16 @@ impl SimulationBuilder {
             obs_handle.register(inv);
         }
 
+        #[cfg(feature = "exploration")]
+        let explorer = Self::init_assertions_and_exploration(self.exploration_config.as_ref());
+        #[cfg(not(feature = "exploration"))]
         Self::init_assertions_and_exploration(self.exploration_config.as_ref());
 
         let mut state = RunState::new(&self);
+        #[cfg(feature = "exploration")]
+        {
+            state.explorer = explorer;
+        }
 
         while state.iteration_manager.should_continue() {
             if let Some(report) = self.execute_iteration(&mut state, &obs_handle) {
@@ -1379,6 +1420,19 @@ impl SimulationBuilder {
                 break;
             }
         }
+
+        // Read the sancov totals while the controller (which owns the sancov
+        // shared memory) is still alive, then drop it — freeing the worker
+        // slots and coverage buffers.
+        #[cfg(feature = "exploration")]
+        let sancov_edges = {
+            let edges = (
+                moonpool_explorer::sancov_edges_covered(),
+                moonpool_explorer::sancov_edge_count(),
+            );
+            state.explorer = None;
+            edges
+        };
 
         Self::build_final_report(
             state.metrics_collector,
@@ -1391,13 +1445,19 @@ impl SimulationBuilder {
                 #[cfg(feature = "exploration")]
                 total_exploration_timelines: state.total_exploration_timelines,
                 #[cfg(feature = "exploration")]
-                total_exploration_fork_points: state.total_exploration_fork_points,
+                total_exploration_expansions: state.total_exploration_expansions,
+                #[cfg(feature = "exploration")]
+                total_exploration_discoveries: state.total_exploration_discoveries,
                 #[cfg(feature = "exploration")]
                 total_exploration_bugs: state.total_exploration_bugs,
+                #[cfg(feature = "exploration")]
+                max_active_workers: state.max_active_workers,
                 #[cfg(feature = "exploration")]
                 bug_recipes: state.bug_recipes,
                 #[cfg(feature = "exploration")]
                 per_seed_timelines: state.per_seed_timelines,
+                #[cfg(feature = "exploration")]
+                sancov_edges,
             },
         )
     }
@@ -1414,8 +1474,22 @@ impl SimulationBuilder {
 
         self.prepare_iteration(obs_handle, seed, iteration_count);
 
+        #[cfg(feature = "exploration")]
+        if let Some(explorer) = state.explorer.as_mut() {
+            explorer.begin_seed(seed);
+        }
+
         let (orchestration_result, start_time) =
             self.run_orchestrator_for_iteration(state, obs_handle, seed, iteration_count);
+
+        #[cfg(feature = "exploration")]
+        let root_failed = match &orchestration_result {
+            Ok(output) => {
+                output.results.iter().any(std::result::Result::is_err)
+                    || crate::chaos::has_always_violations()
+            }
+            Err(_) => true,
+        };
 
         if let Err(report) = self.handle_orchestration_result(
             state,
@@ -1427,8 +1501,59 @@ impl SimulationBuilder {
             return Some(*report);
         }
 
+        #[cfg(feature = "exploration")]
+        self.run_exploration_phase(state, obs_handle, seed, iteration_count, root_failed);
+
         self.finish_iteration(state, seed, iteration_count);
         None
+    }
+
+    /// Run the frontier exploration loop for this seed: hand the root run's
+    /// discovery journal to the controller, then execute exploration jobs
+    /// through the bounded worker pool. A worker (or the controller itself
+    /// with `workers == 0`) replays a job's recipe via RNG breakpoints, runs
+    /// one full orchestration, and reports failure; only the controller
+    /// decides what to explore next.
+    #[cfg(feature = "exploration")]
+    fn run_exploration_phase(
+        &mut self,
+        state: &mut RunState,
+        obs_handle: &SimulationLayerHandle,
+        seed: u64,
+        iteration_count: usize,
+        root_failed: bool,
+    ) {
+        let Some(mut explorer) = state.explorer.take() else {
+            return;
+        };
+        explorer.observe_root_run(root_failed);
+        let swarm_operations = self.swarm_operations;
+        explorer.explore(|job| {
+            Self::reset_per_iteration_state(seed, swarm_operations, obs_handle);
+            // Keep the shared assertion region intact across exploration runs:
+            // the discovery latches ARE the cumulative novelty. Without this,
+            // SimWorld::create would zero the region and every run would
+            // "re-discover" everything.
+            crate::chaos::assertions::skip_next_assertion_reset();
+            self.pending_replay = Some(job.recipe.clone());
+            let (outcome, _start) =
+                self.run_orchestrator_for_iteration(state, obs_handle, seed, iteration_count);
+            match outcome {
+                Ok(output) => {
+                    let failed = output.results.iter().any(std::result::Result::is_err)
+                        || crate::chaos::has_always_violations();
+                    // Hand workloads and injectors back so the next in-process
+                    // job (workers == 0) starts from a consistent builder. In a
+                    // forked worker this mutates the copy-on-write copy only.
+                    let return_map = std::mem::take(&mut state.pending_return_map);
+                    self.return_entries(output.workloads, return_map);
+                    self.fault_injectors = output.fault_injectors;
+                    failed
+                }
+                Err(_) => true,
+            }
+        });
+        state.explorer = Some(explorer);
     }
 
     /// Run all per-iteration setup steps before the orchestrator starts:
@@ -1440,13 +1565,10 @@ impl SimulationBuilder {
         iteration_count: usize,
     ) {
         // Preserve assertion data across iterations so the final report
-        // reflects all seeds, not just the last one. For exploration runs,
-        // prepare_next_seed() also does a selective reset of coverage state.
+        // reflects all seeds, not just the last one. Under exploration this
+        // also keeps the discovery latches: novelty is cumulative, so later
+        // seeds only get exploration effort for genuinely new discoveries.
         if iteration_count > 1 {
-            #[cfg(feature = "exploration")]
-            if let Some(ref config) = self.exploration_config {
-                moonpool_explorer::prepare_next_seed(config.global_energy);
-            }
             crate::chaos::assertions::skip_next_assertion_reset();
         }
 
@@ -1455,6 +1577,12 @@ impl SimulationBuilder {
         }
 
         Self::reset_per_iteration_state(seed, self.swarm_operations, obs_handle);
+
+        // Timeline replay: stage the recipe so the orchestrator installs its
+        // breakpoints once the SimWorld's RNG reset has happened.
+        if let Some(recipe) = &self.replay_recipe {
+            self.pending_replay = Some(recipe.clone());
+        }
     }
 
     /// Resolve workload entries, build the per-iteration sim/fault-injectors,
@@ -1494,6 +1622,12 @@ impl SimulationBuilder {
             self.buggify_knobs,
             seed,
         );
+        // Exploration replay: `SimWorld` construction reset the tracked RNG,
+        // so this is the earliest point where breakpoints survive until the
+        // run. The counted stream starts here, matching the recorded anchors.
+        if let Some(breakpoints) = self.pending_replay.take() {
+            crate::sim::set_rng_breakpoints(breakpoints);
+        }
         // Hand the engine the resolved topology as plain data so locality-aware
         // network faults and distance-based latency can see it. Empty (and thus
         // inert) for plain `.processes()` runs.
@@ -1592,14 +1726,7 @@ impl SimulationBuilder {
         let _ = seed;
         #[cfg(feature = "exploration")]
         if self.exploration_config.is_some() {
-            Self::accumulate_exploration_stats(
-                seed,
-                &mut state.per_seed_timelines,
-                &mut state.total_exploration_timelines,
-                &mut state.total_exploration_fork_points,
-                &mut state.total_exploration_bugs,
-                &mut state.bug_recipes,
-            );
+            Self::accumulate_exploration_stats(state, seed);
         }
 
         let needs_assertion_scan = matches!(
@@ -1640,19 +1767,15 @@ impl SimulationBuilder {
         // accumulator Vecs are cloned once here (report time only).
         #[cfg(feature = "exploration")]
         let exploration_report = if exploration_config.is_some() {
-            Some(Self::build_exploration_report(
-                inputs.total_exploration_timelines,
-                inputs.total_exploration_fork_points,
-                inputs.total_exploration_bugs,
-                inputs.bug_recipes.clone(),
-                converged,
-                inputs.per_seed_timelines.clone(),
-            ))
+            Some(Self::build_exploration_report(inputs))
         } else {
             None
         };
         #[cfg(not(feature = "exploration"))]
-        let exploration_report: Option<super::report::ExplorationReport> = None;
+        let exploration_report: Option<super::report::ExplorationReport> = {
+            let _ = exploration_config;
+            None
+        };
 
         // 2. Read assertion + bucket data (freed by cleanup/cleanup_assertions).
         let assertion_results = crate::chaos::assertion_results();
@@ -1661,28 +1784,10 @@ impl SimulationBuilder {
         let raw_assertion_slots = moonpool_assertions::assertion_read_all();
         let raw_each_buckets = moonpool_assertions::each_bucket_read_all();
 
-        // 3. Now safe to free all shared memory. Under exploration `cleanup()`
-        // frees the exploration regions (the assertion table persists, as before);
-        // otherwise free the assertion region directly.
-        let did_exploration_cleanup = {
-            #[cfg(feature = "exploration")]
-            {
-                if exploration_config.is_some() {
-                    moonpool_explorer::cleanup();
-                    true
-                } else {
-                    false
-                }
-            }
-            #[cfg(not(feature = "exploration"))]
-            {
-                let _ = exploration_config;
-                false
-            }
-        };
-        if !did_exploration_cleanup {
-            crate::chaos::exploration_glue::cleanup_assertion_region();
-        }
+        // 3. Now safe to free the assertion region. The explorer's own shared
+        // memory (worker slots, sancov buffers) was freed when the controller
+        // was dropped in `run()`.
+        crate::chaos::exploration_glue::cleanup_assertion_region();
 
         let assertion_details = build_assertion_details(&raw_assertion_slots);
         let bucket_summaries = build_bucket_summaries(&raw_each_buckets);
