@@ -112,6 +112,7 @@ impl<T: TimeProvider> hyper::rt::Timer for HyperTimer<T> {
                 // at sim shutdown.
                 let _ = time.sleep(duration).await;
             }),
+            elapsed: false,
         })
     }
 
@@ -127,14 +128,93 @@ impl<T: TimeProvider> hyper::rt::Timer for HyperTimer<T> {
 /// Future returned by [`HyperTimer`]'s sleep methods.
 struct HyperSleep {
     inner: Pin<Box<dyn Future<Output = ()> + Send + Sync>>,
+
+    /// Latches once the sleep has elapsed, so a later poll answers `Ready`
+    /// instead of resuming a finished future.
+    elapsed: bool,
 }
 
 impl Future for HyperSleep {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        self.inner.as_mut().poll(cx)
+        // hyper polls a Sleep again after it has already elapsed. h2's
+        // keepalive does it on two paths in `maybe_ping`: when the connection
+        // is idle and `keep_alive_while_idle` is off, and when a frame arrived
+        // while the timer was scheduled. Both leave the finished sleep in
+        // place and poll it on the next pass. `tokio::time::Sleep` answers
+        // `Ready` there, so hyper relies on that; an async block instead
+        // panics with "async fn resumed after completion", which used to take
+        // down the connection task and poison hyper's ping mutex.
+        if self.elapsed {
+            return Poll::Ready(());
+        }
+        let poll = self.inner.as_mut().poll(cx);
+        if poll.is_ready() {
+            self.elapsed = true;
+        }
+        poll
     }
 }
 
 impl hyper::rt::Sleep for HyperSleep {}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use futures::task::noop_waker_ref;
+    use hyper::rt::Timer as _;
+    use moonpool_core::{TimeError, TimeProvider};
+
+    use super::{Context, Future, HyperTimer};
+
+    /// A provider whose sleeps are already over, so a single poll elapses the
+    /// timer and the second poll is the one under test.
+    #[derive(Clone, Debug)]
+    struct ElapsedTime;
+
+    impl TimeProvider for ElapsedTime {
+        fn sleep(
+            &self,
+            _duration: Duration,
+        ) -> impl Future<Output = Result<(), TimeError>> + Send + Sync {
+            std::future::ready(Ok(()))
+        }
+
+        fn now(&self) -> Duration {
+            Duration::ZERO
+        }
+
+        fn timer(&self) -> Duration {
+            Duration::ZERO
+        }
+
+        async fn timeout<F, T>(&self, _duration: Duration, future: F) -> Result<T, TimeError>
+        where
+            F: Future<Output = T> + Send,
+            T: Send,
+        {
+            Ok(future.await)
+        }
+    }
+
+    /// hyper's h2 keepalive polls a Sleep it has already seen elapse, on the
+    /// paths in `maybe_ping` where it decides not to send a ping. Answering
+    /// `Ready` is what `tokio::time::Sleep` does and what hyper depends on;
+    /// resuming the finished future instead panics and takes the connection
+    /// with it.
+    #[test]
+    fn a_sleep_polled_after_it_elapsed_stays_ready() {
+        let timer = HyperTimer::new(ElapsedTime);
+        let mut sleep = timer.sleep(Duration::from_secs(3));
+        let mut cx = Context::from_waker(noop_waker_ref());
+
+        assert!(sleep.as_mut().poll(&mut cx).is_ready());
+        assert!(
+            sleep.as_mut().poll(&mut cx).is_ready(),
+            "a second poll must not resume the finished future"
+        );
+        assert!(sleep.as_mut().poll(&mut cx).is_ready());
+    }
+}
