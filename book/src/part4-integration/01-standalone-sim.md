@@ -18,7 +18,7 @@ pub trait NetworkProvider: Clone + Send + Sync + 'static {
 }
 ```
 
-`SimTcpStream` implements `tokio::io::AsyncRead + AsyncWrite + Unpin` and is `Send + Sync + 'static`. That makes it a **drop-in replacement** for `tokio::net::TcpStream` anywhere the tokio ecosystem uses trait-based I/O. And the tokio ecosystem uses trait-based I/O everywhere that matters: hyper, tonic, tower, axum (via hyper), sqlx's wire protocol, redis-rs.
+`SimTcpStream` implements `futures::io::AsyncRead + AsyncWrite + Unpin` (the runtime-agnostic IO traits) and is `Send + Sync + 'static`. One thin adapter turns that into whatever shape a library wants, which makes it a **drop-in replacement** for `tokio::net::TcpStream` anywhere the ecosystem uses trait-based I/O. And the tokio ecosystem uses trait-based I/O everywhere that matters: hyper, tonic, tower, axum (via hyper), sqlx's wire protocol, redis-rs.
 
 This isn't an accident. We designed the provider traits to match tokio's interfaces exactly because we wanted existing libraries to work unchanged.
 
@@ -44,9 +44,9 @@ impl Process for HyperServer {
             _ = ctx.shutdown().cancelled() => return Ok(()),
         };
 
-        // SimTcpStream implements futures::io traits; .compat() bridges them
-        // back to tokio's IO traits, which is what TokioIo (and hyper) expects.
-        let io = TokioIo::new(stream.compat());
+        // SimTcpStream implements the futures-io traits; HyperIo presents
+        // them as the IO traits hyper defines for itself.
+        let io = HyperIo::new(stream);
 
         hyper::server::conn::http1::Builder::new()
             .serve_connection(io, service_fn(handle_request))
@@ -57,9 +57,11 @@ impl Process for HyperServer {
 }
 ```
 
-`SimTcpStream` implements `futures::io::AsyncRead + AsyncWrite` (the runtime-agnostic IO traits). Hyper expects `tokio::io` traits, so we route the stream through `tokio_util::compat::Compat` via `.compat()` (from `FuturesAsyncReadCompatExt`), then hand the result to `TokioIo`. From hyper's perspective nothing has changed: HTTP parser, chunked encoding, keep-alive logic, content-length validation, all exercised for real over simulated networking.
+Hyper 1.x defines its own `rt::Read` and `rt::Write` traits, and `moonpool_hyper::HyperIo` implements them directly over the futures-io shape every provider stream already has. From hyper's perspective nothing has changed: HTTP parser, chunked encoding, keep-alive logic, content-length validation, all exercised for real over simulated networking.
 
-The client side follows the same pattern. Connect via `ctx.network().connect()`, `.compat()` the stream, wrap in `TokioIo`, hand to `hyper::client::conn::http1::handshake`. Real HTTP/1.1 request-response cycles over a network that drops packets, injects latency, and kills connections.
+The client side follows the same pattern. Connect via `ctx.network().connect()`, wrap in `HyperIo`, hand to `hyper::client::conn::http1::handshake`. Real HTTP/1.1 request-response cycles over a network that drops packets, injects latency, and kills connections.
+
+HTTP/2 asks more of the runtime than this, because it spawns work and reads a clock. [The hyper Stack](./08-hyper-stack.md) covers what that takes, and what `moonpool-hyper` hands you for gRPC.
 
 ## Spawning Inside a Simulation
 

@@ -73,6 +73,7 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 - [Using moonpool-sim Standalone](./part4-integration/01-standalone-sim.md) — Standalone simulation engine for existing code (axum, Postgres, etc.)
 - [Where to Draw the Line](./part4-integration/02-mock-boundaries.md) — Fakes vs test containers; binary failure limitations
 - [Wiring a Web Service](./part4-integration/03-wiring-a-web-service.md) — Worked example: axum service in simulation with Store trait fake, chaos, assertions
+- [The hyper Stack: gRPC and HTTP](./part4-integration/08-hyper-stack.md): moonpool-hyper's runtime adapters, the reconnecting h2 channel, the serve helper, and why h2 keepalive and backoff stay deterministic
 - [What You're Testing (and What You're Not)](./part4-integration/04-scope-and-tradeoffs.md) — Tests handler logic and HTTP under chaos; doesn't test TLS, proxies, startup code
 - [Using Providers in Production](./part4-integration/05-production.md) — Deploying the same code on TokioProviders/TokioTransport; the lean dependency stanza; feature + platform matrices; the now() gotcha
 - [Migrating Existing Code to Providers](./part4-integration/06-migrating-existing-code.md) — Routing existing tokio/rand/fs calls through providers; the call mapping; the futures::io Compat gotcha; verifying with the conformance suite

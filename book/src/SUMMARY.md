@@ -68,6 +68,7 @@
 - [Using moonpool-sim Standalone](./part4-integration/01-standalone-sim.md)
   - [Where to Draw the Line](./part4-integration/02-mock-boundaries.md)
   - [Wiring a Web Service](./part4-integration/03-wiring-a-web-service.md)
+  - [The hyper Stack: gRPC and HTTP](./part4-integration/08-hyper-stack.md)
   - [What You're Testing (and What You're Not)](./part4-integration/04-scope-and-tradeoffs.md)
 - [Using Providers in Production](./part4-integration/05-production.md)
 - [Migrating Existing Code to Providers](./part4-integration/06-migrating-existing-code.md)
