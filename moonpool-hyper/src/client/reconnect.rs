@@ -9,6 +9,7 @@ use hyper::body::{Body, Incoming};
 use hyper::rt::bounds::Http2ClientConnExec;
 use hyper::{Request, Response};
 use moonpool_core::{Detach, NetworkProvider, Providers, TaskProvider, TimeProvider};
+use tracing::{Instrument, instrument};
 
 use super::channel::{H2Channel, ResponseFuture};
 use crate::config::KeepAlive;
@@ -25,23 +26,38 @@ type ChannelIo<P> = HyperIo<<<P as Providers>::Network as NetworkProvider>::TcpS
 /// speaks both protocols behaves the same way on both.
 #[derive(Clone, Debug)]
 pub struct ChannelConfig {
-    /// Delay before the first retry. Doubles per consecutive failure.
+    /// Initial delay before attempting reconnection.
+    ///
+    /// Doubles per consecutive failure, up to `max_reconnect_delay`.
     pub initial_reconnect_delay: Duration,
 
-    /// Ceiling for the doubling backoff.
+    /// Maximum delay between reconnection attempts.
     pub max_reconnect_delay: Duration,
 
-    /// Budget for one attempt, covering the TCP connect and the h2 handshake.
-    pub connect_timeout: Duration,
+    /// Timeout for connection attempts.
+    ///
+    /// Applied to the TCP connect and, separately, to the h2 handshake: a peer
+    /// that accepts the connection and then goes quiet must not park the
+    /// connection task forever.
+    pub connection_timeout: Duration,
 
-    /// Consecutive failures tolerated before the channel gives up for good.
+    /// Maximum number of consecutive connection failures before giving up.
     /// `None`, the default, retries forever.
     pub max_connection_failures: Option<u32>,
 
-    /// h2 PING keepalive. `None`, the default, is hyper's own default: no
-    /// keepalive, so a connection to a peer that goes silent without closing
-    /// the socket is only detected by a request failing.
+    /// h2 PING keepalive.
+    ///
+    /// `None`, the default, is hyper's own default: no keepalive, so a peer
+    /// that goes silent without closing the socket is only noticed when a
+    /// request fails.
     pub keep_alive: Option<KeepAlive>,
+
+    /// Whether the connected stream claims efficient vectored writes.
+    ///
+    /// Passed to [`HyperIo::with_vectored_writes`]. Default `false`, matching
+    /// `HyperIo`'s own default: futures-io cannot be asked whether the
+    /// underlying stream really implements `poll_write_vectored`.
+    pub vectored_writes: bool,
 }
 
 impl Default for ChannelConfig {
@@ -49,42 +65,41 @@ impl Default for ChannelConfig {
         Self {
             initial_reconnect_delay: Duration::from_millis(100),
             max_reconnect_delay: Duration::from_secs(30),
-            connect_timeout: Duration::from_secs(5),
+            connection_timeout: Duration::from_secs(5),
             max_connection_failures: None,
             keep_alive: None,
+            vectored_writes: false,
         }
     }
 }
 
-impl ChannelConfig {
-    /// How long to wait before the attempt that follows `failures`
-    /// consecutive failures.
-    ///
-    /// Plain doubling from `initial_reconnect_delay`, saturating at
-    /// `max_reconnect_delay`, with no jitter: production jitter exists to
-    /// desynchronize a fleet of clients, and here it would only make the
-    /// simulation's reconnect timing depend on something other than the seed.
-    fn backoff_delay(&self, failures: u32) -> Duration {
-        if failures == 0 {
-            return Duration::ZERO;
-        }
-        let mut delay = self.initial_reconnect_delay;
-        // Loop count is bounded by the ceiling, not by `failures`.
-        for _ in 1..failures {
-            if delay >= self.max_reconnect_delay {
-                break;
-            }
-            delay = delay.saturating_mul(2);
-        }
-        delay.min(self.max_reconnect_delay)
+/// How long to wait before the attempt that follows `failures` consecutive
+/// failures: `initial_reconnect_delay * 2^(failures - 1)`, capped at
+/// `max_reconnect_delay`.
+///
+/// No jitter, by design. Production jitter desynchronizes a fleet of clients;
+/// here it would only make reconnect timing depend on something other than the
+/// seed. The doubling saturates rather than overflowing, and the loop is
+/// bounded by the ceiling rather than by `failures`.
+fn backoff_delay(failures: u32, config: &ChannelConfig) -> Duration {
+    if failures == 0 {
+        return Duration::ZERO;
     }
+    let mut delay = config.initial_reconnect_delay;
+    for _ in 1..failures {
+        if delay >= config.max_reconnect_delay {
+            break;
+        }
+        delay = delay.saturating_mul(2);
+    }
+    delay.min(config.max_reconnect_delay)
 }
 
 /// A tower [`Service`](tower_service::Service) that keeps an h2 connection to
-/// one destination, reconnecting as needed.
+/// one address, reconnecting as needed.
 ///
 /// This plays the role `tonic::transport::Channel` plays in production: hand it
-/// to a generated gRPC client (or any tower stack) and it connects on the first
+/// to a generated gRPC client (or any tower stack) and it connects on first
 /// use, serves requests over the live connection, and rebuilds the connection
 /// after a loss with deterministic backoff. Cloning shares one connection and
 /// one reconnection state machine.
@@ -92,35 +107,42 @@ impl ChannelConfig {
 /// # Readiness and errors
 ///
 /// `poll_ready` drives everything. It returns `Ready(Ok)` only with a live
-/// connection, `Pending` while one is being established (the caller is woken in
-/// registration order), and `Ready(Err)` once per failed attempt: the failure is
-/// reported to a single caller and the next poll starts a fresh attempt. The
-/// channel never retries a *request* on the caller's behalf, which is the
-/// correct gRPC semantic (the caller knows whether its RPC is idempotent).
+/// connection, reserving a handle that the following `call` consumes;
+/// `Pending` while a connection is being established, waking parked callers in
+/// the order they parked; and `Ready(Err)` once per failed attempt, after which
+/// the next poll starts a fresh attempt. The channel never retries a *request*
+/// on the caller's behalf, which is the correct gRPC semantic: only the caller
+/// knows whether its RPC is idempotent.
 ///
 /// # Where it may be polled
 ///
 /// `poll_ready` spawns the connection task through the task provider, so the
-/// channel must be polled from inside a provider task, exactly like calling
+/// channel must be polled from inside a provider task, exactly as calling
 /// `tokio::spawn` requires a tokio runtime.
 ///
 /// One task exists per connection: it waits out the backoff, connects, then
-/// drives the connection and exits when the connection ends. A channel that
-/// nobody polls starts nothing, and with the default `keep_alive` of `None` an
+/// drives the connection and exits when the connection ends. A channel nobody
+/// polls starts nothing, and with the default `keep_alive` of `None` an
 /// established connection generates no timer traffic of its own, so a quiesced
-/// simulation stays quiesced. Note that dropping every clone does not close a
-/// live connection: the task keeps driving it (keepalive pings included, when
+/// simulation stays quiesced. Dropping every clone does not close a live
+/// connection: the task keeps driving it (keepalive pings included, when
 /// configured) until the peer closes it or the process goes away.
 pub struct ReconnectingChannel<P: Providers, B> {
     shared: Arc<Shared<P, B>>,
+
+    /// Handle reserved by this clone's last successful `poll_ready`, consumed
+    /// by the next `call`. Per clone, not shared: tower's readiness contract is
+    /// between one service handle and one request.
+    ready: Option<H2Channel<B>>,
 }
 
-// Manual: the derive would demand `B: Clone`, and cloning a channel shares
-// state rather than duplicating it.
+// Manual: the derive would demand `B: Clone`. A clone shares the connection
+// state but starts with no reservation of its own.
 impl<P: Providers, B> Clone for ReconnectingChannel<P, B> {
     fn clone(&self) -> Self {
         Self {
             shared: Arc::clone(&self.shared),
+            ready: None,
         }
     }
 }
@@ -128,7 +150,8 @@ impl<P: Providers, B> Clone for ReconnectingChannel<P, B> {
 impl<P: Providers, B> std::fmt::Debug for ReconnectingChannel<P, B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReconnectingChannel")
-            .field("destination", &self.shared.destination)
+            .field("addr", &self.shared.addr)
+            .field("reserved", &self.ready.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -136,7 +159,7 @@ impl<P: Providers, B> std::fmt::Debug for ReconnectingChannel<P, B> {
 /// State shared by every clone of a channel and by the connection task.
 struct Shared<P: Providers, B> {
     providers: P,
-    destination: String,
+    addr: String,
     config: ChannelConfig,
     inner: Mutex<Inner<B>>,
 }
@@ -150,25 +173,26 @@ impl<P: Providers, B> Shared<P, B> {
 }
 
 /// The mutable half. The lock is never held across an await point: the
-/// connection task reads what it needs, releases, and only takes the lock again
+/// connection task reads what it needs, releases, and takes the lock again only
 /// to publish an outcome.
 struct Inner<B> {
     conn: Conn<B>,
 
     /// Consecutive failed attempts, reset by a successful handshake. Drives
-    /// both the backoff and `max_connection_failures`.
+    /// both the backoff and `max_connection_failures`. A connection that ends
+    /// after being established is not a failure and does not touch this.
     failures: u32,
 
-    /// Bumped on every transition that retires a connection task. A task only
-    /// writes back if the generation it was spawned with still stands, which
-    /// keeps a task whose connection died late from clobbering the state of the
-    /// task that replaced it.
+    /// Incremented every time a connection is published. A connection task
+    /// remembers the value it published under and only retires the state if it
+    /// still stands, so a driver that notices its socket is gone long after it
+    /// was replaced cannot demote a newer connection.
     generation: u64,
 
     /// Set by a failed attempt, taken by the next `poll_ready`.
     last_error: Option<ChannelError>,
 
-    /// Callers parked in `poll_ready`, woken in registration order so wake
+    /// Callers parked in `poll_ready`, woken in the order they parked so wake
     /// ordering is a function of poll order alone.
     wakers: Vec<Waker>,
 }
@@ -177,9 +201,10 @@ struct Inner<B> {
 enum Conn<B> {
     /// No connection and no attempt running.
     Disconnected,
-    /// A connection task is running: connecting, or waiting out backoff.
+    /// A connection task is running: waiting out backoff, connecting, or
+    /// handshaking.
     Connecting,
-    /// A live connection. Requests are served by cloning this channel.
+    /// A live connection. Requests are served by cloning this handle.
     Connected(H2Channel<B>),
 }
 
@@ -191,13 +216,14 @@ where
     B::Error: Into<Box<dyn Error + Send + Sync>>,
     HyperExecutor<P::Task>: Http2ClientConnExec<B, ChannelIo<P>>,
 {
-    /// Create a channel to `destination`. No connection is made until the
-    /// channel is first polled ready.
-    pub fn new(providers: P, destination: impl Into<String>, config: ChannelConfig) -> Self {
+    /// Create a channel to `addr`. Nothing connects until the channel is first
+    /// polled ready.
+    #[instrument(skip_all)]
+    pub fn new(providers: &P, addr: impl Into<String>, config: ChannelConfig) -> Self {
         Self {
             shared: Arc::new(Shared {
-                providers,
-                destination: destination.into(),
+                providers: providers.clone(),
+                addr: addr.into(),
                 config,
                 inner: Mutex::new(Inner {
                     conn: Conn::Disconnected,
@@ -207,38 +233,43 @@ where
                     wakers: Vec::new(),
                 }),
             }),
+            ready: None,
         }
     }
 
-    fn poll_connection(&self, cx: &mut Context<'_>) -> Poll<Result<(), ChannelError>> {
-        // Everything that touches the state happens in here; the guard is gone
-        // before anything is spawned, so the channel lock is never held while
-        // the task provider takes its own.
-        let attempt = {
+    fn poll_connection(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), ChannelError>> {
+        // Everything that touches shared state happens in here, and the guard
+        // is gone before anything is spawned: the channel lock is never held
+        // while the task provider takes its own.
+        let start_attempt = {
             let mut inner = self.shared.lock();
 
-            // A failed attempt is reported to exactly one caller; everyone else
-            // (and this caller's next poll) goes on to start a new attempt.
-            if let Some(error) = inner.last_error.take() {
-                return Poll::Ready(Err(error));
-            }
-
-            // A connection that died since the last poll is demoted here rather
-            // than waited on, so the reconnect starts in this very poll.
             if matches!(&inner.conn, Conn::Connected(c) if c.is_closed()) {
-                inner.generation = inner.generation.wrapping_add(1);
+                // A connection that died since the last poll is demoted here
+                // rather than waited on, so the reconnect starts in this very
+                // poll. It is not a failed attempt: neither the failure count
+                // nor the backoff is touched, and no error is surfaced.
                 inner.conn = Conn::Disconnected;
-            } else if matches!(inner.conn, Conn::Connected(_)) {
+                self.ready = None;
+            } else if let Conn::Connected(channel) = &inner.conn {
+                // Reserve a handle for the call that follows.
+                self.ready = Some(channel.clone());
                 return Poll::Ready(Ok(()));
             }
 
-            let mut attempt = None;
+            let mut start_attempt = false;
             if matches!(inner.conn, Conn::Disconnected) {
+                // A failed attempt is reported to exactly one caller; everyone
+                // else, and this caller's next poll, goes on to start a fresh
+                // attempt.
+                if let Some(error) = inner.last_error.take() {
+                    return Poll::Ready(Err(error));
+                }
+
                 if let Some(max) = self.shared.config.max_connection_failures
                     && inner.failures >= max
                 {
-                    return Poll::Ready(Err(ChannelError::GaveUp {
-                        destination: self.shared.destination.clone(),
+                    return Poll::Ready(Err(ChannelError::ExhaustedRetries {
                         failures: inner.failures,
                     }));
                 }
@@ -246,23 +277,22 @@ where
                 // Single flight: flipping to Connecting under the lock means
                 // the next caller to arrive parks instead of starting a second
                 // attempt.
-                inner.generation = inner.generation.wrapping_add(1);
                 inner.conn = Conn::Connecting;
-                attempt = Some(inner.generation);
+                start_attempt = true;
             }
 
             if !inner.wakers.iter().any(|w| w.will_wake(cx.waker())) {
                 inner.wakers.push(cx.waker().clone());
             }
-            attempt
+            start_attempt
         };
 
-        if let Some(generation) = attempt {
+        if start_attempt {
             let shared = Arc::clone(&self.shared);
             self.shared
                 .providers
                 .task()
-                .spawn_task("h2-channel", connect_and_serve(shared, generation))
+                .spawn_task("h2-channel", connect_and_serve(shared))
                 .detach();
         }
         Poll::Pending
@@ -272,8 +302,8 @@ where
 impl<P: Providers, B> ReconnectingChannel<P, B> {
     /// The address this channel connects to.
     #[must_use]
-    pub fn destination(&self) -> &str {
-        &self.shared.destination
+    pub fn addr(&self) -> &str {
+        &self.shared.addr
     }
 
     /// Whether a live connection is currently established.
@@ -303,29 +333,19 @@ where
     }
 
     fn call(&mut self, req: Request<B>) -> Self::Future {
-        // The request takes its own clone of the sender and lives or dies with
-        // it: a reconnection underneath does not rescue it, and its failure
-        // does not disturb the channel's state.
-        let connected = match &self.shared.lock().conn {
-            Conn::Connected(channel) => Some(channel.clone()),
-            Conn::Disconnected | Conn::Connecting => None,
-        };
-
-        match connected {
+        // The reservation from poll_ready is consumed here, and the request
+        // then lives or dies with that handle: a reconnection underneath does
+        // not rescue it, and its failure does not disturb the channel state.
+        match self.ready.take() {
             Some(mut channel) => tower_service::Service::call(&mut channel, req),
-            None => Box::pin(std::future::ready(Err(ChannelError::NotReady))),
+            None => ResponseFuture::failed(ChannelError::NotReady),
         }
     }
 }
 
-/// Connect (after any backoff), publish the connection, then drive it until it
-/// ends. Runs as one provider task per connection attempt.
-#[tracing::instrument(
-    name = "h2_connect",
-    skip_all,
-    fields(destination = %shared.destination, generation)
-)]
-async fn connect_and_serve<P, B>(shared: Arc<Shared<P, B>>, generation: u64)
+/// Wait out any backoff, connect, publish the connection, then drive it until
+/// it ends. One provider task per attempt and its connection.
+async fn connect_and_serve<P, B>(shared: Arc<Shared<P, B>>)
 where
     P: Providers,
     B: Body + Send + Unpin + 'static,
@@ -333,112 +353,71 @@ where
     B::Error: Into<Box<dyn Error + Send + Sync>>,
     HyperExecutor<P::Task>: Http2ClientConnExec<B, ChannelIo<P>>,
 {
-    let destination = shared.destination.clone();
-    let delay = shared.config.backoff_delay(shared.lock().failures);
-
-    tracing::info!(
-        destination = %destination,
-        delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-        "h2_channel_connecting"
-    );
+    let addr = shared.addr.clone();
+    let failures = shared.lock().failures;
+    let attempt = failures.saturating_add(1);
 
     // Backoff is served here, never in the caller: a caller that stops polling
     // must not leave the schedule half-applied.
-    if !delay.is_zero() && shared.providers.time().sleep(delay).await.is_err() {
-        record_failure(
-            &shared,
-            generation,
-            ChannelError::Connect {
-                destination,
-                reason: "time provider stopped".to_owned(),
-            },
-        );
+    if failures > 0
+        && shared
+            .providers
+            .time()
+            .sleep(backoff_delay(failures, &shared.config))
+            .await
+            .is_err()
+    {
+        // The provider is shutting down. Leave the channel disconnected without
+        // counting this as a failed attempt, and let the callers re-poll.
+        let parked = {
+            let mut inner = shared.lock();
+            inner.conn = Conn::Disconnected;
+            take_wakers(&mut inner)
+        };
+        wake_all(parked);
         return;
     }
 
-    let attempt = async {
-        let stream = shared
-            .providers
-            .network()
-            .connect(&shared.destination)
-            .await
-            .map_err(|e| ChannelError::Connect {
-                destination: shared.destination.clone(),
-                reason: e.to_string(),
-            })?;
+    tracing::info!(addr = %addr, attempt, "h2_channel_connecting");
 
-        let mut builder = hyper::client::conn::http2::Builder::new(HyperExecutor::new(
-            shared.providers.task().clone(),
-        ));
-        builder.timer(HyperTimer::new(shared.providers.time().clone()));
-        if let Some(keep_alive) = &shared.config.keep_alive {
-            builder
-                .keep_alive_interval(keep_alive.interval)
-                .keep_alive_timeout(keep_alive.timeout)
-                .keep_alive_while_idle(keep_alive.while_idle);
-        }
-
-        builder
-            .handshake(HyperIo::new(stream))
-            .await
-            .map_err(|e| ChannelError::Connect {
-                destination: shared.destination.clone(),
-                reason: e.to_string(),
-            })
-    };
-
-    // One budget for connect plus handshake: a peer that accepts the TCP
-    // connection and then goes silent must not hold the channel forever.
-    let outcome = shared
-        .providers
-        .time()
-        .timeout(shared.config.connect_timeout, attempt)
-        .await;
+    let span = tracing::info_span!("h2_connect", addr = %addr, attempt);
+    let outcome = connect(&shared).instrument(span).await;
 
     let (sender, connection) = match outcome {
-        Ok(Ok(pair)) => pair,
-        Ok(Err(error)) => {
-            tracing::info!(destination = %destination, error = %error, "h2_channel_connect_failed");
-            record_failure(&shared, generation, error);
-            return;
-        }
-        Err(_elapsed) => {
-            let error = ChannelError::Connect {
-                destination: destination.clone(),
-                reason: "connect timed out".to_owned(),
-            };
-            tracing::info!(destination = %destination, error = %error, "h2_channel_connect_failed");
-            record_failure(&shared, generation, error);
+        Ok(pair) => pair,
+        Err(error) => {
+            record_failure(&shared, &addr, attempt, error);
             return;
         }
     };
 
-    let parked = {
+    let (my_generation, parked) = {
         let mut inner = shared.lock();
-        if inner.generation != generation {
-            // Retired while connecting: drop the connection, which closes the
-            // stream, and leave the current task's state alone.
-            return;
-        }
-        inner.conn = Conn::Connected(H2Channel::new(sender));
+        inner.generation = inner.generation.wrapping_add(1);
         inner.failures = 0;
-        take_wakers(&mut inner)
+        inner.conn = Conn::Connected(H2Channel::new(sender));
+        (inner.generation, take_wakers(&mut inner))
     };
     wake_all(parked);
-    tracing::info!(destination = %destination, "h2_channel_connected");
+    tracing::info!(addr = %addr, "h2_channel_connected");
 
     // Requests only make progress while this future is polled, so the task
     // stays here for the life of the connection and exits when it ends.
     match connection.await {
-        Ok(()) => tracing::info!(destination = %destination, "h2_channel_closed"),
+        Ok(()) => tracing::info!(addr = %addr, "h2_channel_closed"),
         Err(error) => {
-            tracing::info!(destination = %destination, error = %error, "h2_channel_closed");
+            tracing::warn!(addr = %addr, detail = %error, "h2_channel_connection_error");
         }
     }
 
     let parked = {
         let mut inner = shared.lock();
-        if inner.generation != generation {
+        // Retire only the state this task owns. The generation check rejects a
+        // driver whose connection was already replaced; the state check rejects
+        // one whose connection was demoted by a poll_ready that has already
+        // started a replacement attempt, which would otherwise clobber
+        // Connecting and let a second task be spawned.
+        if inner.generation != my_generation || !matches!(inner.conn, Conn::Connected(_)) {
             return;
         }
         inner.conn = Conn::Disconnected;
@@ -450,18 +429,93 @@ where
     wake_all(parked);
 }
 
+/// One connection attempt: TCP connect, then the h2 handshake.
+async fn connect<P, B>(
+    shared: &Shared<P, B>,
+) -> Result<
+    (
+        hyper::client::conn::http2::SendRequest<B>,
+        hyper::client::conn::http2::Connection<ChannelIo<P>, B, HyperExecutor<P::Task>>,
+    ),
+    ChannelError,
+>
+where
+    P: Providers,
+    B: Body + Send + Unpin + 'static,
+    B::Data: Send,
+    B::Error: Into<Box<dyn Error + Send + Sync>>,
+    HyperExecutor<P::Task>: Http2ClientConnExec<B, ChannelIo<P>>,
+{
+    let stream = shared
+        .providers
+        .time()
+        .timeout(
+            shared.config.connection_timeout,
+            shared.providers.network().connect(&shared.addr),
+        )
+        .await
+        .map_err(|_| ChannelError::ConnectTimeout {
+            addr: shared.addr.clone(),
+        })?
+        .map_err(|e| ChannelError::Connect {
+            addr: shared.addr.clone(),
+            detail: e.to_string(),
+        })?;
+
+    let mut builder = hyper::client::conn::http2::Builder::new(HyperExecutor::new(
+        shared.providers.task().clone(),
+    ));
+    builder.timer(HyperTimer::new(shared.providers.time().clone()));
+    if let Some(keep_alive) = &shared.config.keep_alive {
+        builder
+            .keep_alive_interval(keep_alive.interval)
+            .keep_alive_timeout(keep_alive.timeout)
+            .keep_alive_while_idle(keep_alive.while_idle);
+    }
+
+    let io = HyperIo::new(stream).with_vectored_writes(shared.config.vectored_writes);
+
+    // The handshake gets its own budget: a peer that accepts the connection and
+    // then never answers the h2 preface would otherwise park this task forever.
+    shared
+        .providers
+        .time()
+        .timeout(shared.config.connection_timeout, builder.handshake(io))
+        .await
+        .map_err(|_| ChannelError::Handshake {
+            addr: shared.addr.clone(),
+            detail: "handshake timed out".to_owned(),
+        })?
+        .map_err(|e| ChannelError::Handshake {
+            addr: shared.addr.clone(),
+            detail: e.to_string(),
+        })
+}
+
 /// Record a failed attempt and hand the error to the waiting callers.
-fn record_failure<P: Providers, B>(shared: &Shared<P, B>, generation: u64, error: ChannelError) {
-    let parked = {
+fn record_failure<P: Providers, B>(
+    shared: &Shared<P, B>,
+    addr: &str,
+    attempt: u32,
+    error: ChannelError,
+) {
+    let detail = error.to_string();
+    let (delay, parked) = {
         let mut inner = shared.lock();
-        if inner.generation != generation {
-            return;
-        }
         inner.failures = inner.failures.saturating_add(1);
         inner.conn = Conn::Disconnected;
         inner.last_error = Some(error);
-        take_wakers(&mut inner)
+        let delay = backoff_delay(inner.failures, &shared.config);
+        (delay, take_wakers(&mut inner))
     };
+
+    tracing::info!(
+        addr = %addr,
+        attempt,
+        delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+        detail = %detail,
+        "h2_channel_connect_failed"
+    );
     wake_all(parked);
 }
 
@@ -490,42 +544,17 @@ mod tests {
     use moonpool_core::TokioProviders;
     use tower_service::Service as _;
 
-    use super::{ChannelConfig, ReconnectingChannel};
+    use super::{ChannelConfig, ReconnectingChannel, backoff_delay};
     use crate::ChannelError;
 
     /// The channel a production tokio stack would build. Naming this type at
     /// all is the point: it makes the compiler discharge hyper's sealed
-    /// `Http2ClientConnExec` bound for `HyperExecutor<TokioTaskProvider>` over
-    /// a real provider stream, which no generic definition can prove on its
-    /// own.
+    /// `Http2ClientConnExec` bound for `HyperExecutor<TokioTaskProvider>` over a
+    /// real provider stream, which no generic definition can prove on its own.
     type TestChannel = ReconnectingChannel<TokioProviders, Full<Bytes>>;
 
-    #[test]
-    fn call_before_ready_fails_instead_of_panicking() {
-        let mut channel: TestChannel = ReconnectingChannel::new(
-            TokioProviders::new(),
-            "10.0.0.1:50051",
-            ChannelConfig::default(),
-        );
-        assert_eq!(channel.destination(), "10.0.0.1:50051");
-        assert!(!channel.is_connected());
-
-        // No poll_ready first, so no connection and no task provider involved:
-        // the request must resolve to NotReady rather than panic or hang.
-        let request = hyper::Request::new(Full::new(Bytes::from_static(b"body")));
-        let response = futures::executor::block_on(channel.call(request));
-        assert!(matches!(response, Err(ChannelError::NotReady)));
-    }
-
-    #[test]
-    fn clones_share_one_connection_state() {
-        let channel: TestChannel = ReconnectingChannel::new(
-            TokioProviders::new(),
-            "10.0.0.2:50051",
-            ChannelConfig::default(),
-        );
-        let clone = channel.clone();
-        assert!(Arc::ptr_eq(&channel.shared, &clone.shared));
+    fn test_channel(addr: &str) -> TestChannel {
+        ReconnectingChannel::new(&TokioProviders::new(), addr, ChannelConfig::default())
     }
 
     #[test]
@@ -533,33 +562,35 @@ mod tests {
         let config = ChannelConfig::default();
         assert_eq!(config.initial_reconnect_delay, Duration::from_millis(100));
         assert_eq!(config.max_reconnect_delay, Duration::from_secs(30));
-        assert_eq!(config.connect_timeout, Duration::from_secs(5));
+        assert_eq!(config.connection_timeout, Duration::from_secs(5));
         assert!(config.max_connection_failures.is_none());
         assert!(config.keep_alive.is_none());
+        assert!(!config.vectored_writes);
     }
 
     #[test]
     fn the_first_attempt_does_not_wait() {
-        assert_eq!(ChannelConfig::default().backoff_delay(0), Duration::ZERO);
+        assert_eq!(backoff_delay(0, &ChannelConfig::default()), Duration::ZERO);
     }
 
     #[test]
     fn backoff_doubles_per_failure() {
         let config = ChannelConfig::default();
-        assert_eq!(config.backoff_delay(1), Duration::from_millis(100));
-        assert_eq!(config.backoff_delay(2), Duration::from_millis(200));
-        assert_eq!(config.backoff_delay(3), Duration::from_millis(400));
-        assert_eq!(config.backoff_delay(4), Duration::from_millis(800));
+        assert_eq!(backoff_delay(1, &config), Duration::from_millis(100));
+        assert_eq!(backoff_delay(2, &config), Duration::from_millis(200));
+        assert_eq!(backoff_delay(3, &config), Duration::from_millis(400));
+        assert_eq!(backoff_delay(4, &config), Duration::from_millis(800));
     }
 
     #[test]
     fn backoff_saturates_at_the_ceiling() {
         let config = ChannelConfig::default();
-        // 100ms doubled nine times is 25.6s, ten times would overshoot 30s.
-        assert_eq!(config.backoff_delay(9), Duration::from_millis(25_600));
-        assert_eq!(config.backoff_delay(10), Duration::from_secs(30));
-        assert_eq!(config.backoff_delay(1_000), Duration::from_secs(30));
-        assert_eq!(config.backoff_delay(u32::MAX), Duration::from_secs(30));
+        // 100ms doubled eight times is 25.6s; once more would overshoot 30s.
+        assert_eq!(backoff_delay(9, &config), Duration::from_millis(25_600));
+        assert_eq!(backoff_delay(10, &config), Duration::from_secs(30));
+        assert_eq!(backoff_delay(1_000, &config), Duration::from_secs(30));
+        // No overflow panic and no unbounded loop at the extreme.
+        assert_eq!(backoff_delay(u32::MAX, &config), Duration::from_secs(30));
     }
 
     #[test]
@@ -569,7 +600,28 @@ mod tests {
             max_reconnect_delay: Duration::from_secs(30),
             ..ChannelConfig::default()
         };
-        assert_eq!(config.backoff_delay(1), Duration::from_secs(30));
-        assert_eq!(config.backoff_delay(5), Duration::from_secs(30));
+        assert_eq!(backoff_delay(1, &config), Duration::from_secs(30));
+        assert_eq!(backoff_delay(5, &config), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn call_without_a_reservation_fails_instead_of_panicking() {
+        let mut channel = test_channel("10.0.0.1:50051");
+        assert_eq!(channel.addr(), "10.0.0.1:50051");
+        assert!(!channel.is_connected());
+
+        // No poll_ready first, so no reservation and no task provider involved:
+        // the request must resolve to NotReady rather than panic or hang.
+        let request = hyper::Request::new(Full::new(Bytes::from_static(b"body")));
+        let response = futures::executor::block_on(channel.call(request));
+        assert!(matches!(response, Err(ChannelError::NotReady)));
+    }
+
+    #[test]
+    fn clones_share_state_but_not_the_reservation() {
+        let channel = test_channel("10.0.0.2:50051");
+        let clone = channel.clone();
+        assert!(Arc::ptr_eq(&channel.shared, &clone.shared));
+        assert!(clone.ready.is_none());
     }
 }
