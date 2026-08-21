@@ -34,7 +34,7 @@ assert_sometimes_less_than!(p99_latency, 100, "p99 should sometimes drop below 1
 
 Like their boolean counterparts, these are coverage assertions. If the goal is never achieved after all iterations, the validation reports a coverage violation.
 
-The difference from boolean sometimes is in how they interact with the explorer. **Sometimes-numeric assertions fork on watermark improvement.** The framework tracks the best value observed, and when a new observation beats the previous best, the explorer snapshots and branches from that state.
+The difference from boolean sometimes is in how they interact with the explorer. **Sometimes-numeric assertions signal a discovery on watermark improvement.** The framework tracks the best value observed, and when a new observation beats the previous best, the explorer remembers a replayable exemplar of that state and schedules continuations from it — monotonic progress states get preferred treatment in continuation scheduling.
 
 This creates a ratchet. Suppose you write:
 
@@ -51,9 +51,9 @@ Every numeric assertion, whether always or sometimes, maintains a watermark in s
 - For assertions that track the **highest** value (`maximize=true`): `assert_always_less_than!`, `assert_always_less_than_or_equal_to!`, `assert_sometimes_greater_than!`, `assert_sometimes_greater_than_or_equal_to!`. These seek the boundary from below (always) or ratchet upward (sometimes).
 - For assertions that track the **lowest** value (`maximize=false`): `assert_always_greater_than!`, `assert_always_greater_than_or_equal_to!`, `assert_sometimes_less_than!`, `assert_sometimes_less_than_or_equal_to!`. These seek the boundary from above (always) or ratchet downward (sometimes).
 
-The watermark persists across fork boundaries in multiverse mode. When a child timeline improves the watermark, the improvement is visible to subsequent timelines through shared memory. This means the explorer collectively pushes toward the boundary rather than each timeline searching independently.
+The watermark lives in the shared assertion region, so in multiverse mode every timeline sees the same current best. When one timeline improves it, the improvement is immediately visible to all subsequent timelines. This means the explorer collectively pushes toward the boundary rather than each timeline searching independently.
 
-For sometimes-numeric assertions, a second watermark tracks the value at the last fork point. A new fork only triggers when the value improves **past** the last fork watermark. This prevents the same assertion from triggering unlimited forks for tiny incremental improvements.
+For sometimes-numeric assertions, a second watermark tracks the value at the last signalled discovery. A new discovery only fires when the value improves **past** that mark (guarded by an atomic compare-and-swap, so it fires exactly once globally). This prevents the same assertion from flooding the journal with tiny incremental improvements.
 
 ## Use Cases
 

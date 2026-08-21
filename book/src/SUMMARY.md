@@ -98,9 +98,9 @@
 
 - [Multiverse Exploration](./part5-building-on-top/01-exploration.md)
   - [The Exploration Problem](./part5-building-on-top/02-exploration-problem.md)
-  - [Fork at Discovery](./part5-building-on-top/03-fork-at-discovery.md)
-  - [Coverage and Energy Budgets](./part5-building-on-top/04-coverage-energy.md)
-  - [Adaptive Forking](./part5-building-on-top/05-adaptive-forking.md)
+  - [The Frontier Controller](./part5-building-on-top/03-frontier-controller.md)
+  - [Bounded Workers](./part5-building-on-top/04-bounded-workers.md)
+  - [Exemplars and Continuations](./part5-building-on-top/05-exemplars-continuations.md)
   - [Multi-Seed Exploration](./part5-building-on-top/06-multi-seed.md)
 
 ---

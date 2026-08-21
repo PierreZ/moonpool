@@ -152,31 +152,24 @@ This is a proc-macro crate and cannot export regular types or functions.
 
 ### moonpool-explorer
 
-**Role**: Fork-based multiverse exploration, coverage tracking, and energy budgets. A **leaf crate** with zero moonpool knowledge -- communicates with the simulation only through RNG function pointers.
+**Role**: Frontier-based exploration controller: recipes, discovery journals, bounded worker pool, exemplar store. A **leaf crate** with zero moonpool knowledge -- communicates with the simulation through the assertion accounting hooks and an RNG call-count function pointer.
 
 **Dependencies**: libc (only dependency)
 
 **Key types**:
-- `ExplorationConfig` -- max depth, energy, timelines per split, adaptive config
-- `AdaptiveConfig` -- batch size, min/max timelines, per-mark energy
-- `Parallelism` -- multi-core exploration variants (MaxCores, HalfCores, Cores, MaxCoresMinus)
-- `AssertionSlot` / `AssertionSlotSnapshot` -- shared-memory assertion tracking (128 slots)
-- `AssertKind` -- Always, AlwaysOrUnreachable, Sometimes, Reachable, Unreachable, NumericAlways, NumericSometimes, BooleanSometimesAll
-- `AssertCmp` -- Gt, Ge, Lt, Le
-- `EachBucket` -- per-value bucketed assertion tracking (256 buckets)
-- `CoverageBitmap` / `ExploredMap` -- 8192-bit coverage bitmaps
-- `EnergyBudget` -- 3-level energy system (global + per-mark + reallocation pool)
-- `SharedStats` / `SharedRecipe` -- cross-process counters and bug replay data
-- `ExplorationStats` -- snapshot of exploration progress
+- `Explorer` -- the controller: frontier, exemplars, novelty, worker pool
+- `ExplorationConfig` -- workers, run budget, branching factor, frontier/depth caps
+- `ExploreJob` / `Recipe` -- a replayable timeline (RNG breakpoint list)
+- `DiscoveryEvent` -- one journaled discovery (kind, semantic state id, RNG call count)
+- `ExplorationStats` -- per-seed exploration statistics
+- Re-exports from `moonpool-assertions`: `AssertionSlot`, `AssertKind`, `AssertCmp`, `EachBucket`, `DiscoveryKind`, the `assertion_*` accounting functions
 
 **Key functions**:
-- `init()` / `cleanup()` -- lifecycle management
-- `init_assertions()` / `cleanup_assertions()` -- assertion-only lifecycle
-- `set_rng_hooks()` -- connect to simulation's RNG
-- `assertion_bool()`, `assertion_numeric()`, `assertion_sometimes_all()`, `assertion_sometimes_each()` -- assertion recording
-- `split_on_discovery()` -- fork the process at a splitpoint
-- `exit_child()` -- terminate a forked child process
-- `prepare_next_seed()` -- selective reset for multi-seed exploration
+- `Explorer::new()` / `begin_seed()` / `observe_root_run()` / `explore()` -- the controller lifecycle
+- `init_assertions()` / `cleanup_assertions()` -- shared assertion-region lifecycle
+- `set_rng_count_hook()` -- connect to the simulation's RNG call counter
+- `explorer_is_child()` -- whether the current process is a forked worker
+- `format_timeline()` / `parse_timeline()` -- recipe serialization
 - `sancov_edges_covered()`, `sancov_edge_count()`, `sancov_is_available()` -- sanitizer coverage integration
 
 ---
@@ -188,8 +181,8 @@ This is a proc-macro crate and cannot export regular types or functions.
 **Dependencies**: moonpool-sim
 
 **Binaries**:
-- `sim-maze-explore` -- adaptive exploration on maze workload
-- `sim-dungeon-explore` -- adaptive exploration on dungeon workload
+- `sim-maze-explore` -- frontier exploration on maze workload
+- `sim-dungeon-explore` -- frontier exploration on dungeon workload
 
 **Not a library dependency** -- contains only binary targets for demonstration and testing of the exploration subsystem.
 

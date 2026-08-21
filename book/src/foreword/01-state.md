@@ -14,7 +14,7 @@ The **assertion suite** implements the full Antithesis-inspired taxonomy: always
 
 **Transport and RPC** provide a trait-based networking layer with peer connections, wire format, and service definitions via proc-macro. The same code runs against real TCP or the simulated network.
 
-**Fork-based multiverse exploration** is operational: coverage-guided forking, adaptive energy budgets, and multi-seed exploration with coverage preservation across seeds.
+**Frontier-based multiverse exploration** is operational: deterministic recipe replay, a bounded worker pool, exemplar-guided continuations, and multi-seed exploration with cumulative novelty across seeds.
 
 ## What is experimental
 

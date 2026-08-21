@@ -30,7 +30,7 @@ The builder pattern for configuring and running simulation experiments. Created 
 | `enable_chaos(surfaces)` | `impl IntoIterator<Item = Chaos>` | Enable network/storage/attrition chaos per seed, each in a `ChaosMode` (`Random` or `Swarm`) |
 | `swarm_operations()` | -- | Enable per-seed swarm of each workload's operation alphabet |
 | `enable_exploration(config)` | `ExplorationConfig` | Enable fork-based multiverse exploration |
-| `replay_recipe(recipe)` | `BugRecipe` | Replay a specific bug recipe |
+| `replay_timeline(seed, recipe)` | `u64`, `Vec<(u64, u64)>` | Replay one explored timeline (a bug recipe) exactly |
 | `run()` | -- | Execute the simulation, returns `SimulationReport` |
 
 ### Default state
@@ -299,43 +299,15 @@ Ping-based connection health monitoring for peers. Follows FoundationDB's `conne
 
 ## ExplorationConfig
 
-Configuration for fork-based multiverse exploration. Passed to `SimulationBuilder::enable_exploration()`.
+Configuration for frontier-based exploration. Passed to `SimulationBuilder::enable_exploration()`.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `max_depth` | `u32` | Maximum fork depth (0 = no forking) |
-| `timelines_per_split` | `u32` | Children per splitpoint in fixed-count mode |
-| `global_energy` | `i64` | Total number of fork operations allowed |
-| `adaptive` | `Option<AdaptiveConfig>` | Adaptive forking config; `None` = fixed-count mode |
-| `parallelism` | `Option<Parallelism>` | Multi-core exploration; `None` = sequential |
+| `workers` | `usize` | Max concurrent worker processes; `0` = in-process (sequential, deterministic, fork-free) |
+| `max_runs_per_seed` | `u64` | Total timelines (root + exploration runs) per root seed |
+| `branching_factor` | `u32` | Children enqueued when a run makes a new discovery (one expansion per run) |
+| `max_frontier` | `usize` | Cap on queued jobs |
+| `max_recipe_len` | `usize` | Depth cap in replay segments |
 
-### Parallelism
+Live processes are bounded by `1 + workers` regardless of exploration depth. `max_runs_per_seed` is a ceiling, not a quota: a seed whose root run discovers nothing globally new stops after a single timeline.
 
-Controls how many forked children run concurrently.
-
-| Variant | Slot count |
-|---------|-----------|
-| `MaxCores` | All available CPU cores |
-| `HalfCores` | Half of available cores (integer division, min 1) |
-| `Cores(n)` | Exactly `n` concurrent children |
-| `MaxCoresMinus(n)` | All cores minus `n` (min 1) |
-
-## AdaptiveConfig
-
-Configuration for coverage-yield-driven batch forking. Used when `ExplorationConfig::adaptive` is `Some`.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `batch_size` | `u32` | Children to fork per batch before checking coverage yield |
-| `min_timelines` | `u32` | Minimum total forks per mark (even if barren after first batch) |
-| `max_timelines` | `u32` | Hard cap on total forks per mark |
-| `per_mark_energy` | `i64` | Initial energy budget per assertion mark |
-| `warm_min_timelines` | `Option<u32>` | Minimum timelines for warm starts (multi-seed); defaults to `batch_size` if `None` |
-
-### How the 3-level energy system works
-
-1. **Global energy** (`global_energy`): hard cap on total timelines across all marks. When this hits 0, all exploration stops.
-2. **Per-mark energy** (`per_mark_energy`): initial budget for each assertion mark. When exhausted, the mark draws from the reallocation pool.
-3. **Reallocation pool**: energy returned by barren marks (marks that stopped producing new coverage). Productive marks can draw from this pool to continue exploring.
-
-A mark is considered **barren** when a batch of children produces no new coverage bits and the mark has already spawned at least `min_timelines` (or `warm_min_timelines` during a warm start). Barren marks return their remaining per-mark energy to the reallocation pool.

@@ -42,7 +42,7 @@ assert_always_or_unreachable!(
 
 ### `assert_sometimes!(condition, message)`
 
-Records pass/fail statistics. On the **first** time the condition is `true`, triggers a fork in exploration mode to explore alternate timelines from that point. Validated by checking that `pass_count > 0` after enough iterations.
+Records pass/fail statistics. The **first** time the condition is `true` is a discovery: in exploration mode the explorer anchors alternate timelines at that point. Validated by checking that `pass_count > 0` after enough iterations.
 
 ```rust
 assert_sometimes!(
@@ -53,7 +53,7 @@ assert_sometimes!(
 
 ### `assert_reachable!(message)`
 
-Marks a code path as "should be reached." Always passes `true` as the condition. On first reach, triggers a fork. Validated by checking that `pass_count > 0`.
+Marks a code path as "should be reached." Always passes `true` as the condition. First reach is a discovery. Validated by checking that `pass_count > 0`.
 
 ```rust
 if connection_failed {
@@ -77,7 +77,7 @@ match state {
 
 ## Numeric Assertions
 
-These macros compare a value against a threshold. Always-type numeric assertions record violations on failure. Sometimes-type numeric assertions track **watermarks** (best observed value) and trigger forks when the watermark improves.
+These macros compare a value against a threshold. Always-type numeric assertions record violations on failure. Sometimes-type numeric assertions track **watermarks** (best observed value); a watermark improvement is a discovery.
 
 All values are cast to `i64` internally.
 
@@ -151,7 +151,7 @@ If previously at most 2 of the 3 conditions were true at once, and now all 3 are
 
 ### `assert_sometimes_each!(message, [(key, value), ...])` / `assert_sometimes_each!(message, [(key, value), ...], [(quality_key, quality_value), ...])`
 
-Each unique combination of identity keys gets its own **bucket**. On first discovery of a new bucket, a fork is triggered. If quality keys are provided, the explorer also tracks quality watermarks per bucket and re-forks when quality improves.
+Each unique combination of identity keys gets its own **bucket**. A new bucket is a discovery. If quality keys are provided, the explorer also tracks quality watermarks per bucket, and a quality improvement is a fresh discovery (registering a healthier exemplar for the same state).
 
 ```rust
 // Identity keys only -- fork on first discovery of each (lock, depth) combo

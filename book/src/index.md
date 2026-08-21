@@ -97,12 +97,12 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 
 ## Part VI: Building on Top
 
-- [Multiverse Exploration](./part5-building-on-top/01-exploration.md) — Checkpoint-and-branch with fork(); timeline tree; exponential trial reduction
+- [Multiverse Exploration](./part5-building-on-top/01-exploration.md) — Deterministic replay turns executions into accumulated exploration knowledge
 - [The Exploration Problem](./part5-building-on-top/02-exploration-problem.md) — Sequential Luck Problem: N unlikely events need exponential trials without branching
-- [Fork at Discovery](./part5-building-on-top/03-fork-at-discovery.md) — Unix fork() copies process; reseed with FNV-1a; tree of timelines
-- [Coverage and Energy Budgets](./part5-building-on-top/04-coverage-energy.md) — Fixed-count splitting; global energy cap; prevents exponential blowup
-- [Adaptive Forking](./part5-building-on-top/05-adaptive-forking.md) — Batch-based exploration; productive marks earn more; barren marks cut early
-- [Multi-Seed Exploration](./part5-building-on-top/06-multi-seed.md) — Coverage-preserving seed transitions; selective reset; explored map carries forward
+- [The Frontier Controller](./part5-building-on-top/03-frontier-controller.md) — Recipes, discovery journals, one expansion per productive run
+- [Bounded Workers](./part5-building-on-top/04-bounded-workers.md) — fork() as snapshot optimization; 1 + workers live processes, any depth
+- [Exemplars and Continuations](./part5-building-on-top/05-exemplars-continuations.md) — Bounded exemplars per semantic state; depth-weighted continuation scheduling
+- [Multi-Seed Exploration](./part5-building-on-top/06-multi-seed.md) — Cumulative novelty across seeds; barren seeds stop after one run
 
 ## Appendix
 

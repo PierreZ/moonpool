@@ -74,7 +74,7 @@ fn handle_timeout(&mut self) {
 }
 ```
 
-This is equivalent to `assert_sometimes!(true, "...")` but reads more clearly when you just want to confirm a path is exercised. Like `assert_sometimes!`, it triggers a fork on first reach in multiverse mode.
+This is equivalent to `assert_sometimes!(true, "...")` but reads more clearly when you just want to confirm a path is exercised. Like `assert_sometimes!`, its first reach is a discovery in multiverse mode.
 
 ## assert_unreachable!
 
