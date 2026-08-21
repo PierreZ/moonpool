@@ -8,24 +8,28 @@
 //! to the tokio runtime (`tokio::spawn` per connection, hard-coded
 //! `TokioExecutor`/`TokioTimer`) and therefore cannot run inside a
 //! simulation. Instead it uses tonic's runtime-free core plus generated
-//! stubs, and drives hyper's HTTP/2 connection API directly:
+//! stubs, and lets `moonpool-hyper` drive hyper over the provider traits:
 //!
-//! - **IO**: `SimTcpStream` (futures-io) → `Compat` (tokio-io) → `TokioIo`
-//!   (hyper-io), the same bridge as the axum example.
-//! - **Spawning**: `moonpool_hyper::HyperExecutor` routes hyper's internal h2
-//!   spawns onto the deterministic sim executor.
-//! - **Timers**: `moonpool_hyper::HyperTimer` answers hyper's clock reads and
-//!   sleeps from the sim time provider, so h2 keepalive ping/pong (enabled
-//!   on both sides below) runs on deterministic sim time.
+//! - **Client**: one [`ReconnectingChannel`] for the whole workload, the role
+//!   `tonic::transport::Channel` plays in production. It connects lazily,
+//!   reconnects after the server is killed and restarted, and multiplexes
+//!   every round's RPCs over one h2 connection.
+//! - **Server**: [`H2Server::serve_connection_with_shutdown`] per accepted
+//!   connection, wired to the process shutdown token so a graceful Attrition
+//!   reboot drains in-flight RPCs instead of resetting them.
+//! - **IO, spawning, timers**: all inside moonpool-hyper. The stream goes
+//!   straight into hyper's IO traits (no `Compat` plus `TokioIo` bridge),
+//!   hyper's internal h2 tasks land on the deterministic sim executor, and h2
+//!   keepalive ping/pong runs on sim time.
 //! - **gRPC**: the generated `EchoServer`/`EchoClient` from
 //!   `proto/echo.proto` — the exact same codegen output production uses.
 //!
 //! Unlike hyper's HTTP/1 connection state machine (which is `!Send` and must
-//! be driven inline — see `axum_web.rs`), h2 connections are `Send`, so both
-//! server and client connection futures are spawned as ordinary sim tasks.
+//! be driven inline — see `axum_web.rs`), h2 connections are `Send`, so the
+//! server connection futures are spawned as ordinary sim tasks, and the
+//! channel spawns its own connection task.
 //!
-//! What the workload exercises per round, all over one multiplexed h2
-//! connection:
+//! What the workload exercises per round, all over the shared channel:
 //!
 //! - **Concurrent unary RPCs** (cloned clients, joined futures) with
 //!   metadata round-tripping and per-call deadlines via the time provider
@@ -33,6 +37,10 @@
 //!   mid-stream aborts
 //! - **Unknown-service probe** against the unmounted `Shout` service
 //!   (expects `UNIMPLEMENTED`)
+//! - **Transport failures** from the chaos underneath: a dead server or a
+//!   connection killed mid-RPC arrives as `Code::Unknown`, since tonic's
+//!   h2-aware `Status` mapping lives behind features this example does not
+//!   enable. Rounds fail, the channel reconnects, later rounds succeed.
 //!
 //! The sim binary adds Attrition chaos (server crash/reboot) on top of the
 //! default network chaos, so rounds also see dead servers and reconnects.
@@ -45,24 +53,19 @@
 //! - **[`EchoWorkload`]**: drives the RPC mix, validates responses under
 //!   chaos
 
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::task::{Context, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::Stream;
-use hyper_util::rt::TokioIo;
-use hyper_util::service::TowerToHyperService;
-use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tonic::metadata::MetadataValue;
 use tonic::{Code, Request, Response, Status};
 
-use moonpool_hyper::{HyperExecutor, HyperTimer};
+use moonpool_hyper::{ChannelConfig, H2Server, H2ServerConfig, KeepAlive, ReconnectingChannel};
 use moonpool_sim::{
-    NetworkProvider, Process, SimContext, SimTimeProvider, SimulationError, SimulationResult,
-    TaskProvider, TcpListenerTrait, TimeError, TimeProvider, Workload,
+    NetworkProvider, Process, SimContext, SimProviders, SimTimeProvider, SimulationError,
+    SimulationResult, TaskProvider, TcpListenerTrait, TimeError, TimeProvider, Workload,
 };
 
 /// Protobuf messages and gRPC stubs generated from `proto/echo.proto` by
@@ -80,8 +83,9 @@ use proto::echo_server::{Echo, EchoServer};
 use proto::shout_client::ShoutClient;
 use proto::{EchoRequest, EchoResponse, EchoStreamRequest};
 
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
-type BoxFut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+/// The channel every round shares: one h2 connection to the gRPC server,
+/// rebuilt by moonpool-hyper whenever chaos takes it down.
+type GrpcChannel = ReconnectingChannel<SimProviders, tonic::body::Body>;
 
 /// Metadata key the client stamps on each request; the server must echo it
 /// back on the response.
@@ -96,14 +100,36 @@ const RPC_DEADLINE: Duration = Duration::from_secs(4);
 /// Items requested per streaming call.
 const STREAM_COUNT: u64 = 4;
 
-/// h2 keepalive ping interval. With `HyperTimer` on the sim clock, pings
-/// fire on deterministic sim time; a clogged connection that swallows the
-/// ping ACK longer than [`KEEP_ALIVE_TIMEOUT`] is torn down by hyper.
+/// h2 keepalive ping interval. Hyper reads the clock through moonpool-hyper's
+/// timer, so pings fire on deterministic sim time; a clogged connection that
+/// swallows the ping ACK longer than [`KEEP_ALIVE_TIMEOUT`] is torn down.
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(3);
 
 /// How long hyper waits for a keepalive ACK before declaring the
 /// connection dead.
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Budget for one of the channel's connect attempts.
+///
+/// Deliberately shorter than [`RPC_DEADLINE`] so that a dead server surfaces
+/// as the channel's own connect timeout, which the caller sees as a
+/// `Code::Unknown` status, rather than as the caller's deadline every time.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The keepalive both sides run, on sim time.
+///
+/// A clogged connection that swallows the ping ACK longer than the timeout is
+/// torn down by hyper, which is what gives the channel something to reconnect
+/// from when the network misbehaves without closing the socket.
+fn keep_alive() -> KeepAlive {
+    KeepAlive {
+        interval: KEEP_ALIVE_INTERVAL,
+        timeout: KEEP_ALIVE_TIMEOUT,
+        // Client-side only, and off: an idle connection between rounds should
+        // not be torn down for being idle. Ignored by the server side.
+        while_idle: false,
+    }
+}
 
 // ============================================================================
 // Server side — the generated Echo trait, implemented + served
@@ -187,8 +213,12 @@ impl Process for EchoProcess {
             served: AtomicU64::new(0),
         });
         let listener = ctx.network().bind(ctx.my_ip()).await?;
-        let executor = HyperExecutor::new(ctx.task().clone());
-        let timer = HyperTimer::new(ctx.time().clone());
+        let server = H2Server::new(ctx.providers()).with_config(H2ServerConfig {
+            keep_alive: Some(keep_alive()),
+            // Left off here so this example's seeds stay comparable; the
+            // vectored-write opt-in is exercised by the axum example.
+            vectored_writes: false,
+        });
         tracing::info!("grpc server listening");
 
         loop {
@@ -197,20 +227,32 @@ impl Process for EchoProcess {
                     let (stream, addr) = accept?;
                     tracing::info!(%addr, "accepted connection");
 
-                    let io = TokioIo::new(stream.compat());
-                    let service = TowerToHyperService::new(echo.clone());
-                    let conn = hyper::server::conn::http2::Builder::new(executor.clone())
-                        .timer(timer.clone())
-                        .keep_alive_interval(Some(KEEP_ALIVE_INTERVAL))
-                        .keep_alive_timeout(KEEP_ALIVE_TIMEOUT)
-                        .serve_connection(io, service);
+                    // Wired to the shutdown token: a graceful Attrition reboot
+                    // signals it, and hyper then finishes the RPCs already in
+                    // flight before the connection ends.
+                    let shutdown = ctx.shutdown().clone();
+                    let connection = server.serve_connection_with_shutdown(
+                        stream,
+                        echo.clone(),
+                        shutdown.clone().cancelled_owned(),
+                    );
 
                     // Unlike hyper's HTTP/1 connection (which is !Send and must
                     // be driven inline), the h2 connection future is Send, so it
                     // runs as an ordinary spawned sim task.
                     ctx.task()
                         .spawn_task("grpc-server-conn", async move {
-                            if let Err(e) = conn.await {
+                            let outcome = connection.await;
+                            if shutdown.is_cancelled() {
+                                // The connection outlived a shutdown signal, so
+                                // the graceful drain ran rather than the socket
+                                // being dropped from under the client.
+                                moonpool_sim::assert_sometimes!(
+                                    true,
+                                    "grpc_server_drained_on_shutdown"
+                                );
+                            }
+                            if let Err(e) = outcome {
                                 tracing::warn!("h2 connection error (expected under chaos): {e}");
                             }
                         })
@@ -229,30 +271,6 @@ impl Process for EchoProcess {
 // Client side — channel service + Workload
 // ============================================================================
 
-/// Adapts hyper's h2 `SendRequest` into the tower `Service` shape that the
-/// generated clients consume — the role `tonic::transport::Channel` plays in
-/// production. `Clone` shares the underlying h2 connection, so multiple
-/// clients multiplex over one simulated TCP stream.
-#[derive(Clone)]
-struct H2Channel {
-    inner: hyper::client::conn::http2::SendRequest<tonic::body::Body>,
-}
-
-impl tower_service::Service<http::Request<tonic::body::Body>> for H2Channel {
-    type Response = http::Response<hyper::body::Incoming>;
-    type Error = BoxError;
-    type Future = BoxFut<Result<Self::Response, Self::Error>>;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx).map_err(Into::into)
-    }
-
-    fn call(&mut self, req: http::Request<tonic::body::Body>) -> Self::Future {
-        let fut = self.inner.send_request(req);
-        Box::pin(async move { fut.await.map_err(Into::into) })
-    }
-}
-
 /// Test driver that sends concurrent unary, streaming, and unknown-service
 /// RPCs and validates responses.
 pub struct EchoWorkload;
@@ -269,11 +287,28 @@ impl Workload for EchoWorkload {
             .ok_or_else(|| SimulationError::InvalidState("grpc process not found".into()))?;
         tracing::info!(%server_ip, "workload starting");
 
+        // One channel for the whole workload, exactly as a production tonic
+        // client would hold one `Channel`. It connects on the first RPC and
+        // rebuilds itself after every server death, so the rounds below
+        // exercise reconnection rather than reconnecting by hand.
+        let channel: GrpcChannel = ReconnectingChannel::new(
+            ctx.providers(),
+            server_ip.clone(),
+            ChannelConfig {
+                connection_timeout: CONNECT_TIMEOUT,
+                keep_alive: Some(keep_alive()),
+                ..ChannelConfig::default()
+            },
+        );
+        let origin = http::Uri::try_from(format!("http://{server_ip}"))
+            .map_err(|e| SimulationError::InvalidState(format!("bad origin: {e}")))?;
+
+        let mut failed_before = false;
         for round in 0..5u32 {
             tracing::info!(round, "starting round");
             let result = moonpool_sim::select! {
                 biased;
-                result = Self::run_round(ctx, &server_ip, round) => result,
+                result = Self::run_round(ctx, &channel, &origin, round) => result,
                 () = ctx.shutdown().cancelled() => {
                     tracing::info!(round, "shutdown during round, exiting");
                     break;
@@ -281,12 +316,19 @@ impl Workload for EchoWorkload {
             };
             match result {
                 Ok(()) => {
+                    if failed_before {
+                        // The channel produced a working connection after an
+                        // earlier round had lost one (or failed to get one):
+                        // reconnection, observed end to end through gRPC.
+                        moonpool_sim::assert_sometimes!(true, "grpc_channel_recovered");
+                    }
                     tracing::info!(round, "round completed successfully");
                 }
                 Err(e) => {
                     // Under chaos (connection resets, clogs, bit flips, server
                     // reboots), RPCs fail. That's expected — we're testing
                     // resilience.
+                    failed_before = true;
                     moonpool_sim::assert_sometimes!(true, "grpc_round_failed");
                     tracing::warn!(round, "round failed (expected under chaos): {e}");
                 }
@@ -311,52 +353,20 @@ impl Workload for EchoWorkload {
 }
 
 impl EchoWorkload {
-    async fn run_round(ctx: &SimContext, server_ip: &str, round: u32) -> SimulationResult<()> {
+    async fn run_round(
+        ctx: &SimContext,
+        channel: &GrpcChannel,
+        origin: &http::Uri,
+        round: u32,
+    ) -> SimulationResult<()> {
         let time = ctx.time().clone();
 
-        tracing::info!(round, "connecting to server");
-        // Deadline on connect: with Attrition chaos the server may simply be
-        // dead, and a connect to a dead process hangs rather than erroring.
-        let Ok(connected) = time
-            .timeout(RPC_DEADLINE, ctx.network().connect(server_ip))
-            .await
-        else {
-            moonpool_sim::assert_sometimes!(true, "grpc_connect_timed_out");
-            return Err(SimulationError::InvalidState("connect timed out".into()));
-        };
-        let stream = connected?;
-
-        let io = TokioIo::new(stream.compat());
-        let executor = HyperExecutor::new(ctx.task().clone());
-        let (send_request, conn) = hyper::client::conn::http2::Builder::new(executor)
-            .timer(HyperTimer::new(time.clone()))
-            .keep_alive_interval(KEEP_ALIVE_INTERVAL)
-            .keep_alive_timeout(KEEP_ALIVE_TIMEOUT)
-            .handshake(io)
-            .await
-            .map_err(|e| SimulationError::InvalidState(format!("h2 handshake: {e}")))?;
-        tracing::info!(round, "h2 handshake complete");
-
-        // SendRequest only makes progress while the connection future is
-        // polled. The h2 client connection is Send, so spawn it as the
-        // connection driver (no inline select! dance needed as with HTTP/1).
-        ctx.task()
-            .spawn_task("grpc-client-conn", async move {
-                if let Err(e) = conn.await {
-                    tracing::warn!("client conn error (expected under chaos): {e}");
-                }
-            })
-            .detach();
-
-        let channel = H2Channel {
-            inner: send_request,
-        };
-        let origin = http::Uri::try_from(format!("http://{server_ip}"))
-            .map_err(|e| SimulationError::InvalidState(format!("bad origin: {e}")))?;
+        // No connect, no handshake, no connection task here: the channel owns
+        // all of that and establishes a connection on the first RPC below.
         let echo_client = EchoClient::with_origin(channel.clone(), origin.clone());
         // The generated clients are Clone over a Clone channel: everything
-        // below multiplexes over the single h2 connection made above.
-        let mut shout_client = ShoutClient::with_origin(channel, origin);
+        // below multiplexes over the channel's single h2 connection.
+        let mut shout_client = ShoutClient::with_origin(channel.clone(), origin.clone());
 
         // Concurrent unary RPCs: h2 stream multiplexing under chaos. Each
         // seed interleaves the frames differently.
@@ -372,7 +382,7 @@ impl EchoWorkload {
     }
 
     async fn echo_once(
-        mut client: EchoClient<H2Channel>,
+        mut client: EchoClient<GrpcChannel>,
         time: SimTimeProvider,
         round: u32,
         seq: u64,
@@ -418,6 +428,18 @@ impl EchoWorkload {
                 tracing::info!(round, seq, "echo unavailable (buggified server)");
                 Ok(())
             }
+            Ok(Err(status)) if status.code() == Code::Unknown => {
+                // The transport failed under us: no connection to be had, or
+                // one that died mid-RPC. tonic reports it as Unknown because
+                // its h2-aware Status mapping is behind features this example
+                // does not enable. The round fails; the channel reconnects on
+                // its own and a later round proves it.
+                moonpool_sim::assert_sometimes!(true, "grpc_transport_failed");
+                tracing::warn!(round, seq, "echo transport failure: {status}");
+                Err(SimulationError::InvalidState(format!(
+                    "echo rpc transport failure: {status}"
+                )))
+            }
             Ok(Err(status)) => Err(SimulationError::InvalidState(format!(
                 "echo rpc failed: {status}"
             ))),
@@ -425,7 +447,7 @@ impl EchoWorkload {
     }
 
     async fn stream_once(
-        mut client: EchoClient<H2Channel>,
+        mut client: EchoClient<GrpcChannel>,
         time: SimTimeProvider,
         round: u32,
     ) -> SimulationResult<()> {
@@ -449,6 +471,12 @@ impl EchoWorkload {
                 moonpool_sim::assert_sometimes!(true, "grpc_echo_unavailable");
                 tracing::info!(round, "stream refused (buggified server)");
                 return Ok(());
+            }
+            Ok(Err(status)) if status.code() == Code::Unknown => {
+                moonpool_sim::assert_sometimes!(true, "grpc_transport_failed");
+                return Err(SimulationError::InvalidState(format!(
+                    "stream rpc transport failure: {status}"
+                )));
             }
             Ok(Err(status)) => {
                 return Err(SimulationError::InvalidState(format!(
@@ -494,6 +522,14 @@ impl EchoWorkload {
                     tracing::info!(round, delivered = next_seq, "stream aborted (buggified)");
                     return Ok(());
                 }
+                Ok(Err(status)) if status.code() == Code::Unknown => {
+                    // The connection died with items still to come. Whatever
+                    // arrived was validated above, so this is a clean loss.
+                    moonpool_sim::assert_sometimes!(true, "grpc_transport_failed");
+                    return Err(SimulationError::InvalidState(format!(
+                        "stream transport failure after {next_seq} items: {status}"
+                    )));
+                }
                 Ok(Err(status)) => {
                     return Err(SimulationError::InvalidState(format!(
                         "stream failed: {status}"
@@ -504,7 +540,7 @@ impl EchoWorkload {
     }
 
     async fn probe_unimplemented(
-        client: &mut ShoutClient<H2Channel>,
+        client: &mut ShoutClient<GrpcChannel>,
         time: &SimTimeProvider,
     ) -> SimulationResult<()> {
         tracing::info!("calling unmounted Shout service");
@@ -526,6 +562,12 @@ impl EchoWorkload {
                 moonpool_sim::assert_sometimes!(true, "grpc_unimplemented_detected");
                 tracing::info!("unmounted service correctly rejected");
                 Ok(())
+            }
+            Ok(Err(status)) if status.code() == Code::Unknown => {
+                moonpool_sim::assert_sometimes!(true, "grpc_transport_failed");
+                Err(SimulationError::InvalidState(format!(
+                    "probe rpc transport failure: {status}"
+                )))
             }
             Ok(Err(status)) => Err(SimulationError::InvalidState(format!(
                 "probe rpc failed: {status}"

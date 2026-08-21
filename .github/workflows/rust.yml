@@ -86,6 +86,7 @@ jobs:
           - adaptive-explore
           - transport
           - axum-web
+          - tonic-grpc
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
