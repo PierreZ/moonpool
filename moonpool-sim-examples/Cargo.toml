@@ -23,13 +23,14 @@ axum = "0.8"
 bytes = "1"
 http = "1"
 http-body-util = "0.1"
-hyper = { version = "1", features = ["http1", "http2", "server", "client"] }
-hyper-util = { version = "0.1", features = ["tokio", "service"] }
+# Only what the axum example drives by hand: hyper's HTTP/1 connection API on
+# both sides. The h2 features come through moonpool-hyper, and the IO bridge
+# (formerly tokio-util's Compat plus hyper-util's TokioIo) is HyperIo now.
+hyper = { version = "1", features = ["http1", "server", "client"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["compat"] }
 # Runtime-free tonic core: gRPC framing + codegen support without
 # tonic::transport (which hard-codes tokio::spawn / TokioExecutor / TokioTimer).
 prost = "0.14"

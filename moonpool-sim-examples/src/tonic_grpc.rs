@@ -215,9 +215,10 @@ impl Process for EchoProcess {
         let listener = ctx.network().bind(ctx.my_ip()).await?;
         let server = H2Server::new(ctx.providers()).with_config(H2ServerConfig {
             keep_alive: Some(keep_alive()),
-            // Left off here so this example's seeds stay comparable; the
-            // vectored-write opt-in is exercised by the axum example.
-            vectored_writes: false,
+            // The sim delivers each IoSlice separately, with its own chance of
+            // chaos; that path is unreachable while the IO layer reports no
+            // vectored support.
+            vectored_writes: true,
         });
         tracing::info!("grpc server listening");
 
@@ -297,6 +298,7 @@ impl Workload for EchoWorkload {
             ChannelConfig {
                 connection_timeout: CONNECT_TIMEOUT,
                 keep_alive: Some(keep_alive()),
+                vectored_writes: true,
                 ..ChannelConfig::default()
             },
         );
