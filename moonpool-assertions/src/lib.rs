@@ -9,7 +9,7 @@
 //! # How it relates to exploration
 //!
 //! The counts live in a region of memory. By default [`init`] allocates that
-//! region on the heap (single process — wasm, macOS, plain native test runs).
+//! region on the heap (single process — wasm, plain native test runs).
 //! `moonpool-explorer` instead allocates a `MAP_SHARED` region and hands it to
 //! [`install_region`], so the same accounting is visible across `fork`ed
 //! children, and installs a [`DiscoveryHooks`] that turns "a new assertion state

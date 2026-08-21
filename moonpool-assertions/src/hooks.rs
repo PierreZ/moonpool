@@ -3,7 +3,7 @@
 //! The accounting layer ([`crate::slots`], [`crate::buckets`]) calls these hooks
 //! at the exact points where something "new" happens — a first Sometimes/Reachable
 //! pass, a numeric watermark improvement, a frontier advance, or an each-bucket
-//! hit. With no hook installed (the default — wasm, macOS, plain native runs) the
+//! hit. With no hook installed (the default — wasm, plain native runs) the
 //! calls are no-ops and accounting is pure. An exploration backend
 //! (`moonpool-explorer`) installs hooks that mark coverage and dispatch forks.
 //!
