@@ -12,9 +12,9 @@
 //!
 //! - **IO**: `SimTcpStream` (futures-io) → `Compat` (tokio-io) → `TokioIo`
 //!   (hyper-io), the same bridge as the axum example.
-//! - **Spawning**: `moonpool_sim::HyperExecutor` (feature `hyper`) routes
-//!   hyper's internal h2 spawns onto the deterministic sim executor.
-//! - **Timers**: `moonpool_sim::HyperTimer` answers hyper's clock reads and
+//! - **Spawning**: `moonpool_hyper::HyperExecutor` routes hyper's internal h2
+//!   spawns onto the deterministic sim executor.
+//! - **Timers**: `moonpool_hyper::HyperTimer` answers hyper's clock reads and
 //!   sleeps from the sim time provider, so h2 keepalive ping/pong (enabled
 //!   on both sides below) runs on deterministic sim time.
 //! - **gRPC**: the generated `EchoServer`/`EchoClient` from
@@ -59,10 +59,10 @@ use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tonic::metadata::MetadataValue;
 use tonic::{Code, Request, Response, Status};
 
+use moonpool_hyper::{HyperExecutor, HyperTimer};
 use moonpool_sim::{
-    HyperExecutor, HyperTimer, NetworkProvider, Process, SimContext, SimTimeProvider,
-    SimulationError, SimulationResult, TaskProvider, TcpListenerTrait, TimeError, TimeProvider,
-    Workload,
+    NetworkProvider, Process, SimContext, SimTimeProvider, SimulationError, SimulationResult,
+    TaskProvider, TcpListenerTrait, TimeError, TimeProvider, Workload,
 };
 
 /// Protobuf messages and gRPC stubs generated from `proto/echo.proto` by

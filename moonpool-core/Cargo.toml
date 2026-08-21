@@ -29,14 +29,9 @@ select = ["dep:tokio", "tokio/macros"]
 # driven by a seeded start offset. Enabled by moonpool-sim; production graphs
 # without moonpool-sim keep tokio's macro verbatim via `select`.
 deterministic-select = ["select"]
-# hyper 1.x runtime adapters (HyperExecutor/HyperTimer) over the provider
-# traits, for hosting hyper/h2-based stacks (tonic gRPC, axum) on moonpool.
-# hyper's rt traits need no hyper cargo features and pull no runtime.
-hyper = ["dep:hyper"]
 
 [dependencies]
 futures = "0.3"
-hyper = { version = "1", default-features = false, optional = true }
 rand = { version = "0.10", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

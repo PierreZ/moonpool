@@ -14,7 +14,7 @@
 //! [`Timer::now`](hyper::rt::Timer::now) when a timer is configured, and
 //! [`HyperTimer`] answers those reads from the provider clock. The `Instant`
 //! values it returns are offsets from an arbitrary per-timer anchor, so only
-//! differences between them are meaningful — and those differences are pure
+//! differences between them are meaningful, and those differences are pure
 //! provider time, fully deterministic under a simulated clock.
 
 use std::future::Future;
@@ -22,7 +22,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use crate::{Detach, TaskProvider, TimeProvider};
+use moonpool_core::{Detach, TaskProvider, TimeProvider};
 
 /// A [`hyper::rt::Executor`] backed by a moonpool [`TaskProvider`].
 ///
@@ -33,6 +33,16 @@ use crate::{Detach, TaskProvider, TimeProvider};
 pub struct HyperExecutor<T> {
     tasks: T,
 }
+
+// hyper's h2 client connection is generic over its executor and requires
+// `E: Unpin` (the connection future holds the executor inline). Deriving that
+// from `T: Unpin` would force the bound onto every caller's provider generics,
+// so declare it once here.
+//
+// Sound because `HyperExecutor` has no pinned fields and exposes no pinning
+// API: `tasks` is only ever accessed through `&self`, never through a
+// `Pin` projection, so nothing can rely on the value staying put in memory.
+impl<T> Unpin for HyperExecutor<T> {}
 
 impl<T: TaskProvider> HyperExecutor<T> {
     /// Create an executor that spawns via the given task provider.
@@ -70,7 +80,7 @@ pub struct HyperTimer<T> {
     /// anchor cancels out of every deadline computation hyper performs
     /// (deadlines come from `Timer::now() + interval` and return through
     /// `sleep_until`), so despite being captured from the wall clock it
-    /// never influences behavior — provider time does.
+    /// never influences behavior: provider time does.
     anchor: Instant,
     /// Provider time at construction, subtracted so `now()` stays near the
     /// anchor instead of drifting `provider.now()` past it twice.
