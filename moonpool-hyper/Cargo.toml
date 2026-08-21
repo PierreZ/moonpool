@@ -39,6 +39,10 @@ tracing = "0.1"
 [dev-dependencies]
 bytes = "1"
 http-body-util = "0.1"
+# The production providers, so the tests can instantiate the channels with a
+# concrete Providers bundle: that is what proves hyper's sealed
+# Http2ClientConnExec bound is satisfiable through our generics.
+moonpool-core = { path = "../moonpool-core", version = "0.8.0", features = ["tokio-providers"] }
 
 [lints]
 workspace = true

@@ -30,12 +30,20 @@
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 
+#[cfg(feature = "client")]
+mod client;
 mod config;
+#[cfg(feature = "client")]
+mod error;
 mod io;
 mod rt;
 mod service;
 
+#[cfg(feature = "client")]
+pub use client::{ChannelConfig, H2Channel, ReconnectingChannel, ResponseFuture};
 pub use config::KeepAlive;
+#[cfg(feature = "client")]
+pub use error::ChannelError;
 pub use io::HyperIo;
 pub use rt::{HyperExecutor, HyperTimer};
 pub use service::{TowerToHyperService, TowerToHyperServiceFuture};
