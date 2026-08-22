@@ -11,19 +11,17 @@ Inspired by [FoundationDB's simulation testing](https://apple.github.io/foundati
 ```text
 ┌─────────────────────────────────────────────────────────────┐
 │              moonpool (this crate)                          │
-│   Re-exports moonpool-core, moonpool-sim, moonpool-transport │
+│        Facade over core, simulation, and hyper              │
 ├──────────────────────────┬──────────────────────────────────┤
-│  moonpool-transport      │       moonpool-sim               │
-│  • Peer connections      │       • SimWorld runtime         │
-│  • Wire format           │       • Chaos testing            │
-│  • NetTransport + RPC    │       • Buggify macros           │
-│  • #[service] macro      │       • 15 assertion macros      │
-│    (via transport-derive)│       • Multiverse exploration   │
-│                          │         (via moonpool-explorer)  │
+│      moonpool-sim        │         moonpool-hyper           │
+│  • SimWorld runtime      │  • HTTP/1 and HTTP/2 adapters    │
+│  • Chaos testing         │  • Reconnecting h2 channel       │
+│  • Assertion macros      │  • tonic and axum integration    │
+│  • Exploration           │                                  │
 ├──────────────────────────┴──────────────────────────────────┤
 │                     moonpool-core                           │
 │  Provider traits: Time, Task, Network, Random, Storage      │
-│  Core types: UID, Endpoint, NetworkAddress                  │
+│  Production implementations through TokioProviders         │
 └─────────────────────────────────────────────────────────────┘
 ```
 

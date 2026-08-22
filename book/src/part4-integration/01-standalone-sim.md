@@ -1,11 +1,15 @@
 # Using moonpool-sim Standalone
 <!-- toc -->
 
-moonpool, the crate, re-exports the full framework: transport, RPC, `#[service]` macros. Plenty of machinery for building distributed systems from scratch.
+**moonpool-sim is a standalone simulation engine.** Provider traits, chaos
+injection, assertions, and fork-based exploration work with your existing
+application protocol. That may be raw TCP, axum behind hyper, tonic gRPC, or a
+service whose database boundary is replaced with an in-memory fake.
 
-But **moonpool-sim is a standalone simulation engine**. Provider traits, chaos injection, assertions, fork-based exploration. All of it works without importing a single transport type. No `Peer`, no `NetTransport`, no `#[service]`. Just deterministic simulation of your existing code.
-
-Why does this matter? Because most teams aren't building distributed systems from scratch. They're running axum services behind a load balancer, talking to Postgres and Redis, shipping features. The transport layer is irrelevant to them. The simulation engine is not.
+Why does this matter? Most teams are not designing a new networking stack.
+They are running services behind a load balancer, talking to databases, and
+shipping features. Moonpool controls the runtime boundaries while their
+application code stays recognizable.
 
 ## The Technical Foundation
 

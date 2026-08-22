@@ -30,7 +30,6 @@ const SIM_BINARIES: &[SimBinary] = &[
     SimBinary::new("sim-axum-web", SIM_EXAMPLES_CRATE),
     SimBinary::new("sim-topology", SIM_EXAMPLES_CRATE),
     SimBinary::new("sim-tonic-grpc", SIM_EXAMPLES_CRATE),
-    SimBinary::new("sim-transport", "moonpool_transport"),
 ];
 
 fn main() {

@@ -56,7 +56,7 @@ Types: `fix` (bugfix), `feat` (new feature), `build`, `chore`, `ci`, `docs`, `st
 - Document all public items
 - Provider traits use native AFIT (`async fn` in trait) with `Send + Sync + 'static`
   supertraits; trait declarations use `-> impl Future<…> + Send` to propagate Send
-- Dyn-stored traits (`Process`, `Workload`, `FaultInjector`, `#[service]` handler)
+- Dyn-stored traits (`Process`, `Workload`, `FaultInjector`)
   use `#[async_trait]` (no `?Send`) with `Send + Sync + 'static` supertraits
 - Use traits, not concrete types
 - KISS principle
@@ -69,7 +69,7 @@ Types: `fix` (bugfix), `feat` (new feature), `build`, `chore`, `ci`, `docs`, `st
 
 ## Crate Architecture
 ```
-moonpool/                    - Facade crate; features: sim/tokio/transport (default = all)
+moonpool/                    - Facade crate; features: sim/tokio/hyper.
 moonpool-core/               - Provider traits (Time, Task, Network, Random, Storage) + core types.
                                Granular tokio features: tokio-task/-time/-net/-fs/-random
                                (umbrella `tokio-providers`). wasm-clean with all off.
@@ -78,13 +78,10 @@ moonpool-assertions/         - Antithesis-style assertion accounting (pure std, 
 moonpool-sim/                - Simulation runtime, chaos testing, buggify, assertions wiring.
                                feature `exploration` (default ON) gates moonpool-explorer; without it
                                the sim compiles to wasm32-unknown-unknown.
-moonpool-transport/          - Peer connections, wire format, FlowTransport, RPC. Generic over
-                               `P: Providers`; feature `tokio` adds TokioTransport + Builder::tokio().
 moonpool-hyper/              - hyper 1.x integration: runtime adapters (HyperExecutor/HyperTimer),
                                HyperIo, TowerToHyperService, ReconnectingChannel, H2Server. Generic
                                over `P: Providers`; features `client`/`server` (both default on).
                                Facade exposes it as `moonpool::hyper` behind feature `hyper`.
-moonpool-transport-derive/   - Proc-macro: #[service]
 moonpool-explorer/           - Frontier exploration controller (libc/fork/mmap; never wasm).
                                Recipes + bounded worker pool; depends on moonpool-assertions;
                                optional dep of moonpool-sim.
@@ -93,10 +90,10 @@ xtask/                       - Cargo xtask automation (simulation runner)
 
 **Dispatch**: providers stay **static-generic** (traits aren't object-safe: Clone supertrait,
 generic `random<T>`, RPIT futures, associated types; sim is test-only so no runtime selection).
-Where generics hurt, erase at a boundary (precedent: `Arc<dyn TransportHandle>`).
+Where generics hurt, erase at an application boundary with a narrowly scoped trait.
 
 **Production builds** keep sim/explorer out entirely:
-`moonpool = { default-features = false, features = ["tokio", "transport"] }`.
+`moonpool = { default-features = false, features = ["tokio"] }`.
 
 **Portability checks** (must also pass when touching crate structure / features):
 - `nix develop --command cargo clippy -p moonpool-sim --no-default-features --all-targets -- -D warnings`
@@ -169,22 +166,16 @@ Strategic placement: error handling, timeouts, retries, resource limits
 
 ## References
 **Read first**: `docs/analysis/foundationdb/layer-1-flow-runtime.md` (before any `actor.cpp` code)
-**Architecture**: `docs/analysis/foundationdb/layer-2-flow-transport.md`
-
 **Available files in docs/references**:
 - foundationdb/: Buggify.h, FlowTransport.actor.cpp, FlowTransport.h, Net2.actor.cpp, Net2Packet.cpp, Net2Packet.h, Ping.actor.cpp, sim2.actor.cpp
 - tigerbeetle/: packet_simulator.zig
 
-**IMPORTANT**: Always read FoundationDB's implementation first before making changes
-- When working in simulation: always check Net2
-- When working around network stuff like peer and Transport: always check FlowTransport
+**IMPORTANT**: Always read FoundationDB's implementation first before making simulation changes.
+- For simulated networking and connection behavior, check Net2 and `sim2.actor.cpp`.
 
 **Code mapping**:
-- Peer → FlowTransport.h:147-191, FlowTransport.actor.cpp:1016-1125
 - SimWorld → sim2.actor.cpp:1051+
 - Config → tigerbeetle/packet_simulator.zig:12-488
-- Connection → FlowTransport.actor.cpp:760-900
-- Backoff → FlowTransport.actor.cpp:892-897
 - Reliability → Net2Packet.h:30-111
 - Ping → Ping.actor.cpp:29-38,147-169
 - Queuing → Net2Packet.h:43-91
@@ -236,4 +227,4 @@ fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
 - **Sim time** is stamped by the layer from its internal clock (the orchestrator pushes `obs.set_sim_time_ms(...)` after each `sim.step()`). Do NOT include a `time_ms` field on the emit.
 - **Invariants** run from the runner loop (not tracing dispatch); use the assertion macros, not raw `panic!`, and treat `observe(...)` as read-only.
 - **Production**: any tracing subscriber (fmt, OpenTelemetry) sees the same emissions as structured events; cross-validation in sim uses the very same traces.
-- **Canonical example**: `moonpool-sim/tests/leader_election.rs` (split-brain detection). Deeper: `moonpool-transport-sim` (hash-chain replay from `append_block` events).
+- **Canonical example**: `moonpool-sim/tests/leader_election.rs` (split-brain detection).

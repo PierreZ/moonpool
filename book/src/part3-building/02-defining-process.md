@@ -73,7 +73,9 @@ Walk through this line by line.
 
 ## Handling Requests
 
-The connection handler parses a simple wire protocol. For a real system, you would use moonpool-transport's RPC layer, but a raw protocol shows the fundamentals:
+The connection handler parses a simple wire protocol. Production systems can
+keep their existing framing or hand the stream to hyper. A raw protocol shows
+the provider boundary directly:
 
 ```rust
 async fn handle_connection(

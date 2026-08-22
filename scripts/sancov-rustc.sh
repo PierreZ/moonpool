@@ -10,7 +10,7 @@
 #   SANCOV_CRATES=moonpool_explorer_examples cargo run --bin maze_explore
 #
 #   # Instrument app + framework libraries:
-#   SANCOV_CRATES=my_app,moonpool,moonpool_transport cargo run --bin my_app
+#   SANCOV_CRATES=my_app,moonpool cargo run --bin my_app
 #
 #   # No instrumentation (pass-through):
 #   cargo run --bin maze_explore

@@ -11,7 +11,7 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 - **"How do providers work?"** — [The Provider Pattern](./part2-foundations/04-provider-pattern.md)
 - **"How do I add chaos/faults?"** — [Chaos in Moonpool](./part3-building/07-chaos.md)
 - **"How do I use assertions?"** — [Assertions: Finding Bugs](./part3-building/12-assertions.md)
-- **"How does networking/RPC work?"** — [Simulating the Network](./part4-networking/01-simulating-network.md)
+- **"How do I simulate raw TCP?"** — [Simulating the Network](./part4-networking/01-simulating-network.md)
 - **"How do I test an existing app (e.g. axum)?"** — [Using moonpool-sim Standalone](./part4-integration/01-standalone-sim.md)
 - **"How do I ship this to production?"** — [Using Providers in Production](./part4-integration/05-production.md)
 - **"How do I migrate my existing app onto providers?"** — [Migrating Existing Code to Providers](./part4-integration/06-migrating-existing-code.md)
@@ -75,25 +75,13 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 - [Wiring a Web Service](./part4-integration/03-wiring-a-web-service.md) — Worked example: axum service in simulation with Store trait fake, chaos, assertions
 - [The hyper Stack: gRPC and HTTP](./part4-integration/08-hyper-stack.md): moonpool-hyper's runtime adapters, the reconnecting h2 channel, the serve helper, and why h2 keepalive and backoff stay deterministic
 - [What You're Testing (and What You're Not)](./part4-integration/04-scope-and-tradeoffs.md) — Tests handler logic and HTTP under chaos; doesn't test TLS, proxies, startup code
-- [Using Providers in Production](./part4-integration/05-production.md) — Deploying the same code on TokioProviders/TokioTransport; the lean dependency stanza; feature + platform matrices; the now() gotcha
+- [Using Providers in Production](./part4-integration/05-production.md) — Deploying the same code on TokioProviders; the lean dependency stanza; feature + platform matrices; the now() gotcha
 - [Migrating Existing Code to Providers](./part4-integration/06-migrating-existing-code.md) — Routing existing tokio/rand/fs calls through providers; the call mapping; the futures::io Compat gotcha; verifying with the conformance suite
 - [Simulation in the Browser](./part4-integration/07-wasm.md) — Why the sim compiles to wasm; whether block_on parks; building a wasm-able crate; the moonpool-wasm-demo example; the portability CI gate
 
-## Part V: Networking and RPC
+## Part V: Raw Network Simulation
 
-- [Simulating the Network](./part4-networking/01-simulating-network.md) — TCP-level simulation; connection-level faults; FlowTransport architecture
-- [Peers and Connections](./part4-networking/02-peers.md) — Logical connection resilience; reconnection on drop; message draining
-- [Backoff and Reconnection](./part4-networking/03-backoff.md) — Exponential backoff (FDB pattern); prevents storms; 100ms initial, 30s max
-- [Wire Format](./part4-networking/04-wire-format.md) — Packet layout: length, checksum, token, payload; CRC32 validation
-- [RPC with #\[service\]](./part4-networking/05-rpc-service.md) — Proc macro: write trait, get client/server/endpoints generated
-- [Defining a Service](./part4-networking/06-defining-service.md) — `#[service]` trait, request/response types, serialization, dynamic vs well-known tokens
-- [Server, Client, and Endpoints](./part4-networking/07-server-client-endpoints.md) — Server setup, client connection, endpoint routing, RequestStream, ReplyPromise
-- [Delivery Modes](./part4-networking/08-delivery-modes.md) — Four guarantees: send, try_get_reply, get_reply, get_reply_unless_failed_for
-- [Failure Monitor](./part4-networking/09-failure-monitor.md) — Address-level and endpoint-level reachability tracking
-- [Designing Simulation-Friendly RPC](./part4-networking/10-designing-rpc.md) — Idempotent design, versioning, bounded retries, deduplication, causality
-- [Interfaces Are Data](./part4-networking/11-interface-serialization.md) — Custom Serialize plus `deserialize_with`; FDB endpoint adjustment; address+base_token compact wire format
-- [Drop Semantics and the WaitFailure Pattern](./part4-networking/12-drop-semantics.md) — `ReplyPromise` drop sends `BrokenPromise`; FDB WaitFailure liveness beacon; heartbeat-free death detection
-- [What's Next](./part4-networking/13-whats-next.md) — Forward note on load balancing, fan-out, and transport-layer simulation returning in future revisions
+- [Simulating the Network](./part4-networking/01-simulating-network.md) — Provider-backed TCP streams, connection-level faults, partial I/O, and the boundary between simulation and the kernel
 
 ## Part VI: Building on Top
 

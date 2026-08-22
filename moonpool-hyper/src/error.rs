@@ -6,10 +6,9 @@ use thiserror::Error;
 ///
 /// Payloads are `String`s rather than source errors so the type stays `Clone`:
 /// one connection failure can be reported to several waiting callers, and
-/// neither `hyper::Error` nor `io::Error` is `Clone`. This mirrors
-/// moonpool-transport's `PeerError`. Being a `std::error::Error` that is `Send`
-/// and `Sync`, it converts into the boxed error tonic's generated clients
-/// require.
+/// neither `hyper::Error` nor `io::Error` is `Clone`. Being a
+/// `std::error::Error` that is `Send` and `Sync`, it converts into the boxed
+/// error tonic's generated clients require.
 #[derive(Error, Debug, Clone)]
 pub enum ChannelError {
     /// The TCP connect failed.

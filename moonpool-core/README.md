@@ -28,12 +28,8 @@ Instead of `tokio::time::sleep()`, use `time_provider.sleep()`. This ensures you
 
 ## Core Types
 
-Types for endpoint addressing:
-
-- `UID`: 128-bit unique identifier (deterministically generated in simulation)
-- `Endpoint`: Network address + token for direct addressing
-- `NetworkAddress`: IP address + port
-- `WellKnownToken`: Reserved tokens for system services
+The crate also defines the shared provider bundle, provider error types, and
+runtime-neutral file/network traits used by both production and simulation.
 
 ## Documentation
 

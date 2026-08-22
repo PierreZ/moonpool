@@ -2,9 +2,16 @@
 
 <!-- toc -->
 
-Consolidated quick-reference of every fault moonpool-sim can inject, organized by category. For detailed explanations and examples, see [Network Faults](../part3-building/network-faults.md), [Storage Faults](../part3-building/storage-faults.md), and [Attrition: Process Reboots](../part3-building/attrition.md).
+Consolidated quick-reference of every fault moonpool-sim can inject, organized
+by category. For detailed explanations and examples, see
+[Network Faults](../part3-building/10-network-faults.md),
+[Storage Faults](../part3-building/11-storage-faults.md), and
+[Attrition: Process Reboots](../part3-building/09-attrition.md).
 
-Every fault listed below is automatically emitted to the `"sim:faults"` [event timeline](../part3-building/17-events-and-invariants.md) as a `SimFaultEvent`. Invariants can read these to correlate application behavior with infrastructure faults.
+Every fault listed below is automatically emitted to the `"sim_fault"`
+[event timeline](../part3-building/17-events-and-invariants.md) as a
+`SimFaultEvent`. Invariants can read these to correlate application behavior
+with infrastructure faults.
 
 All defaults below refer to the values in `ChaosConfiguration::default()` and `StorageConfiguration::default()`. When using `random_for_seed()`, these values are randomized per seed within documented ranges.
 
@@ -113,7 +120,8 @@ Episodic degradation layered on top of steady-state timing (FoundationDB's `Disk
 
 ## Process Lifecycle Faults
 
-Configured via [`Attrition`](../part3-building/attrition.md) (built-in) or custom [`FaultInjector`](../part3-building/chaos.md) implementations.
+Configured via [`Attrition`](../part3-building/09-attrition.md) (built-in) or
+custom [`FaultInjector`](../part3-building/07-chaos.md) implementations.
 
 | Fault | Mechanism | Behavior |
 |-------|-----------|----------|

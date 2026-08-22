@@ -129,7 +129,10 @@ impl Invariant for AgreementInvariant {
 
 If a leader change causes two nodes to commit different values for the same slot, the invariant fires on the step that captured the second commit. Reset between seeds is the invariant's responsibility: clear the cursor in `reset()` and the simulation builder calls it for you between iterations.
 
-The canonical runnable example is [`moonpool-sim/tests/leader_election.rs`](https://github.com/PierreZ/moonpool/blob/main/moonpool-sim/tests/leader_election.rs): a workload emits `leader_elected` events, a `SplitBrainInvariant` detects two leaders claiming the same term. For a deeper one, [`moonpool-transport-sim`](https://github.com/PierreZ/moonpool/tree/main/moonpool-transport-sim) replays a hash chain from `append_block` events, with the block bytes hex-encoded into a string field.
+The canonical runnable example is
+[`moonpool-sim/tests/leader_election.rs`](https://github.com/PierreZ/moonpool/blob/main/moonpool-sim/tests/leader_election.rs):
+a workload emits `leader_elected` events, and a `SplitBrainInvariant` detects two
+leaders claiming the same term.
 
 ## Reading from a Workload
 

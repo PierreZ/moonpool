@@ -14,8 +14,7 @@ readme = "README.md"
 # need no hyper cargo feature at all, so `default-features = false` builds the
 # featureless core of this crate. No tokio runtime is involved either way: the
 # only tokio in the tree is `tokio/sync`, a non-optional dependency of hyper
-# itself (synchronization primitives, no reactor, no timer, no executor), same
-# as moonpool-transport's own tokio::sync usage.
+# itself (synchronization primitives, no reactor, no timer, no executor).
 default = ["client", "server"]
 # h2 client side (the reconnecting channel).
 client = ["hyper/client", "hyper/http2"]

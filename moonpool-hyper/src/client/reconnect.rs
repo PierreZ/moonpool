@@ -22,8 +22,7 @@ type ChannelIo<P> = HyperIo<<<P as Providers>::Network as NetworkProvider>::TcpS
 
 /// How a [`ReconnectingChannel`] connects and reconnects.
 ///
-/// The defaults mirror moonpool-transport's `PeerConfig`, so a service that
-/// speaks both protocols behaves the same way on both.
+/// Defaults are conservative for both local simulation and production use.
 #[derive(Clone, Debug)]
 pub struct ChannelConfig {
     /// Initial delay before attempting reconnection.
@@ -132,9 +131,8 @@ fn backoff_delay(failures: u32, config: &ChannelConfig) -> Duration {
 /// then dies immediately therefore faces escalating backoff and can exhaust the
 /// failure cap, instead of spinning at zero backoff forever.
 ///
-/// This diverges deliberately from moonpool-transport's `Peer`, which resets
-/// its backoff at connect time (`peer/core.rs:1582`) and so carries that flap
-/// exposure. The two are otherwise configured alike.
+/// Resetting only after a stable interval prevents a peer that accepts and
+/// immediately closes from keeping the channel at zero backoff.
 ///
 /// # Where it may be polled
 ///
@@ -682,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn defaults_mirror_the_peer_config() {
+    fn defaults_are_conservative() {
         let config = ChannelConfig::default();
         assert_eq!(config.initial_reconnect_delay, Duration::from_millis(100));
         assert_eq!(config.max_reconnect_delay, Duration::from_secs(30));

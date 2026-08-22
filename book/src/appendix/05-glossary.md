@@ -20,8 +20,6 @@ Terms are listed alphabetically. Cross-references are shown in **bold**.
 
 **Trace timeline** -- The append-only log of trace events captured by `SimulationLayer`. Producers emit plain `tracing::*!` events with a constant message (the event name) and structured fields; no markers or derives. The `source` is attributed from the process/workload span the orchestrator wraps around each actor task; sim time is stamped automatically. Invariants read via the `TraceQuery` trait: `q.since(name, &cursor)` for incremental scans, `q.snapshot(name)` for full re-scans, with per-field accessors (`e.u64("term")`, `e.str("leader")`). Each event carries `time_ms`, `source`, `target`, `level`, and a global monotonic `seq`. Distinct from **Timeline** (a simulation run in the explorer); see also **Fault timeline**.
 
-**Endpoint** -- A `(IpAddr, Token)` pair that uniquely identifies a connection endpoint in the simulated network. The IP address identifies the node; the **token** identifies the specific listener or connection on that node.
-
 **Explorer** -- The frontier-based exploration controller (`moonpool-explorer` crate). Owns the **frontier**, the per-state **exemplar** store, novelty bookkeeping, and a bounded pool of **worker** processes. Has zero knowledge of Moonpool internals -- communicates through the assertion accounting hooks and an RNG call-count function pointer.
 
 **Fault timeline** -- The well-known event name `"sim_fault"` (`SIM_FAULT_EVENT_NAME`) in the trace timeline. The engine records `SimFaultEvent`s internally and the runner merges them in with `source = "sim"` and a `kind` field (e.g. `"partition_created"`, `"process_force_kill"`) covering network, storage, and process lifecycle faults. Invariants use it to correlate application behavior with infrastructure events. Engine-level tests can drain records directly via `SimWorld::take_faults()`.
@@ -56,14 +54,8 @@ Terms are listed alphabetically. Cross-references are shown in **bold**.
 
 **Timeline** -- One complete simulation run. A root **seed** plus a **recipe** uniquely identifies a timeline; the root timeline has an empty recipe.
 
-**Token** -- A `u64` identifier for a specific listener or connection on a node. Combined with an IP address to form an **endpoint**. See also **well-known token**.
-
 **Watermark** -- For numeric **sometimes** assertions: the best value ever observed. For `gt`/`ge`, the watermark tracks the maximum; for `lt`/`le`, the minimum. An improvement is a **discovery** and marks the owning state as monotonic progress, which continuation scheduling prefers. Preserved across seeds.
 
-**Well-known token** -- A reserved **token** in the range `0..WELL_KNOWN_RESERVED_COUNT` used for framework services. Well-known tokens provide stable endpoints for services like RPC registries without requiring dynamic discovery.
-
 **Worker** -- A forked process that executes exactly one exploration job (replay + continuation), writes its discovery journal into a `MAP_SHARED` result slot, and exits. Workers never fork and never make exploration decisions; the pool size (`workers`) bounds live processes. `workers: 0` runs jobs in-process, sequentially and fully deterministically.
-
-**Wire format** -- The on-the-wire message encoding used by moonpool-transport. Each `WireMessage` includes a `WireHeader` with endpoint routing, a unique ID, message type, and payload size, followed by the serialized payload. CRC32C checksums protect against **bit flip** corruption.
 
 **Workload** -- The test driver. A workload survives process **reboots** and drives requests against the system under test. It validates correctness by making assertions about observed behavior. Analogous to FoundationDB's `tester.actor.cpp`.

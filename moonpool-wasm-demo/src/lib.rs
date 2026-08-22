@@ -13,8 +13,7 @@
 //! [`moonpool_sim::Invariant`] — observes those `tracing` events from the sim's
 //! timeline and reconstructs the message timeline ([`Shot`]s) plus the injected
 //! network faults. Because it keys off the standard event contract, the *same*
-//! recorder visualizes any network workload that emits it (e.g. the
-//! hash-chain workload in `moonpool-transport-sim`) with no changes.
+//! recorder visualizes any network workload that emits it with no changes.
 //!
 //! `.enable_chaos([Chaos::Network(ChaosMode::Random)])` turns on seeded network chaos — variable latency,
 //! reordering, connection drops — so a request comes back fast, slowly, or not
@@ -68,8 +67,7 @@ const NODE_B: u8 = 1;
 /// A raw ping frame contains the sequence and its complement.
 const FRAME_LEN: usize = 16;
 
-// Standard transport-client observability events the recorder consumes. Same
-// names/field as `moonpool-transport-sim`, so the recorder is workload-agnostic.
+// Standard network-client observability events the recorder consumes.
 const EV_ISSUED: &str = "client_issued";
 const EV_ACKED: &str = "client_acknowledged";
 const EV_FAILED: &str = "client_failed";

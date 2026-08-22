@@ -22,7 +22,7 @@ Assertions in moonpool serve two purposes that reinforce each other.
 
 **First, they verify correctness.** An `assert_always!` is a property that must hold every time it is checked. If it fails even once across thousands of iterations, there is a bug. The system tracks pass and fail counts, giving you a precise success rate rather than a binary pass/fail.
 
-**Second, they guide exploration.** When you enable multiverse mode (covered in Part V), certain assertions become active signals to the explorer. An `assert_sometimes!` that fires true for the first time tells the explorer "this is interesting, branch from here." The explorer snapshots that moment and spawns new timelines from it. This is what turns a random walk through state space into a directed search.
+**Second, they guide exploration.** When you enable multiverse mode (covered in Part VI), certain assertions become active signals to the explorer. An `assert_sometimes!` that fires true for the first time tells the explorer "this is interesting, branch from here." The explorer snapshots that moment and spawns new timelines from it. This is what turns a random walk through state space into a directed search.
 
 The same assertion does both jobs. You write it once, thinking about correctness. The exploration framework uses it automatically to find more bugs.
 

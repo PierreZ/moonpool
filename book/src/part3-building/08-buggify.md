@@ -38,7 +38,10 @@ if buggify_with_prob!(0.5) {
 }
 ```
 
-This two-phase design means each seed tests a **different combination** of active fault injection points. Seed 42 might activate the timeout injection in your RPC layer but deactivate the one in your storage engine. Seed 43 might do the reverse. Run enough seeds and you cover the combinatorial space of fault interactions.
+This two-phase design means each seed tests a **different combination** of
+active fault injection points. Seed 42 might activate a request timeout but
+deactivate a storage error. Seed 43 might do the reverse. Run enough seeds and
+you cover the combinatorial space of fault interactions.
 
 ## Five Injection Patterns
 

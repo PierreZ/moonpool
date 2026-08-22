@@ -44,19 +44,9 @@
 //! - ❌ `tokio::time::sleep()`
 //! - ✅ `time_provider.sleep()`
 //!
-//! ## Core Types
-//!
-//! Types for endpoint addressing:
-//!
-//! - [`UID`]: 128-bit unique identifier (deterministically generated in simulation)
-//! - [`Endpoint`]: Network address + token for direct addressing
-//! - [`NetworkAddress`]: IP address + port
-//! - [`WellKnownToken`]: Reserved tokens for system services
-
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 
-mod codec;
 mod error;
 mod network;
 mod providers;
@@ -68,8 +58,6 @@ pub mod select_support;
 mod storage;
 mod task;
 mod time;
-mod types;
-mod well_known;
 
 /// `select!` as tokio's macro, verbatim (production passthrough).
 ///
@@ -85,9 +73,6 @@ pub use tokio::select;
 #[cfg(feature = "select")]
 #[doc(hidden)]
 pub use tokio as __tokio;
-
-// Codec exports
-pub use codec::{CodecError, JsonCodec, MessageCodec};
 
 // Error exports
 pub use error::{SimulationError, SimulationResult};
@@ -111,10 +96,6 @@ pub use task::{TokioJoinHandle, TokioTaskProvider};
 #[cfg(feature = "tokio-time")]
 pub use time::TokioTimeProvider;
 pub use time::{TimeError, TimeProvider};
-
-// Core type exports
-pub use types::{Endpoint, NetworkAddress, NetworkAddressParseError, UID, flags};
-pub use well_known::{WELL_KNOWN_RESERVED_COUNT, WellKnownToken};
 
 /// Common imports for writing code against the provider traits.
 ///

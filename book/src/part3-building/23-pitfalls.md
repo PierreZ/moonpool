@@ -51,7 +51,10 @@ Moonpool runs on a **single OS thread** for determinism. Wrapping a simulation i
 
 ## Using `?Send` on Dyn Traits
 
-Moonpool's dyn-stored traits (`Process`, `Workload`, `FaultInjector`, `#[service]` handlers) carry `Send + Sync + 'static` supertraits so customer code can share state through `Arc<RwLock<…>>` and `DashMap`. Writing `#[async_trait(?Send)]` on your impl removes the `Send` bound the trait promises and the compiler rejects it.
+Moonpool's dyn-stored traits (`Process`, `Workload`, `FaultInjector`) carry
+`Send + Sync + 'static` supertraits so customer code can share state through
+`Arc<RwLock<…>>` and `DashMap`. Writing `#[async_trait(?Send)]` on your impl
+removes the `Send` bound the trait promises and the compiler rejects it.
 
 **Fix**: Use plain `#[async_trait]` (no `?Send`) on dyn-stored impls. Provider traits use native AFIT with `-> impl Future<…> + Send` and need no attribute at all.
 
