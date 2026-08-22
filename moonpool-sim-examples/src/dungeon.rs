@@ -1,9 +1,11 @@
 //! Dungeon workload for fork-based exploration testing.
 //!
-//! 8-floor roguelike with keys, monsters, rooms, health.
-//! Each floor has a hidden key behind a P=0.03 probability gate.
-//! Without exploration: P(reach floor 8) ~ (0.03)^7 ~ impossible.
-//! With exploration: fork amplification at each floor.
+//! 10-floor roguelike with keys, monsters, rooms, health.
+//! Each floor has a hidden key behind a P=0.02 probability gate, and enemy
+//! count grows with depth.
+//! Without exploration: P(reach floor 10) ~ (0.02)^9 ~ 5e-16 ~ impossible.
+//! With exploration: continuations anchored at each floor's discoveries
+//! climb the dungeon incrementally.
 
 use async_trait::async_trait;
 use moonpool_sim::{SimContext, SimulationResult, Workload};
@@ -506,10 +508,10 @@ use dungeon_game::{Action, StepOutcome, Tile};
 /// Default maximum steps per run.
 pub const DEFAULT_MAX_STEPS: u64 = 10000;
 /// Default target level (floor to reach for bug).
-pub const DEFAULT_TARGET_LEVEL: u32 = 8;
+pub const DEFAULT_TARGET_LEVEL: u32 = 10;
 
 /// Level-dependent assertion messages for key discovery events.
-const KEY_FOUND_MSGS: [&str; 9] = [
+const KEY_FOUND_MSGS: [&str; 11] = [
     "key found L0",
     "key found L1",
     "key found L2",
@@ -519,10 +521,12 @@ const KEY_FOUND_MSGS: [&str; 9] = [
     "key found L6",
     "key found L7",
     "key found L8",
+    "key found L9",
+    "key found L10",
 ];
 
 /// Probability of finding the hidden key when on the key tile.
-const KEY_FIND_P: f64 = 0.03;
+const KEY_FIND_P: f64 = 0.02;
 
 /// Probability of repeating the previous action (structured rollout).
 const REPEAT_ACTION_P: f64 = 0.70;
@@ -805,7 +809,7 @@ impl Workload for DungeonWorkload {
 
         moonpool_sim::assert_always!(
             result != StepResult::BugFound,
-            "dungeon bug: treasure found on floor 8"
+            "dungeon bug: treasure found on the last floor"
         );
 
         Ok(())

@@ -1,7 +1,8 @@
-//! Integration tests for fork-based multiverse exploration.
+//! Integration tests for frontier-based exploration.
 //!
-//! These tests exercise the moonpool-explorer crate wired into moonpool-sim.
-//! Since they use `fork()`, each test must run in its own process (nextest default).
+//! These exercise the moonpool-explorer controller wired into moonpool-sim.
+//! Since worker mode uses `fork()`, each test must run in its own process
+//! (nextest default).
 
 use async_trait::async_trait;
 use moonpool_sim::{
@@ -11,6 +12,17 @@ use moonpool_sim::{
 /// Helper to run a simulation and return the report.
 fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
     builder.run()
+}
+
+/// Small bounded exploration config for tests.
+fn test_config(workers: usize, max_runs: u64) -> ExplorationConfig {
+    ExplorationConfig {
+        workers,
+        max_runs_per_seed: max_runs,
+        branching_factor: 2,
+        max_frontier: 64,
+        max_recipe_len: 8,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -34,7 +46,8 @@ impl Workload for AssertOnceWorkload {
     }
 }
 
-/// Workload that triggers a fork, then fails in child processes (simulates a bug).
+/// Workload that succeeds in the root run but fails in exploration workers
+/// (simulates a bug found only in an explored timeline).
 struct ChildBugWorkload;
 
 #[async_trait]
@@ -44,52 +57,13 @@ impl Workload for ChildBugWorkload {
     }
 
     async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
-        moonpool_sim::assert_sometimes!(true, "triggers fork");
+        moonpool_sim::assert_sometimes!(true, "triggers exploration");
 
         if moonpool_explorer::explorer_is_child() {
             return Err(moonpool_sim::SimulationError::InvalidState(
-                "simulated bug in child".to_string(),
+                "simulated bug in explored timeline".to_string(),
             ));
         }
-
-        Ok(())
-    }
-}
-
-/// Workload with two consecutive assertion gates (tests depth limiting).
-struct TwoGateWorkload;
-
-#[async_trait]
-impl Workload for TwoGateWorkload {
-    fn name(&self) -> &'static str {
-        "client"
-    }
-
-    async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
-        // First assertion — will fork in parent (depth 0 -> 1)
-        moonpool_sim::assert_sometimes!(true, "first gate");
-
-        // Second assertion — children are at depth 1 == max_depth,
-        // so they should NOT fork further
-        moonpool_sim::assert_sometimes!(true, "second gate");
-
-        Ok(())
-    }
-}
-
-/// Workload with three assertion gates (tests energy limiting).
-struct ThreeGateWorkload;
-
-#[async_trait]
-impl Workload for ThreeGateWorkload {
-    fn name(&self) -> &'static str {
-        "client"
-    }
-
-    async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
-        moonpool_sim::assert_sometimes!(true, "gate 1");
-        moonpool_sim::assert_sometimes!(true, "gate 2");
-        moonpool_sim::assert_sometimes!(true, "gate 3");
 
         Ok(())
     }
@@ -105,10 +79,10 @@ impl Workload for PlantedBugWorkload {
     }
 
     async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
-        // Gate 1: always passes — triggers the first fork
+        // Gate 1: always passes — the first discovery.
         moonpool_sim::assert_sometimes!(true, "gate 1");
 
-        // Gate 2: ~10% chance (children explore with reseeded RNG)
+        // Gate 2: ~10% chance (continuations re-roll with fresh seeds).
         let gate2 = moonpool_sim::sim_random_range(0u32..10) == 0;
         moonpool_sim::assert_sometimes!(gate2, "gate 2");
 
@@ -139,8 +113,8 @@ impl Workload for EachBucketWorkload {
     }
 
     async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
-        // Use assert_sometimes_each! with identity keys to trigger forking.
-        // Each unique (lock, depth) combination creates a separate bucket.
+        // Each unique (lock, depth) combination creates a separate bucket,
+        // and each new bucket is a discovery the controller can anchor to.
         for lock in 0..2 {
             for depth in 1..3 {
                 moonpool_sim::assert_sometimes_each!(
@@ -175,21 +149,16 @@ fn test_exploration_disabled_default() {
     );
 }
 
-/// Test basic fork exploration — verify children are forked and stats update.
+/// Basic exploration: discoveries produce expansions and extra timelines,
+/// and the run budget is respected.
 #[test]
-fn test_fork_basic() {
+fn test_exploration_basic() {
     let report = run_simulation(
         SimulationBuilder::new()
             .set_iterations(1)
-            .enable_exploration(ExplorationConfig {
-                max_depth: 1,
-                timelines_per_split: 2,
-                global_energy: 10,
-                adaptive: None,
-                parallelism: None,
-            })
+            .enable_exploration(test_config(0, 10))
             .workload(AssertOnceWorkload {
-                message: "triggers fork",
+                message: "triggers exploration",
             }),
     );
 
@@ -197,34 +166,38 @@ fn test_fork_basic() {
 
     let exp = report.exploration.expect("exploration report missing");
     assert!(
-        exp.total_timelines > 0,
-        "expected forked children, got total_timelines={}",
+        exp.total_timelines > 1,
+        "expected exploration runs beyond the root, got total_timelines={}",
         exp.total_timelines
     );
     assert!(
-        exp.fork_points > 0,
-        "expected fork points, got fork_points={}",
-        exp.fork_points
+        exp.total_timelines <= 10,
+        "run budget exceeded: total_timelines={}",
+        exp.total_timelines
+    );
+    assert!(
+        exp.expansions > 0,
+        "expected at least one productive expansion"
+    );
+    assert!(
+        exp.discoveries > 0,
+        "expected the sometimes assertion to be discovered"
     );
 }
 
-/// Test that forked children that fail report exit code 42 (bug found).
+/// Exploration runs that fail are counted as bugs and captured as recipes.
+/// Uses a single worker: `ChildBugWorkload` fails only in forked workers,
+/// which also covers the workers = 1 configuration.
 #[test]
-fn test_child_exit_code() {
+fn test_bug_capture_and_recipe() {
     let report = run_simulation(
         SimulationBuilder::new()
             .set_iterations(1)
-            .enable_exploration(ExplorationConfig {
-                max_depth: 1,
-                timelines_per_split: 2,
-                global_energy: 10,
-                adaptive: None,
-                parallelism: None,
-            })
+            .enable_exploration(test_config(1, 10))
             .workload(ChildBugWorkload),
     );
 
-    // Parent should succeed
+    // The root (in-process) run succeeds; bugs appear in exploration runs.
     assert_eq!(report.successful_runs, 1);
 
     let exp = report.exploration.expect("exploration report missing");
@@ -233,70 +206,75 @@ fn test_child_exit_code() {
         "expected bugs_found > 0, got {}",
         exp.bugs_found
     );
+    assert!(
+        !exp.bug_recipes.is_empty(),
+        "expected bug recipes to be captured"
+    );
+    let recipe = &exp.bug_recipes[0];
+    assert!(
+        !recipe.recipe.is_empty(),
+        "bug recipe should contain at least one replay segment"
+    );
 }
 
-/// Test that `max_depth=1` prevents grandchildren (no recursive forking).
+/// Worker mode: forked workers stay within the configured bound, and bugs
+/// found in workers are captured.
 #[test]
-fn test_depth_limit() {
+fn test_workers_bounded() {
+    let workers = 2;
+    let mut config = test_config(workers, 12);
+    config.branching_factor = 3;
     let report = run_simulation(
         SimulationBuilder::new()
             .set_iterations(1)
-            .enable_exploration(ExplorationConfig {
-                max_depth: 1,
-                timelines_per_split: 2,
-                global_energy: 100,
-                adaptive: None,
-                parallelism: None,
-            })
-            .workload(TwoGateWorkload),
+            .enable_exploration(config)
+            .workload(ChildBugWorkload),
     );
 
     assert_eq!(report.successful_runs, 1);
-
-    // With max_depth=1 and timelines_per_split=2:
-    // - Root forks 2 children at gate_1 (depth 0->1)
-    // - Gate_2 in children: depth=1 == max_depth, no fork
-    // So total_timelines should be exactly 2
     let exp = report.exploration.expect("exploration report missing");
     assert!(
-        exp.total_timelines <= 4,
-        "depth limit exceeded: total_timelines={} (expected <= 4)",
-        exp.total_timelines
+        exp.max_active_workers <= workers,
+        "worker bound exceeded: {} > {workers}",
+        exp.max_active_workers
     );
-}
-
-/// Test that global energy budget limits the number of forks.
-#[test]
-fn test_energy_limit() {
-    let report = run_simulation(
-        SimulationBuilder::new()
-            .set_iterations(1)
-            .enable_exploration(ExplorationConfig {
-                max_depth: 3,
-                timelines_per_split: 8,
-                global_energy: 2,
-                adaptive: None,
-                parallelism: None,
-            })
-            .workload(ThreeGateWorkload),
-    );
-
-    assert_eq!(report.successful_runs, 1);
-
-    // With energy=2 and timelines_per_split=8, we can only fork 2 children total
-    let exp = report.exploration.expect("exploration report missing");
     assert!(
-        exp.total_timelines <= 2,
-        "energy limit exceeded: total_timelines={} (expected <= 2)",
-        exp.total_timelines
+        exp.max_active_workers > 0,
+        "worker mode should have forked workers"
     );
+    assert!(exp.total_timelines <= 12, "run budget exceeded");
+    assert!(exp.bugs_found > 0, "expected worker bugs to be captured");
 }
 
-/// Test that a recipe captured from a bug-finding fork can be replayed
-/// via RNG breakpoints to produce identical results.
+/// In-process exploration (workers = 0) is fully deterministic: two identical
+/// runs produce identical exploration statistics and recipes.
 #[test]
-fn test_replay_matches_fork() {
-    // Verify round-trip format/parse of recipes
+fn test_in_process_exploration_deterministic() {
+    let run = || {
+        run_simulation(
+            SimulationBuilder::new()
+                .set_iterations(2)
+                .set_debug_seeds(vec![1111, 2222])
+                .enable_exploration(test_config(0, 8))
+                .workload(PlantedBugWorkload),
+        )
+    };
+    let first = run();
+    let second = run();
+
+    let exp1 = first.exploration.expect("exploration report missing");
+    let exp2 = second.exploration.expect("exploration report missing");
+    assert_eq!(exp1.total_timelines, exp2.total_timelines);
+    assert_eq!(exp1.expansions, exp2.expansions);
+    assert_eq!(exp1.discoveries, exp2.discoveries);
+    assert_eq!(exp1.bugs_found, exp2.bugs_found);
+    assert_eq!(exp1.bug_recipes, exp2.bug_recipes);
+    assert_eq!(exp1.per_seed_timelines, exp2.per_seed_timelines);
+}
+
+/// Recipe round-trip formatting (replay input format).
+#[test]
+fn test_recipe_format_roundtrip() {
     let recipe = vec![(42, 12345), (17, 67890)];
     let formatted = moonpool_sim::format_timeline(&recipe);
     assert_eq!(formatted, "42@12345 -> 17@67890");
@@ -304,52 +282,61 @@ fn test_replay_matches_fork() {
     let parsed = moonpool_sim::parse_timeline(&formatted).expect("parse failed");
     assert_eq!(recipe, parsed);
 
-    // Also verify empty case
     let empty = moonpool_sim::format_timeline(&[]);
     assert_eq!(empty, "");
     let parsed_empty = moonpool_sim::parse_timeline("").expect("parse failed");
     assert!(parsed_empty.is_empty());
 }
 
-/// Test planted bug scenario: 3 gates at P=0.1, exploration should find the
-/// path through all gates much more efficiently than brute force.
+/// Planted-bug scenario: cascaded rare gates are found through recipe
+/// extension, and the captured recipe replays to the same failure through
+/// [`SimulationBuilder::replay_timeline`].
 #[test]
-fn test_planted_bug() {
+fn test_planted_bug_recipe_replays() {
+    let mut config = test_config(0, 300);
+    config.branching_factor = 4;
     let report = run_simulation(
         SimulationBuilder::new()
             .set_iterations(1)
-            .enable_exploration(ExplorationConfig {
-                max_depth: 3,
-                timelines_per_split: 4,
-                global_energy: 50,
-                adaptive: None,
-                parallelism: None,
-            })
+            .set_debug_seeds(vec![4242])
+            .enable_exploration(config)
             .workload(PlantedBugWorkload),
     );
 
-    // Parent should succeed (bugs only found in forked children)
-    assert_eq!(report.successful_runs, 1);
     let exp = report.exploration.expect("exploration report missing");
     assert!(
-        exp.total_timelines > 0,
-        "expected some exploration, got total_timelines=0"
+        exp.total_timelines > 1,
+        "expected exploration beyond the root run"
+    );
+    let bug = exp
+        .bug_recipes
+        .first()
+        .expect("300 guided runs should find the ~1% planted bug");
+    assert!(
+        !bug.recipe.is_empty(),
+        "planted bug recipe should have replay segments"
+    );
+
+    // Replaying the recipe must reproduce the exact failing timeline.
+    let replay = run_simulation(
+        SimulationBuilder::new()
+            .replay_timeline(bug.seed, bug.recipe.clone())
+            .workload(PlantedBugWorkload),
+    );
+    assert_eq!(
+        replay.failed_runs, 1,
+        "replayed timeline must reproduce the planted bug"
     );
 }
 
-/// Test that `assert_sometimes_each`! triggers fork-based exploration.
+/// `assert_sometimes_each!` buckets are discoveries: each new bucket
+/// contributes to the journal and drives expansions.
 #[test]
-fn test_sometimes_each_triggers_fork() {
+fn test_sometimes_each_drives_exploration() {
     let report = run_simulation(
         SimulationBuilder::new()
             .set_iterations(1)
-            .enable_exploration(ExplorationConfig {
-                max_depth: 2,
-                timelines_per_split: 2,
-                global_energy: 20,
-                adaptive: None,
-                parallelism: None,
-            })
+            .enable_exploration(test_config(0, 10))
             .workload(EachBucketWorkload),
     );
 
@@ -357,8 +344,9 @@ fn test_sometimes_each_triggers_fork() {
 
     let exp = report.exploration.expect("exploration report missing");
     assert!(
-        exp.total_timelines > 0,
-        "expected forked children from assert_sometimes_each!, got total_timelines={}",
-        exp.total_timelines
+        exp.discoveries >= 4,
+        "expected all four (lock, depth) buckets to be discovered, got {}",
+        exp.discoveries
     );
+    assert!(exp.expansions > 0, "expected bucket-driven expansions");
 }

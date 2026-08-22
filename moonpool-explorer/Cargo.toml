@@ -5,12 +5,13 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Fork-based multiverse exploration for moonpool simulation testing"
+description = "Frontier-based exploration controller for moonpool simulation testing"
 documentation = "https://docs.rs/moonpool-explorer"
 
 [[bin]]
-name = "sim-adaptive-explore"
-path = "src/bin/sim/adaptive_explore.rs"
+name = "sim-frontier-explore"
+path = "src/bin/sim/frontier_explore.rs"
+
 
 [dependencies]
 moonpool-assertions = { path = "../moonpool-assertions", version = "0.8.0" }

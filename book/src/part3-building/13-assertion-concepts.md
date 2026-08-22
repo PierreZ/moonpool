@@ -16,7 +16,7 @@ assert_always!(committed_count <= total_count, "commits cannot exceed total");
 
 This is the assertion you reach for most often. In Antithesis's own Pangolin database, about 90% of assertions are always-type. That ratio matches what we see in practice: the vast majority of what we want to say about a system is "this property holds."
 
-Invariant assertions do **not** interact with the explorer. They do not trigger forks or snapshots. Their job is purely to catch violations. When one fails, the runner records the violation and continues. The value is in the recording, not in the stopping.
+Invariant assertions do **not** interact with the explorer. They never count as discoveries. Their job is purely to catch violations. When one fails, the runner records the violation and continues. The value is in the recording, not in the stopping.
 
 There is an important subtlety: `assert_always!` also fails if it is **never reached**. An assertion that is never evaluated gives false confidence. If you have an assertion guarding a recovery path but your simulation never triggers recovery, the assertion tells you nothing. Moonpool flags unreached always-assertions as violations so you know your coverage has gaps.
 
@@ -53,9 +53,9 @@ assert_sometimes_all!("full_cluster_ready", [
 ]);
 ```
 
-Numeric guidance assertions track watermarks. The system remembers the best value it has observed and forks when it discovers a better one. This creates a ratchet effect: the explorer steadily pushes toward boundary conditions where bugs tend to hide.
+Numeric guidance assertions track watermarks. The system remembers the best value it has observed, and an improvement is a discovery the explorer anchors continuations to. This creates a ratchet effect: the explorer steadily pushes toward boundary conditions where bugs tend to hide.
 
-Compound guidance assertions track frontiers. `assert_sometimes_all!` counts how many sub-goals are simultaneously true and forks when that count increases. The explorer is driven to satisfy more sub-goals at once, which naturally leads it toward complex system states that are hard to reach by random exploration alone.
+Compound guidance assertions track frontiers. `assert_sometimes_all!` counts how many sub-goals are simultaneously true, and an increase is a discovery. The explorer is driven to satisfy more sub-goals at once, which naturally leads it toward complex system states that are hard to reach by random exploration alone.
 
 ## Why the Taxonomy Matters
 

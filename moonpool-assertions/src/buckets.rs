@@ -1,11 +1,10 @@
 //! Per-value bucketed accounting for `assert_sometimes_each!`.
 //!
 //! Each unique combination of identity key values creates one bucket. On first
-//! discovery the accounting calls [`crate::hooks::on_bucket_split`]; on every
-//! call it calls [`crate::hooks::on_bucket_mark`]. With no hook installed both
-//! are no-ops (pure accounting); the exploration backend wires them to coverage
-//! marking and fork dispatch. Optional quality watermarks allow re-signalling
-//! when the packed quality score improves.
+//! discovery — and on every quality-watermark improvement — the accounting
+//! calls [`crate::hooks::on_discovery`]. With no hook installed the call is a
+//! no-op (pure accounting); the exploration backend records it into a per-run
+//! discovery journal.
 //!
 //! # Memory Layout
 //!
@@ -14,7 +13,7 @@
 //! ```
 //!
 //! The `next_bucket` counter is incremented atomically (via `AtomicU32::fetch_add`)
-//! to allocate new buckets safely across fork boundaries.
+//! to allocate new buckets safely across process boundaries.
 
 use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, Ordering};
 
@@ -41,8 +40,8 @@ pub struct EachBucket {
     pub site_hash: u32,
     /// Hash of (`site_hash` + identity key values) — uniquely identifies this bucket.
     pub bucket_hash: u32,
-    /// CAS guard: 0 = no fork yet, 1 = first fork triggered.
-    pub split_triggered: u8,
+    /// CAS guard: 0 = not yet discovered, 1 = first discovery signalled.
+    pub discovered: u8,
     /// Number of identity keys stored in `key_values`.
     pub num_keys: u8,
     /// Number of quality keys (0-4). 0 means no quality tracking.
@@ -126,7 +125,7 @@ unsafe fn find_or_alloc_each_bucket(
             EachBucket {
                 site_hash,
                 bucket_hash,
-                split_triggered: 0,
+                discovered: 0,
                 num_keys: u8::try_from(num_keys).expect("num_keys capped at MAX_EACH_KEYS=6"),
                 has_quality,
                 pad: 0,
@@ -138,16 +137,6 @@ unsafe fn find_or_alloc_each_bucket(
         );
         bucket
     }
-}
-
-/// Compute the 0-based array index of a bucket from its pointer.
-fn compute_each_bucket_index(base_ptr: *mut u8, bucket: *const EachBucket) -> usize {
-    if base_ptr.is_null() {
-        return 0;
-    }
-    let buckets_base = unsafe { base_ptr.add(8) } as usize;
-    let offset = (bucket as usize).saturating_sub(buckets_base);
-    offset / std::mem::size_of::<EachBucket>()
 }
 
 /// Pack up to 4 quality key values into a single i64 for lexicographic comparison.
@@ -202,11 +191,6 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
         }
     }
 
-    // Mark coverage for adaptive yield detection (on every call). Different
-    // identity key combinations produce different bucket_hash values, so the
-    // coverage map distinguishes e.g. floor-1 from floor-2 assertions.
-    crate::hooks::on_bucket_mark(bucket_hash);
-
     // `min(4)` guarantees the value fits in u8, so the cast is lossless.
     let has_quality = u8::try_from(quality.len().min(4)).unwrap_or(4);
     let score = if has_quality > 0 {
@@ -223,15 +207,14 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
     }
 
     // Safety: bucket points to valid memory. Atomic operations are used for
-    // cross-fork safety (parent waits on child via waitpid, but atomics ensure
-    // correct visibility for recursive fork scenarios).
+    // cross-process safety when concurrent worker processes share the region.
     unsafe {
         // Increment pass count.
         let count_atomic = &*(&raw const (*bucket).pass_count).cast::<AtomicU32>();
         count_atomic.fetch_add(1, Ordering::Relaxed);
 
-        // Signal discovery on first hit: CAS split_triggered from 0 → 1.
-        let ft = &*(&raw const (*bucket).split_triggered).cast::<AtomicU8>();
+        // Signal discovery on first hit: CAS discovered from 0 → 1.
+        let ft = &*(&raw const (*bucket).discovered).cast::<AtomicU8>();
         let first_discovery = ft
             .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok();
@@ -243,8 +226,10 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
                 bs_atomic.store(score, Ordering::Relaxed);
             }
 
-            let bucket_index = compute_each_bucket_index(ptr, bucket);
-            crate::hooks::on_bucket_split(msg, bucket_index % crate::slots::MAX_ASSERTION_SLOTS);
+            crate::hooks::on_discovery(
+                crate::hooks::DiscoveryKind::BucketFirst,
+                u64::from(bucket_hash),
+            );
         } else if has_quality > 0 {
             // Not first discovery: check quality watermark improvement.
             // CAS loop on best_score — re-signal when score improves.
@@ -261,10 +246,9 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => {
-                        let bucket_index = compute_each_bucket_index(ptr, bucket);
-                        crate::hooks::on_bucket_split(
-                            msg,
-                            bucket_index % crate::slots::MAX_ASSERTION_SLOTS,
+                        crate::hooks::on_discovery(
+                            crate::hooks::DiscoveryKind::BucketQuality,
+                            u64::from(bucket_hash),
                         );
                         break;
                     }

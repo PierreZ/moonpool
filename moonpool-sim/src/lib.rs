@@ -212,9 +212,7 @@ pub use providers::{SimProviders, SimRandomProvider, SimTaskProvider, SimTimePro
 pub use moonpool_assertions::{AssertCmp, AssertKind};
 // Exploration-only re-exports (fork-based multiverse engine).
 #[cfg(feature = "exploration")]
-pub use moonpool_explorer::{
-    AdaptiveConfig, ExplorationConfig, Parallelism, format_timeline, parse_timeline,
-};
+pub use moonpool_explorer::{ExplorationConfig, Recipe, format_timeline, parse_timeline};
 pub use runner::report::{BugRecipe, ExplorationReport};
 
 // Macros are automatically available at crate root when defined with #[macro_export]

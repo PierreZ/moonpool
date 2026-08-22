@@ -7,14 +7,16 @@
 //!
 //! Each slot is accessed via raw pointer arithmetic on the assertion region
 //! (heap by default, or `MAP_SHARED` memory when an exploration backend installs
-//! one). With multiple fork children running concurrently, `find_or_alloc_slot`
+//! one). With multiple worker processes running concurrently, `find_or_alloc_slot`
 //! claims slots by atomically writing `msg_hash` before re-scanning, ensuring
 //! concurrent allocators see each other.
 //!
 //! On a "discovery" (first Sometimes/Reachable pass, numeric watermark
 //! improvement, or frontier advance) the accounting calls
-//! [`crate::hooks::on_slot_discovery`]. With no hook installed this is a no-op
-//! (pure accounting); the exploration backend wires it to coverage + forking.
+//! [`crate::hooks::on_discovery`]. Each discovery is guarded by an atomic
+//! latch so it fires exactly once globally. With no hook installed this is a
+//! no-op (pure accounting); the exploration backend wires it to a per-run
+//! discovery journal.
 
 use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, Ordering};
 
@@ -97,16 +99,16 @@ pub struct AssertionSlot {
     pub must_hit: u8,
     /// Whether to maximize (1) or minimize (0) the watermark value.
     pub maximize: u8,
-    /// Whether a fork has been triggered for this assertion (0 = no, 1 = yes).
-    pub split_triggered: u8,
+    /// Whether this assertion has made its first discovery (0 = no, 1 = yes).
+    pub discovered: u8,
     /// Total number of times this assertion passed.
     pub pass_count: u64,
     /// Total number of times this assertion failed.
     pub fail_count: u64,
     /// Numeric watermark: best value observed (for guidance assertions).
     pub watermark: i64,
-    /// Watermark value at last fork (for detecting improvement).
-    pub split_watermark: i64,
+    /// Watermark value at the last signalled discovery (for improvement detection).
+    pub discovery_watermark: i64,
     /// Frontier: number of simultaneously true bools (for `BooleanSometimesAll`).
     pub frontier: u8,
     /// Padding for alignment.
@@ -204,11 +206,11 @@ unsafe fn find_or_alloc_slot(
         (*slot).kind = kind as u8;
         (*slot).must_hit = must_hit;
         (*slot).maximize = maximize;
-        (*slot).split_triggered = 0;
+        (*slot).discovered = 0;
         (*slot).pass_count = 0;
         (*slot).fail_count = 0;
         (*slot).watermark = if maximize == 1 { i64::MIN } else { i64::MAX };
-        (*slot).split_watermark = if maximize == 1 { i64::MIN } else { i64::MAX };
+        (*slot).discovery_watermark = if maximize == 1 { i64::MIN } else { i64::MAX };
         (*slot).frontier = 0;
         (*slot).pad = [0; 7];
         (*slot).msg = msg_buf;
@@ -234,7 +236,7 @@ pub fn assertion_bool(kind: AssertKind, must_hit: bool, condition: bool, msg: &s
     let must_hit_u8 = u8::from(must_hit);
 
     // Safety: table_ptr points to ASSERTION_TABLE_MEM_SIZE bytes.
-    let (slot, slot_idx) =
+    let (slot, _slot_idx) =
         unsafe { find_or_alloc_slot(table_ptr, hash, kind, must_hit_u8, 0, msg) };
     if slot.is_null() {
         return;
@@ -260,13 +262,16 @@ pub fn assertion_bool(kind: AssertKind, must_hit: bool, condition: bool, msg: &s
                     let pc = &*(&raw const (*slot).pass_count).cast::<AtomicI64>();
                     pc.fetch_add(1, Ordering::Relaxed);
 
-                    // CAS split_triggered from 0 → 1 on first success
-                    let ft = &*(&raw const (*slot).split_triggered).cast::<AtomicU8>();
+                    // CAS discovered from 0 → 1 on first success
+                    let ft = &*(&raw const (*slot).discovered).cast::<AtomicU8>();
                     if ft
                         .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
                         .is_ok()
                     {
-                        crate::hooks::on_slot_discovery(slot_idx, hash);
+                        crate::hooks::on_discovery(
+                            crate::hooks::DiscoveryKind::SometimesPass,
+                            u64::from(hash),
+                        );
                     }
                 } else {
                     let fc = &*(&raw const (*slot).fail_count).cast::<AtomicI64>();
@@ -292,7 +297,7 @@ pub fn assertion_bool(kind: AssertKind, must_hit: bool, condition: bool, msg: &s
 /// Evaluates a comparison (left `cmp` right), tracks pass/fail counts,
 /// and maintains a watermark of the best observed value of `left`.
 /// For `NumericSometimes`, signals a discovery when the watermark improves past
-/// the last fork watermark.
+/// the last discovery watermark.
 ///
 /// `maximize` determines whether improving means getting larger (true) or smaller (false).
 ///
@@ -314,7 +319,7 @@ pub fn assertion_numeric(
     let maximize_u8 = u8::from(maximize);
 
     // Safety: table_ptr points to ASSERTION_TABLE_MEM_SIZE bytes.
-    let (slot, slot_idx) =
+    let (slot, _slot_idx) =
         unsafe { find_or_alloc_slot(table_ptr, hash, kind, 1, maximize_u8, msg) };
     if slot.is_null() {
         return;
@@ -361,30 +366,33 @@ pub fn assertion_numeric(
             }
         }
 
-        // For NumericSometimes: signal discovery when watermark improves past split_watermark
+        // For NumericSometimes: signal discovery when watermark improves past discovery_watermark
         if kind == AssertKind::NumericSometimes {
-            let fw = &*(&raw const (*slot).split_watermark).cast::<AtomicI64>();
-            let mut fork_current = fw.load(Ordering::Relaxed);
+            let fw = &*(&raw const (*slot).discovery_watermark).cast::<AtomicI64>();
+            let mut discovery_current = fw.load(Ordering::Relaxed);
             loop {
                 let is_better = if maximize {
-                    left > fork_current
+                    left > discovery_current
                 } else {
-                    left < fork_current
+                    left < discovery_current
                 };
                 if !is_better {
                     break;
                 }
                 match fw.compare_exchange_weak(
-                    fork_current,
+                    discovery_current,
                     left,
                     Ordering::Relaxed,
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => {
-                        crate::hooks::on_slot_discovery(slot_idx, hash);
+                        crate::hooks::on_discovery(
+                            crate::hooks::DiscoveryKind::WatermarkImprovement,
+                            u64::from(hash),
+                        );
                         break;
                     }
-                    Err(actual) => fork_current = actual,
+                    Err(actual) => discovery_current = actual,
                 }
             }
         }
@@ -407,7 +415,7 @@ pub fn assertion_sometimes_all(msg: &str, named_bools: &[(&str, bool)]) {
     let hash = msg_hash(msg);
 
     // Safety: table_ptr points to ASSERTION_TABLE_MEM_SIZE bytes.
-    let (slot, slot_idx) =
+    let (slot, _slot_idx) =
         unsafe { find_or_alloc_slot(table_ptr, hash, AssertKind::BooleanSometimesAll, 1, 0, msg) };
     if slot.is_null() {
         return;
@@ -439,7 +447,10 @@ pub fn assertion_sometimes_all(msg: &str, named_bools: &[(&str, bool)]) {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    crate::hooks::on_slot_discovery(slot_idx, hash);
+                    crate::hooks::on_discovery(
+                        crate::hooks::DiscoveryKind::FrontierAdvance,
+                        u64::from(hash),
+                    );
                     break;
                 }
                 Err(actual) => current = actual,
@@ -538,8 +549,8 @@ mod tests {
     #[test]
     fn test_slot_size_stable() {
         // Verify AssertionSlot size for shared memory layout stability.
-        // msg_hash(4) + kind(1) + must_hit(1) + maximize(1) + split_triggered(1) +
-        // pass_count(8) + fail_count(8) + watermark(8) + split_watermark(8) +
+        // msg_hash(4) + kind(1) + must_hit(1) + maximize(1) + discovered(1) +
+        // pass_count(8) + fail_count(8) + watermark(8) + discovery_watermark(8) +
         // frontier(1) + _pad(7) + msg(64) = 112
         assert_eq!(std::mem::size_of::<AssertionSlot>(), 112);
     }

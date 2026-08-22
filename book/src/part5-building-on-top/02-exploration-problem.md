@@ -62,10 +62,10 @@ This generalizes beyond games. In distributed systems testing, the analogues are
 
 The NES examples reveal a deeper truth: exploration is fundamentally a **resource allocation** problem, not just a randomness problem.
 
-We have a finite compute budget. We can spend it on breadth (more root seeds, wider coverage) or depth (more branches from interesting states, deeper sequences). We can spread it evenly across all splitpoints or concentrate it on the most productive ones. We can run one seed with massive energy or many seeds with moderate energy.
+We have a finite compute budget. We can spend it on breadth (more root seeds, wider coverage) or depth (more continuations from interesting states, deeper sequences). We can spread it evenly across all known states or concentrate it on the most promising ones.
 
-Every one of these decisions affects what bugs we find. A breadth-heavy approach misses deep sequential bugs. A depth-heavy approach misses bugs in unexplored regions. Even allocation wastes budget on barren splitpoints. Concentrated allocation might miss productive ones entirely.
+Every one of these decisions affects what bugs we find. A breadth-heavy approach misses deep sequential bugs. A depth-heavy approach misses bugs in unexplored regions. Even allocation wastes budget on doomed states. Concentrated allocation might miss productive ones entirely.
 
-The next four chapters describe how moonpool makes these allocation decisions automatically. We start with the basic mechanism (fork at discovery), add resource limits (energy budgets), make the allocation adaptive (batch-based forking with early termination), and finally show how multiple seeds explore genuinely different regions of the state space.
+The next three chapters describe how moonpool makes these allocation decisions with a deliberately simple policy: productive exploration produces new work, unproductive exploration dies naturally. We start with the frontier controller (the exploration loop itself), then the bounded worker pool (the physical execution model), and finally the exemplar store and continuation scheduling that keep pushing the frontier deeper.
 
-The goal is to find bugs that random testing cannot reach, using the same compute budget. And as we will see, the results are dramatic.
+The goal is to find bugs that random testing cannot reach, using the same compute budget — while keeping the number of live processes small and fixed.

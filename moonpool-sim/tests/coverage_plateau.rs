@@ -87,11 +87,11 @@ fn test_plateau_with_exploration() {
     let report = run_simulation(
         SimulationBuilder::new()
             .enable_exploration(ExplorationConfig {
-                max_depth: 1,
-                timelines_per_split: 2,
-                global_energy: 20,
-                adaptive: None,
-                parallelism: None,
+                workers: 0,
+                max_runs_per_seed: 20,
+                branching_factor: 2,
+                max_frontier: 64,
+                max_recipe_len: 8,
             })
             .until_coverage_stable(3, 100)
             .workload(ThreeAlwaysHitWorkload),

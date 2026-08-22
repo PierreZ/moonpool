@@ -11,10 +11,9 @@
 
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::cell::Cell;
-use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::buckets::{EACH_BUCKET_MEM_SIZE, EachBucket, MAX_EACH_BUCKETS};
-use crate::slots::{ASSERTION_TABLE_MEM_SIZE, AssertionSlot, MAX_ASSERTION_SLOTS};
+use crate::buckets::EACH_BUCKET_MEM_SIZE;
+use crate::slots::ASSERTION_TABLE_MEM_SIZE;
 
 /// Alignment for both regions. `AssertionSlot`/`EachBucket` contain `u64`/`i64`
 /// fields and the layout places the slot array at offset 8, so 8-byte alignment
@@ -129,55 +128,10 @@ pub fn reset() {
     }
 }
 
-/// Reset only the per-seed split triggers, preserving pass/fail counts and
-/// watermarks/frontiers across seeds (coverage-preserving multi-seed reset).
-///
-/// `pass_count`/`fail_count` accumulate across seeds so contract validation never
-/// reports a false "was never reached" when a seed doesn't reach a guarded
-/// assertion. Forking uses `split_triggered`, not counts. No-op if uninitialized.
-pub fn prepare_next_seed_reset() {
-    let table = assertion_table_ptr();
-    if !table.is_null() {
-        // Safety: region is the assertion table laid out as
-        // `[count: u32, _pad, slots: [AssertionSlot; MAX_ASSERTION_SLOTS]]`.
-        unsafe {
-            let count_ptr = table.cast::<()>().cast::<AtomicU32>();
-            // MAX_ASSERTION_SLOTS is a small const (128), so the cast is lossless.
-            let max_slots = u32::try_from(MAX_ASSERTION_SLOTS).unwrap_or(u32::MAX);
-            let count = (*count_ptr).load(Ordering::Relaxed).min(max_slots) as usize;
-            let base = table.add(8).cast::<()>().cast::<AssertionSlot>();
-            for i in 0..count {
-                let slot = &mut *base.add(i);
-                // Skip tombstones (msg_hash == 0) left by the duplicate-slot race fix.
-                if slot.msg_hash == 0 {
-                    continue;
-                }
-                slot.split_triggered = 0;
-            }
-        }
-    }
-
-    let buckets = each_bucket_ptr();
-    if !buckets.is_null() {
-        // Safety: region is the each-bucket table laid out as
-        // `[count: u32, _pad, buckets: [EachBucket; MAX_EACH_BUCKETS]]`.
-        unsafe {
-            let count_ptr = buckets.cast::<()>().cast::<AtomicU32>();
-            // MAX_EACH_BUCKETS is a small const (256), so the cast is lossless.
-            let max_buckets = u32::try_from(MAX_EACH_BUCKETS).unwrap_or(u32::MAX);
-            let count = (*count_ptr).load(Ordering::Relaxed).min(max_buckets) as usize;
-            let base = buckets.add(8).cast::<()>().cast::<EachBucket>();
-            for i in 0..count {
-                (*base.add(i)).split_triggered = 0;
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slots::{AssertCmp, AssertKind, assertion_bool, assertion_read_all};
+    use crate::slots::{AssertKind, assertion_bool, assertion_read_all};
 
     #[test]
     fn heap_init_enables_accounting_and_reset() {
@@ -199,29 +153,5 @@ mod tests {
 
         clear();
         assert!(assertion_table_ptr().is_null());
-    }
-
-    #[test]
-    fn prepare_next_seed_preserves_counts_resets_triggers() {
-        init();
-        crate::slots::assertion_numeric(
-            AssertKind::NumericSometimes,
-            AssertCmp::Gt,
-            true,
-            5,
-            0,
-            "n",
-        );
-        assertion_bool(AssertKind::Sometimes, true, true, "s");
-        let before = assertion_read_all();
-        let pass_total: u64 = before.iter().map(|s| s.pass_count).sum();
-        assert!(pass_total >= 2);
-
-        prepare_next_seed_reset();
-        let after = assertion_read_all();
-        // Counts preserved across the seed boundary.
-        let pass_after: u64 = after.iter().map(|s| s.pass_count).sum();
-        assert_eq!(pass_total, pass_after);
-        clear();
     }
 }

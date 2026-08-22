@@ -85,8 +85,9 @@ moonpool-hyper/              - hyper 1.x integration: runtime adapters (HyperExe
                                over `P: Providers`; features `client`/`server` (both default on).
                                Facade exposes it as `moonpool::hyper` behind feature `hyper`.
 moonpool-transport-derive/   - Proc-macro: #[service]
-moonpool-explorer/           - Fork-based multiverse exploration (libc/fork/mmap; never wasm).
-                               Depends on moonpool-assertions; optional dep of moonpool-sim.
+moonpool-explorer/           - Frontier exploration controller (libc/fork/mmap; never wasm).
+                               Recipes + bounded worker pool; depends on moonpool-assertions;
+                               optional dep of moonpool-sim.
 xtask/                       - Cargo xtask automation (simulation runner)
 ```
 

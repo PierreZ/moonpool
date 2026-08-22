@@ -752,6 +752,57 @@ pub unsafe fn sancov_pool_slot(pool_base: *mut u8, idx: usize) -> *mut u8 {
     unsafe { pool_base.add(idx * len) }
 }
 
+/// Allocate the per-worker sancov pool. No-op when sancov is unavailable.
+pub(crate) fn init_sancov_pool(slot_count: usize) {
+    let _ = get_or_init_sancov_pool(slot_count);
+}
+
+/// Zero one pool slot before handing it to a worker.
+///
+/// No-op when sancov is unavailable or the pool was not allocated.
+pub(crate) fn clear_pool_slot(idx: usize) {
+    let pool = SANCOV_POOL.with(std::cell::Cell::get);
+    let slots = SANCOV_POOL_SLOTS.with(std::cell::Cell::get);
+    if pool.is_null() || idx >= slots {
+        return;
+    }
+    let len = COUNTERS_LEN.load(Ordering::Relaxed);
+    // Safety: pool covers slots * len bytes and idx < slots.
+    unsafe {
+        std::ptr::write_bytes(sancov_pool_slot(pool, idx), 0, len);
+    }
+}
+
+/// In a worker: point the transfer buffer at this worker's pool slot, so
+/// `copy_counters_to_shared` lands in memory the controller can read back.
+///
+/// No-op when sancov is unavailable or the pool was not allocated.
+pub(crate) fn redirect_transfer_to_pool_slot(idx: usize) {
+    let pool = SANCOV_POOL.with(std::cell::Cell::get);
+    let slots = SANCOV_POOL_SLOTS.with(std::cell::Cell::get);
+    if pool.is_null() || idx >= slots {
+        return;
+    }
+    // Safety: pool covers slots * len bytes and idx < slots.
+    let slot_ptr = unsafe { sancov_pool_slot(pool, idx) };
+    SANCOV_TRANSFER.with(|c| c.set(slot_ptr));
+}
+
+/// Classify one pool slot's counters and merge them into the history map.
+///
+/// Returns `true` when the slot contributed new coverage. `false` when
+/// sancov is unavailable or the pool was not allocated.
+pub(crate) fn has_new_pool_coverage(idx: usize) -> bool {
+    let pool = SANCOV_POOL.with(std::cell::Cell::get);
+    let slots = SANCOV_POOL_SLOTS.with(std::cell::Cell::get);
+    if pool.is_null() || idx >= slots {
+        return false;
+    }
+    // Safety: pool covers slots * len bytes and idx < slots.
+    let slot_ptr = unsafe { sancov_pool_slot(pool, idx) };
+    has_new_sancov_coverage_from(slot_ptr)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

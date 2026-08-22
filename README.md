@@ -14,13 +14,13 @@ moonpool                          Facade crate (features: sim / tokio / transpor
 │   └── moonpool-transport-derive #[service] proc-macro
 ├── moonpool-sim                  Simulation engine, chaos testing, assertion wiring
 │   ├── moonpool-assertions       Assertion accounting (pure std, zero deps, wasm-able)
-│   └── moonpool-explorer         Fork-based multiverse exploration (optional, libc)
+│   └── moonpool-explorer         Frontier-based exploration controller (optional, libc)
 ├── moonpool-hyper                hyper 1.x: runtime adapters, h2 channel, serve helper (opt-in)
 └── moonpool-core                 Provider traits and core types
 ```
 
 The simulation runtime compiles to `wasm32-unknown-unknown` (build `moonpool-sim`
-with `--no-default-features`); the fork-based explorer runs on Linux and macOS.
+with `--no-default-features`); the explorer runs on Linux and macOS.
 
 ## Which Crate to Use
 
@@ -32,14 +32,14 @@ with `--no-default-features`); the fork-based explorer runs on Linux and macOS.
 | Transport without simulation | `moonpool-transport` |
 | An HTTP/2 stack (tonic, axum, hyper) on the providers | `moonpool` with feature `hyper`, or `moonpool-hyper` |
 | Assertion accounting only | `moonpool-assertions` |
-| Fork-based exploration internals | `moonpool-explorer` |
+| Exploration controller internals | `moonpool-explorer` |
 | Proc-macro internals | `moonpool-transport-derive` |
 
 ## Using in Production
 
 The code you test is the code you ship — write it once against the provider
 traits, then deploy on the real `TokioProviders` backend. Keep the simulation
-runtime and the fork-based explorer out of your release binary with a lean
+runtime and the explorer out of your release binary with a lean
 dependency stanza:
 
 ```toml
@@ -59,7 +59,7 @@ its own `#[test]`, and the "Using Providers in Production" chapter of the book.
 - **Deterministic simulation** — Same seed = identical execution. Logical time skips idle periods. Years of uptime simulated in seconds.
 - **Chaos testing** — Network delays, disconnects, partitions, bit flips, partial writes, storage corruption. `buggify!` fires with 25% probability at fault injection points.
 - **Assertion suite** — 15 Antithesis-style assertion macros (`assert_always!`, `assert_sometimes!`, numeric comparisons, compound assertions). Multi-seed testing runs until all `sometimes` assertions fire.
-- **Fork-based exploration** — When assertions discover new behavior, `fork()` explores alternate timelines with different RNG seeds. Adaptive energy budgets and coverage bitmaps guide exploration.
+- **Frontier exploration** — When assertions discover new behavior, the explorer remembers the replayable recipe and schedules bounded continuations from it. A fixed pool of forked workers executes the timelines; the logical exploration tree can be huge while live processes stay at `1 + workers`.
 - **`#[service]` macro** — Auto-generates RPC server/client boilerplate from a single trait definition.
 
 ## Quick Start

@@ -21,7 +21,7 @@ assert_sometimes_all!("cluster_fully_operational", [
 
 The assertion tracks a **frontier**: the maximum number of sub-goals that have been simultaneously true. It starts at zero. The first time any sub-goal is true, the frontier advances to 1. When two are true at once, it advances to 2. When all four are true simultaneously, the frontier reaches 4 and the assertion is fully satisfied.
 
-Each time the frontier advances, the explorer forks. This creates a progression: the explorer first finds states where one sub-goal is met, then branches from there to find states where two are met, and so on. The exploration naturally follows the path of increasing difficulty.
+Each frontier advance is a discovery the explorer schedules continuations from. This creates a progression: the explorer first finds states where one sub-goal is met, then continues from there to find states where two are met, and so on. The exploration naturally follows the path of increasing difficulty.
 
 This is powerful for multi-step objectives. Consider a distributed transaction system. The full operation requires: prepare all participants, get all votes, commit, and acknowledge to the client. As a sometimes-all assertion:
 
@@ -55,7 +55,7 @@ assert_sometimes_each!("state_coverage", [
 ]);
 ```
 
-Each unique combination of key values gets its own bucket. The first time a new bucket is discovered, the explorer forks. This equalizes exploration across all discovered values, preventing the simulation from over-concentrating on values it finds easily while neglecting harder-to-reach ones.
+Each unique combination of key values gets its own bucket. Discovering a new bucket registers a replayable exemplar the explorer can continue from. This equalizes exploration across all discovered values, preventing the simulation from over-concentrating on values it finds easily while neglecting harder-to-reach ones.
 
 The Antithesis team demonstrated this dramatically with The Legend of Zelda. They used `SOMETIMES_EACH` with screen coordinates to ensure the explorer visited all 128 overworld screens and 230 dungeon rooms. Without per-value bucketing, the explorer would revisit the starting area thousands of times while leaving distant rooms unexplored. With it, every room gets roughly equal attention.
 
@@ -84,7 +84,7 @@ Each bucket remembers the best quality values observed. When a bucket is revisit
 
 ## State Explosion and Practical Limits
 
-Compound assertions can create a lot of buckets. If you use two identity keys with 100 distinct values each, that is 10,000 potential buckets. Each bucket consumes exploration energy. The explorer bounds energy per assertion to prevent any single assertion from monopolizing the search, but individual assertion effectiveness degrades when buckets proliferate.
+Compound assertions can create a lot of buckets. If you use two identity keys with 100 distinct values each, that is 10,000 potential buckets. Each new bucket is a discovery the explorer may anchor continuations to, and the bucket table itself is bounded (256 slots), so individual assertion effectiveness degrades when buckets proliferate.
 
 Keep identity keys coarse enough to be useful. If you are tracking screen positions in a 256x256 grid, bucket them into 16x16 regions rather than tracking exact pixels. The goal is coverage of **meaningful** distinct states, not exhaustive enumeration of every possible value.
 

@@ -871,8 +871,8 @@ impl WorkloadOrchestrator {
         })
     }
 
-    /// Run sections 5 (abort) + 6 (settle) + 7 (check) and the optional
-    /// explorer exit. Returns the final orchestration output.
+    /// Run sections 5 (abort) + 6 (settle) + 7 (check). Returns the final
+    /// orchestration output.
     async fn finalize_orchestration(
         inputs: FinalizeOrchestration<'_, '_>,
     ) -> Result<OrchestrateOutput, (Vec<u64>, usize)> {
@@ -929,27 +929,12 @@ impl WorkloadOrchestrator {
         .map_err(|()| (vec![seed], 1usize))?;
         let metrics = sim.extract_metrics();
 
-        Self::maybe_exit_child(&results);
-
         Ok(OrchestrateOutput {
             workloads: final_workloads,
             fault_injectors: returned_injectors,
             results,
             metrics,
         })
-    }
-
-    /// If running as a forked explorer child, exit with status 0 on success
-    /// (all `Ok` results + no `assert_always!` violations) and 42 otherwise.
-    /// Returns to the caller when not a forked child.
-    fn maybe_exit_child(results: &[SimulationResult<()>]) {
-        if !crate::chaos::exploration_glue::explorer_is_child() {
-            return;
-        }
-        let success = results.iter().all(std::result::Result::is_ok)
-            && !crate::chaos::has_always_violations();
-        let code = if success { 0 } else { 42 };
-        crate::chaos::exploration_glue::exit_child(code);
     }
 
     /// Run the entire check phase: build per-workload contexts, spawn

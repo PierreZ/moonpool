@@ -6,6 +6,10 @@
 
 use std::fmt;
 
+/// Replay breakpoints identifying one timeline: `(rng_call_count, seed)`
+/// segments applied in order from the root seed. Empty = the root timeline.
+pub type Recipe = Vec<(u64, u64)>;
+
 /// Error parsing a timeline string.
 #[derive(Debug)]
 pub struct ParseTimelineError {

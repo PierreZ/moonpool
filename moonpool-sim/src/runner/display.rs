@@ -51,15 +51,6 @@ fn fmt_num(n: u64) -> String {
     result.chars().rev().collect()
 }
 
-/// Format an `i64` with comma separators.
-fn fmt_i64(n: i64) -> String {
-    if n < 0 {
-        format!("-{}", fmt_num(n.unsigned_abs()))
-    } else {
-        fmt_num(n.unsigned_abs())
-    }
-}
-
 /// Convert a non-negative finite `f64` to a saturated `u64`.
 fn f64_to_u64_saturating(v: f64) -> u64 {
     const TWO_POW_64: f64 = 18_446_744_073_709_551_616.0;
@@ -405,27 +396,20 @@ fn write_exploration(w: &mut impl Write, exp: &ExplorationReport, color: bool) {
     );
     let _ = writeln!(
         w,
-        "  Fork Points  {:<16} Energy       {} remaining",
-        fmt_num(exp.fork_points),
-        fmt_i64(exp.energy_remaining),
+        "  Expansions   {:<16} Discoveries  {}",
+        fmt_num(exp.expansions),
+        fmt_num(exp.discoveries),
     );
-
-    if exp.realloc_pool_remaining != 0 {
-        let _ = writeln!(w, "  Realloc Pool {}", fmt_i64(exp.realloc_pool_remaining));
-    }
-
-    // Progress bars
-    let _ = writeln!(w);
-    if exp.coverage_total > 0 {
-        let frac = f64::from(exp.coverage_bits) / f64::from(exp.coverage_total);
+    if exp.max_active_workers > 0 {
         let _ = writeln!(
             w,
-            "  Exploration  {}   {} / {} bits",
-            progress_bar(frac, color),
-            fmt_num(u64::from(exp.coverage_bits)),
-            fmt_num(u64::from(exp.coverage_total)),
+            "  Peak Workers {}",
+            fmt_num(u64::try_from(exp.max_active_workers).unwrap_or(u64::MAX)),
         );
     }
+
+    // Progress bar
+    let _ = writeln!(w);
     if exp.sancov_edges_total > 0 {
         let covered_u32 = u32::try_from(exp.sancov_edges_covered).unwrap_or(u32::MAX);
         let total_u32 = u32::try_from(exp.sancov_edges_total).unwrap_or(u32::MAX);
