@@ -365,7 +365,7 @@ impl Explorer {
                 let failed = run_one(&job);
                 let events = journal::take();
                 let slots = self.slots.as_ref().expect("worker mode has slots");
-                slots.write_slot(slot, &events, journal::overflow_count());
+                slots.write_slot(slot, &events);
                 crate::sancov::copy_counters_to_shared();
                 // Safety: _exit is always safe; skips atexit/stdio flushing,
                 // which is what a forked worker wants.

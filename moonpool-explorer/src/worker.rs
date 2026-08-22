@@ -19,7 +19,7 @@
 //! Each worker owns one slot in a `MAP_SHARED` region:
 //!
 //! ```text
-//! [len: u32][overflow: u32][entries: [RawEvent; MAX_JOURNAL_ENTRIES]]
+//! [len: u32][padding: u32][entries: [RawEvent; MAX_JOURNAL_ENTRIES]]
 //! RawEvent = { call_count: u64, state_id: u64, kind: u64 }
 //! ```
 //!
@@ -111,17 +111,14 @@ impl SlotPool {
     }
 
     /// Serialize the given journal into a slot (called in the worker).
-    pub fn write_slot(&self, idx: usize, journal: &[DiscoveryEvent], overflow: u64) {
+    pub fn write_slot(&self, idx: usize, journal: &[DiscoveryEvent]) {
         let ptr = self.slot_ptr(idx);
         let len = journal.len().min(MAX_JOURNAL_ENTRIES);
         // Safety: the slot is SLOT_SIZE bytes: an 8-byte header followed by
         // MAX_JOURNAL_ENTRIES RawEvents; len is capped to that entry count.
+        // Write the entries before publishing len so a worker interrupted
+        // during serialization still leaves the controller an empty slot.
         unsafe {
-            *ptr.cast::<()>().cast::<u32>() =
-                u32::try_from(len).expect("len capped at MAX_JOURNAL_ENTRIES");
-            *ptr.add(4).cast::<()>().cast::<u32>() =
-                u32::try_from(overflow.min(u64::from(u32::MAX)))
-                    .expect("overflow clamped to u32::MAX");
             let entries = ptr.add(8).cast::<()>().cast::<RawEvent>();
             for (i, event) in journal.iter().take(len).enumerate() {
                 entries.add(i).write(RawEvent {
@@ -130,6 +127,8 @@ impl SlotPool {
                     kind: event.kind as u64,
                 });
             }
+            *ptr.cast::<()>().cast::<u32>() =
+                u32::try_from(len).expect("len capped at MAX_JOURNAL_ENTRIES");
         }
     }
 
@@ -221,7 +220,7 @@ mod tests {
         ];
         pool.clear_slot(0);
         pool.clear_slot(1);
-        pool.write_slot(1, &journal, 0);
+        pool.write_slot(1, &journal);
 
         assert!(pool.read_slot(0).is_empty());
         assert_eq!(pool.read_slot(1), journal);

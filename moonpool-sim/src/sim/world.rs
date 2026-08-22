@@ -960,7 +960,9 @@ impl SimWorld {
         inner
             .network
             .pending_connections
-            .insert(addr.to_string(), connection_id);
+            .entry(addr.to_string())
+            .or_default()
+            .push_back(connection_id);
 
         // Wake any accept() calls waiting for this connection
         let mut hasher = DefaultHasher::new();
@@ -978,7 +980,12 @@ impl SimWorld {
             .inner
             .write()
             .expect("RwLock poisoned: prior task panicked");
-        inner.network.pending_connections.remove(addr)
+        let queue = inner.network.pending_connections.get_mut(addr)?;
+        let connection_id = queue.pop_front();
+        if queue.is_empty() {
+            inner.network.pending_connections.remove(addr);
+        }
+        connection_id
     }
 
     /// Get the peer address for a connection.

@@ -24,9 +24,9 @@ use moonpool_assertions::DiscoveryKind;
 /// Maximum number of discovery events retained per run.
 ///
 /// A run that makes more discoveries than this keeps the first
-/// `MAX_JOURNAL_ENTRIES` and counts the rest as overflow. One run is expanded
-/// at most once regardless of how many discoveries it made, so overflow only
-/// loses exemplar anchors, never exploration momentum.
+/// `MAX_JOURNAL_ENTRIES`. One run is expanded at most once regardless of how
+/// many discoveries it made, so truncation only loses exemplar anchors, never
+/// exploration momentum.
 pub const MAX_JOURNAL_ENTRIES: usize = 256;
 
 /// One globally-new discovery observed during a run.
@@ -60,9 +60,6 @@ thread_local! {
     /// Discovery events recorded during the current run.
     static JOURNAL: RefCell<Vec<DiscoveryEvent>> = const { RefCell::new(Vec::new()) };
 
-    /// Number of events dropped because the journal was full.
-    static OVERFLOW: Cell<u64> = const { Cell::new(0) };
-
     /// Hook returning the simulation RNG call count (set by the runner).
     static RNG_COUNT_HOOK: Cell<fn() -> u64> = const { Cell::new(|| 0) };
 }
@@ -87,8 +84,6 @@ pub(crate) fn install_hooks() {
                     kind,
                     state_id,
                 });
-            } else {
-                OVERFLOW.with(|o| o.set(o.get() + 1));
             }
         });
     }
@@ -98,17 +93,11 @@ pub(crate) fn install_hooks() {
 /// Clear the journal before a run.
 pub(crate) fn clear() {
     JOURNAL.with(|j| j.borrow_mut().clear());
-    OVERFLOW.with(|o| o.set(0));
 }
 
 /// Take the recorded events, leaving the journal empty.
 pub(crate) fn take() -> Vec<DiscoveryEvent> {
     JOURNAL.with(|j| std::mem::take(&mut *j.borrow_mut()))
-}
-
-/// Number of events dropped since the journal was last cleared.
-pub(crate) fn overflow_count() -> u64 {
-    OVERFLOW.with(Cell::get)
 }
 
 #[cfg(test)]

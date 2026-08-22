@@ -264,6 +264,10 @@ impl AsyncRead for SimTcpStream {
             "SimTcpStream::poll_read called on connection_id={}",
             self.connection_id.0
         );
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
         let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Random close chaos injection (FDB rollRandomClose pattern)
@@ -273,6 +277,15 @@ impl AsyncRead for SimTcpStream {
             // 30% explicit exception - throw connection_failed immediately
             return Poll::Ready(Err(random_connection_failure_error()));
             // 70% silent case: connection already marked as closed, will return EOF below
+        }
+
+        // `is_recv_closed` includes fully closed connections. Preserve the
+        // stronger RST signal before treating an asymmetrically closed receive
+        // side as EOF.
+        if sim.is_connection_closed(self.connection_id)
+            && sim.close_reason(self.connection_id) == CloseReason::Aborted
+        {
+            return Poll::Ready(Err(connection_aborted_error()));
         }
 
         // Check if receive side is closed (asymmetric closure)
@@ -312,9 +325,8 @@ impl AsyncRead for SimTcpStream {
 
         // Try to read from connection's receive buffer first
         // We should be able to read buffered data even if connection is currently cut
-        let mut temp_buf = vec![0u8; buf.len()];
         let bytes_read = sim
-            .read_from_connection(self.connection_id, &mut temp_buf)
+            .read_from_connection(self.connection_id, buf)
             .map_err(|e| io::Error::other(format!("read error: {e}")))?;
 
         tracing::trace!(
@@ -324,13 +336,12 @@ impl AsyncRead for SimTcpStream {
         );
 
         if bytes_read > 0 {
-            let data_preview = String::from_utf8_lossy(&temp_buf[..std::cmp::min(bytes_read, 20)]);
+            let data_preview = String::from_utf8_lossy(&buf[..bytes_read.min(20)]);
             tracing::trace!(
                 "SimTcpStream::poll_read connection_id={} returning data: '{}'",
                 self.connection_id.0,
                 data_preview
             );
-            buf[..bytes_read].copy_from_slice(&temp_buf[..bytes_read]);
             return Poll::Ready(Ok(bytes_read));
         }
         Self::poll_read_no_data(&sim, self.connection_id, cx, buf)
@@ -348,26 +359,8 @@ impl SimTcpStream {
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
         // No data available - check if connection has received FIN, is closed, or cut.
-        if sim.is_remote_fin_received(connection_id) {
-            tracing::info!(
-                "SimTcpStream::poll_read connection_id={} remote FIN received, returning EOF",
-                connection_id.0
-            );
-            return Poll::Ready(Ok(0));
-        }
-        if sim.is_connection_closed(connection_id) {
-            if sim.close_reason(connection_id) == CloseReason::Aborted {
-                tracing::info!(
-                    "SimTcpStream::poll_read connection_id={} was aborted (RST)",
-                    connection_id.0
-                );
-                return Poll::Ready(Err(connection_aborted_error()));
-            }
-            tracing::info!(
-                "SimTcpStream::poll_read connection_id={} closed gracefully (FIN)",
-                connection_id.0
-            );
-            return Poll::Ready(Ok(0));
+        if let Some(result) = Self::read_terminal_result(sim, connection_id) {
+            return Poll::Ready(result);
         }
         if sim.is_connection_cut(connection_id) {
             tracing::debug!(
@@ -385,27 +378,48 @@ impl SimTcpStream {
         );
         sim.register_read_waker(connection_id, cx.waker().clone());
 
-        let mut temp_buf_recheck = vec![0u8; buf.len()];
-        let bytes_read_recheck = sim
-            .read_from_connection(connection_id, &mut temp_buf_recheck)
+        let bytes_read = sim
+            .read_from_connection(connection_id, buf)
             .map_err(|e| io::Error::other(format!("recheck read error: {e}")))?;
 
-        if bytes_read_recheck > 0 {
-            buf[..bytes_read_recheck].copy_from_slice(&temp_buf_recheck[..bytes_read_recheck]);
-            return Poll::Ready(Ok(bytes_read_recheck));
+        if bytes_read > 0 {
+            return Poll::Ready(Ok(bytes_read));
         }
 
         // Final check after waker registration.
-        if sim.is_remote_fin_received(connection_id) {
-            return Poll::Ready(Ok(0));
-        }
-        if sim.is_connection_closed(connection_id) {
-            if sim.close_reason(connection_id) == CloseReason::Aborted {
-                return Poll::Ready(Err(connection_aborted_error()));
-            }
-            return Poll::Ready(Ok(0));
+        if let Some(result) = Self::read_terminal_result(sim, connection_id) {
+            return Poll::Ready(result);
         }
         Poll::Pending
+    }
+
+    /// Return the result of a terminal receive state, if the connection reached one.
+    fn read_terminal_result(
+        sim: &crate::sim::SimWorld,
+        connection_id: ConnectionId,
+    ) -> Option<io::Result<usize>> {
+        if sim.is_remote_fin_received(connection_id) {
+            tracing::info!(
+                "SimTcpStream::poll_read connection_id={} remote FIN received, returning EOF",
+                connection_id.0
+            );
+            return Some(Ok(0));
+        }
+        if !sim.is_connection_closed(connection_id) {
+            return None;
+        }
+        if sim.close_reason(connection_id) == CloseReason::Aborted {
+            tracing::info!(
+                "SimTcpStream::poll_read connection_id={} was aborted (RST)",
+                connection_id.0
+            );
+            return Some(Err(connection_aborted_error()));
+        }
+        tracing::info!(
+            "SimTcpStream::poll_read connection_id={} closed gracefully (FIN)",
+            connection_id.0
+        );
+        Some(Ok(0))
     }
 }
 
@@ -422,14 +436,17 @@ impl AsyncWrite for SimTcpStream {
             return poll;
         }
 
-        // Check for send buffer space (backpressure)
-        let available_buffer = sim.available_send_buffer(self.connection_id);
-        if available_buffer < buf.len() {
-            // Not enough buffer space, register waker and return Pending
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
+        // Match write(2): accept a short write when some capacity remains and
+        // park only when the send buffer has no room at all.
+        let available = sim.available_send_buffer(self.connection_id);
+        if available == 0 {
             tracing::debug!(
-                "SimTcpStream::poll_write connection_id={} buffer full (available={}, needed={}), waiting",
+                "SimTcpStream::poll_write connection_id={} buffer full (needed={}), waiting",
                 self.connection_id.0,
-                available_buffer,
                 buf.len()
             );
             sim.register_send_buffer_waker(self.connection_id, cx.waker().clone());
@@ -440,19 +457,21 @@ impl AsyncWrite for SimTcpStream {
             return poll;
         }
 
-        // Use buffered send to maintain TCP ordering
-        let data_preview = String::from_utf8_lossy(&buf[..std::cmp::min(buf.len(), 20)]);
+        // Use buffered send to maintain TCP ordering.
+        let accepted = buf.len().min(available);
+        let accepted_data = &buf[..accepted];
+        let data_preview = String::from_utf8_lossy(&accepted_data[..accepted.min(20)]);
         tracing::trace!(
             "SimTcpStream::poll_write buffering {} bytes: '{}' for ordered delivery",
-            buf.len(),
+            accepted,
             data_preview
         );
 
         // Buffer the data for ordered processing instead of direct event scheduling
-        sim.buffer_send(self.connection_id, buf.to_vec())
+        sim.buffer_send(self.connection_id, accepted_data.to_vec())
             .map_err(|e| io::Error::other(format!("buffer send error: {e}")))?;
 
-        Poll::Ready(Ok(buf.len()))
+        Poll::Ready(Ok(accepted))
     }
 
     #[instrument(skip(self, cx, bufs))]

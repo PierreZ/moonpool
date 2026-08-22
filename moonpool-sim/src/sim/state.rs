@@ -254,8 +254,8 @@ pub struct NetworkState {
     pub connections: BTreeMap<ConnectionId, ConnectionState>,
     /// Active listener IDs.
     pub listeners: BTreeSet<ListenerId>,
-    /// Connections pending acceptance, indexed by address.
-    pub pending_connections: BTreeMap<String, ConnectionId>,
+    /// Connections pending acceptance in FIFO order, indexed by listener address.
+    pub pending_connections: BTreeMap<String, VecDeque<ConnectionId>>,
 
     /// Write clog state (temporary write blocking).
     pub connection_clogs: BTreeMap<ConnectionId, ClogState>,

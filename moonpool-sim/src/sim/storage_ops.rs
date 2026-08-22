@@ -46,6 +46,14 @@ fn take_pending_op(
     Some((op_seq, op))
 }
 
+/// Remove and wake the task waiting for a completed storage operation.
+fn wake_storage_op(inner: &mut SimInner, file_id: FileId, op_seq: u64, kind: &str) {
+    if let Some(waker) = inner.wakers.storage_ops.remove(&(file_id, op_seq)) {
+        tracing::trace!("Waking {kind} waker for file {file_id:?}, op {op_seq}");
+        waker.wake();
+    }
+}
+
 /// Advance an owning process's disk-degradation episode state machine and return
 /// the episode (if any) active for the operation now being scheduled.
 ///
@@ -198,10 +206,7 @@ fn handle_read_complete(inner: &mut SimInner, file_id: FileId) {
     }
 
     // Wake the waker for this operation
-    if let Some(waker) = inner.wakers.storage_ops.remove(&(file_id, op_seq)) {
-        tracing::trace!("Waking read waker for file {:?}, op {}", file_id, op_seq);
-        waker.wake();
-    }
+    wake_storage_op(inner, file_id, op_seq, "read");
 }
 
 /// Handle write operation completion.
@@ -300,10 +305,7 @@ fn handle_write_complete(inner: &mut SimInner, file_id: FileId) {
     }
 
     // Wake the waker for this operation
-    if let Some(waker) = inner.wakers.storage_ops.remove(&(file_id, op_seq)) {
-        tracing::trace!("Waking write waker for file {:?}, op {}", file_id, op_seq);
-        waker.wake();
-    }
+    wake_storage_op(inner, file_id, op_seq, "write");
 }
 
 /// Handle sync operation completion.
@@ -343,10 +345,7 @@ fn handle_sync_complete(inner: &mut SimInner, file_id: FileId) {
     }
 
     // Wake the waker for this operation
-    if let Some(waker) = inner.wakers.storage_ops.remove(&(file_id, op_seq)) {
-        tracing::trace!("Waking sync waker for file {:?}, op {}", file_id, op_seq);
-        waker.wake();
-    }
+    wake_storage_op(inner, file_id, op_seq, "sync");
 }
 
 /// Handle open operation completion.
@@ -359,10 +358,7 @@ fn handle_open_complete(inner: &mut SimInner, file_id: FileId) {
     };
 
     // Wake the waker for this operation
-    if let Some(waker) = inner.wakers.storage_ops.remove(&(file_id, op_seq)) {
-        tracing::trace!("Waking open waker for file {:?}, op {}", file_id, op_seq);
-        waker.wake();
-    }
+    wake_storage_op(inner, file_id, op_seq, "open");
 }
 
 /// Handle `set_len` operation completion.
@@ -379,15 +375,7 @@ fn handle_set_len_complete(inner: &mut SimInner, file_id: FileId, new_len: u64) 
     }
 
     // Wake the waker for this operation
-    if let Some(waker) = inner.wakers.storage_ops.remove(&(file_id, op_seq)) {
-        tracing::trace!(
-            "Waking set_len waker for file {:?}, op {}, new_len={}",
-            file_id,
-            op_seq,
-            new_len
-        );
-        waker.wake();
-    }
+    wake_storage_op(inner, file_id, op_seq, "set_len");
 }
 
 // =============================================================================

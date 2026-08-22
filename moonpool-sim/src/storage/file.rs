@@ -6,7 +6,6 @@ use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use moonpool_core::StorageFile;
 use std::io::{self, SeekFrom};
 use std::pin::Pin;
-use std::sync::Mutex;
 use std::task::{Context, Poll};
 
 use super::futures::{SetLenFuture, SyncFuture};
@@ -19,7 +18,7 @@ use super::sim_shutdown_error;
 ///
 /// ## State Tracking
 ///
-/// The file tracks pending operations under a `Mutex`:
+/// The file tracks pending operations directly on the handle:
 /// - `pending_read`: Active read operation (`op_seq`, offset, len)
 /// - `pending_write`: Active write operation (`op_seq`, `bytes_written`)
 ///
@@ -34,9 +33,9 @@ pub struct SimStorageFile {
     sim: WeakSimWorld,
     file_id: FileId,
     /// Pending read operation: (`op_seq`, offset, len)
-    pending_read: Mutex<Option<(u64, u64, usize)>>,
+    pending_read: Option<(u64, u64, usize)>,
     /// Pending write operation: (`op_seq`, `bytes_written`)
-    pending_write: Mutex<Option<(u64, usize)>>,
+    pending_write: Option<(u64, usize)>,
 }
 
 impl SimStorageFile {
@@ -45,8 +44,8 @@ impl SimStorageFile {
         Self {
             sim,
             file_id,
-            pending_read: Mutex::new(None),
-            pending_write: Mutex::new(None),
+            pending_read: None,
+            pending_write: None,
         }
     }
 }
@@ -78,21 +77,15 @@ impl AsyncRead for SimStorageFile {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
+        let this = self.get_mut();
+        let sim = this.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Check for pending read operation
-        let pending = *self
-            .pending_read
-            .lock()
-            .expect("Mutex poisoned: prior task panicked");
-        if let Some((op_seq, offset, len)) = pending {
+        if let Some((op_seq, offset, len)) = this.pending_read {
             // Check if operation is complete
-            if sim.is_storage_op_complete(self.file_id, op_seq) {
+            if sim.is_storage_op_complete(this.file_id, op_seq) {
                 // Clear pending state
-                *self
-                    .pending_read
-                    .lock()
-                    .expect("Mutex poisoned: prior task panicked") = None;
+                this.pending_read = None;
 
                 // Calculate how many bytes to actually read
                 let bytes_to_read = buf.len().min(len);
@@ -102,27 +95,27 @@ impl AsyncRead for SimStorageFile {
 
                 // Read from file at the stored offset
                 let bytes_read =
-                    sim.read_from_file(self.file_id, offset, &mut buf[..bytes_to_read])?;
+                    sim.read_from_file(this.file_id, offset, &mut buf[..bytes_to_read])?;
 
                 // Update file position
                 let new_position = offset + bytes_read as u64;
-                sim.set_file_position(self.file_id, new_position)?;
+                sim.set_file_position(this.file_id, new_position)?;
 
                 return Poll::Ready(Ok(bytes_read));
             }
 
             // Operation not complete, register waker and wait
-            sim.register_storage_waker(self.file_id, op_seq, cx.waker().clone());
+            sim.register_storage_waker(this.file_id, op_seq, cx.waker().clone());
             return Poll::Pending;
         }
 
         // No pending read - start a new one
 
         // Get current position
-        let position = sim.file_position(self.file_id)?;
+        let position = sim.file_position(this.file_id)?;
 
         // Get file size to check for EOF
-        let file_size = sim.file_size(self.file_id)?;
+        let file_size = sim.file_size(this.file_id)?;
 
         // Check for EOF
         if position >= file_size {
@@ -139,16 +132,13 @@ impl AsyncRead for SimStorageFile {
         }
 
         // Schedule the read operation
-        let op_seq = sim.schedule_read(self.file_id, position, len)?;
+        let op_seq = sim.schedule_read(this.file_id, position, len)?;
 
         // Store pending state
-        *self
-            .pending_read
-            .lock()
-            .expect("Mutex poisoned: prior task panicked") = Some((op_seq, position, len));
+        this.pending_read = Some((op_seq, position, len));
 
         // Register waker
-        sim.register_storage_waker(self.file_id, op_seq, cx.waker().clone());
+        sim.register_storage_waker(this.file_id, op_seq, cx.waker().clone());
 
         Poll::Pending
     }
@@ -160,32 +150,26 @@ impl AsyncWrite for SimStorageFile {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
+        let this = self.get_mut();
+        let sim = this.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Check for pending write operation
-        let pending = *self
-            .pending_write
-            .lock()
-            .expect("Mutex poisoned: prior task panicked");
-        if let Some((op_seq, bytes_written)) = pending {
+        if let Some((op_seq, bytes_written)) = this.pending_write {
             // Check if operation is complete
-            if sim.is_storage_op_complete(self.file_id, op_seq) {
+            if sim.is_storage_op_complete(this.file_id, op_seq) {
                 // Clear pending state
-                *self
-                    .pending_write
-                    .lock()
-                    .expect("Mutex poisoned: prior task panicked") = None;
+                this.pending_write = None;
 
                 // Update file position
-                let position = sim.file_position(self.file_id)?;
+                let position = sim.file_position(this.file_id)?;
                 let new_position = position + bytes_written as u64;
-                sim.set_file_position(self.file_id, new_position)?;
+                sim.set_file_position(this.file_id, new_position)?;
 
                 return Poll::Ready(Ok(bytes_written));
             }
 
             // Operation not complete, register waker and wait
-            sim.register_storage_waker(self.file_id, op_seq, cx.waker().clone());
+            sim.register_storage_waker(this.file_id, op_seq, cx.waker().clone());
             return Poll::Pending;
         }
 
@@ -196,19 +180,16 @@ impl AsyncWrite for SimStorageFile {
         }
 
         // Get current position
-        let position = sim.file_position(self.file_id)?;
+        let position = sim.file_position(this.file_id)?;
 
         // Schedule the write operation
-        let op_seq = sim.schedule_write(self.file_id, position, buf.to_vec())?;
+        let op_seq = sim.schedule_write(this.file_id, position, buf.to_vec())?;
 
         // Store pending state
-        *self
-            .pending_write
-            .lock()
-            .expect("Mutex poisoned: prior task panicked") = Some((op_seq, buf.len()));
+        this.pending_write = Some((op_seq, buf.len()));
 
         // Register waker
-        sim.register_storage_waker(self.file_id, op_seq, cx.waker().clone());
+        sim.register_storage_waker(this.file_id, op_seq, cx.waker().clone());
 
         Poll::Pending
     }

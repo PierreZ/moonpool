@@ -25,7 +25,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use bytes::Bytes;
@@ -38,6 +38,8 @@ use tracing::instrument;
 use moonpool_sim::{
     NetworkProvider, Process, SimContext, SimulationResult, TcpListenerTrait, Workload,
 };
+
+type HttpSender = hyper::client::conn::http1::SendRequest<Full<Bytes>>;
 
 // ============================================================================
 // Domain types
@@ -344,6 +346,44 @@ impl Workload for WebWorkload {
 }
 
 impl WebWorkload {
+    async fn send_request(
+        sender: &mut HttpSender,
+        server_ip: &str,
+        method: Method,
+        uri: &str,
+        json_body: Option<Bytes>,
+    ) -> SimulationResult<hyper::Response<hyper::body::Incoming>> {
+        let mut builder = Request::builder()
+            .method(method.clone())
+            .uri(uri)
+            .header("host", server_ip);
+        if json_body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let request = builder
+            .body(Full::new(json_body.unwrap_or_default()))
+            .map_err(|e| {
+                moonpool_sim::SimulationError::InvalidState(format!(
+                    "build {method} {uri} request: {e}"
+                ))
+            })?;
+
+        sender.send_request(request).await.map_err(|e| {
+            moonpool_sim::SimulationError::InvalidState(format!("send {method} {uri} request: {e}"))
+        })
+    }
+
+    async fn response_body(
+        response: hyper::Response<hyper::body::Incoming>,
+    ) -> SimulationResult<Bytes> {
+        response
+            .into_body()
+            .collect()
+            .await
+            .map(http_body_util::Collected::to_bytes)
+            .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("body: {e}")))
+    }
+
     async fn send_round(
         &self,
         ctx: &SimContext,
@@ -392,21 +432,12 @@ impl WebWorkload {
     }
 
     async fn check_health(
-        sender: &mut hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+        sender: &mut HttpSender,
         server_ip: &str,
         round: u32,
     ) -> SimulationResult<()> {
         tracing::info!(round, "sending GET /health");
-        let req = Request::builder()
-            .uri("/health")
-            .header("host", server_ip)
-            .body(Full::new(Bytes::new()))
-            .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("build: {e}")))?;
-
-        let res = sender
-            .send_request(req)
-            .await
-            .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("health: {e}")))?;
+        let res = Self::send_request(sender, server_ip, Method::GET, "/health", None).await?;
         tracing::info!(round, status = %res.status(), "GET /health response");
         moonpool_sim::assert_always!(
             res.status() == StatusCode::OK,
@@ -416,7 +447,7 @@ impl WebWorkload {
     }
 
     async fn create_and_read_item(
-        sender: &mut hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+        sender: &mut HttpSender,
         server_ip: &str,
         round: u32,
     ) -> SimulationResult<()> {
@@ -426,27 +457,18 @@ impl WebWorkload {
         })
         .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("serialize: {e}")))?;
 
-        let req = Request::builder()
-            .method("POST")
-            .uri("/items")
-            .header("host", server_ip)
-            .header("content-type", "application/json")
-            .body(Full::new(Bytes::from(body)))
-            .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("build: {e}")))?;
-
-        let res = sender
-            .send_request(req)
-            .await
-            .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("create: {e}")))?;
+        let res = Self::send_request(
+            sender,
+            server_ip,
+            Method::POST,
+            "/items",
+            Some(Bytes::from(body)),
+        )
+        .await?;
 
         let status = res.status();
         tracing::info!(round, %status, "POST /items response");
-        let body_bytes = res
-            .into_body()
-            .collect()
-            .await
-            .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("body: {e}")))?
-            .to_bytes();
+        let body_bytes = Self::response_body(res).await?;
 
         if status == StatusCode::CREATED {
             moonpool_sim::assert_sometimes!(true, "item_created_successfully");
@@ -466,32 +488,19 @@ impl WebWorkload {
     }
 
     async fn read_item_back(
-        sender: &mut hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+        sender: &mut HttpSender,
         server_ip: &str,
         round: u32,
         item: &Item,
     ) -> SimulationResult<()> {
         tracing::info!(round, item_id = item.id, "sending GET /items/{}", item.id);
-        let req = Request::builder()
-            .uri(format!("/items/{}", item.id))
-            .header("host", server_ip)
-            .body(Full::new(Bytes::new()))
-            .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("build: {e}")))?;
-
-        let res = sender
-            .send_request(req)
-            .await
-            .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("get: {e}")))?;
+        let uri = format!("/items/{}", item.id);
+        let res = Self::send_request(sender, server_ip, Method::GET, &uri, None).await?;
 
         let get_status = res.status();
         tracing::info!(round, %get_status, "GET /items/{} response", item.id);
         if get_status == StatusCode::OK {
-            let get_body = res
-                .into_body()
-                .collect()
-                .await
-                .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("body: {e}")))?
-                .to_bytes();
+            let get_body = Self::response_body(res).await?;
 
             let fetched: Item = serde_json::from_slice(&get_body).map_err(|e| {
                 moonpool_sim::SimulationError::InvalidState(format!("deserialize: {e}"))
@@ -512,21 +521,12 @@ impl WebWorkload {
     }
 
     async fn check_not_found(
-        sender: &mut hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+        sender: &mut HttpSender,
         server_ip: &str,
         round: u32,
     ) -> SimulationResult<()> {
         tracing::info!(round, "sending GET /items/999999");
-        let req = Request::builder()
-            .uri("/items/999999")
-            .header("host", server_ip)
-            .body(Full::new(Bytes::new()))
-            .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("build: {e}")))?;
-
-        let res = sender
-            .send_request(req)
-            .await
-            .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("get-404: {e}")))?;
+        let res = Self::send_request(sender, server_ip, Method::GET, "/items/999999", None).await?;
 
         // May get 404 (normal) or 500 (buggified read failure)
         let not_found_status = res.status();
