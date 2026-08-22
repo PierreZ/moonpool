@@ -4,12 +4,10 @@ use thiserror::Error;
 
 /// What a channel reports to its caller.
 ///
-/// Payloads are `String`s rather than source errors so the type stays `Clone`:
-/// one connection failure can be reported to several waiting callers, and
-/// neither `hyper::Error` nor `io::Error` is `Clone`. Being a
-/// `std::error::Error` that is `Send` and `Sync`, it converts into the boxed
-/// error tonic's generated clients require.
-#[derive(Error, Debug, Clone)]
+/// Payloads are strings because the provider and hyper errors have different
+/// concrete types. As a `Send + Sync` [`std::error::Error`], this converts into
+/// the boxed error tonic's generated clients require.
+#[derive(Error, Debug)]
 pub enum ChannelError {
     /// The TCP connect failed.
     #[error("connect to {addr} failed: {detail}")]

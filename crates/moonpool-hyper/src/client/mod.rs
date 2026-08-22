@@ -7,7 +7,10 @@
 //! production tonic stack.
 
 mod channel;
+mod config;
 mod reconnect;
+mod state;
 
 pub use channel::{H2Channel, ResponseFuture};
-pub use reconnect::{ChannelConfig, ReconnectingChannel};
+pub use config::ChannelConfig;
+pub use reconnect::ReconnectingChannel;

@@ -4,11 +4,9 @@
 //! consistent with other provider abstractions in the simulation framework
 //! like `TimeProvider`, `NetworkProvider`, and `TaskProvider`.
 
+#[cfg(feature = "tokio-random")]
+use rand::RngExt as _;
 use rand::distr::{Distribution, StandardUniform, uniform::SampleUniform};
-#[cfg(feature = "tokio-random")]
-use rand::prelude::*;
-#[cfg(feature = "tokio-random")]
-use std::cell::RefCell;
 use std::ops::Range;
 
 /// Provider trait for random number generation.
@@ -35,12 +33,16 @@ pub trait RandomProvider: Clone + Send + Sync + 'static {
     /// Generate a random f64 between 0.0 and 1.0.
     ///
     /// This is a convenience method for generating ratios and percentages.
-    fn random_ratio(&self) -> f64;
+    fn random_ratio(&self) -> f64 {
+        self.random()
+    }
 
     /// Generate a random bool with the given probability of being true.
     ///
     /// The probability should be between 0.0 and 1.0.
-    fn random_bool(&self, probability: f64) -> bool;
+    fn random_bool(&self, probability: f64) -> bool {
+        self.random_ratio() < probability
+    }
 }
 
 /// Production random provider using thread-local RNG.
@@ -70,33 +72,19 @@ impl TokioRandomProvider {
     }
 }
 
-// Thread-local RNG for TokioRandomProvider
-#[cfg(feature = "tokio-random")]
-thread_local! {
-    static RNG: RefCell<rand::rngs::ThreadRng> = RefCell::new(rand::rng());
-}
-
 #[cfg(feature = "tokio-random")]
 impl RandomProvider for TokioRandomProvider {
     fn random<T>(&self) -> T
     where
         StandardUniform: Distribution<T>,
     {
-        RNG.with(|rng| rng.borrow_mut().random())
+        rand::rng().random()
     }
 
     fn random_range<T>(&self, range: Range<T>) -> T
     where
         T: SampleUniform + PartialOrd,
     {
-        RNG.with(|rng| rng.borrow_mut().random_range(range))
-    }
-
-    fn random_ratio(&self) -> f64 {
-        RNG.with(|rng| rng.borrow_mut().random())
-    }
-
-    fn random_bool(&self, probability: f64) -> bool {
-        self.random_ratio() < probability
+        rand::rng().random_range(range)
     }
 }

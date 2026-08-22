@@ -204,11 +204,7 @@ impl StorageProvider for TokioStorageProvider {
     }
 
     async fn exists(&self, path: &str) -> io::Result<bool> {
-        match tokio::fs::metadata(path).await {
-            Ok(_) => Ok(true),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(e),
-        }
+        tokio::fs::try_exists(path).await
     }
 
     async fn delete(&self, path: &str) -> io::Result<()> {

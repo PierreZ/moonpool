@@ -36,6 +36,7 @@
 use std::cell::Cell;
 
 use crate::journal::{DiscoveryEvent, MAX_JOURNAL_ENTRIES};
+use crate::shared_mem::SharedMemory;
 use moonpool_assertions::DiscoveryKind;
 
 /// One serialized discovery event in a result slot.
@@ -79,29 +80,23 @@ pub(crate) enum WorkerExit {
 
 /// Fixed-size pool of `MAP_SHARED` journal result slots.
 pub(crate) struct SlotPool {
-    base: *mut u8,
+    memory: SharedMemory,
     slots: usize,
-    byte_len: usize,
 }
 
 impl SlotPool {
     /// Allocate `slots` journal result slots in shared memory.
     pub fn new(slots: usize) -> Result<Self, std::io::Error> {
-        let base = crate::shared_mem::alloc_shared_array(slots, SLOT_SIZE)?;
-        let byte_len = slots
-            .checked_mul(SLOT_SIZE)
-            .expect("allocation rejected size overflow");
         Ok(Self {
-            base,
+            memory: SharedMemory::array(slots, SLOT_SIZE)?,
             slots,
-            byte_len,
         })
     }
 
     fn slot_ptr(&self, idx: usize) -> *mut u8 {
         assert!(idx < self.slots, "slot index out of range");
         // Safety: base points to slots * SLOT_SIZE bytes and idx < slots.
-        unsafe { self.base.add(idx * SLOT_SIZE) }
+        unsafe { self.memory.as_ptr().add(idx * SLOT_SIZE) }
     }
 
     /// Zero a slot before handing it to a worker.
@@ -155,14 +150,6 @@ impl SlotPool {
                 })
                 .collect()
         }
-    }
-}
-
-impl Drop for SlotPool {
-    fn drop(&mut self) {
-        // Safety: base was returned by alloc_shared(byte_len) and is freed
-        // exactly once here with the original allocation size.
-        unsafe { crate::shared_mem::free_shared(self.base, self.byte_len) };
     }
 }
 

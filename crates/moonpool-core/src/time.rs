@@ -39,7 +39,7 @@ pub trait TimeProvider: Clone + Send + Sync + 'static {
     fn sleep(
         &self,
         duration: Duration,
-    ) -> impl std::future::Future<Output = Result<(), TimeError>> + Send + Sync;
+    ) -> impl std::future::Future<Output = Result<(), TimeError>> + Send;
 
     /// Get exact current time.
     ///
@@ -59,7 +59,9 @@ pub trait TimeProvider: Clone + Send + Sync + 'static {
     /// to test how code handles clock drift.
     ///
     /// FDB ref: sim2.actor.cpp:1058-1064
-    fn timer(&self) -> Duration;
+    fn timer(&self) -> Duration {
+        self.now()
+    }
 
     /// Run a future with a timeout.
     ///
@@ -111,11 +113,6 @@ impl TimeProvider for TokioTimeProvider {
     fn now(&self) -> Duration {
         // Return elapsed time since provider creation
         self.start_time.elapsed()
-    }
-
-    fn timer(&self) -> Duration {
-        // In real time, there's no simulated drift - timer equals now
-        self.now()
     }
 
     async fn timeout<F, T>(&self, duration: Duration, future: F) -> Result<T, TimeError>

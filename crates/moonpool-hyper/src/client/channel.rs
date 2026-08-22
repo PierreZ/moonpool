@@ -125,8 +125,8 @@ where
     fn call(&mut self, req: Request<B>) -> Self::Future {
         let request = self.sender.send_request(req);
         ResponseFuture::new(async move {
-            request.await.map_err(|e| ChannelError::Request {
-                detail: e.to_string(),
+            request.await.map_err(|error| ChannelError::Request {
+                detail: error.to_string(),
             })
         })
     }

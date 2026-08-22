@@ -78,10 +78,14 @@ pub fn init() {
 /// freeing it after calling [`clear`]. Frees any heap regions this crate
 /// previously allocated.
 ///
-/// Both pointers must reference at least [`crate::ASSERTION_TABLE_MEM_SIZE`] /
+/// # Safety
+///
+/// Both pointers must be non-null, zero-initialized, aligned to at least eight
+/// bytes, reference at least [`crate::ASSERTION_TABLE_MEM_SIZE`] and
 /// [`crate::EACH_BUCKET_MEM_SIZE`] bytes respectively, and stay valid until
-/// [`clear`] is called.
-pub fn install_region(table: *mut u8, buckets: *mut u8) {
+/// [`clear`] is called. The regions must not be reset or freed while accounting
+/// calls may access them.
+pub unsafe fn install_region(table: *mut u8, buckets: *mut u8) {
     free_heap_regions();
     ASSERTION_TABLE.with(|c| c.set(table));
     EACH_BUCKET_PTR.with(|c| c.set(buckets));

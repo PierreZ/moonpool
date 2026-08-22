@@ -293,7 +293,7 @@ thread_local! {
     /// MAP_SHARED buffer for child→parent counter transfer.
     ///
     /// Public so `split_loop.rs` can redirect per-child in parallel mode.
-    pub static SANCOV_TRANSFER: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
+    static SANCOV_TRANSFER: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
 
     /// MAP_SHARED global max map (history of highest bucketed values).
     static SANCOV_HISTORY: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
@@ -301,12 +301,22 @@ thread_local! {
     /// MAP_SHARED pool base for parallel mode (one slot per concurrent child).
     ///
     /// Public so `setup_child()` can reset for nested splits.
-    pub static SANCOV_POOL: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
+    static SANCOV_POOL: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
 
     /// Number of slots in the sancov pool.
     ///
     /// Public so `setup_child()` can reset for nested splits.
-    pub static SANCOV_POOL_SLOTS: Cell<usize> = const { Cell::new(0) };
+    static SANCOV_POOL_SLOTS: Cell<usize> = const { Cell::new(0) };
+
+    /// Owners of the transfer and history pointers above.
+    static SANCOV_REGIONS: RefCell<Option<(
+        crate::shared_mem::SharedMemory,
+        crate::shared_mem::SharedMemory,
+    )>> = const { RefCell::new(None) };
+
+    /// Owner of the parallel worker pool pointer above.
+    static SANCOV_POOL_REGION: RefCell<Option<crate::shared_mem::SharedMemory>> =
+        const { RefCell::new(None) };
 
     /// Cumulative "ever non-zero" mask over the BSS counter array (one byte per
     /// edge), for the fork-free live coverage reader. Lets the reader survive
@@ -586,11 +596,16 @@ pub fn init_sancov_shared() -> Result<(), std::io::Error> {
     if len == 0 {
         return Ok(());
     }
+    if SANCOV_REGIONS.with(|regions| regions.borrow().is_some()) {
+        return Ok(());
+    }
 
-    let (transfer, history) = crate::shared_mem::alloc_shared_pair(len, len)?;
+    let transfer = crate::shared_mem::SharedMemory::new(len)?;
+    let history = crate::shared_mem::SharedMemory::new(len)?;
 
-    SANCOV_TRANSFER.with(|c| c.set(transfer));
-    SANCOV_HISTORY.with(|c| c.set(history));
+    SANCOV_TRANSFER.with(|c| c.set(transfer.as_ptr()));
+    SANCOV_HISTORY.with(|c| c.set(history.as_ptr()));
+    SANCOV_REGIONS.with(|regions| *regions.borrow_mut() = Some((transfer, history)));
 
     Ok(())
 }
@@ -599,35 +614,12 @@ pub fn init_sancov_shared() -> Result<(), std::io::Error> {
 ///
 /// Nulls all pointers after freeing. No-op if not initialized.
 pub fn cleanup_sancov_shared() {
-    let len = COUNTERS_LEN.load(Ordering::Relaxed);
-
-    let transfer = SANCOV_TRANSFER.with(std::cell::Cell::get);
-    if !transfer.is_null() {
-        // Safety: transfer was returned by alloc_shared(len) in init_sancov_shared().
-        // Pointer is non-null (checked above) and has not been previously freed.
-        unsafe { crate::shared_mem::free_shared(transfer, len) };
-        SANCOV_TRANSFER.with(|c| c.set(std::ptr::null_mut()));
-    }
-
-    let history = SANCOV_HISTORY.with(std::cell::Cell::get);
-    if !history.is_null() {
-        // Safety: history was returned by alloc_shared(len) in init_sancov_shared().
-        // Pointer is non-null (checked above) and has not been previously freed.
-        unsafe { crate::shared_mem::free_shared(history, len) };
-        SANCOV_HISTORY.with(|c| c.set(std::ptr::null_mut()));
-    }
-
-    let pool = SANCOV_POOL.with(std::cell::Cell::get);
-    if !pool.is_null() {
-        let slots = SANCOV_POOL_SLOTS.with(std::cell::Cell::get);
-        if slots > 0 {
-            // Safety: pool was returned by alloc_shared(slots * len) in
-            // get_or_init_sancov_pool(). Size matches the original allocation.
-            unsafe { crate::shared_mem::free_shared(pool, slots * len) };
-        }
-        SANCOV_POOL.with(|c| c.set(std::ptr::null_mut()));
-        SANCOV_POOL_SLOTS.with(|c| c.set(0));
-    }
+    SANCOV_TRANSFER.with(|c| c.set(std::ptr::null_mut()));
+    SANCOV_HISTORY.with(|c| c.set(std::ptr::null_mut()));
+    SANCOV_POOL.with(|c| c.set(std::ptr::null_mut()));
+    SANCOV_POOL_SLOTS.with(|c| c.set(0));
+    SANCOV_REGIONS.with(|regions| drop(regions.borrow_mut().take()));
+    SANCOV_POOL_REGION.with(|pool| drop(pool.borrow_mut().take()));
 }
 
 /// Zero the transfer buffer before forking a child.
@@ -642,8 +634,8 @@ pub fn clear_transfer_buffer() {
         return;
     }
     let len = COUNTERS_LEN.load(Ordering::Relaxed);
-    // Safety: transfer was returned by alloc_shared(len) and is non-null (checked
-    // above). write_bytes zeroes exactly len bytes, matching the allocation size.
+    // Safety: transfer points into the live `SharedMemory` owner and is non-null
+    // (checked above). write_bytes covers exactly its `len` bytes.
     unsafe {
         std::ptr::write_bytes(transfer, 0, len);
     }
@@ -668,7 +660,7 @@ pub fn copy_counters_to_shared() {
     let src = COUNTERS_PTR.load(Ordering::Relaxed);
     let len = COUNTERS_LEN.load(Ordering::Relaxed);
     // Safety: src points to the LLVM-generated BSS counter array (set by
-    // __sanitizer_cov_8bit_counters_init), transfer points to alloc_shared(len).
+    // __sanitizer_cov_8bit_counters_init), transfer points to a live shared mapping.
     // Both are valid for len bytes. The regions do not overlap (BSS vs mmap).
     unsafe {
         std::ptr::copy_nonoverlapping(src, transfer, len);
@@ -718,21 +710,19 @@ pub fn get_or_init_sancov_pool(slot_count: usize) -> *mut u8 {
         return existing;
     }
 
-    // Free old pool if too small
+    // Free the old pool if it is too small.
     if !existing.is_null() {
-        // Safety: existing was returned by alloc_shared(existing_slots * len)
-        // in a prior call. Size matches the original allocation.
-        unsafe {
-            crate::shared_mem::free_shared(existing, existing_slots * len);
-        }
         SANCOV_POOL.with(|c| c.set(std::ptr::null_mut()));
         SANCOV_POOL_SLOTS.with(|c| c.set(0));
+        SANCOV_POOL_REGION.with(|pool| drop(pool.borrow_mut().take()));
     }
 
-    match crate::shared_mem::alloc_shared_array(slot_count, len) {
-        Ok(ptr) => {
+    match crate::shared_mem::SharedMemory::array(slot_count, len) {
+        Ok(memory) => {
+            let ptr = memory.as_ptr();
             SANCOV_POOL.with(|c| c.set(ptr));
             SANCOV_POOL_SLOTS.with(|c| c.set(slot_count));
+            SANCOV_POOL_REGION.with(|pool| *pool.borrow_mut() = Some(memory));
             ptr
         }
         Err(_) => std::ptr::null_mut(),

@@ -110,11 +110,13 @@
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 
+use std::cell::RefCell;
+
 pub mod controller;
 pub mod journal;
 pub mod replay;
 pub mod sancov;
-pub mod shared_mem;
+mod shared_mem;
 pub mod simulations;
 pub mod worker;
 
@@ -125,6 +127,15 @@ pub use sancov::{
     sancov_edge_count, sancov_edges_covered, sancov_edges_covered_live, sancov_is_available,
 };
 pub use worker::explorer_is_child;
+
+use shared_mem::SharedMemory;
+
+thread_local! {
+    /// Owners for the pointers installed into `moonpool-assertions`.
+    static ASSERTION_REGIONS: RefCell<Option<(SharedMemory, SharedMemory)>> = const {
+        RefCell::new(None)
+    };
+}
 
 // The assertion + each-bucket accounting lives in the dependency-free,
 // wasm-able `moonpool-assertions` crate. Re-export the surface callers reach
@@ -144,13 +155,17 @@ pub use moonpool_assertions::{
 ///
 /// Returns an error if shared memory allocation fails.
 pub fn init_assertions() -> Result<(), std::io::Error> {
-    if !assertion_table_ptr().is_null() {
-        return Ok(()); // Already initialized
+    if ASSERTION_REGIONS.with(|regions| regions.borrow().is_some()) {
+        return Ok(());
     }
 
-    let (table_ptr, each_bucket_ptr) =
-        shared_mem::alloc_shared_pair(ASSERTION_TABLE_MEM_SIZE, EACH_BUCKET_MEM_SIZE)?;
-    moonpool_assertions::install_region(table_ptr, each_bucket_ptr);
+    let table = SharedMemory::new(ASSERTION_TABLE_MEM_SIZE)?;
+    let buckets = SharedMemory::new(EACH_BUCKET_MEM_SIZE)?;
+    // Safety: `SharedMemory` returns non-null, page-aligned, zeroed mappings of
+    // exactly the required lengths. The thread-local owners remain live until
+    // `cleanup_assertions` first clears the accounting pointers.
+    unsafe { moonpool_assertions::install_region(table.as_ptr(), buckets.as_ptr()) };
+    ASSERTION_REGIONS.with(|regions| *regions.borrow_mut() = Some((table, buckets)));
     Ok(())
 }
 
@@ -158,17 +173,8 @@ pub fn init_assertions() -> Result<(), std::io::Error> {
 ///
 /// Nulls the pointers after freeing. No-op if not initialized.
 pub fn cleanup_assertions() {
-    let table_ptr = assertion_table_ptr();
-    let each_bucket_ptr = moonpool_assertions::each_bucket_ptr();
     moonpool_assertions::clear();
-    unsafe {
-        if !table_ptr.is_null() {
-            shared_mem::free_shared(table_ptr, ASSERTION_TABLE_MEM_SIZE);
-        }
-        if !each_bucket_ptr.is_null() {
-            shared_mem::free_shared(each_bucket_ptr, EACH_BUCKET_MEM_SIZE);
-        }
-    }
+    ASSERTION_REGIONS.with(|regions| regions.borrow_mut().take());
 }
 
 /// Zero assertion table memory for between-run resets.
@@ -184,8 +190,16 @@ mod tests {
 
     #[test]
     fn test_init_assertions_standalone() {
+        // A plain assertion run may have installed heap regions first. The
+        // explorer must replace those rather than mistaking them for shared
+        // mappings that forked workers can observe.
+        moonpool_assertions::init();
+        assertion_bool(AssertKind::Sometimes, true, true, "heap-only");
+        assert_eq!(assertion_read_all().len(), 1);
+
         init_assertions().expect("init_assertions failed");
         assert!(!assertion_table_ptr().is_null());
+        assert!(assertion_read_all().is_empty());
 
         // Idempotent — second call should be no-op
         init_assertions().expect("init_assertions second call failed");

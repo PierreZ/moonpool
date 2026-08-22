@@ -16,8 +16,8 @@
 //! │   Re-exports all functionality from sub-crates             │
 //! ├─────────────────────────────────────────────────────────────┤
 //! │                      moonpool-sim                           │
-//! │  • SimWorld runtime         • Chaos testing                 │
-//! │  • Buggify macros           • Multiverse exploration       │
+//! │  • Scheduler + SimWorld     • NetworkSimulation             │
+//! │  • StorageEngine            • Chaos + exploration           │
 //! │                               (via moonpool-explorer)       │
 //! ├─────────────────────────────────────────────────────────────┤
 //! │       moonpool-hyper (feature "hyper", opt-in)              │
@@ -32,13 +32,12 @@
 //! ## Quick Start
 //!
 //! ```ignore
-//! use moonpool::{SimulationBuilder, WorkloadTopology};
+//! use moonpool::SimulationBuilder;
 //!
 //! SimulationBuilder::new()
-//!     .topology(WorkloadTopology::ClientServer { clients: 2, servers: 1 })
-//!     .run(|ctx| async move {
-//!         // Your distributed system workload
-//!     });
+//!     .processes(1, || Box::new(MyServer::default()))
+//!     .workload(MyWorkload::default())
+//!     .run();
 //! ```
 //!
 //! ## Which Crate to Use
@@ -58,21 +57,21 @@
 //! - `moonpool::hyper` - hyper 1.x integration, behind the `hyper` feature
 
 #![deny(missing_docs)]
-#![allow(ambiguous_glob_reexports)]
 
 // Re-export all public items from sub-crates. `moonpool-core` is always present;
 // `sim` is feature-gated so a lean production build pulls neither the simulation
 // runtime nor the explorer (no libc/mio in the prod dependency tree).
+#[allow(ambiguous_glob_reexports)]
 pub use moonpool_core::*;
 #[cfg(feature = "sim")]
+#[allow(ambiguous_glob_reexports)]
 pub use moonpool_sim::*;
 
 /// hyper 1.x integration, from [`moonpool_hyper`].
 ///
 /// A namespaced module rather than a fourth glob re-export at the root: the
-/// three globs above already collide in places (hence
-/// `allow(ambiguous_glob_reexports)`), and hyper names like `H2Channel` or
-/// `KeepAlive` read better qualified anyway.
+/// the core and simulation root exports already overlap in places. Hyper names
+/// like `H2Channel` or `KeepAlive` read better qualified anyway.
 ///
 /// ```ignore
 /// use moonpool::hyper::{ChannelConfig, ReconnectingChannel};
@@ -101,5 +100,5 @@ pub mod prelude {
     pub use moonpool_core::prelude::*;
 
     #[cfg(feature = "sim")]
-    pub use moonpool_sim::{Process, SimContext, SimulationBuilder, Workload, WorkloadTopology};
+    pub use moonpool_sim::{Process, SimContext, SimulationBuilder, Workload};
 }

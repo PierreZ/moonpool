@@ -23,8 +23,9 @@ its messages and chaos with no recorder changes.
 `.enable_chaos([Chaos::Network(ChaosMode::Random)])` turns on seeded network chaos — variable latency, reordering,
 connection drops — so a request comes back fast, slowly, or not at all. The
 front-end animates each round trip as a ball flying A→B→A; a dropped request is a
-ball lost at the net (red ✗). Nothing really waits: logical time is driven by the
-sim event queue, which is exactly why the whole simulation runs in a tab.
+ball lost at the net (red ✗). Nothing really waits: the global scheduler advances
+logical time through delayed network events, which is exactly why the whole
+simulation runs in a tab.
 
 **The same seed always produces the same run — byte-for-byte, native and in the
 browser.** That is the whole point of deterministic simulation.
@@ -68,16 +69,15 @@ cd web && python3 -m http.server 8917
 
 ## How it's wired (for the curious)
 
-- `src/lib.rs`
-  - `PongServer` (`Process`) + `PingClient` (`Workload`) — plain TCP actors
-    that emit standard `client_*` events; no visualization code.
-  - `TimelineRecorder` (`Invariant`) — the generic, workload-agnostic layer that
-    snapshots those events (and `sim_fault`s) off the trace timeline and rebuilds
-    the `Shot` timeline.
-  - `run_seed` / `run_seed_json` — register the recorder, run one seed, return
-    the timeline. The wasm export `runSeed(seed)` lives behind
-    `#[cfg(target_arch = "wasm32")]` and installs `console_error_panic_hook` so
-    any panic surfaces in the console.
+- `src/actors.rs` — `PongServer` (`Process`) and `PingClient` (`Workload`), plain
+  TCP actors that emit standard `client_*` events.
+- `src/protocol.rs` — the fixed-size integrity-checked ping frame.
+- `src/timeline.rs` — the workload-agnostic `Invariant` that turns trace events
+  into the browser timeline without retaining unused fault payload strings.
+- `src/model.rs` — the stable serializable `RunResult` / `Shot` JSON model.
+- `src/lib.rs` — registers the actors and recorder and exposes `run_seed` /
+  `run_seed_json`. The wasm `runSeed(seed)` export also installs
+  `console_error_panic_hook` so panics surface in the console.
 - `src/main.rs` — the native smoke runner.
 - `web/index.html` — ~280 lines of vanilla JS: a canvas, two nodes, a flying
   ball, and the seeded chaos animation. No framework.

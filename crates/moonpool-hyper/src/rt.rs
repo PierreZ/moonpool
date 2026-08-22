@@ -19,6 +19,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Mutex;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -105,13 +106,13 @@ impl<T: TimeProvider> hyper::rt::Timer for HyperTimer<T> {
         // borrows &self, but hyper needs a 'static Sleep.
         let time = self.time.clone();
         Box::pin(HyperSleep {
-            inner: Box::pin(async move {
+            inner: Mutex::new(Box::pin(async move {
                 // A sleep that errors (provider shutdown) resolves rather
                 // than pending forever: hyper treats it as an elapsed timer
                 // and unwinds the connection, which is the correct behavior
                 // at sim shutdown.
                 let _ = time.sleep(duration).await;
-            }),
+            })),
             elapsed: false,
         })
     }
@@ -127,7 +128,10 @@ impl<T: TimeProvider> hyper::rt::Timer for HyperTimer<T> {
 
 /// Future returned by [`HyperTimer`]'s sleep methods.
 struct HyperSleep {
-    inner: Pin<Box<dyn Future<Output = ()> + Send + Sync>>,
+    // `hyper::rt::Sleep` requires `Sync`, although polling always has exclusive
+    // access. The mutex provides that marker without locking in `poll`: its
+    // `get_mut` path uses the existing `&mut self` directly.
+    inner: Mutex<Pin<Box<dyn Future<Output = ()> + Send>>>,
 
     /// Latches once the sleep has elapsed, so a later poll answers `Ready`
     /// instead of resuming a finished future.
@@ -149,7 +153,12 @@ impl Future for HyperSleep {
         if self.elapsed {
             return Poll::Ready(());
         }
-        let poll = self.inner.as_mut().poll(cx);
+        let poll = self
+            .inner
+            .get_mut()
+            .expect("Mutex poisoned: prior task panicked")
+            .as_mut()
+            .poll(cx);
         if poll.is_ready() {
             self.elapsed = true;
         }
@@ -175,18 +184,11 @@ mod tests {
     struct ElapsedTime;
 
     impl TimeProvider for ElapsedTime {
-        fn sleep(
-            &self,
-            _duration: Duration,
-        ) -> impl Future<Output = Result<(), TimeError>> + Send + Sync {
+        fn sleep(&self, _duration: Duration) -> impl Future<Output = Result<(), TimeError>> + Send {
             std::future::ready(Ok(()))
         }
 
         fn now(&self) -> Duration {
-            Duration::ZERO
-        }
-
-        fn timer(&self) -> Duration {
             Duration::ZERO
         }
 

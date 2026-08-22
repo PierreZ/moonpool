@@ -1,16 +1,20 @@
-use std::process::{self, Command};
+use std::path::Path;
+use std::process::{Command, ExitCode};
 use std::time::Instant;
 
 /// A simulation binary with its name and the crates to instrument with sancov.
+#[derive(Clone, Copy)]
 struct SimBinary {
     name: &'static str,
+    package: &'static str,
     sancov_crates: &'static str,
 }
 
 impl SimBinary {
-    const fn new(name: &'static str, sancov_crates: &'static str) -> Self {
+    const fn new(name: &'static str, package: &'static str, sancov_crates: &'static str) -> Self {
         Self {
             name,
+            package,
             sancov_crates,
         }
     }
@@ -22,26 +26,46 @@ impl SimBinary {
 }
 
 const SIM_EXAMPLES_CRATE: &str = "moonpool_sim_examples";
+const SIM_EXAMPLES_PACKAGE: &str = "moonpool-sim-examples";
+const WORKSPACE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
 const SIM_BINARIES: &[SimBinary] = &[
-    SimBinary::new("sim-maze-explore", SIM_EXAMPLES_CRATE),
-    SimBinary::new("sim-dungeon-explore", SIM_EXAMPLES_CRATE),
-    SimBinary::new("sim-frontier-explore", "moonpool_explorer"),
-    SimBinary::new("sim-axum-web", SIM_EXAMPLES_CRATE),
-    SimBinary::new("sim-topology", SIM_EXAMPLES_CRATE),
-    SimBinary::new("sim-tonic-grpc", SIM_EXAMPLES_CRATE),
+    SimBinary::new("sim-maze-explore", SIM_EXAMPLES_PACKAGE, SIM_EXAMPLES_CRATE),
+    SimBinary::new(
+        "sim-dungeon-explore",
+        SIM_EXAMPLES_PACKAGE,
+        SIM_EXAMPLES_CRATE,
+    ),
+    SimBinary::new(
+        "sim-frontier-explore",
+        "moonpool-explorer",
+        "moonpool_explorer",
+    ),
+    SimBinary::new("sim-axum-web", SIM_EXAMPLES_PACKAGE, SIM_EXAMPLES_CRATE),
+    SimBinary::new("sim-topology", SIM_EXAMPLES_PACKAGE, SIM_EXAMPLES_CRATE),
+    SimBinary::new("sim-tonic-grpc", SIM_EXAMPLES_PACKAGE, SIM_EXAMPLES_CRATE),
 ];
 
-fn main() {
+fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if dispatch(&args) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
 
+fn dispatch(args: &[String]) -> bool {
     match args.first().map(String::as_str) {
         Some("sim") => sim_dispatch(&args[1..]),
-        Some("help" | "--help" | "-h") | None => print_usage(),
+        Some("help" | "--help" | "-h") | None => {
+            print_usage();
+            true
+        }
         Some(cmd) => {
             eprintln!("unknown command: {cmd}");
             print_usage();
-            process::exit(1);
+            false
         }
     }
 }
@@ -55,16 +79,19 @@ fn print_usage() {
     eprintln!("Run 'cargo xtask sim --help' for simulation subcommands.");
 }
 
-fn sim_dispatch(args: &[String]) {
+fn sim_dispatch(args: &[String]) -> bool {
     match args.first().map(String::as_str) {
         Some("list") => sim_list(&args[1..]),
         Some("run") => sim_run(&args[1..]),
         Some("run-all") => sim_run_all(),
-        Some("help" | "--help" | "-h") | None => sim_help(),
+        Some("help" | "--help" | "-h") | None => {
+            sim_help();
+            true
+        }
         Some(cmd) => {
             eprintln!("unknown sim subcommand: {cmd}");
             sim_help();
-            process::exit(1);
+            false
         }
     }
 }
@@ -98,62 +125,86 @@ fn fmt_duration(d: std::time::Duration) -> String {
     }
 }
 
-fn filter_binaries(filters: &[String]) -> Vec<&'static SimBinary> {
+fn filter_binaries(filters: &[String]) -> Vec<SimBinary> {
     if filters.is_empty() {
-        SIM_BINARIES.iter().collect()
+        SIM_BINARIES.to_vec()
     } else {
         SIM_BINARIES
             .iter()
             .filter(|b| filters.iter().any(|f| b.name.contains(f.as_str())))
+            .copied()
             .collect()
     }
 }
 
-fn sim_list(args: &[String]) {
+fn sim_list(args: &[String]) -> bool {
     let binaries = filter_binaries(args);
 
     if binaries.is_empty() {
         eprintln!("No binaries match filters: {args:?}");
-        process::exit(1);
+        return false;
     }
 
     for bin in &binaries {
         println!("{}", bin.display_name());
     }
+    true
 }
 
-fn sim_run(args: &[String]) {
-    // Split on "--" to separate filter args from binary args.
-    let (filter_args, binary_args): (&[String], &[String]) =
-        match args.iter().position(|a| a == "--") {
-            Some(pos) => (&args[..pos], &args[pos + 1..]),
-            None => (args, &[]),
-        };
+fn split_run_args(args: &[String]) -> (&[String], &[String]) {
+    args.iter()
+        .position(|argument| argument == "--")
+        .map_or((args, &[]), |separator| {
+            (&args[..separator], &args[separator + 1..])
+        })
+}
+
+fn sim_run(args: &[String]) -> bool {
+    let (filter_args, binary_args) = split_run_args(args);
 
     if filter_args.is_empty() {
         eprintln!("error: 'run' requires at least one filter argument");
         eprintln!();
         eprintln!("Usage: cargo xtask sim run <filter...> [-- <binary-args...>]");
         eprintln!("       cargo xtask sim run-all    (to run all binaries)");
-        process::exit(1);
+        return false;
     }
 
     let binaries = filter_binaries(filter_args);
 
     if binaries.is_empty() {
         eprintln!("No binaries match filters: {filter_args:?}");
-        process::exit(1);
+        return false;
     }
 
-    run_binaries(&binaries, binary_args);
+    run_binaries(&binaries, binary_args)
 }
 
-fn sim_run_all() {
-    let binaries: Vec<&SimBinary> = SIM_BINARIES.iter().collect();
-    run_binaries(&binaries, &[]);
+fn sim_run_all() -> bool {
+    run_binaries(SIM_BINARIES, &[])
 }
 
-fn run_binaries(binaries: &[&SimBinary], extra_args: &[String]) {
+fn simulation_command(binary: &SimBinary, extra_args: &[String]) -> Command {
+    let mut command = Command::new("cargo");
+    command
+        .current_dir(Path::new(WORKSPACE_ROOT))
+        .args([
+            "run",
+            "--package",
+            binary.package,
+            "--bin",
+            binary.name,
+            "--target-dir",
+            "target/sancov",
+        ])
+        .env("SANCOV_CRATES", binary.sancov_crates);
+    if !extra_args.is_empty() {
+        command.arg("--").args(extra_args);
+    }
+    command
+}
+
+fn run_binaries(binaries: &[SimBinary], extra_args: &[String]) -> bool {
     eprintln!(
         "Running {} simulation binaries (sancov enabled)",
         binaries.len()
@@ -161,7 +212,7 @@ fn run_binaries(binaries: &[&SimBinary], extra_args: &[String]) {
     eprintln!();
 
     let total_start = Instant::now();
-    let mut passed = Vec::new();
+    let mut passed = 0;
     let mut failed = Vec::new();
 
     for bin in binaries {
@@ -169,23 +220,14 @@ fn run_binaries(binaries: &[&SimBinary], extra_args: &[String]) {
         eprintln!("--- {name} ---");
         let bin_start = Instant::now();
 
-        let mut cmd = Command::new("cargo");
-        cmd.args(["run", "--bin", bin.name]);
-
-        cmd.env("SANCOV_CRATES", bin.sancov_crates);
-        // Use a separate target dir so cargo doesn't serve a cached
-        // non-instrumented build (SANCOV_CRATES isn't in cargo's fingerprint).
-        cmd.args(["--target-dir", "target/sancov"]);
-
-        if !extra_args.is_empty() {
-            cmd.arg("--");
-            cmd.args(extra_args);
-        }
+        // Use a separate target dir so cargo does not serve a cached
+        // non-instrumented build (`SANCOV_CRATES` is not in its fingerprint).
+        let mut cmd = simulation_command(bin, extra_args);
 
         match cmd.status() {
             Ok(status) if status.success() => {
                 eprintln!("--- {name} --- ({})\n", fmt_duration(bin_start.elapsed()));
-                passed.push(name);
+                passed += 1;
             }
             Ok(status) => {
                 let code = status.code().unwrap_or(-1);
@@ -207,7 +249,7 @@ fn run_binaries(binaries: &[&SimBinary], extra_args: &[String]) {
     eprintln!("=== Summary ===");
     eprintln!(
         "{} passed, {} failed, {} total ({})",
-        passed.len(),
+        passed,
         failed.len(),
         binaries.len(),
         fmt_duration(total_elapsed),
@@ -217,6 +259,72 @@ fn run_binaries(binaries: &[&SimBinary], extra_args: &[String]) {
         for name in &failed {
             eprintln!("  {name}");
         }
-        process::exit(1);
+        return false;
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{
+        SIM_BINARIES, WORKSPACE_ROOT, filter_binaries, fmt_duration, simulation_command,
+        split_run_args,
+    };
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn filters_match_names_and_accept_multiple_terms() {
+        let matches = filter_binaries(&strings(&["maze", "tonic"]));
+        let names: Vec<_> = matches.iter().map(super::SimBinary::display_name).collect();
+        assert_eq!(names, ["maze-explore", "tonic-grpc"]);
+        assert!(filter_binaries(&strings(&["missing"])).is_empty());
+    }
+
+    #[test]
+    fn run_separator_keeps_binary_arguments_out_of_filters() {
+        let args = strings(&["maze", "--", "--seed", "42"]);
+        let (filters, binary_args) = split_run_args(&args);
+        assert_eq!(filters, strings(&["maze"]));
+        assert_eq!(binary_args, strings(&["--seed", "42"]));
+    }
+
+    #[test]
+    fn durations_use_compact_units() {
+        assert_eq!(fmt_duration(Duration::from_millis(999)), "999ms");
+        assert_eq!(fmt_duration(Duration::from_millis(1_250)), "1.2s");
+        assert_eq!(fmt_duration(Duration::from_secs(125)), "2m 05s");
+    }
+
+    #[test]
+    fn child_cargo_is_anchored_to_the_workspace_and_package() {
+        let command = simulation_command(&SIM_BINARIES[0], &strings(&["--seed", "42"]));
+        assert_eq!(
+            command.get_current_dir(),
+            Some(std::path::Path::new(WORKSPACE_ROOT))
+        );
+        let args: Vec<_> = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            strings(&[
+                "run",
+                "--package",
+                "moonpool-sim-examples",
+                "--bin",
+                "sim-maze-explore",
+                "--target-dir",
+                "target/sancov",
+                "--",
+                "--seed",
+                "42",
+            ])
+        );
     }
 }

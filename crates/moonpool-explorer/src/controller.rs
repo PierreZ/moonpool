@@ -573,12 +573,6 @@ impl Explorer {
     }
 }
 
-impl Drop for Explorer {
-    fn drop(&mut self) {
-        crate::sancov::cleanup_sancov_shared();
-    }
-}
-
 /// Derive a child continuation seed deterministically from its coordinates.
 fn derive_seed(
     root_seed: u64,

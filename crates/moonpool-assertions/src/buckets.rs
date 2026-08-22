@@ -26,6 +26,9 @@ pub const MAX_EACH_KEYS: usize = 6;
 /// Maximum length of the assertion message stored in a bucket.
 const EACH_MSG_LEN: usize = 32;
 
+const BUCKET_INITIALIZING: u8 = 1;
+const BUCKET_READY: u8 = 2;
+
 /// Total memory size for the `EachBucket` region.
 pub const EACH_BUCKET_MEM_SIZE: usize = 8 + MAX_EACH_BUCKETS * std::mem::size_of::<EachBucket>();
 
@@ -46,8 +49,8 @@ pub struct EachBucket {
     pub num_keys: u8,
     /// Number of quality keys (0-4). 0 means no quality tracking.
     pub has_quality: u8,
-    /// Alignment padding.
-    pad: u8,
+    /// Publication state: zero = unused, one = initializing, two = ready.
+    published: u8,
     /// Number of times this bucket has been hit (atomic increment).
     pub pass_count: u32,
     /// Best quality watermark score (atomic CAS for improvement detection).
@@ -91,25 +94,77 @@ unsafe fn find_or_alloc_each_bucket(
 ) -> *mut EachBucket {
     unsafe {
         let next_atomic = &*ptr.cast::<()>().cast::<AtomicU32>();
-        let count = next_atomic.load(Ordering::Relaxed) as usize;
+        let count = next_atomic.load(Ordering::Acquire) as usize;
         let base = ptr.add(8).cast::<()>().cast::<EachBucket>();
 
         // Search existing buckets.
         for i in 0..count.min(MAX_EACH_BUCKETS) {
             let bucket = base.add(i);
-            if (*bucket).site_hash == site_hash && (*bucket).bucket_hash == bucket_hash {
+            let published = &*std::ptr::addr_of!((*bucket).published).cast::<AtomicU8>();
+            let state = published.load(Ordering::Acquire);
+            if state == 0 {
+                continue;
+            }
+            let existing_site = &*std::ptr::addr_of!((*bucket).site_hash).cast::<AtomicU32>();
+            let existing_bucket = &*std::ptr::addr_of!((*bucket).bucket_hash).cast::<AtomicU32>();
+            if existing_site.load(Ordering::Relaxed) == site_hash
+                && existing_bucket.load(Ordering::Relaxed) == bucket_hash
+            {
+                if state == BUCKET_INITIALIZING {
+                    return std::ptr::null_mut();
+                }
                 return bucket;
             }
         }
 
         // Allocate new bucket atomically.
-        let new_idx = next_atomic.fetch_add(1, Ordering::Relaxed) as usize;
+        let new_idx = next_atomic.fetch_add(1, Ordering::AcqRel) as usize;
         if new_idx >= MAX_EACH_BUCKETS {
-            next_atomic.fetch_sub(1, Ordering::Relaxed);
+            next_atomic.fetch_sub(1, Ordering::AcqRel);
             return std::ptr::null_mut();
         }
 
         let bucket = base.add(new_idx);
+        let bucket_site = &*std::ptr::addr_of!((*bucket).site_hash).cast::<AtomicU32>();
+        let bucket_hash_field = &*std::ptr::addr_of!((*bucket).bucket_hash).cast::<AtomicU32>();
+        let published = &*std::ptr::addr_of!((*bucket).published).cast::<AtomicU8>();
+        bucket_site.store(site_hash, Ordering::Relaxed);
+        bucket_hash_field.store(bucket_hash, Ordering::Relaxed);
+        published.store(BUCKET_INITIALIZING, Ordering::Release);
+
+        // A published claim wins immediately; among simultaneous initializers,
+        // the lower index wins deterministically.
+        let claimed = next_atomic.load(Ordering::Acquire) as usize;
+        for i in 0..claimed.min(MAX_EACH_BUCKETS) {
+            if i == new_idx {
+                continue;
+            }
+            let existing = base.add(i);
+            let existing_state = &*std::ptr::addr_of!((*existing).published).cast::<AtomicU8>();
+            let state = existing_state.load(Ordering::Acquire);
+            if state == 0 {
+                continue;
+            }
+            let existing_site = &*std::ptr::addr_of!((*existing).site_hash).cast::<AtomicU32>();
+            let existing_bucket = &*std::ptr::addr_of!((*existing).bucket_hash).cast::<AtomicU32>();
+            if existing_site.load(Ordering::Relaxed) != site_hash
+                || existing_bucket.load(Ordering::Relaxed) != bucket_hash
+            {
+                continue;
+            }
+            if state == BUCKET_INITIALIZING && i > new_idx {
+                continue;
+            }
+            bucket_site.store(0, Ordering::Relaxed);
+            bucket_hash_field.store(0, Ordering::Relaxed);
+            published.store(0, Ordering::Release);
+            return if state == BUCKET_READY {
+                existing
+            } else {
+                std::ptr::null_mut()
+            };
+        }
+
         let mut msg_buf = [0u8; EACH_MSG_LEN];
         let n = msg.len().min(EACH_MSG_LEN - 1);
         msg_buf[..n].copy_from_slice(&msg.as_bytes()[..n]);
@@ -120,21 +175,15 @@ unsafe fn find_or_alloc_each_bucket(
             key_values[i] = v;
         }
 
-        std::ptr::write(
-            bucket,
-            EachBucket {
-                site_hash,
-                bucket_hash,
-                discovered: 0,
-                num_keys: u8::try_from(num_keys).expect("num_keys capped at MAX_EACH_KEYS=6"),
-                has_quality,
-                pad: 0,
-                pass_count: 0,
-                best_score: i64::MIN,
-                key_values,
-                msg: msg_buf,
-            },
-        );
+        (*bucket).discovered = 0;
+        (*bucket).num_keys = u8::try_from(num_keys).expect("num_keys capped at MAX_EACH_KEYS=6");
+        (*bucket).has_quality = has_quality;
+        (*bucket).pass_count = 0;
+        (*bucket).best_score = i64::MIN;
+        (*bucket).key_values = key_values;
+        (*bucket).msg = msg_buf;
+
+        published.store(BUCKET_READY, Ordering::Release);
         bucket
     }
 }
@@ -256,12 +305,36 @@ pub fn each_bucket_read_all() -> Vec<EachBucket> {
     // - The first 4 bytes hold the bucket count (u32), capped at MAX_EACH_BUCKETS.
     // - base = ptr + 8 is the start of the EachBucket array.
     // - Loop bound 0..count ensures base.add(i) stays within the allocated region.
-    // - EachBucket is #[repr(C)] + Copy, so ptr::read is valid for initialized slots.
+    // - Mutable accounting fields are loaded atomically while immutable metadata
+    //   is read only after acquiring the publication latch.
     unsafe {
-        let count = (*ptr.cast::<()>().cast::<u32>()) as usize;
+        let count = (&*ptr.cast::<()>().cast::<AtomicU32>()).load(Ordering::Acquire) as usize;
         let count = count.min(MAX_EACH_BUCKETS);
         let base = ptr.add(8).cast::<()>().cast::<EachBucket>();
-        (0..count).map(|i| std::ptr::read(base.add(i))).collect()
+        (0..count)
+            .filter_map(|i| {
+                let bucket = base.add(i);
+                let published = &*std::ptr::addr_of!((*bucket).published).cast::<AtomicU8>();
+                if published.load(Ordering::Acquire) != BUCKET_READY {
+                    return None;
+                }
+                Some(EachBucket {
+                    site_hash: std::ptr::read(std::ptr::addr_of!((*bucket).site_hash)),
+                    bucket_hash: std::ptr::read(std::ptr::addr_of!((*bucket).bucket_hash)),
+                    discovered: (&*std::ptr::addr_of!((*bucket).discovered).cast::<AtomicU8>())
+                        .load(Ordering::Relaxed),
+                    num_keys: std::ptr::read(std::ptr::addr_of!((*bucket).num_keys)),
+                    has_quality: std::ptr::read(std::ptr::addr_of!((*bucket).has_quality)),
+                    published: BUCKET_READY,
+                    pass_count: (&*std::ptr::addr_of!((*bucket).pass_count).cast::<AtomicU32>())
+                        .load(Ordering::Relaxed),
+                    best_score: (&*std::ptr::addr_of!((*bucket).best_score).cast::<AtomicI64>())
+                        .load(Ordering::Relaxed),
+                    key_values: std::ptr::read(std::ptr::addr_of!((*bucket).key_values)),
+                    msg: std::ptr::read(std::ptr::addr_of!((*bucket).msg)),
+                })
+            })
+            .collect()
     }
 }
 
@@ -307,6 +380,22 @@ mod tests {
         // EachBucket must have a stable size for shared memory layout.
         // 4+4+1+1+1+1+4+8+6*8+32 = 104 bytes
         assert_eq!(std::mem::size_of::<EachBucket>(), 104);
+    }
+
+    #[test]
+    fn snapshots_skip_buckets_until_metadata_is_published() {
+        crate::region::init();
+        crate::region::reset();
+        let buckets = crate::region::each_bucket_ptr();
+
+        // Simulate an allocator that reserved index zero but has not finished
+        // initializing its metadata. Readers must not expose the zeroed bucket.
+        // Safety: `init` installed a correctly aligned bucket region.
+        unsafe {
+            (&*buckets.cast::<()>().cast::<AtomicU32>()).store(1, Ordering::Release);
+        }
+        assert!(each_bucket_read_all().is_empty());
+        crate::region::clear();
     }
 
     #[test]

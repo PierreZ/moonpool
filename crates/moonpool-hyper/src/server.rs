@@ -69,23 +69,11 @@ pub struct H2ServerConfig {
 ///     }
 /// }
 /// ```
+#[derive(Clone)]
 pub struct H2Server<P: Providers> {
     executor: HyperExecutor<P::Task>,
     timer: HyperTimer<P::Time>,
     config: H2ServerConfig,
-}
-
-// Manual: the derive would add a `P: Clone` bound that says nothing (Providers
-// already requires Clone) and would obscure that only the two adapters and the
-// config are cloned.
-impl<P: Providers> Clone for H2Server<P> {
-    fn clone(&self) -> Self {
-        Self {
-            executor: self.executor.clone(),
-            timer: self.timer.clone(),
-            config: self.config.clone(),
-        }
-    }
 }
 
 impl<P: Providers> fmt::Debug for H2Server<P> {

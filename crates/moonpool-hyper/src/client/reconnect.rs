@@ -12,96 +12,15 @@ use moonpool_core::{Detach, NetworkProvider, Providers, TaskProvider, TimeProvid
 use tracing::{Instrument, instrument};
 
 use super::channel::{H2Channel, ResponseFuture};
-use crate::config::KeepAlive;
 use crate::error::ChannelError;
 use crate::io::HyperIo;
 use crate::rt::{HyperExecutor, HyperTimer};
 
+use super::config::{ChannelConfig, backoff_delay};
+use super::state::{Conn, Inner};
+
 /// The hyper IO type a channel builds over a provider's stream.
 type ChannelIo<P> = HyperIo<<<P as Providers>::Network as NetworkProvider>::TcpStream>;
-
-/// How a [`ReconnectingChannel`] connects and reconnects.
-///
-/// Defaults are conservative for both local simulation and production use.
-#[derive(Clone, Debug)]
-pub struct ChannelConfig {
-    /// Initial delay before attempting reconnection.
-    ///
-    /// Doubles per consecutive failure, up to `max_reconnect_delay`.
-    ///
-    /// Doubles as the stability threshold: a connection that stays up at least
-    /// this long has proved itself and clears the failure count, while one that
-    /// dies younger with an error counts as another failure. That is what keeps
-    /// a peer which accepts and immediately dies from reconnecting forever at
-    /// zero backoff.
-    pub initial_reconnect_delay: Duration,
-
-    /// Maximum delay between reconnection attempts.
-    pub max_reconnect_delay: Duration,
-
-    /// Timeout for connection attempts.
-    ///
-    /// Applied to the TCP connect and, separately, to the h2 handshake: a peer
-    /// that accepts the connection and then goes quiet must not park the
-    /// connection task forever.
-    pub connection_timeout: Duration,
-
-    /// Maximum number of consecutive connection failures before giving up.
-    /// `None`, the default, retries forever.
-    pub max_connection_failures: Option<u32>,
-
-    /// h2 PING keepalive.
-    ///
-    /// `None`, the default, is hyper's own default: no keepalive, so a peer
-    /// that goes silent without closing the socket is only noticed when a
-    /// request fails.
-    pub keep_alive: Option<KeepAlive>,
-
-    /// Whether the connected stream claims efficient vectored writes.
-    ///
-    /// Passed to [`HyperIo::with_vectored_writes`]. Default `false`, matching
-    /// `HyperIo`'s own default: futures-io cannot be asked whether the
-    /// underlying stream really implements `poll_write_vectored`.
-    pub vectored_writes: bool,
-}
-
-impl Default for ChannelConfig {
-    fn default() -> Self {
-        Self {
-            initial_reconnect_delay: Duration::from_millis(100),
-            max_reconnect_delay: Duration::from_secs(30),
-            connection_timeout: Duration::from_secs(5),
-            max_connection_failures: None,
-            keep_alive: None,
-            vectored_writes: false,
-        }
-    }
-}
-
-/// How long to wait before the attempt that follows `failures` consecutive
-/// failures: `initial_reconnect_delay * 2^(failures - 1)`, capped at
-/// `max_reconnect_delay`.
-///
-/// No jitter, by design. Production jitter desynchronizes a fleet of clients;
-/// here it would only make reconnect timing depend on something other than the
-/// seed. The doubling saturates rather than overflowing, and the loop is
-/// bounded by the ceiling rather than by `failures`.
-fn backoff_delay(failures: u32, config: &ChannelConfig) -> Duration {
-    if failures == 0 || config.initial_reconnect_delay.is_zero() {
-        return Duration::ZERO;
-    }
-
-    let mut delay = config
-        .initial_reconnect_delay
-        .min(config.max_reconnect_delay);
-    for _ in 1..failures {
-        if delay == config.max_reconnect_delay {
-            break;
-        }
-        delay = delay.saturating_mul(2).min(config.max_reconnect_delay);
-    }
-    delay
-}
 
 /// A tower [`Service`](tower_service::Service) that keeps an h2 connection to
 /// one address, reconnecting as needed.
@@ -192,42 +111,6 @@ impl<P: Providers, B> Shared<P, B> {
     }
 }
 
-/// The mutable half. The lock is never held across an await point: the
-/// connection task reads what it needs, releases, and takes the lock again only
-/// to publish an outcome.
-struct Inner<B> {
-    conn: Conn<B>,
-
-    /// Consecutive failed attempts, reset by a successful handshake. Drives
-    /// both the backoff and `max_connection_failures`. A connection that ends
-    /// after being established is not a failure and does not touch this.
-    failures: u32,
-
-    /// Incremented every time a connection is published. A connection task
-    /// remembers the value it published under and only retires the state if it
-    /// still stands, so a driver that notices its socket is gone long after it
-    /// was replaced cannot demote a newer connection.
-    generation: u64,
-
-    /// Set by a failed attempt, taken by the next `poll_ready`.
-    last_error: Option<ChannelError>,
-
-    /// Callers parked in `poll_ready`, woken in the order they parked so wake
-    /// ordering is a function of poll order alone.
-    wakers: Vec<Waker>,
-}
-
-/// Connection state.
-enum Conn<B> {
-    /// No connection and no attempt running.
-    Disconnected,
-    /// A connection task is running: waiting out backoff, connecting, or
-    /// handshaking.
-    Connecting,
-    /// A live connection. Requests are served by cloning this handle.
-    Connected(H2Channel<B>),
-}
-
 impl<P, B> ReconnectingChannel<P, B>
 where
     P: Providers,
@@ -245,13 +128,7 @@ where
                 providers: providers.clone(),
                 addr: addr.into(),
                 config,
-                inner: Mutex::new(Inner {
-                    conn: Conn::Disconnected,
-                    failures: 0,
-                    generation: 0,
-                    last_error: None,
-                    wakers: Vec::new(),
-                }),
+                inner: Mutex::new(Inner::new()),
             }),
             ready: None,
         }
@@ -298,15 +175,12 @@ where
                 return Poll::Ready(Ok(()));
             }
 
+            if let Some(error) = inner.take_failure() {
+                return Poll::Ready(Err(error));
+            }
+
             let mut start_attempt = false;
             if matches!(inner.conn, Conn::Disconnected) {
-                // A failed attempt is reported to exactly one caller; everyone
-                // else, and this caller's next poll, goes on to start a fresh
-                // attempt.
-                if let Some(error) = inner.last_error.take() {
-                    return Poll::Ready(Err(error));
-                }
-
                 if let Some(max) = self.shared.config.max_connection_failures
                     && inner.failures >= max
                 {
@@ -322,9 +196,7 @@ where
                 start_attempt = true;
             }
 
-            if !inner.wakers.iter().any(|w| w.will_wake(cx.waker())) {
-                inner.wakers.push(cx.waker().clone());
-            }
+            inner.park(cx.waker());
             start_attempt
         };
 
@@ -446,7 +318,7 @@ where
         let mut inner = shared.lock();
         inner.generation = inner.generation.wrapping_add(1);
         inner.conn = Conn::Connected(H2Channel::new(sender));
-        (inner.generation, take_wakers(&mut inner))
+        (inner.generation, inner.take_wakers())
     };
     let published_at = shared.providers.time().now();
     wake_all(parked);
@@ -482,7 +354,7 @@ where
         // failed connect attempt, so the next poll_ready reconnects rather than
         // reporting anything, though it may now have a backoff to wait out.
         inner.failures = next_failures(inner.failures, alive, ended_with_error, &shared.config);
-        take_wakers(&mut inner)
+        inner.take_wakers()
     };
     wake_all(parked);
 }
@@ -539,7 +411,7 @@ impl<P: Providers, B> Drop for AttemptGuard<P, B> {
             // failure count and the backoff stay as they were and the next
             // poll_ready starts a fresh attempt immediately.
             inner.conn = Conn::Disconnected;
-            take_wakers(&mut inner)
+            inner.take_wakers()
         };
         wake_all(parked);
     }
@@ -619,10 +491,9 @@ fn record_failure<P: Providers, B>(
     let (delay, parked) = {
         let mut inner = shared.lock();
         inner.failures = inner.failures.saturating_add(1);
-        inner.conn = Conn::Disconnected;
-        inner.last_error = Some(error);
+        inner.conn = Conn::Failed(error);
         let delay = backoff_delay(inner.failures, &shared.config);
-        (delay, take_wakers(&mut inner))
+        (delay, inner.take_wakers())
     };
 
     tracing::info!(
@@ -633,11 +504,6 @@ fn record_failure<P: Providers, B>(
         "h2_channel_connect_failed"
     );
     wake_all(parked);
-}
-
-/// Collect the parked callers, oldest first.
-fn take_wakers<B>(inner: &mut Inner<B>) -> Vec<Waker> {
-    std::mem::take(&mut inner.wakers)
 }
 
 /// Wake parked callers in the order they parked.
@@ -827,20 +693,16 @@ mod tests {
     fn channel_with(
         conn: Conn<Full<Bytes>>,
         reservation: Option<H2Channel<Full<Bytes>>>,
-        last_error: Option<ChannelError>,
     ) -> TestChannel {
+        let mut inner = Inner::new();
+        inner.conn = conn;
+        inner.generation = 1;
         ReconnectingChannel {
             shared: Arc::new(Shared {
                 providers: TokioProviders::new(),
                 addr: "10.0.0.9:50051".to_owned(),
                 config: ChannelConfig::default(),
-                inner: Mutex::new(Inner {
-                    conn,
-                    failures: 0,
-                    generation: 1,
-                    last_error,
-                    wakers: Vec::new(),
-                }),
+                inner: Mutex::new(inner),
             }),
             ready: reservation,
         }
@@ -851,7 +713,7 @@ mod tests {
         let (live, connection) = handshake().await;
         assert!(!live.is_closed());
 
-        let mut channel = channel_with(Conn::Connected(live), None, None);
+        let mut channel = channel_with(Conn::Connected(live), None);
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
 
         // First poll grants readiness and takes a reservation.
@@ -879,7 +741,7 @@ mod tests {
         );
 
         let (live, _live_connection) = handshake().await;
-        let mut channel = channel_with(Conn::Connected(live), Some(stale), None);
+        let mut channel = channel_with(Conn::Connected(live), Some(stale));
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
 
         assert!(matches!(channel.poll_ready(&mut cx), Poll::Ready(Ok(()))));
@@ -897,22 +759,33 @@ mod tests {
 
         // Disconnected with an error waiting: if the reserved clone consumed
         // the error or started an attempt, the assertions below would see it.
-        let mut channel = channel_with(
-            Conn::Disconnected,
-            Some(reservation),
-            Some(ChannelError::NotReady),
-        );
+        let mut channel = channel_with(Conn::Failed(ChannelError::NotReady), Some(reservation));
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
 
         assert!(matches!(channel.poll_ready(&mut cx), Poll::Ready(Ok(()))));
 
         let inner = channel.shared.lock();
-        assert!(inner.last_error.is_some(), "stored error must not be taken");
         assert!(
-            matches!(inner.conn, Conn::Disconnected),
+            matches!(inner.conn, Conn::Failed(ChannelError::NotReady)),
+            "stored error must not be taken"
+        );
+        assert!(
+            !matches!(inner.conn, Conn::Connecting),
             "no attempt started"
         );
-        assert!(inner.wakers.is_empty(), "a ready caller must not park");
+        assert_eq!(inner.parked_count(), 0, "a ready caller must not park");
+    }
+
+    #[test]
+    fn a_failed_attempt_is_reported_once_and_consumed() {
+        let mut channel = channel_with(Conn::Failed(ChannelError::NotReady), None);
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+
+        assert!(matches!(
+            channel.poll_ready(&mut cx),
+            Poll::Ready(Err(ChannelError::NotReady))
+        ));
+        assert!(matches!(channel.shared.lock().conn, Conn::Disconnected));
     }
 
     #[test]
@@ -1006,17 +879,16 @@ mod tests {
         Arc<RecordingWaker>,
     ) {
         let flag = Arc::new(RecordingWaker(AtomicBool::new(false)));
+        let mut inner = Inner::new();
+        inner.conn = conn;
+        inner.failures = 2;
+        inner.generation = generation;
+        inner.park(&Waker::from(Arc::clone(&flag)));
         let shared = Arc::new(Shared {
             providers: TokioProviders::new(),
             addr: "10.0.0.3:50051".to_owned(),
             config: ChannelConfig::default(),
-            inner: Mutex::new(Inner {
-                conn,
-                failures: 2,
-                generation,
-                last_error: None,
-                wakers: vec![Waker::from(Arc::clone(&flag))],
-            }),
+            inner: Mutex::new(inner),
         });
         (shared, flag)
     }
@@ -1032,7 +904,7 @@ mod tests {
 
         let inner = shared.lock();
         assert!(matches!(inner.conn, Conn::Disconnected));
-        assert!(inner.wakers.is_empty());
+        assert_eq!(inner.parked_count(), 0);
         assert!(flag.0.load(Ordering::SeqCst), "parked caller must be woken");
         // The attempt never reached a verdict, so it is not counted as a
         // failure and the backoff schedule is untouched.
@@ -1051,7 +923,7 @@ mod tests {
 
         let inner = shared.lock();
         assert!(matches!(inner.conn, Conn::Connecting));
-        assert_eq!(inner.wakers.len(), 1);
+        assert_eq!(inner.parked_count(), 1);
         assert!(!flag.0.load(Ordering::SeqCst));
     }
 
@@ -1068,7 +940,7 @@ mod tests {
         });
 
         let inner = shared.lock();
-        assert_eq!(inner.wakers.len(), 1);
+        assert_eq!(inner.parked_count(), 1);
         assert!(!flag.0.load(Ordering::SeqCst));
     }
 }
