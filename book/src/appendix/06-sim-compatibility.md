@@ -46,7 +46,7 @@ The simulated stream overrides `poll_write_vectored`: each `IoSlice` becomes its
 | `tokio::fs::*`, `std::fs::*` | `storage.open(path, options)`, `storage.exists`, `storage.delete`, `storage.rename` |
 | Direct file handles | `StorageFile` with `sync_all`, `sync_data`, `size`, `set_len` |
 
-Storage operations return `Poll::Pending` and require simulation stepping. See the **Storage Testing Patterns** section of the project `CLAUDE.md` for the step-loop required when driving storage from a test.
+Storage operations return `Poll::Pending` and require simulation stepping. See the **Storage Testing Patterns** section of the project `AGENTS.md` for the step-loop required when driving storage from a test.
 
 ## 5. Randomness
 
