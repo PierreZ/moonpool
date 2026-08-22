@@ -23,8 +23,7 @@ impl SimTimeProvider {
 impl TimeProvider for SimTimeProvider {
     async fn sleep(&self, duration: Duration) -> Result<(), TimeError> {
         let sleep_future = self.sim.sleep(duration).map_err(|_| TimeError::Shutdown)?;
-        let _ = sleep_future.await;
-        Ok(())
+        sleep_future.await.map_err(|_| TimeError::Shutdown)
     }
 
     fn now(&self) -> Duration {
@@ -52,7 +51,10 @@ impl TimeProvider for SimTimeProvider {
         moonpool_core::select! {
             biased;
             result = future => Ok(result),
-            _ = sleep_future => Err(TimeError::Elapsed),
+            sleep_result = sleep_future => match sleep_result {
+                Ok(()) => Err(TimeError::Elapsed),
+                Err(_) => Err(TimeError::Shutdown),
+            },
         }
     }
 }
@@ -80,6 +82,8 @@ mod tests {
             .timeout(Duration::from_millis(100), async { 42 })
             .await;
         assert_eq!(result, Ok(42));
+        assert_eq!(sim.pending_event_count(), 0);
+        assert_eq!(sim.current_time(), Duration::ZERO);
     }
 
     #[test]

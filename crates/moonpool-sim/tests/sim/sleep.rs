@@ -159,3 +159,33 @@ async fn test_weak_sim_world_sleep_handling() {
     let result = sleep_future.await;
     assert!(result.is_err());
 }
+
+#[test]
+fn dropping_an_unpolled_sleep_removes_its_event() {
+    let mut sim = SimWorld::new();
+    let sleep = sim.sleep(Duration::from_mins(1));
+    assert_eq!(sim.pending_event_count(), 1);
+
+    drop(sleep);
+
+    assert_eq!(sim.pending_event_count(), 0);
+    assert!(!sim.has_pending_events());
+    assert!(!sim.step());
+    assert_eq!(sim.current_time(), Duration::ZERO);
+}
+
+#[test]
+fn cancelling_one_sleep_preserves_other_fifo_events() {
+    let mut sim = SimWorld::new();
+    let first = sim.sleep(Duration::from_millis(10));
+    let cancelled = sim.sleep(Duration::from_millis(10));
+    let third = sim.sleep(Duration::from_millis(10));
+
+    drop(cancelled);
+    assert_eq!(sim.pending_event_count(), 2);
+    assert!(sim.step());
+    assert!(!sim.step());
+    assert_eq!(sim.current_time(), Duration::from_millis(10));
+
+    drop((first, third));
+}

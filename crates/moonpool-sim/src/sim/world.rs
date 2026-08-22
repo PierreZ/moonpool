@@ -23,26 +23,23 @@ use crate::{
 };
 
 use super::{
-    events::{ConnectionStateChange, Event, EventQueue, NetworkOperation, ScheduledEvent},
+    events::{ConnectionStateChange, Event, NetworkOperation, ScheduleId, Scheduler},
     rng::{reset_sim_rng, set_sim_seed, sim_random, sim_random_range},
     sleep::SleepFuture,
     state::{
         ClogState, CloseReason, ConnectionFlags, ConnectionState, NetworkState, PartitionState,
         StorageState,
     },
-    wakers::WakerRegistry,
+    wakers::{WakeBatch, Wakers},
 };
 
 /// Internal simulation state holder
 #[derive(Debug)]
 pub(crate) struct SimInner {
-    pub(crate) current_time: Duration,
+    pub(crate) scheduler: Scheduler<Event>,
     /// Drifted timer time (can be ahead of `current_time`)
     /// FDB ref: sim2.actor.cpp:1058-1064 - `timer()` drifts 0-0.1s ahead of `now()`
     pub(crate) timer_time: Duration,
-    pub(crate) event_queue: EventQueue,
-    pub(crate) next_sequence: u64,
-
     // Network management
     pub(crate) network: NetworkState,
 
@@ -56,7 +53,7 @@ pub(crate) struct SimInner {
     pub(crate) storage: StorageState,
 
     // Async coordination
-    pub(crate) wakers: WakerRegistry,
+    pub(crate) wakers: Wakers,
 
     // Task management for sleep functionality
     pub(crate) next_task_id: u64,
@@ -79,14 +76,12 @@ pub(crate) struct SimInner {
 impl SimInner {
     pub(crate) fn new() -> Self {
         Self {
-            current_time: Duration::ZERO,
+            scheduler: Scheduler::new(),
             timer_time: Duration::ZERO,
-            event_queue: EventQueue::new(),
-            next_sequence: 0,
             network: NetworkState::new(NetworkConfiguration::default()),
             localities: BTreeMap::new(),
             storage: StorageState::default(),
-            wakers: WakerRegistry::default(),
+            wakers: Wakers::default(),
             next_task_id: 0,
             awakened_tasks: HashSet::new(),
             events_processed: 0,
@@ -98,14 +93,12 @@ impl SimInner {
 
     pub(crate) fn new_with_config(network_config: NetworkConfiguration) -> Self {
         Self {
-            current_time: Duration::ZERO,
+            scheduler: Scheduler::new(),
             timer_time: Duration::ZERO,
-            event_queue: EventQueue::new(),
-            next_sequence: 0,
             network: NetworkState::new(network_config),
             localities: BTreeMap::new(),
             storage: StorageState::default(),
-            wakers: WakerRegistry::default(),
+            wakers: Wakers::default(),
             next_task_id: 0,
             awakened_tasks: HashSet::new(),
             events_processed: 0,
@@ -115,13 +108,29 @@ impl SimInner {
         }
     }
 
+    pub(crate) fn now(&self) -> Duration {
+        self.scheduler.now()
+    }
+
+    pub(crate) fn schedule_after(&mut self, event: Event, delay: Duration) {
+        if let Err(error) = self.scheduler.schedule_after(delay, event) {
+            tracing::error!(%error, "failed to schedule simulation event");
+        }
+    }
+
+    pub(crate) fn schedule_at(&mut self, event: Event, time: Duration) {
+        if let Err(error) = self.scheduler.schedule_at(time, event) {
+            tracing::error!(%error, "failed to schedule simulation event");
+        }
+    }
+
     /// Record an engine-injected fault, stamped with the current sim time.
     ///
     /// Faults accumulate in [`SimInner::pending_faults`] until the runner
     /// drains them via [`SimWorld::take_faults`] into the observability
     /// timeline. The engine never touches `tracing` for faults.
     pub(crate) fn record_fault(&mut self, event: SimFaultEvent) {
-        let time_ms = u64::try_from(self.current_time.as_millis()).unwrap_or(u64::MAX);
+        let time_ms = u64::try_from(self.now().as_millis()).unwrap_or(u64::MAX);
         self.pending_faults.push(SimFaultRecord { time_ms, event });
     }
 
@@ -259,35 +268,36 @@ impl SimWorld {
     /// Panics if the simulation lock is poisoned by a prior task panic.
     #[instrument(skip(self))]
     pub fn step(&mut self) -> bool {
-        let mut inner = self
-            .inner
-            .write()
-            .expect("RwLock poisoned: prior task panicked");
+        let (processed, wakes) = {
+            let mut inner = self
+                .inner
+                .write()
+                .expect("RwLock poisoned: prior task panicked");
+            let mut wakes = WakeBatch::default();
 
-        if let Some(scheduled_event) = inner.event_queue.pop_earliest() {
-            // Advance logical time to event timestamp
-            inner.current_time = scheduled_event.time();
+            let processed = if let Some(scheduled) = inner.scheduler.pop() {
+                Self::clear_expired_clogs_with_inner(&mut inner, &mut wakes);
+                Self::randomly_trigger_partitions_with_inner(&mut inner);
 
-            // Phase 7: Clear expired clogs after time advancement
-            Self::clear_expired_clogs_with_inner(&mut inner);
+                let event = scheduled.into_value();
+                inner.last_processed_event = Some(event.clone());
+                Self::process_event_with_inner(&mut inner, event, &mut wakes);
+                true
+            } else {
+                inner.last_processed_event = None;
+                false
+            };
+            (processed, wakes)
+        };
 
-            // Trigger random partitions based on configuration
-            Self::randomly_trigger_partitions_with_inner(&mut inner);
-
-            // Store the event for orchestrator inspection (e.g., ProcessRestart)
-            let event = scheduled_event.into_event();
-            inner.last_processed_event = Some(event.clone());
-
-            // Process the event with the mutable reference
-            Self::process_event_with_inner(&mut inner, event);
-
-            // Return true if more events are available
-            !inner.event_queue.is_empty()
-        } else {
-            inner.last_processed_event = None;
-            // No more events to process
-            false
-        }
+        wakes.wake();
+        processed
+            && !self
+                .inner
+                .read()
+                .expect("RwLock poisoned: prior task panicked")
+                .scheduler
+                .is_empty()
     }
 
     /// Processes all scheduled events until the queue is empty or only infrastructure events remain.
@@ -314,8 +324,9 @@ impl SimWorld {
                     .inner
                     .read()
                     .expect("RwLock poisoned: prior task panicked")
-                    .event_queue
-                    .has_only_infrastructure_events();
+                    .scheduler
+                    .iter()
+                    .all(|scheduled| scheduled.value().is_infrastructure_event());
                 if !has_workload_events {
                     tracing::debug!(
                         "Early termination: only infrastructure events remain in queue"
@@ -336,7 +347,8 @@ impl SimWorld {
         self.inner
             .read()
             .expect("RwLock poisoned: prior task panicked")
-            .current_time
+            .scheduler
+            .now()
     }
 
     /// Returns the exact simulation time (equivalent to FDB's `now()`).
@@ -352,7 +364,8 @@ impl SimWorld {
         self.inner
             .read()
             .expect("RwLock poisoned: prior task panicked")
-            .current_time
+            .scheduler
+            .now()
     }
 
     /// Returns the drifted timer time (equivalent to FDB's `timer()`).
@@ -383,13 +396,13 @@ impl SimWorld {
 
         // If clock drift is disabled, return exact simulation time
         if !chaos.clock_drift_enabled {
-            return inner.current_time;
+            return inner.now();
         }
 
         // FDB formula: timerTime += random01() * (time + 0.1 - timerTime) / 2.0
         // This smoothly interpolates timerTime toward (time + drift_max)
         // The /2.0 creates a damped approach (never overshoots)
-        let max_timer = inner.current_time + chaos.clock_drift_max;
+        let max_timer = inner.now() + chaos.clock_drift_max;
 
         // Only advance if timer is behind max
         if inner.timer_time < max_timer {
@@ -403,7 +416,7 @@ impl SimWorld {
         }
 
         // Ensure timer never goes backwards relative to simulation time
-        inner.timer_time = inner.timer_time.max(inner.current_time);
+        inner.timer_time = inner.timer_time.max(inner.now());
 
         inner.timer_time
     }
@@ -419,12 +432,7 @@ impl SimWorld {
             .inner
             .write()
             .expect("RwLock poisoned: prior task panicked");
-        let scheduled_time = inner.current_time + delay;
-        let sequence = inner.next_sequence;
-        inner.next_sequence += 1;
-
-        let scheduled_event = ScheduledEvent::new(scheduled_time, event, sequence);
-        inner.event_queue.schedule(scheduled_event);
+        inner.schedule_after(event, delay);
     }
 
     /// Schedules an event to execute at the specified absolute time.
@@ -437,11 +445,7 @@ impl SimWorld {
             .inner
             .write()
             .expect("RwLock poisoned: prior task panicked");
-        let sequence = inner.next_sequence;
-        inner.next_sequence += 1;
-
-        let scheduled_event = ScheduledEvent::new(time, event, sequence);
-        inner.event_queue.schedule(scheduled_event);
+        inner.schedule_at(event, time);
     }
 
     /// Creates a weak reference to this simulation world.
@@ -466,7 +470,7 @@ impl SimWorld {
             .inner
             .read()
             .expect("RwLock poisoned: prior task panicked")
-            .event_queue
+            .scheduler
             .is_empty()
     }
 
@@ -480,7 +484,7 @@ impl SimWorld {
         self.inner
             .read()
             .expect("RwLock poisoned: prior task panicked")
-            .event_queue
+            .scheduler
             .len()
     }
 
@@ -770,22 +774,12 @@ impl SimWorld {
                 );
                 conn.flags.set_send_in_progress(true);
 
-                // Schedule immediate processing of the buffer
-                let scheduled_time = inner.current_time + std::time::Duration::ZERO;
-                let sequence = inner.next_sequence;
-                inner.next_sequence += 1;
-                let scheduled_event = ScheduledEvent::new(
-                    scheduled_time,
+                inner.schedule_after(
                     Event::Network {
                         connection_id: connection_id.0,
                         operation: NetworkOperation::ProcessSendBuffer,
                     },
-                    sequence,
-                );
-                inner.event_queue.schedule(scheduled_event);
-                tracing::debug!(
-                    "buffer_send: scheduled ProcessSendBuffer event with sequence {}",
-                    sequence
+                    Duration::ZERO,
                 );
             }
 
@@ -830,7 +824,7 @@ impl SimWorld {
         inner.network.next_connection_id += 1;
 
         // Capture current time to avoid borrow conflicts
-        let current_time = inner.current_time;
+        let current_time = inner.now();
 
         // Parse IP addresses for partition tracking
         let client_endpoint = NetworkState::parse_ip_from_addr(client_addr);
@@ -953,23 +947,24 @@ impl SimWorld {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
-        let mut inner = self
-            .inner
-            .write()
-            .expect("RwLock poisoned: prior task panicked");
-        inner
-            .network
-            .pending_connections
-            .entry(addr.to_string())
-            .or_default()
-            .push_back(connection_id);
+        let waker = {
+            let mut inner = self
+                .inner
+                .write()
+                .expect("RwLock poisoned: prior task panicked");
+            inner
+                .network
+                .pending_connections
+                .entry(addr.to_string())
+                .or_default()
+                .push_back(connection_id);
 
-        // Wake any accept() calls waiting for this connection
-        let mut hasher = DefaultHasher::new();
-        addr.hash(&mut hasher);
-        let listener_key = ListenerId(hasher.finish());
+            let mut hasher = DefaultHasher::new();
+            addr.hash(&mut hasher);
+            inner.wakers.listeners.remove(&ListenerId(hasher.finish()))
+        };
 
-        if let Some(waker) = inner.wakers.listeners.remove(&listener_key) {
+        if let Some(waker) = waker {
             waker.wake();
         }
     }
@@ -1012,18 +1007,34 @@ impl SimWorld {
     ///
     /// Returns a future that will complete when the simulation time has advanced
     /// by the specified duration.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another task previously panicked while holding the simulation
+    /// state lock.
     #[instrument(skip(self))]
     pub fn sleep(&self, duration: Duration) -> SleepFuture {
-        let task_id = self.generate_task_id();
-
-        // Apply buggified delay if enabled
         let actual_duration = self.apply_buggified_delay(duration);
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
+        let task_id = inner.next_task_id;
+        let Some(next_task_id) = task_id.checked_add(1) else {
+            return SleepFuture::failed(
+                self.downgrade(),
+                "sleep task identifier space exhausted".to_string(),
+            );
+        };
+        inner.next_task_id = next_task_id;
 
-        // Schedule a wake event for this task
-        self.schedule_event(Event::Timer { task_id }, actual_duration);
-
-        // Return a future that will be woken when the event is processed
-        SleepFuture::new(self.downgrade(), task_id)
+        match inner
+            .scheduler
+            .schedule_after(actual_duration, Event::Timer { task_id })
+        {
+            Ok(schedule_id) => SleepFuture::new(self.downgrade(), task_id, schedule_id),
+            Err(error) => SleepFuture::failed(self.downgrade(), error.to_string()),
+        }
     }
 
     /// Apply buggified delay to a duration if chaos is enabled.
@@ -1053,47 +1064,44 @@ impl SimWorld {
         }
     }
 
-    /// Generate a unique task ID for sleep operations.
-    fn generate_task_id(&self) -> u64 {
-        let mut inner = self
-            .inner
-            .write()
-            .expect("RwLock poisoned: prior task panicked");
-        let task_id = inner.next_task_id;
-        inner.next_task_id += 1;
-        task_id
-    }
-
     /// Wake all tasks associated with a connection
-    fn wake_all(wakers: &mut BTreeMap<ConnectionId, Vec<Waker>>, connection_id: ConnectionId) {
-        if let Some(waker_list) = wakers.remove(&connection_id) {
-            for waker in waker_list {
-                waker.wake();
-            }
+    fn take_all(
+        registered: &mut BTreeMap<ConnectionId, Vec<Waker>>,
+        connection_id: ConnectionId,
+        wakes: &mut WakeBatch,
+    ) {
+        if let Some(waker_list) = registered.remove(&connection_id) {
+            wakes.extend(waker_list);
         }
     }
 
-    /// Check if a task has been awakened.
-    pub(crate) fn is_task_awake(&self, task_id: u64) -> bool {
-        let inner = self
-            .inner
-            .read()
-            .expect("RwLock poisoned: prior task panicked");
-        inner.awakened_tasks.contains(&task_id)
-    }
-
-    /// Register a waker for a task.
-    pub(crate) fn register_task_waker(&self, task_id: u64, waker: Waker) {
+    pub(crate) fn poll_sleep(&self, task_id: u64, waker: &Waker) -> bool {
         let mut inner = self
             .inner
             .write()
             .expect("RwLock poisoned: prior task panicked");
-        inner.wakers.tasks.insert(task_id, waker);
+        if inner.awakened_tasks.remove(&task_id) {
+            inner.wakers.tasks.remove(&task_id);
+            true
+        } else {
+            inner.wakers.tasks.register(task_id, waker);
+            false
+        }
+    }
+
+    pub(crate) fn cancel_sleep(&self, task_id: u64, schedule_id: ScheduleId) {
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
+        inner.scheduler.cancel(schedule_id);
+        inner.wakers.tasks.remove(&task_id);
+        inner.awakened_tasks.remove(&task_id);
     }
 
     /// Clear expired clogs and wake pending tasks (helper for use with `SimInner`)
-    fn clear_expired_clogs_with_inner(inner: &mut SimInner) {
-        let now = inner.current_time;
+    fn clear_expired_clogs_with_inner(inner: &mut SimInner, wakes: &mut WakeBatch) {
+        let now = inner.now();
         let expired: Vec<ConnectionId> = inner
             .network
             .connection_clogs
@@ -1103,26 +1111,28 @@ impl SimWorld {
 
         for id in expired {
             inner.network.connection_clogs.remove(&id);
-            Self::wake_all(&mut inner.wakers.write_clogs, id);
+            Self::take_all(&mut inner.wakers.write_clogs, id, wakes);
         }
     }
 
     /// Static event processor for simulation events.
     #[instrument(skip(inner))]
-    fn process_event_with_inner(inner: &mut SimInner, event: Event) {
+    fn process_event_with_inner(inner: &mut SimInner, event: Event, wakes: &mut WakeBatch) {
         inner.events_processed += 1;
 
         match event {
-            Event::Timer { task_id } => Self::handle_timer_event(inner, task_id),
-            Event::Connection { id, state } => Self::handle_connection_event(inner, id, state),
+            Event::Timer { task_id } => Self::handle_timer_event(inner, task_id, wakes),
+            Event::Connection { id, state } => {
+                Self::handle_connection_event(inner, id, state, wakes);
+            }
             Event::Network {
                 connection_id,
                 operation,
-            } => Self::handle_network_event(inner, connection_id, operation),
+            } => Self::handle_network_event(inner, connection_id, operation, wakes),
             Event::Storage { file_id, operation } => {
-                super::storage_ops::handle_storage_event(inner, file_id, operation);
+                super::storage_ops::handle_storage_event(inner, file_id, operation, wakes);
             }
-            Event::Shutdown => Self::handle_shutdown_event(inner),
+            Event::Shutdown => Self::handle_shutdown_event(inner, wakes),
             Event::ProcessRestart { ip }
             | Event::ProcessGracefulShutdown { ip, .. }
             | Event::ProcessForceKill { ip, .. } => {
@@ -1134,15 +1144,18 @@ impl SimWorld {
     }
 
     /// Handle timer events - wake sleeping tasks.
-    fn handle_timer_event(inner: &mut SimInner, task_id: u64) {
+    fn handle_timer_event(inner: &mut SimInner, task_id: u64, wakes: &mut WakeBatch) {
         inner.awakened_tasks.insert(task_id);
-        if let Some(waker) = inner.wakers.tasks.remove(&task_id) {
-            waker.wake();
-        }
+        wakes.push(inner.wakers.tasks.remove(&task_id));
     }
 
     /// Handle connection state change events.
-    fn handle_connection_event(inner: &mut SimInner, id: u64, state: ConnectionStateChange) {
+    fn handle_connection_event(
+        inner: &mut SimInner,
+        id: u64,
+        state: ConnectionStateChange,
+        wakes: &mut WakeBatch,
+    ) {
         let connection_id = ConnectionId(id);
 
         match state {
@@ -1151,11 +1164,11 @@ impl SimWorld {
             }
             ConnectionStateChange::ClogClear => {
                 inner.network.connection_clogs.remove(&connection_id);
-                Self::wake_all(&mut inner.wakers.write_clogs, connection_id);
+                Self::take_all(&mut inner.wakers.write_clogs, connection_id, wakes);
             }
             ConnectionStateChange::ReadClogClear => {
                 inner.network.read_clogs.remove(&connection_id);
-                Self::wake_all(&mut inner.wakers.read_clogs, connection_id);
+                Self::take_all(&mut inner.wakers.read_clogs, connection_id, wakes);
             }
             ConnectionStateChange::PartitionRestore => {
                 Self::clear_expired_partitions(inner);
@@ -1174,23 +1187,21 @@ impl SimWorld {
                     conn.cut_expiry = None;
                     inner.record_fault(SimFaultEvent::CutRestored { connection_id: id });
                     tracing::debug!("Connection {} restored via scheduled event", id);
-                    Self::wake_all(&mut inner.wakers.cuts, connection_id);
+                    Self::take_all(&mut inner.wakers.cuts, connection_id, wakes);
                 }
             }
             ConnectionStateChange::HalfOpenError => {
                 inner.record_fault(SimFaultEvent::HalfOpenError { connection_id: id });
                 tracing::debug!("Connection {} half-open error time reached", id);
-                if let Some(waker) = inner.wakers.reads.remove(&connection_id) {
-                    waker.wake();
-                }
-                Self::wake_all(&mut inner.wakers.send_buffers, connection_id);
+                wakes.push(inner.wakers.reads.remove(&connection_id));
+                Self::take_all(&mut inner.wakers.send_buffers, connection_id, wakes);
             }
         }
     }
 
     /// Clear expired IP partitions.
     fn clear_expired_partitions(inner: &mut SimInner) {
-        let now = inner.current_time;
+        let now = inner.now();
         let expired: Vec<_> = inner
             .network
             .ip_partitions
@@ -1206,7 +1217,7 @@ impl SimWorld {
 
     /// Clear expired send partitions.
     fn clear_expired_send_partitions(inner: &mut SimInner) {
-        let now = inner.current_time;
+        let now = inner.now();
         let expired: Vec<_> = inner
             .network
             .send_partitions
@@ -1222,7 +1233,7 @@ impl SimWorld {
 
     /// Clear expired receive partitions.
     fn clear_expired_recv_partitions(inner: &mut SimInner) {
-        let now = inner.current_time;
+        let now = inner.now();
         let expired: Vec<_> = inner
             .network
             .recv_partitions
@@ -1237,24 +1248,34 @@ impl SimWorld {
     }
 
     /// Handle network events (data delivery and send buffer processing).
-    fn handle_network_event(inner: &mut SimInner, conn_id: u64, operation: NetworkOperation) {
+    fn handle_network_event(
+        inner: &mut SimInner,
+        conn_id: u64,
+        operation: NetworkOperation,
+        wakes: &mut WakeBatch,
+    ) {
         let connection_id = ConnectionId(conn_id);
 
         match operation {
             NetworkOperation::DataDelivery { data } => {
-                Self::handle_data_delivery(inner, connection_id, data);
+                Self::handle_data_delivery(inner, connection_id, data, wakes);
             }
             NetworkOperation::ProcessSendBuffer => {
-                Self::handle_process_send_buffer(inner, connection_id);
+                Self::handle_process_send_buffer(inner, connection_id, wakes);
             }
             NetworkOperation::FinDelivery => {
-                Self::handle_fin_delivery(inner, connection_id);
+                Self::handle_fin_delivery(inner, connection_id, wakes);
             }
         }
     }
 
     /// Handle data delivery to a connection's receive buffer.
-    fn handle_data_delivery(inner: &mut SimInner, connection_id: ConnectionId, data: Vec<u8>) {
+    fn handle_data_delivery(
+        inner: &mut SimInner,
+        connection_id: ConnectionId,
+        data: Vec<u8>,
+        wakes: &mut WakeBatch,
+    ) {
         tracing::trace!(
             "DataDelivery: {} bytes to connection {}",
             data.len(),
@@ -1289,9 +1310,7 @@ impl SimWorld {
             conn.receive_buffer.push_back(byte);
         }
 
-        if let Some(waker) = inner.wakers.reads.remove(&connection_id) {
-            waker.wake();
-        }
+        wakes.push(inner.wakers.reads.remove(&connection_id));
     }
 
     /// Handle FIN delivery to a connection's receive side (TCP half-close).
@@ -1299,7 +1318,11 @@ impl SimWorld {
     /// Sets `remote_fin_received` on the receiving connection so that `poll_read`
     /// returns EOF after the receive buffer is drained. Ignores FIN if the connection
     /// was already aborted (stale event).
-    fn handle_fin_delivery(inner: &mut SimInner, connection_id: ConnectionId) {
+    fn handle_fin_delivery(
+        inner: &mut SimInner,
+        connection_id: ConnectionId,
+        wakes: &mut WakeBatch,
+    ) {
         tracing::debug!(
             "FinDelivery: FIN received on connection {}",
             connection_id.0
@@ -1324,9 +1347,7 @@ impl SimWorld {
             conn.flags.set_remote_fin_received(true);
         }
 
-        if let Some(waker) = inner.wakers.reads.remove(&connection_id) {
-            waker.wake();
-        }
+        wakes.push(inner.wakers.reads.remove(&connection_id));
     }
 
     /// Schedule a `FinDelivery` event to the peer connection.
@@ -1344,12 +1365,9 @@ impl SimWorld {
 
         // FIN must arrive after all DataDelivery events
         let fin_time = match last_delivery_time {
-            Some(t) if t >= inner.current_time => t + Duration::from_nanos(1),
-            _ => inner.current_time + Duration::from_nanos(1),
+            Some(t) if t >= inner.now() => t + Duration::from_nanos(1),
+            _ => inner.now() + Duration::from_nanos(1),
         };
-
-        let sequence = inner.next_sequence;
-        inner.next_sequence += 1;
 
         tracing::debug!(
             "Scheduling FinDelivery to connection {} at {:?}",
@@ -1357,14 +1375,13 @@ impl SimWorld {
             fin_time
         );
 
-        inner.event_queue.schedule(ScheduledEvent::new(
-            fin_time,
+        inner.schedule_at(
             Event::Network {
                 connection_id: peer_id.0,
                 operation: NetworkOperation::FinDelivery,
             },
-            sequence,
-        ));
+            fin_time,
+        );
     }
 
     /// Maybe corrupt data with bit flips based on chaos configuration.
@@ -1378,7 +1395,7 @@ impl SimWorld {
         }
 
         let chaos = &inner.network.config.chaos;
-        let now = inner.current_time;
+        let now = inner.now();
         let cooldown_elapsed =
             now.saturating_sub(inner.last_bit_flip_time) >= chaos.bit_flip_cooldown;
 
@@ -1430,20 +1447,28 @@ impl SimWorld {
     }
 
     /// Handle processing of a connection's send buffer.
-    fn handle_process_send_buffer(inner: &mut SimInner, connection_id: ConnectionId) {
+    fn handle_process_send_buffer(
+        inner: &mut SimInner,
+        connection_id: ConnectionId,
+        wakes: &mut WakeBatch,
+    ) {
         let is_partitioned = inner
             .network
-            .is_connection_partitioned(connection_id, inner.current_time);
+            .is_connection_partitioned(connection_id, inner.now());
 
         if is_partitioned {
-            Self::handle_partitioned_send(inner, connection_id);
+            Self::handle_partitioned_send(inner, connection_id, wakes);
         } else {
-            Self::handle_normal_send(inner, connection_id);
+            Self::handle_normal_send(inner, connection_id, wakes);
         }
     }
 
     /// Handle send when connection is partitioned.
-    fn handle_partitioned_send(inner: &mut SimInner, connection_id: ConnectionId) {
+    fn handle_partitioned_send(
+        inner: &mut SimInner,
+        connection_id: ConnectionId,
+        wakes: &mut WakeBatch,
+    ) {
         let Some(conn) = inner.network.connections.get_mut(&connection_id) else {
             return;
         };
@@ -1454,7 +1479,7 @@ impl SimWorld {
                 connection_id.0,
                 data.len()
             );
-            Self::wake_all(&mut inner.wakers.send_buffers, connection_id);
+            Self::take_all(&mut inner.wakers.send_buffers, connection_id, wakes);
 
             if conn.send_buffer.is_empty() {
                 conn.flags.set_send_in_progress(false);
@@ -1481,7 +1506,11 @@ impl SimWorld {
     }
 
     /// Handle normal (non-partitioned) send.
-    fn handle_normal_send(inner: &mut SimInner, connection_id: ConnectionId) {
+    fn handle_normal_send(
+        inner: &mut SimInner,
+        connection_id: ConnectionId,
+        wakes: &mut WakeBatch,
+    ) {
         // Extract connection info first
         let Some(conn) = inner.network.connections.get(&connection_id) else {
             return;
@@ -1530,6 +1559,7 @@ impl SimWorld {
             return;
         }
 
+        let now = inner.now();
         let Some(conn) = inner.network.connections.get_mut(&connection_id) else {
             return;
         };
@@ -1539,7 +1569,7 @@ impl SimWorld {
             return;
         };
 
-        Self::wake_all(&mut inner.wakers.send_buffers, connection_id);
+        Self::take_all(&mut inner.wakers.send_buffers, connection_id, wakes);
 
         // BUGGIFY: Simulate partial/short writes (skip for stable connections)
         if !is_stable && crate::buggify!() && !data.is_empty() {
@@ -1569,23 +1599,21 @@ impl SimWorld {
             })
         };
 
-        let earliest_time = std::cmp::max(inner.current_time + base_delay, next_send_time);
+        let earliest_time = std::cmp::max(now + base_delay, next_send_time);
         conn.next_send_time = earliest_time + Duration::from_nanos(1);
 
         // Schedule data delivery to paired connection
         if let Some(paired_id) = paired_id {
             let scheduled_time = earliest_time + recv_delay.unwrap_or(Duration::ZERO) + pair_extra;
-            let sequence = inner.next_sequence;
-            inner.next_sequence += 1;
-
-            inner.event_queue.schedule(ScheduledEvent::new(
+            if let Err(error) = inner.scheduler.schedule_at(
                 scheduled_time,
                 Event::Network {
                     connection_id: paired_id.0,
                     operation: NetworkOperation::DataDelivery { data },
                 },
-                sequence,
-            ));
+            ) {
+                tracing::error!(%error, "failed to schedule data delivery");
+            }
 
             // Track delivery time for FIN ordering (must be after last DataDelivery)
             conn.last_data_delivery_scheduled_at = Some(scheduled_time);
@@ -1608,31 +1636,25 @@ impl SimWorld {
 
     /// Schedule a `ProcessSendBuffer` event for the given connection.
     fn schedule_process_send_buffer(inner: &mut SimInner, connection_id: ConnectionId) {
-        let sequence = inner.next_sequence;
-        inner.next_sequence += 1;
-
-        inner.event_queue.schedule(ScheduledEvent::new(
-            inner.current_time,
+        inner.schedule_after(
             Event::Network {
                 connection_id: connection_id.0,
                 operation: NetworkOperation::ProcessSendBuffer,
             },
-            sequence,
-        ));
+            Duration::ZERO,
+        );
     }
 
     /// Handle shutdown event - wake all pending tasks.
-    fn handle_shutdown_event(inner: &mut SimInner) {
+    fn handle_shutdown_event(inner: &mut SimInner, wakes: &mut WakeBatch) {
         tracing::debug!("Processing Shutdown event - waking all pending tasks");
 
-        for (task_id, waker) in std::mem::take(&mut inner.wakers.tasks) {
+        for (task_id, waker) in inner.wakers.tasks.drain() {
             tracing::trace!("Waking task {}", task_id);
-            waker.wake();
+            wakes.extend([waker]);
         }
 
-        for (_conn_id, waker) in std::mem::take(&mut inner.wakers.reads) {
-            waker.wake();
-        }
+        wakes.extend(inner.wakers.reads.drain().map(|(_, waker)| waker));
 
         tracing::debug!("Shutdown event processed");
     }
@@ -1736,7 +1758,7 @@ impl SimWorld {
 
         crate::runner::SimulationMetrics {
             wall_time: std::time::Duration::ZERO,
-            simulated_time: inner.current_time,
+            simulated_time: inner.now(),
             events_processed: inner.events_processed,
         }
     }
@@ -1768,7 +1790,7 @@ impl SimWorld {
 
         // Skip if already clogged
         if let Some(clog_state) = inner.network.connection_clogs.get(&connection_id) {
-            return inner.current_time < clog_state.expires_at;
+            return inner.now() < clog_state.expires_at;
         }
 
         // Check probability
@@ -1788,7 +1810,7 @@ impl SimWorld {
         let config = &inner.network.config;
 
         let clog_duration = crate::network::sample_duration(&config.chaos.clog_duration);
-        let expires_at = inner.current_time + clog_duration;
+        let expires_at = inner.now() + clog_duration;
         inner
             .network
             .connection_clogs
@@ -1799,11 +1821,7 @@ impl SimWorld {
             id: connection_id.0,
             state: ConnectionStateChange::ClogClear,
         };
-        let sequence = inner.next_sequence;
-        inner.next_sequence += 1;
-        inner
-            .event_queue
-            .schedule(ScheduledEvent::new(expires_at, clear_event, sequence));
+        inner.schedule_at(clear_event, expires_at);
     }
 
     /// Check if a connection's writes are currently clogged
@@ -1819,7 +1837,7 @@ impl SimWorld {
             .expect("RwLock poisoned: prior task panicked");
 
         if let Some(clog_state) = inner.network.connection_clogs.get(&connection_id) {
-            inner.current_time < clog_state.expires_at
+            inner.now() < clog_state.expires_at
         } else {
             false
         }
@@ -1870,7 +1888,7 @@ impl SimWorld {
 
         // Skip if already clogged
         if let Some(clog_state) = inner.network.read_clogs.get(&connection_id) {
-            return inner.current_time < clog_state.expires_at;
+            return inner.now() < clog_state.expires_at;
         }
 
         // Check probability (same as write clogging)
@@ -1890,7 +1908,7 @@ impl SimWorld {
         let config = &inner.network.config;
 
         let clog_duration = crate::network::sample_duration(&config.chaos.clog_duration);
-        let expires_at = inner.current_time + clog_duration;
+        let expires_at = inner.now() + clog_duration;
         inner
             .network
             .read_clogs
@@ -1901,11 +1919,7 @@ impl SimWorld {
             id: connection_id.0,
             state: ConnectionStateChange::ReadClogClear,
         };
-        let sequence = inner.next_sequence;
-        inner.next_sequence += 1;
-        inner
-            .event_queue
-            .schedule(ScheduledEvent::new(expires_at, clear_event, sequence));
+        inner.schedule_at(clear_event, expires_at);
     }
 
     /// Check if a connection's reads are currently clogged
@@ -1921,7 +1935,7 @@ impl SimWorld {
             .expect("RwLock poisoned: prior task panicked");
 
         if let Some(clog_state) = inner.network.read_clogs.get(&connection_id) {
-            inner.current_time < clog_state.expires_at
+            inner.now() < clog_state.expires_at
         } else {
             false
         }
@@ -1951,22 +1965,27 @@ impl SimWorld {
     ///
     /// Panics if the simulation lock is poisoned by a prior task panic.
     pub fn clear_expired_clogs(&self) {
-        let mut inner = self
-            .inner
-            .write()
-            .expect("RwLock poisoned: prior task panicked");
-        let now = inner.current_time;
-        let expired: Vec<ConnectionId> = inner
-            .network
-            .connection_clogs
-            .iter()
-            .filter_map(|(id, state)| (now >= state.expires_at).then_some(*id))
-            .collect();
+        let wakes = {
+            let mut inner = self
+                .inner
+                .write()
+                .expect("RwLock poisoned: prior task panicked");
+            let now = inner.now();
+            let expired: Vec<ConnectionId> = inner
+                .network
+                .connection_clogs
+                .iter()
+                .filter_map(|(id, state)| (now >= state.expires_at).then_some(*id))
+                .collect();
+            let mut wakes = WakeBatch::default();
 
-        for id in expired {
-            inner.network.connection_clogs.remove(&id);
-            Self::wake_all(&mut inner.wakers.write_clogs, id);
-        }
+            for id in expired {
+                inner.network.connection_clogs.remove(&id);
+                Self::take_all(&mut inner.wakers.write_clogs, id, &mut wakes);
+            }
+            wakes
+        };
+        wakes.wake();
     }
 
     // Connection Cut Methods (temporary network outage simulation)
@@ -1990,10 +2009,7 @@ impl SimWorld {
             .connections
             .get(&connection_id)
             .is_some_and(|conn| {
-                conn.flags.is_cut()
-                    && conn
-                        .cut_expiry
-                        .is_some_and(|expiry| inner.current_time < expiry)
+                conn.flags.is_cut() && conn.cut_expiry.is_some_and(|expiry| inner.now() < expiry)
             })
     }
 
@@ -2381,10 +2397,7 @@ impl SimWorld {
             );
         }
 
-        // Wake local read waker (so local poll_read returns EOF if needed)
-        if let Some(waker) = inner.wakers.reads.remove(&connection_id) {
-            waker.wake();
-        }
+        let waker = inner.wakers.reads.remove(&connection_id);
 
         // Do NOT set is_closed on the peer — they can still read buffered data.
         // Instead, schedule a FIN delivery after all data has been delivered.
@@ -2400,6 +2413,10 @@ impl SimWorld {
         } else {
             // Pipeline is idle — schedule FIN delivery now
             Self::schedule_fin_delivery(&mut inner, paired_id, last_delivery_time);
+        }
+        drop(inner);
+        if let Some(waker) = waker {
+            waker.wake();
         }
     }
 
@@ -2444,12 +2461,13 @@ impl SimWorld {
             );
         }
 
+        let mut wakes = WakeBatch::default();
         if let Some(waker) = inner.wakers.reads.remove(&connection_id) {
             tracing::debug!(
                 "Waking read waker for aborted connection {}",
                 connection_id.0
             );
-            waker.wake();
+            wakes.extend([waker]);
         }
 
         if let Some(paired_id) = paired_connection_id
@@ -2459,8 +2477,10 @@ impl SimWorld {
                 "Waking read waker for paired aborted connection {}",
                 paired_id.0
             );
-            paired_waker.wake();
+            wakes.extend([paired_waker]);
         }
+        drop(inner);
+        wakes.wake();
     }
 
     /// Close connection asymmetrically (FDB rollRandomClose pattern)
@@ -2505,15 +2525,18 @@ impl SimWorld {
             );
         }
 
+        let mut wakes = WakeBatch::default();
         if close_send && let Some(waker) = inner.wakers.reads.remove(&connection_id) {
-            waker.wake();
+            wakes.extend([waker]);
         }
         if close_recv
             && let Some(paired) = paired_id
             && let Some(waker) = inner.wakers.reads.remove(&paired)
         {
-            waker.wake();
+            wakes.extend([waker]);
         }
+        drop(inner);
+        wakes.wake();
     }
 
     /// Roll random close chaos injection (FDB rollRandomClose pattern)
@@ -2542,7 +2565,7 @@ impl SimWorld {
             return None;
         }
 
-        let current_time = inner.current_time;
+        let current_time = inner.now();
         let time_since_last = current_time.saturating_sub(inner.network.last_random_close_time);
         if time_since_last < config.chaos.random_close_cooldown {
             return None;
@@ -2588,14 +2611,15 @@ impl SimWorld {
             paired_conn.flags.set_recv_closed(true);
         }
 
+        let mut wakes = WakeBatch::default();
         if close_send && let Some(waker) = inner.wakers.reads.remove(&connection_id) {
-            waker.wake();
+            wakes.extend([waker]);
         }
         if close_recv
             && let Some(paired) = paired_id
             && let Some(waker) = inner.wakers.reads.remove(&paired)
         {
-            waker.wake();
+            wakes.extend([waker]);
         }
 
         let b = super::rng::sim_random_f64();
@@ -2608,6 +2632,8 @@ impl SimWorld {
             inner.network.config.chaos.random_close_explicit_ratio
         );
 
+        drop(inner);
+        wakes.wake();
         Some(explicit)
     }
 
@@ -2699,7 +2725,7 @@ impl SimWorld {
             .inner
             .read()
             .expect("RwLock poisoned: prior task panicked");
-        let current_time = inner.current_time;
+        let current_time = inner.now();
         inner
             .network
             .connections
@@ -2772,7 +2798,7 @@ impl SimWorld {
             .inner
             .write()
             .expect("RwLock poisoned: prior task panicked");
-        let expires_at = inner.current_time + duration;
+        let expires_at = inner.now() + duration;
 
         inner
             .network
@@ -2783,10 +2809,7 @@ impl SimWorld {
             id: 0,
             state: ConnectionStateChange::PartitionRestore,
         };
-        let sequence = inner.next_sequence;
-        inner.next_sequence += 1;
-        let scheduled_event = ScheduledEvent::new(expires_at, restore_event, sequence);
-        inner.event_queue.schedule(scheduled_event);
+        inner.schedule_at(restore_event, expires_at);
 
         inner.record_fault(SimFaultEvent::PartitionCreated {
             from: from_ip.to_string(),
@@ -2834,11 +2857,7 @@ impl SimWorld {
         expires_at: Duration,
     ) {
         let clear_event = Event::Connection { id: 0, state };
-        let sequence = inner.next_sequence;
-        inner.next_sequence += 1;
-        inner
-            .event_queue
-            .schedule(ScheduledEvent::new(expires_at, clear_event, sequence));
+        inner.schedule_at(clear_event, expires_at);
     }
 
     /// Block outgoing traffic from `ip` for `duration` on an already-locked
@@ -2848,7 +2867,7 @@ impl SimWorld {
     /// automatic [`PartitionStrategy::AsymmetricSend`] rotation, so both surface
     /// identically on the fault timeline.
     fn insert_send_partition(inner: &mut SimInner, ip: IpAddr, duration: Duration) {
-        let expires_at = inner.current_time + duration;
+        let expires_at = inner.now() + duration;
         inner.network.send_partitions.insert(ip, expires_at);
         Self::schedule_partition_clear(
             inner,
@@ -2865,7 +2884,7 @@ impl SimWorld {
     /// Mirror of [`insert_send_partition`](Self::insert_send_partition), shared
     /// with the [`PartitionStrategy::AsymmetricRecv`] rotation.
     fn insert_recv_partition(inner: &mut SimInner, ip: IpAddr, duration: Duration) {
-        let expires_at = inner.current_time + duration;
+        let expires_at = inner.now() + duration;
         inner.network.recv_partitions.insert(ip, expires_at);
         Self::schedule_partition_clear(
             inner,
@@ -2943,9 +2962,7 @@ impl SimWorld {
             .inner
             .read()
             .expect("RwLock poisoned: prior task panicked");
-        Ok(inner
-            .network
-            .is_partitioned(from_ip, to_ip, inner.current_time))
+        Ok(inner.network.is_partitioned(from_ip, to_ip, inner.now()))
     }
 
     /// Helper method for use with `SimInner` - randomly trigger partitions
@@ -3014,7 +3031,7 @@ impl SimWorld {
             return;
         }
 
-        let expires_at = inner.current_time + partition_duration;
+        let expires_at = inner.now() + partition_duration;
         Self::cut_groups_bidirectionally(inner, &ip_list, &partitioned_ips, expires_at, strategy);
 
         // Schedule restoration event
@@ -3127,10 +3144,7 @@ impl SimWorld {
         for &from_ip in partitioned_ips {
             for &to_ip in &non_partitioned {
                 // Skip if already partitioned
-                if inner
-                    .network
-                    .is_partitioned(from_ip, to_ip, inner.current_time)
-                {
+                if inner.network.is_partitioned(from_ip, to_ip, inner.now()) {
                     continue;
                 }
 
@@ -3264,6 +3278,24 @@ impl Clone for WeakSimWorld {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        future::Future,
+        task::{Context, Poll, Wake},
+    };
+
+    struct ScheduleOnWake {
+        inner: Weak<RwLock<SimInner>>,
+    }
+
+    impl Wake for ScheduleOnWake {
+        fn wake(self: Arc<Self>) {
+            let inner = self.inner.upgrade().expect("simulation should still exist");
+            let mut inner = inner
+                .try_write()
+                .expect("simulation lock must be released before invoking wakers");
+            inner.schedule_after(Event::Timer { task_id: u64::MAX }, Duration::ZERO);
+        }
+    }
 
     #[test]
     fn sim_world_basic_lifecycle() {
@@ -3450,7 +3482,8 @@ mod tests {
     #[test]
     fn record_fault_stamps_current_time() {
         let mut inner = SimInner::new();
-        inner.current_time = Duration::from_millis(500);
+        inner.schedule_after(Event::Timer { task_id: 0 }, Duration::from_millis(500));
+        inner.scheduler.pop().expect("timer should be scheduled");
         inner.record_fault(SimFaultEvent::StorageCrash {
             ip: "10.0.1.1".to_string(),
         });
@@ -3459,6 +3492,47 @@ mod tests {
         let record = &inner.pending_faults[0];
         assert_eq!(record.time_ms, 500);
         assert!(matches!(record.event, SimFaultEvent::StorageCrash { .. }));
+    }
+
+    #[test]
+    fn dropping_a_fired_sleep_cleans_its_ready_marker() {
+        let mut sim = SimWorld::new();
+        let sleep = sim.sleep(Duration::from_millis(1));
+
+        assert!(!sim.step());
+        assert_eq!(
+            sim.inner
+                .read()
+                .expect("RwLock poisoned: prior task panicked")
+                .awakened_tasks
+                .len(),
+            1
+        );
+
+        drop(sleep);
+        assert!(
+            sim.inner
+                .read()
+                .expect("RwLock poisoned: prior task panicked")
+                .awakened_tasks
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_reentrant_waker_schedules_follow_up_before_step_reports_empty() {
+        let mut sim = SimWorld::new();
+        let mut sleep = Box::pin(sim.sleep(Duration::from_millis(1)));
+        let waker = Waker::from(Arc::new(ScheduleOnWake {
+            inner: Arc::downgrade(&sim.inner),
+        }));
+        let mut context = Context::from_waker(&waker);
+        assert_eq!(sleep.as_mut().poll(&mut context), Poll::Pending);
+
+        assert!(sim.step());
+        assert_eq!(sim.pending_event_count(), 1);
+        assert_eq!(sim.current_time(), Duration::from_millis(1));
+        assert!(!sim.step());
     }
 
     #[test]

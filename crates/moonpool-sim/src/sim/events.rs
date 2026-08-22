@@ -1,64 +1,52 @@
-//! Event scheduling and processing for the simulation engine.
-//!
-//! This module provides the core event types and queue for scheduling
-//! events in chronological order with deterministic ordering.
+//! Deterministic event scheduling for the simulation engine.
 
-use std::{cmp::Ordering, collections::BinaryHeap, time::Duration};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeSet, BinaryHeap},
+    error::Error,
+    fmt,
+    time::Duration,
+};
 
 pub use crate::storage::StorageOperation;
 
 /// Events that can be scheduled in the simulation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    /// Timer event for waking sleeping tasks
+    /// Timer event for waking sleeping tasks.
     Timer {
         /// The unique identifier for the task to wake.
         task_id: u64,
     },
-
-    /// Network data operations
+    /// Network data operation.
     Network {
-        /// The connection involved
+        /// The connection involved.
         connection_id: u64,
-        /// The operation type
+        /// The operation type.
         operation: NetworkOperation,
     },
-
-    /// Connection state changes
+    /// Connection state change.
     Connection {
-        /// The connection or listener ID
+        /// The connection or listener ID.
         id: u64,
-        /// The state change type
+        /// The state change type.
         state: ConnectionStateChange,
     },
-
-    /// Storage I/O operations
+    /// Storage I/O operation.
     Storage {
-        /// The file involved
+        /// The file involved.
         file_id: u64,
-        /// The operation type
+        /// The operation type.
         operation: StorageOperation,
     },
-
-    /// Shutdown event to wake all tasks for graceful termination
+    /// Shutdown event to wake all tasks for graceful termination.
     Shutdown,
-
     /// Process restart event: a rebooted process is ready to boot again.
-    ///
-    /// Scheduled after a process is killed, at `now + recovery_delay`.
-    /// The orchestrator handles this by calling the process factory
-    /// and spawning a new `run()` task.
     ProcessRestart {
         /// The IP address of the process to restart.
         ip: std::net::IpAddr,
     },
-
     /// Graceful shutdown initiated for a process.
-    ///
-    /// Cancels the per-process shutdown token so the process can observe
-    /// `ctx.shutdown().is_cancelled()` and perform cleanup. A
-    /// [`ProcessForceKill`](Event::ProcessForceKill) is scheduled after the
-    /// grace period expires.
     ProcessGracefulShutdown {
         /// The IP address of the process being gracefully shut down.
         ip: std::net::IpAddr,
@@ -67,11 +55,7 @@ pub enum Event {
         /// Recovery delay in milliseconds after force-kill before restart.
         recovery_delay_ms: u64,
     },
-
     /// Force-kill a process after a graceful shutdown grace period.
-    ///
-    /// Aborts the process task and all its connections, then schedules a
-    /// [`ProcessRestart`](Event::ProcessRestart) after a recovery delay.
     ProcessForceKill {
         /// The IP address of the process to force-kill.
         ip: std::net::IpAddr,
@@ -81,11 +65,7 @@ pub enum Event {
 }
 
 impl Event {
-    /// Determines if this event is purely infrastructural (not workload-related).
-    ///
-    /// Infrastructure events maintain simulation state but don't represent actual
-    /// application work. These events can be safely ignored when determining if
-    /// a simulation should terminate after workloads complete.
+    /// Returns whether the event only maintains simulation infrastructure.
     #[must_use]
     pub fn is_infrastructure_event(&self) -> bool {
         matches!(
@@ -101,158 +81,249 @@ impl Event {
     }
 }
 
-/// Network data operations
+/// Network data operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetworkOperation {
-    /// Deliver data to connection's receive buffer
+    /// Deliver data to a connection's receive buffer.
     DataDelivery {
-        /// The data bytes to deliver
+        /// The bytes to deliver.
         data: Vec<u8>,
     },
-    /// Process next message from connection's send buffer
+    /// Process the next message from a connection's send buffer.
     ProcessSendBuffer,
-    /// Deliver FIN (graceful close) to a connection's receive side.
-    /// Scheduled after the last `DataDelivery` to ensure all data arrives first.
+    /// Deliver FIN to a connection's receive side.
     FinDelivery,
 }
 
-/// Connection state changes
+/// Connection state change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionStateChange {
-    /// Listener bind operation completed
+    /// Listener bind operation completed.
     BindComplete,
-    /// Connection establishment completed
+    /// Connection establishment completed.
     ConnectionReady,
-    /// Clear write clog for a connection
+    /// Clear a write clog.
     ClogClear,
-    /// Clear read clog for a connection
+    /// Clear a read clog.
     ReadClogClear,
-    /// Restore a temporarily cut connection
+    /// Restore a temporarily cut connection.
     CutRestore,
-    /// Restore network partition between IPs
+    /// Restore a network partition between IPs.
     PartitionRestore,
-    /// Clear send partition for an IP
+    /// Clear a send partition for an IP.
     SendPartitionClear,
-    /// Clear receive partition for an IP
+    /// Clear a receive partition for an IP.
     RecvPartitionClear,
-    /// Half-open connection starts returning errors
+    /// Start returning errors for a half-open connection.
     HalfOpenError,
 }
 
-/// An event scheduled for execution at a specific simulation time.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScheduledEvent {
-    time: Duration,
-    event: Event,
-    /// Sequence number for deterministic ordering
-    pub sequence: u64,
+/// Stable identifier assigned to a scheduled item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ScheduleId(u64);
+
+impl ScheduleId {
+    /// Returns the deterministic sequence number backing this identifier.
+    #[must_use]
+    pub fn sequence(self) -> u64 {
+        self.0
+    }
 }
 
-impl ScheduledEvent {
-    /// Creates a new scheduled event.
-    #[must_use]
-    pub fn new(time: Duration, event: Event, sequence: u64) -> Self {
-        Self {
-            time,
-            event,
-            sequence,
+/// Error returned when an item cannot be scheduled deterministically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleError {
+    /// Adding a relative delay overflowed [`Duration`].
+    TimeOverflow,
+    /// The global deterministic sequence space is exhausted.
+    SequenceOverflow,
+}
+
+impl fmt::Display for ScheduleError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TimeOverflow => formatter.write_str("scheduled time overflowed Duration"),
+            Self::SequenceOverflow => formatter.write_str("scheduler sequence space exhausted"),
         }
     }
+}
 
+impl Error for ScheduleError {}
+
+/// An item scheduled for execution at a deterministic time and sequence.
+#[derive(Debug, Clone)]
+pub struct Scheduled<E> {
+    time: Duration,
+    value: E,
+    id: ScheduleId,
+}
+
+impl<E> Scheduled<E> {
     /// Returns the scheduled execution time.
     #[must_use]
     pub fn time(&self) -> Duration {
         self.time
     }
 
-    /// Returns a reference to the event.
+    /// Returns the stable schedule identifier.
     #[must_use]
-    pub fn event(&self) -> &Event {
-        &self.event
+    pub fn id(&self) -> ScheduleId {
+        self.id
     }
 
-    /// Consumes the scheduled event and returns the event.
+    /// Returns the deterministic sequence number.
     #[must_use]
-    pub fn into_event(self) -> Event {
-        self.event
+    pub fn sequence(&self) -> u64 {
+        self.id.sequence()
+    }
+
+    /// Returns a reference to the scheduled value.
+    #[must_use]
+    pub fn value(&self) -> &E {
+        &self.value
+    }
+
+    /// Consumes the entry and returns its value.
+    #[must_use]
+    pub fn into_value(self) -> E {
+        self.value
     }
 }
 
-impl PartialOrd for ScheduledEvent {
+impl<E> PartialEq for Scheduled<E> {
+    fn eq(&self, other: &Self) -> bool {
+        self.time == other.time && self.id == other.id
+    }
+}
+
+impl<E> Eq for Scheduled<E> {}
+
+impl<E> PartialOrd for Scheduled<E> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for ScheduledEvent {
+impl<E> Ord for Scheduled<E> {
     fn cmp(&self, other: &Self) -> Ordering {
-        // BinaryHeap is a max heap, but we want earliest time first
-        // So we reverse the time comparison
-        match other.time.cmp(&self.time) {
-            Ordering::Equal => {
-                // For events at the same time, use sequence number for deterministic ordering
-                // Earlier sequence numbers should be processed first (also reversed for max heap)
-                other.sequence.cmp(&self.sequence)
-            }
-            other => other,
-        }
+        other
+            .time
+            .cmp(&self.time)
+            .then_with(|| other.id.cmp(&self.id))
     }
 }
 
-/// A priority queue for scheduling events in chronological order.
+/// A deterministic delayed-item scheduler.
 ///
-/// Events are processed in time order, with deterministic ordering for events
-/// scheduled at the same time using sequence numbers.
+/// The scheduler exclusively owns logical time, global sequence allocation,
+/// queue ordering, and cancellation. Cancelled entries are removed eagerly
+/// without advancing logical time or leaving tombstones in the queue.
 #[derive(Debug)]
-pub struct EventQueue {
-    heap: BinaryHeap<ScheduledEvent>,
+pub struct Scheduler<E> {
+    now: Duration,
+    next_sequence: u64,
+    heap: BinaryHeap<Scheduled<E>>,
+    live: BTreeSet<ScheduleId>,
 }
 
-impl EventQueue {
-    /// Creates a new empty event queue.
+impl<E> Scheduler<E> {
+    /// Creates an empty scheduler at time zero.
     #[must_use]
     pub fn new() -> Self {
         Self {
+            now: Duration::ZERO,
+            next_sequence: 0,
             heap: BinaryHeap::new(),
+            live: BTreeSet::new(),
         }
     }
 
-    /// Schedules an event for execution.
-    pub fn schedule(&mut self, event: ScheduledEvent) {
-        self.heap.push(event);
-    }
-
-    /// Removes and returns the earliest scheduled event.
-    pub fn pop_earliest(&mut self) -> Option<ScheduledEvent> {
-        self.heap.pop()
-    }
-
-    /// Returns `true` if the queue is empty.
+    /// Returns the current logical time.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.heap.is_empty()
+    pub fn now(&self) -> Duration {
+        self.now
     }
 
-    /// Returns the number of events in the queue.
+    /// Schedules a value after `delay` from the current logical time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScheduleError::TimeOverflow`] if `delay` would exceed the
+    /// representable duration, or [`ScheduleError::SequenceOverflow`] if every
+    /// schedule identifier has been consumed.
+    pub fn schedule_after(
+        &mut self,
+        delay: Duration,
+        value: E,
+    ) -> Result<ScheduleId, ScheduleError> {
+        let time = self
+            .now
+            .checked_add(delay)
+            .ok_or(ScheduleError::TimeOverflow)?;
+        self.schedule_at(time, value)
+    }
+
+    /// Schedules a value at an absolute logical time.
+    ///
+    /// Times before the current logical time are clamped to the current time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScheduleError::SequenceOverflow`] if every schedule identifier
+    /// has been consumed.
+    pub fn schedule_at(&mut self, time: Duration, value: E) -> Result<ScheduleId, ScheduleError> {
+        let time = time.max(self.now);
+
+        let next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .ok_or(ScheduleError::SequenceOverflow)?;
+        let id = ScheduleId(self.next_sequence);
+        self.next_sequence = next_sequence;
+        self.live.insert(id);
+        self.heap.push(Scheduled { time, value, id });
+        Ok(id)
+    }
+
+    /// Cancels a live scheduled item.
+    ///
+    /// Returns `true` only when the identifier still referred to a queued item.
+    pub fn cancel(&mut self, id: ScheduleId) -> bool {
+        if self.live.remove(&id) {
+            self.heap.retain(|scheduled| scheduled.id != id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Pops the next live item and advances logical time to its timestamp.
+    pub fn pop(&mut self) -> Option<Scheduled<E>> {
+        let scheduled = self.heap.pop()?;
+        self.live.remove(&scheduled.id);
+        self.now = scheduled.time;
+        Some(scheduled)
+    }
+
+    /// Returns the number of live queued items.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.heap.len()
+        self.live.len()
     }
 
-    /// Checks if the queue contains only infrastructure events (no workload events).
-    ///
-    /// Infrastructure events are those that maintain simulation state but don't
-    /// represent actual application work (like connection restoration).
-    /// Returns true if empty or contains only infrastructure events.
+    /// Returns whether no live items remain queued.
     #[must_use]
-    pub fn has_only_infrastructure_events(&self) -> bool {
-        self.heap
-            .iter()
-            .all(|scheduled_event| scheduled_event.event().is_infrastructure_event())
+    pub fn is_empty(&self) -> bool {
+        self.live.is_empty()
+    }
+
+    /// Iterates over live queued items in unspecified heap order.
+    pub fn iter(&self) -> impl Iterator<Item = &Scheduled<E>> {
+        self.heap.iter()
     }
 }
 
-impl Default for EventQueue {
+impl<E> Default for Scheduler<E> {
     fn default() -> Self {
         Self::new()
     }
@@ -260,131 +331,95 @@ impl Default for EventQueue {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{ScheduleError, Scheduled, Scheduler};
+    use std::time::Duration;
 
     #[test]
-    fn test_infrastructure_event_detection() {
-        // Test Event::is_infrastructure_event() method
-        let restore_event = Event::Connection {
-            id: 1,
-            state: ConnectionStateChange::PartitionRestore,
-        };
-        assert!(restore_event.is_infrastructure_event());
+    fn same_time_items_are_fifo() {
+        let mut scheduler = Scheduler::new();
+        scheduler
+            .schedule_at(Duration::from_secs(1), "first")
+            .expect("first item should schedule");
+        scheduler
+            .schedule_at(Duration::from_secs(1), "second")
+            .expect("second item should schedule");
+        scheduler
+            .schedule_at(Duration::from_secs(1), "third")
+            .expect("third item should schedule");
 
-        let timer_event = Event::Timer { task_id: 1 };
-        assert!(!timer_event.is_infrastructure_event());
-
-        let network_event = Event::Network {
-            connection_id: 1,
-            operation: NetworkOperation::DataDelivery {
-                data: vec![1, 2, 3],
-            },
-        };
-        assert!(!network_event.is_infrastructure_event());
-
-        let shutdown_event = Event::Shutdown;
-        assert!(!shutdown_event.is_infrastructure_event());
-
-        // Test EventQueue::has_only_infrastructure_events() method
-        let mut queue = EventQueue::new();
-
-        // Empty queue should be considered "only infrastructure"
-        assert!(queue.has_only_infrastructure_events());
-
-        // Queue with only ConnectionRestore events
-        queue.schedule(ScheduledEvent::new(
-            Duration::from_secs(1),
-            restore_event,
-            1,
-        ));
-        assert!(queue.has_only_infrastructure_events());
-
-        // Queue with workload events should return false
-        queue.schedule(ScheduledEvent::new(Duration::from_secs(2), timer_event, 2));
-        assert!(!queue.has_only_infrastructure_events());
-
-        // Queue with network events should return false
-        let mut queue2 = EventQueue::new();
-        queue2.schedule(ScheduledEvent::new(
-            Duration::from_secs(1),
-            network_event,
-            1,
-        ));
-        assert!(!queue2.has_only_infrastructure_events());
+        let values = (0..3)
+            .map(|_| {
+                scheduler
+                    .pop()
+                    .expect("scheduled item should exist")
+                    .into_value()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, ["first", "second", "third"]);
     }
 
     #[test]
-    fn event_queue_ordering() {
-        let mut queue = EventQueue::new();
+    fn cancellation_does_not_advance_time() {
+        let mut scheduler = Scheduler::new();
+        let cancelled = scheduler
+            .schedule_at(Duration::from_secs(5), "cancelled")
+            .expect("item should schedule");
+        scheduler
+            .schedule_at(Duration::from_secs(10), "live")
+            .expect("item should schedule");
 
-        // Schedule events in random order
-        queue.schedule(ScheduledEvent::new(
-            Duration::from_millis(300),
-            Event::Timer { task_id: 3 },
-            2,
-        ));
-        queue.schedule(ScheduledEvent::new(
-            Duration::from_millis(100),
-            Event::Timer { task_id: 1 },
-            0,
-        ));
-        queue.schedule(ScheduledEvent::new(
-            Duration::from_millis(200),
-            Event::Timer { task_id: 2 },
-            1,
-        ));
-
-        // Should pop in time order
-        let event1 = queue.pop_earliest().expect("should have event");
-        assert_eq!(event1.time(), Duration::from_millis(100));
-        assert_eq!(event1.event(), &Event::Timer { task_id: 1 });
-
-        let event2 = queue.pop_earliest().expect("should have event");
-        assert_eq!(event2.time(), Duration::from_millis(200));
-        assert_eq!(event2.event(), &Event::Timer { task_id: 2 });
-
-        let event3 = queue.pop_earliest().expect("should have event");
-        assert_eq!(event3.time(), Duration::from_millis(300));
-        assert_eq!(event3.event(), &Event::Timer { task_id: 3 });
-
-        assert!(queue.is_empty());
+        assert!(scheduler.cancel(cancelled));
+        assert!(!scheduler.cancel(cancelled));
+        assert_eq!(scheduler.len(), 1);
+        assert_eq!(scheduler.pop().map(Scheduled::into_value), Some("live"));
+        assert_eq!(scheduler.now(), Duration::from_secs(10));
     }
 
     #[test]
-    fn same_time_deterministic_ordering() {
-        let mut queue = EventQueue::new();
-        let same_time = Duration::from_millis(100);
+    fn repeated_cancellation_does_not_retain_heap_entries() {
+        let mut scheduler = Scheduler::new();
+        for value in 0..10_000 {
+            let id = scheduler
+                .schedule_after(Duration::from_secs(1), value)
+                .expect("item should schedule");
+            assert!(scheduler.cancel(id));
+        }
 
-        // Schedule multiple events at the same time with different sequence numbers
-        queue.schedule(ScheduledEvent::new(
-            same_time,
-            Event::Timer { task_id: 3 },
-            2, // Later sequence
-        ));
-        queue.schedule(ScheduledEvent::new(
-            same_time,
-            Event::Timer { task_id: 1 },
-            0, // Earlier sequence
-        ));
-        queue.schedule(ScheduledEvent::new(
-            same_time,
-            Event::Timer { task_id: 2 },
-            1, // Middle sequence
-        ));
+        assert!(scheduler.is_empty());
+        assert!(scheduler.heap.is_empty());
+        assert!(scheduler.pop().is_none());
+        assert_eq!(scheduler.now(), Duration::ZERO);
+    }
 
-        // Should pop in sequence order when times are equal
-        let event1 = queue.pop_earliest().expect("should have event");
-        assert_eq!(event1.event(), &Event::Timer { task_id: 1 });
-        assert_eq!(event1.sequence, 0);
+    #[test]
+    fn scheduling_in_the_past_runs_now_without_regressing_time() {
+        let mut scheduler = Scheduler::new();
+        scheduler
+            .schedule_at(Duration::from_secs(2), ())
+            .expect("item should schedule");
+        scheduler.pop().expect("scheduled item should exist");
 
-        let event2 = queue.pop_earliest().expect("should have event");
-        assert_eq!(event2.event(), &Event::Timer { task_id: 2 });
-        assert_eq!(event2.sequence, 1);
+        scheduler
+            .schedule_at(Duration::from_secs(1), ())
+            .expect("overdue item should schedule at now");
+        let overdue = scheduler.pop().expect("overdue item should exist");
+        assert_eq!(overdue.time(), Duration::from_secs(2));
+        assert_eq!(scheduler.now(), Duration::from_secs(2));
+    }
 
-        let event3 = queue.pop_earliest().expect("should have event");
-        assert_eq!(event3.event(), &Event::Timer { task_id: 3 });
-        assert_eq!(event3.sequence, 2);
+    #[test]
+    fn time_and_sequence_overflow_are_rejected() {
+        let mut scheduler = Scheduler::new();
+        scheduler.now = Duration::MAX;
+        assert_eq!(
+            scheduler.schedule_after(Duration::from_nanos(1), ()),
+            Err(ScheduleError::TimeOverflow)
+        );
 
-        assert!(queue.is_empty());
+        scheduler.next_sequence = u64::MAX;
+        assert_eq!(
+            scheduler.schedule_at(Duration::MAX, ()),
+            Err(ScheduleError::SequenceOverflow)
+        );
     }
 }

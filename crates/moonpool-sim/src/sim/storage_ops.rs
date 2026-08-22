@@ -16,9 +16,10 @@ use crate::storage::StorageError;
 use crate::chaos::fault_events::SimFaultEvent;
 
 use super::{
-    events::{Event, ScheduledEvent, StorageOperation},
+    events::{Event, StorageOperation},
     rng::{sim_random, sim_random_range},
     state::{DiskDegradationState, DiskEpisodeKind, FileId, PendingOpType, PendingStorageOp},
+    wakers::WakeBatch,
     world::{SimInner, SimWorld},
 };
 
@@ -47,10 +48,16 @@ fn take_pending_op(
 }
 
 /// Remove and wake the task waiting for a completed storage operation.
-fn wake_storage_op(inner: &mut SimInner, file_id: FileId, op_seq: u64, kind: &str) {
+fn take_storage_waker(
+    inner: &mut SimInner,
+    wakes: &mut WakeBatch,
+    file_id: FileId,
+    op_seq: u64,
+    kind: &str,
+) {
     if let Some(waker) = inner.wakers.storage_ops.remove(&(file_id, op_seq)) {
         tracing::trace!("Waking {kind} waker for file {file_id:?}, op {op_seq}");
-        waker.wake();
+        wakes.extend([waker]);
     }
 }
 
@@ -138,30 +145,31 @@ pub(crate) fn handle_storage_event(
     inner: &mut SimInner,
     file_id: u64,
     operation: StorageOperation,
+    wakes: &mut WakeBatch,
 ) {
     let file_id = FileId(file_id);
 
     match operation {
         StorageOperation::ReadComplete { len: _ } => {
-            handle_read_complete(inner, file_id);
+            handle_read_complete(inner, file_id, wakes);
         }
         StorageOperation::WriteComplete { len: _ } => {
-            handle_write_complete(inner, file_id);
+            handle_write_complete(inner, file_id, wakes);
         }
         StorageOperation::SyncComplete => {
-            handle_sync_complete(inner, file_id);
+            handle_sync_complete(inner, file_id, wakes);
         }
         StorageOperation::OpenComplete => {
-            handle_open_complete(inner, file_id);
+            handle_open_complete(inner, file_id, wakes);
         }
         StorageOperation::SetLenComplete { new_len } => {
-            handle_set_len_complete(inner, file_id, new_len);
+            handle_set_len_complete(inner, file_id, new_len, wakes);
         }
     }
 }
 
 /// Handle read operation completion.
-fn handle_read_complete(inner: &mut SimInner, file_id: FileId) {
+fn handle_read_complete(inner: &mut SimInner, file_id: FileId, wakes: &mut WakeBatch) {
     let read_fault_probability = inner.storage.files.get(&file_id).map_or(0.0, |f| {
         inner.storage.config_for(f.owner_ip).read_fault_probability
     });
@@ -206,7 +214,7 @@ fn handle_read_complete(inner: &mut SimInner, file_id: FileId) {
     }
 
     // Wake the waker for this operation
-    wake_storage_op(inner, file_id, op_seq, "read");
+    take_storage_waker(inner, wakes, file_id, op_seq, "read");
 }
 
 /// Handle write operation completion.
@@ -214,7 +222,7 @@ fn handle_read_complete(inner: &mut SimInner, file_id: FileId) {
 /// Applies the write to storage with potential fault injection:
 /// - `phantom_write_probability`: write appears to succeed but isn't persisted
 /// - `misdirect_write_probability`: write lands at wrong location
-fn handle_write_complete(inner: &mut SimInner, file_id: FileId) {
+fn handle_write_complete(inner: &mut SimInner, file_id: FileId, wakes: &mut WakeBatch) {
     let config = inner
         .storage
         .files
@@ -305,13 +313,13 @@ fn handle_write_complete(inner: &mut SimInner, file_id: FileId) {
     }
 
     // Wake the waker for this operation
-    wake_storage_op(inner, file_id, op_seq, "write");
+    take_storage_waker(inner, wakes, file_id, op_seq, "write");
 }
 
 /// Handle sync operation completion.
 ///
 /// Applies `sync_failure_probability` fault injection.
-fn handle_sync_complete(inner: &mut SimInner, file_id: FileId) {
+fn handle_sync_complete(inner: &mut SimInner, file_id: FileId, wakes: &mut WakeBatch) {
     let sync_failure_prob = inner.storage.files.get(&file_id).map_or(0.0, |f| {
         inner
             .storage
@@ -345,11 +353,11 @@ fn handle_sync_complete(inner: &mut SimInner, file_id: FileId) {
     }
 
     // Wake the waker for this operation
-    wake_storage_op(inner, file_id, op_seq, "sync");
+    take_storage_waker(inner, wakes, file_id, op_seq, "sync");
 }
 
 /// Handle open operation completion.
-fn handle_open_complete(inner: &mut SimInner, file_id: FileId) {
+fn handle_open_complete(inner: &mut SimInner, file_id: FileId, wakes: &mut WakeBatch) {
     // Find and remove the oldest pending open operation
     let Some((op_seq, _)) = take_pending_op(inner, file_id, PendingOpType::Open) else {
         // File might not have pending open op (it was already "open" on creation)
@@ -358,11 +366,16 @@ fn handle_open_complete(inner: &mut SimInner, file_id: FileId) {
     };
 
     // Wake the waker for this operation
-    wake_storage_op(inner, file_id, op_seq, "open");
+    take_storage_waker(inner, wakes, file_id, op_seq, "open");
 }
 
 /// Handle `set_len` operation completion.
-fn handle_set_len_complete(inner: &mut SimInner, file_id: FileId, new_len: u64) {
+fn handle_set_len_complete(
+    inner: &mut SimInner,
+    file_id: FileId,
+    new_len: u64,
+    wakes: &mut WakeBatch,
+) {
     // Find and remove the oldest pending set_len operation
     let Some((op_seq, _)) = take_pending_op(inner, file_id, PendingOpType::SetLen) else {
         tracing::warn!("SetLenComplete for unknown file {:?}", file_id);
@@ -375,7 +388,7 @@ fn handle_set_len_complete(inner: &mut SimInner, file_id: FileId, new_len: u64) 
     }
 
     // Wake the waker for this operation
-    wake_storage_op(inner, file_id, op_seq, "set_len");
+    take_storage_waker(inner, wakes, file_id, op_seq, "set_len");
 }
 
 // =============================================================================
@@ -480,16 +493,12 @@ impl SimWorld {
 
         // Schedule OpenComplete event with minimal latency
         let open_latency = Duration::from_micros(1);
-        let scheduled_time = inner.current_time + open_latency;
-        let sequence = inner.next_sequence;
-        inner.next_sequence += 1;
+        let scheduled_time = inner.now() + open_latency;
         let event = Event::Storage {
             file_id: file_id.0,
             operation: StorageOperation::OpenComplete,
         };
-        inner
-            .event_queue
-            .schedule(ScheduledEvent::new(scheduled_time, event, sequence));
+        inner.schedule_at(event, scheduled_time);
 
         tracing::debug!("Opened file {:?} with id {:?}", path, file_id);
         Ok(file_id)
@@ -591,7 +600,7 @@ impl SimWorld {
 
         // Advance the disk-degradation episode, then compute latency.
         let owner_ip = file_state.owner_ip;
-        let now = inner.current_time;
+        let now = inner.now();
         let (stall_p, stall_dur, throttle_p, throttle_dur) = disk_episode_knobs(&inner, owner_ip);
         let episode = update_disk_episode(
             &mut inner.storage.disk_episodes,
@@ -605,8 +614,6 @@ impl SimWorld {
         let config = inner.storage.config_for(owner_ip);
         let latency = Self::calculate_storage_latency(config, len, false, episode, now);
         let scheduled_time = now + latency;
-        let sequence = inner.next_sequence;
-        inner.next_sequence += 1;
 
         let event = Event::Storage {
             file_id: file_id.0,
@@ -614,9 +621,7 @@ impl SimWorld {
                 len: u32::try_from(len).expect("read length fits in u32"),
             },
         };
-        inner
-            .event_queue
-            .schedule(ScheduledEvent::new(scheduled_time, event, sequence));
+        inner.schedule_at(event, scheduled_time);
 
         tracing::trace!(
             "Scheduled read: file={:?}, offset={}, len={}, op_seq={}",
@@ -670,7 +675,7 @@ impl SimWorld {
 
         // Advance the disk-degradation episode, then compute latency.
         let owner_ip = file_state.owner_ip;
-        let now = inner.current_time;
+        let now = inner.now();
         let (stall_p, stall_dur, throttle_p, throttle_dur) = disk_episode_knobs(&inner, owner_ip);
         let episode = update_disk_episode(
             &mut inner.storage.disk_episodes,
@@ -684,8 +689,6 @@ impl SimWorld {
         let config = inner.storage.config_for(owner_ip);
         let latency = Self::calculate_storage_latency(config, len, true, episode, now);
         let scheduled_time = now + latency;
-        let sequence = inner.next_sequence;
-        inner.next_sequence += 1;
 
         let event = Event::Storage {
             file_id: file_id.0,
@@ -693,9 +696,7 @@ impl SimWorld {
                 len: u32::try_from(len).expect("write length fits in u32"),
             },
         };
-        inner
-            .event_queue
-            .schedule(ScheduledEvent::new(scheduled_time, event, sequence));
+        inner.schedule_at(event, scheduled_time);
 
         tracing::trace!(
             "Scheduled write: file={:?}, offset={}, len={}, op_seq={}",
@@ -745,7 +746,7 @@ impl SimWorld {
         // is affected by stalls (the disk is frozen until expiry); a throttle
         // scales IOPS/bandwidth, which sync latency does not use.
         let owner_ip = file_state.owner_ip;
-        let now = inner.current_time;
+        let now = inner.now();
         let (stall_p, stall_dur, throttle_p, throttle_dur) = disk_episode_knobs(&inner, owner_ip);
         let episode = update_disk_episode(
             &mut inner.storage.disk_episodes,
@@ -766,16 +767,12 @@ impl SimWorld {
             latency += expires_at.saturating_sub(now);
         }
         let scheduled_time = now + latency;
-        let sequence = inner.next_sequence;
-        inner.next_sequence += 1;
 
         let event = Event::Storage {
             file_id: file_id.0,
             operation: StorageOperation::SyncComplete,
         };
-        inner
-            .event_queue
-            .schedule(ScheduledEvent::new(scheduled_time, event, sequence));
+        inner.schedule_at(event, scheduled_time);
 
         tracing::trace!("Scheduled sync: file={:?}, op_seq={}", file_id, op_seq);
 
@@ -823,17 +820,13 @@ impl SimWorld {
         let owner_ip = file_state.owner_ip;
         let config = inner.storage.config_for(owner_ip);
         let latency = crate::network::sample_latency(&config.write_latency);
-        let scheduled_time = inner.current_time + latency;
-        let sequence = inner.next_sequence;
-        inner.next_sequence += 1;
+        let scheduled_time = inner.now() + latency;
 
         let event = Event::Storage {
             file_id: file_id.0,
             operation: StorageOperation::SetLenComplete { new_len },
         };
-        inner
-            .event_queue
-            .schedule(ScheduledEvent::new(scheduled_time, event, sequence));
+        inner.schedule_at(event, scheduled_time);
 
         tracing::trace!(
             "Scheduled set_len: file={:?}, new_len={}, op_seq={}",
@@ -1076,12 +1069,10 @@ impl SimWorld {
             }
         }
 
-        // Wake all collected wakers (after file iteration is complete)
-        for key in wakers_to_wake {
-            if let Some(waker) = inner.wakers.storage_ops.remove(&key) {
-                waker.wake();
-            }
-        }
+        let wakers = wakers_to_wake
+            .into_iter()
+            .filter_map(|key| inner.wakers.storage_ops.remove(&key))
+            .collect::<Vec<_>>();
 
         inner.record_fault(SimFaultEvent::StorageCrash { ip: ip.to_string() });
 
@@ -1091,6 +1082,10 @@ impl SimWorld {
             file_ids.len(),
             close_files
         );
+        drop(inner);
+        for waker in wakers {
+            waker.wake();
+        }
     }
 
     /// Wipe all storage for a specific process.
@@ -1133,16 +1128,18 @@ impl SimWorld {
             inner.storage.deleted_paths.insert(path.clone());
         }
 
-        // Wake all collected wakers
-        for key in wakers_to_wake {
-            if let Some(waker) = inner.wakers.storage_ops.remove(&key) {
-                waker.wake();
-            }
-        }
+        let wakers = wakers_to_wake
+            .into_iter()
+            .filter_map(|key| inner.wakers.storage_ops.remove(&key))
+            .collect::<Vec<_>>();
 
         inner.record_fault(SimFaultEvent::StorageWipe { ip: ip.to_string() });
 
         tracing::info!("Storage wiped for {}: {} files deleted", ip, file_ids.len(),);
+        drop(inner);
+        for waker in wakers {
+            waker.wake();
+        }
     }
 
     /// Set storage configuration for a specific process.
