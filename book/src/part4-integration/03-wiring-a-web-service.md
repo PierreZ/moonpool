@@ -1,7 +1,7 @@
 # Wiring a Web Service
 <!-- toc -->
 
-Theory is cheap. Here's a complete worked example: an axum web service running inside moonpool-sim with chaos injection, fault-injectable storage, and assertion-based validation. The full source lives in `moonpool-sim-examples/src/axum_web.rs`.
+Theory is cheap. Here's a complete worked example: an axum web service running inside moonpool-sim with chaos injection, fault-injectable storage, and assertion-based validation. The full source lives in `crates/moonpool-sim-examples/src/axum_web.rs`.
 
 ## Step 1: The Store Trait
 

@@ -12,7 +12,9 @@ The **simulation engine** is the most mature piece. Single-threaded deterministi
 
 The **assertion suite** implements the full Antithesis-inspired taxonomy: always, sometimes, reachable, unreachable, numeric, and sometimes-all assertions. These live in shared memory and survive fork boundaries for multiverse exploration.
 
-**Transport and RPC** provide a trait-based networking layer with peer connections, wire format, and service definitions via proc-macro. The same code runs against real TCP or the simulated network.
+**Provider-backed networking** runs the same application protocol over real TCP
+or simulated byte streams. The hyper integration carries real HTTP, axum, and
+tonic traffic through that same boundary.
 
 **Frontier-based multiverse exploration** is operational: deterministic recipe replay, a bounded worker pool, exemplar-guided continuations, and multi-seed exploration with cumulative novelty across seeds.
 
@@ -24,6 +26,6 @@ The **assertion suite** implements the full Antithesis-inspired taxonomy: always
 
 Part I stands alone as philosophy. You can read it without ever touching moonpool code, and the ideas apply to any simulation framework.
 
-Parts II through V are practical and reflect current APIs. Code examples compile against the latest version, but expect them to evolve. When an API is experimental, the text says so.
+Parts II through VI are practical and reflect current APIs. Code examples compile against the latest version, but expect them to evolve. When an API is experimental, the text says so.
 
-Part V on multiverse exploration describes the most novel piece of moonpool. If you are evaluating whether fork-based exploration matters for your use case, start there.
+Part VI on multiverse exploration describes the most novel piece of moonpool. If you are evaluating whether fork-based exploration matters for your use case, start there.

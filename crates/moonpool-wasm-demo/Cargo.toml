@@ -1,0 +1,37 @@
+[package]
+name = "moonpool-wasm-demo"
+version.workspace = true
+publish = false
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Browser/wasm demo: animate a deterministic ping-pong simulation and the impact of chaos"
+
+[lib]
+# cdylib for the wasm32 build (wasm-bindgen), rlib for the native bin + tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The simulator without its production (tokio net/fs) features is wasm-able.
+moonpool-sim = { path = "../moonpool-sim", version = "0.8.0", default-features = false }
+async-trait = "0.1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The workload emits standard `client_*` observability events; the generic
+# recorder reconstructs the timeline from them.
+tracing = "0.1"
+
+# wasm-only glue. The crate version MUST exactly match the flake's
+# wasm-bindgen-cli (0.2.121) — a mismatch is the #1 wasm-bindgen footgun and
+# produces an opaque "schema version" error at bindgen time. dependabot is told
+# to ignore `wasm-bindgen*` (see .github/dependabot.yml) so it can't bump this
+# out of sync with the CLI; bump both together when `nix flake update` moves the
+# CLI (run `nix develop --command wasm-bindgen --version` and match it here).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.121"
+console_error_panic_hook = "0.1"
+
+[lints]
+workspace = true

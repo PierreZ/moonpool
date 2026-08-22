@@ -1,0 +1,42 @@
+[package]
+name = "moonpool"
+version.workspace = true
+authors.workspace = true
+description.workspace = true
+documentation.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+readme = "README.md"
+
+[features]
+# Default = the full simulation framework. Lean production builds opt out of
+# sim/explorer entirely with `default-features = false, features = ["tokio"]`.
+default = ["sim", "tokio"]
+sim = ["dep:moonpool-sim"]
+# Production providers (TokioProviders) on core and moonpool::select! (core's
+# tokio passthrough), so the documented lean
+# config `default-features = false, features = ["tokio"]` has the macro too.
+tokio = ["moonpool-core/tokio-providers", "moonpool-core/select"]
+# hyper 1.x integration (moonpool::hyper). Off by default, including in the
+# batteries-included default above: a stack that speaks no HTTP should not
+# compile h2 and tower, and the lean production tree stays free of hyper.
+hyper = ["dep:moonpool-hyper"]
+
+[dependencies]
+moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false }
+moonpool-hyper = { path = "../moonpool-hyper", version = "0.8.0", optional = true }
+moonpool-sim = { path = "../moonpool-sim", version = "0.8.0", optional = true }
+
+[dev-dependencies]
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+
+# Production-usage example, also driven through the simulator by its #[test].
+[[example]]
+name = "retrying_worker"
+test = true
+required-features = ["tokio"]
+
+[lints]
+workspace = true

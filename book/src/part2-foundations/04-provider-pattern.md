@@ -38,12 +38,12 @@ where
 Moonpool solves this with a single bundle trait called `Providers`:
 
 ```rust
-pub trait Providers: Clone + 'static {
-    type Network: NetworkProvider + Clone + 'static;
-    type Time: TimeProvider + Clone + 'static;
-    type Task: TaskProvider + Clone + 'static;
-    type Random: RandomProvider + Clone + 'static;
-    type Storage: StorageProvider + Clone + 'static;
+pub trait Providers: Clone + Send + Sync + 'static {
+    type Network: NetworkProvider;
+    type Time: TimeProvider;
+    type Task: TaskProvider;
+    type Random: RandomProvider;
+    type Storage: StorageProvider;
 
     fn network(&self) -> &Self::Network;
     fn time(&self) -> &Self::Time;
@@ -80,3 +80,10 @@ run_server(providers);
 ```
 
 Same `run_server`. Same code path. Same binary. The only difference is which `Providers` implementation gets plugged in. This is the architectural foundation that makes everything else in moonpool possible: chaos testing, assertion coverage, multiverse exploration, all of it rests on the guarantee that your production code runs unmodified inside the simulator.
+
+On the simulation side, each provider is intentionally thin. Time requests go
+to the global `Scheduler<Event>`. Network calls go to `NetworkSimulation`, and
+storage calls go to `StorageEngine`. The engines own their state, exact pending
+results, faults, and wakers, then return scheduling effects to `SimWorld`. This
+keeps the application-facing trait familiar without collapsing the simulator
+back into one global state object.

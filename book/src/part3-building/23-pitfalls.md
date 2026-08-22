@@ -4,32 +4,30 @@
 
 A reference list of mistakes we have seen (and made) when building simulations with Moonpool.
 
-## Storage Needs the Step Loop
+## Delayed Operations Need the Scheduler
 
-Network operations buffer data and return `Poll::Ready` immediately. Storage operations return `Poll::Pending` and wait for the simulation to process them. If you `await` a storage operation without stepping the simulation, your workload hangs forever.
+Storage read, write, sync, and set-length operations wait for targeted
+completion events. Network bind, connect, and accept are delayed operations too.
+If a low-level test polls one of these futures without stepping `SimWorld`, the
+future cannot complete.
 
-**Fix**: Use the step loop pattern for storage tests:
+**Fix**: Prefer `SimulationBuilder::run()`, which already interleaves executor
+drains and scheduler steps. For a low-level provider test, use
+`Executor::block_on(...)` and a `poll_fn` driver that steps `SimWorld` while the
+future is pending. The complete helper is in
+[Storage Faults](./11-storage-faults.md#exact-asynchronous-operations).
 
-```rust
-let handle = tokio::spawn(async move {
-    let mut file = provider.open("test.txt", OpenOptions::create_write()).await?;
-    file.write_all(b"hello").await?;
-    file.sync_all().await
-});
+## Confusing Task Yield With Driver Drain
 
-while !handle.is_finished() {
-    while sim.pending_event_count() > 0 {
-        sim.step();
-    }
-    tokio::task::yield_now().await;
-}
-```
+Spawned tasks do not run until the current task yields or parks. If application
+code spawns a task and immediately checks shared state, that task may not have
+run yet. Use `task_provider.yield_now().await` when the application genuinely
+needs to yield.
 
-## Missing `yield_now()` Calls
-
-Spawned tasks do not run until the current task yields. If your workload spawns a task and immediately checks its result without yielding, the task has never run.
-
-**Fix**: Call `tokio::task::yield_now().await` after spawning, and in loops where you wait for spawned tasks to complete.
+The simulation driver has a different job. After `sim.step()` wakes tasks, it
+uses `executor::until_stalled().await` to drain every runnable task before the
+next event. `until_stalled()` is driver-only. Awaiting it from a spawned task is
+an error because that task would be waiting for a drain that includes itself.
 
 ## Using `unwrap()`
 
@@ -51,7 +49,10 @@ Moonpool runs on a **single OS thread** for determinism. Wrapping a simulation i
 
 ## Using `?Send` on Dyn Traits
 
-Moonpool's dyn-stored traits (`Process`, `Workload`, `FaultInjector`, `#[service]` handlers) carry `Send + Sync + 'static` supertraits so customer code can share state through `Arc<RwLock<…>>` and `DashMap`. Writing `#[async_trait(?Send)]` on your impl removes the `Send` bound the trait promises and the compiler rejects it.
+Moonpool's dyn-stored traits (`Process`, `Workload`, `FaultInjector`) carry
+`Send + Sync + 'static` supertraits so customer code can share state through
+`Arc<RwLock<…>>` and `DashMap`. Writing `#[async_trait(?Send)]` on your impl
+removes the `Send` bound the trait promises and the compiler rejects it.
 
 **Fix**: Use plain `#[async_trait]` (no `?Send`) on dyn-stored impls. Provider traits use native AFIT with `-> impl Future<…> + Send` and need no attribute at all.
 
@@ -80,11 +81,19 @@ network.send(&payload).await?;
 
 **Fix**: Use `Arc<RwLock<…>>` or `Arc<AtomicX>` for shared mutable state. If you have a legitimate single-task data structure, keep it on the stack of a non-spawned future, never close over it in a spawn.
 
-## Borrow Checker Fights in `world.rs`
+## Moving Resource State Back Into `world.rs`
 
-When working on simulation internals, you may need to access a connection (`inner.network.connections.get_mut()`) and then schedule an event (`inner.event_queue.schedule()`). The borrow checker sees both as borrows of `inner`.
+`SimWorld` coordinates a global `Scheduler<Event>` and lifecycle. Network state,
+faults, operations, and wakers belong to `NetworkSimulation`. The corresponding
+storage data belongs to `StorageEngine`. Reaching through `SimInner` to mutate a
+resource and then scheduling directly couples ownership again and usually
+creates difficult borrows.
 
-**Fix**: Extract values from the connection into local variables before calling functions that take `&mut SimInner`. NLL allows the borrow of `conn` to end before you borrow `inner` again, as long as you do not use `conn` after the second borrow begins.
+**Fix**: Add a targeted component transition. Let it return ordered schedule and
+cancel effects, fault records, and a `WakeBatch`. The world applies those
+effects through the scheduler and invokes the wakers after releasing its lock.
+Never wake while holding the world lock because a waker may immediately poll and
+re-enter the same component.
 
 ## HashMap Iteration Non-Determinism
 

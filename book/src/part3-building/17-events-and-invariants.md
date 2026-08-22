@@ -129,7 +129,10 @@ impl Invariant for AgreementInvariant {
 
 If a leader change causes two nodes to commit different values for the same slot, the invariant fires on the step that captured the second commit. Reset between seeds is the invariant's responsibility: clear the cursor in `reset()` and the simulation builder calls it for you between iterations.
 
-The canonical runnable example is [`moonpool-sim/tests/leader_election.rs`](https://github.com/PierreZ/moonpool/blob/main/moonpool-sim/tests/leader_election.rs): a workload emits `leader_elected` events, a `SplitBrainInvariant` detects two leaders claiming the same term. For a deeper one, [`moonpool-transport-sim`](https://github.com/PierreZ/moonpool/tree/main/moonpool-transport-sim) replays a hash chain from `append_block` events, with the block bytes hex-encoded into a string field.
+The canonical runnable example is
+[`crates/moonpool-sim/tests/leader_election.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool-sim/tests/leader_election.rs):
+a workload emits `leader_elected` events, and a `SplitBrainInvariant` detects two
+leaders claiming the same term.
 
 ## Reading from a Workload
 
@@ -179,10 +182,14 @@ impl Invariant for KillRateInvariant {
 }
 ```
 
-The `kind` values cover three categories:
+The `kind` values cover three categories. Network and storage faults originate
+inside the component that owns the affected state. The component returns the
+fault beside its ordered scheduler effects, and `SimWorld` stamps it with the
+current monotonic scheduler time before the runner merges it into the trace
+timeline.
 
 - **Process lifecycle**: `process_graceful_shutdown` (with `grace_period_ms`), `process_force_kill`, `process_restart` (all with `ip`)
-- **Network**: `partition_created`, `partition_healed` (with `from`/`to`), `connection_cut`, `cut_restored`, `half_open_error`, `random_close`, `peer_crash`, `bit_flip` (with `connection_id`), `send_partition_created`, `recv_partition_created` (with `ip`)
+- **Network**: `partition_created`, `partition_healed` (with `from`/`to`), `random_close`, `bit_flip` (with `connection_id`), `send_partition_created`, `recv_partition_created` (with `ip`)
 - **Storage**: `storage_read_fault`, `storage_write_fault` (with `write_kind`), `storage_sync_fault`, `storage_crash`, `storage_wipe` (all with `ip`)
 
 The real power is **correlation**. When an application-level invariant fires, cross-reference the fault events to understand what the infrastructure was doing at that moment. A conservation law violation at `t=5000` that coincides with a `process_force_kill` at `t=4980` tells a very different story than one with no faults nearby. Both kinds of events sit in one timeline with one clock, which is exactly how you would correlate an alert window against infrastructure events in a production log aggregator.

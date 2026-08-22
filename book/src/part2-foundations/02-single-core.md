@@ -39,7 +39,8 @@ pub trait TimeProvider: Clone + Send + Sync + 'static {
 }
 ```
 
-Dyn-stored traits (`Process`, `Workload`, `FaultInjector`, `#[service]` handlers) use `#[async_trait]` without `?Send`, also with `Send + Sync + 'static` supertraits.
+Dyn-stored traits (`Process`, `Workload`, `FaultInjector`) use `#[async_trait]`
+without `?Send`, also with `Send + Sync + 'static` supertraits.
 
 **Send is paid for interoperability, not for parallelism.**
 

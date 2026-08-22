@@ -34,7 +34,7 @@ written once.
 ## Serving: One Call Per Connection
 
 Here is the gRPC server from
-[`tonic_grpc.rs`](https://github.com/PierreZ/moonpool/blob/main/moonpool-sim-examples/src/tonic_grpc.rs),
+[`tonic_grpc.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool-sim-examples/src/tonic_grpc.rs),
 the whole thing:
 
 ```rust

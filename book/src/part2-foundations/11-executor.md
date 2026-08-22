@@ -50,11 +50,13 @@ decisions never shift the fork explorer's `count@seed` replay bookkeeping.
 
 There is none, and that is the deep reason this executor is small. A
 production runtime pairs its executor with a reactor (epoll, timers) that
-turns OS events into waker calls. In the simulation, `SimWorld`'s event
-queue plays that role: virtual time, network delivery, and storage
-completions are queue entries whose processing wakes the parked task through
-its ordinary `Waker`. The executor only answers one question: of the tasks
-that are runnable *right now*, which runs next?
+turns OS events into waker calls. In the simulation, `SimWorld` and its global
+`Scheduler<Event>` play that role. The scheduler owns logical time, stable
+same-time ordering, and cancellation. It dispatches targeted events to
+`NetworkSimulation` and `StorageEngine`, which own their resource state,
+operation results, and waker registries. The returned wake batches are invoked
+after the world lock is released. The executor only answers one question: of
+the tasks that are runnable *right now*, which runs next?
 
 ## The drive loop
 
@@ -66,7 +68,7 @@ loop {
     poll driver ── Ready? ─────────────► return
     run_until_stalled()   // poll ready tasks in seeded-random order
                           // until none is runnable
-    (driver not woken AND queue empty) ► panic: deadlock (with the seed)
+    (driver not woken AND scheduler empty) ► panic: deadlock (with the seed)
 }
 ```
 
@@ -145,9 +147,9 @@ so a forked child never inherits a held lock.
 
 ## Verifying it yourself
 
-The executor's contracts are enforced by `moonpool-sim/tests/executor.rs`
+The executor's contracts are enforced by `crates/moonpool-sim/tests/executor.rs`
 (join/abort/detach/panic/kill-on-drop, same-seed replay, cross-seed
-diversity) and `moonpool-sim/tests/determinism.rs`, an end-to-end tripwire:
+diversity) and `crates/moonpool-sim/tests/determinism.rs`, an end-to-end tripwire:
 two full `SimulationBuilder` runs of racing workloads on the same seed must
 produce byte-identical execution traces. If any component, executor,
 `select!`, providers, ever consults an unseeded randomness source, that test

@@ -128,12 +128,17 @@ The type of reboot chosen based on attrition probabilities:
 
 Top-level network simulation parameters.
 
+Bind, connect, and accept use their latency fields as genuinely delayed
+operations. Each call remains pending until its targeted scheduler completion
+fires. Established reads wait on buffered byte delivery or a network waker.
+Write and link latency apply to ordered byte delivery after the stream accepts
+available send-buffer capacity.
+
 | Field | Type | Default |
 |-------|------|---------|
 | `bind_latency` | `LatencyDistribution` | `Uniform` 50us..150us |
 | `accept_latency` | `LatencyDistribution` | `Uniform` 1ms..6ms |
 | `connect_latency` | `LatencyDistribution` | `Uniform` 1ms..11ms |
-| `read_latency` | `LatencyDistribution` | `Uniform` 10us..60us |
 | `write_latency` | `LatencyDistribution` | `Uniform` 100us..600us |
 | `link_latency` | `Option<LinkLatencyConfig>` | `None` (distance-blind) |
 | `chaos` | `ChaosConfiguration` | See below |
@@ -148,7 +153,7 @@ Top-level network simulation parameters.
 
 ### Latency distribution
 
-Each per-operation latency field above is a `LatencyDistribution`, not a plain range. This lets a simulation exercise the heavy P99 tail where timeout cascades and retry storms live. Every variant samples deterministically through the simulation RNG.
+Each per-operation latency field above is a `LatencyDistribution`, not a plain range. This lets a simulation exercise the heavy P99 tail where timeout cascades and retry storms live. Every variant samples deterministically through the simulation RNG. Reads do not add a separate delay: they wait for bytes whose delivery already includes write and link latency.
 
 | Variant | Shape | Models |
 |---------|-------|--------|
@@ -157,6 +162,10 @@ Each per-operation latency field above is a `LatencyDistribution`, not a plain r
 | `Bimodal { fast_range, slow_range, slow_probability }` | Fast cluster with a rare slow tail | Cross-datacenter hops, GC spikes (FoundationDB) |
 
 `default()` and `fast_local()` keep every field `Uniform`, so behavior is unchanged unless you opt in. `random_for_seed()` mixes all three shapes per field for chaos seeds. The same `LatencyDistribution` type configures storage `read_latency`, `write_latency`, and `sync_latency`.
+
+Every sampled delay enters the global `Scheduler<Event>`. Same-time events keep
+their insertion order through stable schedule IDs, and dropping a delayed
+network future cancels its live schedule.
 
 ### Link latency (distance-based)
 
@@ -258,45 +267,6 @@ Each ordered IP pair samples one fixed latency from this range at first contact 
 | `handshake_delay_enabled` | `bool` | `true` |
 | `handshake_delay_max` | `Duration` | 10ms |
 
-## PeerConfig
-
-Configuration for peer behavior and automatic reconnection. Part of moonpool-transport.
-
-| Field | Type | Default |
-|-------|------|---------|
-| `initial_reconnect_delay` | `Duration` | 100ms |
-| `max_reconnect_delay` | `Duration` | 30s |
-| `max_queue_size` | `usize` | 1000 |
-| `connection_timeout` | `Duration` | 5s |
-| `max_connection_failures` | `Option<u32>` | `None` (unlimited) |
-| `monitor` | `Option<MonitorConfig>` | `Some(MonitorConfig::default())` |
-
-### Constructor variants
-
-| Constructor | `initial_reconnect_delay` | `max_reconnect_delay` | `max_queue_size` | `connection_timeout` | `max_connection_failures` |
-|-------------|---------------------------|----------------------|------------------|---------------------|--------------------------|
-| `PeerConfig::default()` | 100ms | 30s | 1000 | 5s | None |
-| `PeerConfig::local_network()` | 10ms | 1s | 100 | 500ms | Some(10) |
-| `PeerConfig::wan_network()` | 500ms | 60s | 5000 | 30s | None |
-
-## MonitorConfig
-
-Ping-based connection health monitoring for peers. Follows FoundationDB's `connectionMonitor` pattern.
-
-| Field | Type | Default |
-|-------|------|---------|
-| `ping_interval` | `Duration` | 1s |
-| `ping_timeout` | `Duration` | 2s |
-| `max_tolerated_timeouts` | `u32` | 3 |
-
-### Constructor variants
-
-| Constructor | `ping_interval` | `ping_timeout` | `max_tolerated_timeouts` |
-|-------------|-----------------|----------------|--------------------------|
-| `MonitorConfig::default()` | 1s | 2s | 3 |
-| `MonitorConfig::local_network()` | 500ms | 1s | 2 |
-| `MonitorConfig::wan_network()` | 5s | 10s | 5 |
-
 ## ExplorationConfig
 
 Configuration for frontier-based exploration. Passed to `SimulationBuilder::enable_exploration()`.
@@ -310,4 +280,3 @@ Configuration for frontier-based exploration. Passed to `SimulationBuilder::enab
 | `max_recipe_len` | `usize` | Depth cap in replay segments |
 
 Live processes are bounded by `1 + workers` regardless of exploration depth. `max_runs_per_seed` is a ceiling, not a quota: a seed whose root run discovers nothing globally new stops after a single timeline.
-

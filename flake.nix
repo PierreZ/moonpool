@@ -1,5 +1,5 @@
 {
-  description = "Moonpool - Distributed Systems Toolbox";
+  description = "Moonpool - deterministic simulation testing for distributed systems";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -48,7 +48,7 @@
 
             # wasm demo: generate JS/TS bindings for the cdylib. Its version (from
             # nixpkgs) MUST match the `wasm-bindgen` crate pin in
-            # moonpool-wasm-demo/Cargo.toml exactly — a mismatch breaks the bindgen
+            # crates/moonpool-wasm-demo/Cargo.toml exactly — a mismatch breaks the bindgen
             # step with an opaque "schema version" error. When `nix flake update`
             # moves this, re-pin the crate to `wasm-bindgen --version`.
             wasm-bindgen-cli
@@ -73,7 +73,9 @@
             # Set environment variables
             export RUST_BACKTRACE=1
             export RUST_LOG=debug
-            export RUSTC_WRAPPER="$PWD/scripts/sancov-rustc.sh"
+            # Use the flake source path, not $PWD: `nix develop` is valid from
+            # any workspace subdirectory.
+            export RUSTC_WRAPPER="${self}/scripts/sancov-rustc.sh"
             
             # Inform about available tools
             echo "Available tools:"

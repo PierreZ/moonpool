@@ -94,40 +94,96 @@ let stalling = StorageConfiguration {
 
 The key property is that **a disabled disk never touches the random number stream**. When both probabilities are zero, the state machine returns before drawing any randomness, so steady-state runs stay byte-for-byte deterministic. Chaos runs enable low-rate episodes through `random_for_seed()`, swarm masking, and buggify knob spikes, the same machinery every other storage fault family uses.
 
-## The Step Loop Pattern
+## Exact Asynchronous Operations
 
-Storage operations in moonpool differ from network operations in one critical way: **storage operations return `Poll::Pending` and require simulation stepping**. Network operations buffer data and return `Poll::Ready` immediately. Storage operations need the simulation engine to advance time and process the I/O.
+Read, write, sync, and set-length calls schedule work and return
+`Poll::Pending`. Each submission receives a unique `OperationId`. Its
+`StorageEvent` carries that exact ID, the submitting handle, and the expected
+operation kind. `StorageEngine` keeps an explicit pending entry and later an
+explicit `Result` for the same ID. A missing entry is an invalid operation, not
+implicit success.
 
-This means you cannot just `await` a storage operation in a test. You need the step loop pattern:
+Network establishment is asynchronous too. Bind, connect, and accept also need
+the scheduler to advance. Established stream writes can accept bytes into their
+send buffer immediately, and reads can complete immediately when bytes are
+already buffered. Do not use the old rule that all network operations are ready
+while all storage operations are pending.
 
-```rust
-let handle = tokio::spawn(async move {
-    // This runs inside the simulation
-    let mut file = provider.open("test.txt", OpenOptions::create_write()).await?;
-    file.write_all(b"hello").await?;
-    file.sync_all().await
-});
+`SimulationBuilder::run()` already interleaves the deterministic executor and
+the scheduler for normal process and workload tests. If you write a low-level
+provider test, drive its future and `SimWorld` together on Moonpool's executor:
 
-// Drive the simulation until the task completes
-while !handle.is_finished() {
-    while sim.pending_event_count() > 0 {
-        sim.step();  // Process one simulation event
-    }
-    tokio::task::yield_now().await;  // Let the spawned task make progress
+```rust,ignore
+async fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
+    futures::pin_mut!(future);
+    futures::future::poll_fn(|cx| match future.as_mut().poll(cx) {
+        Poll::Ready(output) => Poll::Ready(output),
+        Poll::Pending if sim.has_pending_events() => {
+            sim.step();
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+        Poll::Pending => Poll::Pending,
+    })
+    .await
 }
 
-handle.await.unwrap().unwrap();
+let mut executor = moonpool_sim::executor::Executor::new(seed);
+executor.block_on(async move {
+    let provider = sim.storage_provider(ip);
+    drive(&mut sim, async move {
+        let mut file = provider.open("test.txt", OpenOptions::create_write()).await?;
+        file.write_all(b"hello").await?;
+        file.sync_all().await
+    })
+    .await
+})?;
 ```
 
-The outer loop checks if the spawned task has finished. The inner loop processes all pending simulation events (which include storage I/O completions). The `yield_now()` gives the spawned task a chance to run after events have been processed.
+The helper polls the provider future, steps one scheduled event when necessary,
+and lets the event's waker make the future runnable again. If the future is
+pending with no scheduled path to progress, the executor reports a deadlock
+with the seed.
 
-This pattern is mechanical but important. Without it, storage operations will hang forever waiting for simulation events that never get processed.
+## StorageEngine Ownership
+
+`StorageEngine` owns the whole simulated disk surface: persistent file data,
+path lookup, open handles, default and per-process configurations, disk
+episodes, pending operations, completed results, fault decisions, and storage
+wakers. `SimWorld` only schedules the engine's requested events and
+cancellations, records returned faults, and invokes the returned wake batch
+after releasing the world lock.
+
+That split keeps operation ordering explicit. Completion events never search
+for the oldest operation with the same file and kind. Concurrent operations on
+one file can finish in scheduler order and wake only their own callers. Dropping
+a future cancels its schedule and removes its pending result state.
+
+## Independent Open Handles
+
+Persistent contents belong to a file record. Cursor position, access options,
+closed state, and pending-operation IDs belong to an open handle. Opening the
+same path twice therefore creates two handles over one file:
+
+- Seeking or reading through one handle does not move the other handle's cursor
+- Read-only and write-only permissions are enforced per handle
+- Dropping or closing one handle cancels its pending work without deleting the
+  persistent file or closing sibling handles
+- Append handles resolve the current end of the shared file when scheduling a
+  write
+
+This matches the behavior applications expect from real file descriptors and
+makes concurrent-handle races meaningful rather than accidentally sharing one
+cursor.
 
 ## Per-Process Storage Configuration
 
 Storage fault injection is scoped per process. Each process is identified by its IP address, and you can assign different `StorageConfiguration` to different processes. This models real-world heterogeneous hardware: one node with a flaky SSD, another with a healthy disk.
 
-The `StorageState` maintains a global configuration as the default, plus optional per-process overrides in `per_process_configs: HashMap<IpAddr, StorageConfiguration>`. When the simulation needs a config for a file operation, `StorageState::config_for(ip)` checks for a per-process override first, falling back to the global config.
+The engine maintains a global configuration as the default plus optional
+per-process overrides. For each file operation it resolves the profile by the
+file owner's IP, then updates that process's disk-degradation episode before
+calculating latency and faults.
 
 Set per-process configuration through `SimWorld`:
 
@@ -138,18 +194,33 @@ let degraded = StorageConfiguration {
     write_fault_probability: 0.005,
     ..StorageConfiguration::default()
 };
-sim.set_process_storage_config("10.0.1.2".parse().unwrap(), degraded);
+let degraded_ip = "10.0.1.2".parse().expect("valid process IP");
+sim.set_process_storage_config(degraded_ip, degraded);
 ```
 
-Every file opened by a process is tagged with that process's IP (`StorageFileState::owner_ip`). Fault injection decisions (corruption probabilities, latency ranges, sync failures) use the config resolved for the file's owner, not a single global setting.
+Every persistent file is tagged with its owning process IP. Fault injection
+decisions such as corruption, latency, and sync failure use that owner rather
+than a single global profile.
 
 ## Crash and Wipe Operations
 
 Two `SimWorld` methods handle storage lifecycle during process failures:
 
-**`simulate_crash_for_process(ip, close_files)`** simulates a power loss for a specific process. Pending writes are subject to crash fault injection (torn writes), and open file handles are optionally closed. This replaces the old `simulate_crash()` which operated globally.
+**`simulate_crash_for_process(ip, close_files)`** applies crash behavior to the
+process's persistent files, including torn-write fault injection. Every pending
+read, write, sync, or set-length operation for those files completes with an
+interrupted error and wakes its exact waiter. When `close_files` is true, the
+affected handles are also marked closed.
 
-**`wipe_storage_for_process(ip)`** deletes all persistent storage owned by the given process. This models total disk failure or replacing a machine. The `CrashAndWipe` reboot kind calls both: crash first, then wipe. The wipe happens immediately (not deferred).
+**`wipe_storage_for_process(ip)`** deletes all persistent storage owned by the
+given process and invalidates its handles. This models total disk failure or
+replacing a machine. The `CrashAndWipe` reboot kind calls both: crash first,
+then wipe. The wipe happens immediately.
+
+Global simulation shutdown follows the same explicit-result rule. It cancels
+every pending storage schedule, records a shutdown error for each operation,
+marks handles closed, and returns all waiters for wakeup. No task is left parked
+behind a synthetic timer, and no crash-cleared operation can report `Ok(())`.
 
 ## Configuration in Practice
 

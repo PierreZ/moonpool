@@ -2,7 +2,15 @@
 
 <!-- toc -->
 
-Consult this list when bringing an existing crate into a moonpool simulation. Determinism is the contract: every source of wall-clock time, real I/O, untracked concurrency, or platform entropy must be routed through a **provider** or replaced with a deterministic alternative. Each section below pairs the calls that break determinism with the moonpool equivalents that preserve it. The [Axum web service example](../../moonpool-sim-examples/src/axum_web.rs) shows the full pattern end-to-end, including how to bridge `futures::io` to tokio-flavored libraries via `tokio_util::compat`.
+Consult this list when bringing an existing crate into a moonpool simulation.
+Determinism is the contract: every source of wall-clock time, real I/O,
+untracked concurrency, or platform entropy must be routed through a
+**provider** or replaced with a deterministic alternative. Each section below
+pairs the calls that break determinism with the moonpool equivalents that
+preserve it. The
+[Axum web service example](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool-sim-examples/src/axum_web.rs)
+shows the full pattern end to end, including how `HyperIo` presents a
+provider-backed stream to hyper.
 
 ## 1. Time
 
@@ -35,7 +43,7 @@ The same goes for branch selection. Bare `tokio::select!` draws its polling offs
 
 `NetworkProvider::TcpStream` implements `futures::io::AsyncRead + AsyncWrite`. For hyper (and therefore axum and tonic), wrap it in `moonpool_hyper::HyperIo`, which presents that shape as hyper's own `rt::Read` and `rt::Write`. That replaces the older two-hop bridge through `tokio_util::compat::Compat` and `hyper_util::rt::TokioIo`, so neither of those crates needs to appear in your dependency list.
 
-For gRPC via tonic, skip `tonic::transport` entirely: it hard-codes `tokio::spawn`, `TokioExecutor`, and `TokioTimer` with no override hooks. Use tonic with `default-features = false` (the runtime-free gRPC framing core) and let `moonpool-hyper` drive hyper for you. `ReconnectingChannel` plays the role `tonic::transport::Channel` plays in production (lazy connect, deterministic backoff, one multiplexed connection shared by every generated client), and `H2Server::serve_connection_with_shutdown` serves each accepted connection with a graceful drain wired to your shutdown token. Underneath, `HyperExecutor` routes hyper's internal h2 tasks to the `TaskProvider` and `HyperTimer` answers hyper's clock reads from the `TimeProvider`, so h2 keepalive ping/pong runs on deterministic sim time. h2 connections are `Send`, so unlike the HTTP/1 case they spawn as ordinary sim tasks. See [The hyper Stack](../part4-integration/08-hyper-stack.md) for the worked example, and `moonpool-sim-examples/src/tonic_grpc.rs` (`cargo xtask sim run tonic-grpc`) for the code: generated protobuf stubs, concurrent unary RPCs multiplexed on one connection, server streaming, deadlines via the time provider, keepalive, reconnection, and Attrition server reboots.
+For gRPC via tonic, skip `tonic::transport` entirely: it hard-codes `tokio::spawn`, `TokioExecutor`, and `TokioTimer` with no override hooks. Use tonic with `default-features = false` (the runtime-free gRPC framing core) and let `moonpool-hyper` drive hyper for you. `ReconnectingChannel` plays the role `tonic::transport::Channel` plays in production (lazy connect, deterministic backoff, one multiplexed connection shared by every generated client), and `H2Server::serve_connection_with_shutdown` serves each accepted connection with a graceful drain wired to your shutdown token. Underneath, `HyperExecutor` routes hyper's internal h2 tasks to the `TaskProvider` and `HyperTimer` answers hyper's clock reads from the `TimeProvider`, so h2 keepalive ping/pong runs on deterministic sim time. h2 connections are `Send`, so unlike the HTTP/1 case they spawn as ordinary sim tasks. See [The hyper Stack](../part4-integration/08-hyper-stack.md) for the worked example, and [`crates/moonpool-sim-examples/src/tonic_grpc.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool-sim-examples/src/tonic_grpc.rs) (`cargo xtask sim run tonic-grpc`) for the code: generated protobuf stubs, concurrent unary RPCs multiplexed on one connection, server streaming, deadlines via the time provider, keepalive, reconnection, and Attrition server reboots.
 
 The simulated stream overrides `poll_write_vectored`: each `IoSlice` becomes its own ordered delivery event (so the chaos pack can act on individual segments), and it follows `writev(2)` partial-accept semantics, accepting the bytes that fit under send-buffer pressure and reporting a short count rather than blocking all-or-nothing. Reaching that path takes an IO layer that advertises the capability. `HyperIo` reports no vectored support by default, because futures-io gives it no way to ask the stream, so opt in with `HyperIo::new(stream).with_vectored_writes(true)` (or the `vectored_writes` flag on `ChannelConfig` and `H2ServerConfig`). Both examples switch it on.
 
@@ -46,7 +54,7 @@ The simulated stream overrides `poll_write_vectored`: each `IoSlice` becomes its
 | `tokio::fs::*`, `std::fs::*` | `storage.open(path, options)`, `storage.exists`, `storage.delete`, `storage.rename` |
 | Direct file handles | `StorageFile` with `sync_all`, `sync_data`, `size`, `set_len` |
 
-Storage operations return `Poll::Pending` and require simulation stepping. See the **Storage Testing Patterns** section of the project `CLAUDE.md` for the step-loop required when driving storage from a test.
+Storage operations return `Poll::Pending` and require simulation stepping. See the **Storage Testing Patterns** section of the project `AGENTS.md` for the step-loop required when driving storage from a test.
 
 ## 5. Randomness
 
@@ -71,7 +79,8 @@ Every random decision must be seeded by the simulation. A single ungoverned `thr
 
 - Trait-crossing futures must be **`Send + 'static`**. The sim runs on the single-threaded moonpool executor, but spawned futures are Send-bounded.
 - Shared mutable state: **`Arc<RwLock<…>>`**, `Arc<AtomicBool>`, `DashMap`, and similar. Not `Rc<RefCell<…>>`.
-- `Process`, `Workload`, `FaultInjector`, and `#[service]` handlers are dyn-stored. Use `#[async_trait]` with `Send + Sync + 'static` supertraits.
+- `Process`, `Workload`, and `FaultInjector` are dyn-stored. Use
+  `#[async_trait]` with `Send + Sync + 'static` supertraits.
 - Provider traits (`TimeProvider`, `TaskProvider`, `NetworkProvider`, `RandomProvider`, `StorageProvider`) use native AFIT with `-> impl Future<…> + Send`. No `#[async_trait]`.
 - Never hold a `MutexGuard` (or `RwLockGuard`) across `.await`. Drop the guard first, then await.
 

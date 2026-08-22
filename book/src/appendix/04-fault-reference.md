@@ -2,9 +2,16 @@
 
 <!-- toc -->
 
-Consolidated quick-reference of every fault moonpool-sim can inject, organized by category. For detailed explanations and examples, see [Network Faults](../part3-building/network-faults.md), [Storage Faults](../part3-building/storage-faults.md), and [Attrition: Process Reboots](../part3-building/attrition.md).
+Consolidated quick-reference of every fault moonpool-sim can inject, organized
+by category. For detailed explanations and examples, see
+[Network Faults](../part3-building/10-network-faults.md),
+[Storage Faults](../part3-building/11-storage-faults.md), and
+[Attrition: Process Reboots](../part3-building/09-attrition.md).
 
-Every fault listed below is automatically emitted to the `"sim:faults"` [event timeline](../part3-building/17-events-and-invariants.md) as a `SimFaultEvent`. Invariants can read these to correlate application behavior with infrastructure faults.
+Every fault listed below is automatically emitted to the `"sim_fault"`
+[event timeline](../part3-building/17-events-and-invariants.md) as a
+`SimFaultEvent`. Invariants can read these to correlate application behavior
+with infrastructure faults.
 
 All defaults below refer to the values in `ChaosConfiguration::default()` and `StorageConfiguration::default()`. When using `random_for_seed()`, these values are randomized per seed within documented ranges.
 
@@ -17,16 +24,17 @@ Configured via `ChaosConfiguration` (nested under `NetworkConfiguration::chaos`)
 | Fault | Config Field | Default | Real-World Scenario |
 |-------|-------------|---------|---------------------|
 | Random connection close | `random_close_probability` | 0.001% | Reconnection logic, message redelivery, connection pooling |
-| Asymmetric close | `random_close_explicit_ratio` | 30% explicit (FIN), 70% silent (RST) | Half-closed sockets, FIN vs RST handling |
+| Close error surfacing | `random_close_explicit_ratio` | 30% immediate error, 70% silent close | Explicit-error and timeout-based detection |
 | Close cooldown | `random_close_cooldown` | 5s | Prevents cascading failures after a close event |
 | Connect failure | `connect_failure_mode` | `Probabilistic` (50% refused, 50% hang) | Connection establishment retries, timeout handling |
 | Connect failure probability | `connect_failure_probability` | 50% | Ratio of failed vs hanging connections |
+| Stable connection exemption | `mark_connection_stable()` | Manual | Exempt supervision channels from random-close chaos |
 
 ### Latency and Congestion
 
 | Fault | Config Field | Default | Real-World Scenario |
 |-------|-------------|---------|---------------------|
-| Operation latency shape | `bind/accept/connect/read/write_latency` | `Uniform` | P99/P99.9 tail latency testing |
+| Operation latency shape | `bind/accept/connect/write_latency` | `Uniform` | P99/P99.9 tail latency testing |
 | Exponential tail | `LatencyDistribution::Exponential { min, mean }` | opt-in | Slow disks, GC pauses (TigerBeetle model) |
 | Bimodal tail | `LatencyDistribution::Bimodal { fast_range, slow_range, slow_probability }` | opt-in | Rare cross-datacenter hops, GC spikes (FoundationDB model) |
 | Write clogging | `clog_probability` / `clog_duration` | 0%, 100-300ms | Backpressure handling, flow control |
@@ -46,7 +54,7 @@ Configured via `ChaosConfiguration` (nested under `NetworkConfiguration::chaos`)
 | Failure-domain partition | `partition_strategy = IsolateZone` / `IsolateDatacenter` | `Random` | Rack or region cut (needs a `cluster` topology, else falls back to `Random`) |
 | One-way partition | `partition_strategy = AsymmetricSend` / `AsymmetricRecv` | `Random` | Half-reachable node, failure detectors that infer liveness from the wrong direction |
 
-Manual partition methods are also available on `SimWorld`: `partition_pair()`, `partition_send_from()`, `partition_recv_to()`.
+Manual partition methods are also available on `SimWorld`: `partition_pair()`, `partition_send_from()`, and `partition_recv_to()`. `partition_pair(from, to, ...)` creates one directed pair entry; `restore_partition(from, to)` removes pair entries in both directions so a bidirectional cut can be healed with one call. Send-wide and receive-wide partitions are restored by their own expiry events.
 
 ### Data Integrity
 
@@ -58,17 +66,20 @@ Manual partition methods are also available on `SimWorld`: `partition_pair()`, `
 | Partial writes | `partial_write_max_bytes` | 1000 bytes | TCP fragmentation, message framing |
 | Partial reads | `partial_read_max_bytes` | 1000 bytes | TCP short reads, message reassembly / framing |
 
-### Half-Open Connections
-
-| Fault | Method | Real-World Scenario |
-|-------|--------|---------------------|
-| Peer crash simulation | `simulate_peer_crash()` | TCP keepalive, heartbeat detection, silent failures |
-| Half-open error detection | `should_half_open_error()` | Timeout-based failure detection |
-| Stable connection exemption | `mark_connection_stable()` | Exempt supervision channels from chaos |
-
 ## Storage Faults
 
-Configured via `StorageConfiguration`. All fault probabilities default to 0% and must be enabled explicitly or via `random_for_seed()`. Storage faults are scoped per process: `StorageState` holds a global config plus optional per-process overrides in `per_process_configs`. Use `SimWorld::set_process_storage_config(ip, config)` to assign different fault profiles to individual processes.
+Configured via `StorageConfiguration`. All fault probabilities default to 0%
+and must be enabled explicitly or via `random_for_seed()`. Storage faults are
+scoped per process. `StorageEngine` owns the default profile, per-process
+overrides, and degradation episodes, then resolves the profile from each
+persistent file's owner. Use
+`SimWorld::set_process_storage_config(ip, config)` to assign different fault
+profiles to individual processes.
+
+Each delayed storage completion targets one exact `OperationId`. Crash, wipe,
+and shutdown cancel live schedules, store explicit errors for interrupted
+operations, and wake their registered callers. Missing completion state is
+never interpreted as success.
 
 | Fault | Config Field | Default | Real-World Scenario |
 |-------|-------------|---------|---------------------|
@@ -113,7 +124,8 @@ Episodic degradation layered on top of steady-state timing (FoundationDB's `Disk
 
 ## Process Lifecycle Faults
 
-Configured via [`Attrition`](../part3-building/attrition.md) (built-in) or custom [`FaultInjector`](../part3-building/chaos.md) implementations.
+Configured via [`Attrition`](../part3-building/09-attrition.md) (built-in) or
+custom [`FaultInjector`](../part3-building/07-chaos.md) implementations.
 
 | Fault | Mechanism | Behavior |
 |-------|-----------|----------|

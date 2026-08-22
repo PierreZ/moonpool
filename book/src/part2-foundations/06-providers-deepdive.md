@@ -32,6 +32,13 @@ A mock for TCP might say: "when `connect("10.0.1.1:9000")` is called, return `Ok
 
 **Providers are full implementations, not recorded expectations.** The simulation network provider maintains connection state, buffers packets, injects delays, simulates TCP half-close, drops messages under partition. It is a complete in-memory TCP implementation. When your code connects through the simulation provider, it gets a real (simulated) TCP session with real (simulated) failure modes.
 
+That fidelity includes asynchronous establishment. Simulated `bind`, `connect`,
+and `accept` do not manufacture an immediately ready socket. They park the
+calling future, schedule a targeted network operation, and wake it when the
+configured delay expires. Storage follows the same contract for read, write,
+sync, and set-length operations. A provider is therefore an adapter into a
+stateful engine, not a shortcut around the scheduler.
+
 This is the fidelity spectrum that Oxide's codebases demonstrate: from no-op fakes (methods return `Ok(())`), through in-memory implementations (real data operations without real I/O), all the way to full protocol simulation. Providers operate at the highest fidelity level because simulation needs to exercise the same edge cases that production encounters.
 
 ## The Pattern
@@ -79,5 +86,10 @@ The provider pattern gives you three things that mocks and `#[cfg(test)]` cannot
 **Same code path.** Your production code is your test code. No divergence, no conditional compilation, no "it works in test but fails in production" surprises.
 
 **Full behavior, not just call verification.** Providers simulate the actual behavior of the subsystem, not just whether your code calls the right methods. A simulated network can partition, delay, reorder, and corrupt. A mock just records calls.
+
+**Resource ownership stays local.** The network and storage engines own their
+state, pending results, faults, and wakers. `SimWorld` coordinates their effects
+through the global scheduler. This makes cancellation and shutdown explicit and
+prevents a missing result from being mistaken for a successful operation.
 
 **Compile-time safety.** If you forget to use a provider and call tokio directly, the simulation still compiles and runs, but the behavior will not be deterministic. Moonpool's code conventions (enforced in review) catch these: no direct `tokio::time::sleep()`, no `tokio::spawn()`, no `tokio::net::*`. Always go through the provider.

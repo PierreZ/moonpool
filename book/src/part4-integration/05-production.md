@@ -36,21 +36,15 @@ async fn main() {
 ```
 
 The complete, runnable version lives in
-[`moonpool/examples/retrying_worker.rs`](https://github.com/PierreZ/moonpool/blob/main/moonpool/examples/retrying_worker.rs).
+[`crates/moonpool/examples/retrying_worker.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool/examples/retrying_worker.rs).
 Its `main` runs on Tokio; its `#[test]` drives the same `fetch_with_retry`
 through `SimulationBuilder` across 50 seeds. One function, two worlds, verified
 by `cargo test --example retrying_worker`.
 
-For the transport layer the production path is just as short. The `tokio` feature
-gives you a `TokioTransport` alias and a builder shortcut, so you skip naming the
-providers bundle:
-
-```rust
-let transport = NetTransportBuilder::tokio()
-    .local_address(NetworkAddress::parse("127.0.0.1:4500")?)
-    .build_listening()
-    .await?;
-```
+Networking follows the same swap. Code written against `NetworkProvider` sees
+`SimTcpStream` in a simulation and real Tokio TCP streams in production. If the
+application speaks HTTP or gRPC, enable `moonpool-hyper` and give its adapters
+the same provider bundle.
 
 ## A lean dependency tree
 
@@ -64,18 +58,18 @@ Moonpool keeps it out with features. The default pulls the whole framework
 
 ```toml
 [dependencies]
-moonpool = { version = "0.8", default-features = false, features = ["tokio", "transport"] }
+moonpool = { version = "0.8", default-features = false, features = ["tokio"] }
 ```
 
-That stanza gives you the provider contract, the production backend, and the
-transport layer — and nothing else. `cargo tree` on such a build shows no
+That stanza gives you the provider contract and the production backend, and
+nothing else. `cargo tree` on such a build shows no
 `moonpool-sim`, no `moonpool-explorer`, no `moonpool-assertions`. The only system
 libraries present are the ones tokio itself needs for real sockets and files.
 
 | Feature | Pulls in | Use it when |
 |---------|----------|-------------|
-| `tokio` | `TokioProviders`, `TokioTransport` | Always, in production |
-| `transport` | `NetTransport`, `#[service]` RPC | You speak the moonpool wire protocol |
+| `tokio` | `TokioProviders` | Application code runs on real time, tasks, TCP, randomness, and files |
+| `hyper` | hyper runtime adapters, h2 channel, serve helper | The application uses hyper, axum, or tonic |
 | `sim` | the simulation runtime + explorer | Tests, benchmarks, local dev (default) |
 
 Keep `sim` on as a `dev-dependency` feature and off in your release profile, and
@@ -98,11 +92,11 @@ The provider contract and the production backend compile broadly. The sim
 runtime is portable too, with one boundary: the fork-based explorer needs a
 POSIX process model.
 
-| Target | core + tokio | transport | sim runtime | explorer (fork) |
+| Target | core traits | `TokioProviders` | sim runtime | explorer (fork) |
 |--------|:---:|:---:|:---:|:---:|
 | Linux | yes | yes | yes | yes |
 | macOS | yes | yes | yes | yes |
-| `wasm32-unknown-unknown` | task/time only | no (no sockets) | yes, `--no-default-features` | no |
+| `wasm32-unknown-unknown` | yes | no | yes, `--no-default-features` | no |
 
 The simulation engine compiles to `wasm32-unknown-unknown` because it derives
 everything from a seeded RNG, a logical clock, and a cooperative scheduler — no

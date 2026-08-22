@@ -14,7 +14,8 @@ cargo xtask sim run kv       # Run binaries matching "kv"
 cargo xtask sim run-all      # Run everything
 ```
 
-The `run` subcommand matches against binary names. `cargo xtask sim run transport` would run both `sim-transport-e2e` and `sim-transport-messaging`.
+The `run` subcommand matches against binary names. For example,
+`cargo xtask sim run tonic-grpc` selects the `sim-tonic-grpc` example.
 
 Each simulation binary is a standalone Rust binary that constructs a `SimulationBuilder`, calls `.run()`, and prints the report. A typical `main` function:
 

@@ -48,4 +48,4 @@ if buggify_with_prob!(0.5) {
 
 ## Source
 
-Macros defined in `moonpool-sim/src/chaos/buggify.rs`.
+Macros defined in `crates/moonpool-sim/src/chaos/buggify.rs`.

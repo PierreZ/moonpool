@@ -53,4 +53,4 @@ Read these for detailed usage, decision flowcharts, examples, best practices, an
 
 ## Source
 
-Macros defined in `moonpool-sim/src/chaos/assertions.rs`. Backing shared-memory infrastructure in `moonpool-explorer/src/assertion_slots.rs`.
+Macros defined in `crates/moonpool-sim/src/chaos/assertions.rs`. Assertion slots live in `crates/moonpool-assertions/src/slots.rs`; the explorer installs their shared-memory backing in `crates/moonpool-explorer/src/lib.rs`.

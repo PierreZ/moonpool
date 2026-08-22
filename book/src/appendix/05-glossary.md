@@ -20,8 +20,6 @@ Terms are listed alphabetically. Cross-references are shown in **bold**.
 
 **Trace timeline** -- The append-only log of trace events captured by `SimulationLayer`. Producers emit plain `tracing::*!` events with a constant message (the event name) and structured fields; no markers or derives. The `source` is attributed from the process/workload span the orchestrator wraps around each actor task; sim time is stamped automatically. Invariants read via the `TraceQuery` trait: `q.since(name, &cursor)` for incremental scans, `q.snapshot(name)` for full re-scans, with per-field accessors (`e.u64("term")`, `e.str("leader")`). Each event carries `time_ms`, `source`, `target`, `level`, and a global monotonic `seq`. Distinct from **Timeline** (a simulation run in the explorer); see also **Fault timeline**.
 
-**Endpoint** -- A `(IpAddr, Token)` pair that uniquely identifies a connection endpoint in the simulated network. The IP address identifies the node; the **token** identifies the specific listener or connection on that node.
-
 **Explorer** -- The frontier-based exploration controller (`moonpool-explorer` crate). Owns the **frontier**, the per-state **exemplar** store, novelty bookkeeping, and a bounded pool of **worker** processes. Has zero knowledge of Moonpool internals -- communicates through the assertion accounting hooks and an RNG call-count function pointer.
 
 **Fault timeline** -- The well-known event name `"sim_fault"` (`SIM_FAULT_EVENT_NAME`) in the trace timeline. The engine records `SimFaultEvent`s internally and the runner merges them in with `source = "sim"` and a `kind` field (e.g. `"partition_created"`, `"process_force_kill"`) covering network, storage, and process lifecycle faults. Invariants use it to correlate application behavior with infrastructure events. Engine-level tests can drain records directly via `SimWorld::take_faults()`.
@@ -44,6 +42,10 @@ Terms are listed alphabetically. Cross-references are shown in **bold**.
 
 **Provider** -- A trait abstraction over runtime services (time, tasks, network, random, storage). Real implementations (`TokioTimeProvider`, etc.) delegate to tokio; simulation implementations intercept calls for deterministic control. Code uses providers instead of calling tokio directly.
 
+**Scheduler** -- The global `Scheduler<Event>` that owns monotonic simulation
+time, stable same-time FIFO sequence IDs, and cancellation. It dispatches
+targeted events but does not own network or storage resource state.
+
 **Reachable** -- An assertion kind (`assert_reachable!`) that marks a code path as "should be reached at least once." First reach is a **discovery**. A coverage violation is reported if the path is never reached after enough iterations.
 
 **Recipe** -- The replay path to a specific **timeline**: a list of `(rng_call_count, seed)` breakpoints applied from the root seed. If a bug is found, the recipe enables exact replay via `SimulationBuilder::replay_timeline()`. Formatted as `"151@seed -> 80@seed"`.
@@ -52,18 +54,21 @@ Terms are listed alphabetically. Cross-references are shown in **bold**.
 
 **Sometimes assertion** -- An assertion that should hold **at least once** across all iterations. Does not panic if false; instead, records statistics. Its first success is a **discovery** that exploration can anchor continuations to. A coverage violation is reported if the condition is never true. See `assert_sometimes!`.
 
-**SimStorageProvider** -- The simulation implementation of `StorageProvider`. Constructed with an IP address (`SimStorageProvider::new(sim, ip)`) so all file operations are tagged with the owning **process**. Fault injection uses the per-process `StorageConfiguration` resolved by `StorageState::config_for(ip)`.
+**SimStorageProvider** -- The simulation implementation of `StorageProvider`.
+Constructed with an IP address (`SimStorageProvider::new(sim, ip)`) so persistent
+files are tagged with the owning **process**. `StorageEngine` resolves that
+process's configuration and disk episode, while every open handle keeps its own
+cursor, access options, closed state, and pending operation IDs.
+
+**Storage operation** -- One exact delayed read, write, sync, or set-length
+submission identified by `OperationId`. The storage engine keeps explicit
+pending and completed `Result` state and a matching waker. Crashes and shutdown
+finish pending operations with errors.
 
 **Timeline** -- One complete simulation run. A root **seed** plus a **recipe** uniquely identifies a timeline; the root timeline has an empty recipe.
 
-**Token** -- A `u64` identifier for a specific listener or connection on a node. Combined with an IP address to form an **endpoint**. See also **well-known token**.
-
 **Watermark** -- For numeric **sometimes** assertions: the best value ever observed. For `gt`/`ge`, the watermark tracks the maximum; for `lt`/`le`, the minimum. An improvement is a **discovery** and marks the owning state as monotonic progress, which continuation scheduling prefers. Preserved across seeds.
 
-**Well-known token** -- A reserved **token** in the range `0..WELL_KNOWN_RESERVED_COUNT` used for framework services. Well-known tokens provide stable endpoints for services like RPC registries without requiring dynamic discovery.
-
 **Worker** -- A forked process that executes exactly one exploration job (replay + continuation), writes its discovery journal into a `MAP_SHARED` result slot, and exits. Workers never fork and never make exploration decisions; the pool size (`workers`) bounds live processes. `workers: 0` runs jobs in-process, sequentially and fully deterministically.
-
-**Wire format** -- The on-the-wire message encoding used by moonpool-transport. Each `WireMessage` includes a `WireHeader` with endpoint routing, a unique ID, message type, and payload size, followed by the serialized payload. CRC32C checksums protect against **bit flip** corruption.
 
 **Workload** -- The test driver. A workload survives process **reboots** and drives requests against the system under test. It validates correctness by making assertions about observed behavior. Analogous to FoundationDB's `tester.actor.cpp`.

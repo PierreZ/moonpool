@@ -1,0 +1,45 @@
+[package]
+name = "moonpool-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core abstractions for the moonpool simulation framework"
+documentation = "https://docs.rs/moonpool-core"
+readme = "README.md"
+
+[features]
+default = ["tokio-providers", "select"]
+# Umbrella: the full production bundle (TokioProviders needs all five slots).
+tokio-providers = ["tokio-task", "tokio-time", "tokio-net", "tokio-fs", "tokio-random"]
+# Granular per-provider features. A consumer that only needs one provider (e.g.
+# moonpool-sim bundles the real TokioTaskProvider) enables just that one and stays
+# free of net/fs/time — keeping the crate wasm-clean where those aren't used.
+# tokio::task::Builder (named spawn) is behind cfg_trace! → needs tokio/tracing.
+tokio-task = ["dep:tokio", "tokio/rt", "tokio/tracing"]
+tokio-time = ["dep:tokio", "tokio/time"]
+tokio-net = ["dep:tokio", "tokio/net", "tokio/io-util", "dep:tokio-util"]
+tokio-fs = ["dep:tokio", "tokio/fs", "tokio/io-util", "dep:tokio-util"]
+# TokioRandomProvider uses rand's ThreadRng; no tokio involved.
+tokio-random = ["rand/thread_rng"]
+# `moonpool_core::select!` as a verbatim re-export of tokio's macro (production).
+select = ["dep:tokio", "tokio/macros"]
+# Deterministic `select!`: replaces the passthrough with tokio's expansion
+# driven by a seeded start offset. Enabled by moonpool-sim; production graphs
+# without moonpool-sim keep tokio's macro verbatim via `select`.
+deterministic-select = ["select"]
+
+[dependencies]
+futures = "0.3"
+rand = { version = "0.10", default-features = false }
+thiserror = "2.0"
+tokio = { version = "1", default-features = false, optional = true }
+tokio-util = { version = "0.7", features = ["compat"], optional = true }
+tracing = "0.1"
+
+[dev-dependencies]
+futures = "0.3"
+
+[lints]
+workspace = true

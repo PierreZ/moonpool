@@ -5,6 +5,7 @@ Cargo.lock
 *.pdb
 .direnv/
 .claude/settings.local.json
+.DS_Store
 
 # mdbook
 book/output

@@ -89,7 +89,7 @@ if !enabled.iter().any(|&i| i < NUM_MOVE_OPS) {
 }
 ```
 
-The dungeon example in `moonpool-sim-examples/src/dungeon.rs` is the reference implementation, and `moonpool-sim/tests/swarm_op_alphabet.rs` shows the assertion firing under `.swarm_operations()` and staying unreachable without it.
+The dungeon example in `crates/moonpool-sim-examples/src/dungeon.rs` is the reference implementation, and `crates/moonpool-sim/tests/swarm_op_alphabet.rs` shows the assertion firing under `.swarm_operations()` and staying unreachable without it.
 
 ## Invariant Patterns
 

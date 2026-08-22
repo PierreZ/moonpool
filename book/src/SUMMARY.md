@@ -76,21 +76,9 @@
 
 ---
 
-# Part V: Networking and RPC
+# Part V: Raw Network Simulation
 
 - [Simulating the Network](./part4-networking/01-simulating-network.md)
-- [Peers and Connections](./part4-networking/02-peers.md)
-  - [Backoff and Reconnection](./part4-networking/03-backoff.md)
-  - [Wire Format](./part4-networking/04-wire-format.md)
-- [RPC with #\[service\]](./part4-networking/05-rpc-service.md)
-  - [Defining a Service](./part4-networking/06-defining-service.md)
-  - [Server, Client, and Endpoints](./part4-networking/07-server-client-endpoints.md)
-- [Delivery Modes](./part4-networking/08-delivery-modes.md)
-- [Failure Monitor](./part4-networking/09-failure-monitor.md)
-- [Designing Simulation-Friendly RPC](./part4-networking/10-designing-rpc.md)
-- [Interfaces Are Data](./part4-networking/11-interface-serialization.md)
-- [Drop Semantics and the WaitFailure Pattern](./part4-networking/12-drop-semantics.md)
-- [What's Next](./part4-networking/13-whats-next.md)
 
 ---
 

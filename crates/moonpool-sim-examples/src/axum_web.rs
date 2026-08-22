@@ -1,0 +1,548 @@
+//! Axum web service simulation example.
+//!
+//! Demonstrates how to test an existing axum/hyper web service inside
+//! moonpool-sim's deterministic simulation with chaos injection.
+//!
+//! The key insight: `SimTcpStream` implements `futures::io::AsyncRead + AsyncWrite`,
+//! and `moonpool_hyper::HyperIo` presents that shape as hyper's own IO traits,
+//! so hyper (and therefore axum) works **unchanged** over simulated TCP.
+//!
+//! Vectored writes are switched on here: `SimTcpStream` applies its chaos per
+//! `IoSlice`, a path that stays unreachable while the IO layer reports no
+//! vectored support.
+//!
+//! # Architecture
+//!
+//! - **Store trait**: dependency boundary for item persistence
+//! - **`InMemoryStore`**: BTreeMap-based fake with buggify fault injection
+//! - **`WebProcess`**: accepts TCP, serves axum via `hyper::serve_connection`
+//! - **`WebWorkload`**: sends HTTP requests, validates responses under chaos
+
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
+
+use async_trait::async_trait;
+use axum::Json;
+use axum::extract::{Path, State};
+use axum::http::{Method, StatusCode};
+use axum::response::IntoResponse;
+use axum::routing::{get, post};
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use hyper::Request;
+use moonpool_hyper::{HyperIo, TowerToHyperService};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use tracing::instrument;
+
+use moonpool_sim::{
+    NetworkProvider, Process, SimContext, SimulationResult, TcpListenerTrait, Workload,
+};
+
+type HttpSender = hyper::client::conn::http1::SendRequest<Full<Bytes>>;
+
+/// Small request boundary that keeps host, body, and error plumbing in one
+/// place while the hyper connection driver is polled alongside it.
+struct HttpClient<'a> {
+    sender: HttpSender,
+    host: &'a str,
+}
+
+impl HttpClient<'_> {
+    async fn request(
+        &mut self,
+        method: Method,
+        uri: &str,
+        body: Option<Bytes>,
+    ) -> SimulationResult<hyper::Response<hyper::body::Incoming>> {
+        let mut builder = Request::builder()
+            .method(method.clone())
+            .uri(uri)
+            .header("host", self.host);
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let request = builder
+            .body(Full::new(body.unwrap_or_default()))
+            .map_err(|error| invalid_state(format!("build {method} {uri} request: {error}")))?;
+
+        self.sender
+            .send_request(request)
+            .await
+            .map_err(|error| invalid_state(format!("send {method} {uri} request: {error}")))
+    }
+
+    async fn get(&mut self, uri: &str) -> SimulationResult<hyper::Response<hyper::body::Incoming>> {
+        self.request(Method::GET, uri, None).await
+    }
+
+    async fn post_json<T: Serialize>(
+        &mut self,
+        uri: &str,
+        value: &T,
+    ) -> SimulationResult<hyper::Response<hyper::body::Incoming>> {
+        let body = serde_json::to_vec(value)
+            .map(Bytes::from)
+            .map_err(|error| invalid_state(format!("serialize request: {error}")))?;
+        self.request(Method::POST, uri, Some(body)).await
+    }
+
+    async fn body(response: hyper::Response<hyper::body::Incoming>) -> SimulationResult<Bytes> {
+        response
+            .into_body()
+            .collect()
+            .await
+            .map(http_body_util::Collected::to_bytes)
+            .map_err(|error| invalid_state(format!("read response body: {error}")))
+    }
+
+    async fn json<T: DeserializeOwned>(
+        response: hyper::Response<hyper::body::Incoming>,
+    ) -> SimulationResult<T> {
+        let body = Self::body(response).await?;
+        serde_json::from_slice(&body)
+            .map_err(|error| invalid_state(format!("deserialize response: {error}")))
+    }
+}
+
+fn invalid_state(message: String) -> moonpool_sim::SimulationError {
+    moonpool_sim::SimulationError::InvalidState(message)
+}
+
+// ============================================================================
+// Domain types
+// ============================================================================
+
+/// An item in the store.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Item {
+    /// Unique identifier.
+    pub id: u64,
+    /// Item name.
+    pub name: String,
+}
+
+/// Request body for creating an item.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateItemRequest {
+    /// Item name.
+    pub name: String,
+}
+
+// ============================================================================
+// Store trait — the dependency boundary
+// ============================================================================
+
+/// Trait for item persistence. In production, backed by a real database.
+/// In simulation, backed by an in-memory `BTreeMap` with fault injection.
+///
+/// This is the "mock boundary": we simulate the network (HTTP traffic) via
+/// moonpool, but fake the database at the service level. A fake with 80%
+/// fidelity and deterministic fault injection beats a test container with
+/// 100% fidelity but zero control over failure modes.
+pub trait Store: Send + Sync + 'static {
+    /// Create an item, returning its assigned ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::WriteFailed`] when the underlying write fails
+    /// (modeled via buggify in the in-memory fake).
+    fn create(&self, name: &str) -> Result<Item, StoreError>;
+
+    /// Get an item by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::ReadFailed`] when the underlying read fails
+    /// (modeled via buggify in the in-memory fake).
+    fn get(&self, id: u64) -> Result<Option<Item>, StoreError>;
+}
+
+/// Store errors — designed with injectable failure modes in mind.
+#[derive(Debug, thiserror::Error)]
+pub enum StoreError {
+    /// Simulated write failure (e.g., disk full, replication lag).
+    #[error("write failed: {0}")]
+    WriteFailed(String),
+
+    /// Simulated read failure (e.g., connection pool exhaustion).
+    #[error("read failed: {0}")]
+    ReadFailed(String),
+}
+
+// ============================================================================
+// InMemoryStore — fault-injectable fake
+// ============================================================================
+
+/// In-memory store backed by `BTreeMap` (deterministic iteration order).
+///
+/// Uses `buggify!()` to inject partial failures — the kind of failures a
+/// real database container cannot produce. A test container fails as a whole
+/// (binary up/down). This fake can fail individual writes while reads succeed,
+/// or return stale data for specific IDs.
+pub struct InMemoryStore {
+    items: RwLock<BTreeMap<u64, Item>>,
+    next_id: AtomicU64,
+}
+
+impl InMemoryStore {
+    /// Create a new empty store.
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            items: RwLock::new(BTreeMap::new()),
+            next_id: AtomicU64::new(1),
+        })
+    }
+}
+
+impl Store for InMemoryStore {
+    fn create(&self, name: &str) -> Result<Item, StoreError> {
+        // Fault injection: randomly fail writes.
+        // A real Postgres container can only be fully up or fully down.
+        // This fake can fail individual writes — modeling disk full, replication
+        // lag, or constraint violations that happen in production.
+        if moonpool_sim::buggify!() {
+            return Err(StoreError::WriteFailed("buggified write failure".into()));
+        }
+
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let item = Item {
+            id,
+            name: name.to_string(),
+        };
+        let mut items = self
+            .items
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
+        items.insert(id, item.clone());
+        Ok(item)
+    }
+
+    fn get(&self, id: u64) -> Result<Option<Item>, StoreError> {
+        // Fault injection: randomly fail reads.
+        // Models connection pool exhaustion or replica lag.
+        if moonpool_sim::buggify_with_prob!(0.05) {
+            return Err(StoreError::ReadFailed("buggified read failure".into()));
+        }
+
+        let items = self
+            .items
+            .read()
+            .expect("RwLock poisoned: prior task panicked");
+        Ok(items.get(&id).cloned())
+    }
+}
+
+// ============================================================================
+// Axum handlers — standard axum, nothing moonpool-specific
+// ============================================================================
+
+#[instrument]
+async fn health() -> &'static str {
+    "ok"
+}
+
+#[instrument(skip(store))]
+async fn create_item(
+    State(store): State<Arc<dyn Store>>,
+    Json(body): Json<CreateItemRequest>,
+) -> impl IntoResponse {
+    match store.create(&body.name) {
+        Ok(item) => {
+            tracing::info!(?item, "item created");
+            (StatusCode::CREATED, Json(item)).into_response()
+        }
+        Err(e) => {
+            tracing::warn!("create_item failed: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    }
+}
+
+#[instrument(skip(store))]
+async fn get_item(State(store): State<Arc<dyn Store>>, Path(id): Path<u64>) -> impl IntoResponse {
+    match store.get(id) {
+        Ok(Some(item)) => {
+            tracing::info!(?item, "item found");
+            Json(item).into_response()
+        }
+        Ok(None) => {
+            tracing::info!(id, "item not found");
+            StatusCode::NOT_FOUND.into_response()
+        }
+        Err(e) => {
+            tracing::warn!("get_item failed: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    }
+}
+
+/// Build the axum router with the given store.
+pub fn build_router(store: Arc<dyn Store>) -> axum::Router {
+    axum::Router::new()
+        .route("/health", get(health))
+        .route("/items", post(create_item))
+        .route("/items/{id}", get(get_item))
+        .with_state(store)
+}
+
+// ============================================================================
+// Process — the system under test
+// ============================================================================
+
+/// An axum web server running as a moonpool Process.
+///
+/// Uses `hyper::server::conn::http1::serve_connection` instead of `axum::serve`
+/// because `axum::serve` requires `tokio::net::TcpListener`. We need moonpool's
+/// simulated listener.
+pub struct WebProcess;
+
+#[async_trait]
+impl Process for WebProcess {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        use futures::stream::{FuturesUnordered, StreamExt};
+
+        let store = InMemoryStore::new();
+        let app = build_router(store);
+
+        let listener = ctx.network().bind(ctx.my_ip()).await?;
+        tracing::info!("server bound and listening");
+
+        // hyper's serve_connection future is !Send (HTTP1 state machine holds
+        // internal Rc<…>), so it cannot be spawned on the Send-bounded sim
+        // runtime. Drive multiple in-flight connections inline via
+        // FuturesUnordered instead.
+        let mut connections = FuturesUnordered::new();
+
+        loop {
+            // Deliberately NOT `biased;`: accept (new connection) and
+            // connections.next() (progress on in-flight connections) are peer
+            // data sources; the seeded start offset lets different seeds
+            // explore both orderings when both are ready.
+            moonpool_sim::select! {
+                accept = listener.accept() => {
+                    let (stream, addr) = accept?;
+                    tracing::info!(%addr, "accepted connection");
+
+                    // SimTcpStream implements the futures-io traits, which is all
+                    // HyperIo needs to present it as hyper's own IO. Vectored
+                    // writes on: the sim delivers each IoSlice separately, with
+                    // its own chance of chaos.
+                    let io = HyperIo::new(stream).with_vectored_writes(true);
+                    let service = TowerToHyperService::new(app.clone());
+
+                    connections.push(async move {
+                        tracing::info!("serve_connection starting");
+                        if let Err(e) = hyper::server::conn::http1::Builder::new()
+                            .serve_connection(io, service)
+                            .await
+                        {
+                            tracing::warn!(
+                                "hyper serve_connection error (expected under chaos): {e}"
+                            );
+                        }
+                        tracing::info!("serve_connection finished");
+                    });
+                }
+                Some(()) = connections.next(), if !connections.is_empty() => {}
+                () = ctx.shutdown().cancelled() => {
+                    tracing::info!("server shutting down");
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Workload — the test driver
+// ============================================================================
+
+/// Test driver that sends HTTP requests to the web process and validates responses.
+pub struct WebWorkload;
+
+#[async_trait]
+impl Workload for WebWorkload {
+    fn name(&self) -> &'static str {
+        "client"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let server_ip = ctx.peer("web").ok_or_else(|| {
+            moonpool_sim::SimulationError::InvalidState("web process not found".into())
+        })?;
+
+        tracing::info!(%server_ip, "workload starting");
+
+        // Multiple rounds of requests to exercise chaos.
+        // Each round is wrapped in a shutdown-aware select so the workload
+        // exits cleanly when the orchestrator triggers shutdown (e.g., after
+        // a chaos-induced connect hang is detected as no-progress).
+        for round in 0..5 {
+            tracing::info!(round, "starting round");
+            let result = moonpool_sim::select! {
+                biased;
+                result = self.send_round(ctx, &server_ip, round) => result,
+                () = ctx.shutdown().cancelled() => {
+                    tracing::info!(round, "shutdown during round, exiting");
+                    break;
+                }
+            };
+            match result {
+                Ok(()) => {
+                    tracing::info!(round, "round completed successfully");
+                }
+                Err(e) => {
+                    // Under chaos (connection drops, process reboots), requests
+                    // can fail. That's expected — we're testing resilience.
+                    moonpool_sim::assert_sometimes!(true, "request_round_failed");
+                    tracing::warn!(round, "round failed (expected under chaos): {e}");
+                }
+            }
+        }
+
+        tracing::info!("workload finished all rounds");
+        Ok(())
+    }
+}
+
+impl WebWorkload {
+    async fn send_round(
+        &self,
+        ctx: &SimContext,
+        server_ip: &str,
+        round: u32,
+    ) -> SimulationResult<()> {
+        tracing::info!(round, "connecting to server");
+        let stream = moonpool_sim::select! {
+            biased;
+            result = ctx.network().connect(server_ip) => result?,
+            () = ctx.shutdown().cancelled() => return Ok(()),
+        };
+        tracing::info!(round, "connected, starting handshake");
+
+        let io = HyperIo::new(stream).with_vectored_writes(true);
+        let (sender, conn) = hyper::client::conn::http1::handshake(io)
+            .await
+            .map_err(|error| invalid_state(format!("handshake: {error}")))?;
+        let mut client = HttpClient {
+            sender,
+            host: server_ip,
+        };
+
+        tracing::info!(round, "handshake complete, driving conn inline");
+        let driver = async move {
+            tracing::info!("client conn driver starting");
+            if let Err(e) = conn.await {
+                tracing::warn!("client conn driver error: {e}");
+            }
+            tracing::info!("client conn driver finished");
+        };
+
+        // hyper's SendRequest only makes progress while the Connection future
+        // is polled, so the driver MUST be raced alongside the requests (a
+        // merely pinned-but-never-polled driver leaves every request pending
+        // forever). Same idiom as the hyper_http integration test.
+        moonpool_sim::select! {
+            biased;
+            result = async {
+                Self::check_health(&mut client, round).await?;
+                Self::create_and_read_item(&mut client, round).await?;
+                Self::check_not_found(&mut client, round).await?;
+                Ok::<(), moonpool_sim::SimulationError>(())
+            } => result?,
+            // Connection died first (expected under chaos): give up the round.
+            () = driver => {}
+        }
+
+        Ok(())
+    }
+
+    async fn check_health(client: &mut HttpClient<'_>, round: u32) -> SimulationResult<()> {
+        tracing::info!(round, "sending GET /health");
+        let res = client.get("/health").await?;
+        tracing::info!(round, status = %res.status(), "GET /health response");
+        moonpool_sim::assert_always!(
+            res.status() == StatusCode::OK,
+            "health endpoint must return 200"
+        );
+        Ok(())
+    }
+
+    async fn create_and_read_item(client: &mut HttpClient<'_>, round: u32) -> SimulationResult<()> {
+        tracing::info!(round, "sending POST /items");
+        let res = client
+            .post_json(
+                "/items",
+                &CreateItemRequest {
+                    name: "test-item".to_string(),
+                },
+            )
+            .await?;
+
+        let status = res.status();
+        tracing::info!(round, %status, "POST /items response");
+        if status == StatusCode::CREATED {
+            moonpool_sim::assert_sometimes!(true, "item_created_successfully");
+            let item: Item = HttpClient::json(res).await?;
+            Self::read_item_back(client, round, &item).await?;
+        } else if status == StatusCode::INTERNAL_SERVER_ERROR {
+            let _body = HttpClient::body(res).await?;
+            // Store write failure via buggify — expected
+            moonpool_sim::assert_sometimes!(true, "store_write_failed");
+        } else {
+            let _body = HttpClient::body(res).await?;
+            moonpool_sim::assert_always!(false, format!("unexpected POST status: {status}"));
+        }
+        Ok(())
+    }
+
+    async fn read_item_back(
+        client: &mut HttpClient<'_>,
+        round: u32,
+        item: &Item,
+    ) -> SimulationResult<()> {
+        tracing::info!(round, item_id = item.id, "sending GET /items/{}", item.id);
+        let uri = format!("/items/{}", item.id);
+        let res = client.get(&uri).await?;
+
+        let get_status = res.status();
+        tracing::info!(round, %get_status, "GET /items/{} response", item.id);
+        if get_status == StatusCode::OK {
+            let fetched: Item = HttpClient::json(res).await?;
+
+            // What we wrote must match what we read.
+            moonpool_sim::assert_always!(
+                fetched.id == item.id && fetched.name == item.name,
+                "read-after-write consistency"
+            );
+        } else if get_status == StatusCode::INTERNAL_SERVER_ERROR {
+            // Store read failure via buggify — expected
+            moonpool_sim::assert_sometimes!(true, "store_read_failed");
+        } else {
+            moonpool_sim::assert_always!(false, format!("unexpected GET status: {get_status}"));
+        }
+        Ok(())
+    }
+
+    async fn check_not_found(client: &mut HttpClient<'_>, round: u32) -> SimulationResult<()> {
+        tracing::info!(round, "sending GET /items/999999");
+        let res = client.get("/items/999999").await?;
+
+        // May get 404 (normal) or 500 (buggified read failure)
+        let not_found_status = res.status();
+        tracing::info!(round, %not_found_status, "GET /items/999999 response");
+        moonpool_sim::assert_always!(
+            not_found_status == StatusCode::NOT_FOUND
+                || not_found_status == StatusCode::INTERNAL_SERVER_ERROR,
+            "nonexistent item must return 404 or 500"
+        );
+        Ok(())
+    }
+}
