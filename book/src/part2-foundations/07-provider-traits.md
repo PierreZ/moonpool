@@ -40,7 +40,11 @@ The distinction between `now()` and `timer()` is borrowed from FoundationDB's `s
 
 **Production**: `TokioTimeProvider` delegates `sleep` to `tokio::time::sleep`, `timeout` to `tokio::time::timeout`, and `now` to `std::time::Instant::elapsed`.
 
-**Simulation**: Sleep schedules an event on the simulation event queue. When all tasks are blocked, the simulator performs "time travel," jumping forward to the next scheduled event. This compresses hours of simulated cluster time into seconds of wall-clock time.
+**Simulation**: Sleep schedules a `Timer` in the global `Scheduler<Event>`.
+The scheduler owns monotonic logical time and same-time FIFO sequence order.
+When all tasks are blocked, the simulator performs "time travel" by popping the
+next scheduled event. This compresses hours of simulated cluster time into
+seconds of wall-clock time.
 
 ## NetworkProvider
 
@@ -81,7 +85,11 @@ The API deliberately matches what you would expect from tokio networking. `bind`
 
 **Production**: `TokioNetworkProvider` wraps `tokio::net`.
 
-**Simulation**: Connections are in-memory buffer pairs with deterministic delivery delays, TCP half-close simulation, and fault injection (connection drops, partitions, delayed delivery).
+**Simulation**: `NetworkSimulation` owns listeners, connections, topology,
+faults, pending operation results, and network wakers. Bind, connect, and accept
+park until their scheduled latency expires. Established streams use in-memory
+buffers with deterministic delivery delays, TCP half-close simulation, and
+fault injection such as connection drops, partitions, and corruption.
 
 ## TaskProvider
 
@@ -169,7 +177,18 @@ Storage is the newest provider, and the one with the richest fault model. `OpenO
 
 **Production**: `TokioStorageProvider` wraps `tokio::fs`.
 
-**Simulation**: In-memory filesystem with fault injection inspired by TigerBeetle and FoundationDB patterns: read/write corruption, crash and torn writes, misdirected reads/writes, sync failures, and IOPS/bandwidth timing simulation. Each `SimStorageProvider` is scoped to a process IP (`SimStorageProvider::new(sim, ip)`), and files are tagged with `owner_ip` so fault injection uses the correct per-process configuration.
+**Simulation**: `StorageEngine` owns an in-memory filesystem with fault
+injection inspired by TigerBeetle and FoundationDB patterns: read and write
+corruption, crash and torn writes, misdirected I/O, sync failures, and
+IOPS/bandwidth timing. Persistent file contents are separate from open-handle
+state, so two handles have independent cursors, access options, and pending
+operations. Each delayed operation has an exact ID, explicit pending or
+completed result, and its own waker. Crash and shutdown complete pending work
+with errors rather than treating absence as success.
+
+Each `SimStorageProvider` is scoped to a process IP
+(`SimStorageProvider::new(sim, ip)`), so the engine resolves the correct
+per-process configuration and disk-degradation episode for every operation.
 
 ## The Providers Bundle
 

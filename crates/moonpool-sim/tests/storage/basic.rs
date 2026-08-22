@@ -297,3 +297,76 @@ fn test_delete_and_rename() {
         result.expect("test failed");
     });
 }
+
+#[test]
+fn deleted_path_can_be_reused_as_rename_target() {
+    local_runtime().block_on(async {
+        let result: std::io::Result<()> = run_storage_test(fast_sim(), |provider| async move {
+            let target = provider
+                .open("target.txt", OpenOptions::create_write())
+                .await?;
+            drop(target);
+            provider.delete("target.txt").await?;
+
+            let mut source = provider
+                .open("source.txt", OpenOptions::create_write())
+                .await?;
+            source.write_all(b"replacement").await?;
+            source.sync_all().await?;
+            drop(source);
+
+            provider.rename("source.txt", "target.txt").await?;
+            assert!(!provider.exists("source.txt").await?);
+            assert!(provider.exists("target.txt").await?);
+
+            let mut target = provider
+                .open("target.txt", OpenOptions::read_only())
+                .await?;
+            let mut contents = Vec::new();
+            target.read_to_end(&mut contents).await?;
+            assert_eq!(contents, b"replacement");
+            Ok(())
+        })
+        .await;
+
+        result.expect("test failed");
+    });
+}
+
+#[test]
+fn rename_replaces_existing_target_and_invalidates_its_handles() {
+    local_runtime().block_on(async {
+        let result: std::io::Result<()> = run_storage_test(fast_sim(), |provider| async move {
+            let mut old_target = provider
+                .open("target.txt", OpenOptions::create_write())
+                .await?;
+            old_target.write_all(b"old").await?;
+            old_target.sync_all().await?;
+
+            let mut source = provider
+                .open("source.txt", OpenOptions::create_write())
+                .await?;
+            source.write_all(b"new").await?;
+            source.sync_all().await?;
+            drop(source);
+
+            provider.rename("source.txt", "target.txt").await?;
+            let error = old_target
+                .size()
+                .await
+                .expect_err("replaced handle must close");
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+
+            let mut target = provider
+                .open("target.txt", OpenOptions::read_only())
+                .await?;
+            let mut contents = Vec::new();
+            target.read_to_end(&mut contents).await?;
+            assert_eq!(contents, b"new");
+            Ok(())
+        })
+        .await;
+
+        result.expect("test failed");
+    });
+}

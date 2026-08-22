@@ -5,7 +5,7 @@
 
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
-use moonpool_sim::{SimWorld, StorageConfiguration};
+use moonpool_sim::{SimFaultEvent, SimWorld, StorageConfiguration};
 use std::net::IpAddr;
 
 const TEST_IP_STR: &str = "127.0.0.1";
@@ -193,7 +193,8 @@ fn test_misdirected_read_fault() {
         let mut sim = SimWorld::new();
         sim.set_storage_config(config);
 
-        let result: std::io::Result<Vec<u8>> = run_storage_test(sim, |provider| async move {
+        let provider = sim.storage_provider(test_ip());
+        let handle = tokio::spawn(async move {
             // Create a file with known data pattern
             let mut file = provider
                 .open("misdirect_read.txt", OpenOptions::create_write())
@@ -206,21 +207,28 @@ fn test_misdirected_read_fault() {
             let mut file = provider
                 .open("misdirect_read.txt", OpenOptions::read_only())
                 .await?;
-            let mut buf = Vec::new();
-            file.read_to_end(&mut buf).await?;
+            let mut buf = [0; 2];
+            file.read_exact(&mut buf).await?;
 
-            Ok(buf)
-        })
-        .await;
+            Ok::<_, std::io::Error>(buf)
+        });
 
-        let data = result.expect("test failed");
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
 
-        // With read misdirection, data may come from wrong positions
-        println!(
-            "Misdirected read result: {:?}",
-            String::from_utf8_lossy(&data)
-        );
-        assert!(!data.is_empty(), "Should have gotten some data");
+        let data = handle.await.expect("task panicked").expect("test failed");
+
+        assert_ne!(&data, b"AA", "100% misdirection must read another offset");
+        let faults = sim.take_faults();
+        assert_eq!(faults.len(), 1);
+        assert!(matches!(
+            &faults[0].event,
+            SimFaultEvent::StorageReadFault { .. }
+        ));
     });
 }
 

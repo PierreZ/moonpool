@@ -42,6 +42,10 @@ Terms are listed alphabetically. Cross-references are shown in **bold**.
 
 **Provider** -- A trait abstraction over runtime services (time, tasks, network, random, storage). Real implementations (`TokioTimeProvider`, etc.) delegate to tokio; simulation implementations intercept calls for deterministic control. Code uses providers instead of calling tokio directly.
 
+**Scheduler** -- The global `Scheduler<Event>` that owns monotonic simulation
+time, stable same-time FIFO sequence IDs, and cancellation. It dispatches
+targeted events but does not own network or storage resource state.
+
 **Reachable** -- An assertion kind (`assert_reachable!`) that marks a code path as "should be reached at least once." First reach is a **discovery**. A coverage violation is reported if the path is never reached after enough iterations.
 
 **Recipe** -- The replay path to a specific **timeline**: a list of `(rng_call_count, seed)` breakpoints applied from the root seed. If a bug is found, the recipe enables exact replay via `SimulationBuilder::replay_timeline()`. Formatted as `"151@seed -> 80@seed"`.
@@ -50,7 +54,16 @@ Terms are listed alphabetically. Cross-references are shown in **bold**.
 
 **Sometimes assertion** -- An assertion that should hold **at least once** across all iterations. Does not panic if false; instead, records statistics. Its first success is a **discovery** that exploration can anchor continuations to. A coverage violation is reported if the condition is never true. See `assert_sometimes!`.
 
-**SimStorageProvider** -- The simulation implementation of `StorageProvider`. Constructed with an IP address (`SimStorageProvider::new(sim, ip)`) so all file operations are tagged with the owning **process**. Fault injection uses the per-process `StorageConfiguration` resolved by `StorageState::config_for(ip)`.
+**SimStorageProvider** -- The simulation implementation of `StorageProvider`.
+Constructed with an IP address (`SimStorageProvider::new(sim, ip)`) so persistent
+files are tagged with the owning **process**. `StorageEngine` resolves that
+process's configuration and disk episode, while every open handle keeps its own
+cursor, access options, closed state, and pending operation IDs.
+
+**Storage operation** -- One exact delayed read, write, sync, or set-length
+submission identified by `OperationId`. The storage engine keeps explicit
+pending and completed `Result` state and a matching waker. Crashes and shutdown
+finish pending operations with errors.
 
 **Timeline** -- One complete simulation run. A root **seed** plus a **recipe** uniquely identifies a timeline; the root timeline has an empty recipe.
 

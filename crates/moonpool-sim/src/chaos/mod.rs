@@ -65,7 +65,7 @@
 //! | Partial/short writes | 1000 bytes max | Message fragmentation |
 //! | Packet loss | disabled | At-least-once delivery |
 //! | Network partitions | disabled | Split-brain handling |
-//! | Half-open connections | manual | Peer crash detection |
+//! | One-way partitions | disabled | Asymmetric reachability and failure detection |
 //!
 //! ## Timing Faults
 //!

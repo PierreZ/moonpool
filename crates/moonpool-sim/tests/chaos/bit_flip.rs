@@ -31,9 +31,11 @@ fn test_bit_flip_disabled_with_zero_probability() {
 
         // Send multiple messages
         let addr = "test-server";
-        let listener = provider.bind(addr).await.unwrap();
-        let mut client = provider.connect(addr).await.unwrap();
-        let (mut server, _) = listener.accept().await.unwrap();
+        let listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
+        let mut client = super::drive(&mut sim, provider.connect(addr))
+            .await
+            .unwrap();
+        let (mut server, _) = super::drive(&mut sim, listener.accept()).await.unwrap();
 
         // Send data multiple times
         for i in 0..10 {
@@ -74,9 +76,11 @@ fn test_bit_flip_injection_with_high_probability() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "chaos-server";
-        let listener = provider.bind(addr).await.unwrap();
-        let mut client = provider.connect(addr).await.unwrap();
-        let (mut _server, _) = listener.accept().await.unwrap();
+        let listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
+        let mut client = super::drive(&mut sim, provider.connect(addr))
+            .await
+            .unwrap();
+        let (mut _server, _) = super::drive(&mut sim, listener.accept()).await.unwrap();
 
         // Send many small messages to increase chance of corruption
         // Note: With high probability and buggify enabled, we should see bit flips in logs
@@ -96,7 +100,7 @@ fn test_bit_flip_injection_with_high_probability() {
 ///
 /// Note: We test this indirectly through the integration tests above.
 /// The power-law distribution (32 - floor(log2(random))) is implemented
-/// in `SimInner::calculate_flip_bit_count` and matches FDB's approach.
+/// in `NetworkSimulation::calculate_flip_bit_count` and matches FDB's approach.
 /// Direct unit testing would require exposing internal implementation details.
 /// Test that cooldown prevents excessive bit flipping
 #[test]
@@ -118,9 +122,11 @@ fn test_bit_flip_cooldown() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "cooldown-server";
-        let listener = provider.bind(addr).await.unwrap();
-        let mut client = provider.connect(addr).await.unwrap();
-        let (mut _server, _) = listener.accept().await.unwrap();
+        let listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
+        let mut client = super::drive(&mut sim, provider.connect(addr))
+            .await
+            .unwrap();
+        let (mut _server, _) = super::drive(&mut sim, listener.accept()).await.unwrap();
 
         // First message might trigger bit flip
         client.write_all(b"Message 1").await.unwrap();
@@ -156,9 +162,11 @@ fn test_peer_checksum_error_recovery() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "recovery-server";
-        let listener = provider.bind(addr).await.unwrap();
-        let mut client = provider.connect(addr).await.unwrap();
-        let (mut _server, _) = listener.accept().await.unwrap();
+        let listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
+        let mut client = super::drive(&mut sim, provider.connect(addr))
+            .await
+            .unwrap();
+        let (mut _server, _) = super::drive(&mut sim, listener.accept()).await.unwrap();
 
         // Send messages - some may be corrupted, but peer should not crash
         for i in 0..20 {
@@ -194,9 +202,9 @@ fn test_bit_flip_with_message_exchange() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "message-exchange";
-        let listener = provider.bind(addr).await.unwrap();
-        let mut client = provider.connect(addr).await.unwrap();
-        let (mut _server, _) = listener.accept().await.unwrap();
+        let listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
+        let mut client = super::drive(&mut sim, provider.connect(addr)).await.unwrap();
+        let (mut _server, _) = super::drive(&mut sim, listener.accept()).await.unwrap();
 
         // Simulate realistic workload
         let test_messages = [b"Short".to_vec(),

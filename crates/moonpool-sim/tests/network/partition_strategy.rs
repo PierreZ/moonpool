@@ -5,11 +5,12 @@
 //! degenerate partition duration, so `sample_duration` consumes no RNG draw and
 //! the only randomness left is the strategy's own selection.
 
+use futures::future::poll_fn;
 use moonpool_sim::{
     LocalityInfo, NetworkProvider, SimFaultEvent, SimWorld, TcpListenerTrait,
     network::{NetworkConfiguration, PartitionStrategy},
 };
-use std::{collections::BTreeMap, net::IpAddr, time::Duration};
+use std::{collections::BTreeMap, future::Future, net::IpAddr, time::Duration};
 
 /// Fixed seed for every rotation test in this file.
 const SEED: u64 = 42;
@@ -51,6 +52,21 @@ fn localities(layout: [(&str, &str); 4]) -> BTreeMap<IpAddr, LocalityInfo> {
         .collect()
 }
 
+async fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
+    futures::pin_mut!(future);
+    poll_fn(|cx| match future.as_mut().poll(cx) {
+        std::task::Poll::Ready(output) => std::task::Poll::Ready(output),
+        std::task::Poll::Pending => {
+            if sim.has_pending_events() {
+                sim.step();
+                cx.waker().wake_by_ref();
+            }
+            std::task::Poll::Pending
+        }
+    })
+    .await
+}
+
 /// Build a simulation with two established connections, so the engine sees the
 /// four IPs `10.0.1.1` ..= `10.0.1.4`, then step until the rotation fires.
 ///
@@ -66,25 +82,35 @@ fn run_rotation(
         .build()
         .expect("failed to build test runtime");
 
-    let mut sim = SimWorld::new_with_network_config_and_seed(rotation_config(strategy), SEED);
+    let mut sim =
+        SimWorld::new_with_network_config_and_seed(NetworkConfiguration::fast_local(), SEED);
     sim.set_localities(locality_map);
 
     let faults = runtime.block_on(async {
         let first = sim.network_provider(ip(1));
-        let listener_two = first.bind("10.0.1.2:8080").await.expect("bind .2");
-        let _client_one = first
-            .connect("10.0.1.2:8080")
+        let listener_two = drive(&mut sim, first.bind("10.0.1.2:8080"))
+            .await
+            .expect("bind .2");
+        let _client_one = drive(&mut sim, first.connect("10.0.1.2:8080"))
             .await
             .expect("connect .1->.2");
-        let (_server_two, _) = listener_two.accept().await.expect("accept on .2");
+        let (_server_two, _) = drive(&mut sim, listener_two.accept())
+            .await
+            .expect("accept on .2");
 
         let third = sim.network_provider(ip(3));
-        let listener_four = third.bind("10.0.1.4:8080").await.expect("bind .4");
-        let _client_three = third
-            .connect("10.0.1.4:8080")
+        let listener_four = drive(&mut sim, third.bind("10.0.1.4:8080"))
+            .await
+            .expect("bind .4");
+        let _client_three = drive(&mut sim, third.connect("10.0.1.4:8080"))
             .await
             .expect("connect .3->.4");
-        let (_server_four, _) = listener_four.accept().await.expect("accept on .4");
+        let (_server_four, _) = drive(&mut sim, listener_four.accept())
+            .await
+            .expect("accept on .4");
+
+        sim.set_network_config(rotation_config(strategy));
+        let _ = sim.take_faults();
 
         // Connections must stay alive while the rotation runs, otherwise the
         // engine has no IPs left to choose from.
@@ -114,11 +140,11 @@ fn step_until_fault(sim: &mut SimWorld) -> Vec<SimFaultEvent> {
 /// Assert that `a` and `b` cannot reach each other in either direction.
 fn assert_cut(sim: &SimWorld, a: IpAddr, b: IpAddr) {
     assert!(
-        sim.is_partitioned(a, b).expect("live simulation"),
+        sim.is_partitioned(a, b),
         "expected {a} -> {b} to be partitioned"
     );
     assert!(
-        sim.is_partitioned(b, a).expect("live simulation"),
+        sim.is_partitioned(b, a),
         "expected {b} -> {a} to be partitioned"
     );
 }
@@ -126,11 +152,11 @@ fn assert_cut(sim: &SimWorld, a: IpAddr, b: IpAddr) {
 /// Assert that `a` and `b` still reach each other in both directions.
 fn assert_intact(sim: &SimWorld, a: IpAddr, b: IpAddr) {
     assert!(
-        !sim.is_partitioned(a, b).expect("live simulation"),
+        !sim.is_partitioned(a, b),
         "expected {a} -> {b} to stay reachable"
     );
     assert!(
-        !sim.is_partitioned(b, a).expect("live simulation"),
+        !sim.is_partitioned(b, a),
         "expected {b} -> {a} to stay reachable"
     );
 }
@@ -211,11 +237,11 @@ fn asymmetric_send_blocks_only_the_outgoing_direction() {
             continue;
         }
         assert!(
-            sim.is_partitioned(blocked, other).expect("live simulation"),
+            sim.is_partitioned(blocked, other),
             "sends from {blocked} to {other} should be blocked"
         );
         assert!(
-            !sim.is_partitioned(other, blocked).expect("live simulation"),
+            !sim.is_partitioned(other, blocked),
             "{other} should still reach {blocked}"
         );
     }
@@ -239,11 +265,11 @@ fn asymmetric_recv_blocks_only_the_incoming_direction() {
             continue;
         }
         assert!(
-            sim.is_partitioned(other, blocked).expect("live simulation"),
+            sim.is_partitioned(other, blocked),
             "traffic from {other} to {blocked} should be blocked"
         );
         assert!(
-            !sim.is_partitioned(blocked, other).expect("live simulation"),
+            !sim.is_partitioned(blocked, other),
             "{blocked} should still reach {other}"
         );
     }

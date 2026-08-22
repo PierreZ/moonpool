@@ -125,6 +125,94 @@ fn test_interleaved_writes() {
     });
 }
 
+/// Concurrent append handles resolve EOF in completion order, so neither write
+/// overwrites the other even when both operations have the same deadline.
+#[test]
+fn concurrent_append_handles_preserve_both_writes() {
+    local_runtime().block_on(async {
+        let mut sim = fast_sim();
+        let provider = sim.storage_provider(test_ip());
+        let handle = tokio::spawn(async move {
+            let verify_provider = provider.clone();
+            let left_provider = provider.clone();
+            let left = async move {
+                let mut file = left_provider
+                    .open("append.txt", OpenOptions::new().append(true).create(true))
+                    .await?;
+                file.write_all(b"A").await
+            };
+            let right = async move {
+                let mut file = provider
+                    .open("append.txt", OpenOptions::new().append(true).create(true))
+                    .await?;
+                file.write_all(b"B").await
+            };
+            let (left_result, right_result) = futures::join!(left, right);
+            left_result?;
+            right_result?;
+
+            let mut file = verify_provider
+                .open("append.txt", OpenOptions::read_only())
+                .await?;
+            let mut contents = Vec::new();
+            file.read_to_end(&mut contents).await?;
+            assert_eq!(contents, b"AB", "same-time appends must complete FIFO");
+            Ok::<_, std::io::Error>(())
+        });
+
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+        handle.await.expect("task panicked").expect("io error");
+    });
+}
+
+/// A read event captures its bytes before a later same-deadline write event,
+/// even if the task is not repolled until both events have fired.
+#[test]
+fn read_completion_precedes_later_write_before_repoll() {
+    local_runtime().block_on(async {
+        let mut sim = fast_sim();
+        let provider = sim.storage_provider(test_ip());
+        let handle = tokio::spawn(async move {
+            let mut initial = provider
+                .open("ordered.txt", OpenOptions::create_write())
+                .await?;
+            initial.write_all(b"old").await?;
+            initial.sync_all().await?;
+            drop(initial);
+
+            let mut reader = provider
+                .open("ordered.txt", OpenOptions::read_only())
+                .await?;
+            let mut writer = provider
+                .open("ordered.txt", OpenOptions::new().write(true))
+                .await?;
+            let read = async move {
+                let mut bytes = [0; 3];
+                reader.read_exact(&mut bytes).await?;
+                Ok::<_, std::io::Error>(bytes)
+            };
+            let write = async move { writer.write_all(b"new").await };
+            let (read_result, write_result) = futures::join!(read, write);
+            assert_eq!(&read_result?, b"old");
+            write_result?;
+            Ok::<_, std::io::Error>(())
+        });
+
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+        handle.await.expect("task panicked").expect("io error");
+    });
+}
+
 /// Test writing to one file while reading from another (in same operation block)
 #[test]
 fn test_write_one_read_another() {
@@ -437,6 +525,129 @@ fn test_sequential_reads_same_file() {
             assert_eq!(buf1, buf2, "Both reads should see same content");
             assert_eq!(&buf1, b"shared content for reading");
 
+            Ok::<_, std::io::Error>(())
+        });
+
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+        handle.await.expect("task panicked").expect("io error");
+    });
+}
+
+/// Two handles for one persistent file keep independent cursors.
+#[test]
+fn same_file_handles_have_independent_positions() {
+    local_runtime().block_on(async {
+        let mut sim = fast_sim();
+        let provider = sim.storage_provider(test_ip());
+        let handle = tokio::spawn(async move {
+            let mut writer = provider
+                .open("shared_positions.txt", OpenOptions::create_write())
+                .await?;
+            writer.write_all(b"0123456789").await?;
+            writer.sync_all().await?;
+            drop(writer);
+
+            let mut first = provider
+                .open("shared_positions.txt", OpenOptions::read_only())
+                .await?;
+            let mut second = provider
+                .open("shared_positions.txt", OpenOptions::read_only())
+                .await?;
+            first.seek(std::io::SeekFrom::Start(1)).await?;
+            second.seek(std::io::SeekFrom::Start(7)).await?;
+
+            let mut first_bytes = [0; 2];
+            let mut second_bytes = [0; 2];
+            futures::future::try_join(
+                first.read_exact(&mut first_bytes),
+                second.read_exact(&mut second_bytes),
+            )
+            .await?;
+
+            assert_eq!(&first_bytes, b"12");
+            assert_eq!(&second_bytes, b"78");
+            assert_eq!(first.seek(std::io::SeekFrom::Current(0)).await?, 3);
+            assert_eq!(second.seek(std::io::SeekFrom::Current(0)).await?, 9);
+            Ok::<_, std::io::Error>(())
+        });
+
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+        handle.await.expect("task panicked").expect("io error");
+    });
+}
+
+/// Same-kind operations on one persistent file complete their exact requests,
+/// even when both handles have work in flight together.
+#[test]
+fn concurrent_same_file_writes_keep_operation_identity() {
+    local_runtime().block_on(async {
+        let mut sim = fast_sim();
+        let provider = sim.storage_provider(test_ip());
+        let handle = tokio::spawn(async move {
+            let mut initial = provider
+                .open("shared_writes.txt", OpenOptions::create_write())
+                .await?;
+            initial.write_all(b"............").await?;
+            drop(initial);
+
+            let options = OpenOptions::new().read(true).write(true);
+            let mut first = provider.open("shared_writes.txt", options.clone()).await?;
+            let mut second = provider.open("shared_writes.txt", options).await?;
+            first.seek(std::io::SeekFrom::Start(1)).await?;
+            second.seek(std::io::SeekFrom::Start(8)).await?;
+            futures::future::try_join(first.write_all(b"AAA"), second.write_all(b"BB")).await?;
+
+            drop(first);
+            drop(second);
+            let mut reader = provider
+                .open("shared_writes.txt", OpenOptions::read_only())
+                .await?;
+            let mut contents = Vec::new();
+            reader.read_to_end(&mut contents).await?;
+            assert_eq!(&contents, b".AAA....BB..");
+            Ok::<_, std::io::Error>(())
+        });
+
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+        handle.await.expect("task panicked").expect("io error");
+    });
+}
+
+/// Closing one handle invalidates that handle without closing the persistent
+/// file or another independently opened handle.
+#[test]
+fn close_is_handle_local_and_enforced() {
+    local_runtime().block_on(async {
+        let mut sim = fast_sim();
+        let provider = sim.storage_provider(test_ip());
+        let handle = tokio::spawn(async move {
+            let mut closed = provider
+                .open("close_handle.txt", OpenOptions::create_write())
+                .await?;
+            closed.write_all(b"data").await?;
+            let survivor = provider
+                .open("close_handle.txt", OpenOptions::read_only())
+                .await?;
+
+            closed.close().await?;
+            let error = closed.size().await.expect_err("closed handle must fail");
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+            assert_eq!(survivor.size().await?, 4);
             Ok::<_, std::io::Error>(())
         });
 

@@ -1,11 +1,12 @@
 //! Simulated storage file implementation.
 
 use crate::sim::WeakSimWorld;
-use crate::sim::state::FileId;
+use crate::storage::sim::{HandleId, OperationId, StorageCompletion};
 use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use moonpool_core::StorageFile;
 use std::io::{self, SeekFrom};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use super::futures::{SetLenFuture, SyncFuture};
@@ -31,43 +32,56 @@ use super::sim_shutdown_error;
 #[derive(Debug)]
 pub struct SimStorageFile {
     sim: WeakSimWorld,
-    file_id: FileId,
+    handle_id: HandleId,
+    closed: AtomicBool,
     /// Pending read operation: (`op_seq`, offset, len)
-    pending_read: Option<(u64, u64, usize)>,
+    pending_read: Option<(OperationId, u64, usize)>,
     /// Pending write operation: (`op_seq`, `bytes_written`)
-    pending_write: Option<(u64, usize)>,
+    pending_write: Option<(OperationId, usize)>,
 }
 
 impl SimStorageFile {
     /// Create a new simulated storage file.
-    pub(crate) fn new(sim: WeakSimWorld, file_id: FileId) -> Self {
+    pub(crate) fn new(sim: WeakSimWorld, handle_id: HandleId) -> Self {
         Self {
             sim,
-            file_id,
+            handle_id,
+            closed: AtomicBool::new(false),
             pending_read: None,
             pending_write: None,
+        }
+    }
+
+    fn ensure_open(&self) -> io::Result<()> {
+        if self.closed.load(Ordering::Relaxed) {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "file is closed"))
+        } else {
+            Ok(())
         }
     }
 }
 
 impl StorageFile for SimStorageFile {
     async fn sync_all(&self) -> io::Result<()> {
-        SyncFuture::new(self.sim.clone(), self.file_id).await
+        self.ensure_open()?;
+        SyncFuture::new(self.sim.clone(), self.handle_id).await
     }
 
     async fn sync_data(&self) -> io::Result<()> {
         // Simulation treats sync_all and sync_data identically
-        SyncFuture::new(self.sim.clone(), self.file_id).await
+        self.ensure_open()?;
+        SyncFuture::new(self.sim.clone(), self.handle_id).await
     }
 
     async fn size(&self) -> io::Result<u64> {
+        self.ensure_open()?;
         let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
-        sim.file_size(self.file_id)
-            .map_err(|e| io::Error::other(e.to_string()))
+        sim.file_size(self.handle_id).map_err(Into::into)
     }
 
     async fn set_len(&self, size: u64) -> io::Result<()> {
-        SetLenFuture::new(self.sim.clone(), self.file_id, size).await
+        self.ensure_open()?;
+        SetLenFuture::new(self.sim.clone(), self.handle_id, size).await
     }
 }
 
@@ -78,44 +92,40 @@ impl AsyncRead for SimStorageFile {
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        this.ensure_open()?;
         let sim = this.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Check for pending read operation
-        if let Some((op_seq, offset, len)) = this.pending_read {
+        if let Some((operation_id, offset, len)) = this.pending_read {
             // Check if operation is complete
-            if sim.is_storage_op_complete(this.file_id, op_seq) {
-                // Clear pending state
+            if let Poll::Ready(result) = sim.poll_storage_operation(operation_id, cx.waker()) {
                 this.pending_read = None;
-
-                // Calculate how many bytes to actually read
-                let bytes_to_read = buf.len().min(len);
-                if bytes_to_read == 0 {
-                    return Poll::Ready(Ok(0));
-                }
-
-                // Read from file at the stored offset
-                let bytes_read =
-                    sim.read_from_file(this.file_id, offset, &mut buf[..bytes_to_read])?;
+                let StorageCompletion::Read(data) = result? else {
+                    return Poll::Ready(Err(io::Error::other(
+                        "read operation returned a non-read completion",
+                    )));
+                };
+                let bytes_read = buf.len().min(data.len()).min(len);
+                buf[..bytes_read].copy_from_slice(&data[..bytes_read]);
 
                 // Update file position
                 let new_position = offset + bytes_read as u64;
-                sim.set_file_position(this.file_id, new_position)?;
+                sim.set_file_position(this.handle_id, new_position)?;
 
                 return Poll::Ready(Ok(bytes_read));
             }
 
             // Operation not complete, register waker and wait
-            sim.register_storage_waker(this.file_id, op_seq, cx.waker().clone());
             return Poll::Pending;
         }
 
         // No pending read - start a new one
 
         // Get current position
-        let position = sim.file_position(this.file_id)?;
+        let position = sim.file_position(this.handle_id)?;
 
         // Get file size to check for EOF
-        let file_size = sim.file_size(this.file_id)?;
+        let file_size = sim.file_size(this.handle_id)?;
 
         // Check for EOF
         if position >= file_size {
@@ -132,13 +142,13 @@ impl AsyncRead for SimStorageFile {
         }
 
         // Schedule the read operation
-        let op_seq = sim.schedule_read(this.file_id, position, len)?;
+        let operation_id = sim.schedule_read(this.handle_id, position, len)?;
 
         // Store pending state
-        this.pending_read = Some((op_seq, position, len));
+        this.pending_read = Some((operation_id, position, len));
 
         // Register waker
-        sim.register_storage_waker(this.file_id, op_seq, cx.waker().clone());
+        let _ = sim.poll_storage_operation(operation_id, cx.waker());
 
         Poll::Pending
     }
@@ -151,25 +161,25 @@ impl AsyncWrite for SimStorageFile {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        this.ensure_open()?;
         let sim = this.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Check for pending write operation
-        if let Some((op_seq, bytes_written)) = this.pending_write {
+        if let Some((operation_id, bytes_written)) = this.pending_write {
             // Check if operation is complete
-            if sim.is_storage_op_complete(this.file_id, op_seq) {
-                // Clear pending state
+            if let Poll::Ready(result) = sim.poll_storage_operation(operation_id, cx.waker()) {
                 this.pending_write = None;
-
-                // Update file position
-                let position = sim.file_position(this.file_id)?;
-                let new_position = position + bytes_written as u64;
-                sim.set_file_position(this.file_id, new_position)?;
-
-                return Poll::Ready(Ok(bytes_written));
+                let StorageCompletion::Write { offset, len } = result? else {
+                    return Poll::Ready(Err(io::Error::other(
+                        "write operation returned a non-write completion",
+                    )));
+                };
+                debug_assert_eq!(len, bytes_written);
+                tracing::trace!(offset, len, "storage write completed");
+                return Poll::Ready(Ok(len));
             }
 
             // Operation not complete, register waker and wait
-            sim.register_storage_waker(this.file_id, op_seq, cx.waker().clone());
             return Poll::Pending;
         }
 
@@ -180,16 +190,16 @@ impl AsyncWrite for SimStorageFile {
         }
 
         // Get current position
-        let position = sim.file_position(this.file_id)?;
+        let position = sim.file_position(this.handle_id)?;
 
         // Schedule the write operation
-        let op_seq = sim.schedule_write(this.file_id, position, buf.to_vec())?;
+        let operation_id = sim.schedule_write(this.handle_id, position, buf.to_vec())?;
 
         // Store pending state
-        this.pending_write = Some((op_seq, buf.len()));
+        this.pending_write = Some((operation_id, buf.len()));
 
         // Register waker
-        sim.register_storage_waker(this.file_id, op_seq, cx.waker().clone());
+        let _ = sim.poll_storage_operation(operation_id, cx.waker());
 
         Poll::Pending
     }
@@ -200,7 +210,20 @@ impl AsyncWrite for SimStorageFile {
     }
 
     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // Close is a no-op - file cleanup handled via Drop if needed
+        let this = self.get_mut();
+        if !this.closed.swap(true, Ordering::Relaxed)
+            && let Ok(sim) = this.sim.upgrade()
+        {
+            if let Some((operation_id, ..)) = this.pending_read {
+                sim.cancel_storage_operation(operation_id);
+            }
+            if let Some((operation_id, ..)) = this.pending_write {
+                sim.cancel_storage_operation(operation_id);
+            }
+            sim.close_storage_handle(this.handle_id);
+        }
+        this.pending_read = None;
+        this.pending_write = None;
         Poll::Ready(Ok(()))
     }
 }
@@ -211,10 +234,11 @@ impl AsyncSeek for SimStorageFile {
         _cx: &mut Context<'_>,
         pos: SeekFrom,
     ) -> Poll<io::Result<u64>> {
+        self.ensure_open()?;
         let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
-        let current_position = sim.file_position(self.file_id)?;
-        let file_size = sim.file_size(self.file_id)?;
+        let current_position = sim.file_position(self.handle_id)?;
+        let file_size = sim.file_size(self.handle_id)?;
 
         let target = match pos {
             SeekFrom::Start(p) => p,
@@ -234,7 +258,23 @@ impl AsyncSeek for SimStorageFile {
             }
         };
 
-        sim.set_file_position(self.file_id, target)?;
+        sim.set_file_position(self.handle_id, target)?;
         Poll::Ready(Ok(target))
+    }
+}
+
+impl Drop for SimStorageFile {
+    fn drop(&mut self) {
+        if !self.closed.swap(true, Ordering::Relaxed)
+            && let Ok(sim) = self.sim.upgrade()
+        {
+            if let Some((operation_id, ..)) = self.pending_read {
+                sim.cancel_storage_operation(operation_id);
+            }
+            if let Some((operation_id, ..)) = self.pending_write {
+                sim.cancel_storage_operation(operation_id);
+            }
+            sim.close_storage_handle(self.handle_id);
+        }
     }
 }

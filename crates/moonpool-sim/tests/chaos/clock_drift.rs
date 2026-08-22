@@ -202,7 +202,7 @@ fn test_clock_drift_with_time_advance() {
         assert!(initial_timer <= initial_now + Duration::from_millis(100));
 
         // Advance time by sleeping
-        let _sleep = sim.downgrade().sleep(Duration::from_millis(100));
+        let _sleep = sim.sleep(Duration::from_millis(100));
         sim.run_until_empty();
 
         // After advancing time

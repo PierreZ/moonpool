@@ -6,8 +6,9 @@
 
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
-use moonpool_sim::{SimWorld, StorageConfiguration};
+use moonpool_sim::{Event, SimWorld, StorageConfiguration};
 use std::net::IpAddr;
+use std::time::Duration;
 
 const TEST_IP_STR: &str = "127.0.0.1";
 
@@ -532,5 +533,169 @@ fn test_simulate_crash_no_files() {
 
         let exists = handle.await.expect("task panicked").expect("io error");
         assert!(exists, "Should be able to create files after crash");
+    });
+}
+
+/// A crash fails an exact in-flight operation instead of treating disappearance
+/// from the pending table as successful completion.
+#[test]
+fn crash_returns_error_to_pending_write() {
+    local_runtime().block_on(async {
+        let sim = fast_sim();
+        let provider = sim.storage_provider(test_ip());
+        let handle = tokio::spawn(async move {
+            let mut file = provider
+                .open("pending_crash.txt", OpenOptions::create_write())
+                .await?;
+            file.write_all(b"must not report success").await
+        });
+
+        while sim.pending_event_count() == 0 {
+            tokio::task::yield_now().await;
+        }
+        sim.simulate_crash_for_process(test_ip(), false);
+        while !handle.is_finished() {
+            tokio::task::yield_now().await;
+        }
+
+        let error = handle
+            .await
+            .expect("task panicked")
+            .expect_err("crashed write must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(
+            sim.pending_event_count(),
+            0,
+            "stale completion was canceled"
+        );
+    });
+}
+
+/// Global shutdown fails pending storage work, wakes its waiter, and cancels
+/// the completion event from the global scheduler.
+#[test]
+fn shutdown_returns_error_to_pending_write() {
+    local_runtime().block_on(async {
+        let mut sim = fast_sim();
+        let provider = sim.storage_provider(test_ip());
+        let handle = tokio::spawn(async move {
+            let mut file = provider
+                .open("pending_shutdown.txt", OpenOptions::create_write())
+                .await?;
+            file.write_all(b"shutdown").await
+        });
+
+        while sim.pending_event_count() == 0 {
+            tokio::task::yield_now().await;
+        }
+        sim.schedule_event(Event::Shutdown, Duration::ZERO);
+        sim.step();
+        while !handle.is_finished() {
+            tokio::task::yield_now().await;
+        }
+
+        let error = handle
+            .await
+            .expect("task panicked")
+            .expect_err("shutdown write must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        assert_eq!(
+            sim.pending_event_count(),
+            0,
+            "stale completion was canceled"
+        );
+    });
+}
+
+/// Shutdown overrides completions that fired but were not consumed, while the
+/// storage engine remains usable for handles opened after shutdown.
+#[test]
+fn shutdown_overrides_unconsumed_read_write_and_sync_results() {
+    local_runtime().block_on(async {
+        let mut sim = fast_sim();
+        let provider = sim.storage_provider(test_ip());
+
+        let setup_provider = provider.clone();
+        let setup = tokio::spawn(async move {
+            let mut file = setup_provider
+                .open("shutdown_race.txt", OpenOptions::create_write())
+                .await?;
+            file.write_all(b"old").await?;
+            file.sync_all().await
+        });
+        while !setup.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+        setup.await.expect("task panicked").expect("setup failed");
+
+        let old_idle = provider
+            .open("shutdown_race.txt", OpenOptions::read_only())
+            .await
+            .expect("open idle handle");
+        let mut read_file = provider
+            .open("shutdown_race.txt", OpenOptions::read_only())
+            .await
+            .expect("open read handle");
+        let mut write_file = provider
+            .open("shutdown_race.txt", OpenOptions::new().write(true))
+            .await
+            .expect("open write handle");
+        let sync_file = provider
+            .open("shutdown_race.txt", OpenOptions::new().write(true))
+            .await
+            .expect("open sync handle");
+
+        let read = tokio::spawn(async move {
+            let mut bytes = [0; 3];
+            read_file.read_exact(&mut bytes).await
+        });
+        let write = tokio::spawn(async move { write_file.write_all(b"new").await });
+        let sync = tokio::spawn(async move { sync_file.sync_all().await });
+
+        while sim.pending_event_count() < 3 {
+            tokio::task::yield_now().await;
+        }
+        while sim.pending_event_count() > 0 {
+            sim.step();
+        }
+
+        sim.schedule_event(Event::Shutdown, Duration::ZERO);
+        sim.step();
+
+        for result in [
+            read.await.expect("read task panicked"),
+            write.await.expect("write task panicked"),
+            sync.await.expect("sync task panicked"),
+        ] {
+            let error = result.expect_err("unconsumed completion must fail on shutdown");
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        }
+        let error = old_idle
+            .size()
+            .await
+            .expect_err("pre-shutdown handle must close");
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+
+        let new_provider = provider.clone();
+        let after_shutdown = tokio::spawn(async move {
+            let mut file = new_provider
+                .open("after_shutdown.txt", OpenOptions::create_write())
+                .await?;
+            file.write_all(b"works").await?;
+            file.sync_all().await
+        });
+        while !after_shutdown.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+        after_shutdown
+            .await
+            .expect("post-shutdown task panicked")
+            .expect("new handle should work");
     });
 }

@@ -2,6 +2,25 @@
 //!
 //! Contains tests for chaos injection and fault tolerance.
 
+use futures::future::poll_fn;
+use moonpool_sim::SimWorld;
+use std::future::Future;
+
+async fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
+    futures::pin_mut!(future);
+    poll_fn(|cx| match future.as_mut().poll(cx) {
+        std::task::Poll::Ready(output) => std::task::Poll::Ready(output),
+        std::task::Poll::Pending => {
+            if sim.has_pending_events() {
+                sim.step();
+                cx.waker().wake_by_ref();
+            }
+            std::task::Poll::Pending
+        }
+    })
+    .await
+}
+
 #[path = "chaos/bit_flip.rs"]
 mod bit_flip;
 #[path = "chaos/buggified_delay.rs"]

@@ -35,9 +35,6 @@ pub enum StorageOperation {
     /// `sync_failure_probability`.
     SyncComplete,
 
-    /// File open operation completed.
-    OpenComplete,
-
     /// File truncate/extend operation completed.
     SetLenComplete {
         /// New file length

@@ -182,10 +182,14 @@ impl Invariant for KillRateInvariant {
 }
 ```
 
-The `kind` values cover three categories:
+The `kind` values cover three categories. Network and storage faults originate
+inside the component that owns the affected state. The component returns the
+fault beside its ordered scheduler effects, and `SimWorld` stamps it with the
+current monotonic scheduler time before the runner merges it into the trace
+timeline.
 
 - **Process lifecycle**: `process_graceful_shutdown` (with `grace_period_ms`), `process_force_kill`, `process_restart` (all with `ip`)
-- **Network**: `partition_created`, `partition_healed` (with `from`/`to`), `connection_cut`, `cut_restored`, `half_open_error`, `random_close`, `peer_crash`, `bit_flip` (with `connection_id`), `send_partition_created`, `recv_partition_created` (with `ip`)
+- **Network**: `partition_created`, `partition_healed` (with `from`/`to`), `random_close`, `bit_flip` (with `connection_id`), `send_partition_created`, `recv_partition_created` (with `ip`)
 - **Storage**: `storage_read_fault`, `storage_write_fault` (with `write_kind`), `storage_sync_fault`, `storage_crash`, `storage_wipe` (all with `ip`)
 
 The real power is **correlation**. When an application-level invariant fires, cross-reference the fault events to understand what the infrastructure was doing at that moment. A conservation law violation at `t=5000` that coincides with a `process_force_kill` at `t=4980` tells a very different story than one with no faults nearby. Both kinds of events sit in one timeline with one clock, which is exactly how you would correlate an alert window against infrastructure events in a production log aggregator.

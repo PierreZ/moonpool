@@ -53,8 +53,8 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 - [Chaos in Moonpool](./part3-building/07-chaos.md) — Four fault dimensions: buggify, attrition, network faults, storage faults
 - [Buggify: Fault Injection](./part3-building/08-buggify.md) — Two-phase activation; testing error paths; FoundationDB-inspired
 - [Attrition: Process Reboots](./part3-building/09-attrition.md) — Graceful, crash, wipe reboot types; randomized kills; recovery delay
-- [Network Faults](./part3-building/10-network-faults.md) — Connection-level: latency, partition, drops, reordering, clogging
-- [Storage Faults](./part3-building/11-storage-faults.md) — TigerBeetle-inspired: corruption, misdirected I/O, phantom writes, sync failures; per-process storage config and crash/wipe scoped by IP
+- [Network Faults](./part3-building/10-network-faults.md) — Delayed connection establishment, latency, partitions, drops, reordering, and clogging
+- [Storage Faults](./part3-building/11-storage-faults.md) — Exact delayed operations, independent handles, corruption, misdirected I/O, crash errors, and per-process disk behavior
 - [Assertions: Finding Bugs](./part3-building/12-assertions.md) — Record and continue (Antithesis principle); cascade discovery
 - [Invariants vs Discovery vs Guidance](./part3-building/13-assertion-concepts.md) — Three assertion categories: invariants, sometimes, numeric
 - [Always and Sometimes](./part3-building/14-always-sometimes.md) — `assert_always!` (must hold) vs `assert_sometimes!` (exploration guidance)
@@ -64,8 +64,8 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 - [Designing Workloads That Find Bugs](./part3-building/19-designing-workloads.md) — Targeted adversarial design vs white noise; strategy matters
 - [Debugging a Failing Seed](./part3-building/20-debugging.md) — Five-step workflow: reproduce, isolate, understand, fix, verify
 - [Reproducing with FixedCount](./part3-building/21-reproducing.md) — Pin seed with `set_debug_seeds()` + `set_iterations(1)`; exact replay
-- [Reading the Event Trace](./part3-building/22-event-trace.md) — Event queue ordering; `RUST_LOG=trace`; causal chain reconstruction
-- [Common Pitfalls](./part3-building/23-pitfalls.md) — Don't `stop().await` in workloads (deadlock); use `drop()` instead
+- [Reading the Event Trace](./part3-building/22-event-trace.md) — Scheduler ordering, targeted component events, and causal chain reconstruction
+- [Common Pitfalls](./part3-building/23-pitfalls.md) — Delayed-operation driving, executor drains, provider-only calls, and component boundaries
 - [Discovering Properties](./part3-building/24-discovering-properties.md) — Systematic property discovery using attention focuses; finding where to place assertions and buggify
 
 ## Part IV: Simulating Existing Applications
@@ -95,7 +95,7 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 ## Appendix
 
 - [Assertion Reference](./appendix/01-assertion-reference.md) — Complete table of 15 assertion macros with behavior and parameters
-- [Crate Map](./appendix/02-crate-map.md) — 8-crate workspace diagram and dependency hierarchy
+- [Crate Map](./appendix/02-crate-map.md) — Workspace crate diagram and dependency hierarchy
 - [Configuration Reference](./appendix/03-configuration.md) — SimulationBuilder methods, ChaosConfiguration, AttritionConfiguration, exploration
 - [Fault Reference](./appendix/04-fault-reference.md) — Every fault by category with config fields and defaults
 - [Glossary](./appendix/05-glossary.md) — Alphabetical definitions: adaptive forking, always assertion, attrition, buggify, coverage bitmap, etc.

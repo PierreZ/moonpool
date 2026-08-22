@@ -4,8 +4,9 @@
 
 When we built the provider traits in Part II, we put TCP behind
 `NetworkProvider`. Production gets real sockets from `TokioNetworkProvider`.
-Simulation gets `SimTcpStream` and an event queue. Application code sees the
-same `futures::io::AsyncRead` and `AsyncWrite` interface in both places.
+Simulation gets provider-backed listeners and `SimTcpStream`. Application code
+sees the same `futures::io::AsyncRead` and `AsyncWrite` interface in both
+places.
 
 That seam is deliberately small. Moonpool simulates the network behavior a
 distributed application can observe without pretending to be an IP stack.
@@ -20,7 +21,7 @@ an application whose contract begins at a TCP byte stream.
 Our systems speak TCP. They open connections, send messages, read responses, and handle disconnections. The bugs that kill production clusters happen at **connection** granularity, not packet granularity:
 
 - A node loses its connection mid-write and the remote sees a partial message
-- A connection hangs in half-open state where one side thinks it is alive and the other does not
+- A one-way partition lets one side hear heartbeats while its replies disappear
 - A process reboots while clients still hold streams to the old process
 - A partition heals after several request deadlines have expired
 
@@ -38,9 +39,12 @@ system.
 
 The simulation network controls:
 
-- **Connect, bind, and accept.** A simulated listener has a backlog and a
-  connection handshake that can succeed, fail, or hang under chaos.
-- **Byte delivery.** Writes enter the event queue and become readable later.
+- **Connect, bind, and accept.** Each call is a real delayed operation. It
+  remains pending until its targeted scheduler event fires. A simulated
+  listener has a backlog and a connection handshake that can succeed, fail, or
+  hang under chaos.
+- **Byte delivery.** Writes enter the connection's send buffer and the network
+  engine requests ordered delivery events from the global scheduler.
   Partial writes and partial reads exercise loops that incorrectly assume one
   poll transfers a complete application message.
 - **Latency and clogging.** Per-link latency, temporary clogs, and partitions
@@ -52,6 +56,25 @@ The simulation network controls:
 
 Every decision comes from the seeded simulation RNG. A connection that hangs
 on seed 73 hangs the same way every time seed 73 is replayed.
+
+## Who Owns What
+
+The networking provider is a thin adapter into `NetworkSimulation`. That
+engine owns listeners, connection pairs, pending backlogs, topology, partition
+state, network faults, delayed-operation results, and every network waker. It
+does **not** own logical time or a private queue.
+
+`SimWorld` coordinates a single `Scheduler<Event>` for timers, network events,
+storage events, and process lifecycle. A network transition returns ordered
+actions such as scheduling a `DataDelivery`, cancelling an operation, or
+recording a fault. The coordinator applies those actions, releases its lock,
+then wakes tasks. Keeping wake calls outside the lock lets a re-entrant waker
+poll network state without deadlocking.
+
+Delayed bind and connect futures are cancellation-safe. Accept reserves one
+backlogged connection while its latency elapses, and dropping the future
+returns that reservation to the front of the backlog. Shutdown fails delayed
+operations and drains network waiters instead of leaving them parked.
 
 ## A Raw TCP Process
 
@@ -125,7 +148,10 @@ Application Code
   │          │
   ▼          ▼
 Real TCP   SimWorld
-(tokio)    (event queue)
+(tokio)    (Scheduler<Event>)
+                │
+                ▼
+         NetworkSimulation
 ```
 
 There is no `#[cfg(test)]` branch and no socket mock in the application. The

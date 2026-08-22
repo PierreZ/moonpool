@@ -24,7 +24,7 @@ Processes crash. Processes restart. Sometimes they restart cleanly, sometimes th
 
 ### Network Faults
 
-TCP connections fail in subtle ways. Moonpool simulates connection drops, latency spikes, packet corruption, clock drift, partial writes, network partitions, and half-open connections. The simulation operates at the **TCP connection level**, not the packet level, because connection-level faults are what distributed systems actually need to handle.
+TCP connections fail in subtle ways. Moonpool simulates connection drops, latency spikes, byte corruption, clock drift, partial writes, and both symmetric and one-way network partitions. The simulation operates at the **TCP connection level**, not the packet level, because connection-level faults are what distributed systems actually need to handle.
 
 ### Storage Faults
 

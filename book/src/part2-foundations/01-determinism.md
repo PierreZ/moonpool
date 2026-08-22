@@ -20,13 +20,28 @@ Together, these forces make distributed systems bugs the hardest kind to find. T
 
 ## Moonpool's Answer
 
-Moonpool eliminates both sources. Completely.
+Moonpool brings all three sources under deterministic control.
 
 **Single-core execution** removes thread scheduling from the equation. One thread. One execution order. No races, no interleavings, no "works on my machine but fails in CI." We cover this in detail in the next chapter.
 
 **Provider abstraction** replaces real I/O and real randomness with simulated equivalents. Every system call your code makes (network, disk, time, random numbers) goes through a trait. In production, the trait calls tokio. In simulation, the trait calls moonpool's deterministic runtime. Same code, different wiring. No `#[cfg(test)]` branching. The production code path **is** the tested code path.
 
-With both sources eliminated, the simulation becomes a **pure function** of its seed. A single `u64` value determines everything: which connections fail, when timeouts fire, what order messages arrive, whether disk writes corrupt. Same seed, same execution, same bugs. Every time.
+With all three sources controlled, the simulation becomes a **pure function** of its seed. A single `u64` value determines everything: which connections fail, when timeouts fire, what order messages arrive, whether disk writes corrupt. Same seed, same execution, same bugs. Every time.
+
+The event side of that guarantee is explicit. A global `Scheduler<Event>` owns
+logical time, cancellation, and a monotonically increasing sequence number.
+Scheduling into the past clamps to the current time. Events with the same
+timestamp execute in sequence order, so they are FIFO without relying on heap
+iteration details. Cancelled work is removed without advancing time.
+
+The scheduler does not own the simulated resources. `NetworkSimulation` owns
+connections, topology, network faults, operations, and wakers.
+`StorageEngine` owns persistent files, open handles, disk episodes, operations,
+results, and wakers. Each component consumes its targeted event and returns
+ordered effects for the coordinator to schedule. This boundary matters for
+replay: random decisions happen in the component that owns the state, global
+ordering happens in one scheduler, and wakers run only after the world lock is
+released.
 
 ## What This Gives You
 

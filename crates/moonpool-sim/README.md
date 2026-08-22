@@ -18,6 +18,26 @@ Bugs hide in rare combinations of events. An API with just six variables creates
 
 **Chaos injection.** The simulator deliberately biases execution toward rare code paths. Network delays, disconnects, partitions, bit flips, storage corruption—failures that might take months to occur in production happen continuously in simulation.
 
+## Runtime Architecture
+
+`SimWorld` is the coordinator, not a bucket for every subsystem's mutable
+state. Its global `Scheduler<Event>` owns logical time, deterministic same-time
+FIFO ordering, and cancellation. It dispatches targeted events to two
+independent engines:
+
+- `NetworkSimulation` owns listeners, connections, topology, network faults,
+  pending operations, results, and network wakers. Bind, connect, and accept
+  complete only after their configured simulated latency.
+- `StorageEngine` owns persistent file contents, independent open handles and
+  cursors, per-process disk configuration, degradation episodes, exact pending
+  operation results, and storage wakers. Read, write, sync, and set-length
+  completions identify the operation that submitted them.
+
+Both engines return ordered scheduling and cancellation effects plus wake
+batches to the coordinator. The coordinator applies those effects and invokes
+wakers after releasing the world lock. Shutdown and process crashes cancel or
+fail pending work instead of treating a missing completion as success.
+
 ## Controlled Failure Injection: BUGGIFY
 
 Rather than hoping rare bugs surface, moonpool deliberately triggers them. `buggify!` points fire with 25% probability during testing, creating a combinatorial explosion across configurations.
@@ -26,7 +46,7 @@ Strategic placement at error-prone points ensures deep bugs—those needing rare
 
 ## The Assertion Suite
 
-Moonpool provides 14 Antithesis-style assertion macros for comprehensive property testing:
+Moonpool provides 15 Antithesis-style assertion macros for comprehensive property testing:
 
 **Boolean assertions** — guard correctness properties:
 - `assert_always!` / `assert_always_or_unreachable!` — invariants that must never fail

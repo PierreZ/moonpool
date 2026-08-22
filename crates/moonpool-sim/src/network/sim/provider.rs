@@ -1,12 +1,44 @@
 use super::stream::{SimTcpListener, SimTcpStream};
 use crate::NetworkProvider;
+use crate::WeakSimWorld;
 use crate::buggify;
 use crate::network::ConnectFailureMode;
 use crate::sim::rng::sim_random;
-use crate::{Event, WeakSimWorld};
 use std::io;
 use std::net::IpAddr;
 use tracing::instrument;
+
+use super::ConnectionId;
+
+struct PendingConnectionPair {
+    sim: WeakSimWorld,
+    client: ConnectionId,
+    armed: bool,
+}
+
+impl PendingConnectionPair {
+    fn new(sim: WeakSimWorld, client: ConnectionId) -> Self {
+        Self {
+            sim,
+            client,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingConnectionPair {
+    fn drop(&mut self) {
+        if self.armed
+            && let Ok(sim) = self.sim.upgrade()
+        {
+            sim.discard_connection_pair(self.client);
+        }
+    }
+}
 
 /// Simulated networking implementation
 ///
@@ -60,17 +92,11 @@ impl NetworkProvider for SimNetworkProvider {
         let delay =
             sim.with_network_config(|config| crate::network::sample_latency(&config.bind_latency));
 
-        // Schedule bind completion event to advance simulation time
-        let listener_id = sim.create_listener();
-
-        // Schedule an event to simulate the bind delay - this advances simulation time
-        sim.schedule_event(
-            Event::Connection {
-                id: listener_id.0,
-                state: crate::ConnectionStateChange::BindComplete,
-            },
-            delay,
-        );
+        sim.network_delay(delay)
+            .map_err(io::Error::other)?
+            .await
+            .map_err(io::Error::other)?;
+        sim.create_listener();
 
         let listener = SimTcpListener::new(self.sim.clone(), addr.to_string());
         Ok(listener)
@@ -140,23 +166,21 @@ impl NetworkProvider for SimNetworkProvider {
         // only the IP is parsed out) so per-pair chaos can key off it.
         let client_addr = std::net::SocketAddr::new(self.local_ip, 0).to_string();
         let (client_id, server_id) = sim.create_connection_pair(&client_addr, addr);
+        let mut pending_pair = PendingConnectionPair::new(self.sim.clone(), client_id);
 
         // FDB SimClogging: fix a permanent per-pair latency at first contact, for
         // both directions. No-op (returns ZERO, no RNG) when max_pair_latency is off.
         let _ = sim.connection_base_latency(client_id);
         let _ = sim.connection_base_latency(server_id);
 
-        // Store the server side for accept() to pick up later
-        sim.store_pending_connection(addr, server_id);
+        sim.network_delay(delay)
+            .map_err(io::Error::other)?
+            .await
+            .map_err(io::Error::other)?;
 
-        // Schedule connection ready event to advance simulation time
-        sim.schedule_event(
-            Event::Connection {
-                id: client_id.0,
-                state: crate::ConnectionStateChange::ConnectionReady,
-            },
-            delay,
-        );
+        // Only publish the server endpoint after connection establishment.
+        sim.store_pending_connection(addr, server_id);
+        pending_pair.disarm();
 
         let stream = SimTcpStream::new(self.sim.clone(), client_id);
         Ok(stream)

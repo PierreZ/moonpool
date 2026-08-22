@@ -24,6 +24,9 @@ pub mod memory;
 /// Storage provider implementation
 pub mod provider;
 
+/// Deterministic storage engine and targeted event types.
+pub mod sim;
+
 use std::io;
 
 /// Create an `io::Error` for simulation shutdown.

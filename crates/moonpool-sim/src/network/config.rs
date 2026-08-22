@@ -9,14 +9,14 @@
 //! | Failure | Config Field | Default | Real-World Scenario |
 //! |---------|--------------|---------|---------------------|
 //! | Random close | `random_close_probability` | 0.001% | Reconnection logic, message redelivery, connection pooling |
-//! | Asymmetric close | `random_close_explicit_ratio` | 30% explicit | Half-closed sockets, FIN vs RST handling |
+//! | Close error surfacing | `random_close_explicit_ratio` | 30% explicit | Immediate-error vs timeout-based detection |
 //! | Connect failure | `connect_failure_mode` | Probabilistic | Connection establishment retries, timeout handling |
 //!
 //! ## Network Latency & Congestion
 //!
 //! | Delay Type | Config Field | Default | Real-World Scenario |
 //! |------------|--------------|---------|---------------------|
-//! | Operation latency | `bind/accept/connect/read/write_latency` | Various ranges | Timeout settings, async operation ordering |
+//! | Operation latency | `bind/accept/connect/write_latency` | Various ranges | Timeout settings, async operation ordering |
 //! | Write clogging | `clog_probability` + `clog_duration` | 0%, 100-300ms | Backpressure handling, flow control |
 //! | Read clogging | Same as write | Same | Symmetric flow control |
 //! | Clock drift | `clock_drift_enabled` + `clock_drift_max` | true, 100ms | Lease expiration, distributed consensus, TTL handling |
@@ -27,7 +27,8 @@
 //! | Partition Type | Config/Method | Default | Real-World Scenario |
 //! |----------------|---------------|---------|---------------------|
 //! | Random partition | `partition_probability` + `partition_duration` | 0%, 200ms-2s | Split-brain, quorum loss, leader election |
-//! | Bi-directional | `partition_pair()` | Manual | Complete isolation between nodes |
+//! | Directed pair | `partition_pair()` | Manual | One-way loss between two nodes |
+//! | Pair restore | `restore_partition()` | Manual | Heals both directed pair entries |
 //! | Send-only block | `partition_send_from()` | Manual | Asymmetric network failures |
 //! | Recv-only block | `partition_recv_to()` | Manual | Asymmetric network failures |
 //! | Partition strategy | `partition_strategy` | Random | Different failure patterns (uniform, isolate) |
@@ -507,8 +508,6 @@ pub struct NetworkConfiguration {
     pub accept_latency: LatencyDistribution,
     /// Latency distribution for connect operations
     pub connect_latency: LatencyDistribution,
-    /// Latency distribution for read operations
-    pub read_latency: LatencyDistribution,
     /// Latency distribution for write operations
     pub write_latency: LatencyDistribution,
 
@@ -536,10 +535,6 @@ impl Default for NetworkConfiguration {
             connect_latency: LatencyDistribution::Uniform {
                 start: Duration::from_millis(1),
                 end: Duration::from_millis(11),
-            },
-            read_latency: LatencyDistribution::Uniform {
-                start: Duration::from_micros(10),
-                end: Duration::from_micros(60),
             },
             write_latency: LatencyDistribution::Uniform {
                 start: Duration::from_micros(100),
@@ -735,10 +730,6 @@ impl NetworkConfiguration {
                 Duration::from_micros(sim_random_range(1000..50_000))
                     ..Duration::from_micros(sim_random_range(10_000..100_000)),
             ),
-            read_latency: random_latency_for_seed(
-                Duration::from_micros(sim_random_range(5..100))
-                    ..Duration::from_micros(sim_random_range(50..200)),
-            ),
             write_latency: random_latency_for_seed(
                 Duration::from_micros(sim_random_range(50..1000))
                     ..Duration::from_micros(sim_random_range(200..2000)),
@@ -773,7 +764,6 @@ impl NetworkConfiguration {
             bind_latency: uniform(one_us, one_us),
             accept_latency: uniform(ten_us, ten_us),
             connect_latency: uniform(ten_us, ten_us),
-            read_latency: uniform(one_us, one_us),
             write_latency: uniform(one_us, one_us),
             link_latency: None,
             chaos: ChaosConfiguration::disabled(),
@@ -987,7 +977,6 @@ mod latency_distribution_tests {
             &net.bind_latency,
             &net.accept_latency,
             &net.connect_latency,
-            &net.read_latency,
             &net.write_latency,
         ] {
             assert!(

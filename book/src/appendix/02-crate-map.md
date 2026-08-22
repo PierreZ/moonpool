@@ -71,7 +71,10 @@ process lifecycle, workloads, tracing invariants, and assertion wiring.
 
 - `SimulationBuilder` configures processes, workloads, chaos, and iterations
 - `SimContext` exposes providers, topology, shared state, and shutdown
-- `SimWorld` owns simulated time and the event queue
+- `SimWorld` coordinates lifecycle and the global `Scheduler<Event>`
+- `Scheduler<Event>` owns monotonic logical time, same-time FIFO ordering, and cancellation
+- `NetworkSimulation` owns network state, topology, faults, operations, results, and wakers
+- `StorageEngine` owns persistent files, independent handles, disk behavior, operations, results, and wakers
 - `Process` describes the system under test
 - `Workload` describes the test driver
 - `Invariant` checks cross-process properties from trace events

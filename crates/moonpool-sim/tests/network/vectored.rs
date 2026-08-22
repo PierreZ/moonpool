@@ -1,5 +1,9 @@
-use futures::io::{AsyncRead, AsyncWriteExt};
+use futures::{
+    future::poll_fn,
+    io::{AsyncRead, AsyncWriteExt},
+};
 use moonpool_sim::{NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait};
+use std::future::Future;
 use std::io::IoSlice;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -11,6 +15,21 @@ fn try_read(server: &mut (impl AsyncRead + Unpin), buf: &mut [u8]) -> Option<usi
         Poll::Ready(Ok(n)) if n > 0 => Some(n),
         _ => None,
     }
+}
+
+async fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
+    futures::pin_mut!(future);
+    poll_fn(|cx| match future.as_mut().poll(cx) {
+        Poll::Ready(output) => Poll::Ready(output),
+        Poll::Pending => {
+            if sim.has_pending_events() {
+                sim.step();
+                cx.waker().wake_by_ref();
+            }
+            Poll::Pending
+        }
+    })
+    .await
 }
 
 #[test]
@@ -26,12 +45,15 @@ fn vectored_write_preserves_slice_boundaries_as_delivery_events() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
         let addr = "vectored-write-test";
 
-        let listener = provider.bind(addr).await.expect("bind should succeed");
-        let mut client = provider
-            .connect(addr)
+        let listener = drive(&mut sim, provider.bind(addr))
+            .await
+            .expect("bind should succeed");
+        let mut client = drive(&mut sim, provider.connect(addr))
             .await
             .expect("connect should succeed");
-        let (mut server, _peer_addr) = listener.accept().await.expect("accept should succeed");
+        let (mut server, _peer_addr) = drive(&mut sim, listener.accept())
+            .await
+            .expect("accept should succeed");
 
         assert!(client.is_write_vectored());
 

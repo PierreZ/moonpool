@@ -3,12 +3,7 @@
 //! This module provides utilities for orchestrating workload execution
 //! and managing simulation iterations.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-
-use super::wall_clock::Instant;
 
 use tracing::Instrument as _;
 
@@ -19,271 +14,14 @@ use crate::runner::builder::WorkloadClientInfo;
 use crate::runner::context::SimContext;
 use crate::runner::fault_injector::{FaultContext, FaultInjector};
 use crate::runner::locality::MachineRegistry;
-use crate::runner::process::Process;
 use crate::runner::tags::{ProcessTags, TagRegistry};
 use crate::runner::topology::{TopologyFactory, TopologyInputs};
 use crate::runner::workload::Workload;
-use crate::{
-    SimulationResult, assert_always_less_than_or_equal_to, assert_reachable, chaos::AssertionStats,
-};
+use crate::{SimulationResult, assert_reachable};
 
+use super::process_manager::{ProcessConfig, ProcessManager};
 use super::report::SimulationMetrics;
-
-/// Default virtual-time budget for a single run phase.
-///
-/// If simulated time advances past this bound while workloads are still
-/// running, the run is declared deadlocked. The default is intentionally
-/// enormous (one simulated hour) so it never trips a legitimate long-running
-/// simulation; it exists only to convert a self-perpetuating-timer hang
-/// (a detached keepalive/reconnect loop re-arming a sleep every tick) into an
-/// actionable deadlock instead of an unbounded spin. Override per simulation
-/// with [`crate::SimulationBuilder::run_time_budget`].
-pub(crate) const DEFAULT_RUN_TIME_BUDGET: Duration = Duration::from_hours(1);
-
-/// Deadlock detection utility to identify stuck simulations.
-#[derive(Debug, Default)]
-pub(crate) struct DeadlockDetector {
-    no_progress_count: usize,
-    threshold: usize,
-}
-
-impl DeadlockDetector {
-    /// Create a new deadlock detector with a threshold for consecutive no-progress iterations.
-    pub(crate) fn new(threshold: usize) -> Self {
-        Self {
-            no_progress_count: 0,
-            threshold,
-        }
-    }
-
-    /// Check if deadlock conditions are met and update internal state.
-    /// Returns true if deadlock is detected.
-    pub(crate) fn check_deadlock(
-        &mut self,
-        handles_count: usize,
-        initial_handle_count: usize,
-        event_count: usize,
-        initial_event_count: usize,
-    ) -> bool {
-        if event_count == 0 && handles_count == initial_handle_count && initial_event_count == 0 {
-            self.no_progress_count += 1;
-            self.no_progress_count > self.threshold
-        } else {
-            self.no_progress_count = 0;
-            false
-        }
-    }
-
-    /// Get the current no-progress count for logging.
-    pub(crate) fn no_progress_count(&self) -> usize {
-        self.no_progress_count
-    }
-
-    /// Reset the no-progress counter (e.g. after triggering shutdown to give tasks a chance).
-    pub(crate) fn reset(&mut self) {
-        self.no_progress_count = 0;
-    }
-}
-
-/// Configuration for server processes in the simulation.
-///
-/// Created by the builder after resolving process count and tags.
-pub(crate) struct ProcessConfig<'a> {
-    /// Factory for creating process instances.
-    pub(crate) factory: &'a dyn Fn() -> Box<dyn Process>,
-    /// Process (name, ip) pairs for topology.
-    pub(crate) info: Vec<(String, String)>,
-    /// Process IP addresses.
-    pub(crate) ips: Vec<String>,
-    /// Tag registry mapping process IPs to their resolved tags.
-    pub(crate) tag_registry: TagRegistry,
-    /// Machine registry mapping process IPs to their failure-domain locality.
-    pub(crate) machine_registry: MachineRegistry,
-}
-
-/// Manages process lifecycle during a simulation run.
-///
-/// Tracks running process tasks and handles restarts when `ProcessRestart`
-/// events fire in the simulation event queue.
-struct ProcessManager<'a> {
-    factory: Option<&'a dyn Fn() -> Box<dyn Process>>,
-    handles: Vec<Option<crate::executor::JoinHandle<()>>>,
-    /// Per-process shutdown tokens (child of the global `shutdown_signal`).
-    /// Cancelling a child signals only that process; cancelling the parent
-    /// signals all processes.
-    process_tokens: Vec<Option<tokio_util::sync::CancellationToken>>,
-    ips: Vec<String>,
-    tag_registry: TagRegistry,
-    machine_registry: MachineRegistry,
-    all_entities: Vec<(String, String)>,
-    /// Count of currently dead (killed but not yet restarted) processes.
-    dead_count: Arc<AtomicUsize>,
-}
-
-impl<'a> ProcessManager<'a> {
-    /// Create an empty process manager (no processes configured).
-    fn new_empty() -> Self {
-        Self {
-            factory: None,
-            handles: Vec::new(),
-            process_tokens: Vec::new(),
-            ips: Vec::new(),
-            tag_registry: TagRegistry::default(),
-            machine_registry: MachineRegistry::default(),
-            all_entities: Vec::new(),
-            dead_count: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    /// Create a process manager from config and booted process handles.
-    fn new(
-        factory: &'a dyn Fn() -> Box<dyn Process>,
-        handles: Vec<Option<crate::executor::JoinHandle<()>>>,
-        process_tokens: Vec<Option<tokio_util::sync::CancellationToken>>,
-        ips: Vec<String>,
-        tag_registry: TagRegistry,
-        machine_registry: MachineRegistry,
-        all_entities: Vec<(String, String)>,
-    ) -> Self {
-        Self {
-            factory: Some(factory),
-            handles,
-            process_tokens,
-            ips,
-            tag_registry,
-            machine_registry,
-            all_entities,
-            dead_count: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    /// Get a shared reference to the dead process counter.
-    fn dead_count(&self) -> Arc<AtomicUsize> {
-        self.dead_count.clone()
-    }
-
-    /// Resolve process index from IP, returning None for unknown IPs.
-    fn index_for_ip(&self, ip: std::net::IpAddr) -> Option<usize> {
-        let ip_str = ip.to_string();
-        self.ips.iter().position(|p| p == &ip_str)
-    }
-
-    /// Signal a graceful shutdown for a process by cancelling its per-process token.
-    ///
-    /// The process will see `ctx.shutdown().is_cancelled()` and can perform
-    /// cleanup before the force-kill timer fires.
-    fn signal_graceful_shutdown(&mut self, ip: std::net::IpAddr) {
-        let Some(idx) = self.index_for_ip(ip) else {
-            tracing::warn!("ProcessGracefulShutdown for unknown IP {}", ip);
-            return;
-        };
-        if let Some(token) = &self.process_tokens[idx] {
-            token.cancel();
-            self.dead_count.fetch_add(1, Ordering::Relaxed);
-            assert_always_less_than_or_equal_to!(
-                self.dead_count.load(Ordering::Relaxed),
-                self.ips.len(),
-                "dead_count <= process_count"
-            );
-            assert_reachable!("process_manager: graceful shutdown signaled");
-            tracing::info!(
-                "Signaled graceful shutdown for process at {} (index {})",
-                ip,
-                idx
-            );
-        }
-    }
-
-    /// Abort a specific process task (force-kill after grace period).
-    fn abort_process(&mut self, ip: std::net::IpAddr) {
-        let Some(idx) = self.index_for_ip(ip) else {
-            tracing::warn!("ProcessForceKill for unknown IP {}", ip);
-            return;
-        };
-        if let Some(handle) = self.handles[idx].take() {
-            handle.abort();
-            tracing::info!("Force-killed process at {} (index {})", ip, idx);
-        }
-        // Clear the token — a new one will be created on restart
-        self.process_tokens[idx] = None;
-    }
-
-    /// Handle a `ProcessRestart` event by spawning a new process task.
-    fn handle_restart(
-        &mut self,
-        ip: std::net::IpAddr,
-        sim: &crate::sim::WeakSimWorld,
-        seed: u64,
-        state: &StateHandle,
-        obs: &SimulationLayerHandle,
-        shutdown_signal: &tokio_util::sync::CancellationToken,
-    ) {
-        let ip_str = ip.to_string();
-        let Some(idx) = self.index_for_ip(ip) else {
-            tracing::warn!("ProcessRestart for unknown IP {}", ip);
-            return;
-        };
-        let Some(factory) = self.factory else {
-            tracing::warn!("ProcessRestart but no process factory configured");
-            return;
-        };
-
-        // Abort old task if still running (safety net)
-        if let Some(handle) = self.handles[idx].take() {
-            handle.abort();
-        }
-
-        // Create fresh per-process token as child of global shutdown
-        let process_token = shutdown_signal.child_token();
-        self.process_tokens[idx] = Some(process_token.clone());
-
-        // Create fresh process instance
-        let mut process = factory();
-        let process_tags = self.tag_registry.tags_for(ip).cloned().unwrap_or_default();
-        let process_locality = self.machine_registry.locality_for(ip).cloned();
-        let topology = TopologyFactory::create_topology_with_processes(TopologyInputs {
-            ip: &ip_str,
-            client_id: idx,
-            client_count: self.ips.len(),
-            all_entities: &self.all_entities,
-            process_ips: &self.ips,
-            my_tags: process_tags,
-            tag_registry: self.tag_registry.clone(),
-            my_locality: process_locality,
-            machine_registry: self.machine_registry.clone(),
-            shutdown_signal: process_token,
-        });
-        let providers = crate::SimProviders::new(sim.clone(), seed, ip);
-        let ctx = SimContext::new(providers, topology, state.clone(), obs.clone());
-        let ip_for_log = ip_str.clone();
-        let handle = crate::executor::spawn(
-            &format!("process@{ip_str}"),
-            async move {
-                if let Err(e) = process.run(&ctx).await {
-                    tracing::debug!("Restarted process at {} exited: {}", ip_for_log, e);
-                }
-            }
-            .instrument(tracing::info_span!("process", ip = %ip_str)),
-        );
-        self.handles[idx] = Some(handle);
-        // Process is alive again
-        let current = self.dead_count.load(Ordering::Relaxed);
-        if current > 0 {
-            self.dead_count.fetch_sub(1, Ordering::Relaxed);
-        }
-        assert_reachable!("process_manager: process restarted");
-        tracing::info!("Process at {} restarted (index {})", ip_str, idx);
-    }
-
-    /// Abort all running process tasks.
-    fn abort_all(&mut self) {
-        for handle_opt in &mut self.handles {
-            if let Some(handle) = handle_opt.take() {
-                handle.abort();
-            }
-        }
-    }
-}
+use super::stall::{RunStallGuard, StallOutcome};
 
 /// Orchestrates workload execution and event processing.
 pub(crate) struct WorkloadOrchestrator;
@@ -497,91 +235,6 @@ struct ChaosAndRunOutput {
     returned_workloads: Vec<Box<dyn Workload>>,
     returned_injectors: Vec<Box<dyn FaultInjector>>,
     results: Vec<SimulationResult<()>>,
-}
-
-/// Inputs to [`WorkloadOrchestrator::check_run_time_budget`].
-struct BudgetGuardInputs {
-    /// Workloads still running this iteration.
-    current_active: usize,
-    /// Current simulated time.
-    now: Duration,
-    /// Simulated time at which the run phase started.
-    run_start: Duration,
-    /// Configured virtual-time budget for the run phase.
-    run_time_budget: Duration,
-    /// Simulated time at which the budget was first breached, if any.
-    budget_breach_time: Option<Duration>,
-    /// Iteration seed (diagnostics).
-    seed: u64,
-    /// Iteration index (diagnostics).
-    iteration_count: usize,
-}
-
-/// Borrows + scalars needed by [`WorkloadOrchestrator::evaluate_stall_guards`]
-/// for one run-loop iteration.
-struct StallGuardInputs<'a> {
-    sim: &'a crate::sim::SimWorld,
-    deadlock_detector: &'a mut DeadlockDetector,
-    /// Simulated time at which the run phase started.
-    run_start: Duration,
-    /// Configured virtual-time budget for the run phase.
-    run_time_budget: Duration,
-    /// Simulated time at which the budget was first breached, if any.
-    budget_breach_time: &'a mut Option<Duration>,
-    /// Whether a shutdown has already been triggered this run.
-    shutdown_triggered: bool,
-    /// Workloads still running this iteration.
-    current_active: usize,
-    /// Workloads running at the start of this iteration.
-    initial_handle_count: usize,
-    /// Pending events at the start of this iteration.
-    initial_event_count: usize,
-    /// Iteration seed (diagnostics).
-    seed: u64,
-    /// Iteration index (diagnostics).
-    iteration_count: usize,
-}
-
-/// Inputs to [`WorkloadOrchestrator::check_no_progress`].
-struct NoProgressInputs {
-    /// Workloads still running this iteration.
-    current_active: usize,
-    /// Workloads running at the start of this iteration.
-    initial_handle_count: usize,
-    /// Pending events after this iteration's step.
-    event_count: usize,
-    /// Pending events at the start of this iteration.
-    initial_event_count: usize,
-    /// Iteration seed (diagnostics).
-    seed: u64,
-    /// Iteration index (diagnostics).
-    iteration_count: usize,
-}
-
-/// Outcome of a run-phase stall guard (no-progress counter or virtual-time
-/// budget). Both guards share the same two-phase escalation: first breach
-/// triggers a graceful shutdown; a persistent stall after shutdown is a
-/// deadlock.
-#[derive(Clone, Copy)]
-enum StallOutcome {
-    /// Making progress (or already shut down inside the grace window).
-    Ok,
-    /// Stall first detected: trigger a graceful shutdown to unblock workloads.
-    Breached,
-    /// Still stalled after shutdown: declare deadlock.
-    Deadlock,
-}
-
-impl StallOutcome {
-    /// Combine two stall verdicts, keeping the most severe
-    /// (`Deadlock` > `Breached` > `Ok`).
-    fn merge(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Deadlock, _) | (_, Self::Deadlock) => Self::Deadlock,
-            (Self::Breached, _) | (_, Self::Breached) => Self::Breached,
-            _ => Self::Ok,
-        }
-    }
 }
 
 impl WorkloadOrchestrator {
@@ -1072,14 +725,10 @@ impl WorkloadOrchestrator {
         // running `sim.current_time()` are pure functions of the event
         // schedule, so the budget trip point is bit-for-bit deterministic
         // across replays (no wall clock, no RNG).
-        let run_start = sim.current_time();
         let mut chaos_ended = chaos_duration.is_none();
-        let mut deadlock_detector = DeadlockDetector::new(3);
+        let mut stall_guard =
+            RunStallGuard::new(sim.current_time(), run_time_budget, seed, iteration_count);
         let mut shutdown_triggered = false;
-        // Virtual time at which the run-phase budget was first breached, if any.
-        // Used to give workloads a virtual-time grace window to observe the
-        // shutdown and exit before the run is declared deadlocked.
-        let mut budget_breach_time: Option<Duration> = None;
         let mut loop_count: u64 = 0;
 
         loop {
@@ -1136,25 +785,19 @@ impl WorkloadOrchestrator {
 
             // Evaluate both stall guards (virtual-time budget + classic
             // no-progress detector) and act on the most severe verdict.
-            let stall = Self::evaluate_stall_guards(StallGuardInputs {
+            let stall = stall_guard.evaluate(
                 sim,
-                deadlock_detector: &mut deadlock_detector,
-                run_start,
-                run_time_budget,
-                budget_breach_time: &mut budget_breach_time,
                 shutdown_triggered,
                 current_active,
                 initial_handle_count,
                 initial_event_count,
-                seed,
-                iteration_count,
-            });
+            );
             match stall {
                 StallOutcome::Ok => {}
                 StallOutcome::Breached => {
                     Self::trigger_shutdown(sim, shutdown_signal);
                     shutdown_triggered = true;
-                    deadlock_detector.reset();
+                    stall_guard.reset_no_progress();
                 }
                 StallOutcome::Deadlock => return Err((vec![seed], 1)),
             }
@@ -1166,164 +809,6 @@ impl WorkloadOrchestrator {
         // Final pump: capture events emitted after the last step.
         Self::pump_observability(sim, obs);
         Ok(())
-    }
-
-    /// Run both run-loop stall guards and combine their verdicts.
-    ///
-    /// The virtual-time budget guard ([`Self::check_run_time_budget`]) catches
-    /// a self-perpetuating timer that the classic no-progress detector
-    /// ([`Self::check_no_progress`]) cannot; the most severe of the two
-    /// verdicts wins (`Deadlock` > `Breached` > `Ok`). Records the budget
-    /// breach time so the post-shutdown grace window can be measured.
-    fn evaluate_stall_guards(inputs: StallGuardInputs<'_>) -> StallOutcome {
-        let StallGuardInputs {
-            sim,
-            deadlock_detector,
-            run_start,
-            run_time_budget,
-            budget_breach_time,
-            shutdown_triggered,
-            current_active,
-            initial_handle_count,
-            initial_event_count,
-            seed,
-            iteration_count,
-        } = inputs;
-
-        let budget = Self::check_run_time_budget(&BudgetGuardInputs {
-            current_active,
-            now: sim.current_time(),
-            run_start,
-            run_time_budget,
-            budget_breach_time: *budget_breach_time,
-            seed,
-            iteration_count,
-        });
-        if let StallOutcome::Breached = budget {
-            *budget_breach_time = Some(sim.current_time());
-        }
-        let no_progress = Self::check_no_progress(
-            deadlock_detector,
-            shutdown_triggered,
-            &NoProgressInputs {
-                current_active,
-                initial_handle_count,
-                event_count: sim.pending_event_count(),
-                initial_event_count,
-                seed,
-                iteration_count,
-            },
-        );
-        budget.merge(no_progress)
-    }
-
-    /// Evaluate the no-progress deadlock detector for one loop iteration.
-    ///
-    /// This is the classic stall guard: it fires when the event queue is empty
-    /// and the handle count is unchanged for several consecutive iterations
-    /// (see [`DeadlockDetector::check_deadlock`]). It cannot catch a
-    /// self-perpetuating timer — that path keeps the queue non-empty forever;
-    /// [`Self::check_run_time_budget`] covers that case.
-    fn check_no_progress(
-        deadlock_detector: &mut DeadlockDetector,
-        shutdown_triggered: bool,
-        inputs: &NoProgressInputs,
-    ) -> StallOutcome {
-        let &NoProgressInputs {
-            current_active,
-            initial_handle_count,
-            event_count,
-            initial_event_count,
-            seed,
-            iteration_count,
-        } = inputs;
-        if !deadlock_detector.check_deadlock(
-            current_active,
-            initial_handle_count,
-            event_count,
-            initial_event_count,
-        ) {
-            return StallOutcome::Ok;
-        }
-        if shutdown_triggered {
-            tracing::error!(
-                "DEADLOCK detected on iteration {} with seed {}: {} tasks remaining after {} no-progress iterations",
-                iteration_count,
-                seed,
-                current_active,
-                deadlock_detector.no_progress_count()
-            );
-            return StallOutcome::Deadlock;
-        }
-        tracing::warn!(
-            "No progress detected on iteration {} with seed {}: {} tasks remaining. Triggering shutdown to unblock workloads.",
-            iteration_count,
-            seed,
-            current_active,
-        );
-        StallOutcome::Breached
-    }
-
-    /// Evaluate the run-phase virtual-time budget for one loop iteration.
-    ///
-    /// A *self-perpetuating timer* (e.g. a detached keepalive/reconnect loop
-    /// re-arming a sleep every tick) keeps the event queue non-empty forever,
-    /// so the no-progress [`DeadlockDetector`] never fires — yet simulated
-    /// time climbs without bound while a workload waits on it. This guard
-    /// catches that class:
-    ///
-    /// - The first breach (run-phase elapsed > budget while workloads remain)
-    ///   returns [`StallOutcome::Breached`]: the caller triggers a
-    ///   graceful shutdown so a cancellation-aware workload can drain and exit
-    ///   via the nanosecond-offset wake events (which barely advance virtual
-    ///   time, so it finishes inside the grace window).
-    /// - If simulated time then climbs by *another* full budget after the
-    ///   breach while workloads are still running, the self-perpetuating timer
-    ///   is confirmed and this returns [`StallOutcome::Deadlock`].
-    ///
-    /// The decision is a pure function of the simulated event schedule (no
-    /// wall clock, no RNG), so the trip point replays bit-for-bit.
-    fn check_run_time_budget(inputs: &BudgetGuardInputs) -> StallOutcome {
-        let &BudgetGuardInputs {
-            current_active,
-            now,
-            run_start,
-            run_time_budget,
-            budget_breach_time,
-            seed,
-            iteration_count,
-        } = inputs;
-
-        if current_active == 0 {
-            return StallOutcome::Ok;
-        }
-        let run_elapsed = now.saturating_sub(run_start);
-        match budget_breach_time {
-            None if run_elapsed > run_time_budget => {
-                tracing::warn!(
-                    "Run-phase virtual-time budget exceeded on iteration {} with seed {}: simulated time advanced {:?} (budget {:?}) with {} workload(s) still running. Triggering shutdown to unblock workloads.",
-                    iteration_count,
-                    seed,
-                    run_elapsed,
-                    run_time_budget,
-                    current_active,
-                );
-                StallOutcome::Breached
-            }
-            Some(breach) if now.saturating_sub(breach) > run_time_budget => {
-                tracing::error!(
-                    "DEADLOCK detected on iteration {} with seed {}: run-phase virtual time advanced {:?} (budget {:?}) and kept climbing for another {:?} after shutdown with {} workload(s) still running — self-perpetuating timer making no workload progress",
-                    iteration_count,
-                    seed,
-                    run_elapsed,
-                    run_time_budget,
-                    now.saturating_sub(breach),
-                    current_active,
-                );
-                StallOutcome::Deadlock
-            }
-            _ => StallOutcome::Ok,
-        }
     }
 
     /// Spawn the fault injectors for the chaos phase. When `chaos_duration`
@@ -1347,12 +832,7 @@ impl WorkloadOrchestrator {
                 let fault_sim = sim.downgrade().upgrade().map_err(|_| ())?;
                 let fault_ctx = FaultContext::new(
                     fault_sim,
-                    crate::runner::fault_injector::ProcessInfo {
-                        process_ips: process_manager.ips.clone(),
-                        tag_registry: process_manager.tag_registry.clone(),
-                        machine_registry: process_manager.machine_registry.clone(),
-                        dead_count: process_manager.dead_count(),
-                    },
+                    process_manager.process_info(),
                     crate::SimRandomProvider::new(seed),
                     sim.time_provider(),
                     chaos_shutdown.clone(),
@@ -1404,7 +884,7 @@ impl WorkloadOrchestrator {
                 pc.machine_registry,
                 all_entities.to_vec(),
             ),
-            None => ProcessManager::new_empty(),
+            None => ProcessManager::empty(),
         })
     }
 
@@ -1827,13 +1307,13 @@ impl WorkloadOrchestrator {
                 let event = SimFaultEvent::ProcessRestart { ip: ip.to_string() };
                 obs.record_sim_fault(Self::sim_now_ms(sim), &event);
                 let weak_sim = sim.downgrade();
-                process_manager.handle_restart(ip, &weak_sim, seed, state, obs, shutdown_signal);
+                process_manager.restart(ip, &weak_sim, seed, state, obs, shutdown_signal);
             }
             _ => {}
         }
     }
 
-    /// Trigger shutdown signal and schedule wake events.
+    /// Trigger shutdown and let each simulation engine drain its own waiters.
     fn trigger_shutdown(
         sim: &mut crate::sim::SimWorld,
         shutdown_signal: &tokio_util::sync::CancellationToken,
@@ -1842,15 +1322,6 @@ impl WorkloadOrchestrator {
         shutdown_signal.cancel();
 
         sim.schedule_event(crate::sim::Event::Shutdown, Duration::from_nanos(1));
-
-        for i in 1..100 {
-            sim.schedule_event(
-                crate::sim::Event::Timer {
-                    task_id: u64::MAX - i,
-                },
-                Duration::from_nanos(i),
-            );
-        }
     }
 
     /// Heal all network partitions between all IP pairs.
@@ -1861,243 +1332,9 @@ impl WorkloadOrchestrator {
                     all_ips[i].parse::<std::net::IpAddr>(),
                     all_ips[j].parse::<std::net::IpAddr>(),
                 ) {
-                    let _ = sim.restore_partition(a_ip, b_ip);
+                    sim.restore_partition(a_ip, b_ip);
                 }
             }
         }
     }
-}
-
-/// Manages iteration control, seed generation, and progress tracking.
-pub(crate) struct IterationManager {
-    control: super::builder::IterationControl,
-    seeds: Vec<u64>,
-    base_seed: u64,
-    iteration_count: usize,
-    start_time: Instant,
-}
-
-impl IterationManager {
-    /// Create a new iteration manager with the given control strategy and initial seeds.
-    pub(crate) fn new(control: super::builder::IterationControl, initial_seeds: Vec<u64>) -> Self {
-        let base_seed = super::wall_clock::default_base_seed();
-
-        Self {
-            control,
-            seeds: initial_seeds,
-            base_seed,
-            iteration_count: 0,
-            start_time: Instant::now(),
-        }
-    }
-
-    /// Check if more iterations should be run.
-    pub(crate) fn should_continue(&self) -> bool {
-        match &self.control {
-            super::builder::IterationControl::FixedCount(count)
-            | super::builder::IterationControl::UntilCoverageStable {
-                max_iterations: count,
-                ..
-            } => self.iteration_count < *count,
-            super::builder::IterationControl::TimeLimit(duration) => {
-                self.start_time.elapsed() < *duration
-            }
-        }
-    }
-
-    /// Get the seed for the current iteration and advance to the next.
-    pub(crate) fn next_iteration(&mut self) -> u64 {
-        let seed = if self.iteration_count < self.seeds.len() {
-            self.seeds[self.iteration_count]
-        } else {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut hasher = DefaultHasher::new();
-            self.base_seed.hash(&mut hasher);
-            self.iteration_count.hash(&mut hasher);
-            let new_seed = hasher.finish();
-            self.seeds.push(new_seed);
-            new_seed
-        };
-
-        self.iteration_count += 1;
-
-        tracing::info!(
-            "Starting iteration {} with seed {} (iteration {}/{})",
-            self.iteration_count,
-            seed,
-            self.iteration_count,
-            match &self.control {
-                super::builder::IterationControl::FixedCount(count) => *count,
-                super::builder::IterationControl::TimeLimit(_) => 0,
-                super::builder::IterationControl::UntilCoverageStable {
-                    max_iterations, ..
-                } => *max_iterations,
-            }
-        );
-
-        seed
-    }
-
-    /// Get the current iteration count.
-    pub(crate) fn current_iteration(&self) -> usize {
-        self.iteration_count
-    }
-
-    /// Get the known maximum number of iterations, or `None` for time-based control.
-    pub(crate) fn max_iterations(&self) -> Option<usize> {
-        match &self.control {
-            super::builder::IterationControl::FixedCount(count)
-            | super::builder::IterationControl::UntilCoverageStable {
-                max_iterations: count,
-                ..
-            } => Some(*count),
-            super::builder::IterationControl::TimeLimit(_) => None,
-        }
-    }
-
-    /// Get all seeds used so far.
-    pub(crate) fn seeds_used(&self) -> &[u64] {
-        &self.seeds[..self.iteration_count]
-    }
-}
-
-/// Collects and aggregates metrics across simulation iterations.
-pub(crate) struct MetricsCollector {
-    successful_runs: usize,
-    failed_runs: usize,
-    aggregated_metrics: SimulationMetrics,
-    individual_metrics: Vec<SimulationResult<SimulationMetrics>>,
-    faulty_seeds: Vec<u64>,
-}
-
-impl MetricsCollector {
-    /// Create a new metrics collector.
-    pub(crate) fn new() -> Self {
-        Self {
-            successful_runs: 0,
-            failed_runs: 0,
-            aggregated_metrics: SimulationMetrics::default(),
-            individual_metrics: Vec::new(),
-            faulty_seeds: Vec::new(),
-        }
-    }
-
-    /// Record the results of an iteration.
-    ///
-    /// An iteration is considered failed if any workload returned an error
-    /// OR if assertion violations were detected during the iteration.
-    pub(crate) fn record_iteration(
-        &mut self,
-        seed: u64,
-        wall_time: Duration,
-        all_results: &[SimulationResult<()>],
-        has_assertion_violations: bool,
-        sim_metrics: SimulationMetrics,
-    ) {
-        let workloads_ok = all_results.iter().all(std::result::Result::is_ok);
-        let all_ok = workloads_ok && !has_assertion_violations;
-
-        if all_ok {
-            self.record_success(seed, wall_time, sim_metrics);
-        } else {
-            self.record_failure(seed);
-        }
-    }
-
-    /// Record a successful iteration.
-    fn record_success(&mut self, seed: u64, wall_time: Duration, sim_metrics: SimulationMetrics) {
-        self.successful_runs += 1;
-        tracing::info!("Iteration completed successfully with seed {}", seed);
-
-        self.aggregated_metrics.wall_time += wall_time;
-        self.aggregated_metrics.simulated_time += sim_metrics.simulated_time;
-        self.aggregated_metrics.events_processed += sim_metrics.events_processed;
-
-        let mut individual = sim_metrics;
-        individual.wall_time = wall_time;
-        self.individual_metrics.push(Ok(individual));
-    }
-
-    /// Record a failed iteration.
-    fn record_failure(&mut self, seed: u64) {
-        self.failed_runs += 1;
-        tracing::error!("Iteration FAILED with seed {}", seed);
-        self.individual_metrics
-            .push(Err(crate::SimulationError::InvalidState(format!(
-                "One or more workloads failed (seed {seed})"
-            ))));
-        self.faulty_seeds.push(seed);
-    }
-
-    /// Add faulty seeds from external sources.
-    pub(crate) fn add_faulty_seeds(&mut self, mut seeds: Vec<u64>) {
-        self.faulty_seeds.append(&mut seeds);
-    }
-
-    /// Increment failed runs count.
-    pub(crate) fn add_failed_runs(&mut self, count: usize) {
-        self.failed_runs += count;
-    }
-
-    /// Generate the final simulation report.
-    pub(crate) fn generate_report(
-        self,
-        inputs: GenerateReportInputs,
-    ) -> super::report::SimulationReport {
-        let GenerateReportInputs {
-            iteration_count,
-            seeds_used,
-            assertion_results,
-            assertion_violations,
-            coverage_violations,
-            exploration,
-            assertion_details,
-            bucket_summaries,
-            convergence_timeout,
-            saturation,
-        } = inputs;
-        super::report::SimulationReport {
-            iterations: iteration_count,
-            successful_runs: self.successful_runs,
-            failed_runs: self.failed_runs,
-            metrics: self.aggregated_metrics,
-            individual_metrics: self.individual_metrics,
-            seeds_used,
-            seeds_failing: self.faulty_seeds,
-            assertion_results,
-            assertion_violations,
-            coverage_violations,
-            exploration,
-            assertion_details,
-            bucket_summaries,
-            convergence_timeout,
-            saturation,
-        }
-    }
-}
-
-/// Inputs needed to build a [`super::report::SimulationReport`] from a
-/// [`MetricsCollector`].
-pub(crate) struct GenerateReportInputs {
-    /// Total iterations executed.
-    pub(crate) iteration_count: usize,
-    /// Seeds that ran during the simulation.
-    pub(crate) seeds_used: Vec<u64>,
-    /// Aggregated per-name assertion statistics.
-    pub(crate) assertion_results: HashMap<String, AssertionStats>,
-    /// Names of assertion contracts that failed.
-    pub(crate) assertion_violations: Vec<String>,
-    /// Names of coverage assertions that were never reached.
-    pub(crate) coverage_violations: Vec<String>,
-    /// Optional exploration (multiverse) report.
-    pub(crate) exploration: Option<super::report::ExplorationReport>,
-    /// Per-assertion details collected from shared memory.
-    pub(crate) assertion_details: Vec<super::report::AssertionDetail>,
-    /// Per-`each_bucket` site summaries collected from shared memory.
-    pub(crate) bucket_summaries: Vec<super::report::BucketSiteSummary>,
-    /// Whether the simulation stopped due to a convergence timeout.
-    pub(crate) convergence_timeout: bool,
-    /// Saturation outcome for an `UntilCoverageStable` run.
-    pub(crate) saturation: Option<super::report::SaturationReport>,
 }

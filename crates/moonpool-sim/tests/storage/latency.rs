@@ -5,7 +5,7 @@
 
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
-use moonpool_sim::sim::state::DiskEpisodeKind;
+use moonpool_sim::storage::sim::DiskEpisodeKind;
 use moonpool_sim::{LatencyDistribution, SimWorld, StorageConfiguration};
 use std::net::IpAddr;
 use std::time::Duration;

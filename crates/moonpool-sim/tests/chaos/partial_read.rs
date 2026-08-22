@@ -30,9 +30,11 @@ async fn drain_with_partial_reads(seed: u64, max_bytes: usize, payload: &[u8]) -
     let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
     let addr = "partial-read-server";
-    let listener = provider.bind(addr).await.unwrap();
-    let mut client = provider.connect(addr).await.unwrap();
-    let (mut server, _) = listener.accept().await.unwrap();
+    let listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
+    let mut client = super::drive(&mut sim, provider.connect(addr))
+        .await
+        .unwrap();
+    let (mut server, _) = super::drive(&mut sim, listener.accept()).await.unwrap();
 
     client.write_all(payload).await.unwrap();
     // Drain the network so every byte sits in the server's receive buffer.
@@ -128,9 +130,11 @@ fn test_partial_read_disabled_without_buggify() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "no-partial-read-server";
-        let listener = provider.bind(addr).await.unwrap();
-        let mut client = provider.connect(addr).await.unwrap();
-        let (mut server, _) = listener.accept().await.unwrap();
+        let listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
+        let mut client = super::drive(&mut sim, provider.connect(addr))
+            .await
+            .unwrap();
+        let (mut server, _) = super::drive(&mut sim, listener.accept()).await.unwrap();
 
         let payload: Vec<u8> = (0u8..100).collect();
         client.write_all(&payload).await.unwrap();

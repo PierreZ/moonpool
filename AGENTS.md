@@ -91,6 +91,20 @@ crates/
 └── xtask/                 - Cargo xtask automation (simulation runner)
 ```
 
+**Simulation internals** are split by ownership:
+- `SimWorld` coordinates lifecycle and a global `Scheduler<Event>`. The scheduler
+  alone owns monotonic logical time, same-time FIFO sequence allocation, and
+  cancellation.
+- `NetworkSimulation` owns network topology, connections, faults, pending
+  operations, results, and network wakers. Bind, connect, and accept are real
+  delayed operations.
+- `StorageEngine` owns persistent files, independent open handles, disk configs
+  and degradation episodes, exact pending/completed operations, faults, and
+  storage wakers.
+- Components return ordered scheduling/cancellation effects and `WakeBatch`es to
+  the coordinator. Do not move component state or wakers back into `SimInner`,
+  and never invoke a waker while holding the world lock.
+
 **Dispatch**: providers stay **static-generic** (traits aren't object-safe: Clone supertrait,
 generic `random<T>`, RPIT futures, associated types; sim is test-only so no runtime selection).
 Where generics hurt, erase at an application boundary with a narrowly scoped trait.
@@ -108,38 +122,54 @@ Where generics hurt, erase at an application boundary with a narrowly scoped tra
 
 **Multi-seed testing**: Default `UntilCoverageStable` runs adaptively until all assert_sometimes! statements have triggered and code coverage plateaus (`.until_coverage_stable(plateau_seeds, max_iterations)` to tune)
 **Failing seeds**: Debug with `SimulationBuilder::set_seed(failing_seed)` → fix root cause → verify → re-enable chaos
-**Infrastructure events**: Tests terminate early when only ConnectionRestore events remain
+**Infrastructure events**: Tests terminate early when only partition-expiry events remain
 **Invariant checking**: Cross-workload properties validated after every simulation step
 **Goal**: Find bugs, not regression testing
 **NEVER remove assertions that catch bugs** — if an assertion fails, fix the underlying bug. Assertions exist to find real issues; deleting a failing assertion hides the bug.
 **When an assertion catches a bug**: Stop, enter plan mode, and enable deep thinking. Read relevant reference code, trace the full data flow, and understand the root cause before attempting a fix. Do not rush.
 
 ## Storage Testing Patterns
-**Key difference from network**: Storage operations return `Poll::Pending` and require simulation stepping. Network operations buffer and return `Poll::Ready` immediately.
+Storage read, write, sync, and set-length operations return `Poll::Pending` and
+complete through scheduled `StorageEvent`s. Network bind, connect, and accept
+are delayed too. Established stream I/O is buffer-driven and may complete on the
+current poll when data or capacity is already available.
 
-**The Step Loop Pattern** (required for storage tests):
+`SimulationBuilder::run()` drives the scheduler and executor for process and
+workload tests. Low-level provider tests must drive the future and `SimWorld`
+together on Moonpool's executor:
+
 ```rust
-let handle = tokio::task::spawn_local(async move {
-    let mut file = provider.open("test.txt", OpenOptions::create_write()).await?;
-    file.write_all(b"hello").await?;
-    file.sync_all().await
-});
-
-while !handle.is_finished() {
-    while sim.pending_event_count() > 0 {
-        sim.step();
-    }
-    tokio::task::yield_now().await;
+async fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
+    futures::pin_mut!(future);
+    futures::future::poll_fn(|cx| match future.as_mut().poll(cx) {
+        Poll::Ready(output) => Poll::Ready(output),
+        Poll::Pending if sim.has_pending_events() => {
+            sim.step();
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+        Poll::Pending => Poll::Pending,
+    })
+    .await
 }
-handle.await.unwrap().unwrap();
+
+let mut executor = moonpool_sim::executor::Executor::new(seed);
+executor.block_on(async move {
+    let provider = sim.storage_provider(ip);
+    drive(&mut sim, async move {
+        let mut file = provider.open("test.txt", OpenOptions::create_write()).await?;
+        file.write_all(b"hello").await?;
+        file.sync_all().await
+    })
+    .await
+})?;
 ```
 
 **Key functions**:
 - `sim.step()` - Process one simulation event
-- `sim.pending_event_count()` - Check for pending events
+- `sim.has_pending_events()` - Check whether the scheduler can make progress
 - `sim.storage_provider()` - Create storage provider for simulation
-- `tokio::task::yield_now()` - Yield to spawned tasks
-- `handle.is_finished()` - Check task completion
+- `executor::until_stalled()` - Let all tasks woken by a step run in orchestrator loops
 
 **Fault coverage** (TigerBeetle + FDB patterns):
 - Read/write corruption, crash/torn writes

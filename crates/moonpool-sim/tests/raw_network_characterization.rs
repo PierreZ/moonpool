@@ -1,8 +1,8 @@
 //! Characterization tests for the raw simulated TCP contract.
 //!
 //! These tests intentionally exercise behavior at the provider/stream boundary.
-//! They are the compatibility tripwires for the planned separation of the
-//! scheduler from the network state machine.
+//! They are compatibility tripwires for the separation between the global
+//! scheduler and the network state machine.
 
 use std::{
     future::Future,
@@ -167,6 +167,31 @@ fn graceful_close_delivers_buffered_bytes_before_fin() {
     let mut byte = [0; 1];
     let read = drive(&mut sim, server.read(&mut byte)).expect("read after FIN succeeds");
     assert_eq!(read, 0, "FIN becomes EOF after the receive buffer drains");
+}
+
+#[test]
+fn graceful_close_orders_fin_after_an_already_scheduled_delivery() {
+    buggify_reset();
+    let mut sim = fast_world(7);
+    let provider = sim.network_provider("127.0.0.1".parse().expect("valid loopback IP"));
+    let listener =
+        drive(&mut sim, provider.bind("scheduled-fin-listener")).expect("listener binds");
+    let mut client =
+        drive(&mut sim, provider.connect("scheduled-fin-listener")).expect("client connects");
+    let (mut server, _) = drive(&mut sim, listener.accept()).expect("server accepts");
+
+    drive(&mut sim, client.write_all(b"scheduled")).expect("write succeeds");
+    assert!(sim.step(), "the buffered send is processed");
+    drive(&mut sim, client.close()).expect("graceful close succeeds");
+    sim.run_until_empty();
+
+    let mut payload = [0; 9];
+    drive(&mut sim, server.read_exact(&mut payload)).expect("scheduled bytes precede FIN");
+    assert_eq!(&payload, b"scheduled");
+
+    let mut byte = [0; 1];
+    let read = drive(&mut sim, server.read(&mut byte)).expect("read after FIN succeeds");
+    assert_eq!(read, 0, "FIN becomes EOF after the scheduled delivery");
 }
 
 #[test]

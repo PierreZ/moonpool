@@ -7,7 +7,6 @@
 //!
 //! - `world` - Core SimWorld and WeakSimWorld types
 //! - `events` - Event types and queue for scheduling
-//! - `state` - Network and storage state management
 //! - `wakers` - Waker management for async coordination
 //! - `sleep` - Sleep future for simulation time
 //! - `rng` - Thread-local random number generation
@@ -15,16 +14,12 @@
 pub mod events;
 pub mod rng;
 pub mod sleep;
-pub mod state;
 pub mod storage_ops;
 pub mod wakers;
 pub mod world;
 
 // Re-export main types at module level
-pub use events::{
-    ConnectionStateChange, Event, NetworkOperation, ScheduleError, ScheduleId, Scheduled,
-    Scheduler, StorageOperation,
-};
+pub use events::{Event, ScheduleError, ScheduleId, Scheduled, Scheduler, StorageOperation};
 pub use rng::{
     clear_rng_breakpoints, config_random_bool, config_random_f64, current_sim_seed,
     reset_config_rng, reset_rng_call_count, reset_select_rng, reset_sim_rng, rng_call_count,

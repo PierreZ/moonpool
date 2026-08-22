@@ -8,7 +8,9 @@ use std::{
     time::Duration,
 };
 
+use crate::network::sim::NetworkEvent;
 pub use crate::storage::StorageOperation;
+use crate::storage::sim::StorageEvent;
 
 /// Events that can be scheduled in the simulation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,27 +20,10 @@ pub enum Event {
         /// The unique identifier for the task to wake.
         task_id: u64,
     },
-    /// Network data operation.
-    Network {
-        /// The connection involved.
-        connection_id: u64,
-        /// The operation type.
-        operation: NetworkOperation,
-    },
-    /// Connection state change.
-    Connection {
-        /// The connection or listener ID.
-        id: u64,
-        /// The state change type.
-        state: ConnectionStateChange,
-    },
-    /// Storage I/O operation.
-    Storage {
-        /// The file involved.
-        file_id: u64,
-        /// The operation type.
-        operation: StorageOperation,
-    },
+    /// A targeted network event.
+    Network(NetworkEvent),
+    /// A targeted storage event.
+    Storage(StorageEvent),
     /// Shutdown event to wake all tasks for graceful termination.
     Shutdown,
     /// Process restart event: a rebooted process is ready to boot again.
@@ -68,54 +53,9 @@ impl Event {
     /// Returns whether the event only maintains simulation infrastructure.
     #[must_use]
     pub fn is_infrastructure_event(&self) -> bool {
-        matches!(
-            self,
-            Event::Connection {
-                state: ConnectionStateChange::PartitionRestore
-                    | ConnectionStateChange::SendPartitionClear
-                    | ConnectionStateChange::RecvPartitionClear
-                    | ConnectionStateChange::CutRestore,
-                ..
-            } | Event::ProcessRestart { .. }
-        )
+        matches!(self, Event::Network(event) if event.is_infrastructure())
+            || matches!(self, Event::ProcessRestart { .. })
     }
-}
-
-/// Network data operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NetworkOperation {
-    /// Deliver data to a connection's receive buffer.
-    DataDelivery {
-        /// The bytes to deliver.
-        data: Vec<u8>,
-    },
-    /// Process the next message from a connection's send buffer.
-    ProcessSendBuffer,
-    /// Deliver FIN to a connection's receive side.
-    FinDelivery,
-}
-
-/// Connection state change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConnectionStateChange {
-    /// Listener bind operation completed.
-    BindComplete,
-    /// Connection establishment completed.
-    ConnectionReady,
-    /// Clear a write clog.
-    ClogClear,
-    /// Clear a read clog.
-    ReadClogClear,
-    /// Restore a temporarily cut connection.
-    CutRestore,
-    /// Restore a network partition between IPs.
-    PartitionRestore,
-    /// Clear a send partition for an IP.
-    SendPartitionClear,
-    /// Clear a receive partition for an IP.
-    RecvPartitionClear,
-    /// Start returning errors for a half-open connection.
-    HalfOpenError,
 }
 
 /// Stable identifier assigned to a scheduled item.

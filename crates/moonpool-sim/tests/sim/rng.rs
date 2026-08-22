@@ -191,13 +191,11 @@ fn test_simworld_network_config_integration() {
     // Sample various latencies
     let bind_delay = sim.with_network_config(|config| sample_latency(&config.bind_latency));
     let connect_delay = sim.with_network_config(|config| sample_latency(&config.connect_latency));
-    let read_delay = sim.with_network_config(|config| sample_latency(&config.read_latency));
     let write_delay = sim.with_network_config(|config| sample_latency(&config.write_latency));
 
     // All should be within expected bounds
     assert!(bind_delay >= Duration::from_micros(50));
     assert!(connect_delay >= Duration::from_millis(1));
-    assert!(read_delay >= Duration::from_micros(10));
     assert!(write_delay >= Duration::from_micros(100));
 
     // Repeat with same seed - should get identical values
@@ -209,10 +207,6 @@ fn test_simworld_network_config_integration() {
     assert_eq!(
         connect_delay,
         sim2.with_network_config(|config| sample_latency(&config.connect_latency))
-    );
-    assert_eq!(
-        read_delay,
-        sim2.with_network_config(|config| sample_latency(&config.read_latency))
     );
     assert_eq!(
         write_delay,
@@ -249,7 +243,6 @@ fn run_complex_simulation_sequence(seed: u64) -> Vec<Duration> {
         results.push(sim.with_network_config(|config| sample_latency(&config.bind_latency)));
         results.push(sim.with_network_config(|config| sample_latency(&config.connect_latency)));
         results.push(sim.with_network_config(|config| sample_latency(&config.write_latency)));
-        results.push(sim.with_network_config(|config| sample_latency(&config.read_latency)));
     }
 
     results

@@ -1,10 +1,13 @@
-use futures::io::AsyncWriteExt;
+use futures::{future::poll_fn, io::AsyncWriteExt};
 use moonpool_sim::{
     ChaosConfiguration, LatencyDistribution, LinkLatencyConfig, LocalityInfo, NetworkConfiguration,
     NetworkProvider, SimWorld, TcpListenerTrait,
 };
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::net::IpAddr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 /// Build a uniform latency distribution over `[start, end)` for test configs.
@@ -13,13 +16,83 @@ fn uniform(start: Duration, end: Duration) -> LatencyDistribution {
 }
 
 // Simple networking test that measures bind + connect + accept latency
-async fn simple_network_test<P>(provider: P, addr: &str) -> std::io::Result<()>
+async fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
+    futures::pin_mut!(future);
+    poll_fn(|cx| match future.as_mut().poll(cx) {
+        std::task::Poll::Ready(output) => std::task::Poll::Ready(output),
+        std::task::Poll::Pending => {
+            if sim.has_pending_events() {
+                sim.step();
+                cx.waker().wake_by_ref();
+            }
+            std::task::Poll::Pending
+        }
+    })
+    .await
+}
+
+fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
+    let waker = futures::task::noop_waker();
+    future.poll(&mut Context::from_waker(&waker))
+}
+
+#[test]
+fn bind_completes_at_its_exact_sampled_deadline() {
+    let mut config = NetworkConfiguration::fast_local();
+    config.bind_latency = uniform(Duration::from_millis(7), Duration::from_millis(7));
+    let mut sim = SimWorld::new_with_network_config(config);
+    let provider = sim.network_provider("127.0.0.1".parse().expect("valid IP"));
+    let mut bind = Box::pin(provider.bind("exact-bind"));
+
+    assert!(poll_once(bind.as_mut()).is_pending());
+    assert_eq!(sim.current_time(), Duration::ZERO);
+    assert_eq!(sim.pending_event_count(), 1);
+    assert!(!sim.step());
+    assert_eq!(sim.current_time(), Duration::from_millis(7));
+    assert!(poll_once(bind.as_mut()).is_ready());
+}
+
+#[test]
+fn cancelled_accept_returns_its_fifo_reservation() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("test runtime");
+    runtime.block_on(async {
+        let mut config = NetworkConfiguration::fast_local();
+        config.accept_latency = uniform(Duration::from_millis(9), Duration::from_millis(9));
+        let mut sim = SimWorld::new_with_network_config(config);
+        let provider = sim.network_provider("127.0.0.1".parse().expect("valid IP"));
+        let listener = drive(&mut sim, provider.bind("cancel-accept"))
+            .await
+            .expect("bind");
+        let _client = drive(&mut sim, provider.connect("cancel-accept"))
+            .await
+            .expect("connect");
+        let before_accept = sim.current_time();
+
+        {
+            let mut cancelled = Box::pin(listener.accept());
+            assert!(poll_once(cancelled.as_mut()).is_pending());
+            assert_eq!(sim.pending_event_count(), 1);
+        }
+
+        assert_eq!(sim.pending_event_count(), 0);
+        let (_server, _) = drive(&mut sim, listener.accept())
+            .await
+            .expect("reservation returned to backlog");
+        assert_eq!(sim.current_time(), before_accept + Duration::from_millis(9));
+    });
+}
+
+async fn simple_network_test<P>(sim: &mut SimWorld, provider: P, addr: &str) -> std::io::Result<()>
 where
     P: NetworkProvider + Clone,
 {
-    let listener = provider.bind(addr).await?;
-    let _client = provider.connect(addr).await?; // Create connection first
-    let (mut stream, _peer_addr) = listener.accept().await?; // Then accept it
+    let listener = drive(sim, provider.bind(addr)).await?;
+    let _client = drive(sim, provider.connect(addr)).await?;
+    let (mut stream, _peer_addr) = drive(sim, listener.accept()).await?;
 
     // Write some data to exercise the write latency
     let test_data = b"test data for latency measurement";
@@ -42,7 +115,9 @@ fn test_fast_local_configuration() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let start_time = std::time::Instant::now();
-        simple_network_test(provider, "fast-test").await.unwrap();
+        simple_network_test(&mut sim, provider, "fast-test")
+            .await
+            .unwrap();
         let elapsed = start_time.elapsed();
 
         // Process all simulation events
@@ -73,7 +148,9 @@ fn test_default_simulation_configuration() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let start_time = std::time::Instant::now();
-        simple_network_test(provider, "wan-test").await.unwrap();
+        simple_network_test(&mut sim, provider, "wan-test")
+            .await
+            .unwrap();
         let elapsed = start_time.elapsed();
 
         // Process all simulation events
@@ -104,7 +181,6 @@ fn test_custom_latency_configuration() {
             bind_latency: uniform(Duration::from_millis(5), Duration::from_millis(5)),
             accept_latency: uniform(Duration::from_millis(10), Duration::from_millis(10)),
             connect_latency: uniform(Duration::from_millis(1), Duration::from_millis(1)),
-            read_latency: uniform(Duration::from_micros(10), Duration::from_micros(10)),
             write_latency: uniform(Duration::from_millis(2), Duration::from_millis(2)),
             link_latency: None,
             chaos: ChaosConfiguration::disabled(),
@@ -113,7 +189,9 @@ fn test_custom_latency_configuration() {
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
-        simple_network_test(provider, "custom-test").await.unwrap();
+        simple_network_test(&mut sim, provider, "custom-test")
+            .await
+            .unwrap();
 
         // Process all simulation events
         sim.run_until_empty();
@@ -148,7 +226,6 @@ fn test_latency_range_sampling() {
             bind_latency: uniform(Duration::from_millis(1), Duration::from_millis(6)), // 1-6ms range
             accept_latency: uniform(Duration::from_millis(1), Duration::from_millis(6)),
             connect_latency: uniform(Duration::from_millis(1), Duration::from_millis(6)),
-            read_latency: uniform(Duration::from_micros(10), Duration::from_micros(10)),
             write_latency: uniform(Duration::from_millis(1), Duration::from_millis(6)),
             link_latency: None,
             chaos: ChaosConfiguration::disabled(),
@@ -160,7 +237,9 @@ fn test_latency_range_sampling() {
             let mut sim = SimWorld::new_with_network_config(config.clone());
             let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
-            simple_network_test(provider, "jitter-test").await.unwrap();
+            simple_network_test(&mut sim, provider, "jitter-test")
+                .await
+                .unwrap();
 
             sim.run_until_empty();
             execution_times.push(sim.current_time());
@@ -203,7 +282,6 @@ fn test_network_randomization_ranges() {
             bind_latency: uniform(Duration::from_millis(1), Duration::from_millis(1)),
             accept_latency: uniform(Duration::from_millis(2), Duration::from_millis(2)),
             connect_latency: uniform(Duration::from_millis(3), Duration::from_millis(3)),
-            read_latency: uniform(Duration::from_micros(100), Duration::from_micros(100)),
             write_latency: uniform(Duration::from_micros(500), Duration::from_micros(500)),
             link_latency: None,
             chaos: ChaosConfiguration::disabled(),
@@ -212,7 +290,7 @@ fn test_network_randomization_ranges() {
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
-        simple_network_test(provider, "custom-ranges-test")
+        simple_network_test(&mut sim, provider, "custom-ranges-test")
             .await
             .unwrap();
 
@@ -269,9 +347,11 @@ fn test_client_initiated_connection_records_pair_latency() {
         let server_addr = "10.0.1.2:8080";
 
         let provider = sim.network_provider(client_ip);
-        let listener = provider.bind(server_addr).await.unwrap();
-        let _client = provider.connect(server_addr).await.unwrap();
-        let (_server, _peer_addr) = listener.accept().await.unwrap();
+        let listener = drive(&mut sim, provider.bind(server_addr)).await.unwrap();
+        let _client = drive(&mut sim, provider.connect(server_addr))
+            .await
+            .unwrap();
+        let (_server, _peer_addr) = drive(&mut sim, listener.accept()).await.unwrap();
 
         sim.run_until_empty();
 
@@ -344,9 +424,13 @@ fn memoized_pair_latency(
         let server_addr = "10.0.1.2:8080";
 
         let provider = sim.network_provider(client_ip);
-        let listener = provider.bind(server_addr).await.expect("bind");
-        let _client = provider.connect(server_addr).await.expect("connect");
-        let (_server, _) = listener.accept().await.expect("accept");
+        let listener = drive(&mut sim, provider.bind(server_addr))
+            .await
+            .expect("bind");
+        let _client = drive(&mut sim, provider.connect(server_addr))
+            .await
+            .expect("connect");
+        let (_server, _) = drive(&mut sim, listener.accept()).await.expect("accept");
 
         sim.run_until_empty();
         sim.pair_latency(client_ip, server_ip)

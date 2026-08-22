@@ -11,13 +11,18 @@
 //! - `orchestrator` - Internal workload orchestration
 
 pub mod builder;
+mod config;
 pub mod context;
 pub mod display;
 pub mod fault_injector;
+pub(crate) mod iteration;
 pub mod locality;
+pub(crate) mod metrics;
 pub(crate) mod orchestrator;
 pub mod process;
+pub(crate) mod process_manager;
 pub mod report;
+pub(crate) mod stall;
 pub mod tags;
 pub mod topology;
 pub(crate) mod wall_clock;

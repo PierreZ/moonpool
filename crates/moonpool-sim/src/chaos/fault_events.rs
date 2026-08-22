@@ -63,7 +63,7 @@ pub enum SimFaultEvent {
     },
 
     // -- Network --
-    /// Bidirectional network partition created between two IPs.
+    /// Directed network partition edge created between two IPs.
     PartitionCreated {
         /// Source IP.
         from: String,
@@ -76,23 +76,6 @@ pub enum SimFaultEvent {
         from: String,
         /// Destination IP.
         to: String,
-    },
-    /// Connection temporarily cut.
-    ConnectionCut {
-        /// The connection that was cut.
-        connection_id: u64,
-        /// Duration of the cut in milliseconds.
-        duration_ms: u64,
-    },
-    /// Temporarily cut connection restored.
-    CutRestored {
-        /// The connection that was restored.
-        connection_id: u64,
-    },
-    /// Half-open connection error triggered.
-    HalfOpenError {
-        /// The connection now returning errors.
-        connection_id: u64,
     },
     /// Send partition created (blocks outgoing from an IP).
     SendPartitionCreated {
@@ -107,11 +90,6 @@ pub enum SimFaultEvent {
     /// Connection randomly closed by chaos.
     RandomClose {
         /// The connection that was closed.
-        connection_id: u64,
-    },
-    /// Peer crash simulated (half-open connection created).
-    PeerCrash {
-        /// The connection now in half-open state.
         connection_id: u64,
     },
     /// Bit flip corruption injected during data delivery.
@@ -171,13 +149,9 @@ impl SimFaultEvent {
             Self::ProcessRestart { .. } => "process_restart",
             Self::PartitionCreated { .. } => "partition_created",
             Self::PartitionHealed { .. } => "partition_healed",
-            Self::ConnectionCut { .. } => "connection_cut",
-            Self::CutRestored { .. } => "cut_restored",
-            Self::HalfOpenError { .. } => "half_open_error",
             Self::SendPartitionCreated { .. } => "send_partition_created",
             Self::RecvPartitionCreated { .. } => "recv_partition_created",
             Self::RandomClose { .. } => "random_close",
-            Self::PeerCrash { .. } => "peer_crash",
             Self::BitFlip { .. } => "bit_flip",
             Self::StorageReadFault { .. } => "storage_read_fault",
             Self::StorageWriteFault { .. } => "storage_write_fault",

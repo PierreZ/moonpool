@@ -1,26 +1,40 @@
-use futures::io::AsyncWriteExt;
+use std::future::Future;
+use std::pin::pin;
+use std::task::{Context, Poll};
+
+use futures::{io::AsyncWriteExt, task::noop_waker};
 use moonpool_sim::{NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait};
+
+const MAX_DRIVER_STEPS: usize = 100_000;
+
+fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
+    let mut future = pin!(future);
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+
+    for _ in 0..MAX_DRIVER_STEPS {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        assert!(
+            sim.has_pending_events(),
+            "simulation-backed future stalled without a pending event"
+        );
+        sim.step();
+    }
+    panic!("simulation-backed future exceeded {MAX_DRIVER_STEPS} events");
+}
 
 #[test]
 fn test_basic_simulation_bind() {
-    // Use local runtime for tests with async traits without Send
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
+    let mut sim = SimWorld::new();
+    let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
-    local_runtime.block_on(async move {
-        let sim = SimWorld::new();
-        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
-
-        // Test basic binding functionality
-        let listener = provider.bind("test-addr").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        assert_eq!(addr, "test-addr");
-
-        println!("Successfully bound to {addr}");
-    });
+    let listener = drive(&mut sim, provider.bind("test-addr")).expect("listener binds");
+    assert_eq!(
+        listener.local_addr().expect("listener has an address"),
+        "test-addr"
+    );
 }
 
 // Simple echo server that reads once and writes back
@@ -41,73 +55,33 @@ where
 
 #[test]
 fn test_simple_echo_simulation() {
-    // Use local runtime for tests with async traits without Send
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
+    let config = NetworkConfiguration::fast_local();
+    let mut sim = SimWorld::new_with_network_config(config);
+    let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
-    local_runtime.block_on(async move {
-        // Use fast local config for integration tests to avoid timeouts
-        let config = NetworkConfiguration::fast_local(); // Deterministic, fast
-        let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
+    drive(&mut sim, simple_echo_server(provider, "echo-server")).expect("echo exchange succeeds");
+    sim.run_until_empty();
 
-        // Test simple echo server with simulation
-        simple_echo_server(provider, "echo-server").await.unwrap();
-
-        // Process all simulation events
-        sim.run_until_empty();
-
-        // Verify time advanced due to simulated delays (should be >10ms with WAN config)
-        assert!(sim.current_time() > std::time::Duration::ZERO);
-        println!("Simulation completed in {:?}", sim.current_time());
-    });
+    assert!(sim.current_time() > std::time::Duration::ZERO);
 }
 
 #[test]
 fn test_deterministic_simulation_behavior() {
-    // Use local runtime for tests with async traits without Send
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
-        // Run simulation multiple times with same seed - should get same results
-        let mut execution_times = Vec::new();
-
-        for _run in 0..3 {
-            // Use fast local config for deterministic integration tests
-            let config = NetworkConfiguration::fast_local();
-            let mut sim = SimWorld::new_with_network_config(config);
+    let execution_times = (0..3)
+        .map(|_| {
+            let mut sim = SimWorld::new_with_network_config(NetworkConfiguration::fast_local());
             let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
-
-            simple_echo_server(provider, "deterministic-test")
-                .await
-                .unwrap();
+            drive(&mut sim, simple_echo_server(provider, "deterministic-test"))
+                .expect("echo exchange succeeds");
             sim.run_until_empty();
+            sim.current_time()
+        })
+        .collect::<Vec<_>>();
 
-            execution_times.push(sim.current_time());
-        }
-
-        // All runs should produce identical timing
-        let first_time = execution_times[0];
-        for (i, &time) in execution_times.iter().enumerate() {
-            assert_eq!(
-                time, first_time,
-                "Run {i} produced different timing than first run. Expected: {first_time:?}, Got: {time:?}"
-            );
-        }
-
-        println!(
-            "All {} runs completed deterministically in {:?}",
-            execution_times.len(),
-            first_time
-        );
-    });
+    assert!(
+        execution_times.windows(2).all(|times| times[0] == times[1]),
+        "identical configurations must produce identical timings: {execution_times:?}"
+    );
 }
 
 /// Test that `SimNetworkProvider` can be used generically.
@@ -121,22 +95,10 @@ async fn use_provider_generically<P: NetworkProvider>(
 
 #[test]
 fn test_network_provider_trait_usage() {
-    // Use local runtime for tests with async traits without Send
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
+    let mut sim = SimWorld::new();
+    let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
-    local_runtime.block_on(async move {
-        let sim = SimWorld::new();
-        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
-
-        let addr = use_provider_generically(provider, "dynamic-test")
-            .await
-            .unwrap();
-        assert_eq!(addr, "dynamic-test");
-
-        println!("Generic provider usage successful: bound to {addr}");
-    });
+    let addr = drive(&mut sim, use_provider_generically(provider, "dynamic-test"))
+        .expect("generic provider binds");
+    assert_eq!(addr, "dynamic-test");
 }

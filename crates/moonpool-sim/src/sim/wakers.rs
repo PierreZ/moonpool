@@ -2,11 +2,6 @@
 
 use std::{collections::BTreeMap, task::Waker};
 
-use crate::{
-    network::sim::{ConnectionId, ListenerId},
-    sim::state::FileId,
-};
-
 /// A keyed, single-waiter waker registry.
 ///
 /// Registering the same task repeatedly replaces its previous waker only when
@@ -55,10 +50,6 @@ impl<K: Ord> WakerRegistry<K> {
         self.entries.contains_key(key)
     }
 
-    pub(crate) fn contains_key(&self, key: &K) -> bool {
-        self.contains(key)
-    }
-
     /// Returns the number of registered keys.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -97,22 +88,8 @@ impl<K> Default for WakerRegistry<K> {
 /// Waker registries owned by the simulation state.
 #[derive(Debug, Default)]
 pub(crate) struct Wakers {
-    /// Wakers waiting on `accept()` per listener.
-    pub(crate) listeners: WakerRegistry<ListenerId>,
-    /// Wakers waiting on `read` per connection.
-    pub(crate) reads: WakerRegistry<ConnectionId>,
     /// Wakers waiting on time-based events per task id.
     pub(crate) tasks: WakerRegistry<u64>,
-    /// Wakers waiting for write clog to clear.
-    pub(crate) write_clogs: BTreeMap<ConnectionId, Vec<Waker>>,
-    /// Wakers waiting for read clog to clear.
-    pub(crate) read_clogs: BTreeMap<ConnectionId, Vec<Waker>>,
-    /// Wakers waiting for cut connections to be restored.
-    pub(crate) cuts: BTreeMap<ConnectionId, Vec<Waker>>,
-    /// Wakers waiting for send buffer space to become available.
-    pub(crate) send_buffers: BTreeMap<ConnectionId, Vec<Waker>>,
-    /// Wakers waiting for storage operations to complete.
-    pub(crate) storage_ops: WakerRegistry<(FileId, u64)>,
 }
 
 /// Wakers collected while the simulation state is locked.
@@ -128,6 +105,11 @@ impl WakeBatch {
     /// Adds every waker in an iterator to this batch.
     pub(crate) fn extend(&mut self, wakers: impl IntoIterator<Item = Waker>) {
         self.0.extend(wakers);
+    }
+
+    /// Merges another batch without waking it yet.
+    pub(crate) fn append(&mut self, mut other: Self) {
+        self.0.append(&mut other.0);
     }
 
     /// Invokes all collected wakers.

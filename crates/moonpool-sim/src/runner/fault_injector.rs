@@ -106,7 +106,7 @@ impl FaultContext {
     ///
     /// # Errors
     ///
-    /// Returns an error if IP parsing fails or the operation is rejected by the simulator.
+    /// Returns an error if IP parsing fails.
     pub fn partition(&self, a: &str, b: &str) -> SimulationResult<()> {
         let a_ip: std::net::IpAddr = a
             .parse()
@@ -115,14 +115,16 @@ impl FaultContext {
             .parse()
             .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{b}': {e}")))?;
         // Use a long duration — heal_partition is the expected way to undo
-        self.sim.partition_pair(a_ip, b_ip, Duration::from_hours(1))
+        self.sim.partition_pair(a_ip, b_ip, Duration::from_hours(1));
+        self.sim.partition_pair(b_ip, a_ip, Duration::from_hours(1));
+        Ok(())
     }
 
     /// Remove a network partition between two IPs.
     ///
     /// # Errors
     ///
-    /// Returns an error if IP parsing fails or the operation is rejected by the simulator.
+    /// Returns an error if IP parsing fails.
     pub fn heal_partition(&self, a: &str, b: &str) -> SimulationResult<()> {
         let a_ip: std::net::IpAddr = a
             .parse()
@@ -130,14 +132,15 @@ impl FaultContext {
         let b_ip: std::net::IpAddr = b
             .parse()
             .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{b}': {e}")))?;
-        self.sim.restore_partition(a_ip, b_ip)
+        self.sim.restore_partition(a_ip, b_ip);
+        Ok(())
     }
 
     /// Check whether two IPs are partitioned.
     ///
     /// # Errors
     ///
-    /// Returns an error if IP parsing fails or the operation is rejected by the simulator.
+    /// Returns an error if IP parsing fails.
     pub fn is_partitioned(&self, a: &str, b: &str) -> SimulationResult<bool> {
         let a_ip: std::net::IpAddr = a
             .parse()
@@ -145,7 +148,7 @@ impl FaultContext {
         let b_ip: std::net::IpAddr = b
             .parse()
             .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{b}': {e}")))?;
-        self.sim.is_partitioned(a_ip, b_ip)
+        Ok(self.sim.is_partitioned(a_ip, b_ip))
     }
 
     /// Get the seeded random provider.

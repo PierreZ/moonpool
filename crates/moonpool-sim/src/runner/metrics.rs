@@ -1,0 +1,118 @@
+//! Cross-iteration metrics and final report assembly.
+
+use std::collections::HashMap;
+use std::time::Duration;
+
+use crate::chaos::AssertionStats;
+use crate::{SimulationError, SimulationResult};
+
+use super::report::{
+    AssertionDetail, BucketSiteSummary, ExplorationReport, SaturationReport, SimulationMetrics,
+    SimulationReport,
+};
+
+/// Collects and aggregates metrics across simulation iterations.
+pub(crate) struct MetricsCollector {
+    successful_runs: usize,
+    failed_runs: usize,
+    aggregated_metrics: SimulationMetrics,
+    individual_metrics: Vec<SimulationResult<SimulationMetrics>>,
+    faulty_seeds: Vec<u64>,
+}
+
+impl MetricsCollector {
+    /// Create an empty metrics collector.
+    pub(crate) fn new() -> Self {
+        Self {
+            successful_runs: 0,
+            failed_runs: 0,
+            aggregated_metrics: SimulationMetrics::default(),
+            individual_metrics: Vec::new(),
+            faulty_seeds: Vec::new(),
+        }
+    }
+
+    /// Record a simulation iteration and its assertion outcome.
+    pub(crate) fn record_iteration(
+        &mut self,
+        seed: u64,
+        wall_time: Duration,
+        results: &[SimulationResult<()>],
+        has_assertion_violations: bool,
+        metrics: SimulationMetrics,
+    ) {
+        if results.iter().all(Result::is_ok) && !has_assertion_violations {
+            self.record_success(seed, wall_time, metrics);
+        } else {
+            self.record_failure(seed);
+        }
+    }
+
+    fn record_success(&mut self, seed: u64, wall_time: Duration, metrics: SimulationMetrics) {
+        self.successful_runs += 1;
+        tracing::info!(seed, "simulation iteration completed");
+
+        self.aggregated_metrics.wall_time += wall_time;
+        self.aggregated_metrics.simulated_time += metrics.simulated_time;
+        self.aggregated_metrics.events_processed += metrics.events_processed;
+
+        let mut individual = metrics;
+        individual.wall_time = wall_time;
+        self.individual_metrics.push(Ok(individual));
+    }
+
+    fn record_failure(&mut self, seed: u64) {
+        self.failed_runs += 1;
+        tracing::error!(seed, "simulation iteration failed");
+        self.individual_metrics
+            .push(Err(SimulationError::InvalidState(format!(
+                "one or more workloads failed (seed {seed})"
+            ))));
+        self.faulty_seeds.push(seed);
+    }
+
+    /// Add faulty seeds reported by an external exploration phase.
+    pub(crate) fn add_faulty_seeds(&mut self, mut seeds: Vec<u64>) {
+        self.faulty_seeds.append(&mut seeds);
+    }
+
+    /// Add failures reported outside the normal iteration path.
+    pub(crate) fn add_failed_runs(&mut self, count: usize) {
+        self.failed_runs += count;
+    }
+
+    /// Consume the collector and assemble the public report.
+    pub(crate) fn generate_report(self, inputs: GenerateReportInputs) -> SimulationReport {
+        SimulationReport {
+            iterations: inputs.iteration_count,
+            successful_runs: self.successful_runs,
+            failed_runs: self.failed_runs,
+            metrics: self.aggregated_metrics,
+            individual_metrics: self.individual_metrics,
+            seeds_used: inputs.seeds_used,
+            seeds_failing: self.faulty_seeds,
+            assertion_results: inputs.assertion_results,
+            assertion_violations: inputs.assertion_violations,
+            coverage_violations: inputs.coverage_violations,
+            exploration: inputs.exploration,
+            assertion_details: inputs.assertion_details,
+            bucket_summaries: inputs.bucket_summaries,
+            convergence_timeout: inputs.convergence_timeout,
+            saturation: inputs.saturation,
+        }
+    }
+}
+
+/// Inputs needed to assemble a final simulation report.
+pub(crate) struct GenerateReportInputs {
+    pub(crate) iteration_count: usize,
+    pub(crate) seeds_used: Vec<u64>,
+    pub(crate) assertion_results: HashMap<String, AssertionStats>,
+    pub(crate) assertion_violations: Vec<String>,
+    pub(crate) coverage_violations: Vec<String>,
+    pub(crate) exploration: Option<ExplorationReport>,
+    pub(crate) assertion_details: Vec<AssertionDetail>,
+    pub(crate) bucket_summaries: Vec<BucketSiteSummary>,
+    pub(crate) convergence_timeout: bool,
+    pub(crate) saturation: Option<SaturationReport>,
+}

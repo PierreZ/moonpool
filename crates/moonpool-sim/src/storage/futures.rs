@@ -5,7 +5,7 @@
 //! traits.
 
 use crate::sim::WeakSimWorld;
-use crate::sim::state::FileId;
+use crate::storage::sim::{HandleId, OperationId, StorageCompletion};
 use std::cell::Cell;
 use std::future::Future;
 use std::io;
@@ -22,17 +22,17 @@ use super::sim_shutdown_error;
 /// 3. Final poll: Clear state, return Ok(())
 pub struct SyncFuture {
     sim: WeakSimWorld,
-    file_id: FileId,
+    handle_id: HandleId,
     /// Pending operation sequence number
-    pending_op: Cell<Option<u64>>,
+    pending_op: Cell<Option<OperationId>>,
 }
 
 impl SyncFuture {
     /// Create a new sync future.
-    pub(crate) fn new(sim: WeakSimWorld, file_id: FileId) -> Self {
+    pub(crate) fn new(sim: WeakSimWorld, handle_id: HandleId) -> Self {
         Self {
             sim,
-            file_id,
+            handle_id,
             pending_op: Cell::new(None),
         }
     }
@@ -45,35 +45,42 @@ impl Future for SyncFuture {
         let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Check for pending operation
-        if let Some(op_seq) = self.pending_op.get() {
+        if let Some(operation_id) = self.pending_op.get() {
             // Check if operation is complete
-            if sim.is_storage_op_complete(self.file_id, op_seq) {
+            if let Poll::Ready(result) = sim.poll_storage_operation(operation_id, cx.waker()) {
                 // Clear pending state
                 self.pending_op.set(None);
-
-                // Check if sync failed due to fault injection
-                if sim.take_sync_failure(self.file_id, op_seq) {
-                    return Poll::Ready(Err(io::Error::other("sync failed (simulated I/O error)")));
-                }
-
-                return Poll::Ready(Ok(()));
+                return Poll::Ready(match result {
+                    Ok(StorageCompletion::Unit) => Ok(()),
+                    Ok(_) => Err(io::Error::other(
+                        "sync operation returned a value completion",
+                    )),
+                    Err(error) => Err(error.into()),
+                });
             }
-
-            // Operation not complete, register waker and wait
-            sim.register_storage_waker(self.file_id, op_seq, cx.waker().clone());
             return Poll::Pending;
         }
 
         // No pending operation - start a new one
-        let op_seq = sim.schedule_sync(self.file_id)?;
+        let operation_id = sim.schedule_sync(self.handle_id)?;
 
         // Store pending state
-        self.pending_op.set(Some(op_seq));
+        self.pending_op.set(Some(operation_id));
 
         // Register waker
-        sim.register_storage_waker(self.file_id, op_seq, cx.waker().clone());
+        let _ = sim.poll_storage_operation(operation_id, cx.waker());
 
         Poll::Pending
+    }
+}
+
+impl Drop for SyncFuture {
+    fn drop(&mut self) {
+        if let Some(operation_id) = self.pending_op.get()
+            && let Ok(sim) = self.sim.upgrade()
+        {
+            sim.cancel_storage_operation(operation_id);
+        }
     }
 }
 
@@ -85,19 +92,19 @@ impl Future for SyncFuture {
 /// 3. Final poll: Clear state, return Ok(())
 pub struct SetLenFuture {
     sim: WeakSimWorld,
-    file_id: FileId,
+    handle_id: HandleId,
     /// The new length to set the file to.
     new_len: u64,
     /// Pending operation sequence number
-    pending_op: Cell<Option<u64>>,
+    pending_op: Cell<Option<OperationId>>,
 }
 
 impl SetLenFuture {
     /// Create a new `set_len` future.
-    pub(crate) fn new(sim: WeakSimWorld, file_id: FileId, new_len: u64) -> Self {
+    pub(crate) fn new(sim: WeakSimWorld, handle_id: HandleId, new_len: u64) -> Self {
         Self {
             sim,
-            file_id,
+            handle_id,
             new_len,
             pending_op: Cell::new(None),
         }
@@ -111,28 +118,41 @@ impl Future for SetLenFuture {
         let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Check for pending operation
-        if let Some(op_seq) = self.pending_op.get() {
+        if let Some(operation_id) = self.pending_op.get() {
             // Check if operation is complete
-            if sim.is_storage_op_complete(self.file_id, op_seq) {
+            if let Poll::Ready(result) = sim.poll_storage_operation(operation_id, cx.waker()) {
                 // Clear pending state
                 self.pending_op.set(None);
-                return Poll::Ready(Ok(()));
+                return Poll::Ready(match result {
+                    Ok(StorageCompletion::Unit) => Ok(()),
+                    Ok(_) => Err(io::Error::other(
+                        "set_len operation returned a value completion",
+                    )),
+                    Err(error) => Err(error.into()),
+                });
             }
-
-            // Operation not complete, register waker and wait
-            sim.register_storage_waker(self.file_id, op_seq, cx.waker().clone());
             return Poll::Pending;
         }
 
         // No pending operation - start a new one
-        let op_seq = sim.schedule_set_len(self.file_id, self.new_len)?;
+        let operation_id = sim.schedule_set_len(self.handle_id, self.new_len)?;
 
         // Store pending state
-        self.pending_op.set(Some(op_seq));
+        self.pending_op.set(Some(operation_id));
 
         // Register waker
-        sim.register_storage_waker(self.file_id, op_seq, cx.waker().clone());
+        let _ = sim.poll_storage_operation(operation_id, cx.waker());
 
         Poll::Pending
+    }
+}
+
+impl Drop for SetLenFuture {
+    fn drop(&mut self) {
+        if let Some(operation_id) = self.pending_op.get()
+            && let Ok(sim) = self.sim.upgrade()
+        {
+            sim.cancel_storage_operation(operation_id);
+        }
     }
 }

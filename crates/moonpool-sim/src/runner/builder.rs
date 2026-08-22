@@ -4,7 +4,6 @@
 //! and executing simulation experiments.
 
 use std::collections::HashMap;
-use std::ops::{Range, RangeInclusive};
 use std::time::Duration;
 
 use super::wall_clock::Instant;
@@ -18,10 +17,12 @@ use crate::runner::process::{Attrition, Process};
 use crate::runner::tags::TagDistribution;
 use crate::runner::workload::Workload;
 
-use super::orchestrator::{
-    GenerateReportInputs, IterationManager, MetricsCollector, OrchestrateInputs, OrchestrateOutput,
-    WorkloadOrchestrator,
+pub use super::config::{
+    Chaos, ChaosMode, ClientId, IterationControl, ProcessCount, WorkloadCount,
 };
+use super::iteration::IterationManager;
+use super::metrics::{GenerateReportInputs, MetricsCollector};
+use super::orchestrator::{OrchestrateInputs, OrchestrateOutput, WorkloadOrchestrator};
 
 /// Client identity information for a single workload instance.
 #[derive(Debug, Clone, Copy)]
@@ -39,7 +40,7 @@ struct RunOrchestratorInputs<'a> {
     workloads: Vec<Box<dyn Workload>>,
     workload_info: Vec<(String, String)>,
     client_info: Vec<WorkloadClientInfo>,
-    process_config: Option<super::orchestrator::ProcessConfig<'a>>,
+    process_config: Option<super::process_manager::ProcessConfig<'a>>,
     sim: crate::sim::SimWorld,
     fault_injectors: Vec<Box<dyn FaultInjector>>,
     chaos_duration: Option<Duration>,
@@ -180,163 +181,6 @@ struct ResolvedEntries {
 }
 use super::report::{SimulationMetrics, SimulationReport};
 
-/// Configuration for how many iterations a simulation should run.
-///
-/// Provides flexible control over simulation execution duration and completion criteria.
-#[derive(Debug, Clone)]
-pub enum IterationControl {
-    /// Run a fixed number of iterations with specific seeds
-    FixedCount(usize),
-    /// Run for a specific duration of wall-clock time
-    TimeLimit(Duration),
-    /// Stop when the system is saturated: every observed
-    /// `assert_sometimes!` / `assert_reachable!` has fired **and** code
-    /// coverage has not grown for `plateau_seeds` consecutive seeds.
-    ///
-    /// Uses real LLVM sancov code coverage when the binary is instrumented
-    /// (i.e. built via `cargo xtask sim run`); otherwise falls back to the
-    /// count of distinct reached sometimes/reachable assertion slots. Works
-    /// with or without [`SimulationBuilder::enable_exploration`]; no fork
-    /// occurs unless exploration is explicitly enabled.
-    UntilCoverageStable {
-        /// Number of consecutive seeds without coverage growth required to stop.
-        plateau_seeds: usize,
-        /// Maximum number of seeds before stopping regardless (safety cap).
-        max_iterations: usize,
-    },
-}
-
-/// How many instances of a workload to spawn per iteration.
-///
-/// Use `Fixed` for deterministic topologies or `Random` for chaos testing
-/// with varying cluster sizes.
-///
-/// # Examples
-///
-/// ```ignore
-/// // Always 3 replicas
-/// WorkloadCount::Fixed(3)
-///
-/// // 1 to 5 replicas, randomized per iteration
-/// WorkloadCount::Random(1..6)
-/// ```
-#[derive(Debug, Clone)]
-pub enum WorkloadCount {
-    /// Spawn exactly N instances every iteration.
-    Fixed(usize),
-    /// Spawn a random number of instances in `[start..end)` per iteration,
-    /// using the simulation RNG (deterministic per seed).
-    Random(Range<usize>),
-}
-
-impl WorkloadCount {
-    /// Resolve the count for the current iteration.
-    /// For `Random`, uses the sim RNG which must already be seeded.
-    fn resolve(&self) -> usize {
-        match self {
-            WorkloadCount::Fixed(n) => *n,
-            WorkloadCount::Random(range) => crate::sim::sim_random_range(range.clone()),
-        }
-    }
-}
-
-/// Strategy for assigning client IDs to workload instances.
-///
-/// Inspired by `FoundationDB`'s `WorkloadContext.clientId`, but more
-/// programmable. The resolved client ID is available via
-/// [`SimContext::client_id()`](super::context::SimContext::client_id).
-///
-/// # Examples
-///
-/// ```ignore
-/// // FDB-style sequential: IDs 0, 1, 2
-/// ClientId::Fixed(0)
-///
-/// // Sequential starting from 10: IDs 10, 11, 12
-/// ClientId::Fixed(10)
-///
-/// // Random IDs in [100..200) per instance
-/// ClientId::RandomRange(100..200)
-/// ```
-#[derive(Debug, Clone, PartialEq)]
-pub enum ClientId {
-    /// Sequential IDs starting from `base`: instance 0 gets `base`,
-    /// instance 1 gets `base + 1`, and so on.
-    Fixed(usize),
-    /// Random ID drawn from `[start..end)` per instance,
-    /// using the simulation RNG (deterministic per seed).
-    /// IDs are not guaranteed unique across instances.
-    RandomRange(Range<usize>),
-}
-
-impl Default for ClientId {
-    fn default() -> Self {
-        Self::Fixed(0)
-    }
-}
-
-impl ClientId {
-    /// Resolve a client ID for the given instance index.
-    fn resolve(&self, index: usize) -> usize {
-        match self {
-            ClientId::Fixed(base) => base + index,
-            ClientId::RandomRange(range) => crate::sim::sim_random_range(range.clone()),
-        }
-    }
-}
-
-/// How many process instances to spawn per iteration.
-///
-/// Use `Fixed` for deterministic topologies or `Range` for chaos testing
-/// with varying cluster sizes.
-///
-/// # Examples
-///
-/// ```ignore
-/// // Always 3 server processes
-/// ProcessCount::Fixed(3)
-///
-/// // 3 to 7 server processes, randomized per iteration
-/// ProcessCount::Range(3..=7)
-/// ```
-#[derive(Debug, Clone, PartialEq)]
-pub enum ProcessCount {
-    /// Spawn exactly N process instances every iteration.
-    Fixed(usize),
-    /// Spawn a random number in `[start..=end]` per iteration,
-    /// using the simulation RNG (deterministic per seed).
-    Range(RangeInclusive<usize>),
-}
-
-impl ProcessCount {
-    /// Resolve the count for the current iteration.
-    pub(crate) fn resolve(&self) -> usize {
-        match self {
-            ProcessCount::Fixed(n) => *n,
-            ProcessCount::Range(range) => {
-                let start = *range.start();
-                let end = *range.end() + 1; // RangeInclusive -> exclusive for sim_random_range
-                if start >= end {
-                    return start;
-                }
-                crate::sim::sim_random_range(start..end)
-            }
-        }
-    }
-}
-
-impl From<usize> for ProcessCount {
-    fn from(n: usize) -> Self {
-        ProcessCount::Fixed(n)
-    }
-}
-
-impl From<RangeInclusive<usize>> for ProcessCount {
-    fn from(range: RangeInclusive<usize>) -> Self {
-        ProcessCount::Range(range)
-    }
-}
-
 /// Internal storage for a process entry in the builder.
 pub(crate) struct ProcessEntry {
     pub(crate) count: ProcessCount,
@@ -358,54 +202,6 @@ enum WorkloadEntry {
         client_id: ClientId,
         factory: Box<dyn Fn(usize) -> Box<dyn Workload>>,
     },
-}
-
-/// How an enabled chaos surface is sampled each seed.
-///
-/// This is the *sampling-strategy* axis, orthogonal to *which* surface is
-/// enabled (see [`Chaos`]). It does not apply to the workload operation-alphabet
-/// swarm, which is a test-driver concern with its own switch
-/// ([`SimulationBuilder::swarm_operations`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChaosMode {
-    /// Full surface every seed: all sub-families active, intensities seed-randomized.
-    ///
-    /// Network/storage use `random_for_seed`; attrition uses the configured regime
-    /// as written (reboot kinds still vary per seed via the in-run RNG).
-    Random,
-    /// Swarm testing (Groce et al., ISSTA 2012): a per-seed random *subset* of
-    /// sub-families is active, the rest fully off.
-    ///
-    /// Network/storage use `swarm_for_seed`; attrition randomizes the reboot regime
-    /// per seed, including the never-reboot and single-mode cases.
-    Swarm,
-}
-
-/// A chaos surface to enable, and how to sample it per seed.
-///
-/// Pass these to [`SimulationBuilder::enable_chaos`]. A surface absent from the
-/// enable list is **off**. The two axes are orthogonal: enabling a surface
-/// (which variant) is distinct from how it is sampled (its [`ChaosMode`]).
-#[derive(Debug, Clone, PartialEq)]
-pub enum Chaos {
-    /// Network faults (clogging, partitions, bit-flips, random close, …).
-    Network(ChaosMode),
-    /// Storage faults (read/write/crash/misdirect/phantom/sync).
-    Storage(ChaosMode),
-    /// Process attrition (chaos reboots). Carries the base regime; requires
-    /// [`chaos_duration`](SimulationBuilder::chaos_duration) to actually run.
-    Attrition {
-        /// Base reboot regime (weights, `max_dead`, delays).
-        config: Attrition,
-        /// How the regime is sampled per seed.
-        mode: ChaosMode,
-    },
-    /// Buggify-driven knob value-perturbation. An additive *modifier*, not a
-    /// surface of its own: on enabled network/storage surfaces it occasionally
-    /// spikes individual knob *values* (latencies, IOPS, fault rates) to an
-    /// extreme within bounds, per FDB's `if (randomize && BUGGIFY) KNOB =
-    /// random(lo, hi)`. Composes with [`ChaosMode::Random`]/[`ChaosMode::Swarm`].
-    BuggifyKnobs,
 }
 
 /// Builder pattern for configuring and running simulation experiments.
@@ -473,7 +269,7 @@ impl SimulationBuilder {
             replay_recipe: None,
             before_iteration_hooks: Vec::new(),
             seed_warning_timeout: None,
-            run_time_budget: super::orchestrator::DEFAULT_RUN_TIME_BUDGET,
+            run_time_budget: super::stall::DEFAULT_RUN_TIME_BUDGET,
         }
     }
 
@@ -1192,7 +988,7 @@ impl SimulationBuilder {
 
     /// Resolve a process entry into a `ProcessConfig` for the current
     /// iteration, sampling the count/tags from the sim RNG (already seeded).
-    fn resolve_process_config(entry: &ProcessEntry) -> super::orchestrator::ProcessConfig<'_> {
+    fn resolve_process_config(entry: &ProcessEntry) -> super::process_manager::ProcessConfig<'_> {
         // When a topology is configured it owns the process count (sampled per
         // seed); otherwise fall back to the flat `.processes()` count.
         let localities = entry
@@ -1224,7 +1020,7 @@ impl SimulationBuilder {
             };
             info.push((name, ip));
         }
-        super::orchestrator::ProcessConfig {
+        super::process_manager::ProcessConfig {
             factory: &*entry.factory,
             info,
             ips,

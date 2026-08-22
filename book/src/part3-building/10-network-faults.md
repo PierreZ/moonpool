@@ -14,7 +14,18 @@ Moonpool's `ChaosConfiguration` controls a wide range of network faults. Each fa
 
 ### Latency Injection
 
-Every network operation (bind, accept, connect, read, write) has a configurable latency range. The simulator picks a random duration from the range for each operation. This models the basic reality that network operations take time, and that time varies.
+Network timing uses configurable latency distributions. Bind, connect, and
+accept are genuinely asynchronous: each allocates an operation,
+schedules its completion, registers the caller's waker, and remains pending
+until that exact operation becomes ready. Dropping one of these delayed futures
+cancels its scheduled work. Reads wait for data delivery when the receive buffer
+is empty. Writes accept available send-buffer capacity and schedule later byte
+delivery, applying write and link latency on the delivery path.
+
+This distinction is observable. A timeout can beat bind, connect, or accept,
+and dropping the losing branch does not leave a stale completion behind. The
+simulator still picks every delay deterministically from the configured
+distribution, so the same seed reproduces the same race.
 
 For tail latency testing, moonpool supports **bimodal latency distribution**, following FoundationDB's `halfLatency()` pattern. In bimodal mode, 99.9% of operations use normal latency, but 0.1% experience latencies multiplied by 5x to 20x. This is how real networks behave: most requests are fast, but a small fraction hit GC pauses, cross-datacenter hops, or congestion.
 
@@ -72,6 +83,8 @@ Moonpool supports seven partition strategies:
 | AsymmetricRecv | One node's incoming traffic blocked, outgoing still flows | The mirror case |
 
 Partitions have configurable probability and duration. They can be programmatic (via `FaultContext::partition`) or automatic (via `partition_probability` in the chaos config).
+
+At the lower-level `SimWorld` API, `partition_pair(from, to, duration)` adds one directed pair entry. Call it for both directions to create a bidirectional pair cut. A single `restore_partition(from, to)` deliberately removes both directed entries, preventing a half-healed pair during recovery. Send-wide and receive-wide partitions remain separate and expire through their targeted restore events.
 
 The first three strategies are IP-blind: they pick nodes out of a hat. `IsolateZone` and `IsolateDatacenter` read the [`.cluster()`](09-attrition.md#failure-domains-correlated-reboots) topology instead, so the cut lands exactly where a real one would, on the boundary that shares a switch or a region. Without a topology they fall back to `Random` selection, which keeps them safe to draw for any seed.
 
