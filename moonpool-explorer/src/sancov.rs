@@ -587,8 +587,7 @@ pub fn init_sancov_shared() -> Result<(), std::io::Error> {
         return Ok(());
     }
 
-    let transfer = crate::shared_mem::alloc_shared(len)?;
-    let history = crate::shared_mem::alloc_shared(len)?;
+    let (transfer, history) = crate::shared_mem::alloc_shared_pair(len, len)?;
 
     SANCOV_TRANSFER.with(|c| c.set(transfer));
     SANCOV_HISTORY.with(|c| c.set(history));
@@ -730,7 +729,7 @@ pub fn get_or_init_sancov_pool(slot_count: usize) -> *mut u8 {
         SANCOV_POOL_SLOTS.with(|c| c.set(0));
     }
 
-    match crate::shared_mem::alloc_shared(slot_count * len) {
+    match crate::shared_mem::alloc_shared_array(slot_count, len) {
         Ok(ptr) => {
             SANCOV_POOL.with(|c| c.set(ptr));
             SANCOV_POOL_SLOTS.with(|c| c.set(slot_count));

@@ -213,6 +213,16 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
         let count_atomic = &*(&raw const (*bucket).pass_count).cast::<AtomicU32>();
         count_atomic.fetch_add(1, Ordering::Relaxed);
 
+        // Advance the quality watermark before publishing discovery. Using a
+        // monotonic RMW here prevents a first-discovery worker from overwriting
+        // a better score recorded concurrently by another worker.
+        let quality_advanced = if has_quality > 0 {
+            let best_score = &*(&raw const (*bucket).best_score).cast::<AtomicI64>();
+            score > best_score.fetch_max(score, Ordering::Relaxed)
+        } else {
+            false
+        };
+
         // Signal discovery on first hit: CAS discovered from 0 → 1.
         let ft = &*(&raw const (*bucket).discovered).cast::<AtomicU8>();
         let first_discovery = ft
@@ -220,41 +230,15 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
             .is_ok();
 
         if first_discovery {
-            // On first discovery, initialize best_score if quality-tracked.
-            if has_quality > 0 {
-                let bs_atomic = &*(&raw const (*bucket).best_score).cast::<AtomicI64>();
-                bs_atomic.store(score, Ordering::Relaxed);
-            }
-
             crate::hooks::on_discovery(
                 crate::hooks::DiscoveryKind::BucketFirst,
                 u64::from(bucket_hash),
             );
-        } else if has_quality > 0 {
-            // Not first discovery: check quality watermark improvement.
-            // CAS loop on best_score — re-signal when score improves.
-            let bs_atomic = &*(&raw const (*bucket).best_score).cast::<AtomicI64>();
-            let mut current = bs_atomic.load(Ordering::Relaxed);
-            loop {
-                if score <= current {
-                    break;
-                }
-                match bs_atomic.compare_exchange_weak(
-                    current,
-                    score,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => {
-                        crate::hooks::on_discovery(
-                            crate::hooks::DiscoveryKind::BucketQuality,
-                            u64::from(bucket_hash),
-                        );
-                        break;
-                    }
-                    Err(actual) => current = actual,
-                }
-            }
+        } else if quality_advanced {
+            crate::hooks::on_discovery(
+                crate::hooks::DiscoveryKind::BucketQuality,
+                u64::from(bucket_hash),
+            );
         }
     }
 }
@@ -336,5 +320,21 @@ mod tests {
     fn test_assertion_sometimes_each_noop_when_inactive() {
         // Should not panic when EachBucket memory is not initialized.
         assertion_sometimes_each("test", &[("key", 1)], &[]);
+    }
+
+    #[test]
+    fn test_quality_watermark_only_moves_forward() {
+        crate::region::init();
+
+        assertion_sometimes_each("quality", &[("key", 1)], &[("score", 10)]);
+        assertion_sometimes_each("quality", &[("key", 1)], &[("score", 5)]);
+        assertion_sometimes_each("quality", &[("key", 1)], &[("score", 20)]);
+
+        let buckets = each_bucket_read_all();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].pass_count, 3);
+        assert_eq!(unpack_quality(buckets[0].best_score, 1), vec![20]);
+
+        crate::region::clear();
     }
 }

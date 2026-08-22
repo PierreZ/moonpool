@@ -47,35 +47,19 @@
 //! // }
 //! ```
 
-use std::fmt;
-
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use thiserror::Error;
 
 /// Error type for codec operations.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CodecError {
     /// Failed to encode a message to bytes.
-    Encode(Box<dyn std::error::Error + Send + Sync>),
+    #[error("encode error: {0}")]
+    Encode(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// Failed to decode bytes to a message.
-    Decode(Box<dyn std::error::Error + Send + Sync>),
-}
-
-impl fmt::Display for CodecError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CodecError::Encode(e) => write!(f, "encode error: {e}"),
-            CodecError::Decode(e) => write!(f, "decode error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for CodecError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            CodecError::Encode(e) | CodecError::Decode(e) => Some(e.as_ref()),
-        }
-    }
+    #[error("decode error: {0}")]
+    Decode(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Pluggable message serialization format.

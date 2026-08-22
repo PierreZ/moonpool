@@ -78,24 +78,7 @@ impl<T: DeserializeOwned> Future for ReplyFuture<T> {
     type Output = Result<T, ReplyError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Try to receive from the queue (non-blocking)
-        if let Some(result) = self.queue.try_recv() {
-            return Poll::Ready(result);
-        }
-
-        // Check if queue is closed (connection failed or peer disconnected)
-        if self.queue.is_closed() {
-            let reason = self
-                .queue
-                .close_reason()
-                .unwrap_or(ReplyError::ConnectionFailed);
-            return Poll::Ready(Err(reason));
-        }
-
-        // Poll the recv future to register the waker
-        // We create a recv future each time to register the waker
-        let mut recv_future = Box::pin(self.queue.recv());
-        match recv_future.as_mut().poll(cx) {
+        match self.queue.poll_recv(cx) {
             Poll::Ready(Some(result)) => Poll::Ready(result),
             Poll::Ready(None) => {
                 let reason = self

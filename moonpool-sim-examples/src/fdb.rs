@@ -1,4 +1,4 @@
-//! A fake FoundationDB — the entire dependency in one file.
+//! A fake `FoundationDB` — the entire dependency in one file.
 //!
 //! This module shows how a layer author can ship a faithful in-memory FDB
 //! alongside the production binding and **never start a Docker container in
@@ -82,8 +82,6 @@
 //! The version generator's floor-of-1 guarantees that two commits landing
 //! in the same microsecond still get distinct versions, preserving strict
 //! monotonicity even under heavy concurrent load.
-
-#![allow(clippy::missing_errors_doc, clippy::doc_markdown)]
 
 use std::collections::BTreeMap;
 use std::ops::{Bound, Range};
@@ -529,7 +527,6 @@ where
 // ============================================================================
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use moonpool_sim::TokioProviders;
@@ -542,16 +539,35 @@ mod tests {
         MockDatabase::new(TokioProviders::new(), MockConfig::deterministic())
     }
 
+    async fn commit(tx: MockTransaction<TokioProviders>) -> Version {
+        tx.commit()
+            .await
+            .expect("deterministic commit should succeed")
+    }
+
+    async fn get(tx: &mut MockTransaction<TokioProviders>, key: Key) -> Option<Value> {
+        tx.get(key)
+            .await
+            .expect("deterministic read should succeed")
+    }
+
+    fn parse_u64(value: &Value) -> u64 {
+        std::str::from_utf8(value)
+            .expect("stored counter should be UTF-8")
+            .parse()
+            .expect("stored counter should be a u64")
+    }
+
     #[tokio::test]
     async fn put_then_get_across_transactions() {
         let db = deterministic();
 
         let mut tx = db.create_transaction();
         tx.put(k("hello"), k("world"));
-        tx.commit().await.unwrap();
+        commit(tx).await;
 
         let mut tx = db.create_transaction();
-        assert_eq!(tx.get(k("hello")).await.unwrap(), Some(k("world")));
+        assert_eq!(get(&mut tx, k("hello")).await, Some(k("world")));
     }
 
     #[tokio::test]
@@ -559,7 +575,7 @@ mod tests {
         let db = deterministic();
         let mut tx = db.create_transaction();
         tx.put(k("k"), k("v"));
-        assert_eq!(tx.get(k("k")).await.unwrap(), Some(k("v")));
+        assert_eq!(get(&mut tx, k("k")).await, Some(k("v")));
     }
 
     #[tokio::test]
@@ -568,17 +584,17 @@ mod tests {
 
         let mut tx = db.create_transaction();
         tx.put(k("k"), k("v1"));
-        tx.commit().await.unwrap();
+        commit(tx).await;
 
         // Reader A captures its read_version here, before B's commit.
         let mut tx_a = db.create_transaction();
 
         let mut tx_b = db.create_transaction();
         tx_b.put(k("k"), k("v2"));
-        tx_b.commit().await.unwrap();
+        commit(tx_b).await;
 
         // A still sees v1 — its snapshot predates B's commit.
-        assert_eq!(tx_a.get(k("k")).await.unwrap(), Some(k("v1")));
+        assert_eq!(get(&mut tx_a, k("k")).await, Some(k("v1")));
     }
 
     #[tokio::test]
@@ -587,16 +603,16 @@ mod tests {
 
         let mut seed = db.create_transaction();
         seed.put(k("counter"), k("0"));
-        seed.commit().await.unwrap();
+        commit(seed).await;
 
         let mut tx_a = db.create_transaction();
         let mut tx_b = db.create_transaction();
 
         // Both read, both want to write. B commits first.
-        let _ = tx_a.get(k("counter")).await.unwrap();
-        let _ = tx_b.get(k("counter")).await.unwrap();
+        let _ = get(&mut tx_a, k("counter")).await;
+        let _ = get(&mut tx_b, k("counter")).await;
         tx_b.put(k("counter"), k("1"));
-        tx_b.commit().await.unwrap();
+        commit(tx_b).await;
 
         // A's commit must fail — its read conflict range covers `counter`,
         // and B wrote there after A's read_version.
@@ -610,14 +626,14 @@ mod tests {
 
         let mut tx = db.create_transaction();
         tx.put(k("k"), k("v"));
-        tx.commit().await.unwrap();
+        commit(tx).await;
 
         let mut tx = db.create_transaction();
         tx.delete(k("k"));
-        tx.commit().await.unwrap();
+        commit(tx).await;
 
         let mut tx = db.create_transaction();
-        assert_eq!(tx.get(k("k")).await.unwrap(), None);
+        assert_eq!(get(&mut tx, k("k")).await, None);
     }
 
     #[tokio::test]
@@ -671,14 +687,12 @@ mod tests {
         // Drive both commits concurrently. Disjoint write sets means no
         // resolver conflict; the floor-of-1 in next_commit_version ensures
         // they still get distinct commit_versions.
-        let (a, b) = tokio::join!(tx_a.commit(), tx_b.commit());
-        let v_a = a.unwrap();
-        let v_b = b.unwrap();
+        let (v_a, v_b) = tokio::join!(commit(tx_a), commit(tx_b));
         assert_ne!(v_a, v_b, "concurrent commits must get distinct versions");
 
         let mut tx = db.create_transaction();
-        assert_eq!(tx.get(k("a")).await.unwrap(), Some(k("1")));
-        assert_eq!(tx.get(k("b")).await.unwrap(), Some(k("2")));
+        assert_eq!(get(&mut tx, k("a")).await, Some(k("1")));
+        assert_eq!(get(&mut tx, k("b")).await, Some(k("2")));
     }
 
     #[tokio::test]
@@ -694,7 +708,7 @@ mod tests {
 
         let mut tx = db.create_transaction();
         tx.put(k("counter"), Bytes::from_static(b"0"));
-        tx.commit().await.unwrap();
+        commit(tx).await;
 
         let mut handles = Vec::new();
         for i in 0..N {
@@ -702,11 +716,10 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 loop {
                     let mut tx = db.create_transaction();
-                    let cur: u64 = tx
-                        .get(k("counter"))
+                    let cur = get(&mut tx, k("counter"))
                         .await
-                        .unwrap()
-                        .map_or(0, |b| std::str::from_utf8(&b).unwrap().parse().unwrap());
+                        .as_ref()
+                        .map_or(0, parse_u64);
                     tx.put(k("counter"), Bytes::from((cur + 1).to_string()));
                     tx.put(Bytes::from(format!("tag/{i}")), Bytes::from_static(b"done"));
                     match tx.commit().await {
@@ -718,20 +731,19 @@ mod tests {
             }));
         }
         for h in handles {
-            h.await.unwrap();
+            h.await.expect("counter task should not panic");
         }
 
         let mut tx = db.create_transaction();
-        let final_count: u64 = tx
-            .get(k("counter"))
+        let final_count = get(&mut tx, k("counter"))
             .await
-            .unwrap()
-            .map(|b| std::str::from_utf8(&b).unwrap().parse().unwrap())
-            .unwrap();
+            .as_ref()
+            .map(parse_u64)
+            .expect("counter should exist");
         assert_eq!(final_count, N, "every increment must land exactly once");
         for i in 0..N {
             assert_eq!(
-                tx.get(Bytes::from(format!("tag/{i}"))).await.unwrap(),
+                get(&mut tx, Bytes::from(format!("tag/{i}"))).await,
                 Some(Bytes::from_static(b"done")),
                 "tag/{i} missing — task didn't commit",
             );
@@ -759,7 +771,7 @@ mod tests {
             assert_eq!(tx.commit().await, Err(FdbError::CommitUnknownResult));
 
             let mut tx = db.create_transaction();
-            match tx.get(key).await.unwrap() {
+            match get(&mut tx, key).await {
                 Some(got) if got == val => saw_landed = true,
                 None => saw_dropped = true,
                 other => panic!("unexpected value: {other:?}"),

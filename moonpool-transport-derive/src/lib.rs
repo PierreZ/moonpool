@@ -86,18 +86,28 @@ const METHOD_INDEX_OFFSET: u32 = 1;
 /// Collect [`MethodInfo`] entries for every `fn` item in the trait.
 fn collect_method_infos(item: &ItemTrait) -> syn::Result<Vec<MethodInfo>> {
     let mut method_infos: Vec<MethodInfo> = Vec::new();
-    for (index, trait_item) in item.items.iter().enumerate() {
+    for trait_item in &item.items {
         if let TraitItem::Fn(method) = trait_item {
             let (req_type, resp_type) = extract_method_types(&method.sig)?;
-            let idx = u32::try_from(index).expect("trait has more than u32::MAX methods");
+            let index = u32::try_from(method_infos.len())
+                .expect("trait has more than u32::MAX methods")
+                + METHOD_INDEX_OFFSET;
             method_infos.push(MethodInfo {
-                index: idx + METHOD_INDEX_OFFSET,
+                index,
                 name: method.sig.ident.clone(),
                 req_type,
                 resp_type,
             });
         }
     }
+
+    if method_infos.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &item.ident,
+            "RPC service must define at least one method",
+        ));
+    }
+
     Ok(method_infos)
 }
 
@@ -534,4 +544,47 @@ fn to_snake_case(s: &str) -> String {
         result.push(c.to_ascii_lowercase());
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use syn::parse_quote;
+
+    use super::*;
+
+    #[test]
+    fn method_indices_ignore_non_method_items() -> syn::Result<()> {
+        let item: ItemTrait = parse_quote! {
+            trait Example {
+                type Context;
+                async fn first(&self, request: FirstRequest) -> Result<FirstResponse, RpcError>;
+                const VERSION: u32;
+                async fn second(&self, request: SecondRequest) -> Result<SecondResponse, RpcError>;
+            }
+        };
+
+        let methods = collect_method_infos(&item)?;
+
+        assert_eq!(methods.len(), 2);
+        assert_eq!(methods[0].index, 1);
+        assert_eq!(methods[1].index, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_service_returns_a_diagnostic() {
+        let item: ItemTrait = parse_quote! {
+            trait Empty {}
+        };
+
+        let result = collect_method_infos(&item);
+
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert_eq!(
+                error.to_string(),
+                "RPC service must define at least one method"
+            );
+        }
+    }
 }

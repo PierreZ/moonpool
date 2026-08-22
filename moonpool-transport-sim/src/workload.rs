@@ -166,14 +166,9 @@ impl Workload for TransportClientWorkload {
                 moonpool_sim::SimulationError::InvalidState(format!("transport build: {e}"))
             })?;
 
-        let endpoint = Endpoint::new(
-            parse_sim_addr(&server_ip)?,
-            append_method_uid(METHOD_APPEND_BLOCK),
-        );
-        let bad_endpoint = Endpoint::new(
-            parse_sim_addr(&server_ip)?,
-            UID::new(0xDEAD_BEEF, 0xBAD0_BAD0),
-        );
+        let server_addr = parse_sim_addr(&server_ip)?;
+        let endpoint = Endpoint::new(server_addr.clone(), append_method_uid(METHOD_APPEND_BLOCK));
+        let bad_endpoint = Endpoint::new(server_addr, UID::new(0xDEAD_BEEF, 0xBAD0_BAD0));
 
         let encode =
             make_encode_fn::<moonpool_transport::RequestEnvelope<AppendBlockRequest>, _>(JsonCodec);

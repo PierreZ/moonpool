@@ -88,17 +88,20 @@ impl Default for ChannelConfig {
 /// seed. The doubling saturates rather than overflowing, and the loop is
 /// bounded by the ceiling rather than by `failures`.
 fn backoff_delay(failures: u32, config: &ChannelConfig) -> Duration {
-    if failures == 0 {
+    if failures == 0 || config.initial_reconnect_delay.is_zero() {
         return Duration::ZERO;
     }
-    let mut delay = config.initial_reconnect_delay;
+
+    let mut delay = config
+        .initial_reconnect_delay
+        .min(config.max_reconnect_delay);
     for _ in 1..failures {
-        if delay >= config.max_reconnect_delay {
+        if delay == config.max_reconnect_delay {
             break;
         }
-        delay = delay.saturating_mul(2);
+        delay = delay.saturating_mul(2).min(config.max_reconnect_delay);
     }
-    delay.min(config.max_reconnect_delay)
+    delay
 }
 
 /// A tower [`Service`](tower_service::Service) that keeps an h2 connection to
@@ -723,6 +726,19 @@ mod tests {
         };
         assert_eq!(backoff_delay(1, &config), Duration::from_secs(30));
         assert_eq!(backoff_delay(5, &config), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn a_zero_initial_delay_stays_zero_at_the_failure_limit() {
+        let config = ChannelConfig {
+            initial_reconnect_delay: Duration::ZERO,
+            ..ChannelConfig::default()
+        };
+
+        // A zero delay cannot grow by doubling. Handle it directly rather than
+        // iterating over every failure when the saturating counter reaches its
+        // limit.
+        assert_eq!(backoff_delay(u32::MAX, &config), Duration::ZERO);
     }
 
     // ===== readiness reservations =====

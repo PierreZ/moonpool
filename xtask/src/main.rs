@@ -8,47 +8,35 @@ struct SimBinary {
 }
 
 impl SimBinary {
+    const fn new(name: &'static str, sancov_crates: &'static str) -> Self {
+        Self {
+            name,
+            sancov_crates,
+        }
+    }
+
     /// Display name without the `sim-` prefix.
     fn display_name(&self) -> &str {
         self.name.strip_prefix("sim-").unwrap_or(self.name)
     }
 }
 
+const SIM_EXAMPLES_CRATE: &str = "moonpool_sim_examples";
+
 const SIM_BINARIES: &[SimBinary] = &[
-    SimBinary {
-        name: "sim-maze-explore",
-        sancov_crates: "moonpool_sim_examples",
-    },
-    SimBinary {
-        name: "sim-dungeon-explore",
-        sancov_crates: "moonpool_sim_examples",
-    },
-    SimBinary {
-        name: "sim-frontier-explore",
-        sancov_crates: "moonpool_explorer",
-    },
-    SimBinary {
-        name: "sim-axum-web",
-        sancov_crates: "moonpool_sim_examples",
-    },
-    SimBinary {
-        name: "sim-topology",
-        sancov_crates: "moonpool_sim_examples",
-    },
-    SimBinary {
-        name: "sim-tonic-grpc",
-        sancov_crates: "moonpool_sim_examples",
-    },
-    SimBinary {
-        name: "sim-transport",
-        sancov_crates: "moonpool_transport",
-    },
+    SimBinary::new("sim-maze-explore", SIM_EXAMPLES_CRATE),
+    SimBinary::new("sim-dungeon-explore", SIM_EXAMPLES_CRATE),
+    SimBinary::new("sim-frontier-explore", "moonpool_explorer"),
+    SimBinary::new("sim-axum-web", SIM_EXAMPLES_CRATE),
+    SimBinary::new("sim-topology", SIM_EXAMPLES_CRATE),
+    SimBinary::new("sim-tonic-grpc", SIM_EXAMPLES_CRATE),
+    SimBinary::new("sim-transport", "moonpool_transport"),
 ];
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    match args.first().map(std::string::String::as_str) {
+    match args.first().map(String::as_str) {
         Some("sim") => sim_dispatch(&args[1..]),
         Some("help" | "--help" | "-h") | None => print_usage(),
         Some(cmd) => {
@@ -69,7 +57,7 @@ fn print_usage() {
 }
 
 fn sim_dispatch(args: &[String]) {
-    match args.first().map(std::string::String::as_str) {
+    match args.first().map(String::as_str) {
         Some("list") => sim_list(&args[1..]),
         Some("run") => sim_run(&args[1..]),
         Some("run-all") => sim_run_all(),
@@ -137,10 +125,11 @@ fn sim_list(args: &[String]) {
 
 fn sim_run(args: &[String]) {
     // Split on "--" to separate filter args from binary args.
-    let (filter_args, binary_args) = match args.iter().position(|a| a == "--") {
-        Some(pos) => (&args[..pos], &args[pos + 1..]),
-        None => (args, [].as_slice()),
-    };
+    let (filter_args, binary_args): (&[String], &[String]) =
+        match args.iter().position(|a| a == "--") {
+            Some(pos) => (&args[..pos], &args[pos + 1..]),
+            None => (args, &[]),
+        };
 
     if filter_args.is_empty() {
         eprintln!("error: 'run' requires at least one filter argument");
@@ -177,7 +166,8 @@ fn run_binaries(binaries: &[&SimBinary], extra_args: &[String]) {
     let mut failed = Vec::new();
 
     for bin in binaries {
-        eprintln!("--- {} ---", bin.display_name());
+        let name = bin.display_name();
+        eprintln!("--- {name} ---");
         let bin_start = Instant::now();
 
         let mut cmd = Command::new("cargo");
@@ -195,25 +185,20 @@ fn run_binaries(binaries: &[&SimBinary], extra_args: &[String]) {
 
         match cmd.status() {
             Ok(status) if status.success() => {
-                eprintln!(
-                    "--- {} --- ({})\n",
-                    bin.display_name(),
-                    fmt_duration(bin_start.elapsed())
-                );
-                passed.push(bin.display_name());
+                eprintln!("--- {name} --- ({})\n", fmt_duration(bin_start.elapsed()));
+                passed.push(name);
             }
             Ok(status) => {
                 let code = status.code().unwrap_or(-1);
                 eprintln!(
-                    "{}: exited with code {code} ({})\n",
-                    bin.display_name(),
+                    "{name}: exited with code {code} ({})\n",
                     fmt_duration(bin_start.elapsed())
                 );
-                failed.push(bin.display_name());
+                failed.push(name);
             }
             Err(e) => {
-                eprintln!("{}: failed to launch: {e}\n", bin.display_name());
-                failed.push(bin.display_name());
+                eprintln!("{name}: failed to launch: {e}\n");
+                failed.push(name);
             }
         }
     }

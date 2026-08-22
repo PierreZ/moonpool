@@ -255,7 +255,7 @@ impl SimulationReport {
 ///
 /// Returns 0 for NaN / negative values and `u64::MAX` for values that exceed
 /// `u64::MAX`. Smaller magnitudes round to the nearest integer.
-fn f64_to_u64_saturating(v: f64) -> u64 {
+pub(crate) fn f64_to_u64_saturating(v: f64) -> u64 {
     // `2^64` as an `f64` — values at or above this saturate to `u64::MAX`.
     const TWO_POW_64: f64 = 18_446_744_073_709_551_616.0;
     if !v.is_finite() || v <= 0.0 {
@@ -270,7 +270,7 @@ fn f64_to_u64_saturating(v: f64) -> u64 {
 }
 
 /// Format a number with comma separators (e.g., 123456 -> "123,456").
-fn fmt_num(n: u64) -> String {
+pub(crate) fn fmt_num(n: u64) -> String {
     let s = n.to_string();
     let mut result = String::with_capacity(s.len() + s.len() / 3);
     for (i, c) in s.chars().rev().enumerate() {
@@ -283,7 +283,7 @@ fn fmt_num(n: u64) -> String {
 }
 
 /// Format a duration as a human-readable string.
-fn fmt_duration(d: Duration) -> String {
+pub(crate) fn fmt_duration(d: Duration) -> String {
     let total_ms = d.as_millis();
     if total_ms < 1000 {
         format!("{total_ms}ms")
@@ -297,7 +297,7 @@ fn fmt_duration(d: Duration) -> String {
 }
 
 /// Short human-readable label for an assertion kind.
-fn kind_label(kind: AssertKind) -> &'static str {
+pub(crate) fn kind_label(kind: AssertKind) -> &'static str {
     match kind {
         AssertKind::Always => "always",
         AssertKind::AlwaysOrUnreachable => "always?",
@@ -311,7 +311,7 @@ fn kind_label(kind: AssertKind) -> &'static str {
 }
 
 /// Sort key for grouping assertion kinds in display.
-fn kind_sort_order(kind: AssertKind) -> u8 {
+pub(crate) fn kind_sort_order(kind: AssertKind) -> u8 {
     match kind {
         AssertKind::Always => 0,
         AssertKind::AlwaysOrUnreachable => 1,

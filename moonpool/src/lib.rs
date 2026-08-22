@@ -19,7 +19,7 @@
 //! │  • Peer connections      │       • SimWorld runtime         │
 //! │  • Wire format           │       • Chaos testing            │
 //! │  • NetTransport + RPC    │       • Buggify macros           │
-//! │  • #[service] macro      │       • 14 assertion macros      │
+//! │  • #[service] macro      │       • 15 assertion macros      │
 //! │    (via transport-derive)│       • Multiverse exploration   │
 //! │                          │         (via moonpool-explorer)  │
 //! ├──────────────────────────┴──────────────────────────────────┤

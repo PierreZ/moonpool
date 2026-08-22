@@ -148,8 +148,8 @@ pub fn init_assertions() -> Result<(), std::io::Error> {
         return Ok(()); // Already initialized
     }
 
-    let table_ptr = shared_mem::alloc_shared(ASSERTION_TABLE_MEM_SIZE)?;
-    let each_bucket_ptr = shared_mem::alloc_shared(EACH_BUCKET_MEM_SIZE)?;
+    let (table_ptr, each_bucket_ptr) =
+        shared_mem::alloc_shared_pair(ASSERTION_TABLE_MEM_SIZE, EACH_BUCKET_MEM_SIZE)?;
     moonpool_assertions::install_region(table_ptr, each_bucket_ptr);
     Ok(())
 }

@@ -81,13 +81,21 @@ pub(crate) enum WorkerExit {
 pub(crate) struct SlotPool {
     base: *mut u8,
     slots: usize,
+    byte_len: usize,
 }
 
 impl SlotPool {
     /// Allocate `slots` journal result slots in shared memory.
     pub fn new(slots: usize) -> Result<Self, std::io::Error> {
-        let base = crate::shared_mem::alloc_shared(slots * SLOT_SIZE)?;
-        Ok(Self { base, slots })
+        let base = crate::shared_mem::alloc_shared_array(slots, SLOT_SIZE)?;
+        let byte_len = slots
+            .checked_mul(SLOT_SIZE)
+            .expect("allocation rejected size overflow");
+        Ok(Self {
+            base,
+            slots,
+            byte_len,
+        })
     }
 
     fn slot_ptr(&self, idx: usize) -> *mut u8 {
@@ -153,9 +161,9 @@ impl SlotPool {
 
 impl Drop for SlotPool {
     fn drop(&mut self) {
-        // Safety: base was returned by alloc_shared(slots * SLOT_SIZE) and is
-        // freed exactly once here.
-        unsafe { crate::shared_mem::free_shared(self.base, self.slots * SLOT_SIZE) };
+        // Safety: base was returned by alloc_shared(byte_len) and is freed
+        // exactly once here with the original allocation size.
+        unsafe { crate::shared_mem::free_shared(self.base, self.byte_len) };
     }
 }
 
@@ -226,5 +234,13 @@ mod tests {
     #[test]
     fn worker_flag_default_false() {
         assert!(!explorer_is_child());
+    }
+
+    #[test]
+    fn slot_count_overflow_is_rejected() {
+        let Err(error) = SlotPool::new(usize::MAX) else {
+            panic!("slot byte size must overflow");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 }

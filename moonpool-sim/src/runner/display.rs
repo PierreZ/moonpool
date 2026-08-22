@@ -9,7 +9,8 @@ use moonpool_assertions::AssertKind;
 
 use super::report::{
     AssertionDetail, AssertionStatus, BucketSiteSummary, ExplorationReport, SaturationSignal,
-    SimulationReport, format_recipe,
+    SimulationReport, f64_to_u64_saturating, fmt_duration, fmt_num, format_recipe, kind_label,
+    kind_sort_order,
 };
 
 // ---------------------------------------------------------------------------
@@ -32,78 +33,6 @@ mod ansi {
 /// Whether to emit ANSI color codes.
 fn use_color() -> bool {
     std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
-}
-
-// ---------------------------------------------------------------------------
-// Formatting helpers (reused from report.rs, extended)
-// ---------------------------------------------------------------------------
-
-/// Format a `u64` with comma separators.
-fn fmt_num(n: u64) -> String {
-    let s = n.to_string();
-    let mut result = String::with_capacity(s.len() + s.len() / 3);
-    for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            result.push(',');
-        }
-        result.push(c);
-    }
-    result.chars().rev().collect()
-}
-
-/// Convert a non-negative finite `f64` to a saturated `u64`.
-fn f64_to_u64_saturating(v: f64) -> u64 {
-    const TWO_POW_64: f64 = 18_446_744_073_709_551_616.0;
-    if !v.is_finite() || v <= 0.0 {
-        0
-    } else if v >= TWO_POW_64 {
-        u64::MAX
-    } else {
-        // SAFETY: `v` is finite, non-negative, and strictly below `2^64`.
-        unsafe { v.round().to_int_unchecked::<u64>() }
-    }
-}
-
-/// Format a duration as a human-readable string.
-fn fmt_duration(d: std::time::Duration) -> String {
-    let total_ms = d.as_millis();
-    if total_ms < 1000 {
-        format!("{total_ms}ms")
-    } else if total_ms < 60_000 {
-        format!("{:.2}s", d.as_secs_f64())
-    } else {
-        let mins = d.as_secs() / 60;
-        let secs = d.as_secs() % 60;
-        format!("{mins}m {secs:02}s")
-    }
-}
-
-/// Short label for an assertion kind.
-fn kind_label(kind: AssertKind) -> &'static str {
-    match kind {
-        AssertKind::Always => "always",
-        AssertKind::AlwaysOrUnreachable => "always?",
-        AssertKind::Sometimes => "sometimes",
-        AssertKind::Reachable => "reachable",
-        AssertKind::Unreachable => "unreachable",
-        AssertKind::NumericAlways => "num-always",
-        AssertKind::NumericSometimes => "numeric",
-        AssertKind::BooleanSometimesAll => "frontier",
-    }
-}
-
-/// Sort key for grouping assertion kinds.
-fn kind_sort_order(kind: AssertKind) -> u8 {
-    match kind {
-        AssertKind::Always => 0,
-        AssertKind::AlwaysOrUnreachable => 1,
-        AssertKind::Unreachable => 2,
-        AssertKind::NumericAlways => 3,
-        AssertKind::Sometimes => 4,
-        AssertKind::Reachable => 5,
-        AssertKind::NumericSometimes => 6,
-        AssertKind::BooleanSometimesAll => 7,
-    }
 }
 
 // ---------------------------------------------------------------------------

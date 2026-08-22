@@ -39,6 +39,7 @@ tokio = { version = "1", features = ["rt", "macros", "time"] }
 [[example]]
 name = "retrying_worker"
 test = true
+required-features = ["tokio"]
 
 [lints]
 workspace = true

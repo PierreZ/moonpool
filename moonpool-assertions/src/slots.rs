@@ -141,6 +141,20 @@ pub fn msg_hash(msg: &str) -> u32 {
     h
 }
 
+/// Update a monotonic watermark, returning whether this call advanced it.
+fn update_watermark(watermark: &AtomicI64, value: i64, maximize: bool) -> bool {
+    let previous = if maximize {
+        watermark.fetch_max(value, Ordering::Relaxed)
+    } else {
+        watermark.fetch_min(value, Ordering::Relaxed)
+    };
+    if maximize {
+        value > previous
+    } else {
+        value < previous
+    }
+}
+
 /// Find an existing slot or allocate a new one by `msg_hash`.
 ///
 /// Returns a pointer to the slot and its index, or null if the table is full.
@@ -350,50 +364,16 @@ pub fn assertion_numeric(
 
         // Update watermark: track best value of `left`
         let wm = &*(&raw const (*slot).watermark).cast::<AtomicI64>();
-        let mut current = wm.load(Ordering::Relaxed);
-        loop {
-            let is_better = if maximize {
-                left > current
-            } else {
-                left < current
-            };
-            if !is_better {
-                break;
-            }
-            match wm.compare_exchange_weak(current, left, Ordering::Relaxed, Ordering::Relaxed) {
-                Ok(_) => break,
-                Err(actual) => current = actual,
-            }
-        }
+        update_watermark(wm, left, maximize);
 
         // For NumericSometimes: signal discovery when watermark improves past discovery_watermark
         if kind == AssertKind::NumericSometimes {
             let fw = &*(&raw const (*slot).discovery_watermark).cast::<AtomicI64>();
-            let mut discovery_current = fw.load(Ordering::Relaxed);
-            loop {
-                let is_better = if maximize {
-                    left > discovery_current
-                } else {
-                    left < discovery_current
-                };
-                if !is_better {
-                    break;
-                }
-                match fw.compare_exchange_weak(
-                    discovery_current,
-                    left,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => {
-                        crate::hooks::on_discovery(
-                            crate::hooks::DiscoveryKind::WatermarkImprovement,
-                            u64::from(hash),
-                        );
-                        break;
-                    }
-                    Err(actual) => discovery_current = actual,
-                }
+            if update_watermark(fw, left, maximize) {
+                crate::hooks::on_discovery(
+                    crate::hooks::DiscoveryKind::WatermarkImprovement,
+                    u64::from(hash),
+                );
             }
         }
     }
@@ -433,28 +413,13 @@ pub fn assertion_sometimes_all(msg: &str, named_bools: &[(&str, bool)]) {
         let pc = &*(&raw const (*slot).pass_count).cast::<AtomicI64>();
         pc.fetch_add(1, Ordering::Relaxed);
 
-        // CAS loop on frontier — signal discovery when it advances
+        // Signal discovery only for the caller that advances the shared frontier.
         let fr = &*(&raw const (*slot).frontier).cast::<AtomicU8>();
-        let mut current = fr.load(Ordering::Relaxed);
-        loop {
-            if true_count <= current {
-                break;
-            }
-            match fr.compare_exchange_weak(
-                current,
-                true_count,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    crate::hooks::on_discovery(
-                        crate::hooks::DiscoveryKind::FrontierAdvance,
-                        u64::from(hash),
-                    );
-                    break;
-                }
-                Err(actual) => current = actual,
-            }
+        if true_count > fr.fetch_max(true_count, Ordering::Relaxed) {
+            crate::hooks::on_discovery(
+                crate::hooks::DiscoveryKind::FrontierAdvance,
+                u64::from(hash),
+            );
         }
     }
 }
@@ -583,5 +548,61 @@ mod tests {
             Some(AssertKind::BooleanSometimesAll)
         );
         assert_eq!(AssertKind::from_u8(8), None);
+    }
+
+    #[test]
+    fn test_numeric_watermarks_keep_best_value() {
+        crate::region::init();
+
+        for value in [10, 5, 20] {
+            assertion_numeric(
+                AssertKind::NumericSometimes,
+                AssertCmp::Gt,
+                true,
+                value,
+                0,
+                "maximize",
+            );
+        }
+        for value in [10, 20, 5] {
+            assertion_numeric(
+                AssertKind::NumericSometimes,
+                AssertCmp::Gt,
+                false,
+                value,
+                0,
+                "minimize",
+            );
+        }
+
+        let slots = assertion_read_all();
+        let maximize = slots
+            .iter()
+            .find(|slot| slot.msg == "maximize")
+            .expect("maximize slot recorded");
+        let minimize = slots
+            .iter()
+            .find(|slot| slot.msg == "minimize")
+            .expect("minimize slot recorded");
+        assert_eq!(maximize.watermark, 20);
+        assert_eq!(minimize.watermark, 5);
+
+        crate::region::clear();
+    }
+
+    #[test]
+    fn test_sometimes_all_frontier_only_moves_forward() {
+        crate::region::init();
+
+        assertion_sometimes_all("frontier", &[("a", true), ("b", false), ("c", false)]);
+        assertion_sometimes_all("frontier", &[("a", false), ("b", false), ("c", false)]);
+        assertion_sometimes_all("frontier", &[("a", true), ("b", true), ("c", false)]);
+
+        let slots = assertion_read_all();
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].frontier, 2);
+        assert_eq!(slots[0].pass_count, 3);
+
+        crate::region::clear();
     }
 }

@@ -6,6 +6,33 @@
 
 use std::io;
 
+/// Allocate a shared-memory array, rejecting byte-size overflow before
+/// calling `mmap`.
+pub(crate) fn alloc_shared_array(count: usize, element_size: usize) -> Result<*mut u8, io::Error> {
+    let size = count.checked_mul(element_size).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "shared memory size overflow")
+    })?;
+    alloc_shared(size)
+}
+
+/// Allocate two shared-memory regions without leaking the first if the
+/// second allocation fails.
+pub(crate) fn alloc_shared_pair(
+    first_size: usize,
+    second_size: usize,
+) -> Result<(*mut u8, *mut u8), io::Error> {
+    let first = alloc_shared(first_size)?;
+    match alloc_shared(second_size) {
+        Ok(second) => Ok((first, second)),
+        Err(error) => {
+            // Safety: `first` was just returned by `alloc_shared(first_size)`
+            // and ownership has not escaped this function.
+            unsafe { free_shared(first, first_size) };
+            Err(error)
+        }
+    }
+}
+
 /// Allocate shared memory visible across `fork()` boundaries.
 ///
 /// Returns a pointer to `size` bytes of zeroed memory backed by
@@ -98,6 +125,25 @@ mod tests {
                 assert_eq!(*ptr.add(i), 0);
             }
             free_shared(ptr, size);
+        }
+    }
+
+    #[test]
+    fn array_size_overflow_is_rejected() {
+        let error = alloc_shared_array(usize::MAX, 2).expect_err("size must overflow");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn pair_allocates_independent_regions() {
+        let (first, second) = alloc_shared_pair(16, 32).expect("allocate pair");
+        assert_ne!(first, second);
+
+        // Safety: both pointers were returned by alloc_shared_pair with the
+        // corresponding sizes and have not been freed yet.
+        unsafe {
+            free_shared(first, 16);
+            free_shared(second, 32);
         }
     }
 }

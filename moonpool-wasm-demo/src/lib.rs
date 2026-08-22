@@ -40,6 +40,7 @@ use moonpool_transport::{
     RequestEnvelope, UID, get_reply, make_decode_fn, make_encode_fn,
 };
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -314,19 +315,41 @@ struct RecorderData {
     faults: Vec<(u64, String)>,
 }
 
-/// Pull `(seq_id, time_ms)` pairs for every event named `name`.
-fn collect_seq(q: &dyn TraceQuery, name: &str) -> Vec<(u64, u64)> {
-    q.snapshot(name)
+/// Pull `(seq_id, time_ms)` pairs for new events named `name`.
+fn collect_seq(
+    q: &dyn TraceQuery,
+    name: &str,
+    cursor: &Cell<usize>,
+) -> impl Iterator<Item = (u64, u64)> {
+    q.since(name, cursor)
         .into_iter()
-        .filter_map(|e| Some((e.u64("seq_id")?, e.time_ms)))
-        .collect()
+        .filter_map(|e| e.u64("seq_id").map(|seq| (seq, e.time_ms)))
 }
 
 /// A workload-agnostic recorder. As an [`Invariant`] it sees the whole trace
-/// timeline after each step; it snapshots the standard client events and the
+/// timeline after each step; it consumes new standard client events and
 /// injected faults into shared state the driver reads once the run completes.
+#[derive(Default)]
+struct RecorderCursors {
+    issued: Cell<usize>,
+    acked: Cell<usize>,
+    failed: Cell<usize>,
+    ambiguous: Cell<usize>,
+    faults: Cell<usize>,
+}
+
 struct TimelineRecorder {
     data: Arc<Mutex<RecorderData>>,
+    cursors: RecorderCursors,
+}
+
+impl TimelineRecorder {
+    fn new(data: Arc<Mutex<RecorderData>>) -> Self {
+        Self {
+            data,
+            cursors: RecorderCursors::default(),
+        }
+    }
 }
 
 impl Invariant for TimelineRecorder {
@@ -339,16 +362,27 @@ impl Invariant for TimelineRecorder {
             .data
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        d.issued = collect_seq(q, EV_ISSUED);
-        d.acked = collect_seq(q, EV_ACKED);
-        let mut failed = collect_seq(q, EV_FAILED);
-        failed.extend(collect_seq(q, EV_AMBIGUOUS));
-        d.failed = failed;
-        d.faults = q
-            .snapshot(SIM_FAULT_EVENT_NAME)
-            .into_iter()
-            .map(|e| (e.time_ms, e.str("kind").unwrap_or("fault").to_string()))
-            .collect();
+        d.issued
+            .extend(collect_seq(q, EV_ISSUED, &self.cursors.issued));
+        d.acked
+            .extend(collect_seq(q, EV_ACKED, &self.cursors.acked));
+        d.failed
+            .extend(collect_seq(q, EV_FAILED, &self.cursors.failed));
+        d.failed
+            .extend(collect_seq(q, EV_AMBIGUOUS, &self.cursors.ambiguous));
+        d.faults.extend(
+            q.since(SIM_FAULT_EVENT_NAME, &self.cursors.faults)
+                .into_iter()
+                .map(|e| (e.time_ms, e.str("kind").unwrap_or("fault").to_string())),
+        );
+    }
+
+    fn reset(&mut self) {
+        self.cursors = RecorderCursors::default();
+        *self
+            .data
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = RecorderData::default();
     }
 }
 
@@ -431,7 +465,7 @@ pub fn run_seed(seed: u64) -> RunResult {
     let _report = SimulationBuilder::new()
         .processes(ProcessCount::Fixed(1), || Box::new(PongServer))
         .workloads(WorkloadCount::Fixed(1), |_| Box::new(PingClient))
-        .invariant(TimelineRecorder { data: data.clone() })
+        .invariant(TimelineRecorder::new(data.clone()))
         .chaos_duration(Duration::from_secs(CHAOS_SECS))
         .enable_chaos([Chaos::Network(ChaosMode::Random)])
         .set_iterations(1)

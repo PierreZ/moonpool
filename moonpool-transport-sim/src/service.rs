@@ -1,8 +1,12 @@
 //! RPC types for the hash-chain workload and the shared `parse_sim_addr` helper.
 
+use std::net::IpAddr;
+
 use moonpool_sim::SimulationResult;
 use moonpool_transport::{NetworkAddress, UID};
 use serde::{Deserialize, Serialize};
+
+const DEFAULT_SIM_PORT: u16 = 4500;
 
 /// Interface ID for the append-block service.
 pub(crate) const APPEND_INTERFACE: u64 = 0xC4A1_0001;
@@ -23,13 +27,12 @@ pub fn append_method_uid(method_index: u64) -> UID {
 ///
 /// Returns [`moonpool_sim::SimulationError::InvalidState`] if `ip` cannot be parsed.
 pub fn parse_sim_addr(ip: &str) -> SimulationResult<NetworkAddress> {
-    let addr_str = if ip.contains(':') {
-        ip.to_string()
+    let parsed = if let Ok(ip) = ip.parse::<IpAddr>() {
+        Ok(NetworkAddress::new(ip, DEFAULT_SIM_PORT))
     } else {
-        format!("{ip}:4500")
+        NetworkAddress::parse(ip)
     };
-    NetworkAddress::parse(&addr_str)
-        .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("bad addr: {e}")))
+    parsed.map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("bad addr: {e}")))
 }
 
 /// Request to append a block to the hash chain.
@@ -54,4 +57,40 @@ pub struct AppendBlockResponse {
     pub h: u64,
     /// IP of the server that handled the request.
     pub server_ip: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    use super::*;
+
+    #[test]
+    fn parse_sim_addr_defaults_bare_ip_port() {
+        assert_eq!(
+            parse_sim_addr("10.0.1.1").expect("valid IPv4 address"),
+            NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)), DEFAULT_SIM_PORT)
+        );
+        assert_eq!(
+            parse_sim_addr("::1").expect("valid IPv6 address"),
+            NetworkAddress::new(IpAddr::V6(Ipv6Addr::LOCALHOST), DEFAULT_SIM_PORT)
+        );
+    }
+
+    #[test]
+    fn parse_sim_addr_preserves_explicit_port() {
+        assert_eq!(
+            parse_sim_addr("10.0.1.1:1234").expect("valid IPv4 socket address"),
+            NetworkAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)), 1234)
+        );
+        assert_eq!(
+            parse_sim_addr("[::1]:1234").expect("valid IPv6 socket address"),
+            NetworkAddress::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 1234)
+        );
+    }
+
+    #[test]
+    fn parse_sim_addr_rejects_invalid_address() {
+        assert!(parse_sim_addr("not-an-address").is_err());
+    }
 }

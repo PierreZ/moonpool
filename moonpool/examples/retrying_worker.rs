@@ -50,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sim"))]
 mod tests {
     use super::*;
     use async_trait::async_trait;

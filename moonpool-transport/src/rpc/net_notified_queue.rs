@@ -203,15 +203,15 @@ impl<T> NetNotifiedQueue<T> {
     /// Panics if the internal `RwLock` is poisoned (only possible if a prior
     /// task panicked while holding the lock).
     pub fn close(&self) {
-        let mut inner = self
-            .inner
-            .write()
-            .expect("RwLock poisoned: prior task panicked");
-        inner.closed = true;
-        // Wake all waiters to let them see the close
-        for waker in inner.wakers.drain(..) {
-            waker.wake();
-        }
+        let wakers = {
+            let mut inner = self
+                .inner
+                .write()
+                .expect("RwLock poisoned: prior task panicked");
+            inner.closed = true;
+            std::mem::take(&mut inner.wakers)
+        };
+        wake_all(wakers);
     }
 
     /// Check if the queue is closed.
@@ -237,15 +237,16 @@ impl<T> NetNotifiedQueue<T> {
     /// Panics if the internal `RwLock` is poisoned (only possible if a prior
     /// task panicked while holding the lock).
     pub fn close_with_reason(&self, reason: ReplyError) {
-        let mut inner = self
-            .inner
-            .write()
-            .expect("RwLock poisoned: prior task panicked");
-        inner.close_reason = Some(reason);
-        inner.closed = true;
-        for waker in inner.wakers.drain(..) {
-            waker.wake();
-        }
+        let wakers = {
+            let mut inner = self
+                .inner
+                .write()
+                .expect("RwLock poisoned: prior task panicked");
+            inner.close_reason = Some(reason);
+            inner.closed = true;
+            std::mem::take(&mut inner.wakers)
+        };
+        wake_all(wakers);
     }
 
     /// Get the close reason, if one was set via `close_with_reason`.
@@ -267,25 +268,53 @@ impl<T> NetNotifiedQueue<T> {
     /// Push a pre-deserialized message directly (for testing).
     #[cfg(test)]
     fn push(&self, message: T) {
-        let mut inner = self
-            .inner
-            .write()
-            .expect("RwLock poisoned: prior task panicked");
-        inner.queue.push_back(message);
-        inner.messages_received += 1;
-        // Wake all waiters
-        for waker in inner.wakers.drain(..) {
-            waker.wake();
-        }
+        let wakers = {
+            let mut inner = self
+                .inner
+                .write()
+                .expect("RwLock poisoned: prior task panicked");
+            inner.queue.push_back(message);
+            inner.messages_received += 1;
+            std::mem::take(&mut inner.wakers)
+        };
+        wake_all(wakers);
     }
-}
 
-impl<T> NetNotifiedQueue<T> {
     /// Async receive - waits for a message.
     ///
     /// Returns `None` if the queue is closed and empty.
     pub fn recv(&self) -> RecvFuture<'_, T> {
         RecvFuture { queue: self }
+    }
+
+    pub(super) fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        let mut inner = self
+            .inner
+            .write()
+            .expect("RwLock poisoned: prior task panicked");
+
+        if let Some(message) = inner.queue.pop_front() {
+            return Poll::Ready(Some(message));
+        }
+
+        if inner.closed {
+            return Poll::Ready(None);
+        }
+
+        if inner
+            .wakers
+            .iter()
+            .all(|waker| !waker.will_wake(cx.waker()))
+        {
+            inner.wakers.push(cx.waker().clone());
+        }
+        Poll::Pending
+    }
+}
+
+fn wake_all(wakers: Vec<Waker>) {
+    for waker in wakers {
+        waker.wake();
     }
 }
 
@@ -293,17 +322,16 @@ impl<T: Send + Sync + 'static> MessageReceiver for NetNotifiedQueue<T> {
     fn receive(&self, payload: &[u8]) {
         match (self.decode_fn)(payload) {
             Ok(message) => {
-                let mut inner = self
-                    .inner
-                    .write()
-                    .expect("RwLock poisoned: prior task panicked");
-                inner.queue.push_back(message);
-                inner.messages_received += 1;
-
-                // Wake all waiters
-                for waker in inner.wakers.drain(..) {
-                    waker.wake();
-                }
+                let wakers = {
+                    let mut inner = self
+                        .inner
+                        .write()
+                        .expect("RwLock poisoned: prior task panicked");
+                    inner.queue.push_back(message);
+                    inner.messages_received += 1;
+                    std::mem::take(&mut inner.wakers)
+                };
+                wake_all(wakers);
             }
             Err(e) => {
                 tracing::warn!(
@@ -311,23 +339,26 @@ impl<T: Send + Sync + 'static> MessageReceiver for NetNotifiedQueue<T> {
                     error = %e,
                     "failed to deserialize message, closing queue"
                 );
-                let mut inner = self
-                    .inner
-                    .write()
-                    .expect("RwLock poisoned: prior task panicked");
-                inner.messages_dropped += 1;
-                // Close the queue so callers can detect the failure
-                // via close_reason() instead of silently losing the message.
-                // Guard: preserve original close reason if already closed.
-                if !inner.closed {
-                    inner.closed = true;
-                    inner.close_reason = Some(ReplyError::Serialization {
-                        message: format!("{e}"),
-                    });
-                    for waker in inner.wakers.drain(..) {
-                        waker.wake();
+                let wakers = {
+                    let mut inner = self
+                        .inner
+                        .write()
+                        .expect("RwLock poisoned: prior task panicked");
+                    inner.messages_dropped += 1;
+                    // Close the queue so callers can detect the failure
+                    // via close_reason() instead of silently losing the message.
+                    // Guard: preserve original close reason if already closed.
+                    if inner.closed {
+                        Vec::new()
+                    } else {
+                        inner.closed = true;
+                        inner.close_reason = Some(ReplyError::Serialization {
+                            message: e.to_string(),
+                        });
+                        std::mem::take(&mut inner.wakers)
                     }
-                }
+                };
+                wake_all(wakers);
             }
         }
     }
@@ -342,25 +373,7 @@ impl<T> Future for RecvFuture<'_, T> {
     type Output = Option<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut inner = self
-            .queue
-            .inner
-            .write()
-            .expect("RwLock poisoned: prior task panicked");
-
-        // Try to get a message
-        if let Some(message) = inner.queue.pop_front() {
-            return Poll::Ready(Some(message));
-        }
-
-        // If closed and empty, return None
-        if inner.closed {
-            return Poll::Ready(None);
-        }
-
-        // Register waker and wait
-        inner.wakers.push(cx.waker().clone());
-        Poll::Pending
+        self.queue.poll_recv(cx)
     }
 }
 
@@ -412,9 +425,19 @@ impl<T: Send + Sync> ReplyQueueCloser for NetNotifiedQueue<Result<T, ReplyError>
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
     use crate::{JsonCodec, NetworkAddress, UID};
+    use futures::task::{ArcWake, waker_ref};
+
+    struct WakeCounter(AtomicUsize);
+
+    impl ArcWake for WakeCounter {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 
     fn test_endpoint() -> Endpoint {
         let addr = NetworkAddress::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4500);
@@ -607,5 +630,21 @@ mod tests {
 
         let result = queue.recv().await;
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn repeated_polls_register_waker_once() {
+        let queue: NetNotifiedQueue<String> =
+            NetNotifiedQueue::with_codec(test_endpoint(), JsonCodec);
+        let wake_count = Arc::new(WakeCounter(AtomicUsize::new(0)));
+        let waker = waker_ref(&wake_count);
+        let mut cx = Context::from_waker(&waker);
+        let mut recv = std::pin::pin!(queue.recv());
+
+        assert!(recv.as_mut().poll(&mut cx).is_pending());
+        assert!(recv.as_mut().poll(&mut cx).is_pending());
+        queue.close();
+
+        assert_eq!(wake_count.0.load(Ordering::Relaxed), 1);
     }
 }
