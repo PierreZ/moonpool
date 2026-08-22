@@ -1,10 +1,10 @@
 //! Browser/wasm demo of moonpool: run **one deterministic seed** of a ping-pong
-//! simulation over the real `moonpool-transport` RPC layer, driven by the
-//! **simulated network**, and return the message timeline as JSON so a browser
-//! can animate the exchange and the impact of chaos.
+//! simulation over raw TCP, driven by the **simulated network**, and return the
+//! message timeline as JSON so a browser can animate the exchange and the
+//! impact of chaos.
 //!
 //! The visualization is built **on top of the workload**, not inside it. The
-//! workload ([`PingClient`]) is a plain transport client: it sends ping RPCs and
+//! workload ([`PingClient`]) is a plain TCP client: it sends ping frames and
 //! emits the *standard* observability events any well-instrumented client would
 //! — `client_issued`, `client_acknowledged`, `client_failed` (each carrying a
 //! `seq_id`). It contains zero visualization code.
@@ -13,7 +13,7 @@
 //! [`moonpool_sim::Invariant`] — observes those `tracing` events from the sim's
 //! timeline and reconstructs the message timeline ([`Shot`]s) plus the injected
 //! network faults. Because it keys off the standard event contract, the *same*
-//! recorder visualizes any transport workload that emits it (e.g. the
+//! recorder visualizes any network workload that emits it (e.g. the
 //! hash-chain workload in `moonpool-transport-sim`) with no changes.
 //!
 //! `.enable_chaos([Chaos::Network(ChaosMode::Random)])` turns on seeded network chaos — variable latency,
@@ -21,7 +21,7 @@
 //! at all. Each acknowledged request becomes two [`Shot`] legs (A→B then B→A)
 //! split over the observed round-trip time; a failed request becomes a single
 //! dropped A→B leg. Nothing really waits: logical time is driven by the sim
-//! event queue, which is why the whole transport stack runs in a browser tab.
+//! event queue, which is why the whole simulation runs in a browser tab.
 //!
 //! Public entry points:
 //! - [`run_seed`] — run a seed, get the structured [`RunResult`].
@@ -29,17 +29,14 @@
 //!   under `wasm32`, exported to JavaScript as `runSeed`).
 
 use async_trait::async_trait;
+use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_sim::runner::builder::{ProcessCount, WorkloadCount};
 use moonpool_sim::{
-    Chaos, ChaosMode, Invariant, Process, SIM_FAULT_EVENT_NAME, SimContext, SimulationBuilder,
-    SimulationError, SimulationResult, TimeProvider, TraceQuery, Workload, assert_always,
-    assert_reachable, assert_sometimes,
+    Chaos, ChaosMode, Invariant, NetworkProvider, Process, SIM_FAULT_EVENT_NAME, SimContext,
+    SimulationBuilder, SimulationError, SimulationResult, TcpListenerTrait, TimeProvider,
+    TraceQuery, Workload, assert_always, assert_reachable, assert_sometimes,
 };
-use moonpool_transport::{
-    Endpoint, JsonCodec, NetTransport, NetTransportBuilder, NetworkAddress, ReplyError,
-    RequestEnvelope, UID, get_reply, make_decode_fn, make_encode_fn,
-};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -68,10 +65,8 @@ const NODE_A: u8 = 0;
 /// Node B — the server (ponger).
 const NODE_B: u8 = 1;
 
-/// RPC interface id for the ping service.
-const PING_INTERFACE: u64 = 0xF00D_0001;
-/// Method index for `ping` on [`PING_INTERFACE`].
-const METHOD_PING: u64 = 1;
+/// A raw ping frame contains the sequence and its complement.
+const FRAME_LEN: usize = 16;
 
 // Standard transport-client observability events the recorder consumes. Same
 // names/field as `moonpool-transport-sim`, so the recorder is workload-agnostic.
@@ -79,20 +74,6 @@ const EV_ISSUED: &str = "client_issued";
 const EV_ACKED: &str = "client_acknowledged";
 const EV_FAILED: &str = "client_failed";
 const EV_AMBIGUOUS: &str = "client_ambiguous";
-
-/// A ping request: just a sequence number the server echoes back.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Ping {
-    /// Request sequence number.
-    seq: u64,
-}
-
-/// A pong reply: the echoed sequence number.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Pong {
-    /// Echoed sequence number.
-    seq: u64,
-}
 
 /// How a shot (one leg of a round trip) resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -163,21 +144,23 @@ impl RunResult {
     }
 }
 
-/// UID for the ping method.
-fn ping_method_uid() -> UID {
-    UID::new(PING_INTERFACE, METHOD_PING)
+/// Encode a sequence number with a tiny integrity check for injected bit flips.
+fn encode_frame(seq: u64) -> [u8; FRAME_LEN] {
+    let mut frame = [0; FRAME_LEN];
+    frame[..8].copy_from_slice(&seq.to_be_bytes());
+    frame[8..].copy_from_slice(&(!seq).to_be_bytes());
+    frame
 }
 
-/// Parse a sim IP (which may lack a port) into a [`NetworkAddress`], defaulting
-/// to port 4500 (the sim convention).
-fn parse_sim_addr(ip: &str) -> SimulationResult<NetworkAddress> {
-    let addr_str = if ip.contains(':') {
-        ip.to_string()
-    } else {
-        format!("{ip}:4500")
-    };
-    NetworkAddress::parse(&addr_str)
-        .map_err(|e| SimulationError::InvalidState(format!("bad addr: {e}")))
+/// Decode a frame, rejecting data corruption before it can become a false pong.
+fn decode_frame(frame: &[u8; FRAME_LEN]) -> Option<u64> {
+    let mut seq_bytes = [0; 8];
+    seq_bytes.copy_from_slice(&frame[..8]);
+    let seq = u64::from_be_bytes(seq_bytes);
+
+    let mut check_bytes = [0; 8];
+    check_bytes.copy_from_slice(&frame[8..]);
+    (u64::from_be_bytes(check_bytes) == !seq).then_some(seq)
 }
 
 /// Convert a [`Duration`] of simulated time to whole milliseconds.
@@ -186,12 +169,12 @@ fn duration_ms(d: Duration) -> u64 {
 }
 
 // ============================================================================
-// Workload + server: plain transport actors. No visualization code lives here —
+// Workload + server: plain TCP actors. No visualization code lives here —
 // they only do their job and emit standard observability events.
 // ============================================================================
 
-/// Node B: the ponger. Listens on its sim address, registers a ping handler, and
-/// echoes every request's sequence number until shutdown.
+/// Node B: the ponger. It accepts raw TCP connections and echoes each valid
+/// fixed-size ping frame until shutdown.
 struct PongServer;
 
 #[async_trait]
@@ -201,25 +184,39 @@ impl Process for PongServer {
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let addr = parse_sim_addr(ctx.my_ip())?;
-        let transport = NetTransportBuilder::new(ctx.providers().clone())
-            .local_address(addr)
-            .build_listening()
-            .await
-            .map_err(|e| SimulationError::InvalidState(format!("server transport: {e}")))?;
-
-        let (ping_stream, _) = NetTransport::register_handler_at::<Ping, Pong>(
-            &transport,
-            PING_INTERFACE,
-            METHOD_PING,
-        );
+        let listener = ctx.network().bind(ctx.my_ip()).await?;
 
         let shutdown = ctx.shutdown().clone();
         loop {
+            let accepted = moonpool_sim::select! {
+                biased;
+                result = listener.accept() => result,
+                () = shutdown.cancelled() => return Ok(()),
+            };
+            let (mut stream, peer) = match accepted {
+                Ok(connection) => connection,
+                Err(error) => {
+                    tracing::warn!(%error, "accept failed under network chaos");
+                    continue;
+                }
+            };
+
+            let exchange = async {
+                let mut frame = [0; FRAME_LEN];
+                stream.read_exact(&mut frame).await?;
+                let Some(seq) = decode_frame(&frame) else {
+                    tracing::warn!(%peer, "discarding corrupt ping frame");
+                    return Ok::<(), std::io::Error>(());
+                };
+                stream.write_all(&encode_frame(seq)).await
+            };
+
             moonpool_sim::select! {
                 biased;
-                Some((req, reply)) = ping_stream.recv() => {
-                    reply.send(Pong { seq: req.seq });
+                result = exchange => {
+                    if let Err(error) = result {
+                        tracing::warn!(%peer, %error, "ping connection failed under network chaos");
+                    }
                 }
                 () = shutdown.cancelled() => return Ok(()),
             }
@@ -227,7 +224,24 @@ impl Process for PongServer {
     }
 }
 
-/// Node A: the pinger. Sends `REQUESTS` ping RPCs to the server through the
+/// Send one integrity-checked ping over a fresh simulated TCP connection.
+async fn exchange_ping(ctx: &SimContext, server_ip: &str, seq: u64) -> SimulationResult<u64> {
+    let mut stream = ctx.network().connect(server_ip).await?;
+    stream
+        .write_all(&encode_frame(seq))
+        .await
+        .map_err(|error| SimulationError::InvalidState(format!("write ping: {error}")))?;
+
+    let mut response = [0; FRAME_LEN];
+    stream
+        .read_exact(&mut response)
+        .await
+        .map_err(|error| SimulationError::InvalidState(format!("read pong: {error}")))?;
+    decode_frame(&response)
+        .ok_or_else(|| SimulationError::InvalidState("corrupt pong frame".into()))
+}
+
+/// Node A: the pinger. Sends `REQUESTS` raw pings to the server through the
 /// chaotic sim network and emits `client_issued` / `client_acknowledged` /
 /// `client_failed` for each — the standard observability contract the recorder
 /// reconstructs the timeline from. It has no knowledge of the visualization.
@@ -245,17 +259,6 @@ impl Workload for PingClient {
             return Ok(());
         };
 
-        let my_addr = parse_sim_addr(ctx.my_ip())?;
-        let transport = NetTransportBuilder::new(ctx.providers().clone())
-            .local_address(my_addr)
-            .build_listening()
-            .await
-            .map_err(|e| SimulationError::InvalidState(format!("client transport: {e}")))?;
-
-        let endpoint = Endpoint::new(parse_sim_addr(&server_ip)?, ping_method_uid());
-        let encode = make_encode_fn::<RequestEnvelope<Ping>, _>(JsonCodec);
-        let decode = make_decode_fn::<Result<Pong, ReplyError>, _>(JsonCodec);
-
         let time = ctx.time().clone();
         let shutdown = ctx.shutdown().clone();
 
@@ -267,25 +270,16 @@ impl Workload for PingClient {
             let send = time.now();
             tracing::info!(seq_id = seq, "client_issued");
 
-            // Reliable RPC, abandoned if it doesn't return within the deadline.
-            let result: Option<Result<Pong, ReplyError>> = match get_reply(
-                &*transport,
-                &endpoint,
-                Ping { seq },
-                &encode,
-                decode.clone(),
-            ) {
-                Ok(fut) => moonpool_sim::select! {
-                    biased;
-                    r = fut => Some(r),
-                    () = shutdown.cancelled() => None,
-                    _ = time.sleep(Duration::from_millis(TIMEOUT_MS)) => None,
-                },
-                Err(_) => None,
+            // The whole TCP exchange is abandoned if it misses the deadline.
+            let result = moonpool_sim::select! {
+                biased;
+                result = exchange_ping(ctx, &server_ip, seq) => Some(result),
+                () = shutdown.cancelled() => None,
+                _ = time.sleep(Duration::from_millis(TIMEOUT_MS)) => None,
             };
 
-            if let Some(Ok(pong)) = result {
-                assert_always!(pong.seq == seq, "pong echoes the ping it answered");
+            if let Some(Ok(pong_seq)) = result {
+                assert_always!(pong_seq == seq, "pong echoes the ping it answered");
                 let rtt_ms = duration_ms(time.now().saturating_sub(send));
                 assert_sometimes!(rtt_ms >= SLOW_RTT_MS, "a round trip is slowed by chaos");
                 tracing::info!(seq_id = seq, "client_acknowledged");
@@ -457,7 +451,7 @@ fn build_result(seed: u64, data: &RecorderData) -> RunResult {
     }
 }
 
-/// Run one deterministic seed of the ping-pong transport simulation and return
+/// Run one deterministic seed of the ping-pong TCP simulation and return
 /// its full timeline. The same seed always produces the same [`RunResult`].
 #[must_use]
 pub fn run_seed(seed: u64) -> RunResult {
@@ -503,7 +497,16 @@ pub fn run_seed_wasm(seed: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{REQUESTS, run_seed, run_seed_json};
+    use super::{REQUESTS, decode_frame, encode_frame, run_seed, run_seed_json};
+
+    #[test]
+    fn frame_roundtrips_and_detects_corruption() {
+        let mut frame = encode_frame(42);
+        assert_eq!(decode_frame(&frame), Some(42));
+
+        frame[3] ^= 1;
+        assert_eq!(decode_frame(&frame), None);
+    }
 
     #[test]
     fn runs_and_is_reproducible() {

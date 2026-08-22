@@ -1,5 +1,5 @@
 //! Native smoke runner: `cargo run -p moonpool-wasm-demo [seed]` runs one seed
-//! of the ping-pong transport simulation and prints its message timeline, so the
+//! of the ping-pong TCP simulation and prints its message timeline, so the
 //! workload is verified on native hardware before any wasm build. The browser
 //! calls the exact same [`moonpool_wasm_demo::run_seed`] under the hood.
 

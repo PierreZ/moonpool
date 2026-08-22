@@ -42,8 +42,8 @@
 </head>
 <body>
   <h1>moonpool <small>· deterministic ping-pong, in your browser tab</small></h1>
-  <p class="sub">Two nodes exchange ping/pong RPCs over moonpool's <b>real transport stack</b>,
-  driven by a <b>simulated network</b>. The whole simulation — server, client, RPC, seeded
+  <p class="sub">Two nodes exchange ping/pong frames over <b>raw TCP</b>,
+  driven by a <b>simulated network</b>. The whole simulation — server, client, protocol, seeded
   chaos — runs as wasm. Same seed ⇒ same run, every time.</p>
 
   <div class="panel">

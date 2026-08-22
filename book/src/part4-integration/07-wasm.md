@@ -69,8 +69,8 @@ build:
 
 ```toml
 [dependencies]
-moonpool-sim       = { version = "0.8", default-features = false }
-moonpool-transport = { version = "0.8", default-features = false }
+moonpool-sim = { version = "0.8", default-features = false }
+futures = "0.3"
 ```
 
 `default-features = false` drops the explorer and the production tokio providers
@@ -84,8 +84,8 @@ the simulation once, run it in both places.
 
 The repository ships one:
 [`moonpool-wasm-demo`](https://github.com/PierreZ/moonpool/tree/main/moonpool-wasm-demo).
-It runs a single seed of two nodes trading ping/pong RPCs over the **real
-transport stack**, driven by the **simulated** network, and animates the result.
+It runs a single seed of two nodes trading integrity-checked ping/pong frames
+over raw TCP, driven by the **simulated** network, and animates the result.
 The client and server are ordinary `Process` and `Workload` code with no browser
 awareness. `.enable_chaos([Chaos::Network(ChaosMode::Random)])` injects seeded latency and connection drops, so
 some round trips come back slow and some never come back at all. A generic
