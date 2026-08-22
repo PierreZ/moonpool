@@ -40,4 +40,4 @@ In simulation contexts (Process/Workload), use `ctx.time()`, `ctx.network()`, `c
 
 ## Source
 
-Provider traits defined in `moonpool-core/src/providers/`.
+Provider traits defined in `crates/moonpool-core/src/providers/`.

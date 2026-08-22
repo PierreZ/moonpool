@@ -83,7 +83,7 @@ the simulation once, run it in both places.
 ## A worked example
 
 The repository ships one:
-[`moonpool-wasm-demo`](https://github.com/PierreZ/moonpool/tree/main/moonpool-wasm-demo).
+[`crates/moonpool-wasm-demo`](https://github.com/PierreZ/moonpool/tree/main/crates/moonpool-wasm-demo).
 It runs a single seed of two nodes trading integrity-checked ping/pong frames
 over raw TCP, driven by the **simulated** network, and animates the result.
 The client and server are ordinary `Process` and `Workload` code with no browser

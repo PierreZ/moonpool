@@ -55,7 +55,7 @@ cd web && python3 -m http.server 8917
 #   then open http://localhost:8917/
 ```
 
-> Run step 2 from the `moonpool-wasm-demo/` directory (so `web/pkg` resolves),
+> Run step 2 from the `crates/moonpool-wasm-demo/` directory (so `web/pkg` resolves),
 > or pass absolute paths. `web/pkg/` is a build artifact and is gitignored.
 
 ### URL parameters

@@ -78,9 +78,9 @@ if !enabled.iter().any(|&i| i < NUM_MOVE_OPS) {
 }
 ```
 
-Reference implementation: `moonpool-sim-examples/src/dungeon.rs`
+Reference implementation: `crates/moonpool-sim-examples/src/dungeon.rs`
 (`swarm_enabled_actions`, `pick_action_index`). End-to-end test:
-`moonpool-sim/tests/swarm_op_alphabet.rs`.
+`crates/moonpool-sim/tests/swarm_op_alphabet.rs`.
 
 ## Book Chapters
 

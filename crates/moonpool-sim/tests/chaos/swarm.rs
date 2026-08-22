@@ -5,7 +5,7 @@
 //! many seeds: every seed builds its own per-seed fault subset and the
 //! orchestrator completes. The per-seed subset logic itself (which families are
 //! enabled, determinism, the all-off case) is unit-tested in
-//! `moonpool-sim/src/network/config.rs`.
+//! `crates/moonpool-sim/src/network/config.rs`.
 //!
 //! The workload deliberately does not open connections. Under some swarm subsets
 //! `ConnectFailureMode::Probabilistic` makes `connect()` hang forever — correct

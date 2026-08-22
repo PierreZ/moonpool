@@ -69,23 +69,26 @@ Types: `fix` (bugfix), `feat` (new feature), `build`, `chore`, `ci`, `docs`, `st
 
 ## Crate Architecture
 ```
-moonpool/                    - Facade crate; features: sim/tokio/hyper.
-moonpool-core/               - Provider traits (Time, Task, Network, Random, Storage) + core types.
-                               Granular tokio features: tokio-task/-time/-net/-fs/-random
-                               (umbrella `tokio-providers`). wasm-clean with all off.
-moonpool-assertions/         - Antithesis-style assertion accounting (pure std, ZERO deps, wasm-able).
-                               Heap table by default; explorer overlays MAP_SHARED + a discovery hook.
-moonpool-sim/                - Simulation runtime, chaos testing, buggify, assertions wiring.
-                               feature `exploration` (default ON) gates moonpool-explorer; without it
-                               the sim compiles to wasm32-unknown-unknown.
-moonpool-hyper/              - hyper 1.x integration: runtime adapters (HyperExecutor/HyperTimer),
-                               HyperIo, TowerToHyperService, ReconnectingChannel, H2Server. Generic
-                               over `P: Providers`; features `client`/`server` (both default on).
-                               Facade exposes it as `moonpool::hyper` behind feature `hyper`.
-moonpool-explorer/           - Frontier exploration controller (libc/fork/mmap; never wasm).
-                               Recipes + bounded worker pool; depends on moonpool-assertions;
-                               optional dep of moonpool-sim.
-xtask/                       - Cargo xtask automation (simulation runner)
+crates/
+├── moonpool/              - Facade crate; features: sim/tokio/hyper.
+├── moonpool-core/         - Provider traits (Time, Task, Network, Random, Storage) + core types.
+│                            Granular tokio features: tokio-task/-time/-net/-fs/-random
+│                            (umbrella `tokio-providers`). wasm-clean with all off.
+├── moonpool-assertions/   - Antithesis-style assertion accounting (pure std, ZERO deps, wasm-able).
+│                            Heap table by default; explorer overlays MAP_SHARED + a discovery hook.
+├── moonpool-sim/          - Simulation runtime, chaos testing, buggify, assertions wiring.
+│                            feature `exploration` (default ON) gates moonpool-explorer; without it
+│                            the sim compiles to wasm32-unknown-unknown.
+├── moonpool-hyper/        - hyper 1.x integration: runtime adapters (HyperExecutor/HyperTimer),
+│                            HyperIo, TowerToHyperService, ReconnectingChannel, H2Server. Generic
+│                            over `P: Providers`; features `client`/`server` (both default on).
+│                            Facade exposes it as `moonpool::hyper` behind feature `hyper`.
+├── moonpool-explorer/     - Frontier exploration controller (libc/fork/mmap; never wasm).
+│                            Recipes + bounded worker pool; depends on moonpool-assertions;
+│                            optional dep of moonpool-sim.
+├── moonpool-sim-examples/ - Runnable simulation workloads discovered by xtask.
+├── moonpool-wasm-demo/    - Browser demo embedded in the book.
+└── xtask/                 - Cargo xtask automation (simulation runner)
 ```
 
 **Dispatch**: providers stay **static-generic** (traits aren't object-safe: Clone supertrait,
@@ -227,4 +230,4 @@ fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
 - **Sim time** is stamped by the layer from its internal clock (the orchestrator pushes `obs.set_sim_time_ms(...)` after each `sim.step()`). Do NOT include a `time_ms` field on the emit.
 - **Invariants** run from the runner loop (not tracing dispatch); use the assertion macros, not raw `panic!`, and treat `observe(...)` as read-only.
 - **Production**: any tracing subscriber (fmt, OpenTelemetry) sees the same emissions as structured events; cross-validation in sim uses the very same traces.
-- **Canonical example**: `moonpool-sim/tests/leader_election.rs` (split-brain detection).
+- **Canonical example**: `crates/moonpool-sim/tests/leader_election.rs` (split-brain detection).

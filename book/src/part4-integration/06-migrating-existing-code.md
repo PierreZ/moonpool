@@ -115,7 +115,7 @@ synchronous calls like `Instant::now()` slip through type checking and need eyes
 
 Because `TokioProviders` is the production backend, "did I change behavior?" has a
 concrete answer. Moonpool ships a conformance suite under
-[`moonpool-sim/tests/conformance/`](https://github.com/PierreZ/moonpool/tree/main/moonpool-sim/tests/conformance)
+[`crates/moonpool-sim/tests/conformance/`](https://github.com/PierreZ/moonpool/tree/main/crates/moonpool-sim/tests/conformance)
 that runs one generic contract per provider against `TokioProviders` on a real
 runtime. It asserts the properties your migrated code depends on: a sleep advances
 the clock by at least its duration, a timeout over a stalled future elapses, a

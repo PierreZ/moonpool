@@ -48,7 +48,7 @@ moonpool = { version = "0.8", default-features = false, features = ["tokio"] }
 That pulls the provider contract and `TokioProviders`, including real TCP and
 filesystem implementations, without `moonpool-sim`, `moonpool-explorer`, or
 `libc` fork machinery. Add `hyper` when the application uses the HTTP/gRPC
-integration. See [`moonpool/examples/retrying_worker.rs`](moonpool/examples/retrying_worker.rs)
+integration. See [`crates/moonpool/examples/retrying_worker.rs`](crates/moonpool/examples/retrying_worker.rs)
 for a worker that runs on Tokio in `main` and is driven through the simulator by
 its own `#[test]`, and the "Using Providers in Production" chapter of the book.
 

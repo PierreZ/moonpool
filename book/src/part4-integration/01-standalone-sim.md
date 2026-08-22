@@ -28,7 +28,7 @@ This isn't an accident. We designed the provider traits to match tokio's interfa
 
 ## Proof: Real HTTP Over Simulated TCP
 
-The hyper integration test in `moonpool-sim/tests/hyper_http.rs` demonstrates this concretely. Unmodified hyper HTTP/1.1 running over simulated TCP with chaos injection:
+The hyper integration test in `crates/moonpool-sim/tests/hyper_http.rs` demonstrates this concretely. Unmodified hyper HTTP/1.1 running over simulated TCP with chaos injection:
 
 ```rust
 struct HyperServer;

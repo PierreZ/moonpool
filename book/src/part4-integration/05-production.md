@@ -36,7 +36,7 @@ async fn main() {
 ```
 
 The complete, runnable version lives in
-[`moonpool/examples/retrying_worker.rs`](https://github.com/PierreZ/moonpool/blob/main/moonpool/examples/retrying_worker.rs).
+[`crates/moonpool/examples/retrying_worker.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool/examples/retrying_worker.rs).
 Its `main` runs on Tokio; its `#[test]` drives the same `fetch_with_retry`
 through `SimulationBuilder` across 50 seeds. One function, two worlds, verified
 by `cargo test --example retrying_worker`.

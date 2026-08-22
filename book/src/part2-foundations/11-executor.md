@@ -145,9 +145,9 @@ so a forked child never inherits a held lock.
 
 ## Verifying it yourself
 
-The executor's contracts are enforced by `moonpool-sim/tests/executor.rs`
+The executor's contracts are enforced by `crates/moonpool-sim/tests/executor.rs`
 (join/abort/detach/panic/kill-on-drop, same-seed replay, cross-seed
-diversity) and `moonpool-sim/tests/determinism.rs`, an end-to-end tripwire:
+diversity) and `crates/moonpool-sim/tests/determinism.rs`, an end-to-end tripwire:
 two full `SimulationBuilder` runs of racing workloads on the same seed must
 produce byte-identical execution traces. If any component, executor,
 `select!`, providers, ever consults an unseeded randomness source, that test

@@ -28,34 +28,33 @@ features_always_increment_minor = true
 # Package-specific configurations (ordered by dependency hierarchy: bottom → top)
 [[package]]
 name = "moonpool-core"
-changelog_path = "moonpool-core/CHANGELOG.md"
+changelog_path = "crates/moonpool-core/CHANGELOG.md"
 version_group = "moonpool"
 
 # hyper 1.x integration over the provider traits; depends only on moonpool-core.
 [[package]]
 name = "moonpool-hyper"
-changelog_path = "moonpool-hyper/CHANGELOG.md"
 version_group = "moonpool"
 
 # Leaf accounting crate; moonpool-explorer depends on it, so it must publish first.
 [[package]]
 name = "moonpool-assertions"
-changelog_path = "moonpool-assertions/CHANGELOG.md"
+changelog_path = "crates/moonpool-assertions/CHANGELOG.md"
 version_group = "moonpool"
 
 [[package]]
 name = "moonpool-explorer"
-changelog_path = "moonpool-explorer/CHANGELOG.md"
+changelog_path = "crates/moonpool-explorer/CHANGELOG.md"
 version_group = "moonpool"
 
 [[package]]
 name = "moonpool-sim"
-changelog_path = "moonpool-sim/CHANGELOG.md"
+changelog_path = "crates/moonpool-sim/CHANGELOG.md"
 version_group = "moonpool"
 
 [[package]]
 name = "moonpool"
-changelog_path = "moonpool/CHANGELOG.md"
+changelog_path = "crates/moonpool/CHANGELOG.md"
 version_group = "moonpool"
 
 [[package]]
