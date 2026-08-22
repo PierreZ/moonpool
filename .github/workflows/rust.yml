@@ -60,11 +60,18 @@ jobs:
         run: |
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-assertions
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-sim --no-default-features
+          nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-wasm-demo
       - name: Build without any rustflags (no tokio_unstable required)
         run: |
           # Issue #151 acceptance: a consumer on stable with no .cargo/config.toml
           # rustflags must be able to build every published crate.
-          RUSTFLAGS="" nix develop --command cargo check -p moonpool-core -p moonpool-sim
+          RUSTFLAGS="" nix develop --command cargo check \
+            -p moonpool-assertions \
+            -p moonpool-core \
+            -p moonpool-explorer \
+            -p moonpool-hyper \
+            -p moonpool-sim \
+            -p moonpool
       - name: Lean production dependency tree excludes sim/explorer
         run: |
           tree=$(nix develop --command cargo tree -p moonpool --no-default-features --features tokio -e no-dev)
@@ -105,6 +112,7 @@ jobs:
           - dungeon-explore
           - frontier-explore
           - axum-web
+          - topology
           - tonic-grpc
     steps:
       - uses: actions/checkout@v7

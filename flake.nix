@@ -1,5 +1,5 @@
 {
-  description = "Moonpool - Distributed Systems Toolbox";
+  description = "Moonpool - deterministic simulation testing for distributed systems";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -73,7 +73,9 @@
             # Set environment variables
             export RUST_BACKTRACE=1
             export RUST_LOG=debug
-            export RUSTC_WRAPPER="$PWD/scripts/sancov-rustc.sh"
+            # Use the flake source path, not $PWD: `nix develop` is valid from
+            # any workspace subdirectory.
+            export RUSTC_WRAPPER="${self}/scripts/sancov-rustc.sh"
             
             # Inform about available tools
             echo "Available tools:"

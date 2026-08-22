@@ -7,13 +7,14 @@
 #
 # Usage:
 #   # Instrument example crate only:
-#   SANCOV_CRATES=moonpool_explorer_examples cargo run --bin maze_explore
+#   SANCOV_CRATES=moonpool_sim_examples \
+#     cargo run -p moonpool-sim-examples --bin sim-maze-explore
 #
 #   # Instrument app + framework libraries:
 #   SANCOV_CRATES=my_app,moonpool cargo run --bin my_app
 #
 #   # No instrumentation (pass-through):
-#   cargo run --bin maze_explore
+#   cargo run -p moonpool-sim-examples --bin sim-maze-explore
 
 set -euo pipefail
 
