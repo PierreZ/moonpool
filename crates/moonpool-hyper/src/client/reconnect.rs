@@ -1,10 +1,13 @@
 //! A channel that owns its connection and rebuilds it after a loss.
 
 use std::error::Error;
-use std::sync::{Arc, Mutex};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
+use futures::task::AtomicWaker;
 use hyper::body::{Body, Incoming};
 use hyper::rt::bounds::Http2ClientConnExec;
 use hyper::{Request, Response};
@@ -33,13 +36,16 @@ type ChannelIo<P> = HyperIo<<<P as Providers>::Network as NetworkProvider>::TcpS
 ///
 /// # Readiness and errors
 ///
-/// `poll_ready` drives everything. It returns `Ready(Ok)` only with a live
-/// connection, reserving a handle that the following `call` consumes;
-/// `Pending` while a connection is being established, waking parked callers in
-/// the order they parked; and `Ready(Err)` once per failed attempt, after which
-/// the next poll starts a fresh attempt. The channel never retries a *request*
-/// on the caller's behalf, which is the correct gRPC semantic: only the caller
-/// knows whether its RPC is idempotent.
+/// `poll_ready` drives everything. With a live connection it reserves a handle
+/// that the following `call` consumes. While a connection is being established
+/// it returns `Pending`, waking parked callers in the order they parked. A
+/// failed attempt is also reserved for one caller: readiness succeeds and the
+/// following `call` returns that error. This follows tower's rule that a
+/// readiness error is terminal for that service instance while still allowing
+/// the shared channel to reconnect. `Ready(Err)` is reserved for explicit
+/// shutdown and an exhausted connection-failure limit. The channel never
+/// retries a *request* on the caller's behalf, which is the correct gRPC
+/// semantic: only the caller knows whether its RPC is idempotent.
 ///
 /// # Reconnect accounting
 ///
@@ -63,16 +69,25 @@ type ChannelIo<P> = HyperIo<<<P as Providers>::Network as NetworkProvider>::TcpS
 /// drives the connection and exits when the connection ends. A channel nobody
 /// polls starts nothing, and with the default `keep_alive` of `None` an
 /// established connection generates no timer traffic of its own, so a quiesced
-/// simulation stays quiesced. Dropping every clone does not close a live
-/// connection: the task keeps driving it (keepalive pings included, when
-/// configured) until the peer closes it or the process goes away.
+/// simulation stays quiesced. Call [`close`](Self::close) to stop the shared
+/// lifecycle explicitly. Closing is idempotent, affects every clone, and
+/// cancels backoff, connection attempts, h2 keepalive work, and the live
+/// connection driver.
 pub struct ReconnectingChannel<P: Providers, B> {
     shared: Arc<Shared<P, B>>,
 
-    /// Handle reserved by this clone's last successful `poll_ready`, consumed
+    /// Outcome reserved by this clone's last successful `poll_ready`, consumed
     /// by the next `call`. Per clone, not shared: tower's readiness contract is
     /// between one service handle and one request.
-    ready: Option<H2Channel<B>>,
+    ready: Option<Reservation<B>>,
+}
+
+/// The outcome reserved by one clone's successful readiness poll.
+enum Reservation<B> {
+    /// A live h2 sender for the next request.
+    Channel(H2Channel<B>),
+    /// One failed connection attempt, surfaced by the next call.
+    Failure(ChannelError),
 }
 
 // Manual: the derive would demand `B: Clone`. A clone shares the connection
@@ -90,6 +105,7 @@ impl<P: Providers, B> std::fmt::Debug for ReconnectingChannel<P, B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReconnectingChannel")
             .field("addr", &self.shared.addr)
+            .field("closed", &self.shared.is_closed())
             .field("reserved", &self.ready.is_some())
             .finish_non_exhaustive()
     }
@@ -101,6 +117,13 @@ struct Shared<P: Providers, B> {
     addr: String,
     config: ChannelConfig,
     inner: Mutex<Inner<B>>,
+    closed: AtomicBool,
+    close_waiters: Mutex<Vec<Weak<CloseWaiter>>>,
+}
+
+/// One lifecycle task's registration for explicit shutdown.
+struct CloseWaiter {
+    waker: AtomicWaker,
 }
 
 impl<P: Providers, B> Shared<P, B> {
@@ -108,6 +131,59 @@ impl<P: Providers, B> Shared<P, B> {
         self.inner
             .lock()
             .expect("Mutex poisoned: prior task panicked")
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    fn close(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let parked = {
+            let mut inner = self.lock();
+            inner.conn = Conn::Closed;
+            inner.take_wakers()
+        };
+        let lifecycle_waiters = {
+            let mut waiters = self
+                .close_waiters
+                .lock()
+                .expect("Mutex poisoned: prior task panicked");
+            std::mem::take(&mut *waiters)
+        };
+        for waiter in lifecycle_waiters {
+            if let Some(waiter) = waiter.upgrade() {
+                waiter.waker.wake();
+            }
+        }
+        wake_all(parked);
+    }
+
+    fn poll_closed(&self, waiter: &Arc<CloseWaiter>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.is_closed() {
+            return Poll::Ready(());
+        }
+
+        waiter.waker.register(cx.waker());
+        let mut waiters = self
+            .close_waiters
+            .lock()
+            .expect("Mutex poisoned: prior task panicked");
+        if self.is_closed() {
+            return Poll::Ready(());
+        }
+        waiters.retain(|registered| registered.strong_count() > 0);
+        let registration = Arc::downgrade(waiter);
+        if !waiters
+            .iter()
+            .any(|registered| registered.ptr_eq(&registration))
+        {
+            waiters.push(registration);
+        }
+        Poll::Pending
     }
 }
 
@@ -129,28 +205,43 @@ where
                 addr: addr.into(),
                 config,
                 inner: Mutex::new(Inner::new()),
+                closed: AtomicBool::new(false),
+                close_waiters: Mutex::new(Vec::new()),
             }),
             ready: None,
         }
     }
 
     fn poll_connection(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), ChannelError>> {
-        // Readiness once granted is never taken back. Tower forbids returning
-        // Pending after a Ready(Ok), and middleware that polls again before
-        // calling (a balancer picking among ready services, say) would see
-        // exactly that if a connection died in between. So a clone holding a
-        // reservation stays ready, and touches no shared state: it starts no
-        // attempt and consumes no stored error. Calling through a reservation
-        // whose connection died fails fast in the request future instead,
-        // which the contract does allow.
+        if self.shared.is_closed() {
+            self.ready = None;
+            return Poll::Ready(Err(ChannelError::Closed));
+        }
+
+        // Apart from the explicit terminal close handled above, readiness once
+        // granted is never taken back. Tower forbids returning Pending after a
+        // Ready(Ok), and middleware that polls again before calling (a balancer
+        // picking among ready services, say) would see exactly that if a
+        // connection died in between. So a clone holding a reservation stays
+        // ready, and touches no shared state: it starts no attempt and consumes
+        // no stored error. Calling through a reservation whose connection died
+        // fails fast in the request future instead, which the contract allows.
         if self.ready.is_some() {
+            if matches!(self.ready, Some(Reservation::Failure(_))) {
+                return Poll::Ready(Ok(()));
+            }
+
             let inner = self.shared.lock();
+            if self.shared.is_closed() || matches!(inner.conn, Conn::Closed) {
+                self.ready = None;
+                return Poll::Ready(Err(ChannelError::Closed));
+            }
             if let Conn::Connected(channel) = &inner.conn
                 && !channel.is_closed()
             {
                 // A live connection exists, so hand the caller that one rather
                 // than a reservation that may already be stale.
-                self.ready = Some(channel.clone());
+                self.ready = Some(Reservation::Channel(channel.clone()));
             }
             return Poll::Ready(Ok(()));
         }
@@ -160,6 +251,11 @@ where
         // while the task provider takes its own.
         let start_attempt = {
             let mut inner = self.shared.lock();
+
+            if self.shared.is_closed() || matches!(inner.conn, Conn::Closed) {
+                self.ready = None;
+                return Poll::Ready(Err(ChannelError::Closed));
+            }
 
             if matches!(&inner.conn, Conn::Connected(c) if c.is_closed()) {
                 // A connection that died since the last poll is demoted here
@@ -171,12 +267,13 @@ where
                 inner.conn = Conn::Disconnected;
             } else if let Conn::Connected(channel) = &inner.conn {
                 // Reserve a handle for the call that follows.
-                self.ready = Some(channel.clone());
+                self.ready = Some(Reservation::Channel(channel.clone()));
                 return Poll::Ready(Ok(()));
             }
 
             if let Some(error) = inner.take_failure() {
-                return Poll::Ready(Err(error));
+                self.ready = Some(Reservation::Failure(error));
+                return Poll::Ready(Ok(()));
             }
 
             let mut start_attempt = false;
@@ -201,6 +298,9 @@ where
         };
 
         if start_attempt {
+            if self.shared.is_closed() {
+                return Poll::Ready(Err(ChannelError::Closed));
+            }
             let shared = Arc::clone(&self.shared);
             self.shared
                 .providers
@@ -227,6 +327,23 @@ impl<P: Providers, B> ReconnectingChannel<P, B> {
     pub fn is_connected(&self) -> bool {
         matches!(&self.shared.lock().conn, Conn::Connected(c) if !c.is_closed())
     }
+
+    /// Shut down this channel and every clone of it.
+    ///
+    /// The first call wakes pending readiness callers and cancels any backoff,
+    /// connection attempt, handshake, live h2 connection, and keepalive work.
+    /// In-flight request futures, pending and future readiness checks, and
+    /// future calls fail with [`ChannelError::Closed`]. Repeated calls are
+    /// harmless.
+    pub fn close(&self) {
+        self.shared.close();
+    }
+
+    /// Whether this channel has been explicitly shut down.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.shared.is_closed()
+    }
 }
 
 impl<P, B> tower_service::Service<Request<B>> for ReconnectingChannel<P, B>
@@ -246,11 +363,36 @@ where
     }
 
     fn call(&mut self, req: Request<B>) -> Self::Future {
-        // The reservation from poll_ready is consumed here, and the request
-        // then lives or dies with that handle: a reconnection underneath does
-        // not rescue it, and its failure does not disturb the channel state.
+        if self.shared.is_closed() {
+            self.ready = None;
+            return ResponseFuture::failed(ChannelError::Closed);
+        }
+
+        // The reservation from poll_ready is consumed here. A reconnection
+        // underneath does not rescue the request, and its failure does not
+        // disturb channel state; explicit shutdown is the one shared event the
+        // response future also observes.
         match self.ready.take() {
-            Some(mut channel) => tower_service::Service::call(&mut channel, req),
+            Some(Reservation::Channel(mut channel)) => {
+                let response = tower_service::Service::call(&mut channel, req);
+                let shared = Arc::clone(&self.shared);
+                ResponseFuture::new(async move {
+                    match run_until_closed(shared, response).await {
+                        Some(result) => result,
+                        None => Err(ChannelError::Closed),
+                    }
+                })
+            }
+            Some(Reservation::Failure(error)) => {
+                let shared = Arc::clone(&self.shared);
+                ResponseFuture::new(async move {
+                    let failure = std::future::ready(Err(error));
+                    match run_until_closed(shared, failure).await {
+                        Some(result) => result,
+                        None => Err(ChannelError::Closed),
+                    }
+                })
+            }
             None => ResponseFuture::failed(ChannelError::NotReady),
         }
     }
@@ -259,6 +401,36 @@ where
 /// Wait out any backoff, connect, publish the connection, then drive it until
 /// it ends. One provider task per attempt and its connection.
 async fn connect_and_serve<P, B>(shared: Arc<Shared<P, B>>)
+where
+    P: Providers,
+    B: Body + Send + Unpin + 'static,
+    B::Data: Send,
+    B::Error: Into<Box<dyn Error + Send + Sync>>,
+    HyperExecutor<P::Task>: Http2ClientConnExec<B, ChannelIo<P>>,
+{
+    let lifecycle = connection_lifecycle(Arc::clone(&shared));
+    let _ = run_until_closed(shared, lifecycle).await;
+}
+
+/// Run one lifecycle until it completes or explicit channel shutdown wins.
+async fn run_until_closed<P, B, F>(shared: Arc<Shared<P, B>>, future: F) -> Option<F::Output>
+where
+    P: Providers,
+    F: Future,
+{
+    let waiter = Arc::new(CloseWaiter {
+        waker: AtomicWaker::new(),
+    });
+    let closed = futures::future::poll_fn(|cx| shared.poll_closed(&waiter, cx));
+    futures::pin_mut!(closed, future);
+    match futures::future::select(closed, future).await {
+        futures::future::Either::Left((_closed, _future)) => None,
+        futures::future::Either::Right((output, _closed)) => Some(output),
+    }
+}
+
+/// The backoff, connect, handshake, and live-driver work for one attempt.
+async fn connection_lifecycle<P, B>(shared: Arc<Shared<P, B>>)
 where
     P: Providers,
     B: Body + Send + Unpin + 'static,
@@ -316,6 +488,9 @@ where
     // below, once the connection's lifetime is known.
     let (my_generation, parked) = {
         let mut inner = shared.lock();
+        if shared.is_closed() || !matches!(inner.conn, Conn::Connecting) {
+            return;
+        }
         inner.generation = inner.generation.wrapping_add(1);
         inner.conn = Conn::Connected(H2Channel::new(sender));
         (inner.generation, inner.take_wakers())
@@ -490,6 +665,9 @@ fn record_failure<P: Providers, B>(
     let detail = error.to_string();
     let (delay, parked) = {
         let mut inner = shared.lock();
+        if shared.is_closed() || matches!(inner.conn, Conn::Closed) {
+            return;
+        }
         inner.failures = inner.failures.saturating_add(1);
         inner.conn = Conn::Failed(error);
         let delay = backoff_delay(inner.failures, &shared.config);
@@ -527,11 +705,12 @@ mod tests {
     use bytes::Bytes;
     use http_body_util::Full;
     use moonpool_core::TokioProviders;
+    use moonpool_sim::{SimProviders, SimWorld};
     use tower_service::Service as _;
 
     use super::{
         AttemptGuard, ChannelConfig, Conn, H2Channel, Inner, Providers as _, ReconnectingChannel,
-        Shared, backoff_delay, next_failures,
+        Reservation, Shared, backoff_delay, next_failures, run_until_closed,
     };
     use crate::ChannelError;
 
@@ -703,8 +882,10 @@ mod tests {
                 addr: "10.0.0.9:50051".to_owned(),
                 config: ChannelConfig::default(),
                 inner: Mutex::new(inner),
+                closed: AtomicBool::new(false),
+                close_waiters: Mutex::new(Vec::new()),
             }),
-            ready: reservation,
+            ready: reservation.map(Reservation::Channel),
         }
     }
 
@@ -747,7 +928,7 @@ mod tests {
         assert!(matches!(channel.poll_ready(&mut cx), Poll::Ready(Ok(()))));
         let reserved = channel.ready.as_ref().expect("reservation must survive");
         assert!(
-            !reserved.is_closed(),
+            matches!(reserved, Reservation::Channel(channel) if !channel.is_closed()),
             "a live connection must replace a dead reservation"
         );
     }
@@ -776,16 +957,93 @@ mod tests {
         assert_eq!(inner.parked_count(), 0, "a ready caller must not park");
     }
 
-    #[test]
-    fn a_failed_attempt_is_reported_once_and_consumed() {
+    #[tokio::test]
+    async fn a_failed_attempt_is_reserved_until_call() {
         let mut channel = channel_with(Conn::Failed(ChannelError::NotReady), None);
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
 
+        assert!(matches!(channel.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert!(matches!(channel.shared.lock().conn, Conn::Disconnected));
+        assert!(matches!(
+            channel.ready.as_ref(),
+            Some(Reservation::Failure(ChannelError::NotReady))
+        ));
+
+        // Re-polling readiness cannot consume the reserved outcome or start a
+        // new attempt before tower submits the corresponding request.
+        assert!(matches!(channel.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert!(matches!(channel.shared.lock().conn, Conn::Disconnected));
+
+        let request = hyper::Request::new(Full::new(Bytes::from_static(b"body")));
+        let response = channel.call(request).await;
+        assert!(matches!(response, Err(ChannelError::NotReady)));
+        assert!(channel.ready.is_none());
+
+        assert!(matches!(channel.poll_ready(&mut cx), Poll::Pending));
+        assert!(matches!(channel.shared.lock().conn, Conn::Connecting));
+        channel.close();
+    }
+
+    #[tokio::test]
+    async fn a_reserved_failure_is_not_replaced_by_another_clones_connection() {
+        let mut failed = channel_with(Conn::Failed(ChannelError::NotReady), None);
+        let mut connected = failed.clone();
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        assert!(matches!(failed.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        let (live, _connection) = handshake().await;
+        failed.shared.lock().conn = Conn::Connected(live);
+
+        assert!(matches!(failed.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert!(matches!(
+            failed.ready.as_ref(),
+            Some(Reservation::Failure(ChannelError::NotReady))
+        ));
+        assert!(matches!(connected.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert!(matches!(
+            connected.ready.as_ref(),
+            Some(Reservation::Channel(_))
+        ));
+
+        let request = hyper::Request::new(Full::new(Bytes::from_static(b"body")));
+        let response = failed.call(request).await;
+        assert!(matches!(response, Err(ChannelError::NotReady)));
+    }
+
+    #[test]
+    fn explicit_close_overrides_a_reserved_attempt_failure() {
+        let mut channel = channel_with(Conn::Failed(ChannelError::NotReady), None);
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        assert!(matches!(channel.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        let request = hyper::Request::new(Full::new(Bytes::from_static(b"body")));
+        let response = channel.call(request);
+        channel.close();
+
+        let result = futures::executor::block_on(response);
+        assert!(matches!(result, Err(ChannelError::Closed)));
+    }
+
+    #[test]
+    fn exhausting_retries_is_a_terminal_readiness_error() {
+        let mut channel = channel_with(Conn::Failed(ChannelError::NotReady), None);
+        Arc::get_mut(&mut channel.shared)
+            .expect("test channel must have one owner")
+            .config
+            .max_connection_failures = Some(2);
+        channel.shared.lock().failures = 2;
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+
+        assert!(matches!(channel.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let request = hyper::Request::new(Full::new(Bytes::from_static(b"body")));
+        let response = futures::executor::block_on(channel.call(request));
+        assert!(matches!(response, Err(ChannelError::NotReady)));
+
         assert!(matches!(
             channel.poll_ready(&mut cx),
-            Poll::Ready(Err(ChannelError::NotReady))
+            Poll::Ready(Err(ChannelError::ExhaustedRetries { failures: 2 }))
         ));
-        assert!(matches!(channel.shared.lock().conn, Conn::Disconnected));
+        assert!(channel.ready.is_none());
     }
 
     #[test]
@@ -807,6 +1065,148 @@ mod tests {
         let clone = channel.clone();
         assert!(Arc::ptr_eq(&channel.shared, &clone.shared));
         assert!(clone.ready.is_none());
+    }
+
+    #[test]
+    fn close_is_idempotent_and_shared_by_every_clone() {
+        let channel = test_channel("10.0.0.4:50051");
+        let mut clone = channel.clone();
+        let flag = Arc::new(RecordingWaker(AtomicBool::new(false)));
+        channel.shared.lock().park(&Waker::from(Arc::clone(&flag)));
+
+        channel.close();
+        clone.close();
+
+        assert!(channel.is_closed());
+        assert!(clone.is_closed());
+        assert!(matches!(channel.shared.lock().conn, Conn::Closed));
+        assert!(flag.0.load(Ordering::SeqCst), "parked caller must be woken");
+
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        assert!(matches!(
+            clone.poll_ready(&mut cx),
+            Poll::Ready(Err(ChannelError::Closed))
+        ));
+
+        let request = hyper::Request::new(Full::new(Bytes::from_static(b"body")));
+        let response = futures::executor::block_on(clone.call(request));
+        assert!(matches!(response, Err(ChannelError::Closed)));
+    }
+
+    #[tokio::test]
+    async fn close_cancels_a_live_connection_driver() {
+        let (live, connection) = handshake().await;
+        let mut channel = channel_with(Conn::Connected(live), None);
+        let closer = channel.clone();
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        assert!(matches!(channel.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        let shared = Arc::clone(&channel.shared);
+        let driver = tokio::spawn(run_until_closed(Arc::clone(&shared), async move {
+            let _ = connection.await;
+        }));
+        tokio::task::yield_now().await;
+
+        closer.close();
+        tokio::time::timeout(Duration::from_secs(5), driver)
+            .await
+            .expect("closed connection driver did not stop")
+            .expect("connection driver task panicked");
+
+        assert!(matches!(shared.lock().conn, Conn::Closed));
+        assert!(matches!(
+            channel.poll_ready(&mut cx),
+            Poll::Ready(Err(ChannelError::Closed))
+        ));
+    }
+
+    #[tokio::test]
+    async fn close_fails_an_in_flight_request_deterministically() {
+        let (live, _connection) = handshake().await;
+        let mut channel = channel_with(Conn::Connected(live), None);
+        let closer = channel.clone();
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        assert!(matches!(channel.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        let request = hyper::Request::new(Full::new(Bytes::from_static(b"body")));
+        let response = tokio::spawn(channel.call(request));
+        tokio::task::yield_now().await;
+
+        closer.close();
+        let result = tokio::time::timeout(Duration::from_secs(5), response)
+            .await
+            .expect("closed request did not wake")
+            .expect("request task panicked");
+        assert!(matches!(result, Err(ChannelError::Closed)));
+    }
+
+    #[tokio::test]
+    async fn close_wakes_every_overlapping_lifecycle() {
+        let channel = test_channel("10.0.0.5:50051");
+        let first = tokio::spawn(run_until_closed(
+            Arc::clone(&channel.shared),
+            std::future::pending::<()>(),
+        ));
+        let second = tokio::spawn(run_until_closed(
+            Arc::clone(&channel.shared),
+            std::future::pending::<()>(),
+        ));
+        tokio::task::yield_now().await;
+
+        channel.close();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            first.await.expect("first lifecycle task panicked");
+            second.await.expect("second lifecycle task panicked");
+        })
+        .await
+        .expect("not every lifecycle task stopped");
+    }
+
+    fn assert_sim_shutdown_cancels_attempt(failures: u32) {
+        let sim = SimWorld::new();
+        let ip = "10.0.1.1".parse().expect("test IP must be valid");
+        let providers = SimProviders::new(sim.downgrade(), 17, ip);
+        let mut executor = moonpool_sim::executor::Executor::new(17);
+
+        executor.block_on(async {
+            let mut channel: ReconnectingChannel<_, Full<Bytes>> =
+                ReconnectingChannel::new(&providers, "10.0.1.2:50051", ChannelConfig::default());
+            let clone = channel.clone();
+            channel.shared.lock().failures = failures;
+
+            futures::future::poll_fn(|cx| {
+                assert!(matches!(channel.poll_ready(cx), Poll::Pending));
+                Poll::Ready(())
+            })
+            .await;
+            moonpool_sim::executor::until_stalled().await;
+
+            assert!(sim.pending_event_count() > 0, "attempt must own sim work");
+            assert!(
+                Arc::strong_count(&channel.shared) > 2,
+                "attempt task must own shared state"
+            );
+
+            clone.close();
+            moonpool_sim::executor::until_stalled().await;
+
+            assert_eq!(
+                sim.pending_event_count(),
+                0,
+                "shutdown must cancel channel-owned simulation events"
+            );
+            assert_eq!(
+                Arc::strong_count(&channel.shared),
+                2,
+                "no channel-owned task may survive shutdown"
+            );
+        });
+    }
+
+    #[test]
+    fn sim_shutdown_cancels_connect_and_backoff_tasks() {
+        assert_sim_shutdown_cancels_attempt(0);
+        assert_sim_shutdown_cancels_attempt(1);
     }
 
     // ===== the stability rule =====
@@ -889,6 +1289,8 @@ mod tests {
             addr: "10.0.0.3:50051".to_owned(),
             config: ChannelConfig::default(),
             inner: Mutex::new(inner),
+            closed: AtomicBool::new(false),
+            close_waiters: Mutex::new(Vec::new()),
         });
         (shared, flag)
     }

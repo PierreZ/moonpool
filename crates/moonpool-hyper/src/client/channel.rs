@@ -25,7 +25,7 @@ pub struct ResponseFuture {
 
 impl ResponseFuture {
     /// Wrap a future that will produce the response.
-    fn new(
+    pub(crate) fn new(
         future: impl Future<Output = Result<Response<Incoming>, ChannelError>> + Send + 'static,
     ) -> Self {
         Self {

@@ -45,10 +45,10 @@ pub enum ChannelError {
         detail: String,
     },
 
-    /// The h2 connection is closed. A
-    /// [`ReconnectingChannel`](crate::ReconnectingChannel) absorbs this and
-    /// reconnects; a bare [`H2Channel`](crate::H2Channel) surfaces it, since it
-    /// has no way to obtain a new connection.
+    /// The h2 connection or reconnecting channel is closed. A live
+    /// [`ReconnectingChannel`](crate::ReconnectingChannel) absorbs connection
+    /// loss and reconnects, while one shut down with
+    /// [`close`](crate::ReconnectingChannel::close) stays closed.
     #[error("connection closed")]
     Closed,
 
