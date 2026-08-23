@@ -37,7 +37,7 @@ The factory is called once per process per boot. Three processes with two reboot
 
 This is the rule you must internalize: **all in-memory state is lost on reboot**.
 
-If your Process has a `HashMap<String, Vec<u8>>` field tracking client sessions, that map is gone after a reboot. The new instance from the factory starts empty. Only data written to the simulated storage layer survives.
+If your Process has a `BTreeMap<String, Vec<u8>>` field tracking client sessions, that map is gone after a reboot. The new instance from the factory starts empty. Only data written to the simulated storage layer survives.
 
 This matches reality. When a server process crashes and restarts, it does not magically recover its heap. It reads persistent state from disk and rebuilds from there.
 

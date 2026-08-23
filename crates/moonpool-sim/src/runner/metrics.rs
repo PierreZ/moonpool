@@ -1,6 +1,6 @@
 //! Cross-iteration metrics and final report assembly.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::chaos::AssertionStats;
@@ -144,7 +144,7 @@ impl MetricsCollector {
 pub(crate) struct GenerateReportInputs {
     pub(crate) iteration_count: usize,
     pub(crate) seeds_used: Vec<u64>,
-    pub(crate) assertion_results: HashMap<String, AssertionStats>,
+    pub(crate) assertion_results: BTreeMap<String, AssertionStats>,
     pub(crate) assertion_violations: Vec<String>,
     pub(crate) coverage_violations: Vec<String>,
     pub(crate) exploration: Option<ExplorationReport>,

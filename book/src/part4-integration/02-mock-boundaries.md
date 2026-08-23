@@ -57,7 +57,7 @@ Not every dependency needs full simulation. Think of fakes on a spectrum:
 
 **External HTTP APIs**: Canned responses with injectable failures. Your Stripe client fake returns a known charge object, but `buggify!()` returns a 429 or network timeout 10% of the time.
 
-**Cache**: Trait fake with partial cluster modeling if you need it, simple HashMap if you don't. Inject evictions and connection failures.
+**Cache**: Trait fake with partial cluster modeling if you need it, simple `BTreeMap` if you don't. Inject evictions and connection failures.
 
 ## Rules of Engagement
 

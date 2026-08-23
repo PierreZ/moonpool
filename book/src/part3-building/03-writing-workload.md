@@ -19,7 +19,7 @@ struct KvWorkload {
     /// Number of operations per run
     num_ops: usize,
     /// Reference model: what we expect the server to contain
-    model: HashMap<String, Vec<u8>>,
+    model: BTreeMap<String, Vec<u8>>,
     /// Keys we use for operations
     keys: Vec<String>,
 }

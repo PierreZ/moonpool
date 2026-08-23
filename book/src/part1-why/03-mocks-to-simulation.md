@@ -41,7 +41,7 @@ Not every simulated implementation needs full fidelity. There is a spectrum.
 
 **No-op**: the simplest fake. `sleep` returns immediately, `send` discards the message. Useful for testing pure logic that happens to call I/O functions.
 
-**In-memory**: messages go into a queue, disk writes go into a HashMap. Fast, deterministic, but does not model timing, failures, or ordering.
+**In-memory**: messages go into a queue, disk writes go into a `BTreeMap`. Fast and deterministic, but does not model timing, failures, or ordering.
 
 **Controlled simulation**: messages are delayed by randomized amounts, connections drop according to a fault schedule, disk writes can be torn or corrupted. This is where bugs hide, because the system must handle not just the happy path but all the ways the real world deviates from it. Critically, these trait-based fakes scale across the entire codebase. You write each implementation once, and every component that uses the trait gets simulation for free. No per-test mock setup. No maintenance burden that grows with the test suite.
 

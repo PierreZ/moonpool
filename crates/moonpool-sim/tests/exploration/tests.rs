@@ -5,7 +5,7 @@
 //! (nextest default).
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
@@ -174,14 +174,14 @@ impl Process for ElectionNode {
 /// Paxos-style safety check: one term must never have two distinct leaders.
 struct OneLeaderPerTerm {
     cursor: Cell<usize>,
-    leaders: RefCell<HashMap<u64, String>>,
+    leaders: RefCell<BTreeMap<u64, String>>,
 }
 
 impl OneLeaderPerTerm {
     fn new() -> Self {
         Self {
             cursor: Cell::new(0),
-            leaders: RefCell::new(HashMap::new()),
+            leaders: RefCell::new(BTreeMap::new()),
         }
     }
 }

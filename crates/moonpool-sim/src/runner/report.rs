@@ -2,7 +2,7 @@
 //!
 //! This module provides types for collecting and reporting simulation results.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
@@ -174,7 +174,7 @@ pub struct SimulationReport {
     /// failed seeds
     pub seeds_failing: Vec<u64>,
     /// Aggregated assertion results across all iterations
-    pub assertion_results: HashMap<String, AssertionStats>,
+    pub assertion_results: BTreeMap<String, AssertionStats>,
     /// Always-type assertion violations (definite bugs).
     pub assertion_violations: Vec<String>,
     /// Coverage assertion violations (sometimes/reachable not satisfied).

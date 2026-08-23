@@ -349,6 +349,7 @@ impl Workload for EchoWorkload {
             }
         }
 
+        channel.close();
         tracing::info!("workload finished all rounds");
         Ok(())
     }

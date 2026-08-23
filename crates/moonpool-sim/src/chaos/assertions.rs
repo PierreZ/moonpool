@@ -33,7 +33,7 @@
 //! | `assert_sometimes_each!` | yes | no | on discovery/quality |
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 // =============================================================================
 // Thread-local violation tracking (Antithesis-style: never panic)
@@ -207,9 +207,9 @@ pub fn on_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&str, i64)
 /// Reads from shared memory assertion slots. Returns a snapshot of assertion
 /// results for reporting and validation.
 #[must_use]
-pub fn assertion_results() -> HashMap<String, AssertionStats> {
+pub fn assertion_results() -> BTreeMap<String, AssertionStats> {
     let slots = moonpool_assertions::assertion_read_all();
-    let mut results = HashMap::new();
+    let mut results = BTreeMap::new();
 
     for slot in &slots {
         let total =

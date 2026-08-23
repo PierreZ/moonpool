@@ -31,7 +31,7 @@ impl Process for KvServer {
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let listener = ctx.network().bind(ctx.my_ip()).await?;
 
-        let mut store: HashMap<String, Vec<u8>> = HashMap::new();
+        let mut store: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
         loop {
             if ctx.shutdown().is_cancelled() {
@@ -65,7 +65,7 @@ Walk through this line by line.
 
 **Binding the listener**: `ctx.network().bind(ctx.my_ip())` creates a TCP listener on the process's assigned IP. In the simulated world, this registers the IP for incoming connections. No real ports are opened.
 
-**The store**: A plain `HashMap` that lives on the stack. When this process crashes, the HashMap vanishes. When the factory creates a new instance, it starts with an empty map. This is the "all in-memory state is lost on reboot" principle in action.
+**The store**: A plain `BTreeMap` that lives on the stack. When this process crashes, the map vanishes. When the factory creates a new instance, it starts empty. This is the "all in-memory state is lost on reboot" principle in action; the ordered map also keeps iteration deterministic.
 
 **The main loop**: We loop forever, checking the shutdown token each iteration. `ctx.shutdown().is_cancelled()` returns `true` during graceful reboots, giving us a chance to break cleanly. For crash reboots, the framework cancels the entire future, so we never reach this check.
 
@@ -80,7 +80,7 @@ the provider boundary directly:
 ```rust
 async fn handle_connection(
     mut stream: SimTcpStream,
-    store: &mut HashMap<String, Vec<u8>>,
+    store: &mut BTreeMap<String, Vec<u8>>,
 ) {
     let mut buf = vec![0u8; 4096];
     loop {

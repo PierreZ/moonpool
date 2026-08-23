@@ -22,7 +22,7 @@
 //! reports `failed_runs > 0`.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -41,14 +41,14 @@ struct SplitBrainInvariant {
     cursor: Cell<usize>,
     /// `term -> first leader observed`. State persists across `observe` calls
     /// within a seed; cleared by `reset()` at the start of each seed.
-    seen: std::cell::RefCell<HashMap<u64, String>>,
+    seen: std::cell::RefCell<BTreeMap<u64, String>>,
 }
 
 impl SplitBrainInvariant {
     fn new() -> Self {
         Self {
             cursor: Cell::new(0),
-            seen: std::cell::RefCell::new(HashMap::new()),
+            seen: std::cell::RefCell::new(BTreeMap::new()),
         }
     }
 }

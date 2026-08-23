@@ -201,7 +201,7 @@ mod tests {
             .collect();
         let unique = sequences
             .iter()
-            .collect::<std::collections::HashSet<_>>()
+            .collect::<std::collections::BTreeSet<_>>()
             .len();
         assert!(
             unique > 1,

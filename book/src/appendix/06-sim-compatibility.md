@@ -70,10 +70,10 @@ Every random decision must be seeded by the simulation. A single ungoverned `thr
 
 | Forbidden | Use instead |
 |-----------|-------------|
-| `HashMap` / `HashSet` with default `RandomState` | `BTreeMap` / `BTreeSet`, or `HashMap` with a fixed `BuildHasher` |
-| Iterating a `HashMap` and acting on order | Sort keys explicitly, or use an ordered map |
+| `HashMap` / `HashSet` | `BTreeMap` / `BTreeSet` |
+| Iterating an unordered dependency collection | Copy into a `Vec` and sort before acting on it |
 
-`HashMap`'s default hasher randomizes iteration order per process. That is fatal under fork-based exploration where children must replay the parent's behavior.
+`HashMap`'s default hasher randomizes iteration order per process. That is fatal under replay and fork-based exploration. Moonpool enforces this internally with Clippy's `disallowed_types` lint so unordered standard collections cannot silently re-enter simulation infrastructure.
 
 ## 7. Type bounds
 

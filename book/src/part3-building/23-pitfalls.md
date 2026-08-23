@@ -95,11 +95,11 @@ effects through the scheduler and invokes the wakers after releasing its lock.
 Never wake while holding the world lock because a waker may immediately poll and
 re-enter the same component.
 
-## HashMap Iteration Non-Determinism
+## Unordered Collection Non-Determinism
 
 `std::collections::HashMap` does not guarantee iteration order, and the order can vary between runs. If your workload iterates a `HashMap` and the iteration order affects behavior (choosing which account to process, which message to send), you have introduced non-determinism.
 
-**Fix**: Use `BTreeMap` when iteration order matters, or collect into a `Vec` and sort before iterating.
+**Fix**: Use `BTreeMap` / `BTreeSet`, or collect dependency-owned unordered data into a `Vec` and sort before iterating. Moonpool's own workspace denies `HashMap` and `HashSet` through Clippy so this class of replay leak fails CI.
 
 ## Forgetting to Emit Events for Invariants
 

@@ -159,7 +159,7 @@ fn different_seeds_explore_different_schedules() {
     let orders: Vec<Vec<u64>> = (0..8).map(completion_order).collect();
     let distinct = orders
         .iter()
-        .collect::<std::collections::HashSet<_>>()
+        .collect::<std::collections::BTreeSet<_>>()
         .len();
     assert!(
         distinct > 1,
@@ -207,6 +207,45 @@ fn dropping_the_executor_cancels_parked_tasks() {
         "executor drop must cancel the parked task and drop its future"
     );
     assert!(!completed.load(Ordering::Relaxed), "task must not complete");
+}
+
+#[test]
+fn executor_shutdown_cancels_tasks_in_stable_order() {
+    /// Records the task whose parked future is being cancelled.
+    struct DropRecord {
+        id: u64,
+        order: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl Drop for DropRecord {
+        fn drop(&mut self) {
+            self.order.lock().push(self.id);
+        }
+    }
+
+    fn cancellation_order() -> Vec<u64> {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let mut executor = Executor::new(11);
+        executor.block_on(async {
+            for id in 0..16u64 {
+                let record = DropRecord {
+                    id,
+                    order: Arc::clone(&order),
+                };
+                drop(spawn(&format!("parked-{id}"), async move {
+                    let _record = record;
+                    std::future::pending::<()>().await;
+                }));
+            }
+            until_stalled().await;
+        });
+        drop(executor);
+        order.lock().clone()
+    }
+
+    let expected = (0..16u64).rev().collect::<Vec<_>>();
+    assert_eq!(cancellation_order(), expected);
+    assert_eq!(cancellation_order(), expected);
 }
 
 #[test]

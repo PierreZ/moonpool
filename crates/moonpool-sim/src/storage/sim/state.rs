@@ -1,7 +1,7 @@
 //! State owned exclusively by the simulated storage engine.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     net::IpAddr,
     time::Duration,
 };
@@ -91,8 +91,8 @@ pub(crate) struct StorageState {
     pub(crate) next_handle_id: u64,
     pub(crate) next_operation_id: u64,
     pub(crate) config: StorageConfiguration,
-    pub(crate) per_process_configs: HashMap<IpAddr, StorageConfiguration>,
-    pub(crate) disk_episodes: HashMap<IpAddr, DiskDegradationState>,
+    pub(crate) per_process_configs: BTreeMap<IpAddr, StorageConfiguration>,
+    pub(crate) disk_episodes: BTreeMap<IpAddr, DiskDegradationState>,
     pub(crate) files: BTreeMap<FileId, FileState>,
     pub(crate) handles: BTreeMap<HandleId, HandleState>,
     pub(crate) path_to_file: BTreeMap<String, FileId>,
@@ -106,8 +106,8 @@ impl StorageState {
             next_handle_id: 0,
             next_operation_id: 0,
             config,
-            per_process_configs: HashMap::new(),
-            disk_episodes: HashMap::new(),
+            per_process_configs: BTreeMap::new(),
+            disk_episodes: BTreeMap::new(),
             files: BTreeMap::new(),
             handles: BTreeMap::new(),
             path_to_file: BTreeMap::new(),

@@ -195,7 +195,7 @@ These are only meaningful with enough iterations for statistical coverage. A sin
 | `record_always_violation()` | Increment the thread-local violation counter (called by always-type macros) |
 | `reset_always_violations()` | Reset the violation counter (called at the start of each iteration) |
 | `has_always_violations() -> bool` | Check if any always-type violation occurred this iteration |
-| `get_assertion_results() -> HashMap<String, AssertionStats>` | Read all assertion statistics from shared memory |
+| `assertion_results() -> BTreeMap<String, AssertionStats>` | Read all assertion statistics from shared memory in deterministic key order |
 | `reset_assertion_results()` | Zero the shared memory assertion table (between iterations) |
 | `skip_next_assertion_reset()` | Prevent the next reset (used by multi-seed exploration) |
 | `panic_on_assertion_violations(report)` | Panic if the report contains any assertion violations |

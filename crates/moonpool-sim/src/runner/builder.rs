@@ -3,7 +3,7 @@
 //! This module provides the main `SimulationBuilder` type for setting up
 //! and executing simulation experiments.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use super::wall_clock::Instant;
@@ -80,7 +80,7 @@ struct FinalReportInputs {
 struct ConvergenceState<'a> {
     iteration_control: &'a IterationControl,
     iteration_count: usize,
-    reached_sometimes: &'a std::collections::HashSet<String>,
+    reached_sometimes: &'a std::collections::BTreeSet<String>,
     all_sometimes_count: usize,
     /// Whether fork-based exploration is active (selects sancov history vs
     /// the live BSS counter reader for the code-coverage signal).
@@ -121,7 +121,7 @@ impl RunState {
             bug_recipes: Vec::new(),
             #[cfg(feature = "exploration")]
             per_seed_timelines: Vec::new(),
-            reached_sometimes: std::collections::HashSet::new(),
+            reached_sometimes: std::collections::BTreeSet::new(),
             prev_signal: 0,
             converged: false,
             plateau_count: 0,
@@ -160,7 +160,7 @@ struct RunState {
     #[cfg(feature = "exploration")]
     per_seed_timelines: Vec<u64>,
     // Saturation tracking (`UntilCoverageStable`).
-    reached_sometimes: std::collections::HashSet<String>,
+    reached_sometimes: std::collections::BTreeSet<String>,
     /// Previous progress-signal value (code edges, or reached-assertion count
     /// in the no-sancov fallback). Both signals are monotonic non-decreasing.
     prev_signal: usize,
@@ -1174,7 +1174,7 @@ impl SimulationBuilder {
     /// Scan all assertion slots from shared memory: insert the messages of
     /// every satisfied coverage assertion into `reached`, warn for incomplete
     /// sites, and return the number of unique observed coverage contracts.
-    fn scan_assertion_slots(reached: &mut std::collections::HashSet<String>) -> usize {
+    fn scan_assertion_slots(reached: &mut std::collections::BTreeSet<String>) -> usize {
         let slots = moonpool_assertions::assertion_read_all();
         for slot in &slots {
             if let Some(kind) = moonpool_assertions::AssertKind::from_u8(slot.kind)
@@ -1219,7 +1219,7 @@ impl SimulationBuilder {
                 })
             })
             .map(|s| s.msg.clone())
-            .collect::<std::collections::HashSet<_>>()
+            .collect::<std::collections::BTreeSet<_>>()
             .len()
     }
 
@@ -1233,7 +1233,7 @@ impl SimulationBuilder {
             individual_metrics: Vec::new(),
             seeds_used: Vec::new(),
             seeds_failing: Vec::new(),
-            assertion_results: HashMap::new(),
+            assertion_results: BTreeMap::new(),
             assertion_violations: Vec::new(),
             coverage_violations: Vec::new(),
             exploration: None,
@@ -1776,9 +1776,9 @@ fn build_bucket_summaries(
     buckets: &[moonpool_assertions::EachBucket],
 ) -> Vec<super::report::BucketSiteSummary> {
     use super::report::BucketSiteSummary;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
-    let mut sites: HashMap<u32, BucketSiteSummary> = HashMap::new();
+    let mut sites: BTreeMap<u32, BucketSiteSummary> = BTreeMap::new();
 
     for bucket in buckets {
         let entry = sites
