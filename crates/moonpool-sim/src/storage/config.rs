@@ -547,7 +547,7 @@ mod buggify_knob_tests {
 
     #[test]
     fn buggify_knobs_vary_across_seeds() {
-        let distinct: std::collections::HashSet<_> = (0..50_u64).map(buggified_knobs).collect();
+        let distinct: std::collections::BTreeSet<_> = (0..50_u64).map(buggified_knobs).collect();
         assert!(
             distinct.len() > 1,
             "buggify knob spikes should vary across seeds"

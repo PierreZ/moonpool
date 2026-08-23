@@ -23,7 +23,7 @@
 //! single-threaded so the mutex is uncontended.
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -44,7 +44,7 @@ struct EventStore {
     /// Monotonic sequence counter assigned to each captured event.
     seq_counter: u64,
     /// Captured events grouped by their name (the tracing message).
-    by_name: HashMap<String, Vec<TraceEvent>>,
+    by_name: BTreeMap<String, Vec<TraceEvent>>,
     /// Latest known sim time. Advanced by `SimulationLayerHandle::set_sim_time_ms`
     /// (orchestrator pushes after each `sim.step()`) and read at capture time.
     last_sim_time_ms: u64,
@@ -54,7 +54,7 @@ impl EventStore {
     fn new() -> Self {
         Self {
             seq_counter: 0,
-            by_name: HashMap::new(),
+            by_name: BTreeMap::new(),
             last_sim_time_ms: 0,
         }
     }

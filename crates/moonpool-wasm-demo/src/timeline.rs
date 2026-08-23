@@ -1,6 +1,6 @@
 use std::{
     cell::Cell,
-    collections::HashMap,
+    collections::BTreeMap,
     sync::{Arc, Mutex},
 };
 
@@ -107,8 +107,8 @@ pub(crate) fn finish(seed: u64, handle: &RecorderHandle) -> RunResult {
         return RunResult::empty(seed);
     }
 
-    let acknowledgements: HashMap<_, _> = data.acked.iter().copied().collect();
-    let failures: HashMap<_, _> = data.failed.iter().copied().collect();
+    let acknowledgements: BTreeMap<_, _> = data.acked.iter().copied().collect();
+    let failures: BTreeMap<_, _> = data.failed.iter().copied().collect();
     let mut issued = data.issued.clone();
     issued.sort_by_key(|&(_, time)| time);
 

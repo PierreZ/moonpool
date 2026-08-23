@@ -30,3 +30,4 @@ async_fn_in_trait = "allow"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+disallowed_types = "deny"

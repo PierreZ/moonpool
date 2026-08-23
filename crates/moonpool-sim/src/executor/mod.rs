@@ -85,9 +85,11 @@
 //! Dropping the executor kills every remaining task, replicating the
 //! "dropping the per-iteration tokio runtime kills leaked tasks" contract
 //! that isolates simulation iterations. The mechanism (borrowed from
-//! async-executor): a registry keeps one waker per live task; `Drop` wakes
-//! them all, which schedules every parked task into the ready queue, then
-//! pops and drops `Runnable`s until the queue is empty. Dropping a
+//! async-executor): an ordered registry keeps one waker per live task; `Drop`
+//! wakes them in task-id order, which schedules every parked task into the
+//! ready queue, then pops and drops `Runnable`s until the queue is empty.
+//! Stable cancellation order matters because future destructors may wake or
+//! spawn other tasks. Dropping a
 //! `Runnable` cancels its task and drops the future, and if that drop wakes
 //! further tasks they land in the queue and are consumed by the same loop.
 //!
@@ -106,7 +108,7 @@ mod join;
 pub use join::{JoinHandle, YieldNow, until_stalled, yield_now};
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -175,8 +177,8 @@ struct Shared {
     /// chosen by seeded `swap_remove`, not FIFO order.
     queue: Mutex<Vec<ExecRunnable>>,
     /// One waker per live (spawned, not yet completed/cancelled) task,
-    /// keyed by `TaskMeta::id`; consumed by kill-on-drop.
-    wakers: Mutex<HashMap<u64, Waker>>,
+    /// keyed by `TaskMeta::id`; ordered for deterministic kill-on-drop.
+    wakers: Mutex<BTreeMap<u64, Waker>>,
     /// Next task id.
     next_id: AtomicU64,
 }
@@ -345,7 +347,7 @@ impl Executor {
         Self {
             shared: Arc::new(Shared {
                 queue: Mutex::new(Vec::new()),
-                wakers: Mutex::new(HashMap::new()),
+                wakers: Mutex::new(BTreeMap::new()),
                 next_id: AtomicU64::new(0),
             }),
             rng: ChaCha8Rng::seed_from_u64(seed ^ EXEC_RNG_SALT),
@@ -466,13 +468,10 @@ impl Drop for Executor {
 
         // Wake every live task: completed tasks ignore it, parked tasks get
         // their Runnable scheduled into the queue.
-        let wakers: Vec<Waker> = self
-            .shared
-            .wakers
-            .lock()
-            .drain()
-            .map(|(_, waker)| waker)
-            .collect();
+        let wakers: Vec<Waker> = {
+            let mut registered = self.shared.wakers.lock();
+            std::mem::take(&mut *registered).into_values().collect()
+        };
         for waker in wakers {
             waker.wake();
         }

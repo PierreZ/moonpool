@@ -1,7 +1,7 @@
 //! Global deterministic scheduler and lifecycle coordination.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet},
     net::IpAddr,
     sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak},
     task::Waker,
@@ -61,7 +61,7 @@ pub(crate) struct SimInner {
     pub(crate) wakers: Wakers,
     timer_schedules: BTreeMap<u64, ScheduleId>,
     pub(crate) next_task_id: u64,
-    pub(crate) awakened_tasks: HashSet<u64>,
+    pub(crate) awakened_tasks: BTreeSet<u64>,
     pub(crate) events_processed: u64,
     pub(crate) last_processed_event: Option<Event>,
     pub(crate) pending_faults: Vec<SimFaultRecord>,
@@ -79,7 +79,7 @@ impl SimInner {
             wakers: Wakers::default(),
             timer_schedules: BTreeMap::new(),
             next_task_id: 0,
-            awakened_tasks: HashSet::new(),
+            awakened_tasks: BTreeSet::new(),
             events_processed: 0,
             last_processed_event: None,
             pending_faults: Vec::new(),
@@ -456,7 +456,7 @@ impl SimWorld {
     #[must_use]
     pub fn assertion_results(
         &self,
-    ) -> std::collections::HashMap<String, crate::chaos::AssertionStats> {
+    ) -> std::collections::BTreeMap<String, crate::chaos::AssertionStats> {
         crate::chaos::assertion_results()
     }
 

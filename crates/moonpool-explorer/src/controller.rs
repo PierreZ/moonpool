@@ -47,7 +47,7 @@
 //! left to try. Physical process count is bounded by `1 + workers` at all
 //! times; the logical exploration space is unbounded.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 
 use crate::journal::{self, DiscoveryEvent};
@@ -191,7 +191,7 @@ pub struct Explorer {
     runs_started: u64,
     frontier: VecDeque<ExploreJob>,
     states: Vec<StateEntry>,
-    state_index: HashMap<u64, usize>,
+    state_index: BTreeMap<u64, usize>,
     continuation_round: u64,
     stats: ExplorationStats,
     bug_recipes: Vec<Recipe>,
@@ -199,7 +199,7 @@ pub struct Explorer {
     // --- worker pool (None = in-process mode) ---
     slots: Option<SlotPool>,
     #[cfg(unix)]
-    active: HashMap<libc::pid_t, (usize, ExploreJob)>,
+    active: BTreeMap<libc::pid_t, (usize, ExploreJob)>,
     free_slots: Vec<usize>,
 }
 
@@ -233,13 +233,13 @@ impl Explorer {
             runs_started: 0,
             frontier: VecDeque::new(),
             states: Vec::new(),
-            state_index: HashMap::new(),
+            state_index: BTreeMap::new(),
             continuation_round: 0,
             stats: ExplorationStats::default(),
             bug_recipes: Vec::new(),
             slots,
             #[cfg(unix)]
-            active: HashMap::new(),
+            active: BTreeMap::new(),
             free_slots,
         })
     }
@@ -421,7 +421,7 @@ impl Explorer {
         {
             let Some((pid, status)) = worker::wait_any() else {
                 // No children left (ECHILD): drop any stale bookkeeping.
-                for (_, (slot, _)) in self.active.drain() {
+                for (_, (slot, _)) in std::mem::take(&mut self.active) {
                     self.free_slots.push(slot);
                 }
                 return;

@@ -18,7 +18,7 @@
 //! .cluster(LocalityConfig::new(3, 3, 3, 1), || Box::new(MyNode::new()))
 //! ```
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use crate::locality::{DomainLevel, LocalityInfo};
@@ -98,7 +98,7 @@ impl LocalityConfig {
 /// a datacenter).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MachineRegistry {
-    ip_locality: HashMap<IpAddr, LocalityInfo>,
+    ip_locality: BTreeMap<IpAddr, LocalityInfo>,
 }
 
 impl MachineRegistry {
@@ -106,7 +106,7 @@ impl MachineRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            ip_locality: HashMap::new(),
+            ip_locality: BTreeMap::new(),
         }
     }
 

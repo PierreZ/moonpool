@@ -1,0 +1,4 @@
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "randomized iteration order breaks deterministic replay", replacement = "std::collections::BTreeMap" },
+    { path = "std::collections::HashSet", reason = "randomized iteration order breaks deterministic replay", replacement = "std::collections::BTreeSet" },
+]

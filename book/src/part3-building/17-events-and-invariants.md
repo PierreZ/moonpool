@@ -91,13 +91,13 @@ Each node emits `tracing::info!(slot, value, "commit")` whenever it commits. The
 
 ```rust
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use moonpool_sim::{Invariant, TraceQuery, assert_always};
 
 #[derive(Default)]
 pub struct AgreementInvariant {
     cursor: Cell<usize>,
-    committed: RefCell<HashMap<u64, u64>>,
+    committed: RefCell<BTreeMap<u64, u64>>,
 }
 
 impl Invariant for AgreementInvariant {

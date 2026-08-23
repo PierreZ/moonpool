@@ -104,7 +104,7 @@ impl Invariant for AgreementInvariant {
     fn check(&self, state: &StateHandle, _sim_time_ms: u64) {
         if let Some(model) = state.get::<ConsensusModel>("consensus_model") {
             for (slot, values) in &model.committed_values {
-                let unique: HashSet<_> = values.iter().collect();
+                let unique: BTreeSet<_> = values.iter().collect();
                 assert_always!(unique.len() <= 1, "agreement violated");
             }
         }

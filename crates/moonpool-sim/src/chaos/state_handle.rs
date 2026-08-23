@@ -1,6 +1,6 @@
 //! Type-safe shared state for cross-workload mutable values.
 //!
-//! `StateHandle` provides an `Arc<RwLock<HashMap>>`-backed store using
+//! `StateHandle` provides an `Arc<RwLock<BTreeMap>>`-backed store using
 //! `Box<dyn Any + Send + Sync>` so workloads can publish and consume typed
 //! values across tasks within a simulation iteration. It is **not** an event
 //! log — for event timelines and invariants see the
@@ -18,7 +18,7 @@
 //! ```
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 /// Shared state handle for cross-workload publish/get communication.
@@ -28,7 +28,7 @@ use std::sync::{Arc, RwLock};
 /// storage.
 #[derive(Clone, Default)]
 pub struct StateHandle {
-    inner: Arc<RwLock<HashMap<String, Box<dyn Any + Send + Sync>>>>,
+    inner: Arc<RwLock<BTreeMap<String, Box<dyn Any + Send + Sync>>>>,
 }
 
 impl StateHandle {

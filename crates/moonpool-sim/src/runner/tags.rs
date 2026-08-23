@@ -17,7 +17,7 @@
 //!     ])
 //! ```
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 /// Distribution specification for a single tag dimension.
@@ -71,7 +71,7 @@ impl TagDistribution {
     /// `values[i % values.len()]` for each dimension.
     #[must_use]
     pub fn resolve(&self, index: usize) -> ProcessTags {
-        let mut tags = HashMap::new();
+        let mut tags = BTreeMap::new();
         for dim in &self.dimensions {
             if !dim.values.is_empty() {
                 let value = &dim.values[index % dim.values.len()];
@@ -85,7 +85,7 @@ impl TagDistribution {
 /// Resolved tags for a specific process instance.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProcessTags {
-    tags: HashMap<String, String>,
+    tags: BTreeMap<String, String>,
 }
 
 impl ProcessTags {
@@ -114,7 +114,7 @@ impl ProcessTags {
 /// and find IPs matching tag queries.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TagRegistry {
-    ip_tags: HashMap<IpAddr, ProcessTags>,
+    ip_tags: BTreeMap<IpAddr, ProcessTags>,
 }
 
 impl TagRegistry {
@@ -122,7 +122,7 @@ impl TagRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            ip_tags: HashMap::new(),
+            ip_tags: BTreeMap::new(),
         }
     }
 

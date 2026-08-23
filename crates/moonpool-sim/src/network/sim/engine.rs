@@ -1,7 +1,7 @@
 //! Stateful network simulation independent from the global event scheduler.
 
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     net::IpAddr,
     task::Waker,
     time::Duration,
@@ -75,9 +75,9 @@ pub(crate) struct NetworkSimulation {
     last_bit_flip_time: Duration,
     next_operation_id: u64,
     next_accept_waiter_id: u64,
-    completed_operations: HashSet<NetworkOperationId>,
-    failed_operations: HashSet<NetworkOperationId>,
-    failed_accepts: HashSet<AcceptWaiterId>,
+    completed_operations: BTreeSet<NetworkOperationId>,
+    failed_operations: BTreeSet<NetworkOperationId>,
+    failed_accepts: BTreeSet<AcceptWaiterId>,
     accept_reservations: BTreeMap<AcceptWaiterId, AcceptReservation>,
     operation_waiters: WakerRegistry<NetworkOperationId>,
 }
@@ -91,9 +91,9 @@ impl NetworkSimulation {
             last_bit_flip_time: Duration::ZERO,
             next_operation_id: 0,
             next_accept_waiter_id: 0,
-            completed_operations: HashSet::new(),
-            failed_operations: HashSet::new(),
-            failed_accepts: HashSet::new(),
+            completed_operations: BTreeSet::new(),
+            failed_operations: BTreeSet::new(),
+            failed_accepts: BTreeSet::new(),
             accept_reservations: BTreeMap::new(),
             operation_waiters: WakerRegistry::default(),
         }
@@ -584,7 +584,7 @@ impl NetworkSimulation {
             chaos.bit_flip_max_bits,
         );
         let mut result = data.to_vec();
-        let mut positions = HashSet::new();
+        let mut positions = BTreeSet::new();
         for _ in 0..count {
             let raw_byte = sim_random::<u64>();
             let raw_bit = sim_random::<u64>();
@@ -1096,7 +1096,7 @@ impl NetworkSimulation {
             .values()
             .filter(|connection| !connection.flags.is_closed())
             .filter_map(|connection| connection.local_ip)
-            .collect::<HashSet<_>>()
+            .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
         ips.sort_unstable();
