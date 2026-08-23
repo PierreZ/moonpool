@@ -115,11 +115,33 @@ the point: when Attrition kills the server mid-round, the next round does not
 build a fresh connection by hand, it discovers that the channel rebuilt itself.
 That is reconnection under test rather than reconnection assumed.
 
+When the owner removes a peer or ends a process incarnation, shut down that
+shared lifecycle explicitly:
+
+```rust
+channel.close();
+assert!(channel.is_closed());
+```
+
+Shutdown is terminal, idempotent, and shared by every clone. It interrupts an
+active connect or reconnect backoff immediately, drops the live h2 driver (and
+therefore its keepalive work), and makes parked readiness checks, new requests,
+and already-issued request futures return `ChannelError::Closed`. It does not
+replay logical RPCs; deciding whether a request is safe to retry remains the
+application's job.
+
 Failures arrive as `Code::Unknown`, because tonic's h2-aware status mapping
 lives behind features the runtime-free core does not enable. Under chaos that
 is an expected outcome, not a bug, and the example gives it its own
 sometimes-assertion so transport death stays distinguishable from an
 application-level `UNAVAILABLE`.
+
+At the tower boundary, a transient connect or handshake failure is reserved by
+`poll_ready`, which returns `Ready(Ok(()))`; the following `call` returns the
+reserved error. Tower treats `Ready(Err(_))` as terminal for that service
+instance, so the channel uses readiness errors only for terminal shutdown or an
+exhausted `max_connection_failures` limit. This is also the convention tonic's
+own reconnect service follows.
 
 ## The Sealed Bounds
 

@@ -19,6 +19,7 @@ deterministic simulation means giving hyper the same hooks over
 | `HyperIo<S>` | `hyper::rt::Read` + `hyper::rt::Write` over a futures-io stream |
 | `TowerToHyperService<S>` | tower service to hyper service adapter |
 | `KeepAlive` | h2 PING keepalive settings shared by client and server |
+| `ReconnectingChannel<P, B>` | cloneable h2 channel with reconnect and explicit shared shutdown |
 
 `HyperIo` replaces the `tokio_util::compat::Compat` + `hyper_util::rt::TokioIo`
 two-hop bridge: every moonpool network stream already implements the futures-io

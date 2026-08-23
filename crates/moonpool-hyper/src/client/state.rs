@@ -55,9 +55,12 @@ impl<B> Inner<B> {
 
 /// Connection lifecycle and its one-shot failure outcome.
 pub(super) enum Conn<B> {
+    /// Explicitly shut down; this is a terminal state.
+    Closed,
     /// No connection and no attempt running.
     Disconnected,
-    /// The previous attempt failed; the next readiness poll consumes this.
+    /// The previous attempt failed; the next readiness poll reserves this for
+    /// its following call.
     Failed(ChannelError),
     /// Backing off, connecting, or handshaking.
     Connecting,
