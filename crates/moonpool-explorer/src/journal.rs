@@ -23,10 +23,11 @@ use moonpool_assertions::DiscoveryKind;
 
 /// Maximum number of discovery events retained per run.
 ///
-/// A run that makes more discoveries than this keeps the first
-/// `MAX_JOURNAL_ENTRIES`. One run is expanded at most once regardless of how
-/// many discoveries it made, so truncation only loses exemplar anchors, never
-/// exploration momentum.
+/// Entries are coalesced by semantic state. If more distinct states are
+/// discovered, the journal retains the highest-priority, deepest anchors:
+/// monotonic progress first, then structured state novelty, then one-shot
+/// coverage. This prevents early coverage noise from permanently hiding a
+/// later progress anchor after the accounting layer's global latch has fired.
 pub const MAX_JOURNAL_ENTRIES: usize = 256;
 
 /// One globally-new discovery observed during a run.
@@ -54,6 +55,22 @@ impl DiscoveryEvent {
                 | DiscoveryKind::BucketQuality
         )
     }
+
+    /// Semantic priority used for bounded journaling and branch selection.
+    pub(crate) fn guidance_priority(&self) -> u8 {
+        if self.is_progress() {
+            2
+        } else {
+            u8::from(matches!(
+                self.kind,
+                DiscoveryKind::BucketFirst | DiscoveryKind::BooleanCombination
+            ))
+        }
+    }
+
+    fn retention_key(&self) -> (u8, u64) {
+        (self.guidance_priority(), self.call_count)
+    }
 }
 
 thread_local! {
@@ -76,18 +93,43 @@ pub fn set_rng_count_hook(get_count: fn() -> u64) {
 pub(crate) fn install_hooks() {
     fn on_discovery(kind: DiscoveryKind, state_id: u64) {
         let call_count = RNG_COUNT_HOOK.with(Cell::get)();
-        JOURNAL.with(|j| {
-            let mut journal = j.borrow_mut();
-            if journal.len() < MAX_JOURNAL_ENTRIES {
-                journal.push(DiscoveryEvent {
-                    call_count,
-                    kind,
-                    state_id,
-                });
-            }
+        record(DiscoveryEvent {
+            call_count,
+            kind,
+            state_id,
         });
     }
     moonpool_assertions::set_discovery_hooks(moonpool_assertions::DiscoveryHooks { on_discovery });
+}
+
+/// Coalesce or retain one discovery according to semantic priority.
+fn record(event: DiscoveryEvent) {
+    JOURNAL.with(|journal| {
+        let mut journal = journal.borrow_mut();
+        if let Some(existing) = journal
+            .iter_mut()
+            .find(|existing| existing.state_id == event.state_id)
+        {
+            if event.retention_key() > existing.retention_key() {
+                *existing = event;
+            }
+            return;
+        }
+        if journal.len() < MAX_JOURNAL_ENTRIES {
+            journal.push(event);
+            return;
+        }
+        let Some((weakest_index, weakest)) = journal
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, candidate)| candidate.retention_key())
+        else {
+            return;
+        };
+        if event.retention_key() > weakest.retention_key() {
+            journal[weakest_index] = event;
+        }
+    });
 }
 
 /// Clear the journal before a run.
@@ -138,8 +180,69 @@ mod tests {
         };
         assert!(!mk(DiscoveryKind::SometimesPass).is_progress());
         assert!(!mk(DiscoveryKind::BucketFirst).is_progress());
+        assert!(!mk(DiscoveryKind::BooleanCombination).is_progress());
         assert!(mk(DiscoveryKind::WatermarkImprovement).is_progress());
         assert!(mk(DiscoveryKind::FrontierAdvance).is_progress());
         assert!(mk(DiscoveryKind::BucketQuality).is_progress());
+        assert!(
+            mk(DiscoveryKind::WatermarkImprovement).guidance_priority()
+                > mk(DiscoveryKind::BooleanCombination).guidance_priority()
+        );
+        assert!(
+            mk(DiscoveryKind::BooleanCombination).guidance_priority()
+                > mk(DiscoveryKind::SometimesPass).guidance_priority()
+        );
+    }
+
+    #[test]
+    fn journal_coalesces_a_state_to_its_best_latest_anchor() {
+        clear();
+        record(DiscoveryEvent {
+            call_count: 10,
+            kind: DiscoveryKind::BucketFirst,
+            state_id: 7,
+        });
+        record(DiscoveryEvent {
+            call_count: 20,
+            kind: DiscoveryKind::BucketQuality,
+            state_id: 7,
+        });
+        record(DiscoveryEvent {
+            call_count: 30,
+            kind: DiscoveryKind::SometimesPass,
+            state_id: 7,
+        });
+
+        assert_eq!(
+            take(),
+            vec![DiscoveryEvent {
+                call_count: 20,
+                kind: DiscoveryKind::BucketQuality,
+                state_id: 7,
+            }]
+        );
+    }
+
+    #[test]
+    fn full_journal_retains_late_progress_over_coverage_noise() {
+        clear();
+        for state_id in 0..u64::try_from(MAX_JOURNAL_ENTRIES).expect("journal bound fits in u64") {
+            record(DiscoveryEvent {
+                call_count: state_id,
+                kind: DiscoveryKind::SometimesPass,
+                state_id,
+            });
+        }
+        record(DiscoveryEvent {
+            call_count: 1,
+            kind: DiscoveryKind::WatermarkImprovement,
+            state_id: u64::MAX,
+        });
+
+        let events = take();
+        assert_eq!(events.len(), MAX_JOURNAL_ENTRIES);
+        assert!(events.iter().any(|event| {
+            event.state_id == u64::MAX && event.kind == DiscoveryKind::WatermarkImprovement
+        }));
     }
 }

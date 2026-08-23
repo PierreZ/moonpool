@@ -38,6 +38,8 @@ pub enum DiscoveryKind {
     BucketFirst = 3,
     /// An `assert_sometimes_each!` bucket's quality score improved.
     BucketQuality = 4,
+    /// A new partial truth combination was observed at a `sometimes_all` site.
+    BooleanCombination = 5,
 }
 
 impl DiscoveryKind {
@@ -50,6 +52,7 @@ impl DiscoveryKind {
             2 => Some(Self::FrontierAdvance),
             3 => Some(Self::BucketFirst),
             4 => Some(Self::BucketQuality),
+            5 => Some(Self::BooleanCombination),
             _ => None,
         }
     }
@@ -67,10 +70,11 @@ pub struct DiscoveryHooks {
     /// accounting region.
     ///
     /// `state_id` identifies the semantic state that was discovered: the
-    /// assertion message hash for slot assertions, or the bucket hash
-    /// (message plus identity keys) for `sometimes_each` buckets. Watermark
-    /// and quality improvements reuse their site's id: the id names the
-    /// *place* in the semantic state space, the kind says how it advanced.
+    /// assertion message hash for ordinary slot assertions, a hash of the site
+    /// and truth combination for [`DiscoveryKind::BooleanCombination`], or the
+    /// bucket hash (message plus identity keys) for `sometimes_each` buckets.
+    /// Watermark and quality improvements reuse their site's id: the id names
+    /// the *place* in the semantic state space, the kind says how it advanced.
     pub on_discovery: fn(kind: DiscoveryKind, state_id: u64),
 }
 

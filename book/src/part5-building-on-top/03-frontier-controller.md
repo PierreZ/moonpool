@@ -43,15 +43,18 @@ During a run, every globally-new discovery is recorded into a per-run journal: w
 root run (seed 42):
   journal: [floor 2 entered @ call 812, key found @ call 1490]
 
-expansion, anchored at the LATEST discovery (call 1490):
-  child recipes: 1490@S1, 1490@S2, 1490@S3, 1490@S4
+expansion, anchored at the highest-priority discovery:
+  progress > structured state novelty > one-shot coverage
+  latest call count breaks ties inside a class
 ```
 
-Each child replays through *every* state the parent reached — the earlier discoveries are locked into the prefix — and diverges just past the deepest one.
+Numeric watermark, compound frontier, and bucket-quality improvements are progress. New `assert_sometimes_each!` buckets and partial `assert_sometimes_all!` combinations are structured state novelty. A first boolean sometimes/reachable pass is one-shot coverage. This ordering prevents a late, easy coverage hit from pulling immediate children away from an earlier step toward a difficult goal. Every discovery still gets its own retained exemplar for later continuation scheduling.
+
+The journal is bounded to 256 entries. Repeated events for one semantic state are coalesced to its best anchor. If the journal fills, stronger discoveries replace the weakest retained coverage events, so early noise cannot permanently hide late progress after the shared novelty latch has fired.
 
 ## One Expansion Per Run
 
-A run that made at least one semantic assertion discovery is **productive** and is expanded **exactly once**: `branching_factor` children are enqueued, anchored at its latest discovery. This holds no matter how many discoveries the run made. If one timeline discovers five new assertion states, it is still *one productive execution*, not five branching events. Sanitizer code coverage is reported separately and does not create frontier jobs.
+A run that made at least one semantic assertion discovery is **productive** and is expanded **exactly once**: `branching_factor` children are enqueued, anchored at its highest-priority discovery. This holds no matter how many discoveries the run made. If one timeline discovers five new assertion states, it is still *one productive execution*, not five branching events. Sanitizer code coverage is reported separately and does not create frontier jobs.
 
 A run with an empty journal discovered nothing the multiverse had not already seen. It is not punished, scored, or refilled — its branch simply produces no children and dies. This one rule replaces the entire energy system of the previous explorer (global budgets, per-mark allowances, reallocation pools, productive/barren classification): the only global limits are a per-seed run budget and a frontier size cap.
 
@@ -70,7 +73,7 @@ parallel `fork()` workers are worth the less reproducible search order.
 
 ## Who Decides Novelty
 
-Discovery detection lives in the shared assertion region (`moonpool-assertions`): each distinct discovery — a slot's first pass, a new bucket, a watermark improvement — is guarded by an atomic compare-and-swap latch. Whichever timeline wins the CAS journals the discovery; every other timeline, in any process, sees "already known". There is no check-then-merge race and no coverage bitmap to reconcile: the latch *is* the novelty decision, made exactly once, and the controller is the single owner of everything built on top of it (frontier, exemplars, statistics, bug recipes).
+Discovery detection lives in the shared assertion region (`moonpool-assertions`): first passes, new buckets, comparison-distance improvements, compound-frontier advances, and partial truth combinations are guarded by atomic shared state. Whichever timeline records the transition journals it; every other timeline, in any process, sees "already known". There is no check-then-merge race, and the controller is the single owner of everything built on top of these signals (frontier, exemplars, statistics, bug recipes).
 
 ## Bug Recipes
 

@@ -35,8 +35,8 @@
 //!    in-process when `workers == 0`).
 //! 3. A run whose journal is non-empty (it made globally-new discoveries) is
 //!    expanded **exactly once**: `branching_factor` children are enqueued,
-//!    anchored at the run's latest discovery. Every discovery also registers
-//!    a bounded exemplar for its semantic state.
+//!    anchored at its highest-priority discovery (latest breaks ties). Every
+//!    discovery also registers a bounded exemplar for its semantic state.
 //! 4. A run with an empty journal produced nothing new; its branch dies.
 //! 5. When the frontier drains and budget remains, the controller schedules
 //!    continuations from the least-visited known state (ties prefer
@@ -471,18 +471,17 @@ impl Explorer {
         }
 
         // Barren run: nothing globally new — the branch dies here.
-        let Some(anchor_event) = events.iter().max_by_key(|e| e.call_count) else {
+        let Some(anchor_event) = select_anchor(events) else {
             return;
         };
-        let anchor_event = *anchor_event;
 
         for event in events {
             self.register_state(&job.recipe, event);
         }
 
-        // One expansion per productive run, anchored at the latest discovery:
-        // children replay through every state this run reached and diverge
-        // just past the deepest one.
+        // One expansion per productive run, anchored at the most useful
+        // discovery. This keeps late plain-coverage noise from pulling the
+        // immediate branch away from earlier monotonic progress.
         if job.recipe.len() < self.config.max_recipe_len {
             self.stats.expansions += 1;
             self.expand_from(
@@ -635,6 +634,18 @@ fn derive_seed(
     hash
 }
 
+/// Choose the semantic discovery that should drive immediate expansion.
+///
+/// Progress toward an assertion goal outranks structured state novelty, which
+/// outranks a one-shot coverage hit. Within the same class, the latest replay
+/// coordinate preserves the deepest prefix.
+fn select_anchor(events: &[DiscoveryEvent]) -> Option<DiscoveryEvent> {
+    events
+        .iter()
+        .max_by_key(|event| (event.guidance_priority(), event.call_count))
+        .copied()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,5 +710,23 @@ mod tests {
         config
             .validate()
             .expect("in-process minimum should be valid");
+    }
+
+    #[test]
+    fn semantic_progress_outranks_later_plain_coverage() {
+        let events = [
+            DiscoveryEvent {
+                call_count: 12,
+                kind: moonpool_assertions::DiscoveryKind::WatermarkImprovement,
+                state_id: 1,
+            },
+            DiscoveryEvent {
+                call_count: 900,
+                kind: moonpool_assertions::DiscoveryKind::SometimesPass,
+                state_id: 2,
+            },
+        ];
+
+        assert_eq!(select_anchor(&events), Some(events[0]));
     }
 }

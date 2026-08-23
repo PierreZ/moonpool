@@ -204,6 +204,11 @@ mod tests {
                 kind: DiscoveryKind::BucketQuality,
                 state_id: 42,
             },
+            DiscoveryEvent {
+                call_count: 123,
+                kind: DiscoveryKind::BooleanCombination,
+                state_id: 77,
+            },
         ];
         pool.clear_slot(0);
         pool.clear_slot(1);

@@ -428,9 +428,11 @@ fn write_assertions(w: &mut impl Write, details: &[AssertionDetail], color: bool
             }
             AssertKind::BooleanSometimesAll => {
                 format!(
-                    "{} calls  frontier: {}",
+                    "{} calls  frontier: {}/{}  combinations: {}",
                     fmt_num(detail.pass_count),
                     detail.frontier,
+                    detail.frontier_target,
+                    detail.combinations_seen,
                 )
             }
             _ => {
