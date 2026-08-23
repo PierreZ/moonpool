@@ -6,6 +6,7 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 
 ## Quick Start Routes
 
+- **"I am a coding agent adding a full simulation harness"** — [Guide for AI Agents](./llms.md)
 - **"What is Moonpool?"** — [The Case for Simulation](./part1-why/01-case-for-simulation.md), then [Why Moonpool Exists](./part1-why/05-why-moonpool.md)
 - **"How do I write my first simulation?"** — [Your First Simulation](./part3-building/01-first-simulation.md) and its sub-chapters
 - **"How do providers work?"** — [The Provider Pattern](./part2-foundations/04-provider-pattern.md)
