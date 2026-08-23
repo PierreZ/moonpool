@@ -124,20 +124,20 @@ assert_sometimes_less_than!(
 );
 ```
 
-**Watermark tracking**: For `sometimes` numeric assertions, the explorer tracks the best value observed so far. When a new evaluation **improves** the watermark (higher for `gt`/`ge`, lower for `lt`/`le`), a fork is triggered to explore timelines that might push the metric even further.
+**Watermark tracking**: For `sometimes` numeric assertions, the explorer tracks the best value observed so far. When a new evaluation **improves** the watermark (higher for `gt`/`ge`, lower for `lt`/`le`), it creates a replay anchor for timelines that might push the metric even further.
 
 ## Compound Assertions
 
 These macros track multi-dimensional properties across multiple conditions or identity keys.
 
-| Macro | Category | Description | Panics? | Forks in exploration? |
+| Macro | Category | Description | Panics? | Guides exploration? |
 |-------|----------|-------------|---------|----------------------|
 | `assert_sometimes_all!` | BooleanSometimesAll | All named booleans should sometimes be true simultaneously | No | Yes, on frontier advance |
 | `assert_sometimes_each!` | EachBucket | Per-identity bucketed assertion with optional quality watermarks | No | Yes, on new bucket or quality improvement |
 
 ### `assert_sometimes_all!(message, [(name, bool), ...])`
 
-Tracks a **frontier**: the maximum number of conditions that have been simultaneously true. When the frontier advances (more conditions true at once than ever before), a fork is triggered.
+Tracks a **frontier**: the maximum number of conditions that have been simultaneously true. When the frontier advances (more conditions true at once than ever before), a replay anchor is created.
 
 ```rust
 assert_sometimes_all!("all_nodes_healthy", [
@@ -147,17 +147,17 @@ assert_sometimes_all!("all_nodes_healthy", [
 ]);
 ```
 
-If previously at most 2 of the 3 conditions were true at once, and now all 3 are true, the frontier advances from 2 to 3 and a fork is triggered.
+If previously at most 2 of the 3 conditions were true at once, and now all 3 are true, the frontier advances from 2 to 3 and a replay anchor is created.
 
 ### `assert_sometimes_each!(message, [(key, value), ...])` / `assert_sometimes_each!(message, [(key, value), ...], [(quality_key, quality_value), ...])`
 
 Each unique combination of identity keys gets its own **bucket**. A new bucket is a discovery. If quality keys are provided, the explorer also tracks quality watermarks per bucket, and a quality improvement is a fresh discovery (registering a healthier exemplar for the same state).
 
 ```rust
-// Identity keys only -- fork on first discovery of each (lock, depth) combo
+// Identity keys only -- guide on first discovery of each (lock, depth) combo
 assert_sometimes_each!("gate", [("lock", lock_id), ("depth", depth)]);
 
-// With quality watermarks -- also fork when health improves for a known bucket
+// With quality watermarks -- also guide when health improves for a known bucket
 assert_sometimes_each!("descended", [("to_floor", floor)], [("health", hp)]);
 ```
 

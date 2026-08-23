@@ -12,7 +12,7 @@ With independent random seeds, the probability of both events occurring is rough
 
 This is the **Sequential Luck Problem**: a bug requiring N unlikely events in sequence has probability that decreases **multiplicatively**. Two events at 1/1000 each need ~10^6 trials. Three events need ~10^9. The search space grows exponentially with the depth of the required sequence.
 
-Now consider what happens with checkpoint-and-branch. We run seeds until one of them triggers the failover (about 1000 runs). At that moment, we snapshot the simulation and spawn new timelines from the failover point with different randomness. Each of those new timelines has a 1/1000 chance of hitting the rollback window. We need about 1000 branch timelines, plus the ~1000 root seeds to reach the failover. Total: roughly 2000 timelines instead of 1,000,000.
+Now consider what happens with replay-and-continue. We run seeds until one of them triggers the failover (about 1000 runs). At that moment, we retain the deterministic replay prefix and schedule new timelines that reproduce the failover, then continue with different randomness. Each continuation has a 1/1000 chance of hitting the rollback window. We need about 1000 continuations, plus the ~1000 root seeds to reach the failover. Total: roughly 2000 timelines instead of 1,000,000.
 
 The improvement is not incremental. It changes the complexity from **multiplicative** (p1 * p2) to **additive** (p1 + p2). For three-event bugs, the difference is even more dramatic: ~3000 timelines instead of ~10^9.
 

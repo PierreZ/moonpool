@@ -1,44 +1,29 @@
 //! LLVM `SanitizerCoverage` (`inline-8bit-counters`) for code edge coverage.
 //!
 //! This module hooks into LLVM's `SanitizerCoverage` instrumentation to track
-//! which code edges the simulation actually executes. The explorer uses this
-//! as a second coverage signal — alongside the assertion-path fork bitmap —
-//! to decide whether a forked timeline discovered something new. Together,
-//! the two signals make the adaptive loop significantly more precise at
-//! distinguishing productive forks from barren ones.
+//! which code edges the simulation actually executes. Moonpool uses the
+//! cumulative edge count for reporting and `UntilCoverageStable` plateau
+//! detection. Frontier expansion itself is assertion-guided because only an
+//! assertion discovery carries the RNG call-count anchor needed by a replay
+//! recipe.
 //!
 //! All public functions are no-ops when sancov instrumentation is not
 //! present (i.e., `COUNTERS_PTR` is null).
 //!
-//! # Why two coverage systems?
+//! # Coverage and exploration guidance
 //!
-//! The explorer has two independent coverage tracking mechanisms:
-//!
-//! ```text
-//! System                Where it lives         What it tracks
-//! ────────────────────  ─────────────────────  ─────────────────────────────────
-//! Fork bitmap           coverage.rs            Which assert_sometimes! /
-//!   (8192 bits)                                assert_sometimes_each! fired.
-//!                                              Hash-based, high collision rate.
-//!
-//! Sancov edge coverage  sancov.rs (this file)  Which branches/loops/conditions
-//!   (one u8 per edge)                          in the Rust source were executed.
-//!                                              LLVM-instrumented, no collisions.
-//! ```
-//!
-//! The fork bitmap answers "did we trigger a new assertion path?" while
-//! sancov answers "did we execute new code?". Two timelines can trigger
-//! the exact same assertions but take radically different code paths through
-//! the system under test — sancov catches that.
-//!
-//! Both signals feed into the adaptive loop's `batch_has_new` flag in
-//! [`split_loop`](crate::split_loop). A timeline is considered productive
-//! if it contributes new bits to **either** system:
+//! Moonpool keeps two complementary progress signals:
 //!
 //! ```text
-//! batch_has_new |= fork_bitmap.has_new_bits()    // assertion-level
-//! batch_has_new |= has_new_sancov_coverage()      // code-edge-level
+//! Signal                  What it tracks                    What consumes it
+//! ──────────────────────  ────────────────────────────────  ─────────────────────
+//! Assertion discoveries   Semantic states and watermarks    Frontier controller
+//! Sancov edge coverage    Executed branches and conditions  Reports and plateau
 //! ```
+//!
+//! A timeline can add code coverage without creating a frontier job. Add
+//! semantic `assert_sometimes!`, `assert_sometimes_each!`, or numeric guidance
+//! assertions at states from which the explorer should continue.
 //!
 //! # How LLVM inline-8bit-counters work
 //!
@@ -113,23 +98,21 @@
 //!                                                ▼ has_new_coverage_inner()
 //!                                            HISTORY map ── global max per edge
 //!                                                │
-//!                                            batch_has_new = true if any
-//!                                            bucketed > history[i]
+//!                                                ▼
+//!                                            cumulative reporting
 //! ```
 //!
 //! Three shared memory regions:
 //!
-//! - **Transfer buffer** ([`SANCOV_TRANSFER`]): child writes raw counters
+//! - **Transfer buffer** (`SANCOV_TRANSFER`): child writes raw counters
 //!   via [`copy_counters_to_shared`] before `_exit()`. In sequential mode,
 //!   one buffer is reused. In parallel mode, each concurrent child gets
 //!   its own pool slot instead.
 //!
 //! - **History map** (`SANCOV_HISTORY`): global maximum of bucketed values
-//!   per edge. Never reset within a seed. Preserved across seeds by
-//!   [`prepare_next_seed()`](crate::prepare_next_seed) (cumulative, like
-//!   the explored map).
+//!   per edge. It stays cumulative across seeds within one explorer run.
 //!
-//! - **Pool** ([`SANCOV_POOL`]): parallel mode allocates
+//! - **Pool** (`SANCOV_POOL`): worker mode allocates
 //!   `slot_count × edge_count` bytes. Each concurrent child writes to its
 //!   own slot. Parent reads the slot after `waitpid()`. Allocated lazily
 //!   by [`get_or_init_sancov_pool`].
@@ -176,31 +159,20 @@
 //! - [`has_new_sancov_coverage`]: reads from the transfer buffer (sequential)
 //! - [`has_new_sancov_coverage_from`]: reads from a specific pool slot (parallel)
 //!
-//! Novelty feeds into `batch_has_new` in [`split_loop`](crate::split_loop)
-//! alongside the fork bitmap's
-//! [`has_new_bits()`](crate::coverage::ExploredMap::has_new_bits).
+//! # Integration with workers
 //!
-//! # Integration with the fork loop
-//!
-//! This module hooks into [`split_loop`](crate::split_loop) at five points:
+//! The frontier controller uses this module at four points:
 //!
 //! ```text
-//! setup_child()          After fork: reset_bss_counters() so child
-//!                        captures only its OWN edges. Reset pool pointers
-//!                        so nested splits allocate fresh pools.
+//! begin seed/job          reset_bss_counters() so the run captures its edges
 //!
-//! exit_child()           Before _exit(): copy_counters_to_shared() so
+//! worker exit             copy_counters_to_shared() so
 //!                        the parent can read the child's coverage.
 //!
-//! Sequential reap        After waitpid: has_new_sancov_coverage() checks
-//!                        the transfer buffer for novelty.
+//! in-process completion   has_new_sancov_coverage() merges the transfer buffer
 //!
-//! Parallel reap          After waitpid: has_new_sancov_coverage_from(slot)
-//!                        checks the child's pool slot for novelty.
-//!
-//! batch_has_new          Both coverage signals are OR'd together:
-//!                        batch_has_new |= sancov_novelty
-//!                        A barren/productive decision uses BOTH signals.
+//! worker reap             has_new_sancov_coverage_from(slot) merges that worker
+//!                        slot into cumulative history
 //! ```
 //!
 //! # Why binary targets? (sancov requires `main()`)
@@ -223,11 +195,8 @@
 //! Coverage stats flow through the reporting pipeline:
 //!
 //! - [`sancov_edge_count`] and [`sancov_edges_covered`] provide the raw numbers
-//! - [`ExplorationStats`](crate::shared_stats::ExplorationStats) includes
-//!   `sancov_edges_total` and `sancov_edges_covered`
-//! - `ExplorationReport` carries them to the `SimulationReport`
-//! - The terminal display shows a "Code Cov" progress bar alongside
-//!   the "Exploration" (fork bitmap) progress bar
+//! - `moonpool-sim` carries them into its `ExplorationReport`
+//! - The terminal display shows a "Code Cov" progress bar
 //! - Percentage = `edges_covered / edges_total`
 //!
 //! # Running code coverage
@@ -261,11 +230,6 @@
 //!   ├── per-reap:
 //!   │     has_new_sancov_coverage()   bucket + compare against history
 //!   │
-//!   ├── prepare_next_seed():
-//!   │     clear_transfer_buffer()     zero transfer buffer
-//!   │     reset_bss_counters()        zero BSS array
-//!   │     (history preserved)         cumulative across seeds
-//!   │
 //!   └── cleanup_sancov_shared()      free transfer + history + pool
 //! ```
 
@@ -292,7 +256,7 @@ static COUNTERS_LEN: AtomicUsize = AtomicUsize::new(0);
 thread_local! {
     /// MAP_SHARED buffer for child→parent counter transfer.
     ///
-    /// Public so `split_loop.rs` can redirect per-child in parallel mode.
+    /// Redirected to a worker's pool slot after `fork`.
     static SANCOV_TRANSFER: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
 
     /// MAP_SHARED global max map (history of highest bucketed values).
@@ -300,12 +264,12 @@ thread_local! {
 
     /// MAP_SHARED pool base for parallel mode (one slot per concurrent child).
     ///
-    /// Public so `setup_child()` can reset for nested splits.
+    /// Initialized once for the bounded worker pool.
     static SANCOV_POOL: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
 
     /// Number of slots in the sancov pool.
     ///
-    /// Public so `setup_child()` can reset for nested splits.
+    /// Number of initialized bounded-worker slots.
     static SANCOV_POOL_SLOTS: Cell<usize> = const { Cell::new(0) };
 
     /// Owners of the transfer and history pointers above.
@@ -541,7 +505,7 @@ pub fn sancov_edges_covered() -> usize {
 ///
 /// Unlike [`sancov_edges_covered`], this reads the LLVM-instrumented counters
 /// directly in the current process — no `SANCOV_HISTORY`, no fork. Each call
-/// folds the current counters into a persistent "seen" mask ([`SANCOV_SEEN`])
+/// folds the current counters into a persistent internal "seen" mask
 /// and returns the size of the union. Folding (rather than counting raw
 /// non-zero bytes) is essential: the 8-bit counters wrap at 256 and are not
 /// reset between seeds in the sequential path, so a hot edge whose cumulative

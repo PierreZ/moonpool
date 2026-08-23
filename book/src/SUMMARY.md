@@ -90,6 +90,7 @@
   - [Bounded Workers](./part5-building-on-top/04-bounded-workers.md)
   - [Exemplars and Continuations](./part5-building-on-top/05-exemplars-continuations.md)
   - [Multi-Seed Exploration](./part5-building-on-top/06-multi-seed.md)
+  - [Exploring a Consensus Protocol](./part5-building-on-top/07-exploring-consensus.md)
 
 ---
 

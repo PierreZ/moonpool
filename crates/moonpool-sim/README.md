@@ -55,7 +55,7 @@ Moonpool provides 15 Antithesis-style assertion macros for comprehensive propert
 
 **Numeric assertions** — track watermarks and thresholds:
 - `assert_always_greater_than!`, `assert_always_less_than!` (and `_or_equal_to` variants) — numeric invariants
-- `assert_sometimes_greater_than!`, `assert_sometimes_less_than!` (and `_or_equal_to` variants) — watermark tracking with fork-on-improvement
+- `assert_sometimes_greater_than!`, `assert_sometimes_less_than!` (and `_or_equal_to` variants) — watermark tracking with replay anchors on improvement
 
 **Compound assertions** — multi-condition discovery:
 - `assert_sometimes_all!` — frontier tracking across multiple named conditions
@@ -71,9 +71,15 @@ This transforms testing from "check known behaviors" to "explore the unknown unt
 
 ## Multiverse Exploration
 
-Beyond multi-seed testing, moonpool-sim integrates with `moonpool-explorer` for fork-based exploration. When an assertion discovers new behavior, the explorer forks child processes with different RNG seeds to explore alternate timelines from that discovery point.
+Beyond multi-seed testing, moonpool-sim integrates with `moonpool-explorer` for frontier-based exploration. When an assertion discovers new behavior, the explorer records an RNG-coordinate recipe. Bounded workers replay that prefix from the beginning and continue with different deterministic randomness.
 
-Adaptive energy budgets and coverage bitmaps guide exploration toward productive branches, while energy limits prevent runaway forking.
+The controller expands productive runs once, retains a few semantic-state exemplars, and caps total runs, queued jobs, and recipe depth. Code-edge coverage is reported and drives plateau detection; semantic assertions provide the replay anchors that guide the frontier.
+
+This is assertion-guided randomized testing, not exhaustive model checking.
+Exploration requires `.workload_factory()` or `.workloads()` plus built-in
+chaos surfaces; opaque workload instances, `before_iteration` hooks, and custom
+fault-injector instances are rejected because Moonpool cannot reconstruct them
+for every continuation.
 
 ## Documentation
 

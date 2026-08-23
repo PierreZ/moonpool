@@ -33,9 +33,9 @@ assert_reachable!("recovery path exercised");
 
 Where invariants validate, discovery assertions prove coverage. They answer questions like: Did our simulation actually trigger a failover? Did a leader election happen? Did the retry path execute? Without discovery assertions, a simulation could run thousands of iterations exercising only the happy path and report zero failures. Everything looks green, but nothing interesting was tested.
 
-Discovery assertions become **exploration amplifiers** in multiverse mode. When `assert_sometimes!` fires true for the first time, the explorer snapshots the simulation state and branches from that point. Why? Because reaching that state was hard, and there are likely more interesting states reachable from it.
+Discovery assertions become **exploration amplifiers** in multiverse mode. When `assert_sometimes!` fires true for the first time, the explorer records the seed and RNG position that reached it. Follow-up timelines replay that prefix and diverge just afterward. Reaching the state was hard, and there are likely more interesting states reachable from it.
 
-Consider a bug that requires a failover (probability 1/1000) followed by a specific timing condition during recovery (probability 1/1000). Without exploration amplification, finding this bug requires roughly 1,000,000 random iterations. With a sometimes-assertion on the failover that triggers branching, the explorer takes a shortcut: find the failover once in ~1000 iterations, snapshot it, then find the timing condition in ~1000 more iterations from that checkpoint. The effective probability drops from multiplicative to additive.
+Consider a bug that requires a failover (probability 1/1000) followed by a specific timing condition during recovery (probability 1/1000). Without exploration amplification, finding this bug requires roughly 1,000,000 random iterations. With a sometimes-assertion on the failover, the explorer takes a shortcut: find the failover once in ~1000 iterations, retain its replay prefix, then try roughly 1000 continuations from that prefix. The effective probability drops from multiplicative to additive.
 
 This is why discovery assertions have "superpowers" in moonpool. They are not just coverage markers. They are active participants in the search for bugs.
 

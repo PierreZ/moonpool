@@ -4,9 +4,14 @@
 //! Since worker mode uses `fork()`, each test must run in its own process
 //! (nextest default).
 
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+
 use async_trait::async_trait;
+use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_sim::{
-    ExplorationConfig, SimContext, SimulationBuilder, SimulationReport, SimulationResult, Workload,
+    ExplorationConfig, Invariant, NetworkProvider, Process, SimContext, SimulationBuilder,
+    SimulationError, SimulationReport, SimulationResult, TcpListenerTrait, TraceQuery, Workload,
 };
 
 /// Helper to run a simulation and return the report.
@@ -128,6 +133,150 @@ impl Workload for EachBucketWorkload {
     }
 }
 
+/// A tiny consensus node: receiving a one-byte term nominates this node as
+/// leader for that term and acknowledges the request over the simulated TCP
+/// connection.
+struct ElectionNode;
+
+#[async_trait]
+impl Process for ElectionNode {
+    fn name(&self) -> &'static str {
+        "election_node"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let listener = ctx.network().bind(ctx.my_ip()).await?;
+        loop {
+            let accepted = moonpool_sim::select! {
+                biased;
+                result = listener.accept() => result,
+                () = ctx.shutdown().cancelled() => return Ok(()),
+            };
+            let Ok((mut stream, _)) = accepted else {
+                continue;
+            };
+            let mut term = [0_u8; 1];
+            if stream.read_exact(&mut term).await.is_err() {
+                continue;
+            }
+            tracing::info!(
+                term = u64::from(term[0]),
+                leader = %ctx.my_ip(),
+                "exploration_leader_elected"
+            );
+            stream.write_all(b"ack").await.map_err(|error| {
+                SimulationError::InvalidState(format!("election ack failed: {error}"))
+            })?;
+        }
+    }
+}
+
+/// Paxos-style safety check: one term must never have two distinct leaders.
+struct OneLeaderPerTerm {
+    cursor: Cell<usize>,
+    leaders: RefCell<HashMap<u64, String>>,
+}
+
+impl OneLeaderPerTerm {
+    fn new() -> Self {
+        Self {
+            cursor: Cell::new(0),
+            leaders: RefCell::new(HashMap::new()),
+        }
+    }
+}
+
+impl Invariant for OneLeaderPerTerm {
+    fn name(&self) -> &'static str {
+        "one_leader_per_term"
+    }
+
+    fn observe(&self, query: &dyn TraceQuery, _sim_time_ms: u64) {
+        let mut leaders = self.leaders.borrow_mut();
+        for event in query.since("exploration_leader_elected", &self.cursor) {
+            let term = event
+                .u64("term")
+                .expect("leader election event carries a term");
+            let leader = event
+                .str("leader")
+                .expect("leader election event carries a leader")
+                .to_owned();
+            if let Some(previous) = leaders.get(&term) {
+                moonpool_sim::assert_always!(
+                    previous == &leader,
+                    "exploration: one leader per term"
+                );
+            } else {
+                leaders.insert(term, leader);
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        self.cursor.set(0);
+        self.leaders.borrow_mut().clear();
+    }
+}
+
+/// Contact one node through the real simulated-network Process path and wait
+/// until its leader event has been emitted.
+async fn nominate(ctx: &SimContext, node: &str, term: u8) -> SimulationResult<()> {
+    let mut stream = ctx.network().connect(node).await?;
+    stream.write_all(&[term]).await.map_err(|error| {
+        SimulationError::InvalidState(format!("nomination write failed: {error}"))
+    })?;
+    let mut ack = [0_u8; 3];
+    stream.read_exact(&mut ack).await.map_err(|error| {
+        SimulationError::InvalidState(format!("nomination ack failed: {error}"))
+    })?;
+    if ack != *b"ack" {
+        return Err(SimulationError::InvalidState(
+            "invalid nomination acknowledgement".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// A fresh-per-timeline workload with two sequential rare gates. The first
+/// leader is safe; passing both gates nominates a second leader in the same
+/// term, which the invariant catches.
+struct GuidedElectionWorkload;
+
+#[async_trait]
+impl Workload for GuidedElectionWorkload {
+    fn name(&self) -> &'static str {
+        "guided_election"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let nodes = ctx.topology().all_process_ips();
+        if nodes.len() != 3 {
+            return Err(SimulationError::InvalidState(format!(
+                "expected three election nodes, found {}",
+                nodes.len()
+            )));
+        }
+
+        nominate(ctx, &nodes[0], 1).await?;
+        moonpool_sim::assert_sometimes!(true, "exploration: leader elected");
+
+        let competing_ballot = moonpool_sim::sim_random_range(0_u8..10) == 0;
+        moonpool_sim::assert_sometimes!(competing_ballot, "exploration: competing ballot opened");
+        if competing_ballot {
+            let competing_quorum = moonpool_sim::sim_random_range(0_u8..10) == 0;
+            moonpool_sim::assert_sometimes!(
+                competing_quorum,
+                "exploration: competing ballot reached quorum"
+            );
+            if competing_quorum {
+                nominate(ctx, &nodes[1], 1).await?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -157,8 +306,10 @@ fn test_exploration_basic() {
         SimulationBuilder::new()
             .set_iterations(1)
             .enable_exploration(test_config(0, 10))
-            .workload(AssertOnceWorkload {
-                message: "triggers exploration",
+            .workload_factory(|| {
+                Box::new(AssertOnceWorkload {
+                    message: "triggers exploration",
+                })
             }),
     );
 
@@ -194,11 +345,14 @@ fn test_bug_capture_and_recipe() {
         SimulationBuilder::new()
             .set_iterations(1)
             .enable_exploration(test_config(1, 10))
-            .workload(ChildBugWorkload),
+            .workload_factory(|| Box::new(ChildBugWorkload)),
     );
 
-    // The root (in-process) run succeeds; bugs appear in exploration runs.
-    assert_eq!(report.successful_runs, 1);
+    // The root timeline succeeds, but a bug in any continuation makes its
+    // root seed a failed iteration in the top-level report.
+    assert_eq!(report.successful_runs, 0);
+    assert_eq!(report.failed_runs, 1);
+    assert_eq!(report.seeds_failing, report.seeds_used);
 
     let exp = report.exploration.expect("exploration report missing");
     assert!(
@@ -228,10 +382,12 @@ fn test_workers_bounded() {
         SimulationBuilder::new()
             .set_iterations(1)
             .enable_exploration(config)
-            .workload(ChildBugWorkload),
+            .workload_factory(|| Box::new(ChildBugWorkload)),
     );
 
-    assert_eq!(report.successful_runs, 1);
+    assert_eq!(report.successful_runs, 0);
+    assert_eq!(report.failed_runs, 1);
+    assert_eq!(report.seeds_failing, report.seeds_used);
     let exp = report.exploration.expect("exploration report missing");
     assert!(
         exp.max_active_workers <= workers,
@@ -256,7 +412,7 @@ fn test_in_process_exploration_deterministic() {
                 .set_iterations(2)
                 .set_debug_seeds(vec![1111, 2222])
                 .enable_exploration(test_config(0, 8))
-                .workload(PlantedBugWorkload),
+                .workload_factory(|| Box::new(PlantedBugWorkload)),
         )
     };
     let first = run();
@@ -300,7 +456,7 @@ fn test_planted_bug_recipe_replays() {
             .set_iterations(1)
             .set_debug_seeds(vec![4242])
             .enable_exploration(config)
-            .workload(PlantedBugWorkload),
+            .workload_factory(|| Box::new(PlantedBugWorkload)),
     );
 
     let exp = report.exploration.expect("exploration report missing");
@@ -321,7 +477,7 @@ fn test_planted_bug_recipe_replays() {
     let replay = run_simulation(
         SimulationBuilder::new()
             .replay_timeline(bug.seed, bug.recipe.clone())
-            .workload(PlantedBugWorkload),
+            .workload_factory(|| Box::new(PlantedBugWorkload)),
     );
     assert_eq!(
         replay.failed_runs, 1,
@@ -337,7 +493,7 @@ fn test_sometimes_each_drives_exploration() {
         SimulationBuilder::new()
             .set_iterations(1)
             .enable_exploration(test_config(0, 10))
-            .workload(EachBucketWorkload),
+            .workload_factory(|| Box::new(EachBucketWorkload)),
     );
 
     assert_eq!(report.successful_runs, 1);
@@ -349,4 +505,53 @@ fn test_sometimes_each_drives_exploration() {
         exp.discoveries
     );
     assert!(exp.expansions > 0, "expected bucket-driven expansions");
+}
+
+/// A Process/network/invariant path representative of consensus testing:
+/// semantic guidance finds a split-brain timeline, and its recipe reproduces
+/// from fresh nodes and a fresh workload reference model.
+#[test]
+fn test_process_network_guidance_recipe_replays_split_brain() {
+    let build = || {
+        SimulationBuilder::new()
+            .processes(3, || Box::new(ElectionNode))
+            // Factory registration is important for replay: every explored
+            // timeline must start with a fresh test driver.
+            .workload_factory(|| Box::new(GuidedElectionWorkload))
+            .invariant(OneLeaderPerTerm::new())
+    };
+
+    let mut config = test_config(0, 300);
+    config.branching_factor = 4;
+    let report = run_simulation(
+        build()
+            .set_debug_seeds(vec![4242])
+            .set_iterations(1)
+            .enable_exploration(config),
+    );
+
+    let exploration = report.exploration.expect("exploration report missing");
+    let bug = exploration
+        .bug_recipes
+        .first()
+        .expect("guided exploration should find the planted split brain");
+    assert!(
+        bug.recipe.len() >= 2,
+        "the two sequential guidance gates should produce a multi-segment recipe: {}",
+        moonpool_sim::format_timeline(&bug.recipe)
+    );
+
+    let replay = run_simulation(build().replay_timeline(bug.seed, bug.recipe.clone()));
+    assert_eq!(
+        replay.failed_runs, 1,
+        "replayed consensus timeline must reproduce the split-brain invariant failure"
+    );
+    assert!(
+        replay
+            .assertion_violations
+            .iter()
+            .any(|message| message.contains("exploration: one leader per term")),
+        "replay should identify the consensus invariant: {:?}",
+        replay.assertion_violations
+    );
 }

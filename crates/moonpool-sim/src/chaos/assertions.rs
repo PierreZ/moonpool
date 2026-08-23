@@ -231,10 +231,9 @@ pub fn assertion_results() -> HashMap<String, AssertionStats> {
 
 /// Request that the next call to [`reset_assertion_results`] be skipped.
 ///
-/// Used by multi-seed runs: the between-seed reset preserves pass/fail counts
-/// (selectively, under exploration, via the explorer's `prepare_next_seed`; or
-/// by accumulation without it), so the full zero in `SimWorld::create` must be
-/// suppressed.
+/// Used by multi-seed and exploration runs: the between-run reset preserves
+/// cumulative pass/fail counts and discovery latches, so the full zero in
+/// `SimWorld::create` must be suppressed.
 pub fn skip_next_assertion_reset() {
     SKIP_NEXT_ASSERTION_RESET.with(|c| c.set(true));
 }
@@ -436,7 +435,7 @@ macro_rules! assert_always_or_unreachable {
 
 /// Assert a condition that should sometimes be true, tracking stats and triggering exploration.
 ///
-/// Does not panic. On first success, triggers a fork to explore alternate timelines.
+/// Does not panic. Its first success creates a replay anchor for exploration.
 #[macro_export]
 macro_rules! assert_sometimes {
     ($condition:expr, $message:expr) => {
@@ -451,7 +450,7 @@ macro_rules! assert_sometimes {
 
 /// Assert that a code path is reachable (should be reached at least once).
 ///
-/// Does not panic. On first reach, triggers a fork.
+/// Does not panic. Its first reach creates a replay anchor for exploration.
 #[macro_export]
 macro_rules! assert_reachable {
     ($message:expr) => {
@@ -687,7 +686,7 @@ macro_rules! assert_always_less_than_or_equal_to {
     };
 }
 
-/// Assert that `val > threshold` sometimes holds. Forks on watermark improvement.
+/// Assert that `val > threshold` sometimes holds. Guides on watermark improvement.
 #[macro_export]
 macro_rules! assert_sometimes_greater_than {
     ($val:expr, $thresh:expr, $message:expr) => {
@@ -702,7 +701,7 @@ macro_rules! assert_sometimes_greater_than {
     };
 }
 
-/// Assert that `val >= threshold` sometimes holds. Forks on watermark improvement.
+/// Assert that `val >= threshold` sometimes holds. Guides on watermark improvement.
 #[macro_export]
 macro_rules! assert_sometimes_greater_than_or_equal_to {
     ($val:expr, $thresh:expr, $message:expr) => {
@@ -717,7 +716,7 @@ macro_rules! assert_sometimes_greater_than_or_equal_to {
     };
 }
 
-/// Assert that `val < threshold` sometimes holds. Forks on watermark improvement.
+/// Assert that `val < threshold` sometimes holds. Guides on watermark improvement.
 #[macro_export]
 macro_rules! assert_sometimes_less_than {
     ($val:expr, $thresh:expr, $message:expr) => {
@@ -732,7 +731,7 @@ macro_rules! assert_sometimes_less_than {
     };
 }
 
-/// Assert that `val <= threshold` sometimes holds. Forks on watermark improvement.
+/// Assert that `val <= threshold` sometimes holds. Guides on watermark improvement.
 #[macro_export]
 macro_rules! assert_sometimes_less_than_or_equal_to {
     ($val:expr, $thresh:expr, $message:expr) => {
@@ -771,8 +770,8 @@ macro_rules! assert_sometimes_all {
 /// Per-value bucketed sometimes assertion with optional quality watermarks.
 ///
 /// Each unique combination of identity keys gets its own bucket. On first
-/// discovery of a new bucket, a fork is triggered for exploration. If quality
-/// keys are provided, re-forks when quality improves.
+/// discovery of a new bucket creates a replay anchor for exploration. If
+/// quality keys are provided, improvements create new anchors.
 ///
 /// # Usage
 ///

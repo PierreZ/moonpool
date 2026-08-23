@@ -277,12 +277,38 @@ impl SimulationBuilder {
     ///
     /// The instance is reused across iterations (the `run()` method is called
     /// each iteration on the same struct). Gets `client_id = 0`, `client_count = 1`.
+    /// This form is intentionally rejected when exploration is enabled because
+    /// an arbitrary trait object cannot be reconstructed with fresh state for
+    /// each continuation. Use [`Self::workload_factory`] or [`Self::workloads`]
+    /// for exploration.
     #[must_use]
     pub fn workload(mut self, w: impl Workload) -> Self {
         self.entries.push(WorkloadEntry::Instance(
             Some(Box::new(w)),
             ClientId::default(),
         ));
+        self
+    }
+
+    /// Add one workload reconstructed from a factory for every timeline.
+    ///
+    /// Unlike [`Self::workload`], this never reuses a previously-run workload
+    /// value. Use this form for exploration so every root and continuation
+    /// timeline starts with fresh test-driver state and captured bug recipes
+    /// can be replayed from the same lifecycle boundary.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// builder.workload_factory(|| Box::new(ClientWorkload::new()))
+    /// ```
+    #[must_use]
+    pub fn workload_factory(mut self, factory: impl Fn() -> Box<dyn Workload> + 'static) -> Self {
+        self.entries.push(WorkloadEntry::Factory {
+            count: WorkloadCount::Fixed(1),
+            client_id: ClientId::default(),
+            factory: Box::new(move |_| factory()),
+        });
         self
     }
 
@@ -646,17 +672,35 @@ impl SimulationBuilder {
         self
     }
 
-    /// Enable fork-based multiverse exploration.
+    /// Enable frontier-based multiverse exploration.
     ///
-    /// When enabled, the simulation will fork child processes at assertion
-    /// discovery points to explore alternate timelines with different seeds.
-    /// Requires the `exploration` feature.
+    /// When enabled, globally new assertion outcomes create replay recipes.
+    /// Bounded worker processes replay those timelines and continue them with
+    /// different deterministic seeds. Set `config.workers` to zero for
+    /// sequential, fork-free exploration. Requires the `exploration` feature.
+    ///
+    /// Exploration requires factory-created workloads and built-in [`Chaos`]
+    /// surfaces. Instance workloads, `before_iteration` hooks, and custom fault
+    /// injector instances are rejected because the runner cannot reconstruct
+    /// those values with fresh state for every continuation timeline.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the configuration contains a zero exploration bound. The
+    /// simulation also fails fast from [`Self::run`] if exploration is combined
+    /// with instance workloads, `before_iteration` hooks, or custom fault
+    /// injector instances, because those values cannot be reconstructed for
+    /// each continuation timeline. Use [`Self::workload_factory`] or
+    /// [`Self::workloads`] and built-in [`Chaos`] surfaces instead.
     #[cfg(feature = "exploration")]
     #[must_use]
     pub fn enable_exploration(
         mut self,
         config: crate::chaos::exploration_glue::ExplorationConfig,
     ) -> Self {
+        if let Err(error) = config.validate() {
+            panic!("invalid exploration configuration: {error}");
+        }
         self.exploration_config = Some(config);
         self
     }
@@ -839,6 +883,37 @@ impl SimulationBuilder {
             convergence_timeout: false,
             saturation: None,
         })
+    }
+
+    /// Enforce the fresh-state boundary required by exploration recipes.
+    ///
+    /// Factory entries are reconstructed by `resolve_entries` for every root
+    /// and continuation. The rejected inputs are opaque mutable values whose
+    /// pristine state cannot be recovered after one timeline has run.
+    fn validate_exploration_lifecycle(&self) {
+        if self.exploration_config.is_none() {
+            return;
+        }
+
+        assert!(
+            !self
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, WorkloadEntry::Instance(..))),
+            "exploration requires fresh workloads for every timeline; use \
+             SimulationBuilder::workload_factory or SimulationBuilder::workloads instead of \
+             SimulationBuilder::workload"
+        );
+        assert!(
+            self.before_iteration_hooks.is_empty(),
+            "exploration does not support before_iteration hooks because they cannot be \
+             reconstructed for every timeline; move reset state into a workload factory"
+        );
+        assert!(
+            self.fault_injectors.is_empty(),
+            "exploration does not support custom fault injector instances because they cannot be \
+             reconstructed for every timeline; use built-in Chaos surfaces"
+        );
     }
 
     /// Check whether the `UntilCoverageStable` saturation condition has been
@@ -1169,8 +1244,12 @@ impl SimulationBuilder {
     ///
     /// # Panics
     ///
-    /// Panics if a simulation invariant fails or a workload panics.
+    /// Panics if a simulation invariant fails, a workload panics, or exploration
+    /// is configured with lifecycle state that cannot be reconstructed for each
+    /// timeline (an instance workload, a `before_iteration` hook, or a custom
+    /// fault injector instance).
     pub fn run(mut self) -> SimulationReport {
+        self.validate_exploration_lifecycle();
         if self.entries.is_empty() {
             return Self::empty_report();
         }
@@ -1349,6 +1428,11 @@ impl SimulationBuilder {
                 Err(_) => true,
             }
         });
+        if explorer.seed_stats().bug_found > 0 {
+            state
+                .metrics_collector
+                .mark_current_iteration_failed_by_exploration(seed);
+        }
         state.explorer = Some(explorer);
     }
 
@@ -1725,6 +1809,35 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "exploration")]
+    fn test_exploration_config() -> crate::ExplorationConfig {
+        crate::ExplorationConfig {
+            workers: 0,
+            max_runs_per_seed: 1,
+            branching_factor: 1,
+            max_frontier: 1,
+            max_recipe_len: 1,
+        }
+    }
+
+    #[cfg(feature = "exploration")]
+    struct TestFaultInjector;
+
+    #[cfg(feature = "exploration")]
+    #[async_trait]
+    impl FaultInjector for TestFaultInjector {
+        fn name(&self) -> &'static str {
+            "test_fault"
+        }
+
+        async fn inject(
+            &mut self,
+            _ctx: &crate::runner::fault_injector::FaultContext,
+        ) -> SimulationResult<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn test_simulation_builder_basic() {
         let report = SimulationBuilder::new()
@@ -1738,6 +1851,59 @@ mod tests {
         assert_eq!(report.failed_runs, 0);
         assert!((report.success_rate() - 100.0).abs() < f64::EPSILON);
         assert_eq!(report.seeds_used, vec![1, 2, 3]);
+    }
+
+    #[cfg(feature = "exploration")]
+    #[test]
+    fn exploration_accepts_factory_workloads_and_builtin_chaos() {
+        let builder = SimulationBuilder::new()
+            .workload_factory(|| Box::new(BasicWorkload))
+            .enable_chaos([Chaos::Network(ChaosMode::Random)])
+            .enable_exploration(test_exploration_config());
+
+        builder.validate_exploration_lifecycle();
+    }
+
+    #[cfg(feature = "exploration")]
+    #[test]
+    #[should_panic(expected = "max_frontier")]
+    fn exploration_rejects_zero_config_bound() {
+        let mut config = test_exploration_config();
+        config.max_frontier = 0;
+
+        let _builder = SimulationBuilder::new().enable_exploration(config);
+    }
+
+    #[cfg(feature = "exploration")]
+    #[test]
+    #[should_panic(expected = "exploration requires fresh workloads for every timeline")]
+    fn exploration_rejects_instance_workloads() {
+        SimulationBuilder::new()
+            .workload(BasicWorkload)
+            .enable_exploration(test_exploration_config())
+            .validate_exploration_lifecycle();
+    }
+
+    #[cfg(feature = "exploration")]
+    #[test]
+    #[should_panic(expected = "exploration does not support before_iteration hooks")]
+    fn exploration_rejects_before_iteration_hooks() {
+        SimulationBuilder::new()
+            .workload_factory(|| Box::new(BasicWorkload))
+            .before_iteration(|| {})
+            .enable_exploration(test_exploration_config())
+            .validate_exploration_lifecycle();
+    }
+
+    #[cfg(feature = "exploration")]
+    #[test]
+    #[should_panic(expected = "exploration does not support custom fault injector instances")]
+    fn exploration_rejects_custom_fault_injectors() {
+        SimulationBuilder::new()
+            .workload_factory(|| Box::new(BasicWorkload))
+            .fault(TestFaultInjector)
+            .enable_exploration(test_exploration_config())
+            .validate_exploration_lifecycle();
     }
 
     struct FailingWorkload;

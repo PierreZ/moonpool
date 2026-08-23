@@ -71,6 +71,43 @@ impl MetricsCollector {
         self.faulty_seeds.push(seed);
     }
 
+    /// Reclassify the current root iteration when one of its exploration
+    /// timelines finds a bug.
+    ///
+    /// Exploration is part of the root seed's test result, so the public
+    /// iteration counts must still add up to `iterations`: one productive
+    /// seed with several failing continuations is one failed iteration, not
+    /// one successful root plus several extra failures.
+    #[cfg(feature = "exploration")]
+    pub(crate) fn mark_current_iteration_failed_by_exploration(&mut self, seed: u64) {
+        let Some(last_result) = self.individual_metrics.last_mut() else {
+            return;
+        };
+        let Ok(metrics) = last_result else {
+            return;
+        };
+
+        self.successful_runs = self.successful_runs.saturating_sub(1);
+        self.failed_runs += 1;
+        self.aggregated_metrics.wall_time = self
+            .aggregated_metrics
+            .wall_time
+            .saturating_sub(metrics.wall_time);
+        self.aggregated_metrics.simulated_time = self
+            .aggregated_metrics
+            .simulated_time
+            .saturating_sub(metrics.simulated_time);
+        self.aggregated_metrics.events_processed = self
+            .aggregated_metrics
+            .events_processed
+            .saturating_sub(metrics.events_processed);
+        *last_result = Err(SimulationError::InvalidState(format!(
+            "exploration found a failing timeline (root seed {seed})"
+        )));
+        self.faulty_seeds.push(seed);
+        tracing::error!(seed, "exploration found a failing timeline");
+    }
+
     /// Add faulty seeds reported by an external exploration phase.
     pub(crate) fn add_faulty_seeds(&mut self, mut seeds: Vec<u64>) {
         self.faulty_seeds.append(&mut seeds);

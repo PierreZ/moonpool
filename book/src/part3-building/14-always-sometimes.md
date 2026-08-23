@@ -47,7 +47,7 @@ assert_sometimes!(
 
 If the condition is never true after all iterations complete, the post-run validation reports a coverage violation. But unlike always-violations, coverage violations are statistical. They become meaningful only after enough iterations.
 
-The real power of `assert_sometimes!` shows up in multiverse mode. When the condition fires true for the first time in a timeline, the explorer snapshots that moment and branches. New timelines start from that interesting state. This is what transforms sometimes-assertions from passive coverage checks into active exploration amplifiers.
+The real power of `assert_sometimes!` shows up in multiverse mode. When the condition fires true for the first time, the explorer records a replay anchor. New timelines reconstruct that prefix and diverge after the interesting state. This transforms sometimes-assertions from passive coverage checks into active exploration amplifiers.
 
 Think of it this way: `assert_sometimes!` is how you tell the explorer "this state is worth investigating." The explorer does the rest.
 
