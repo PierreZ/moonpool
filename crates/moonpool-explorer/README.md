@@ -1,73 +1,96 @@
 # moonpool-explorer
 
-Fork-based multiverse exploration for deterministic simulation testing.
+Frontier-based exploration for deterministic simulation testing.
 
-## Why: Explore Beyond Single Seeds
+## Why: Explore Beyond Independent Seeds
 
-A single simulation seed finds bugs along one execution path. But bugs hide in rare combinations of events. Multiverse exploration forks child processes at discovery points — when an assertion fires for the first time — and explores alternate timelines with different RNG seeds.
+A single simulation seed follows one execution path. Independent seeds add
+breadth, but bugs that require a sequence of unlikely states remain difficult
+to reach. The explorer turns globally new assertion outcomes into replayable
+frontier jobs, then continues those proven prefixes with fresh deterministic
+randomness.
 
-This is inspired by [Antithesis](https://antithesis.com/)'s approach: use coverage-guided forking to systematically explore the state space.
+## How: Replay and Continue
 
-## How: Fork at Discovery
-
-When an `assert_sometimes!` succeeds for the first time, the explorer:
-
-1. **Forks** child processes with different RNG seeds
-2. Each child **continues** the simulation from the discovery point
-3. Children that discover **new coverage** (via bitmap tracking) get more exploration budget
-4. **Energy budgets** prevent runaway forking
+When an `assert_sometimes!`, `assert_reachable!`, bucket, or guidance watermark
+makes globally new progress, Moonpool records the current RNG call count. The
+controller retains a recipe for that timeline and enqueues bounded
+continuations:
 
 ```text
-Parent (seed 42)
-├── assert_sometimes!("rare event") fires at RNG count 1000
-│   ├── Child A (reseed → 1001) → explores alternate path
-│   ├── Child B (reseed → 1002) → finds new bug!
-│   └── Child C (reseed → 1003) → no new coverage, stops
-└── continues with original seed
+root seed 42
+  └─ discovers "leader changed" at RNG call 1000
+       ├─ replay to 1000, then reseed to A
+       ├─ replay to 1000, then reseed to B ── finds a bug
+       └─ replay to 1000, then reseed to C
 ```
+
+Each worker starts the simulation from the beginning, replays the recipe, and
+diverges after its last breakpoint. Forking is only a bounded process-execution
+optimization between runs; workers do not fork recursively and the explorer
+does not snapshot a live simulation.
 
 ## Architecture
 
 ```text
-moonpool-explorer (this crate)  ── leaf, only depends on libc
-     ^
-moonpool-sim                    ── wires RNG hooks at init
+controller (frontier, exemplars, statistics)
+    ├─ worker: replay one recipe, report journal, exit
+    ├─ worker: replay one recipe, report journal, exit
+    └─ worker: replay one recipe, report journal, exit
 ```
 
-This crate has zero knowledge of moonpool internals. Communication with the simulation RNG uses two function pointers set via `set_rng_hooks()`:
-- `fn() -> u64` — get current RNG call count
-- `fn(u64)` — reseed the RNG
-
-## Key Concepts
-
-- **Coverage bitmap** — 8192-bit vector tracking which code paths have been exercised
-- **Explored map** — Tracks frontier of new coverage across all timelines
-- **Assertion slots** — 128 shared-memory slots for Antithesis-style assertion tracking (boolean, numeric, compound)
-- **Energy budgets** — Three-level system (global, per-mark, realloc pool) prevents runaway forking
-- **Adaptive forking** — Batch-based: fork N children, check coverage yield, return energy from barren marks
-- **Bug recipes** — Deterministic replay paths in `"count@seed -> count@seed"` format
+The controller keeps at most `workers` children live. Set `workers` to `0` for
+fork-free, sequential exploration. The `moonpool-explorer` crate stays unaware
+of Moonpool's network, storage, and process internals; `moonpool-sim` installs
+the RNG and assertion hooks that connect them.
 
 ## Configuration
 
-```rust
-ExplorationConfig {
-    max_depth: 30,              // Maximum fork depth
-    timelines_per_split: 4,     // Timelines per split point (fixed-count mode)
-    global_energy: 50_000,      // Total fork budget
-    adaptive: Some(AdaptiveConfig {
-        batch_size: 20,          // Children per adaptive batch
-        min_timelines: 100,      // Minimum timelines per mark
-        max_timelines: 200,      // Maximum timelines per mark
-        per_mark_energy: 1000,   // Energy budget per fork point
-        warm_min_timelines: None, // Override min_timelines for warm seeds
-    }),
-    parallelism: None,          // Optional multi-core sliding window
-}
+Most users should configure exploration through
+`moonpool_sim::SimulationBuilder`:
+
+```rust,ignore
+use moonpool_sim::{ExplorationConfig, SimulationBuilder};
+
+let report = SimulationBuilder::new()
+    .enable_exploration(ExplorationConfig {
+        workers: 0, // deterministic, fork-free starting point
+        max_runs_per_seed: 8_000,
+        branching_factor: 4,
+        max_frontier: 1_024,
+        max_recipe_len: 64,
+    })
+    .until_coverage_stable(10, 1_000)
+    .workload_factory(|| Box::new(MyWorkload::new()))
+    .run();
 ```
+
+- `max_runs_per_seed` is a ceiling, not a quota. A root run that discovers
+  nothing new ends after one timeline.
+- `branching_factor` controls how many continuations a productive run creates.
+- `max_frontier` bounds queued work, and `max_recipe_len` bounds replay depth.
+- The physical process bound is one controller plus `workers` children.
+- Factory-created workloads and built-in chaos surfaces are required so every
+  continuation starts from reconstructible state.
+
+Bug recipes in `report.exploration` can be replayed with
+`SimulationBuilder::replay_timeline(seed, recipe)` when every timeline starts
+from fresh deterministic test-driver state.
+
+## Platform and Scope
+
+Worker processes require POSIX `fork` support (Linux or macOS). Non-Unix
+targets use in-process exploration. Exploration is assertion-guided randomized
+testing, not exhaustive model checking or a formal proof. Reproducibility also
+requires the system under test to use Moonpool providers rather than external
+time, randomness, threads, or I/O. Use worker processes only from a standalone
+single-threaded simulation binary; raw `fork()` is unsafe when unrelated host
+threads may hold inherited locks.
 
 ## Documentation
 
-- [API Documentation](https://docs.rs/moonpool-explorer)
+- [Moonpool book](https://pierrezemb.github.io/moonpool/)
+- [API documentation](https://docs.rs/moonpool-explorer)
 - [Repository](https://github.com/PierreZ/moonpool)
 
 ## License

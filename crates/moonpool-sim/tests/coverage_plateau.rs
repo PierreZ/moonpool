@@ -94,7 +94,7 @@ fn test_plateau_with_exploration() {
                 max_recipe_len: 8,
             })
             .until_coverage_stable(3, 100)
-            .workload(ThreeAlwaysHitWorkload),
+            .workload_factory(|| Box::new(ThreeAlwaysHitWorkload)),
     );
 
     assert!(

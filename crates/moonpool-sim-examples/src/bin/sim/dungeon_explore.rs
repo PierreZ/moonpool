@@ -11,7 +11,7 @@ fn main() {
     moonpool_sim::init_sim_tracing(tracing::Level::WARN);
 
     let report = moonpool_sim::SimulationBuilder::new()
-        .workload(moonpool_sim_examples::dungeon::DungeonWorkload::default())
+        .workload_factory(|| Box::new(moonpool_sim_examples::dungeon::DungeonWorkload::default()))
         .enable_exploration(moonpool_sim::ExplorationConfig {
             workers: 4,
             max_runs_per_seed: 24_000,

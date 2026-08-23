@@ -51,19 +51,22 @@ Each child replays through *every* state the parent reached — the earlier disc
 
 ## One Expansion Per Run
 
-A run that made at least one discovery is **productive** and is expanded **exactly once**: `branching_factor` children are enqueued, anchored at its latest discovery. This holds no matter how many discoveries the run made. If one timeline discovers 300 code edges and five new assertion states, it is still *one productive execution*, not 305 branching events.
+A run that made at least one semantic assertion discovery is **productive** and is expanded **exactly once**: `branching_factor` children are enqueued, anchored at its latest discovery. This holds no matter how many discoveries the run made. If one timeline discovers five new assertion states, it is still *one productive execution*, not five branching events. Sanitizer code coverage is reported separately and does not create frontier jobs.
 
 A run with an empty journal discovered nothing the multiverse had not already seen. It is not punished, scored, or refilled — its branch simply produces no children and dies. This one rule replaces the entire energy system of the previous explorer (global budgets, per-mark allowances, reallocation pools, productive/barren classification): the only global limits are a per-seed run budget and a frontier size cap.
 
 ```rust,ignore
 ExplorationConfig {
-    workers: 4,             // max concurrent worker processes
+    workers: 0,             // deterministic in-process mode (the default)
     max_runs_per_seed: 8000, // total timelines per root seed
     branching_factor: 4,    // children per productive run
     max_frontier: 1024,     // queued-job cap
     max_recipe_len: 64,     // depth cap in replay segments
 }
 ```
+
+Set `workers` above zero only in a standalone simulation binary when bounded
+parallel `fork()` workers are worth the less reproducible search order.
 
 ## Who Decides Novelty
 

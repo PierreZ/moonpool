@@ -91,12 +91,47 @@ pub struct ExplorationConfig {
 impl Default for ExplorationConfig {
     fn default() -> Self {
         Self {
-            workers: 4,
+            // Raw fork is opt-in: in-process mode is deterministic and safe in
+            // test harnesses or applications that may already have threads.
+            workers: 0,
             max_runs_per_seed: 512,
             branching_factor: 4,
             max_frontier: 1024,
             max_recipe_len: 64,
         }
+    }
+}
+
+impl ExplorationConfig {
+    /// Validate that the run budget and policy bounds are nonzero.
+    /// `workers == 0` remains valid and selects deterministic, in-process
+    /// execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`io::ErrorKind::InvalidInput`] with the invalid field name when
+    /// a run, branching, frontier, or recipe bound is zero.
+    pub fn validate(&self) -> Result<(), io::Error> {
+        for (field, value) in [
+            ("max_runs_per_seed", self.max_runs_per_seed),
+            ("branching_factor", u64::from(self.branching_factor)),
+            (
+                "max_frontier",
+                u64::try_from(self.max_frontier).unwrap_or(u64::MAX),
+            ),
+            (
+                "max_recipe_len",
+                u64::try_from(self.max_recipe_len).unwrap_or(u64::MAX),
+            ),
+        ] {
+            if value == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("exploration config field `{field}` must be greater than zero"),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -177,6 +212,7 @@ impl Explorer {
     ///
     /// Returns an error if shared memory allocation fails.
     pub fn new(config: ExplorationConfig) -> Result<Self, io::Error> {
+        config.validate()?;
         crate::init_assertions()?;
         journal::install_hooks();
         crate::sancov::init_sancov_shared()?;
@@ -616,10 +652,52 @@ mod tests {
     #[test]
     fn default_config_is_bounded() {
         let config = ExplorationConfig::default();
-        assert!(config.workers >= 1);
+        config.validate().expect("default config should be valid");
+        assert_eq!(config.workers, 0);
         assert!(config.max_runs_per_seed > 0);
         assert!(config.branching_factor > 0);
         assert!(config.max_frontier > 0);
         assert!(config.max_recipe_len > 0);
+    }
+
+    #[test]
+    fn zero_exploration_bounds_are_rejected() {
+        let invalid = [
+            ExplorationConfig {
+                max_runs_per_seed: 0,
+                ..ExplorationConfig::default()
+            },
+            ExplorationConfig {
+                branching_factor: 0,
+                ..ExplorationConfig::default()
+            },
+            ExplorationConfig {
+                max_frontier: 0,
+                ..ExplorationConfig::default()
+            },
+            ExplorationConfig {
+                max_recipe_len: 0,
+                ..ExplorationConfig::default()
+            },
+        ];
+
+        for config in invalid {
+            let error = config.validate().expect_err("zero bound must be rejected");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        }
+    }
+
+    #[test]
+    fn zero_workers_is_valid() {
+        let config = ExplorationConfig {
+            workers: 0,
+            max_runs_per_seed: 1,
+            branching_factor: 1,
+            max_frontier: 1,
+            max_recipe_len: 1,
+        };
+        config
+            .validate()
+            .expect("in-process minimum should be valid");
     }
 }

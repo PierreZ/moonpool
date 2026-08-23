@@ -20,7 +20,7 @@
 //! - [`SimulationBuilder`]: Configure and run simulations
 //! - [`chaos`]: Fault injection (buggify, 14 assertion macros, invariants)
 //! - [`storage`]: Storage simulation with fault injection
-//! - Multiverse exploration via `moonpool-explorer` (re-exported as [`ExplorationConfig`], [`AdaptiveConfig`])
+//! - Multiverse exploration via `moonpool-explorer` (configured with [`ExplorationConfig`])
 //!
 //! ## Fault Injection Overview
 //!
@@ -41,63 +41,31 @@
 //! | Torn writes | configurable | Write atomicity, journaling |
 //! | Sync failures | configurable | Durability guarantees |
 //!
-//! ## Coverage-Preserving Multi-Seed Exploration
+//! ## Frontier-Based Multi-Seed Exploration
 //!
-//! When exploration is enabled, multiple seeds share coverage context. The
-//! explored map (coverage bitmap union) and assertion watermarks are preserved
-//! between seeds so each subsequent seed focuses energy on genuinely new
-//! branches rather than re-treading already-discovered paths.
+//! Exploration retains replay recipes for globally new assertion outcomes.
+//! Productive timelines enqueue bounded continuations that replay to the last
+//! discovery and then diverge with fresh deterministic randomness. Assertion
+//! novelty and code-coverage history are cumulative across root seeds, so a
+//! seed that discovers nothing new stops after its root timeline.
 //!
-//! A **warm start** mechanism reduces wasted forks: on seeds after the first,
-//! marks whose first probe batch finds zero new coverage bits stop after
-//! `warm_min_timelines` forks instead of the full `min_timelines`.
-//!
-//! ```text
-//!  Seed 1 (cold start)           Seed 2 (warm start)          Seed 3 (warm start)
-//!  energy: 400K                  energy: 400K                 energy: 400K
-//!
-//!  root ─┬─ mark A ──> 400       root ─┬─ mark A ──> 30      root ─┬─ mark A ──> 30
-//!        │  (new bits!) forks           │  (barren!) skip           │  (barren!) skip
-//!        │                              │                           │
-//!        ├─ mark B ──> 400              ├─ mark B ──> 30            ├─ mark B ──> 30
-//!        │  (new bits!) forks           │  (barren!) skip           │  (barren!) skip
-//!        │                              │                           │
-//!        └─ mark C ──> 400              ├─ mark C ──> 30            ├─ mark C ──> 30
-//!           (new bits!) forks           │  (barren!) skip           │  (barren!) skip
-//!                                       │                           │
-//!                                       └─ mark D ──> 400          └─ mark E ──> 400
-//!                                          (NEW bits!) forks           (NEW bits!) forks
-//!                        │                               │                            │
-//!       ┌────────────────┘              ┌────────────────┘           ┌────────────────┘
-//!       v                               v                            v
-//!  ┌──────────┐  ──preserved──>  ┌──────────┐  ──preserved──>  ┌──────────┐
-//!  │ explored │  coverage map    │ explored │  coverage map    │ explored │
-//!  │ map:     │  + watermarks    │ map:     │  + watermarks    │ map:     │
-//!  │ A,B,C    │                  │ A,B,C,D  │                  │ A,B,C,D,E│
-//!  └──────────┘                  └──────────┘                  └──────────┘
-//!
-//!  Total: each seed spends most energy on NEW discoveries.
-//!  Warm marks (A,B,C on seed 2) exit after warm_min_timelines (30)
-//!  instead of min_timelines (400), saving ~95% energy per barren mark.
-//! ```
+//! Workers are short-lived child processes, bounded by `workers`; set it to
+//! zero for sequential, fork-free exploration. Every worker reconstructs the
+//! timeline from its root seed and recipe rather than snapshotting a live
+//! simulation.
 //!
 //! ```ignore
 //! SimulationBuilder::new()
-//!     .set_iterations(3)  // 3 root seeds with coverage forwarding
 //!     .enable_exploration(ExplorationConfig {
-//!         max_depth: 120,
-//!         timelines_per_split: 4,
-//!         global_energy: 400_000,  // per-seed energy budget
-//!         adaptive: Some(AdaptiveConfig {
-//!             batch_size: 30,
-//!             min_timelines: 400,
-//!             max_timelines: 1_000,
-//!             per_mark_energy: 10_000,
-//!             warm_min_timelines: Some(30),  // quick skip for barren warm marks
-//!         }),
-//!         parallelism: Some(Parallelism::HalfCores),
+//!         workers: 0,
+//!         max_runs_per_seed: 8_000,
+//!         branching_factor: 4,
+//!         max_frontier: 1_024,
+//!         max_recipe_len: 64,
 //!     })
-//!     .workload(my_workload);
+//!     .until_coverage_stable(10, 1_000)
+//!     .workload_factory(|| Box::new(MyWorkload::default()))
+//!     .run();
 //! ```
 
 #![deny(missing_docs)]

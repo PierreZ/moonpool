@@ -44,7 +44,7 @@ Follow those instructions and you arrive at the exact same timeline, determinist
 
 2. **The Frontier Controller** describes the exploration loop: recipes, discovery journals, the one-expansion rule, and how barren branches die without any budget accounting.
 
-3. **Bounded Workers** covers the physical execution model: `fork()` as a snapshot optimization rather than a tree structure, single-owner novelty, crash isolation, and macOS portability.
+3. **Bounded Workers** covers the physical execution model: `fork()` as a bounded job-execution optimization rather than a tree structure, single-owner novelty, crash isolation, and macOS portability.
 
 4. **Exemplars and Continuations** shows how the controller remembers semantic states, retains multiple exemplars per state, and schedules continuations from the under-explored frontier — the machinery that carries the dungeon workload to floor 8.
 

@@ -138,12 +138,14 @@ drops `Runnable`s until the queue is empty. Dropping a `Runnable` cancels
 the task and drops its future, and any tasks that drop wakes land in the
 same queue and are consumed by the same loop.
 
-## Fork safety
+## Exploration process safety
 
-The multiverse explorer forks the process *while tasks are being polled*
-(assertion macros are fork points). Two rules keep that sound: everything is
-single-threaded, and the ready-queue lock is never held across a task poll,
-so a forked child never inherits a held lock.
+The explorer only forks between complete timelines, after the deterministic
+executor and all of its tasks have been dropped. Assertion macros record
+discovery coordinates; they are not fork points. Forked workers are still an
+explicit performance mode because unrelated host threads and resources may
+exist outside the simulation. The default `workers: 0` mode runs continuations
+sequentially in-process and is the conservative choice for deterministic CI.
 
 ## Verifying it yourself
 

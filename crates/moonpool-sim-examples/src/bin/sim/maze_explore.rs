@@ -9,7 +9,7 @@ fn main() {
     moonpool_sim::init_sim_tracing(tracing::Level::WARN);
 
     let report = moonpool_sim::SimulationBuilder::new()
-        .workload(moonpool_sim_examples::maze::MazeWorkload::default())
+        .workload_factory(|| Box::new(moonpool_sim_examples::maze::MazeWorkload::default()))
         .enable_exploration(moonpool_sim::ExplorationConfig {
             workers: 0,
             max_runs_per_seed: 600,

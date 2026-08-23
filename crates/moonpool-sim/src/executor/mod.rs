@@ -93,11 +93,11 @@
 //!
 //! # Fork safety
 //!
-//! The fork-based explorer ([`moonpool-explorer`]) forks the process while
-//! tasks are being polled (assertion macros are fork points). Two rules keep
-//! that sound: everything is single-threaded, and **the queue lock is never
-//! held across `runnable.run()`**; wakes fired during a poll re-acquire the
-//! lock, and a child process inherits no held locks.
+//! The explorer only forks between complete simulation timelines, when no
+//! executor exists and no task is being polled. Forked workers are nevertheless
+//! opt-in: a host process with unrelated threads may leave library locks held
+//! in the child. The default explorer configuration therefore runs in-process;
+//! enable workers only in a standalone, single-threaded simulation binary.
 //!
 //! [`moonpool-explorer`]: https://docs.rs/moonpool-explorer
 
@@ -399,8 +399,8 @@ impl Executor {
 
     /// Poll ready tasks in seeded-random order until none is runnable.
     ///
-    /// The queue lock is released around every `runnable.run()` (fork
-    /// safety; wakes fired during a poll re-acquire it to enqueue).
+    /// The queue lock is released around every `runnable.run()`; wakes fired
+    /// during a poll re-acquire it to enqueue.
     fn run_until_stalled(&mut self) {
         let mut polls: u64 = 0;
 
