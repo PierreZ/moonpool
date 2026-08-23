@@ -11,7 +11,7 @@
 //! it, so concurrent readers never observe a partially initialized slot.
 //!
 //! On a "discovery" (first Sometimes/Reachable pass, numeric watermark
-//! improvement, or frontier advance) the accounting calls
+//! improvement, frontier advance, or new partial boolean combination) the accounting calls
 //! [`crate::hooks::on_discovery`]. Each discovery is guarded by an atomic
 //! latch so it fires exactly once globally. With no hook installed this is a
 //! no-op (pure accounting); the exploration backend wires it to a per-run
@@ -111,12 +111,16 @@ pub struct AssertionSlot {
     pub watermark: i64,
     /// Watermark value at the last signalled discovery (for improvement detection).
     pub discovery_watermark: i64,
+    /// Bounded bloom bitmap of partial combinations seen by `sometimes_all`.
+    pub combination_bits: u64,
     /// Frontier: number of simultaneously true bools (for `BooleanSometimesAll`).
     pub frontier: u8,
+    /// Number of propositions in a `BooleanSometimesAll` assertion.
+    pub frontier_target: u8,
     /// Publication state: zero = unused, one = initializing, two = ready.
     published: u8,
     /// Padding for alignment.
-    pad: [u8; 6],
+    pad: [u8; 5],
     /// Assertion message string (null-terminated).
     pub msg: [u8; SLOT_MSG_LEN],
 }
@@ -143,6 +147,27 @@ pub fn msg_hash(msg: &str) -> u32 {
         h = h.wrapping_mul(0x0100_0193);
     }
     h
+}
+
+/// Stable fingerprint for one complete set of named boolean observations.
+fn boolean_combination_fingerprint(named_bools: &[(&str, bool)]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for (name, value) in named_bools {
+        for byte in name.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+        hash ^= u64::from(*value);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
+/// Mix a site and proposition fingerprint into one semantic state id.
+fn boolean_combination_state_id(site_hash: u32, fingerprint: u64) -> u64 {
+    fingerprint ^ u64::from(site_hash).wrapping_mul(0x9e37_79b9_7f4a_7c15)
 }
 
 /// Update a monotonic watermark, returning whether this call advanced it.
@@ -249,8 +274,10 @@ unsafe fn find_or_alloc_slot(
         (*slot).fail_count = 0;
         (*slot).watermark = if maximize == 1 { i64::MIN } else { i64::MAX };
         (*slot).discovery_watermark = if maximize == 1 { i64::MIN } else { i64::MAX };
+        (*slot).combination_bits = 0;
         (*slot).frontier = 0;
-        (*slot).pad = [0; 6];
+        (*slot).frontier_target = 0;
+        (*slot).pad = [0; 5];
         (*slot).msg = msg_buf;
 
         published.store(SLOT_READY, Ordering::Release);
@@ -392,10 +419,14 @@ pub fn assertion_numeric(
         let wm = &*(&raw const (*slot).watermark).cast::<AtomicI64>();
         update_watermark(wm, left, maximize);
 
-        // For NumericSometimes: signal discovery when watermark improves past discovery_watermark
+        // Numeric guidance follows the comparison distance (`left - right`),
+        // matching Antithesis: a changing threshold must influence whether an
+        // observation is actually closer to satisfying the property. The
+        // public watermark above deliberately remains the best `left` value
+        // for human-readable reporting.
         if kind == AssertKind::NumericSometimes {
             let fw = &*(&raw const (*slot).discovery_watermark).cast::<AtomicI64>();
-            if update_watermark(fw, left, maximize) {
+            if update_watermark(fw, left.saturating_sub(right), maximize) {
                 crate::hooks::on_discovery(
                     crate::hooks::DiscoveryKind::WatermarkImprovement,
                     u64::from(hash),
@@ -407,9 +438,10 @@ pub fn assertion_numeric(
 
 /// Compound boolean assertion backing function (sometimes-all).
 ///
-/// Counts how many of the named booleans are simultaneously true.
-/// Maintains a frontier (max count seen). Signals a discovery when the frontier
-/// advances.
+/// Counts how many of the named booleans are simultaneously true. Maintains a
+/// frontier (max count seen) and a bounded bitmap of distinct partial truth
+/// combinations. Signals a discovery when the frontier advances or a new
+/// same-frontier combination is observed.
 ///
 /// This is a no-op if the assertion table is not initialized.
 pub fn assertion_sometimes_all(msg: &str, named_bools: &[(&str, bool)]) {
@@ -432,6 +464,9 @@ pub fn assertion_sometimes_all(msg: &str, named_bools: &[(&str, bool)]) {
     // via `unwrap_or(u8::MAX)` so we never panic.
     let true_count =
         u8::try_from(named_bools.iter().filter(|(_, v)| *v).count()).unwrap_or(u8::MAX);
+    let target = u8::try_from(named_bools.len()).unwrap_or(u8::MAX);
+    let fingerprint = boolean_combination_fingerprint(named_bools);
+    let combination_bit = 1_u64 << (fingerprint & 63);
 
     // Safety: slot points to valid memory.
     unsafe {
@@ -439,12 +474,28 @@ pub fn assertion_sometimes_all(msg: &str, named_bools: &[(&str, bool)]) {
         let pc = &*(&raw const (*slot).pass_count).cast::<AtomicU64>();
         pc.fetch_add(1, Ordering::Relaxed);
 
-        // Signal discovery only for the caller that advances the shared frontier.
+        let frontier_target = &*(&raw const (*slot).frontier_target).cast::<AtomicU8>();
+        frontier_target.fetch_max(target, Ordering::Relaxed);
+
+        // Record the partial combination even when a frontier advance wins the
+        // discovery for this encounter. That prevents the same combination
+        // from producing a redundant event on its next encounter. A 64-bit
+        // bloom bitmap bounds guidance per site; collisions lose optional
+        // combination hints but never assertion accounting or frontier data.
+        let combinations = &*(&raw const (*slot).combination_bits).cast::<AtomicU64>();
+        let previous_combinations = combinations.fetch_or(combination_bit, Ordering::Relaxed);
+        let new_combination = previous_combinations & combination_bit == 0;
+
         let fr = &*(&raw const (*slot).frontier).cast::<AtomicU8>();
         if true_count > fr.fetch_max(true_count, Ordering::Relaxed) {
             crate::hooks::on_discovery(
                 crate::hooks::DiscoveryKind::FrontierAdvance,
                 u64::from(hash),
+            );
+        } else if true_count > 0 && new_combination {
+            crate::hooks::on_discovery(
+                crate::hooks::DiscoveryKind::BooleanCombination,
+                boolean_combination_state_id(hash, fingerprint),
             );
         }
     }
@@ -495,7 +546,14 @@ pub fn assertion_read_all() -> Vec<AssertionSlotSnapshot> {
                         .load(Ordering::Relaxed),
                     watermark: (&*std::ptr::addr_of!((*slot).watermark).cast::<AtomicI64>())
                         .load(Ordering::Relaxed),
+                    combinations_seen: (&*std::ptr::addr_of!((*slot).combination_bits)
+                        .cast::<AtomicU64>())
+                        .load(Ordering::Relaxed)
+                        .count_ones(),
                     frontier: (&*std::ptr::addr_of!((*slot).frontier).cast::<AtomicU8>())
+                        .load(Ordering::Relaxed),
+                    frontier_target: (&*std::ptr::addr_of!((*slot).frontier_target)
+                        .cast::<AtomicU8>())
                         .load(Ordering::Relaxed),
                 })
             })
@@ -518,13 +576,31 @@ pub struct AssertionSlotSnapshot {
     pub fail_count: u64,
     /// Best watermark value (for numeric assertions).
     pub watermark: i64,
+    /// Number of distinct partial-combination bloom bits observed.
+    pub combinations_seen: u32,
     /// Frontier value (for `BooleanSometimesAll`).
     pub frontier: u8,
+    /// Frontier target (the number of `BooleanSometimesAll` propositions).
+    pub frontier_target: u8,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static TEST_DISCOVERIES: RefCell<Vec<(crate::hooks::DiscoveryKind, u64)>> =
+            const { RefCell::new(Vec::new()) };
+    }
+
+    fn record_discovery(kind: crate::hooks::DiscoveryKind, state_id: u64) {
+        TEST_DISCOVERIES.with(|events| events.borrow_mut().push((kind, state_id)));
+    }
+
+    fn take_discoveries() -> Vec<(crate::hooks::DiscoveryKind, u64)> {
+        TEST_DISCOVERIES.with(|events| std::mem::take(&mut *events.borrow_mut()))
+    }
 
     #[test]
     fn test_msg_hash_deterministic() {
@@ -553,8 +629,9 @@ mod tests {
         // Verify AssertionSlot size for shared memory layout stability.
         // msg_hash(4) + kind(1) + must_hit(1) + maximize(1) + discovered(1) +
         // pass_count(8) + fail_count(8) + watermark(8) + discovery_watermark(8) +
-        // frontier(1) + published(1) + _pad(6) + msg(64) = 112
-        assert_eq!(std::mem::size_of::<AssertionSlot>(), 112);
+        // combination_bits(8) + frontier(1) + frontier_target(1) + published(1) +
+        // _pad(5) + msg(64) = 120
+        assert_eq!(std::mem::size_of::<AssertionSlot>(), 120);
     }
 
     #[test]
@@ -644,18 +721,93 @@ mod tests {
     }
 
     #[test]
-    fn test_sometimes_all_frontier_only_moves_forward() {
+    fn numeric_guidance_tracks_comparison_distance_when_threshold_moves() {
         crate::region::init();
+        crate::hooks::set_discovery_hooks(crate::hooks::DiscoveryHooks {
+            on_discovery: record_discovery,
+        });
+        let _ = take_discoveries();
+
+        assertion_numeric(
+            AssertKind::NumericSometimes,
+            AssertCmp::Gt,
+            true,
+            10,
+            5,
+            "dynamic threshold",
+        );
+        // The left operand improves, but the comparison distance falls from
+        // 5 to -10, so this must not guide the explorer in the wrong direction.
+        assertion_numeric(
+            AssertKind::NumericSometimes,
+            AssertCmp::Gt,
+            true,
+            20,
+            30,
+            "dynamic threshold",
+        );
+        assertion_numeric(
+            AssertKind::NumericSometimes,
+            AssertCmp::Gt,
+            true,
+            21,
+            10,
+            "dynamic threshold",
+        );
+
+        let discoveries = take_discoveries();
+        assert_eq!(discoveries.len(), 2);
+        assert!(
+            discoveries
+                .iter()
+                .all(|(kind, _)| { *kind == crate::hooks::DiscoveryKind::WatermarkImprovement })
+        );
+        let slots = assertion_read_all();
+        assert_eq!(slots[0].watermark, 21, "reports still show best left value");
+
+        crate::hooks::clear_discovery_hooks();
+        crate::region::clear();
+    }
+
+    #[test]
+    fn sometimes_all_tracks_frontier_target_and_distinct_partial_combinations() {
+        crate::region::init();
+        crate::hooks::set_discovery_hooks(crate::hooks::DiscoveryHooks {
+            on_discovery: record_discovery,
+        });
+        let _ = take_discoveries();
 
         assertion_sometimes_all("frontier", &[("a", true), ("b", false), ("c", false)]);
-        assertion_sometimes_all("frontier", &[("a", false), ("b", false), ("c", false)]);
+        // Same score as the first encounter, different proposition. Count-only
+        // guidance used to collapse these two semantically different states.
+        assertion_sometimes_all("frontier", &[("a", false), ("b", true), ("c", false)]);
+        assertion_sometimes_all("frontier", &[("a", true), ("b", false), ("c", false)]);
         assertion_sometimes_all("frontier", &[("a", true), ("b", true), ("c", false)]);
 
         let slots = assertion_read_all();
         assert_eq!(slots.len(), 1);
         assert_eq!(slots[0].frontier, 2);
-        assert_eq!(slots[0].pass_count, 3);
+        assert_eq!(slots[0].frontier_target, 3);
+        assert_eq!(slots[0].combinations_seen, 3);
+        assert_eq!(slots[0].pass_count, 4);
 
+        let discoveries = take_discoveries();
+        assert_eq!(
+            discoveries
+                .iter()
+                .filter(|(kind, _)| *kind == crate::hooks::DiscoveryKind::FrontierAdvance)
+                .count(),
+            2
+        );
+        assert_eq!(
+            discoveries
+                .iter()
+                .filter(|(kind, _)| *kind == crate::hooks::DiscoveryKind::BooleanCombination)
+                .count(),
+            1
+        );
+
+        crate::hooks::clear_discovery_hooks();
         crate::region::clear();
     }
 }

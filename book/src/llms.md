@@ -443,8 +443,8 @@ anchors.
 | A boolean situation should occur | `assert_sometimes!` | First true encounter is a discovery |
 | Mark an already-entered path as interesting | `assert_reachable!` | Encounter is a discovery |
 | A numeric bound must always hold | `assert_always_{greater,less}_than...!` | Numeric safety violation |
-| Drive a quantity higher or lower | `assert_sometimes_{greater,less}_than...!` | Every better watermark can guide deeper search |
-| Several conditions should coincide | `assert_sometimes_all!` | Guides whenever more conditions are simultaneously true |
+| Drive a quantity toward a numeric goal | `assert_sometimes_{greater,less}_than...!` | Every better `left - right` comparison distance can guide deeper search |
+| Several conditions should coincide | `assert_sometimes_all!` | Guides on frontier advances and new partial truth combinations |
 | Explore a bounded vocabulary of states | `assert_sometimes_each!` | New identity bucket and better per-bucket quality guide search |
 
 The exact numeric safety macros are
@@ -501,19 +501,16 @@ moonpool_sim::assert_sometimes_all!("protocol: failover completed", [
 ```
 
 This macro guides on frontier improvement: a run with two of three facts is
-more useful than a run with one. It does not currently create a simple final
-coverage violation for failing to reach all three, so add a separate campaign
-contract if completion is mandatory:
+more useful than a run with one. It also distinguishes bounded partial truth
+combinations, so "only old leader unavailable" and "only new quorum formed"
+can both become replayable states even though each has frontier one. The final
+report and adaptive coverage gate remain incomplete until all propositions are
+true together; do not duplicate it with a separate boolean completion check.
 
-```rust,ignore
-moonpool_sim::assert_sometimes!(
-    old_leader_unavailable && new_quorum_formed && client_completed,
-    "protocol: failover fully completed"
-);
-```
-
-The current frontier compares the number of true propositions, not which
-subset was true. Use bounded bucket identities when the subset itself matters.
+Partial combinations use a 64-bit per-site bitmap. This is bounded guidance,
+not exhaustive subset accounting: collisions may merge optional hints. Use
+`assert_sometimes_each!` with a deliberately small identity vocabulary when
+exact per-value reporting matters.
 
 ### Numeric guidance
 
@@ -535,9 +532,12 @@ moonpool_sim::assert_sometimes_less_than!(
 );
 ```
 
-Choose direction carefully. Greater/greater-or-equal guidance maximizes the
-observed value; less/less-or-equal guidance minimizes it. Values are converted
-to `i64`, so avoid relying on larger unsigned ranges.
+Choose direction carefully. Greater/greater-or-equal guidance maximizes
+`left - right`; less/less-or-equal guidance minimizes it. The human report
+still displays the best observed left operand. Tracking the distance means a
+dynamic threshold cannot report false progress merely because both operands
+grew. Values are converted to `i64`, so avoid relying on larger unsigned
+ranges.
 
 The first numeric evaluation establishes a watermark discovery even when the
 comparison has not passed yet. Later improvements can therefore guide a search

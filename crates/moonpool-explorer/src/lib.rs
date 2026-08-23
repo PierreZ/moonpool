@@ -25,10 +25,10 @@
 //!
 //! Discovery     A globally-new interesting state: the first pass of an
 //!               assert_sometimes!/assert_reachable!, a new
-//!               assert_sometimes_each! bucket, a numeric watermark or
-//!               frontier or quality improvement. Guarded by CAS latches in
-//!               the shared assertion region, so each distinct discovery is
-//!               observed exactly once across all timelines and seeds.
+//!               assert_sometimes_each! bucket, a partial truth combination,
+//!               or a numeric/frontier/quality improvement. Guarded by atomic
+//!               state in the shared assertion region, so each recorded
+//!               transition is observed once across all timelines and seeds.
 //!
 //! Journal       The list of discoveries one run made, each stamped with the
 //!               RNG call count where it happened.

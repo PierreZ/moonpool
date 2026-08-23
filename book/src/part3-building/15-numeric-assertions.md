@@ -34,7 +34,7 @@ assert_sometimes_less_than!(p99_latency, 100, "p99 should sometimes drop below 1
 
 Like their boolean counterparts, these are coverage assertions. If the goal is never achieved after all iterations, the validation reports a coverage violation.
 
-The difference from boolean sometimes is in how they interact with the explorer. **Sometimes-numeric assertions signal a discovery on watermark improvement.** The framework tracks the best value observed, and when a new observation beats the previous best, the explorer remembers a replayable exemplar of that state and schedules continuations from it — monotonic progress states get preferred treatment in continuation scheduling.
+The difference from boolean sometimes is in how they interact with the explorer. **Sometimes-numeric assertions signal a discovery when the comparison distance improves.** Guidance tracks `left - right`, while the report still shows the best value of `left`. Including both operands matters when the threshold changes during a run: a larger left value is not progress toward `left > right` if the right value grew even faster.
 
 This creates a ratchet. Suppose you write:
 
@@ -46,14 +46,14 @@ The first time committed_transactions reaches 50, the explorer branches. Then it
 
 ## Watermark Mechanics
 
-Every numeric assertion, whether always or sometimes, maintains a watermark in shared memory. The watermark is the best value of the left operand observed so far:
+Every numeric assertion, whether always or sometimes, maintains a reporting watermark in shared memory. This watermark is the best value of the left operand observed so far:
 
 - For assertions that track the **highest** value (`maximize=true`): `assert_always_less_than!`, `assert_always_less_than_or_equal_to!`, `assert_sometimes_greater_than!`, `assert_sometimes_greater_than_or_equal_to!`. These seek the boundary from below (always) or ratchet upward (sometimes).
 - For assertions that track the **lowest** value (`maximize=false`): `assert_always_greater_than!`, `assert_always_greater_than_or_equal_to!`, `assert_sometimes_less_than!`, `assert_sometimes_less_than_or_equal_to!`. These seek the boundary from above (always) or ratchet downward (sometimes).
 
 The watermark lives in the shared assertion region, so in multiverse mode every timeline sees the same current best. When one timeline improves it, the improvement is immediately visible to all subsequent timelines. This means the explorer collectively pushes toward the boundary rather than each timeline searching independently.
 
-For sometimes-numeric assertions, a second watermark tracks the value at the last signalled discovery. A new discovery only fires when the value improves **past** that mark (guarded by an atomic compare-and-swap, so it fires exactly once globally). This prevents the same assertion from flooding the journal with tiny incremental improvements.
+For sometimes-numeric assertions, a second watermark tracks the best comparison distance, `left - right`, seen by the explorer. Greater-than goals maximize this distance; less-than goals minimize it. A new discovery only fires when that distance improves past the shared mark, so a moving threshold cannot falsely steer exploration in the wrong direction.
 
 ## Use Cases
 

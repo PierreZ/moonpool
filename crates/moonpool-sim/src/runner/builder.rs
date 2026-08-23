@@ -1171,10 +1171,9 @@ impl SimulationBuilder {
         }
     }
 
-    /// Scan all assertion slots from shared memory: insert the messages
-    /// of every "passed" Sometimes/Reachable slot into `reached`, log a
-    /// warning for every still-unreached slot, and return the count of
-    /// unique Sometimes/Reachable message strings observed.
+    /// Scan all assertion slots from shared memory: insert the messages of
+    /// every satisfied coverage assertion into `reached`, warn for incomplete
+    /// sites, and return the number of unique observed coverage contracts.
     fn scan_assertion_slots(reached: &mut std::collections::HashSet<String>) -> usize {
         let slots = moonpool_assertions::assertion_read_all();
         for slot in &slots {
@@ -1183,17 +1182,26 @@ impl SimulationBuilder {
                     kind,
                     moonpool_assertions::AssertKind::Sometimes
                         | moonpool_assertions::AssertKind::Reachable
+                        | moonpool_assertions::AssertKind::BooleanSometimesAll
                 )
             {
-                if slot.pass_count > 0 {
+                let satisfied = match kind {
+                    moonpool_assertions::AssertKind::BooleanSometimesAll => {
+                        slot.frontier_target > 0 && slot.frontier >= slot.frontier_target
+                    }
+                    _ => slot.pass_count > 0,
+                };
+                if satisfied {
                     reached.insert(slot.msg.clone());
                 } else if !reached.contains(&slot.msg) {
                     tracing::warn!(
-                        "UNREACHED slot: kind={:?} msg={:?} pass={} fail={}",
+                        "INCOMPLETE coverage slot: kind={:?} msg={:?} pass={} fail={} frontier={}/{}",
                         kind,
                         slot.msg,
                         slot.pass_count,
-                        slot.fail_count
+                        slot.fail_count,
+                        slot.frontier,
+                        slot.frontier_target
                     );
                 }
             }
@@ -1206,6 +1214,7 @@ impl SimulationBuilder {
                         k,
                         moonpool_assertions::AssertKind::Sometimes
                             | moonpool_assertions::AssertKind::Reachable
+                            | moonpool_assertions::AssertKind::BooleanSometimesAll
                     )
                 })
             })
@@ -1739,7 +1748,7 @@ fn build_assertion_details(
                     }
                 }
                 AssertKind::BooleanSometimesAll => {
-                    if slot.frontier > 0 {
+                    if slot.frontier_target > 0 && slot.frontier >= slot.frontier_target {
                         AssertionStatus::Pass
                     } else {
                         AssertionStatus::Miss
@@ -1754,6 +1763,8 @@ fn build_assertion_details(
                 fail_count: slot.fail_count,
                 watermark: slot.watermark,
                 frontier: slot.frontier,
+                frontier_target: slot.frontier_target,
+                combinations_seen: slot.combinations_seen,
                 status,
             })
         })
@@ -1795,6 +1806,39 @@ mod tests {
 
     use crate::SimulationResult;
     use crate::runner::context::SimContext;
+
+    #[test]
+    fn sometimes_all_is_a_miss_until_the_full_frontier_is_reached() {
+        let partial = moonpool_assertions::AssertionSlotSnapshot {
+            msg: "cluster ready".to_string(),
+            kind: moonpool_assertions::AssertKind::BooleanSometimesAll as u8,
+            must_hit: 1,
+            pass_count: 4,
+            fail_count: 0,
+            watermark: 0,
+            combinations_seen: 3,
+            frontier: 2,
+            frontier_target: 3,
+        };
+
+        let details = build_assertion_details(std::slice::from_ref(&partial));
+        assert_eq!(
+            details[0].status,
+            crate::runner::report::AssertionStatus::Miss
+        );
+        assert_eq!(details[0].frontier_target, 3);
+        assert_eq!(details[0].combinations_seen, 3);
+
+        let complete = moonpool_assertions::AssertionSlotSnapshot {
+            frontier: 3,
+            ..partial
+        };
+        let details = build_assertion_details(&[complete]);
+        assert_eq!(
+            details[0].status,
+            crate::runner::report::AssertionStatus::Pass
+        );
+    }
 
     struct BasicWorkload;
 

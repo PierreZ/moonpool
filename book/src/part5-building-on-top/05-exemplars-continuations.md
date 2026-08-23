@@ -6,7 +6,7 @@ Expansion alone is momentum: a productive run spawns a few children, and if a ch
 
 ## Semantic States
 
-Every discovery carries a **state id**: the assertion message hash for slot assertions, or the bucket hash (message plus identity keys) for `assert_sometimes_each!`. This is the Castlevania lesson from the problem chapter, applied through the macros you already write: the workload's assertions project the huge concrete state space into a tractable set of semantic buckets.
+Every discovery carries a **state id**: the assertion message hash for ordinary slot assertions, the site-plus-truth-combination hash for partial `assert_sometimes_all!` states, or the bucket hash (message plus identity keys) for `assert_sometimes_each!`. This is the Castlevania lesson from the problem chapter, applied through the macros you already write: the workload's assertions project the huge concrete state space into a tractable set of semantic buckets.
 
 ```rust,ignore
 assert_sometimes_each!("descended",

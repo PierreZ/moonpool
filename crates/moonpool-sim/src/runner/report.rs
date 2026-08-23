@@ -137,6 +137,10 @@ pub struct AssertionDetail {
     pub watermark: i64,
     /// Frontier value (for `BooleanSometimesAll`).
     pub frontier: u8,
+    /// Frontier target (number of `BooleanSometimesAll` propositions).
+    pub frontier_target: u8,
+    /// Approximate number of distinct truth combinations observed.
+    pub combinations_seen: u32,
     /// Computed status based on kind and counts.
     pub status: AssertionStatus,
 }
@@ -485,12 +489,14 @@ fn fmt_assertion_detail(f: &mut fmt::Formatter<'_>, detail: &AssertionDetail) ->
         ),
         AssertKind::BooleanSometimesAll => writeln!(
             f,
-            "  {}  [{:<10}]  {:<34}  {} calls  frontier: {}",
+            "  {}  [{:<10}]  {:<34}  {} calls  frontier: {}/{}  combinations: {}",
             status_tag,
             kind_tag,
             quoted_msg,
             fmt_num(detail.pass_count),
-            detail.frontier
+            detail.frontier,
+            detail.frontier_target,
+            detail.combinations_seen
         ),
         _ => writeln!(
             f,

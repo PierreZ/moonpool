@@ -21,7 +21,9 @@ assert_sometimes_all!("cluster_fully_operational", [
 
 The assertion tracks a **frontier**: the maximum number of sub-goals that have been simultaneously true. It starts at zero. The first time any sub-goal is true, the frontier advances to 1. When two are true at once, it advances to 2. When all four are true simultaneously, the frontier reaches 4 and the assertion is fully satisfied.
 
-Each frontier advance is a discovery the explorer schedules continuations from. This creates a progression: the explorer first finds states where one sub-goal is met, then continues from there to find states where two are met, and so on. The exploration naturally follows the path of increasing difficulty.
+Each frontier advance is a discovery the explorer schedules continuations from. Distinct truth combinations are useful too: `leader_elected` alone and `replicas_synced` alone both have frontier 1, but they may lead to very different futures. Moonpool therefore records new partial combinations as structured state discoveries even when their true-count does not beat the frontier. A bounded 64-bit bitmap per assertion keeps this extra guidance cheap; hash collisions can discard an optional hint but cannot affect assertion correctness or the reported frontier.
+
+This creates a progression without collapsing every same-cardinality state: the explorer can retain several ways to satisfy one sub-goal, then continue toward two, three, and finally all of them. Reports show the frontier as `reached/target` and keep the assertion in `MISS` until the full target is reached.
 
 This is powerful for multi-step objectives. Consider a distributed transaction system. The full operation requires: prepare all participants, get all votes, commit, and acknowledge to the client. As a sometimes-all assertion:
 

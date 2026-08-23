@@ -12,10 +12,10 @@ randomness.
 
 ## How: Replay and Continue
 
-When an `assert_sometimes!`, `assert_reachable!`, bucket, or guidance watermark
-makes globally new progress, Moonpool records the current RNG call count. The
-controller retains a recipe for that timeline and enqueues bounded
-continuations:
+When an `assert_sometimes!`, `assert_reachable!`, bucket, partial truth
+combination, or guidance watermark makes globally new progress, Moonpool
+records the current RNG call count. The controller retains a recipe for that
+timeline and enqueues bounded continuations:
 
 ```text
 root seed 42

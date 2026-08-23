@@ -285,58 +285,64 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
                         .push(format!("assert_always!('{}') was never reached", slot.msg));
                 }
             }
-            Some(moonpool_assertions::AssertKind::AlwaysOrUnreachable) => {
-                if slot.fail_count > 0 {
-                    always_violations.push(format!(
-                        "assert_always_or_unreachable!('{}') failed {} times out of {}",
-                        slot.msg, slot.fail_count, total
-                    ));
-                }
+            Some(moonpool_assertions::AssertKind::AlwaysOrUnreachable) if slot.fail_count > 0 => {
+                always_violations.push(format!(
+                    "assert_always_or_unreachable!('{}') failed {} times out of {}",
+                    slot.msg, slot.fail_count, total
+                ));
             }
-            Some(moonpool_assertions::AssertKind::Sometimes) => {
-                if total > 0 && slot.pass_count == 0 {
-                    coverage_violations.push(format!(
-                        "assert_sometimes!('{}') has 0% success rate ({} checks)",
-                        slot.msg, total
-                    ));
-                }
+            Some(moonpool_assertions::AssertKind::Sometimes)
+                if total > 0 && slot.pass_count == 0 =>
+            {
+                coverage_violations.push(format!(
+                    "assert_sometimes!('{}') has 0% success rate ({} checks)",
+                    slot.msg, total
+                ));
             }
-            Some(moonpool_assertions::AssertKind::Reachable) => {
-                if slot.pass_count == 0 {
-                    coverage_violations.push(format!(
-                        "assert_reachable!('{}') was never reached",
-                        slot.msg
-                    ));
-                }
+            Some(moonpool_assertions::AssertKind::Reachable) if slot.pass_count == 0 => {
+                coverage_violations.push(format!(
+                    "assert_reachable!('{}') was never reached",
+                    slot.msg
+                ));
             }
-            Some(moonpool_assertions::AssertKind::Unreachable) => {
-                if slot.pass_count > 0 {
-                    always_violations.push(format!(
-                        "assert_unreachable!('{}') was reached {} times",
-                        slot.msg, slot.pass_count
-                    ));
-                }
+            Some(moonpool_assertions::AssertKind::Unreachable) if slot.pass_count > 0 => {
+                always_violations.push(format!(
+                    "assert_unreachable!('{}') was reached {} times",
+                    slot.msg, slot.pass_count
+                ));
             }
-            Some(moonpool_assertions::AssertKind::NumericAlways) => {
-                if slot.fail_count > 0 {
-                    always_violations.push(format!(
-                        "numeric assert_always ('{}') failed {} times out of {}",
-                        slot.msg, slot.fail_count, total
-                    ));
-                }
+            Some(moonpool_assertions::AssertKind::NumericAlways) if slot.fail_count > 0 => {
+                always_violations.push(format!(
+                    "numeric assert_always ('{}') failed {} times out of {}",
+                    slot.msg, slot.fail_count, total
+                ));
             }
-            Some(moonpool_assertions::AssertKind::NumericSometimes) => {
-                if total > 0 && slot.pass_count == 0 {
-                    coverage_violations.push(format!(
-                        "numeric assert_sometimes ('{}') has 0% success rate ({} checks)",
-                        slot.msg, total
-                    ));
-                }
+            Some(moonpool_assertions::AssertKind::NumericSometimes)
+                if total > 0 && slot.pass_count == 0 =>
+            {
+                coverage_violations.push(format!(
+                    "numeric assert_sometimes ('{}') has 0% success rate ({} checks)",
+                    slot.msg, total
+                ));
             }
-            Some(moonpool_assertions::AssertKind::BooleanSometimesAll) | None => {
-                // BooleanSometimesAll: no simple pass/fail violation contract
-                // (the frontier tracking is the guidance mechanism)
+            Some(moonpool_assertions::AssertKind::BooleanSometimesAll)
+                if slot.frontier_target > 0 && slot.frontier < slot.frontier_target =>
+            {
+                coverage_violations.push(format!(
+                    "assert_sometimes_all!('{}') reached frontier {}/{}",
+                    slot.msg, slot.frontier, slot.frontier_target
+                ));
             }
+            Some(
+                moonpool_assertions::AssertKind::AlwaysOrUnreachable
+                | moonpool_assertions::AssertKind::Sometimes
+                | moonpool_assertions::AssertKind::Reachable
+                | moonpool_assertions::AssertKind::Unreachable
+                | moonpool_assertions::AssertKind::NumericAlways
+                | moonpool_assertions::AssertKind::NumericSometimes
+                | moonpool_assertions::AssertKind::BooleanSometimesAll,
+            )
+            | None => {}
         }
     }
 
@@ -866,5 +872,29 @@ mod tests {
         let violations = validate_assertion_contracts();
         // May or may not be empty, but should not panic
         let _ = violations;
+    }
+
+    #[test]
+    fn sometimes_all_contract_requires_every_proposition() {
+        moonpool_assertions::init();
+        moonpool_assertions::reset();
+        moonpool_assertions::assertion_sometimes_all(
+            "compound contract",
+            &[("a", true), ("b", false)],
+        );
+
+        let (_, coverage) = validate_assertion_contracts();
+        assert_eq!(
+            coverage,
+            vec!["assert_sometimes_all!('compound contract') reached frontier 1/2"]
+        );
+
+        moonpool_assertions::assertion_sometimes_all(
+            "compound contract",
+            &[("a", true), ("b", true)],
+        );
+        let (_, coverage) = validate_assertion_contracts();
+        assert!(coverage.is_empty());
+        moonpool_assertions::clear();
     }
 }
