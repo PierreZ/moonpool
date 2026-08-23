@@ -2,6 +2,7 @@
 
 [Welcome](./welcome.md)
 [Index](./index.md)
+[Guide for AI Agents](./llms.md)
 
 # Foreword
 
