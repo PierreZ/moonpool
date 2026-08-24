@@ -116,6 +116,12 @@ impl<P: Providers> H2Server<P> {
     /// takes over from there, including wrapping the stream in
     /// [`HyperIo`] and the service in [`TowerToHyperService`], which is what
     /// [`serve_connection`](Self::serve_connection) would have done.
+    ///
+    /// Hyper's automatic `Date` response header is disabled because it reads
+    /// the system clock outside [`HyperTimer`], making otherwise identical
+    /// simulations produce different HPACK bytes. A production caller that
+    /// needs the header can re-enable it on the returned builder or add it in
+    /// its service.
     #[must_use]
     pub fn builder(&self) -> http2::Builder<HyperExecutor<P::Task>> {
         let mut builder = http2::Builder::new(self.executor.clone());

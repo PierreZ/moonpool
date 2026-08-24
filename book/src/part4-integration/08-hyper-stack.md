@@ -170,6 +170,13 @@ clients. Here it would only make reconnect timing depend on something other
 than the seed, so `ChannelConfig` doubles from `initial_reconnect_delay` and
 saturates at `max_reconnect_delay`, full stop.
 
+**Response headers do not read the wall clock.** Hyper normally adds a `Date`
+header from `SystemTime`. That timestamp becomes part of the connection's HPACK
+state, so two otherwise identical gRPC replays can emit different frame sizes
+and perturb later simulated network choices. `H2Server` disables the automatic
+header. A production caller using the builder escape hatch can re-enable it, or
+the service can provide a date from an application-controlled clock.
+
 **A connection has to earn its reset.** The failure count that drives the
 backoff clears only once a connection has survived `initial_reconnect_delay`,
 not the moment the handshake completes. Without that rule, a peer that accepts
