@@ -46,6 +46,8 @@ The engine classifies every IP pair through the [`.cluster()`](09-attrition.md#f
 
 Random close injects spontaneous connection failures during I/O operations, at a configurable probability (default 0.001%). When triggered, 30% of closes are **explicit** (the caller gets an error) and 70% are **silent** (the connection just stops working). This ratio, taken from FoundationDB, tests both error-handling paths and timeout-based failure detection.
 
+Fault decisions are sampled only when an operation can make progress. Re-polling a read with no buffered data or a write under backpressure returns `Poll::Pending` without consuming simulation randomness, so runtime-specific spurious polls cannot shift the seed's later fault and latency choices.
+
 A cooldown period prevents cascading closes from overwhelming the system. The goal is to test recovery, not to make the system completely inoperable.
 
 ### Clogging

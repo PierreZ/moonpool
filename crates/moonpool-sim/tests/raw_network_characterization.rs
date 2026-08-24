@@ -14,11 +14,12 @@ use std::{
 
 use futures::{
     future::join,
-    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     task::noop_waker,
 };
 use moonpool_sim::{
     NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait, buggify_init, buggify_reset,
+    reset_rng_call_count, rng_call_count,
 };
 
 const MAX_DRIVER_STEPS: usize = 100_000;
@@ -48,6 +49,15 @@ fn poll_write_once(stream: &mut (impl AsyncWrite + Unpin), data: &[u8]) -> Poll<
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
     Pin::new(stream).poll_write(&mut context, data)
+}
+
+fn poll_read_once(
+    stream: &mut (impl AsyncRead + Unpin),
+    data: &mut [u8],
+) -> Poll<io::Result<usize>> {
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    Pin::new(stream).poll_read(&mut context, data)
 }
 
 fn poll_write_vectored_once(
@@ -144,6 +154,48 @@ fn scalar_and_vectored_writes_share_partial_backpressure_semantics() {
     sim.run_until_empty();
     assert!(sim.available_send_buffer(scalar.connection_id()) > 0);
     assert!(sim.available_send_buffer(vectored.connection_id()) > 0);
+}
+
+#[test]
+fn no_progress_io_polls_do_not_consume_simulation_rng() {
+    buggify_reset();
+    let mut sim = fast_world(12_345);
+    let provider = sim.network_provider("127.0.0.1".parse().expect("valid loopback IP"));
+    let listener = drive(&mut sim, provider.bind("poll-entropy-listener")).expect("listener binds");
+    let mut client =
+        drive(&mut sim, provider.connect("poll-entropy-listener")).expect("client connects");
+    let (mut server, _) = drive(&mut sim, listener.accept()).expect("server accepts");
+
+    let capacity = sim.available_send_buffer(client.connection_id());
+    let payload = vec![0x5a; capacity];
+    let accepted = poll_write_once(&mut client, &payload)
+        .map(|result| result.expect("initial write succeeds"));
+    assert_eq!(accepted, Poll::Ready(capacity));
+    assert_eq!(sim.available_send_buffer(client.connection_id()), 0);
+
+    let mut chaos = NetworkConfiguration::fast_local();
+    chaos.chaos.random_close_probability = 0.5;
+    chaos.chaos.random_close_cooldown = Duration::ZERO;
+    chaos.chaos.clog_probability = 0.5;
+    sim.set_network_config(chaos);
+    // Keep random-close call sites enabled but inactive. Their first encounter
+    // would still consume an activation draw, making this a sensitive check
+    // that neither pending path reaches a random decision.
+    buggify_init(0.0, 1.0);
+    reset_rng_call_count();
+
+    let mut byte = [0_u8; 1];
+    for _ in 0..3 {
+        assert!(poll_write_once(&mut client, b"x").is_pending());
+        assert!(poll_read_once(&mut server, &mut byte).is_pending());
+    }
+
+    assert_eq!(
+        rng_call_count(),
+        0,
+        "spurious backpressure and no-data polls must be entropy-neutral"
+    );
+    buggify_reset();
 }
 
 #[test]

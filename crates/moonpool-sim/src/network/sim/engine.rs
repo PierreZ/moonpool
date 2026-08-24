@@ -165,6 +165,13 @@ impl NetworkSimulation {
         Ok(limit)
     }
 
+    pub(crate) fn has_readable_data(&self, connection_id: ConnectionId) -> bool {
+        self.state
+            .connections
+            .get(&connection_id)
+            .is_some_and(|connection| !connection.receive_buffer.is_empty())
+    }
+
     pub(crate) fn buffer_send(
         &mut self,
         connection_id: ConnectionId,
