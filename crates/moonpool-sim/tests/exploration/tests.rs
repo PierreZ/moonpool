@@ -10,8 +10,9 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_sim::{
-    ExplorationConfig, Invariant, NetworkProvider, Process, SimContext, SimulationBuilder,
-    SimulationError, SimulationReport, SimulationResult, TcpListenerTrait, TraceQuery, Workload,
+    Chaos, ChaosMode, ExplorationConfig, Invariant, NetworkFault, NetworkFaultMask,
+    NetworkProvider, Process, SimContext, SimulationBuilder, SimulationError, SimulationReport,
+    SimulationResult, TcpListenerTrait, TraceQuery, Workload,
 };
 
 /// Helper to run a simulation and return the report.
@@ -333,6 +334,52 @@ fn test_exploration_basic() {
     assert!(
         exp.discoveries > 0,
         "expected the sometimes assertion to be discovered"
+    );
+}
+
+/// A typed network fault mask is reconstructed before every root and
+/// continuation timeline, so explored Swarm campaigns can exclude corruption
+/// without falling back to a forbidden `before_iteration` hook.
+#[test]
+fn test_network_fault_mask_with_exploration() {
+    let run = || {
+        run_simulation(
+            SimulationBuilder::new()
+                .set_iterations(1)
+                .set_debug_seeds(vec![174])
+                .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
+                .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
+                .enable_exploration(test_config(0, 10))
+                .workload_factory(|| {
+                    Box::new(AssertOnceWorkload {
+                        message: "masked network exploration",
+                    })
+                }),
+        )
+    };
+    let first = run();
+    let second = run();
+
+    assert_eq!(first.successful_runs, 1);
+    assert_eq!(second.successful_runs, 1);
+    let first_exploration = first.exploration.expect("exploration report missing");
+    let second_exploration = second.exploration.expect("exploration report missing");
+    assert!(
+        first_exploration.total_timelines > 1,
+        "expected masked network exploration to run continuations"
+    );
+    assert_eq!(
+        first_exploration.total_timelines,
+        second_exploration.total_timelines
+    );
+    assert_eq!(first_exploration.expansions, second_exploration.expansions);
+    assert_eq!(
+        first_exploration.discoveries,
+        second_exploration.discoveries
+    );
+    assert_eq!(
+        first_exploration.per_seed_timelines,
+        second_exploration.per_seed_timelines
     );
 }
 
