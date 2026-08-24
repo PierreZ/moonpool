@@ -51,6 +51,10 @@ impl SimWorld {
         self.inner.write().network.read(id, buf)
     }
 
+    pub(crate) fn has_readable_data(&self, id: ConnectionId) -> bool {
+        self.inner.read().network.has_readable_data(id)
+    }
+
     pub(crate) fn buffer_send(&self, id: ConnectionId, data: Vec<u8>) -> SimulationResult<()> {
         let mut inner = self.inner.write();
         let now = inner.now();

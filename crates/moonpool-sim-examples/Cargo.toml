@@ -40,6 +40,9 @@ tonic-prost = "0.14"
 [build-dependencies]
 tonic-prost-build = "0.14"
 
+[dev-dependencies]
+tower-service = "0.3"
+
 [[bin]]
 name = "sim-maze-explore"
 path = "src/bin/sim/maze_explore.rs"

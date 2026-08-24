@@ -137,22 +137,13 @@ impl SimTcpStream {
         true
     }
 
-    /// Run the chaos/closure checks that precede backpressure for a write.
+    /// Run the closure checks that precede backpressure for a write.
     ///
     /// Returns `Some(poll)` to short-circuit, `None` to proceed.
     fn write_guard_pre_backpressure(
         &self,
         sim: &crate::sim::SimWorld,
     ) -> Option<Poll<Result<usize, io::Error>>> {
-        // Random close chaos injection (FDB rollRandomClose pattern)
-        // Check at start of every write operation - sim2.actor.cpp:423
-        // Returns Some(true) for explicit error, Some(false) for silent (connection marked closed)
-        if let Some(true) = sim.roll_random_close(self.connection_id) {
-            // 30% explicit exception - throw connection_failed immediately
-            return Some(Poll::Ready(Err(random_connection_failure_error())));
-            // 70% silent case: connection already marked as closed, will fail below
-        }
-
         // Check if send side is closed (asymmetric closure)
         if sim.is_send_closed(self.connection_id) {
             return Some(Poll::Ready(Err(io::Error::new(
@@ -236,14 +227,6 @@ impl AsyncRead for SimTcpStream {
         }
 
         let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
-        // Random close chaos injection (FDB rollRandomClose pattern)
-        // Check at start of every read operation - sim2.actor.cpp:408
-        // Returns Some(true) for explicit error, Some(false) for silent (connection marked closed)
-        if let Some(true) = sim.roll_random_close(self.connection_id) {
-            // 30% explicit exception - throw connection_failed immediately
-            return Poll::Ready(Err(random_connection_failure_error()));
-            // 70% silent case: connection already marked as closed, will return EOF below
-        }
 
         // `is_recv_closed` includes fully closed connections. Preserve the
         // stronger RST signal before treating an asymmetrically closed receive
@@ -272,6 +255,29 @@ impl AsyncRead for SimTcpStream {
             return Poll::Pending;
         }
 
+        // A parked read is not an I/O operation yet. In particular, do not
+        // consume simulation entropy merely because an executor polls h2 again
+        // while the socket still has no data. Poll counts are not semantic and
+        // may vary independently of the simulated execution.
+        if !sim.has_readable_data(self.connection_id) {
+            return Self::poll_read_no_data(&sim, self.connection_id, cx, buf);
+        }
+
+        // Random close chaos injection (FDB rollRandomClose pattern). Sample
+        // only once the read can make progress, so a no-data `Poll::Pending`
+        // cannot shift the global simulation RNG stream.
+        if let Some(true) = sim.roll_random_close(self.connection_id) {
+            return Poll::Ready(Err(random_connection_failure_error()));
+        }
+        if sim.is_connection_closed(self.connection_id)
+            && sim.close_reason(self.connection_id) == CloseReason::Aborted
+        {
+            return Poll::Ready(Err(connection_aborted_error()));
+        }
+        if sim.is_recv_closed(self.connection_id) {
+            return Poll::Ready(Ok(0));
+        }
+
         // Check if this read should be clogged
         if sim.should_clog_read(self.connection_id) {
             sim.clog_read(self.connection_id);
@@ -293,16 +299,14 @@ impl AsyncRead for SimTcpStream {
             bytes_read
         );
 
-        if bytes_read > 0 {
-            let data_preview = String::from_utf8_lossy(&buf[..bytes_read.min(20)]);
-            tracing::trace!(
-                "SimTcpStream::poll_read connection_id={} returning data: '{}'",
-                self.connection_id.0,
-                data_preview
-            );
-            return Poll::Ready(Ok(bytes_read));
-        }
-        Self::poll_read_no_data(&sim, self.connection_id, cx, buf)
+        debug_assert!(bytes_read > 0, "readable connection returned no bytes");
+        let data_preview = String::from_utf8_lossy(&buf[..bytes_read.min(20)]);
+        tracing::trace!(
+            "SimTcpStream::poll_read connection_id={} returning data: '{}'",
+            self.connection_id.0,
+            data_preview
+        );
+        Poll::Ready(Ok(bytes_read))
     }
 }
 
@@ -406,6 +410,16 @@ impl AsyncWrite for SimTcpStream {
             return Poll::Pending;
         }
 
+        // A full send buffer makes this a no-progress poll, not a fresh I/O
+        // operation. Roll random-close chaos only after capacity is available
+        // so backpressure repolls cannot perturb deterministic replay.
+        if let Some(true) = sim.roll_random_close(self.connection_id) {
+            return Poll::Ready(Err(random_connection_failure_error()));
+        }
+        if let Some(poll) = self.write_guard_pre_backpressure(&sim) {
+            return poll;
+        }
+
         if let Some(poll) = self.write_guard_clog(&sim, cx) {
             return poll;
         }
@@ -452,6 +466,13 @@ impl AsyncWrite for SimTcpStream {
                 return Poll::Ready(Err(sim_shutdown_error()));
             }
             return Poll::Pending;
+        }
+
+        if let Some(true) = sim.roll_random_close(self.connection_id) {
+            return Poll::Ready(Err(random_connection_failure_error()));
+        }
+        if let Some(poll) = self.write_guard_pre_backpressure(&sim) {
+            return poll;
         }
 
         if let Some(poll) = self.write_guard_clog(&sim, cx) {
