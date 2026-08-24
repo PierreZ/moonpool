@@ -17,6 +17,7 @@ The builder pattern for configuring and running simulation experiments. Created 
 | `processes(count, factory)` | `impl Into<ProcessCount>`, `Fn() -> Box<dyn Process>` | Add server processes (system under test) |
 | `cluster(config, factory)` | `LocalityConfig`, `Fn() -> Box<dyn Process>` | Add processes laid out across a datacenter/zone/machine topology (replaces `processes`) |
 | `link_latency(config)` | `LinkLatencyConfig` | Give links a distance-dependent latency, resolved through the `cluster` topology |
+| `network_fault_mask(mask)` | `NetworkFaultMask` | Suppress selected families after each Random/Swarm network profile is sampled; deterministic and exploration-safe |
 | `tags(dimensions)` | `&[(&str, &[&str])]` | Attach round-robin tag distribution to processes |
 | `attrition(config)` | `Attrition` | Enable automatic process reboots during chaos phase |
 | `invariant(i)` | `impl Invariant` | Add an invariant checked after every simulation event |
@@ -149,7 +150,32 @@ available send-buffer capacity.
 |-------------|-------------|
 | `NetworkConfiguration::default()` | Standard defaults with chaos enabled |
 | `NetworkConfiguration::random_for_seed()` | Randomized per seed for chaos testing |
+| `NetworkConfiguration::swarm_for_seed()` | Randomized per seed, then restricted to a per-seed subset of fault families |
 | `NetworkConfiguration::fast_local()` | Minimal latencies, all chaos disabled |
+
+### Network fault mask
+
+`SimulationBuilder::network_fault_mask()` applies a typed allow-mask after the
+per-seed Random or Swarm profile and buggify knob perturbations, but before the
+`SimWorld` is created. The mask consumes no simulation or configuration RNG
+draws, so it is compatible with frontier exploration and exact recipe replay.
+The default is `NetworkFaultMask::all()`, which leaves existing builders
+unchanged.
+
+```rust
+SimulationBuilder::new()
+    .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
+    .network_fault_mask(
+        NetworkFaultMask::all().without(NetworkFault::BitFlip),
+    )
+    .enable_exploration(exploration_config)
+```
+
+The mask covers `Clog`, `Partition`, `BitFlip`, `RandomClose`,
+`ConnectFailure`, `ClockDrift`, `BuggifiedDelay`, and `PairLatency`. Removing a
+family can only suppress a fault; it cannot enable a family the sampled profile
+turned off. Partial reads and writes are TCP/buggify behavior rather than
+independently sampled fault families and remain active.
 
 ### Latency distribution
 

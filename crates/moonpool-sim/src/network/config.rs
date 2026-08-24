@@ -166,6 +166,137 @@ pub enum ConnectFailureMode {
     Probabilistic,
 }
 
+/// A network fault family that can be retained or suppressed by a
+/// [`NetworkFaultMask`].
+///
+/// The mask only suppresses faults selected by a network chaos profile; it
+/// never enables a family whose sampled probability or mode is already off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkFault {
+    /// Write-delivery clogging.
+    Clog,
+    /// Directed network partitions.
+    Partition,
+    /// In-flight data bit-flip corruption.
+    BitFlip,
+    /// Spontaneous connection closes during I/O.
+    RandomClose,
+    /// Connection-establishment failures and hangs.
+    ConnectFailure,
+    /// Per-node simulated clock drift.
+    ClockDrift,
+    /// Buggify-driven extra timer delay.
+    BuggifiedDelay,
+    /// Permanent per-IP-pair latency degradation.
+    PairLatency,
+}
+
+impl NetworkFault {
+    const fn bit(self) -> u8 {
+        match self {
+            Self::Clog => 1 << 0,
+            Self::Partition => 1 << 1,
+            Self::BitFlip => 1 << 2,
+            Self::RandomClose => 1 << 3,
+            Self::ConnectFailure => 1 << 4,
+            Self::ClockDrift => 1 << 5,
+            Self::BuggifiedDelay => 1 << 6,
+            Self::PairLatency => 1 << 7,
+        }
+    }
+}
+
+/// A deterministic allow-mask for per-seed network fault profiles.
+///
+/// [`NetworkFaultMask::all`] is the default. Removing a family makes that
+/// family inert after the builder has sampled its Random or Swarm profile,
+/// without consuming either simulation or configuration randomness. This
+/// makes the mask safe for frontier exploration and exact recipe replay.
+///
+/// Partial reads and writes are TCP behavior exercised by buggify rather than
+/// independently sampled fault families, so this mask deliberately leaves
+/// them unchanged.
+///
+/// # Example
+///
+/// ```
+/// use moonpool_sim::{NetworkFault, NetworkFaultMask};
+///
+/// let mask = NetworkFaultMask::all().without(NetworkFault::BitFlip);
+/// assert!(!mask.contains(NetworkFault::BitFlip));
+/// assert!(mask.contains(NetworkFault::Partition));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetworkFaultMask(u8);
+
+impl Default for NetworkFaultMask {
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
+impl NetworkFaultMask {
+    const ALL: u8 = u8::MAX;
+
+    /// Retain every selected network fault family.
+    #[must_use]
+    pub const fn all() -> Self {
+        Self(Self::ALL)
+    }
+
+    /// Suppress every network fault family.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self(0)
+    }
+
+    /// Return a mask that also retains `fault`.
+    #[must_use]
+    pub const fn with(self, fault: NetworkFault) -> Self {
+        Self(self.0 | fault.bit())
+    }
+
+    /// Return a mask that suppresses `fault`.
+    #[must_use]
+    pub const fn without(self, fault: NetworkFault) -> Self {
+        Self(self.0 & !fault.bit())
+    }
+
+    /// Return whether `fault` is retained by this mask.
+    #[must_use]
+    pub const fn contains(self, fault: NetworkFault) -> bool {
+        self.0 & fault.bit() != 0
+    }
+
+    pub(crate) fn apply_to(self, chaos: &mut ChaosConfiguration) {
+        if !self.contains(NetworkFault::Clog) {
+            chaos.clog_probability = 0.0;
+        }
+        if !self.contains(NetworkFault::Partition) {
+            chaos.partition_probability = 0.0;
+        }
+        if !self.contains(NetworkFault::BitFlip) {
+            chaos.bit_flip_probability = 0.0;
+        }
+        if !self.contains(NetworkFault::RandomClose) {
+            chaos.random_close_probability = 0.0;
+        }
+        if !self.contains(NetworkFault::ConnectFailure) {
+            chaos.connect_failure_mode = ConnectFailureMode::Disabled;
+            chaos.connect_failure_probability = 0.0;
+        }
+        if !self.contains(NetworkFault::ClockDrift) {
+            chaos.clock_drift_enabled = false;
+        }
+        if !self.contains(NetworkFault::BuggifiedDelay) {
+            chaos.buggified_delay_enabled = false;
+        }
+        if !self.contains(NetworkFault::PairLatency) {
+            chaos.max_pair_latency = Duration::ZERO..Duration::ZERO;
+        }
+    }
+}
+
 impl ConnectFailureMode {
     /// Create a random failure mode for chaos testing
     #[must_use]
@@ -182,7 +313,7 @@ impl ConnectFailureMode {
 ///
 /// This struct contains all settings related to fault injection and chaos testing,
 /// following `FoundationDB`'s BUGGIFY patterns for deterministic testing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ChaosConfiguration {
     /// Clogging probability for individual writes (0.0 - 1.0)
     pub clog_probability: f64,
@@ -500,7 +631,7 @@ impl LinkLatencyConfig {
 }
 
 /// Configuration for network simulation parameters
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NetworkConfiguration {
     /// Latency distribution for bind operations
     pub bind_latency: LatencyDistribution,

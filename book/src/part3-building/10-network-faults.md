@@ -143,6 +143,27 @@ config.chaos.partition_strategy = PartitionStrategy::IsolateSingle;
 // Everything else at defaults
 ```
 
+When a builder should keep its per-seed Random or Swarm profile but exclude one
+environmental fault family, use a `NetworkFaultMask`. For example, this campaign
+retains clogs, partitions, short reads and writes, closes, latency, and the other
+sampled faults while disabling wire-data corruption:
+
+```rust
+SimulationBuilder::new()
+    .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
+    .network_fault_mask(
+        NetworkFaultMask::all().without(NetworkFault::BitFlip),
+    )
+    .enable_exploration(exploration_config)
+```
+
+The builder samples the complete profile first, applies buggify knob changes,
+then applies the mask immediately before creating `SimWorld`. Masking performs
+no RNG draws. The sampled values and Swarm subset therefore stay identical to
+an unmasked run, the in-run RNG call count does not move, and an exploration
+recipe replays deterministically. With the default all-family mask, this step is
+a no-op.
+
 ## Swarm Testing: Less Is More
 
 There is a subtle trap hiding inside `random_for_seed()`. It sets **every** fault family to a random non-zero probability. Clogging is a little bit on, partitions are a little bit on, bit flips are a little bit on, all at once, on every seed. That sounds thorough. It is actually the opposite.

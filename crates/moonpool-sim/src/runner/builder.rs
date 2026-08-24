@@ -214,6 +214,8 @@ pub struct SimulationBuilder {
     seeds: Vec<u64>,
     network_chaos: Option<ChaosMode>,
     storage_chaos: Option<ChaosMode>,
+    /// Deterministic allow-mask applied after each per-seed network profile.
+    network_fault_mask: crate::NetworkFaultMask,
     /// Distance-based link latency, applied to every iteration's network config.
     link_latency: Option<crate::network::LinkLatencyConfig>,
     /// Buggify-driven knob value-perturbation, enabled via [`Chaos::BuggifyKnobs`].
@@ -258,6 +260,7 @@ impl SimulationBuilder {
             seeds: Vec::new(),
             network_chaos: None,
             storage_chaos: None,
+            network_fault_mask: crate::NetworkFaultMask::all(),
             link_latency: None,
             buggify_knobs: false,
             swarm_operations: false,
@@ -410,6 +413,31 @@ impl SimulationBuilder {
     #[must_use]
     pub fn link_latency(mut self, config: crate::network::LinkLatencyConfig) -> Self {
         self.link_latency = Some(config);
+        self
+    }
+
+    /// Retain only the selected network fault families in every per-seed
+    /// Random or Swarm profile.
+    ///
+    /// The mask is applied after profile sampling and buggify knob
+    /// perturbation, immediately before the [`SimWorld`](crate::SimWorld) is
+    /// created. Applying it consumes no randomness, so configuration RNG draw
+    /// order, exploration recipes, and replay remain unchanged. The default
+    /// mask retains every family and is behaviorally inert.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// SimulationBuilder::new()
+    ///     .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
+    ///     .network_fault_mask(
+    ///         NetworkFaultMask::all().without(NetworkFault::BitFlip),
+    ///     )
+    ///     .enable_exploration(exploration_config)
+    /// ```
+    #[must_use]
+    pub fn network_fault_mask(mut self, mask: crate::NetworkFaultMask) -> Self {
+        self.network_fault_mask = mask;
         self
     }
 
@@ -806,11 +834,14 @@ impl SimulationBuilder {
     /// from its [`ChaosMode`]: `None` ⇒ default (off), `Random` ⇒ `random_for_seed`,
     /// `Swarm` ⇒ `swarm_for_seed`.
     ///
-    /// The network mask (if any) draws from `CONFIG_RNG` before the storage mask,
-    /// keeping the per-seed draw order fixed and reproducible.
+    /// The Swarm network subset (if any) draws from `CONFIG_RNG` before the
+    /// storage subset, keeping the per-seed draw order fixed and reproducible.
+    /// The caller's [`NetworkFaultMask`](crate::NetworkFaultMask) is applied
+    /// afterward and consumes no draws.
     fn build_sim_for_iteration(
         network_chaos: Option<ChaosMode>,
         storage_chaos: Option<ChaosMode>,
+        network_fault_mask: crate::NetworkFaultMask,
         link_latency: Option<crate::network::LinkLatencyConfig>,
         buggify_knobs: bool,
         seed: u64,
@@ -837,6 +868,9 @@ impl SimulationBuilder {
                 storage_config.apply_buggify_knobs();
             }
         }
+        // A caller mask is the final fault-family decision. It consumes no RNG,
+        // so adding or omitting it cannot shift config sampling or replay.
+        network_fault_mask.apply_to(&mut network_config.chaos);
         // Distance latency is deployment shape, not a per-seed fault: it is
         // applied verbatim, whatever the chaos mode.
         network_config.link_latency = link_latency;
@@ -1507,6 +1541,7 @@ impl SimulationBuilder {
         let mut sim = Self::build_sim_for_iteration(
             self.network_chaos,
             self.storage_chaos,
+            self.network_fault_mask,
             self.link_latency.clone(),
             self.buggify_knobs,
             seed,
@@ -1895,6 +1930,61 @@ mod tests {
         assert_eq!(report.failed_runs, 0);
         assert!((report.success_rate() - 100.0).abs() < f64::EPSILON);
         assert_eq!(report.seeds_used, vec![1, 2, 3]);
+    }
+
+    fn sampled_network_config(
+        mode: ChaosMode,
+        mask: crate::NetworkFaultMask,
+        seed: u64,
+    ) -> (crate::NetworkConfiguration, u64) {
+        crate::sim::reset_sim_rng();
+        crate::sim::set_sim_seed(seed);
+        crate::sim::set_config_seed(seed);
+        let sim =
+            SimulationBuilder::build_sim_for_iteration(Some(mode), None, mask, None, false, seed);
+        let config = sim.with_network_config(Clone::clone);
+        let next_config_draw = crate::sim::config_random_f64().to_bits();
+        (config, next_config_draw)
+    }
+
+    #[test]
+    fn network_fault_mask_disables_only_bit_flips() {
+        let seed = 174;
+        let (baseline, _) =
+            sampled_network_config(ChaosMode::Random, crate::NetworkFaultMask::all(), seed);
+        let (masked, _) = sampled_network_config(
+            ChaosMode::Random,
+            crate::NetworkFaultMask::all().without(crate::NetworkFault::BitFlip),
+            seed,
+        );
+
+        assert!(baseline.chaos.bit_flip_probability > 0.0);
+        let mut expected = baseline;
+        expected.chaos.bit_flip_probability = 0.0;
+        assert_eq!(masked, expected, "the mask changed another fault family");
+        assert!(masked.chaos.partial_read_max_bytes > 0);
+        assert!(masked.chaos.partial_write_max_bytes > 0);
+    }
+
+    #[test]
+    fn network_fault_mask_preserves_swarm_config_rng_position() {
+        let (seed, baseline, baseline_next_draw) = (0..1000_u64)
+            .find_map(|seed| {
+                let (config, next_draw) =
+                    sampled_network_config(ChaosMode::Swarm, crate::NetworkFaultMask::all(), seed);
+                (config.chaos.bit_flip_probability > 0.0).then_some((seed, config, next_draw))
+            })
+            .expect("expected Swarm to select bit flips within 1000 seeds");
+        let (masked, masked_next_draw) = sampled_network_config(
+            ChaosMode::Swarm,
+            crate::NetworkFaultMask::all().without(crate::NetworkFault::BitFlip),
+            seed,
+        );
+
+        let mut expected = baseline;
+        expected.chaos.bit_flip_probability = 0.0;
+        assert_eq!(masked, expected);
+        assert_eq!(masked_next_draw, baseline_next_draw);
     }
 
     #[cfg(feature = "exploration")]
