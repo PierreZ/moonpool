@@ -120,6 +120,7 @@ impl<P: Providers> H2Server<P> {
     pub fn builder(&self) -> http2::Builder<HyperExecutor<P::Task>> {
         let mut builder = http2::Builder::new(self.executor.clone());
         builder.timer(self.timer.clone());
+        builder.auto_date_header(false);
         if let Some(keep_alive) = &self.config.keep_alive {
             builder
                 .keep_alive_interval(keep_alive.interval)
