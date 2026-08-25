@@ -65,6 +65,18 @@ pub(crate) struct SimInner {
     pub(crate) events_processed: u64,
     pub(crate) last_processed_event: Option<Event>,
     pub(crate) pending_faults: Vec<SimFaultRecord>,
+    buggified_delay_window: BuggifiedDelayWindow,
+}
+
+/// Campaign lifetime for the global sleep-delay fault.
+#[derive(Debug, Clone, Copy)]
+enum BuggifiedDelayWindow {
+    /// Raw `SimWorld` users retain the historical whole-run behavior.
+    Unbounded,
+    /// Campaign setup, a campaign without a chaos duration, or the quiet tail.
+    Inactive,
+    /// The run phase is inside its configured chaos interval.
+    ActiveUntil(Duration),
 }
 
 impl SimInner {
@@ -83,6 +95,7 @@ impl SimInner {
             events_processed: 0,
             last_processed_event: None,
             pending_faults: Vec::new(),
+            buggified_delay_window: BuggifiedDelayWindow::Unbounded,
         }
     }
 
@@ -417,6 +430,14 @@ impl SimWorld {
         if !chaos.buggified_delay_enabled || chaos.buggified_delay_max == Duration::ZERO {
             return duration;
         }
+        let inside_chaos_window = match inner.buggified_delay_window {
+            BuggifiedDelayWindow::Unbounded => true,
+            BuggifiedDelayWindow::Inactive => false,
+            BuggifiedDelayWindow::ActiveUntil(deadline) => inner.now() < deadline,
+        };
+        if !inside_chaos_window {
+            return duration;
+        }
         if sim_random::<f64>() < chaos.buggified_delay_probability {
             duration.saturating_add(
                 chaos
@@ -426,6 +447,22 @@ impl SimWorld {
         } else {
             duration
         }
+    }
+
+    /// Keep campaign setup free of the global sleep-delay fault until the run
+    /// phase establishes its chaos window.
+    pub(crate) fn prepare_buggified_delay_campaign(&self) {
+        self.inner.write().buggified_delay_window = BuggifiedDelayWindow::Inactive;
+    }
+
+    /// Activate the global sleep-delay fault until the configured chaos
+    /// interval ends. `None` leaves it inactive because no chaos phase exists.
+    pub(crate) fn start_buggified_delay_window(&self, duration: Option<Duration>) {
+        let mut inner = self.inner.write();
+        inner.buggified_delay_window = duration
+            .map_or(BuggifiedDelayWindow::Inactive, |duration| {
+                BuggifiedDelayWindow::ActiveUntil(inner.now().saturating_add(duration))
+            });
     }
 
     pub(crate) fn poll_sleep(&self, task_id: u64, waker: &Waker) -> bool {
@@ -571,6 +608,52 @@ mod tests {
                 Poll::Ready(Ok(()))
             ));
         }
+    }
+
+    #[test]
+    fn buggified_delay_only_draws_inside_campaign_window() {
+        let mut config = NetworkConfiguration::fast_local();
+        config.chaos.buggified_delay_enabled = true;
+        config.chaos.buggified_delay_probability = 1.0;
+        config.chaos.buggified_delay_max = Duration::from_secs(1);
+        let mut sim = SimWorld::new_with_network_config(config);
+
+        sim.prepare_buggified_delay_campaign();
+        let setup_sleep = sim.sleep(Duration::from_millis(1));
+        assert_eq!(crate::sim::rng_call_count(), 0);
+        drop(setup_sleep);
+
+        sim.start_buggified_delay_window(Some(Duration::from_millis(5)));
+        let chaos_sleep = sim.sleep(Duration::from_millis(1));
+        assert_eq!(crate::sim::rng_call_count(), 2);
+        drop(chaos_sleep);
+
+        sim.schedule_event(Event::Timer { task_id: u64::MAX }, Duration::from_millis(5));
+        assert!(!sim.step());
+        let draws_at_cutoff = crate::sim::rng_call_count();
+        let quiet_start = sim.now();
+        let quiet_sleep = sim.sleep(Duration::from_millis(1));
+        assert_eq!(crate::sim::rng_call_count(), draws_at_cutoff);
+        sim.run_until_empty();
+        assert_eq!(
+            sim.now().saturating_sub(quiet_start),
+            Duration::from_millis(1)
+        );
+        drop(quiet_sleep);
+    }
+
+    #[test]
+    fn disabled_buggified_delay_preserves_rng_position_with_campaign_window() {
+        let mut config = NetworkConfiguration::fast_local();
+        config.chaos.buggified_delay_enabled = false;
+        let sim = SimWorld::new_with_network_config(config);
+
+        sim.prepare_buggified_delay_campaign();
+        sim.start_buggified_delay_window(Some(Duration::from_secs(1)));
+        let sleep = sim.sleep(Duration::from_millis(1));
+
+        assert_eq!(crate::sim::rng_call_count(), 0);
+        drop(sleep);
     }
 
     #[test]

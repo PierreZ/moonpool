@@ -480,6 +480,7 @@ impl WorkloadOrchestrator {
         } = inputs;
 
         let chaos_shutdown = tokio_util::sync::CancellationToken::new();
+        sim.start_buggified_delay_window(chaos_duration);
         let all_ips: Vec<String> = all_entities.iter().map(|(_, ip)| ip.clone()).collect();
         let (mut injector_handles, parked_injectors) = Self::start_fault_injectors(
             fault_injectors,

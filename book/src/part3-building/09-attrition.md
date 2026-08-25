@@ -85,7 +85,21 @@ SimulationBuilder::new()
 
 The `.chaos_duration()` call is required because attrition runs only during the chaos phase. After the chaos duration elapses, fault injectors stop and the system continues until all workloads complete. A settle phase then drains remaining events before checks run, surfacing cleanup bugs rather than hiding them behind an arbitrary timer.
 
-`ChaosMode::Random` uses your configured weights as written every seed. Switch to `ChaosMode::Swarm` to swarm the reboot *regime* itself: each seed draws a random subset of the configuration, including the never-reboot case (which surfaces slow-leak and timer bugs that constant restarting hides) and single-mode cases like always-crash or graceful-only. Same reasoning as [swarming network faults](10-network-faults.md#swarm-testing-less-is-more).
+`ChaosMode::Random` uses your configured weights, recovery window, and scope as
+written every seed. Switch to `ChaosMode::Swarm` to swarm the reboot *regime*
+itself. Each seed can select the never-reboot case (which surfaces slow-leak and
+timer bugs that constant restarting hides), a single reboot kind such as
+always-crash or graceful-only, and a recovery-delay range scaled to between 50%
+and 200% of the configured range. With `.cluster()`, the seed also selects among
+`PerProcess` and correlated failure scopes whose groups fit the sampled
+`max_dead` budget. A flat `.processes()` campaign keeps its configured scope
+because it has no failure-domain topology to swarm.
+
+These regime choices come from the separate `CONFIG_RNG` stream. The injector
+still makes the same runtime draws for the actual recovery delay and victim, so
+changing the per-seed regime does not move `SIM_RNG` call counts or invalidate
+an exploration recipe. Same reasoning as [swarming network
+faults](10-network-faults.md#swarm-testing-less-is-more).
 
 ## The max_dead Constraint
 

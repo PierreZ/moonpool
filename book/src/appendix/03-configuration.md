@@ -104,6 +104,11 @@ Built-in configuration for automatic process reboots during the chaos phase. Req
 
 The `prob_*` fields are **weights**, not probabilities. They are normalized internally and do not need to sum to 1.0.
 
+In `ChaosMode::Swarm`, the recovery range is scaled per seed to 50%-200% of
+its configured values. Clustered campaigns also swarm among topology-backed
+scopes whose groups fit `max_dead`. Both decisions use `CONFIG_RNG`, leaving the
+counted runtime RNG stream unchanged.
+
 ### AttritionScope
 
 Which failure domain a reboot kills. `PerMachine`, `PerZone`, and `PerDatacenter` require a [`.cluster()`](../part3-building/09-attrition.md#failure-domains-correlated-reboots) topology; without locality they are a no-op.
@@ -276,6 +281,11 @@ Each ordered IP pair samples one fixed latency from this range at first contact 
 | `buggified_delay_enabled` | `bool` | `true` |
 | `buggified_delay_max` | `Duration` | 100ms |
 | `buggified_delay_probability` | `f64` | 0.25 (25%) |
+
+Builder campaigns apply this fault only to sleeps scheduled inside
+`.chaos_duration()`. Setup and the post-chaos quiet tail do not consume its RNG
+draws or receive extra delay. A directly constructed `SimWorld` has no campaign
+window and applies the configured fault for its whole lifetime.
 
 ### Connection Failures
 

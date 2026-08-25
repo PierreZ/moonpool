@@ -199,18 +199,29 @@ impl Attrition {
     /// importantly the **never-reboot** case (needed to find slow leaks / timer
     /// overflows) and single-mode cases ("always crash", "graceful-only").
     ///
-    /// Draws exactly four `config_random_bool` values from the independent
+    /// Draws exactly six values from the independent
     /// `CONFIG_RNG` stream (fixed sequence ⇒ reproducible per seed, never
     /// perturbs in-run randomness). The first draw, with ~50% probability, sets
     /// `max_dead = 0` — the never-reboot regime, where the injector's
     /// `dead_count() >= max_dead` gate is always true so it never reboots. The
     /// remaining three each mask one reboot-kind weight to `0.0` with ~50%
-    /// probability.
+    /// probability. A fifth draw scales the configured recovery-delay range to
+    /// 50%-200% of its pinned values. The sixth is reserved for failure scope;
+    /// the runner uses it to select a topology-backed scope whose groups can fit
+    /// within `max_dead`.
     ///
     /// When all three kind weights are masked off, [`choose_kind`](Self::choose_kind)
     /// falls back to [`RebootKind::Crash`] — the "always crash" single-mode regime.
     #[must_use]
     pub fn swarm_for_seed(&self) -> Attrition {
+        self.swarm_for_seed_with_topology(None)
+    }
+
+    /// Derive a swarm regime with failure scopes constrained by `topology`.
+    pub(crate) fn swarm_for_seed_with_topology(
+        &self,
+        topology: Option<&super::locality::MachineRegistry>,
+    ) -> Attrition {
         let mut regime = self.clone();
         if !crate::sim::config_random_bool(0.5) {
             regime.max_dead = 0;
@@ -224,14 +235,78 @@ impl Attrition {
         if !crate::sim::config_random_bool(0.5) {
             regime.prob_wipe = 0.0;
         }
+
+        // Scale the whole window rather than sampling the eventual delay here:
+        // the injector still performs its usual single SIM_RNG draw, preserving
+        // counted-stream call positions and exploration recipes.
+        let recovery = self.recovery_delay_ms.clone().unwrap_or(1000..10000);
+        let scale_percent = crate::sim::rng::config_random_range(50..201);
+        regime.recovery_delay_ms = Some(Self::scaled_range(recovery, scale_percent));
+
+        // Twelve is divisible by every possible candidate count (1..=4), so
+        // reducing it modulo the viable set does not bias one scope.
+        let scope_draw = crate::sim::rng::config_random_range(0..12);
+        if let Some(topology) = topology.filter(|topology| !topology.is_empty()) {
+            let scopes = Self::viable_scopes(topology, regime.max_dead);
+            regime.scope = scopes[scope_draw % scopes.len()];
+        }
         regime
+    }
+
+    fn scaled_range(range: Range<usize>, percent: usize) -> Range<usize> {
+        let mut start = range.start.saturating_mul(percent) / 100;
+        let mut end = range.end.saturating_mul(percent) / 100;
+        if end <= start {
+            end = start.saturating_add(1);
+            if end == start {
+                start = start.saturating_sub(1);
+            }
+        }
+        start..end
+    }
+
+    fn viable_scopes(
+        topology: &super::locality::MachineRegistry,
+        max_dead: usize,
+    ) -> Vec<AttritionScope> {
+        let mut scopes = vec![AttritionScope::PerProcess];
+        let candidates = [
+            (
+                AttritionScope::PerMachine,
+                crate::locality::DomainLevel::Machine,
+                topology.all_machines(),
+            ),
+            (
+                AttritionScope::PerZone,
+                crate::locality::DomainLevel::Zone,
+                topology.all_zones(),
+            ),
+            (
+                AttritionScope::PerDatacenter,
+                crate::locality::DomainLevel::Datacenter,
+                topology.all_datacenters(),
+            ),
+        ];
+        for (scope, level, domains) in candidates {
+            let fits_budget = domains.iter().all(|domain| {
+                let group_size = topology.ips_in_domain(level, domain).len();
+                group_size > 0 && group_size <= max_dead
+            });
+            if fits_budget {
+                scopes.push(scope);
+            }
+        }
+        scopes
     }
 }
 
 #[cfg(test)]
 mod swarm_tests {
+    use std::net::IpAddr;
+
     use super::{Attrition, AttritionScope};
-    use crate::sim::rng::set_config_seed;
+    use crate::sim::rng::{rng_call_count, set_config_seed, set_sim_seed};
+    use crate::{LocalityInfo, runner::locality::MachineRegistry};
 
     /// A representative base regime: all three reboot kinds enabled.
     fn base() -> Attrition {
@@ -286,5 +361,75 @@ mod swarm_tests {
             saw_single_mode,
             "no seed in 0..1000 produced a single-mode regime (one kind enabled)"
         );
+    }
+
+    #[test]
+    fn swarm_varies_recovery_window_across_seeds() {
+        let windows = (0..100_u64)
+            .map(|seed| swarm_for(seed).recovery_delay_ms)
+            .collect::<Vec<_>>();
+        let first = windows[0].clone();
+        assert!(
+            windows.iter().any(|window| *window != first),
+            "swarm did not vary the recovery window across 100 seeds"
+        );
+    }
+
+    #[test]
+    fn attrition_swarm_never_advances_the_counted_rng() {
+        set_sim_seed(42);
+        set_config_seed(42);
+        let before = rng_call_count();
+
+        let _ = base().swarm_for_seed();
+
+        assert_eq!(rng_call_count(), before);
+    }
+
+    fn topology(processes_per_machine: usize) -> MachineRegistry {
+        let mut topology = MachineRegistry::new();
+        let mut process = 1_u8;
+        for machine in 1..=2 {
+            for _ in 0..processes_per_machine {
+                topology.register(
+                    IpAddr::from([10, 0, 1, process]),
+                    LocalityInfo::new(
+                        format!("dc{machine}"),
+                        format!("dc{machine}-z1"),
+                        format!("dc{machine}-z1-m1"),
+                    ),
+                );
+                process += 1;
+            }
+        }
+        topology
+    }
+
+    #[test]
+    fn clustered_swarm_varies_viable_attrition_scope() {
+        let topology = topology(1);
+        let scopes = (0..100_u64)
+            .map(|seed| {
+                set_config_seed(seed);
+                base().swarm_for_seed_with_topology(Some(&topology)).scope
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            scopes
+                .iter()
+                .any(|scope| *scope != AttritionScope::PerProcess),
+            "clustered swarm did not select a correlated failure scope"
+        );
+    }
+
+    #[test]
+    fn clustered_swarm_rejects_scopes_that_exceed_max_dead() {
+        let topology = topology(3);
+        for seed in 0..100_u64 {
+            set_config_seed(seed);
+            let regime = base().swarm_for_seed_with_topology(Some(&topology));
+            assert_eq!(regime.scope, AttritionScope::PerProcess);
+        }
     }
 }

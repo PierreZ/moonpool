@@ -355,6 +355,17 @@ pub fn config_random_bool(p: f64) -> bool {
     config_random_f64() < p
 }
 
+/// Generate a value within a range using the configuration RNG.
+///
+/// Like [`config_random_bool`], this never touches the counted [`SIM_RNG`]
+/// stream, so per-seed configuration choices cannot shift exploration recipes.
+pub(crate) fn config_random_range<T>(range: std::ops::Range<T>) -> T
+where
+    T: SampleUniform + PartialOrd,
+{
+    CONFIG_RNG.with(|rng| rng.borrow_mut().random_range(range))
+}
+
 /// Set the per-seed base for workload operation-alphabet swarm masks.
 ///
 /// Called once per iteration by the runner: `Some(seed)` when `.swarm_operations()`
@@ -674,6 +685,7 @@ mod tests {
         for _ in 0..5 {
             let _ = config_random_bool(0.5);
             let _ = config_random_f64();
+            let _ = config_random_range(10..20);
             experiment.push(sim_random::<f64>());
         }
 

@@ -7,7 +7,11 @@
 //! - Add extra latency to sleep operations
 //! - Are deterministic across runs with the same seed
 
-use moonpool_sim::{NetworkConfiguration, SimWorld};
+use async_trait::async_trait;
+use moonpool_sim::{
+    Chaos, ChaosMode, NetworkConfiguration, NetworkFault, NetworkFaultMask, SimContext, SimWorld,
+    SimulationBuilder, SimulationError, TimeProvider, Workload,
+};
 use std::time::Duration;
 
 /// Test that buggified delay is disabled when explicitly turned off
@@ -242,4 +246,50 @@ async fn test_buggified_delay_default_probability() {
     );
 
     println!("✅ Default 25% probability executed successfully");
+}
+
+struct QuietTailSleep;
+
+#[async_trait]
+impl Workload for QuietTailSleep {
+    fn name(&self) -> &'static str {
+        "quiet-tail-sleep"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> moonpool_sim::SimulationResult<()> {
+        // This sleep is scheduled inside a 1ms chaos window but necessarily
+        // wakes after it. The next sleep is therefore scheduled in the quiet
+        // tail and must not receive a buggified delay.
+        ctx.time()
+            .sleep(Duration::from_millis(2))
+            .await
+            .map_err(|error| SimulationError::InvalidState(error.to_string()))?;
+        let start = ctx.time().now();
+        let requested = Duration::from_millis(1);
+        ctx.time()
+            .sleep(requested)
+            .await
+            .map_err(|error| SimulationError::InvalidState(error.to_string()))?;
+        let elapsed = ctx.time().now().saturating_sub(start);
+        if elapsed != requested {
+            return Err(SimulationError::InvalidState(format!(
+                "quiet-tail sleep was inflated: requested {requested:?}, elapsed {elapsed:?}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn builder_campaign_stops_buggified_delay_at_chaos_deadline() {
+    let report = SimulationBuilder::new()
+        .enable_chaos([Chaos::Network(ChaosMode::Random)])
+        .network_fault_mask(NetworkFaultMask::none().with(NetworkFault::BuggifiedDelay))
+        .chaos_duration(Duration::from_millis(1))
+        .set_iterations(1)
+        .set_debug_seeds(vec![42])
+        .workload(QuietTailSleep)
+        .run();
+
+    assert_eq!(report.failed_runs, 0, "quiet-tail campaign failed");
 }
