@@ -35,6 +35,6 @@ pub use hooks::{DiscoveryHooks, DiscoveryKind, clear_discovery_hooks, set_discov
 pub use region::{assertion_table_ptr, clear, each_bucket_ptr, init, install_region, reset};
 pub use slots::{
     ASSERTION_TABLE_MEM_SIZE, AssertCmp, AssertKind, AssertionSlot, AssertionSlotSnapshot,
-    MAX_ASSERTION_SLOTS, assertion_bool, assertion_numeric, assertion_read_all,
-    assertion_sometimes_all, msg_hash,
+    MAX_ASSERTION_SLOTS, assertion_bool, assertion_dropped_allocations, assertion_numeric,
+    assertion_read_all, assertion_sometimes_all, msg_hash,
 };

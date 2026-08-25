@@ -561,7 +561,7 @@ exemplars inside that bucket. Keep identity coarse: phase, role, recovery mode,
 quorum shape, or fault regime. Put progress such as decided slots, inverse lag,
 or remaining health in quality.
 
-The shared tables are bounded: 128 assertion sites and 256
+The shared tables are bounded: 512 assertion sites and 256
 `assert_sometimes_each!` buckets. Supply no more than six identity keys; extra
 values affect the bucket hash but are not retained for display. Never bucket
 unbounded keys, request IDs, ballots, or log slots. Bucket them into a finite

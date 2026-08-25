@@ -113,7 +113,7 @@ assert_sometimes_each!(
 );
 ```
 
-Keep identity keys coarse. The shared table holds 128 assertion sites and 256
+Keep identity keys coarse. The shared table holds 512 assertion sites and 256
 `sometimes_each` buckets. Bucketing every node, ballot, slot, and value tuple
 will exhaust it quickly and teaches the controller identifiers rather than
 protocol structure. Good identity dimensions are phase, role, quorum state,

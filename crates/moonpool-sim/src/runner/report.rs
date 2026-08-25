@@ -177,6 +177,8 @@ pub struct SimulationReport {
     pub assertion_results: BTreeMap<String, AssertionStats>,
     /// Always-type assertion violations (definite bugs).
     pub assertion_violations: Vec<String>,
+    /// Assertion evaluations dropped because the fixed-size slot table was full.
+    pub dropped_assertion_allocations: u32,
     /// Coverage assertion violations (sometimes/reachable not satisfied).
     pub coverage_violations: Vec<String>,
     /// Exploration report (present when fork-based exploration was enabled).

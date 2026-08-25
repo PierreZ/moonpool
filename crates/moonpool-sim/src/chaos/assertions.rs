@@ -268,6 +268,13 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
     let mut coverage_violations = Vec::new();
     let slots = moonpool_assertions::assertion_read_all();
 
+    let dropped_allocations = moonpool_assertions::assertion_dropped_allocations();
+    if dropped_allocations > 0 {
+        always_violations.push(format!(
+            "assertion slot table overflowed: {dropped_allocations} evaluations could not be tracked"
+        ));
+    }
+
     for slot in &slots {
         let total = slot.pass_count.saturating_add(slot.fail_count);
         let kind = moonpool_assertions::AssertKind::from_u8(slot.kind);
@@ -895,6 +902,28 @@ mod tests {
         );
         let (_, coverage) = validate_assertion_contracts();
         assert!(coverage.is_empty());
+        moonpool_assertions::clear();
+    }
+
+    #[test]
+    fn slot_overflow_is_an_always_violation() {
+        moonpool_assertions::init();
+        moonpool_assertions::reset();
+
+        for index in 0..=moonpool_assertions::MAX_ASSERTION_SLOTS {
+            moonpool_assertions::assertion_bool(
+                moonpool_assertions::AssertKind::Sometimes,
+                true,
+                true,
+                &format!("overflow contract assertion {index}"),
+            );
+        }
+
+        let (always, _) = validate_assertion_contracts();
+        assert_eq!(
+            always,
+            vec!["assertion slot table overflowed: 1 evaluations could not be tracked"]
+        );
         moonpool_assertions::clear();
     }
 }

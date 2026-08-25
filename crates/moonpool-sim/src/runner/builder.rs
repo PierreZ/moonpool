@@ -908,12 +908,14 @@ impl SimulationBuilder {
         let assertion_results = crate::chaos::assertion_results();
         let (assertion_violations, coverage_violations) =
             crate::chaos::validate_assertion_contracts();
+        let dropped_assertion_allocations = moonpool_assertions::assertion_dropped_allocations();
         crate::chaos::buggify_reset();
         metrics_collector.generate_report(GenerateReportInputs {
             iteration_count,
             seeds_used,
             assertion_results,
             assertion_violations,
+            dropped_assertion_allocations,
             coverage_violations,
             exploration: None,
             assertion_details: Vec::new(),
@@ -1273,6 +1275,7 @@ impl SimulationBuilder {
             seeds_failing: Vec::new(),
             assertion_results: BTreeMap::new(),
             assertion_violations: Vec::new(),
+            dropped_assertion_allocations: 0,
             coverage_violations: Vec::new(),
             exploration: None,
             assertion_details: Vec::new(),
@@ -1715,6 +1718,7 @@ impl SimulationBuilder {
         let assertion_results = crate::chaos::assertion_results();
         let (assertion_violations, coverage_violations) =
             crate::chaos::validate_assertion_contracts();
+        let dropped_assertion_allocations = moonpool_assertions::assertion_dropped_allocations();
         let raw_assertion_slots = moonpool_assertions::assertion_read_all();
         let raw_each_buckets = moonpool_assertions::each_bucket_read_all();
 
@@ -1740,6 +1744,7 @@ impl SimulationBuilder {
             seeds_used: iteration_manager.seeds_used().to_vec(),
             assertion_results,
             assertion_violations,
+            dropped_assertion_allocations,
             coverage_violations,
             exploration: exploration_report,
             assertion_details,
