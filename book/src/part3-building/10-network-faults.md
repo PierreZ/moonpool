@@ -70,6 +70,23 @@ Packet data is corrupted with random bit flips at low probability (0.01% by defa
 
 Simulated clocks can drift by up to 100ms (configurable) between nodes. This tests anything that depends on time agreement: lease expiration, distributed consensus, TTL handling, and cache invalidation. Clock drift is subtle because the code often works correctly with small drift and fails catastrophically when drift exceeds a threshold.
 
+### Buggified Sleep Delay
+
+FoundationDB occasionally stretches a process timer with a power-law delay to
+exercise timeouts and timing-dependent races. Moonpool applies the same fault to
+`TimeProvider::sleep`. In a `SimulationBuilder` campaign it is active only during
+the configured `chaos_duration`: setup is clean, and sleeps scheduled at or
+after the chaos deadline receive exactly their requested duration. This makes
+the post-chaos quiet tail a real recovery period, so a claim such as "the
+cluster converges within five seconds after faults stop" is measuring the
+cluster rather than a fault that silently continued running.
+
+The gate is checked before either buggified-delay RNG draw. A configuration that
+disables the fault, a `NetworkFaultMask` without `BuggifiedDelay`, and sleeps
+outside the chaos window therefore leave the counted simulation RNG untouched.
+Direct low-level `SimWorld` construction has no campaign phases and retains the
+historical whole-run behavior.
+
 ### Network Partitions
 
 Moonpool supports seven partition strategies:
@@ -179,7 +196,7 @@ SimulationBuilder::new()
     // ...
 ```
 
-`ChaosMode::Swarm` builds on `random_for_seed()`, then masks each of the seven network fault families to off with 50% probability: clog, partition, bit-flip, random-close, connect-failure, clock-drift, and buggified-delay. The all-off subset is allowed on purpose, because a pure no-fault run is a useful, valid config. The same `enable_chaos` call swarms storage faults (`Chaos::Storage`) and the attrition reboot regime (`Chaos::Attrition`) the same way.
+`ChaosMode::Swarm` builds on `random_for_seed()`, then masks each of the eight network fault families to off with 50% probability: clog, partition, bit-flip, random-close, connect-failure, clock-drift, buggified-delay, and permanent pair latency. The all-off subset is allowed on purpose, because a pure no-fault run is a useful, valid config. The same `enable_chaos` call swarms storage faults (`Chaos::Storage`) and the attrition reboot regime (`Chaos::Attrition`) the same way.
 
 The interesting engineering detail is **where the randomness comes from**. Swarm decisions must not perturb the in-run randomness, or they would shift every fault's timing and break fork-explorer replay. So the subset is drawn from a separate `CONFIG_RNG` stream, seeded from the iteration seed but salted to decorrelate it from the main `SIM_RNG`. The config RNG never advances the in-run call counter. Same seed, same subset, every time, with zero effect on the simulation that follows.
 

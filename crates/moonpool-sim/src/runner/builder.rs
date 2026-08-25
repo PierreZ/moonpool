@@ -875,6 +875,10 @@ impl SimulationBuilder {
         // applied verbatim, whatever the chaos mode.
         network_config.link_latency = link_latency;
         let mut sim = crate::sim::SimWorld::new_with_network_config_and_seed(network_config, seed);
+        // Unlike raw `SimWorld` use, a builder campaign has explicit phases.
+        // Setup and the post-chaos quiet tail must not inherit the global sleep
+        // delay fault merely because the sampled network config enabled it.
+        sim.prepare_buggified_delay_campaign();
         sim.set_storage_config(storage_config);
         sim
     }
@@ -1563,7 +1567,13 @@ impl SimulationBuilder {
         // from `CONFIG_RNG` (after the network/storage masks, keeping the draw order
         // fixed); `Random` uses the configured weights as written.
         let attrition = match (self.attrition.as_ref(), self.attrition_mode) {
-            (Some(base), ChaosMode::Swarm) => Some(base.swarm_for_seed()),
+            (Some(base), ChaosMode::Swarm) => Some(
+                base.swarm_for_seed_with_topology(
+                    process_config
+                        .as_ref()
+                        .map(|config| &config.machine_registry),
+                ),
+            ),
             (Some(base), ChaosMode::Random) => Some(base.clone()),
             (None, _) => None,
         };
