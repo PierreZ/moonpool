@@ -20,7 +20,7 @@
 use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 /// Maximum number of tracked assertion slots.
-pub const MAX_ASSERTION_SLOTS: usize = 128;
+pub const MAX_ASSERTION_SLOTS: usize = 512;
 
 /// Maximum length of the assertion message stored in a slot.
 const SLOT_MSG_LEN: usize = 64;
@@ -30,9 +30,11 @@ const SLOT_READY: u8 = 2;
 
 /// Total size of the assertion table memory region in bytes.
 ///
-/// Layout: `[next_slot: u32, _pad: u32, slots: [AssertionSlot; MAX_ASSERTION_SLOTS]]`
+/// Layout: `[next_slot: u32, dropped_allocations: u32, slots: [AssertionSlot; MAX_ASSERTION_SLOTS]]`
 pub const ASSERTION_TABLE_MEM_SIZE: usize =
     8 + MAX_ASSERTION_SLOTS * std::mem::size_of::<AssertionSlot>();
+
+const DROPPED_ALLOCATIONS_OFFSET: usize = std::mem::size_of::<AtomicU32>();
 
 /// The kind of assertion being tracked.
 #[repr(u8)]
@@ -224,6 +226,13 @@ unsafe fn find_or_alloc_slot(
         let new_idx = next_atomic.fetch_add(1, Ordering::AcqRel) as usize;
         if new_idx >= MAX_ASSERTION_SLOTS {
             next_atomic.fetch_sub(1, Ordering::AcqRel);
+            let dropped = &*table_ptr
+                .add(DROPPED_ALLOCATIONS_OFFSET)
+                .cast::<()>()
+                .cast::<AtomicU32>();
+            let _ = dropped.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                Some(count.saturating_add(1))
+            });
             return (std::ptr::null_mut(), 0);
         }
 
@@ -561,6 +570,29 @@ pub fn assertion_read_all() -> Vec<AssertionSlotSnapshot> {
     }
 }
 
+/// Read the number of assertion evaluations that could not allocate a slot.
+///
+/// The counter lives in the assertion table header, so exploration timelines
+/// backed by `MAP_SHARED` memory contribute to one cumulative value. Returns
+/// zero if the assertion table is not initialized.
+#[must_use]
+pub fn assertion_dropped_allocations() -> u32 {
+    let table_ptr = crate::region::assertion_table_ptr();
+    if table_ptr.is_null() {
+        return 0;
+    }
+
+    // Safety: table_ptr points to ASSERTION_TABLE_MEM_SIZE bytes, and the
+    // second u32 in the table header is the dropped-allocation counter.
+    unsafe {
+        (&*table_ptr
+            .add(DROPPED_ALLOCATIONS_OFFSET)
+            .cast::<()>()
+            .cast::<AtomicU32>())
+            .load(Ordering::Relaxed)
+    }
+}
+
 /// A snapshot of an assertion slot for reporting.
 #[derive(Debug, Clone)]
 pub struct AssertionSlotSnapshot {
@@ -647,6 +679,54 @@ mod tests {
             (&*table.cast::<()>().cast::<AtomicU32>()).store(1, Ordering::Release);
         }
         assert!(assertion_read_all().is_empty());
+        crate::region::clear();
+    }
+
+    #[test]
+    fn tracks_more_than_the_legacy_slot_limit() {
+        crate::region::init();
+        crate::region::reset();
+
+        for index in 0..129 {
+            assertion_bool(
+                AssertKind::Sometimes,
+                true,
+                true,
+                &format!("legacy capacity assertion {index}"),
+            );
+        }
+
+        assert_eq!(assertion_read_all().len(), 129);
+        assert_eq!(assertion_dropped_allocations(), 0);
+        crate::region::clear();
+    }
+
+    #[test]
+    fn counts_allocations_dropped_after_the_table_is_full() {
+        crate::region::init();
+        crate::region::reset();
+
+        for index in 0..MAX_ASSERTION_SLOTS {
+            assertion_bool(
+                AssertKind::Sometimes,
+                true,
+                true,
+                &format!("capacity assertion {index}"),
+            );
+        }
+        assert_eq!(assertion_read_all().len(), MAX_ASSERTION_SLOTS);
+
+        assertion_bool(AssertKind::Sometimes, true, true, "first dropped assertion");
+        assertion_bool(
+            AssertKind::Sometimes,
+            true,
+            true,
+            "second dropped assertion",
+        );
+
+        assert_eq!(assertion_dropped_allocations(), 2);
+        crate::region::reset();
+        assert_eq!(assertion_dropped_allocations(), 0);
         crate::region::clear();
     }
 

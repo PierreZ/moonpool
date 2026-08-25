@@ -59,7 +59,8 @@ pub fn init() {
         return;
     }
     // Safety: layouts have non-zero size; alloc_zeroed returns zeroed memory of the
-    // requested size/alignment, matching the `[count: u32, _pad, slots..]` layout.
+    // requested size/alignment, matching the
+    // `[count: u32, dropped_allocations: u32, slots..]` layout.
     let table = unsafe { alloc_zeroed(table_layout()) };
     if table.is_null() {
         std::alloc::handle_alloc_error(table_layout());

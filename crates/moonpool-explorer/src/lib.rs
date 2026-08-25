@@ -143,8 +143,9 @@ thread_local! {
 pub use moonpool_assertions::{
     ASSERTION_TABLE_MEM_SIZE, AssertCmp, AssertKind, AssertionSlot, AssertionSlotSnapshot,
     DiscoveryKind, EACH_BUCKET_MEM_SIZE, EachBucket, MAX_ASSERTION_SLOTS, MAX_EACH_BUCKETS,
-    assertion_bool, assertion_numeric, assertion_read_all, assertion_sometimes_all,
-    assertion_sometimes_each, assertion_table_ptr, each_bucket_read_all, msg_hash, unpack_quality,
+    assertion_bool, assertion_dropped_allocations, assertion_numeric, assertion_read_all,
+    assertion_sometimes_all, assertion_sometimes_each, assertion_table_ptr, each_bucket_read_all,
+    msg_hash, unpack_quality,
 };
 
 /// Initialize the assertion table and each-bucket accounting in `MAP_SHARED`

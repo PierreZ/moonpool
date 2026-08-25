@@ -43,7 +43,7 @@ pub struct AssertionStats {
 
 You can ask for `success_rate()` to get a percentage. An always-assertion with a 99.7% success rate means it failed in 0.3% of checks. That is a bug, and the numbers tell you how hard it is to trigger.
 
-At the end of all iterations, `validate_assertion_contracts()` performs final validation. It returns two categories of violations: **always violations** (definite bugs where invariants were broken) and **coverage violations** (sometimes-assertions that were never satisfied, meaning the simulation did not exercise certain paths). The distinction matters because always violations indicate bugs regardless of iteration count, while coverage violations are only meaningful after enough iterations for statistical confidence.
+At the end of all iterations, `validate_assertion_contracts()` performs final validation. It returns two categories of violations: **always violations** (definite bugs where invariants were broken, including assertion slot-table overflow) and **coverage violations** (sometimes-assertions that were never satisfied, meaning the simulation did not exercise certain paths). The distinction matters because always violations indicate bugs regardless of iteration count, while coverage violations are only meaningful after enough iterations for statistical confidence. The shared table tracks up to 512 assertion sites; if it fills, `SimulationReport::dropped_assertion_allocations` reports the number of untracked evaluations and the run fails loudly instead of appearing green.
 
 ## What Comes Next
 

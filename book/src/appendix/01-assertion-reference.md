@@ -176,6 +176,7 @@ These indicate real bugs and are safe to check regardless of iteration count.
 | `AlwaysOrUnreachable` | `fail_count > 0` (condition was false when reached) |
 | `Unreachable` | `pass_count > 0` (code path was reached) |
 | `NumericAlways` | `fail_count > 0` (comparison failed at least once) |
+| Slot table | `dropped_assertion_allocations > 0` (one or more evaluations could not be tracked) |
 
 ### Coverage violations (statistical)
 
