@@ -65,6 +65,9 @@ hyper = { version = "1", features = ["http1", "server", "client"] }
 # moonpool-hyper depends on moonpool-core, never on moonpool-sim.
 moonpool-hyper = { path = "../moonpool-hyper", version = "0.8.0" }
 tempfile = "3"
+# The h2 tests speak to moonpool-hyper's server/channel, which take and return
+# tower services.
+tower-service = "0.3"
 
 [lints]
 workspace = true
