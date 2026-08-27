@@ -188,7 +188,7 @@ fault beside its ordered scheduler effects, and `SimWorld` stamps it with the
 current monotonic scheduler time before the runner merges it into the trace
 timeline.
 
-- **Process lifecycle**: `process_graceful_shutdown` (with `grace_period_ms`), `process_force_kill`, `process_restart` (all with `ip`)
+- **Process lifecycle**: `process_graceful_shutdown` (with `grace_period_ms`), `process_force_kill` (with `cause`: `grace_period_expired`, `crash`, or `crash_and_wipe`), `process_restart` (all with `ip`)
 - **Network**: `partition_created`, `partition_healed` (with `from`/`to`), `random_close`, `bit_flip` (with `connection_id`), `send_partition_created`, `recv_partition_created` (with `ip`)
 - **Storage**: `storage_read_fault`, `storage_write_fault` (with `write_kind`), `storage_sync_fault`, `storage_crash`, `storage_wipe` (all with `ip`)
 

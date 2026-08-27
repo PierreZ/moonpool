@@ -32,6 +32,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use crate::observability::FieldValue;
+use crate::sim::ProcessKillKind;
 
 /// Well-known event name for simulator-emitted fault events.
 pub const SIM_FAULT_EVENT_NAME: &str = "sim_fault";
@@ -51,10 +52,12 @@ pub enum SimFaultEvent {
         /// Grace period before force-kill, in milliseconds.
         grace_period_ms: u64,
     },
-    /// Process force-killed.
+    /// Process task force-killed (grace period expired, or a crash reboot).
     ProcessForceKill {
         /// IP address of the process.
         ip: String,
+        /// Why the process was killed.
+        cause: ProcessKillKind,
     },
     /// Process restarted after recovery delay.
     ProcessRestart {

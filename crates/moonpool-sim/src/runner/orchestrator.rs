@@ -17,6 +17,7 @@ use crate::runner::locality::MachineRegistry;
 use crate::runner::tags::{ProcessTags, TagRegistry};
 use crate::runner::topology::{TopologyFactory, TopologyInputs};
 use crate::runner::workload::Workload;
+use crate::sim::ProcessKillKind;
 use crate::{SimulationResult, assert_reachable};
 
 use super::process_manager::{ProcessConfig, ProcessManager};
@@ -1289,6 +1290,7 @@ impl WorkloadOrchestrator {
                     crate::sim::Event::ProcessForceKill {
                         ip,
                         recovery_delay_ms,
+                        cause: ProcessKillKind::GracePeriodExpired,
                     },
                     Duration::from_millis(grace_period_ms),
                 );
@@ -1296,11 +1298,27 @@ impl WorkloadOrchestrator {
             Some(crate::sim::Event::ProcessForceKill {
                 ip,
                 recovery_delay_ms,
+                cause,
             }) => {
-                let event = SimFaultEvent::ProcessForceKill { ip: ip.to_string() };
+                assert_reachable!("event: ProcessForceKill");
+                let event = SimFaultEvent::ProcessForceKill {
+                    ip: ip.to_string(),
+                    cause,
+                };
                 obs.record_sim_fault(Self::sim_now_ms(sim), &event);
+                // Abort the task *first*: aborting connections and crashing
+                // storage wake the process, and a dead process must not run
+                // application work during its recovery delay.
                 process_manager.abort_process(ip);
                 sim.abort_all_connections_for_ip(ip);
+                match cause {
+                    ProcessKillKind::GracePeriodExpired => {}
+                    ProcessKillKind::Crash => sim.simulate_crash_for_process(ip, true),
+                    ProcessKillKind::CrashAndWipe => {
+                        sim.simulate_crash_for_process(ip, true);
+                        sim.wipe_storage_for_process(ip);
+                    }
+                }
                 sim.schedule_process_restart(ip, Duration::from_millis(recovery_delay_ms));
             }
             Some(crate::sim::Event::ProcessRestart { ip }) => {

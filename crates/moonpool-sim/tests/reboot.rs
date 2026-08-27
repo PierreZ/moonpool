@@ -483,9 +483,12 @@ impl Invariant for RebootTimingInvariant {
 
         let entries = q.snapshot(SIM_FAULT_EVENT_NAME);
 
-        // Check grace period timing: graceful shutdown → force kill for same IP
+        // Check grace period timing: graceful shutdown → force kill for same IP.
+        // Crash force-kills carry a different cause and have no grace period.
         for (i, entry) in entries.iter().enumerate() {
-            if entry.str("kind") == Some("process_force_kill") {
+            if entry.str("kind") == Some("process_force_kill")
+                && entry.str("cause") == Some("grace_period_expired")
+            {
                 let ip = entry.str("ip").expect("force kill carries an ip");
                 // Look backwards for matching graceful shutdown
                 for j in (0..i).rev() {
@@ -610,5 +613,277 @@ fn test_max_dead_limits_concurrent_kills_via_attrition() {
     assert_eq!(
         report.failed_runs, 0,
         "attrition with max_dead=1 should not cause failures"
+    );
+}
+
+// ============================================================================
+// Test: a crash reboot silences the process at the crash instant
+// ============================================================================
+//
+// Regression guard for the crash path scheduling only `ProcessRestart`: the
+// old task was aborted inside `ProcessManager::restart`, i.e. *after* the
+// recovery delay, so a crashed process kept running application work
+// throughout the interval it was reported dead.
+
+/// Event name emitted by [`HeartbeatProcess`] on every tick.
+const HEARTBEAT: &str = "process_heartbeat";
+
+/// Sim-time between two heartbeats.
+const HEARTBEAT_PERIOD: Duration = Duration::from_millis(200);
+
+/// Fixed recovery delay for [`CrashOnceInjector`], in milliseconds. Spans many
+/// heartbeat periods so a task that survives the crash cannot stay silent by
+/// accident.
+const CRASH_RECOVERY_MS: usize = 3000;
+
+/// Process that ticks forever. A crashed instance must go silent immediately
+/// instead of ticking on until its restart.
+struct HeartbeatProcess;
+
+#[async_trait]
+impl Process for HeartbeatProcess {
+    fn name(&self) -> &'static str {
+        "heartbeat"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let mut beat = 0u64;
+        while !ctx.shutdown().is_cancelled() {
+            ctx.time().sleep(HEARTBEAT_PERIOD).await.map_err(|e| {
+                moonpool_sim::SimulationError::InvalidState(format!("sleep failed: {e}"))
+            })?;
+            beat += 1;
+            tracing::info!(beat, "process_heartbeat");
+        }
+        Ok(())
+    }
+}
+
+/// Crashes the first process once, with a fixed recovery delay so kill and
+/// restart times are comparable across replays of the same seed.
+///
+/// It records the IP and the sim time of the crash itself, so the invariant
+/// knows when the dead interval starts without relying on the very fault event
+/// this test is about.
+struct CrashOnceInjector {
+    observations: SharedObservations,
+}
+
+#[async_trait]
+impl FaultInjector for CrashOnceInjector {
+    fn name(&self) -> &'static str {
+        "crash_once"
+    }
+
+    async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
+        let _ = ctx.time().sleep(Duration::from_secs(1)).await;
+
+        if let Some(ip) = ctx.process_ips().first().cloned() {
+            let crashed_at_ms = u64::try_from(ctx.time().now().as_millis())
+                .expect("sim time fits in u64 milliseconds");
+            ctx.reboot_with_delays(
+                &ip,
+                RebootKind::Crash,
+                &(CRASH_RECOVERY_MS..CRASH_RECOVERY_MS + 1),
+                &(0..1),
+            )?;
+            lock(&self.observations).crashed = Some((ip, crashed_at_ms));
+        }
+
+        ctx.chaos_shutdown().cancelled().await;
+        Ok(())
+    }
+}
+
+/// Shared observations for one run of the crash scenario.
+#[derive(Default)]
+struct CrashObservations {
+    /// `(ip, sim time in ms)` of the crash, recorded by the fault injector.
+    crashed: Option<(String, u64)>,
+    /// `kind@ip@time_ms` for every process-lifecycle fault, in order. Two runs
+    /// of the same seed must produce identical vectors.
+    lifecycle: Vec<String>,
+    /// Number of crash → restart windows proven silent end to end.
+    verified_windows: usize,
+}
+
+type SharedObservations = std::sync::Arc<std::sync::Mutex<CrashObservations>>;
+
+fn lock(observations: &SharedObservations) -> std::sync::MutexGuard<'_, CrashObservations> {
+    observations
+        .lock()
+        .expect("CrashObservations poisoned: prior task panicked")
+}
+
+/// Invariant: from the instant a process is crashed until it restarts, that
+/// process emits nothing.
+///
+/// The window start comes from the injector's own record of the crash, not
+/// from a simulator fault event, so the invariant still fires if the crash
+/// path stops reporting the kill.
+///
+/// Cursor-based — it runs after every simulation step, so it only inspects
+/// events it has not seen before.
+struct DeadProcessIsSilentInvariant {
+    fault_cursor: Cell<usize>,
+    beat_cursor: Cell<usize>,
+    /// Set once the crashed process is seen restarting.
+    restarted: Cell<bool>,
+    observations: SharedObservations,
+}
+
+impl DeadProcessIsSilentInvariant {
+    fn new(observations: SharedObservations) -> Self {
+        Self {
+            fault_cursor: Cell::new(0),
+            beat_cursor: Cell::new(0),
+            restarted: Cell::new(false),
+            observations,
+        }
+    }
+}
+
+impl Invariant for DeadProcessIsSilentInvariant {
+    fn name(&self) -> &'static str {
+        "dead_process_is_silent"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        // Merge the two streams by global sequence number: a heartbeat and the
+        // kill that silences it can land in the same batch.
+        let mut fresh = q.since(SIM_FAULT_EVENT_NAME, &self.fault_cursor);
+        fresh.extend(q.since(HEARTBEAT, &self.beat_cursor));
+        if fresh.is_empty() {
+            return;
+        }
+        fresh.sort_by_key(|event| event.seq);
+
+        let mut observations = lock(&self.observations);
+
+        for event in fresh {
+            let Some((crashed_ip, crashed_at_ms)) = observations.crashed.clone() else {
+                continue;
+            };
+
+            if event.name == HEARTBEAT {
+                assert_always!(
+                    self.restarted.get()
+                        || event.source != crashed_ip
+                        || event.time_ms <= crashed_at_ms,
+                    format!(
+                        "{} emitted a heartbeat at {}ms, after crashing at {crashed_at_ms}ms",
+                        event.source, event.time_ms
+                    )
+                );
+                continue;
+            }
+
+            let Some(kind @ ("process_force_kill" | "process_restart")) = event.str("kind") else {
+                continue;
+            };
+            let ip = event.str("ip").expect("lifecycle fault carries an ip");
+            observations
+                .lifecycle
+                .push(format!("{kind}@{ip}@{}", event.time_ms));
+            if kind == "process_restart" && ip == crashed_ip && !self.restarted.replace(true) {
+                observations.verified_windows += 1;
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        self.fault_cursor.set(0);
+        self.beat_cursor.set(0);
+        self.restarted.set(false);
+    }
+}
+
+/// Run one seed of the crash scenario, returning the report and what the
+/// invariant observed.
+fn run_crash_scenario(seed: u64) -> (moonpool_sim::SimulationReport, CrashObservations) {
+    let observations: SharedObservations = std::sync::Arc::default();
+    let report = SimulationBuilder::new()
+        .processes(2, || Box::new(HeartbeatProcess))
+        .workload(TimedWorkload(Duration::from_secs(8)))
+        .fault(CrashOnceInjector {
+            observations: observations.clone(),
+        })
+        .invariant(DeadProcessIsSilentInvariant::new(observations.clone()))
+        .invariant(RebootTimingInvariant::new())
+        .chaos_duration(Duration::from_secs(6))
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run();
+
+    let observed = std::mem::take(&mut *lock(&observations));
+    (report, observed)
+}
+
+#[test]
+fn test_crash_reboot_silences_process_until_restart() {
+    for seed in [42, 123, 999] {
+        let (report, observed) = run_crash_scenario(seed);
+
+        assert_eq!(
+            report.failed_runs, 0,
+            "seed {seed}: a crashed process must emit nothing until it restarts"
+        );
+        assert_eq!(
+            observed.verified_windows, 1,
+            "seed {seed}: expected exactly one crash → restart window, saw {:?}",
+            observed.lifecycle
+        );
+
+        // The crash records a force-kill at crash time and a restart one
+        // recovery delay later.
+        let times: Vec<u64> = observed
+            .lifecycle
+            .iter()
+            .map(|entry| {
+                entry
+                    .rsplit('@')
+                    .next()
+                    .and_then(|ms| ms.parse().ok())
+                    .expect("lifecycle entry ends with a timestamp")
+            })
+            .collect();
+        assert_eq!(
+            observed.lifecycle.len(),
+            2,
+            "seed {seed}: expected force-kill then restart, saw {:?}",
+            observed.lifecycle
+        );
+        assert!(
+            observed.lifecycle[0].starts_with("process_force_kill@"),
+            "seed {seed}: first lifecycle fault should be the force-kill, saw {:?}",
+            observed.lifecycle
+        );
+        assert!(
+            observed.lifecycle[1].starts_with("process_restart@"),
+            "seed {seed}: second lifecycle fault should be the restart, saw {:?}",
+            observed.lifecycle
+        );
+        assert_eq!(
+            times[1] - times[0],
+            CRASH_RECOVERY_MS as u64,
+            "seed {seed}: restart should land one recovery delay after the kill"
+        );
+    }
+}
+
+#[test]
+fn test_crash_reboot_replays_identically_for_a_seed() {
+    let (first_report, first) = run_crash_scenario(7);
+    let (second_report, second) = run_crash_scenario(7);
+
+    assert_eq!(first_report.failed_runs, 0);
+    assert_eq!(second_report.failed_runs, 0);
+    assert_eq!(
+        first.lifecycle, second.lifecycle,
+        "the same seed must replay the same kill and restart times"
+    );
+    assert!(
+        !first.lifecycle.is_empty(),
+        "the scenario must actually crash a process"
     );
 }

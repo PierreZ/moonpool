@@ -130,7 +130,7 @@ custom [`FaultInjector`](../part3-building/07-chaos.md) implementations.
 | Fault | Mechanism | Behavior |
 |-------|-----------|----------|
 | Graceful reboot | `RebootKind::Graceful` | Signal shutdown token, wait grace period (default 2-5s), force kill, restart after recovery delay (default 1-10s) |
-| Crash reboot | `RebootKind::Crash` | Immediate task abort, all connections reset, restart after recovery delay |
+| Crash reboot | `RebootKind::Crash` | Immediate task abort at the crash instant, all connections reset, restart after recovery delay |
 | Crash + wipe | `RebootKind::CrashAndWipe` | Crash behavior + immediate wipe of all persistent storage owned by the process (scoped by IP) |
 | Continuous attrition | `Attrition` config | Random reboots during chaos phase with weighted `prob_graceful`/`prob_crash`/`prob_wipe` and `max_dead` limit |
 | Correlated reboot | `AttritionScope::PerMachine` / `PerZone` / `PerDatacenter` | Reboot every process of one failure domain together; only fires when the whole group fits in `max_dead` |

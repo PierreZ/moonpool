@@ -8,6 +8,8 @@ use std::{
     time::Duration,
 };
 
+use serde::Serialize;
+
 use crate::network::sim::NetworkEvent;
 pub use crate::storage::StorageOperation;
 use crate::storage::sim::StorageEvent;
@@ -40,13 +42,30 @@ pub enum Event {
         /// Recovery delay in milliseconds after force-kill before restart.
         recovery_delay_ms: u64,
     },
-    /// Force-kill a process after a graceful shutdown grace period.
+    /// Force-kill a process: the task is aborted before any other side effect
+    /// of the kill can wake it again.
     ProcessForceKill {
         /// The IP address of the process to force-kill.
         ip: std::net::IpAddr,
         /// Recovery delay in milliseconds before restart.
         recovery_delay_ms: u64,
+        /// Why the process is dying, and what that costs its storage.
+        cause: ProcessKillKind,
     },
+}
+
+/// Why a process task is force-killed, and what the kill does to its storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessKillKind {
+    /// A graceful reboot's grace period expired: persistent storage survives.
+    GracePeriodExpired,
+    /// A [`RebootKind::Crash`](crate::RebootKind::Crash) reboot: unsynced
+    /// storage state is lost.
+    Crash,
+    /// A [`RebootKind::CrashAndWipe`](crate::RebootKind::CrashAndWipe) reboot:
+    /// every persistent file owned by the process is deleted as well.
+    CrashAndWipe,
 }
 
 impl Event {
