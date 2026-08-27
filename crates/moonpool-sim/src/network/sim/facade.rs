@@ -384,7 +384,8 @@ impl SimWorld {
     /// Restores pair partitions in both directions between two IPs.
     pub fn restore_partition(&self, from: IpAddr, to: IpAddr) {
         let mut inner = self.inner.write();
-        let actions = inner.network.restore_partition(from, to);
+        let now = inner.now();
+        let actions = inner.network.restore_partition(from, to, now);
         inner.apply_network(actions);
     }
 

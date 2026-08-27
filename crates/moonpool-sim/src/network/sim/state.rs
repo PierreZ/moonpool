@@ -46,6 +46,7 @@ impl ConnectionFlags {
     const GRACEFUL_CLOSE_PENDING: u16 = 1 << 6;
     const REMOTE_FIN_RECEIVED: u16 = 1 << 7;
     const SEND_IN_PROGRESS: u16 = 1 << 8;
+    const SEND_STALLED: u16 = 1 << 9;
 
     fn get(self, mask: u16) -> bool {
         (self.0 & mask) != 0
@@ -113,6 +114,18 @@ impl ConnectionFlags {
 
     pub(crate) fn set_send_in_progress(&mut self, value: bool) {
         self.set_bit(Self::SEND_IN_PROGRESS, value);
+    }
+
+    /// Whether a queued send is held back by a partition.
+    ///
+    /// A stalled connection owns no scheduled work: it is re-driven when the
+    /// partitions blocking it heal.
+    pub(crate) fn send_stalled(self) -> bool {
+        self.get(Self::SEND_STALLED)
+    }
+
+    pub(crate) fn set_send_stalled(&mut self, value: bool) {
+        self.set_bit(Self::SEND_STALLED, value);
     }
 }
 
@@ -183,28 +196,41 @@ impl NetworkState {
         }
     }
 
-    pub(crate) fn is_partitioned(&self, from_ip: IpAddr, to_ip: IpAddr, now: Duration) -> bool {
-        self.ip_partitions
-            .get(&(from_ip, to_ip))
-            .is_some_and(|partition| now < partition.expires_at)
-            || self
-                .send_partitions
-                .get(&from_ip)
-                .is_some_and(|expires_at| now < *expires_at)
-            || self
-                .recv_partitions
-                .get(&to_ip)
-                .is_some_and(|expires_at| now < *expires_at)
+    /// Deadline at which every partition blocking `from_ip -> to_ip` has healed.
+    ///
+    /// Returns `None` when the direction is not partitioned at `now`. Directed,
+    /// send-side, and receive-side partitions can overlap, so the caller has to
+    /// wait for the latest of the deadlines currently in force.
+    pub(crate) fn partition_clear_at(
+        &self,
+        from_ip: IpAddr,
+        to_ip: IpAddr,
+        now: Duration,
+    ) -> Option<Duration> {
+        [
+            self.ip_partitions
+                .get(&(from_ip, to_ip))
+                .map(|partition| partition.expires_at),
+            self.send_partitions.get(&from_ip).copied(),
+            self.recv_partitions.get(&to_ip).copied(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|expires_at| now < *expires_at)
+        .max()
     }
 
-    pub(crate) fn is_connection_partitioned(
+    pub(crate) fn is_partitioned(&self, from_ip: IpAddr, to_ip: IpAddr, now: Duration) -> bool {
+        self.partition_clear_at(from_ip, to_ip, now).is_some()
+    }
+
+    /// Deadline at which `connection_id` may send again, if it is partitioned.
+    pub(crate) fn connection_partition_clear_at(
         &self,
         connection_id: ConnectionId,
         now: Duration,
-    ) -> bool {
-        self.connections
-            .get(&connection_id)
-            .and_then(|connection| Some((connection.local_ip?, connection.remote_ip?)))
-            .is_some_and(|(from, to)| self.is_partitioned(from, to, now))
+    ) -> Option<Duration> {
+        let connection = self.connections.get(&connection_id)?;
+        self.partition_clear_at(connection.local_ip?, connection.remote_ip?, now)
     }
 }

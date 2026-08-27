@@ -477,16 +477,19 @@ impl NetworkSimulation {
                 self.state.ip_partitions.retain(|_, state| {
                     state.expires_at != expected_deadline || now < expected_deadline
                 });
+                self.resume_stalled_sends(now, &mut actions);
             }
             NetworkEvent::SendPartitionClear { expected_deadline } => {
                 self.state.send_partitions.retain(|_, deadline| {
                     *deadline != expected_deadline || now < expected_deadline
                 });
+                self.resume_stalled_sends(now, &mut actions);
             }
             NetworkEvent::RecvPartitionClear { expected_deadline } => {
                 self.state.recv_partitions.retain(|_, deadline| {
                     *deadline != expected_deadline || now < expected_deadline
                 });
+                self.resume_stalled_sends(now, &mut actions);
             }
             NetworkEvent::DataDelivery {
                 connection_id,
@@ -624,41 +627,72 @@ impl NetworkSimulation {
             if let Some(connection) = self.state.connections.get_mut(&id) {
                 connection.send_buffer.clear();
                 connection.flags.set_send_in_progress(false);
+                connection.flags.set_send_stalled(false);
             }
             Self::take_waiter(&mut self.waiters.send_buffers, id, wakes);
             return;
         }
-        if self.state.is_connection_partitioned(id, now) {
-            self.handle_partitioned_send(id, now, actions, wakes);
+        // Only queued bytes can stall: with nothing to send there is nothing a
+        // partition could reorder, and the normal path is what releases the
+        // send-in-progress flag and any pending FIN.
+        let has_queued_bytes = self
+            .state
+            .connections
+            .get(&id)
+            .is_some_and(|connection| !connection.send_buffer.is_empty());
+        if has_queued_bytes && self.state.connection_partition_clear_at(id, now).is_some() {
+            self.stall_partitioned_send(id);
         } else {
             self.handle_normal_send(id, now, actions, wakes);
         }
     }
 
-    fn handle_partitioned_send(
-        &mut self,
-        id: ConnectionId,
-        now: Duration,
-        actions: &mut NetworkActions,
-        wakes: &mut WakeBatch,
-    ) {
-        let Some(connection) = self.state.connections.get_mut(&id) else {
-            return;
-        };
-        connection.send_buffer.pop_front();
-        Self::take_waiter(&mut self.waiters.send_buffers, id, wakes);
-        if connection.send_buffer.is_empty() {
-            connection.flags.set_send_in_progress(false);
-            if connection.flags.graceful_close_pending() {
-                connection.flags.set_graceful_close_pending(false);
-                Self::schedule_fin(
-                    connection.paired_connection,
-                    connection.last_data_delivery_scheduled_at,
-                    now,
-                    actions,
-                );
+    /// Hold a queued send until every partition blocking it has healed.
+    ///
+    /// A partition must never punch a hole in an established byte stream. The
+    /// queued chunk stays at the front of the send buffer, so the peer either
+    /// sees the original bytes in order once the partition heals, or sees the
+    /// connection fail — never a later chunk silently filling the gap left by
+    /// an earlier one. `FoundationDB` models the same thing: `SimClogging` turns
+    /// a clogged pair into added delay (`getRecvDelay` clamps to
+    /// `clogPairUntil`), and only an explicit disconnect fails the connection.
+    ///
+    /// Send-buffer waiters are deliberately left registered: no buffer space is
+    /// released while the stream is stalled, so writers keep seeing
+    /// backpressure until the send actually drains.
+    ///
+    /// A stalled connection owns no scheduled work. It is re-driven by
+    /// [`resume_stalled_sends`](Self::resume_stalled_sends) when the partitions
+    /// blocking it heal, whether that happens at their deadline or earlier.
+    fn stall_partitioned_send(&mut self, id: ConnectionId) {
+        if let Some(connection) = self.state.connections.get_mut(&id) {
+            connection.flags.set_send_stalled(true);
+        }
+    }
+
+    /// Re-drive every connection whose blocking partitions have healed.
+    ///
+    /// Runs from each partition-clearing path, so a stream stalled by a
+    /// partition that is healed early releases its bytes early instead of
+    /// waiting out the deadline it stalled under.
+    fn resume_stalled_sends(&mut self, now: Duration, actions: &mut NetworkActions) {
+        let resumed = self
+            .state
+            .connections
+            .iter()
+            .filter(|(id, connection)| {
+                connection.flags.send_stalled()
+                    && self
+                        .state
+                        .connection_partition_clear_at(**id, now)
+                        .is_none()
+            })
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in resumed {
+            if let Some(connection) = self.state.connections.get_mut(&id) {
+                connection.flags.set_send_stalled(false);
             }
-        } else {
             actions.schedule_at(now, NetworkEvent::ProcessSendBuffer { connection_id: id });
         }
     }
@@ -1283,7 +1317,12 @@ impl NetworkSimulation {
         actions
     }
 
-    pub(crate) fn restore_partition(&mut self, from: IpAddr, to: IpAddr) -> NetworkActions {
+    pub(crate) fn restore_partition(
+        &mut self,
+        from: IpAddr,
+        to: IpAddr,
+        now: Duration,
+    ) -> NetworkActions {
         self.state.ip_partitions.remove(&(from, to));
         self.state.ip_partitions.remove(&(to, from));
         let mut actions = NetworkActions::default();
@@ -1291,6 +1330,7 @@ impl NetworkSimulation {
             from: from.to_string(),
             to: to.to_string(),
         });
+        self.resume_stalled_sends(now, &mut actions);
         actions
     }
 
@@ -1396,6 +1436,7 @@ impl NetworkSimulation {
                 c.flags.set_send_closed(true);
                 c.flags.set_recv_closed(true);
                 c.flags.set_send_in_progress(false);
+                c.flags.set_send_stalled(false);
                 c.flags.set_graceful_close_pending(false);
                 c.send_buffer.clear();
                 c.close_reason = CloseReason::Aborted;

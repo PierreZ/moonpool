@@ -105,6 +105,17 @@ Partitions have configurable probability and duration. They can be programmatic 
 
 At the lower-level `SimWorld` API, `partition_pair(from, to, duration)` adds one directed pair entry. Call it for both directions to create a bidirectional pair cut. A single `restore_partition(from, to)` deliberately removes both directed entries, preventing a half-healed pair during recovery. Send-wide and receive-wide partitions remain separate and expire through their targeted restore events.
 
+A partition never punches a hole in an established connection. A queued send
+whose direction is cut **stalls**: the bytes stay at the front of the send
+buffer, the writer keeps seeing backpressure, and the stream resumes in order
+the moment the partition heals, whether that is at its deadline or through an
+early `restore_partition` / `FaultContext::heal_partition`. The peer therefore
+either reads the original bytes in order, or sees the connection fail. It never
+reads a later chunk in place of one that was silently dropped, which for a
+framed protocol (h2 on the same connection) would corrupt the frame that follows.
+This mirrors FoundationDB's `SimClogging`, where a clogged pair adds delay and
+only an explicit disconnect fails the connection.
+
 The first three strategies are IP-blind: they pick nodes out of a hat. `IsolateZone` and `IsolateDatacenter` read the [`.cluster()`](09-attrition.md#failure-domains-correlated-reboots) topology instead, so the cut lands exactly where a real one would, on the boundary that shares a switch or a region. Without a topology they fall back to `Random` selection, which keeps them safe to draw for any seed.
 
 The asymmetric pair is worth dwelling on. A node whose sends are blocked still hears every heartbeat from the cluster, so it happily believes it is healthy while everyone else marks it dead. Systems that infer liveness from "I can see you" rather than "you can see me" split brains here. Both arms record their own fault events (`SendPartitionCreated`, `RecvPartitionCreated`) on the timeline, so an invariant can correlate application behavior with the exact one-way cut that caused it.
