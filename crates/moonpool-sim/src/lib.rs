@@ -173,6 +173,13 @@ pub use storage::{
     StorageError,
 };
 
+// Block-device simulation exports
+pub use storage::{
+    BlockCrashOutcome, BlockCrashReport, BlockEligibilityMask, BlockFaultConfig, BlockFaultKind,
+    BlockFaultRecord, BlockSectorResolution, EioTarget, SimBlockDevice, SimBlockDeviceProvider,
+    SimBlockStore,
+};
+
 // Provider exports
 pub use providers::{SimProviders, SimRandomProvider, SimTaskProvider, SimTimeProvider};
 

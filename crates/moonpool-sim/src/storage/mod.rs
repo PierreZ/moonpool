@@ -3,6 +3,9 @@
 //! This module provides simulated storage that integrates with the
 //! deterministic simulation engine for testing disk I/O patterns and faults.
 
+/// Simulated block device with a barrier-bounded crash model
+pub mod block;
+
 /// Storage configuration and settings
 pub mod config;
 
@@ -35,6 +38,13 @@ use std::io;
 pub(crate) fn sim_shutdown_error() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown")
 }
+
+// Re-export block device simulation
+pub use block::{
+    BlockCrashOutcome, BlockCrashReport, BlockEligibilityMask, BlockFaultConfig, BlockFaultKind,
+    BlockFaultRecord, BlockSectorResolution, EioTarget, SimBlockDevice, SimBlockDeviceProvider,
+    SimBlockStore,
+};
 
 // Re-export error
 pub use error::StorageError;

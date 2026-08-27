@@ -241,3 +241,76 @@ let storage_config = StorageConfiguration::fast_local();
 ```
 
 The fault probabilities in `random_for_seed()` are intentionally low (0.001% to 0.1%). Storage faults at higher rates would prevent the system from making progress. The goal is a steady trickle of faults that occasionally exercises corruption detection and recovery, not a deluge that makes every I/O fail.
+
+## The BlockDevice Contract
+
+The file API above is deliberately POSIX-flavored, which puts it at the wrong
+altitude for a storage *engine*: a WAL, an LSM, or a B-tree pager must
+carefully avoid relying on stream semantics (seek, append, auto-extend) while
+getting no guarantee it actually needs (atomicity unit, alignment, reorder
+window). For that, moonpool-core provides a second, narrower surface:
+`BlockDevice` — sector-aligned reads and writes inside named regions, one
+explicit durability barrier, and grow-only resize.
+
+```rust,ignore
+use moonpool_core::{BlockDevice, BlockDeviceProvider, RegionId, RegionSpec};
+use moonpool_sim::{BlockFaultConfig, SimBlockDeviceProvider, SimBlockStore};
+
+let store = SimBlockStore::new(seed, BlockFaultConfig::default());
+let provider = SimBlockDeviceProvider::new(store.clone());
+
+let device = provider
+    .create("db", &[
+        RegionSpec { name: "wal", size: 1024 * 4096 },
+        RegionSpec { name: "superblock", size: 4096 },
+    ])
+    .await?;
+device.write(RegionId(0), 0, &entry).await?;   // visible, not durable
+device.persist().await?;                        // durability barrier
+```
+
+The contract clauses documented on the trait ARE the feature:
+
+- **Atomicity unit is one sector (4096 bytes), nothing larger.** A crash may
+  independently leave each sector of a multi-sector write old, new, or
+  unreadable.
+- **Writes between two `persist()` calls may reach disk in any order.** Only
+  the barrier orders writes.
+- **Completion of `write()` implies visibility, not durability.**
+- **Never-written sectors read unspecified bytes** — zeros, stale data, or
+  garbage. Never infer written-ness from content.
+- **EIO is an operating condition**, distinct from a successful read of
+  corrupt bytes; corrupt reads are deterministic and retries never heal.
+- `create()` is atomic: the device is invisible to `open()` until its first
+  `persist()`.
+
+### Barrier-Bounded Crash Model
+
+`SimBlockStore::crash_device()` resolves every sector written since the last
+successful `persist()` **independently**: kept old, kept new, lost (reverts to
+the fill pattern — zeros or garbage, chosen per seed), or left with a latent
+read fault. An occasional fully-clean crash (10%, FDB's number) and an
+occasional correlated rollback of a contiguous sector run (erase-block damage)
+round out the shapes. This is what makes "persist-record landed while its
+entry is partial" — the case CTRL-style journal recovery exists to survive —
+actually reachable in simulation.
+
+Fault families (EIO on read/write, read-time corruption, misdirected writes
+contained within a region, phantom writes, persist failures) are gated by both
+the `BlockFaultConfig` probabilities (per-seed swarm via
+`BlockFaultConfig::swarm()`) and a caller-provided eligibility mask
+`(path, region, sector) -> bool`, so a replication-aware harness can enforce
+"never fault all copies of one record" without moonpool knowing what a replica
+is. Directed red tests use the targeted API: `corrupt()`, `fail_with_eio()`,
+`wipe_device()`.
+
+### The Lost-Synced-Write Oracle
+
+At every `persist()`, each synced sector is stamped with a CRC of the content
+the caller was told is durable. After a crash, a stamped sector that no longer
+matches is a **simulator bug** and fails loudly — unless the opt-in
+barrier-violation family is armed (`barrier_violation_probability > 0`), in
+which case `persist()` occasionally *lies* about a sector and the oracle flips
+to must-detect mode, reporting the loss as an expected `LostSyncedWrite` fault
+event. Downstream consumers use that family to prove cluster-level recovery
+heals a single lying disk (the fsyncgate class of failures).
