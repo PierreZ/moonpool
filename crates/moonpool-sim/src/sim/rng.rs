@@ -377,9 +377,10 @@ pub fn set_swarm_op_seed(seed: Option<u64>) {
 
 /// 64-bit `SplitMix64` finalizer — a stateless, dependency-free mixing function.
 ///
-/// Used to derive per-`(seed, op_id)` swarm decisions without consuming any RNG
-/// stream, so the result is idempotent and order-independent.
-fn splitmix64(mut x: u64) -> u64 {
+/// Used to derive per-`(seed, op_id)` swarm decisions and per-process block
+/// store seeds without consuming any RNG stream, so the result is idempotent
+/// and order-independent.
+pub(crate) fn splitmix64(mut x: u64) -> u64 {
     x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     x ^ (x >> 31)

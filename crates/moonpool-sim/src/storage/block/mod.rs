@@ -25,6 +25,7 @@
 
 mod config;
 mod device;
+pub(crate) mod registry;
 mod store;
 
 pub use config::BlockFaultConfig;

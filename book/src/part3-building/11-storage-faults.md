@@ -250,7 +250,9 @@ carefully avoid relying on stream semantics (seek, append, auto-extend) while
 getting no guarantee it actually needs (atomicity unit, alignment, reorder
 window). For that, moonpool-core provides a second, narrower surface:
 `BlockDevice` — sector-aligned reads and writes inside named regions, one
-explicit durability barrier, and grow-only resize.
+explicit durability barrier, and grow-only resize. It is implemented twice:
+`TokioBlockDeviceProvider` for production and the simulated provider below, so
+the same engine code runs under both ("test the code you ship").
 
 ```rust,ignore
 use moonpool_core::{BlockDevice, BlockDeviceProvider, RegionId, RegionSpec};
@@ -314,3 +316,33 @@ which case `persist()` occasionally *lies* about a sector and the oracle flips
 to must-detect mode, reporting the loss as an expected `LostSyncedWrite` fault
 event. Downstream consumers use that family to prove cluster-level recovery
 heals a single lying disk (the fsyncgate class of failures).
+
+### Production Implementation
+
+`TokioBlockDeviceProvider` (moonpool-core, `tokio-fs` feature, unix) lays a
+device out as a directory of preallocated region files plus a manifest, doing
+positioned I/O on the blocking pool through sector-aligned bounce buffers,
+with `O_DIRECT` where the platform and filesystem support it. `create()`
+builds the layout in a `<path>.staging` directory that the first `persist()`
+syncs and renames into place (then fsyncs the parent), so atomic create holds
+on real disks too. A failed `persist()` **fail-stops** the device — every
+subsequent operation returns an error — because after a lying flush the page
+cache can serve stale clean-marked pages (Rebello, ATC'20).
+
+### Simulation Wiring
+
+Inside a simulation, each process gets its own lazily created block store:
+
+- `SimWorld::block_device_provider(ip)` / `SimContext::block_devices()` hand
+  out the per-process provider; `SimWorld::block_store(ip)` exposes the store
+  for targeted faults, fault records, and crash reports.
+- Store seeds derive as a **pure function** of the iteration seed and the IP,
+  so first use never shifts the counted sim RNG stream or explorer replay.
+- Process crashes (`simulate_crash_for_process`, which `Attrition` reboots
+  call) resolve every buffered write through the crash model and record a
+  `block_device_crash` fault in the timeline; `CrashAndWipe` reboots also
+  erase the process's devices (`block_device_wipe`).
+- `Chaos::Storage(mode)` covers block devices too: `Random` enables every
+  default-on fault family (`BlockFaultConfig::chaos()`), `Swarm` additionally
+  keeps a per-seed subset. The barrier-bounded crash model itself is always
+  armed — it only acts when a process actually crashes.

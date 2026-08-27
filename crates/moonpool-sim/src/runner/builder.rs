@@ -880,6 +880,17 @@ impl SimulationBuilder {
         // delay fault merely because the sampled network config enabled it.
         sim.prepare_buggified_delay_campaign();
         sim.set_storage_config(storage_config);
+        // Block devices follow the same chaos switch as stream storage:
+        // Random turns every default-on fault family on, Swarm additionally
+        // keeps a per-seed subset (drawn from the uncounted config RNG).
+        // The barrier-bounded crash model itself is always armed — it only
+        // acts when a process actually crashes.
+        let block_config = match storage_chaos {
+            Some(ChaosMode::Swarm) => crate::storage::BlockFaultConfig::chaos().swarm(),
+            Some(ChaosMode::Random) => crate::storage::BlockFaultConfig::chaos(),
+            None => crate::storage::BlockFaultConfig::default(),
+        };
+        sim.set_block_fault_config(block_config);
         sim
     }
 

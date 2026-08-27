@@ -480,6 +480,19 @@ impl SimBlockStore {
         Ok(())
     }
 
+    /// Remove every device in the store, as if the whole disk were replaced.
+    /// Returns how many devices were wiped.
+    #[must_use]
+    pub fn wipe_all(&self) -> usize {
+        let mut inner = self.inner.lock();
+        let paths: Vec<String> = inner.devices.keys().cloned().collect();
+        inner.devices.clear();
+        for path in &paths {
+            inner.record(path, BlockFaultKind::DeviceWipe, None, None);
+        }
+        paths.len()
+    }
+
     /// Deliberately mutate a *committed* sector out-of-band, bypassing the
     /// crash model. This simulates a sim bug for oracle tests: the next crash
     /// of the device must fail loudly (unless the barrier-violation family is

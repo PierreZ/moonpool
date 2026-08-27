@@ -90,6 +90,18 @@ impl SimContext {
         self.providers.storage()
     }
 
+    /// Get a simulated block-device provider scoped to this workload's
+    /// process IP. Process crashes resolve its buffered writes through the
+    /// barrier-bounded crash model; `CrashAndWipe` reboots erase its devices.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation has already shut down.
+    #[must_use]
+    pub fn block_devices(&self) -> crate::storage::SimBlockDeviceProvider {
+        self.providers.block_devices()
+    }
+
     /// Get this workload's IP address.
     #[must_use]
     pub fn my_ip(&self) -> &str {

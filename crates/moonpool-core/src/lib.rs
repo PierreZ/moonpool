@@ -48,6 +48,8 @@
 #![deny(clippy::unwrap_used)]
 
 pub mod block;
+#[cfg(all(feature = "tokio-fs", unix))]
+mod block_tokio;
 mod error;
 mod network;
 mod providers;
@@ -78,6 +80,8 @@ pub use tokio as __tokio;
 // Block device contract exports (SECTOR_SIZE stays module-scoped as
 // `block::SECTOR_SIZE` to avoid clashing with other sector constants).
 pub use block::{BlockDevice, BlockDeviceProvider, BlockError, RegionId, RegionSpec};
+#[cfg(all(feature = "tokio-fs", unix))]
+pub use block_tokio::{TokioBlockDevice, TokioBlockDeviceProvider};
 
 // Error exports
 pub use error::{SimulationError, SimulationResult};

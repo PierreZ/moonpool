@@ -20,7 +20,9 @@ tokio-providers = ["tokio-task", "tokio-time", "tokio-net", "tokio-fs", "tokio-r
 tokio-task = ["dep:tokio", "tokio/rt", "tokio/tracing"]
 tokio-time = ["dep:tokio", "tokio/time"]
 tokio-net = ["dep:tokio", "tokio/net", "tokio/io-util", "dep:tokio-util"]
-tokio-fs = ["dep:tokio", "tokio/fs", "tokio/io-util", "dep:tokio-util"]
+# tokio/rt is needed for spawn_blocking (TokioBlockDevice runs positioned I/O
+# on the blocking pool); libc supplies O_DIRECT for direct-I/O region files.
+tokio-fs = ["dep:tokio", "tokio/fs", "tokio/io-util", "tokio/rt", "dep:tokio-util", "dep:libc"]
 # TokioRandomProvider uses rand's ThreadRng; no tokio involved.
 tokio-random = ["rand/thread_rng"]
 # `moonpool_core::select!` as a verbatim re-export of tokio's macro (production).
@@ -32,6 +34,7 @@ deterministic-select = ["select"]
 
 [dependencies]
 futures = "0.3"
+libc = { version = "0.2", optional = true }
 rand = { version = "0.10", default-features = false }
 thiserror = "2.0"
 tokio = { version = "1", default-features = false, optional = true }
@@ -40,6 +43,8 @@ tracing = "0.1"
 
 [dev-dependencies]
 futures = "0.3"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true
