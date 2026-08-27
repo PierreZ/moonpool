@@ -241,3 +241,108 @@ let storage_config = StorageConfiguration::fast_local();
 ```
 
 The fault probabilities in `random_for_seed()` are intentionally low (0.001% to 0.1%). Storage faults at higher rates would prevent the system from making progress. The goal is a steady trickle of faults that occasionally exercises corruption detection and recovery, not a deluge that makes every I/O fail.
+
+## The BlockDevice Contract
+
+The file API above is deliberately POSIX-flavored, which puts it at the wrong
+altitude for a storage *engine*: a WAL, an LSM, or a B-tree pager must
+carefully avoid relying on stream semantics (seek, append, auto-extend) while
+getting no guarantee it actually needs (atomicity unit, alignment, reorder
+window). For that, moonpool-core provides a second, narrower surface:
+`BlockDevice` — sector-aligned reads and writes inside named regions, one
+explicit durability barrier, and grow-only resize. It is implemented twice:
+`TokioBlockDeviceProvider` for production and the simulated provider below, so
+the same engine code runs under both ("test the code you ship").
+
+```rust,ignore
+use moonpool_core::{BlockDevice, BlockDeviceProvider, RegionId, RegionSpec};
+use moonpool_sim::{BlockFaultConfig, SimBlockDeviceProvider, SimBlockStore};
+
+let store = SimBlockStore::new(seed, BlockFaultConfig::default());
+let provider = SimBlockDeviceProvider::new(store.clone());
+
+let device = provider
+    .create("db", &[
+        RegionSpec { name: "wal", size: 1024 * 4096 },
+        RegionSpec { name: "superblock", size: 4096 },
+    ])
+    .await?;
+device.write(RegionId(0), 0, &entry).await?;   // visible, not durable
+device.persist().await?;                        // durability barrier
+```
+
+The contract clauses documented on the trait ARE the feature:
+
+- **Atomicity unit is one sector (4096 bytes), nothing larger.** A crash may
+  independently leave each sector of a multi-sector write old, new, or
+  unreadable.
+- **Writes between two `persist()` calls may reach disk in any order.** Only
+  the barrier orders writes.
+- **Completion of `write()` implies visibility, not durability.**
+- **Never-written sectors read unspecified bytes** — zeros, stale data, or
+  garbage. Never infer written-ness from content.
+- **EIO is an operating condition**, distinct from a successful read of
+  corrupt bytes; corrupt reads are deterministic and retries never heal.
+- `create()` is atomic: the device is invisible to `open()` until its first
+  `persist()`.
+
+### Barrier-Bounded Crash Model
+
+`SimBlockStore::crash_device()` resolves every sector written since the last
+successful `persist()` **independently**: kept old, kept new, lost (reverts to
+the fill pattern — zeros or garbage, chosen per seed), or left with a latent
+read fault. An occasional fully-clean crash (10%, FDB's number) and an
+occasional correlated rollback of a contiguous sector run (erase-block damage)
+round out the shapes. This is what makes "persist-record landed while its
+entry is partial" — the case CTRL-style journal recovery exists to survive —
+actually reachable in simulation.
+
+Fault families (EIO on read/write, read-time corruption, misdirected writes
+contained within a region, phantom writes, persist failures) are gated by both
+the `BlockFaultConfig` probabilities (per-seed swarm via
+`BlockFaultConfig::swarm()`) and a caller-provided eligibility mask
+`(path, region, sector) -> bool`, so a replication-aware harness can enforce
+"never fault all copies of one record" without moonpool knowing what a replica
+is. Directed red tests use the targeted API: `corrupt()`, `fail_with_eio()`,
+`wipe_device()`.
+
+### The Lost-Synced-Write Oracle
+
+At every `persist()`, each synced sector is stamped with a CRC of the content
+the caller was told is durable. After a crash, a stamped sector that no longer
+matches is a **simulator bug** and fails loudly — unless the opt-in
+barrier-violation family is armed (`barrier_violation_probability > 0`), in
+which case `persist()` occasionally *lies* about a sector and the oracle flips
+to must-detect mode, reporting the loss as an expected `LostSyncedWrite` fault
+event. Downstream consumers use that family to prove cluster-level recovery
+heals a single lying disk (the fsyncgate class of failures).
+
+### Production Implementation
+
+`TokioBlockDeviceProvider` (moonpool-core, `tokio-fs` feature, unix) lays a
+device out as a directory of preallocated region files plus a manifest, doing
+positioned I/O on the blocking pool through sector-aligned bounce buffers,
+with `O_DIRECT` where the platform and filesystem support it. `create()`
+builds the layout in a `<path>.staging` directory that the first `persist()`
+syncs and renames into place (then fsyncs the parent), so atomic create holds
+on real disks too. A failed `persist()` **fail-stops** the device — every
+subsequent operation returns an error — because after a lying flush the page
+cache can serve stale clean-marked pages (Rebello, ATC'20).
+
+### Simulation Wiring
+
+Inside a simulation, each process gets its own lazily created block store:
+
+- `SimWorld::block_device_provider(ip)` / `SimContext::block_devices()` hand
+  out the per-process provider; `SimWorld::block_store(ip)` exposes the store
+  for targeted faults, fault records, and crash reports.
+- Store seeds derive as a **pure function** of the iteration seed and the IP,
+  so first use never shifts the counted sim RNG stream or explorer replay.
+- Process crashes (`simulate_crash_for_process`, which `Attrition` reboots
+  call) resolve every buffered write through the crash model and record a
+  `block_device_crash` fault in the timeline; `CrashAndWipe` reboots also
+  erase the process's devices (`block_device_wipe`).
+- `Chaos::Storage(mode)` covers block devices too: `Random` enables every
+  default-on fault family (`BlockFaultConfig::chaos()`), `Swarm` additionally
+  keeps a per-seed subset. The barrier-bounded crash model itself is always
+  armed — it only acts when a process actually crashes.

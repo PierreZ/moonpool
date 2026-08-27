@@ -47,6 +47,9 @@
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 
+pub mod block;
+#[cfg(all(feature = "tokio-fs", unix))]
+mod block_tokio;
 mod error;
 mod network;
 mod providers;
@@ -73,6 +76,12 @@ pub use tokio::select;
 #[cfg(feature = "select")]
 #[doc(hidden)]
 pub use tokio as __tokio;
+
+// Block device contract exports (SECTOR_SIZE stays module-scoped as
+// `block::SECTOR_SIZE` to avoid clashing with other sector constants).
+pub use block::{BlockDevice, BlockDeviceProvider, BlockError, RegionId, RegionSpec};
+#[cfg(all(feature = "tokio-fs", unix))]
+pub use block_tokio::{TokioBlockDevice, TokioBlockDeviceProvider};
 
 // Error exports
 pub use error::{SimulationError, SimulationResult};
@@ -108,8 +117,8 @@ pub use time::{TimeError, TimeProvider};
 /// ```
 pub mod prelude {
     pub use crate::{
-        NetworkProvider, Providers, RandomProvider, StorageProvider, TaskProvider,
-        TcpListenerTrait, TimeProvider,
+        BlockDevice, BlockDeviceProvider, NetworkProvider, Providers, RandomProvider,
+        StorageProvider, TaskProvider, TcpListenerTrait, TimeProvider,
     };
 
     #[cfg(feature = "tokio-providers")]

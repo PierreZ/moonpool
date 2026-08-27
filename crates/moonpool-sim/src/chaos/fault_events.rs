@@ -136,6 +136,17 @@ pub enum SimFaultEvent {
         /// IP of the wiped process.
         ip: String,
     },
+    /// Block devices crashed for a process: buffered writes were resolved
+    /// through the barrier-bounded crash model.
+    BlockDeviceCrash {
+        /// IP of the crashed process.
+        ip: String,
+    },
+    /// All block devices wiped for a process (`CrashAndWipe` reboot).
+    BlockDeviceWipe {
+        /// IP of the wiped process.
+        ip: String,
+    },
 }
 
 impl SimFaultEvent {
@@ -158,6 +169,8 @@ impl SimFaultEvent {
             Self::StorageSyncFault { .. } => "storage_sync_fault",
             Self::StorageCrash { .. } => "storage_crash",
             Self::StorageWipe { .. } => "storage_wipe",
+            Self::BlockDeviceCrash { .. } => "block_device_crash",
+            Self::BlockDeviceWipe { .. } => "block_device_wipe",
         }
     }
 

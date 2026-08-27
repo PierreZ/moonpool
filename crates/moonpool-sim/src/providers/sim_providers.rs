@@ -44,6 +44,8 @@ pub struct SimProviders {
     task: SimTaskProvider,
     random: SimRandomProvider,
     storage: SimStorageProvider,
+    sim: WeakSimWorld,
+    ip: IpAddr,
 }
 
 impl SimProviders {
@@ -61,8 +63,28 @@ impl SimProviders {
             time: SimTimeProvider::new(sim.clone()),
             task: SimTaskProvider,
             random: SimRandomProvider::new(seed),
-            storage: SimStorageProvider::new(sim, ip),
+            storage: SimStorageProvider::new(sim.clone(), ip),
+            sim,
+            ip,
         }
+    }
+
+    /// The simulated block-device provider scoped to this bundle's process IP.
+    ///
+    /// This sits outside the [`Providers`](moonpool_core::Providers) trait —
+    /// code generic over a block device should take a
+    /// [`BlockDeviceProvider`](moonpool_core::BlockDeviceProvider) bound of
+    /// its own (`TokioBlockDeviceProvider` in production).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation has already shut down.
+    #[must_use]
+    pub fn block_devices(&self) -> crate::storage::SimBlockDeviceProvider {
+        self.sim
+            .upgrade()
+            .expect("simulation shut down before block device provider access")
+            .block_device_provider(self.ip)
     }
 }
 

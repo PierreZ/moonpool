@@ -214,30 +214,100 @@ impl SimWorld {
 
     /// Simulate a crash affecting storage for a specific process.
     ///
+    /// Applies crash behavior to both the process's stream files and its
+    /// block devices: every block-device sector written since the last
+    /// `persist()` is resolved through the barrier-bounded crash model.
+    ///
     /// # Panics
     ///
-    /// Panics if the simulation lock is poisoned by a prior task panic.
+    /// Panics if the simulation lock is poisoned by a prior task panic, or if
+    /// the block-device lost-synced-write oracle detects a simulator bug.
     #[instrument(skip(self))]
     pub fn simulate_crash_for_process(&self, ip: IpAddr, close_files: bool) {
-        let mut inner = self.inner.write();
-        let actions = inner.storage.simulate_crash(ip, close_files);
-        let wakes = apply_storage_actions(&mut inner, actions);
-        drop(inner);
+        let (wakes, block_store) = {
+            let mut inner = self.inner.write();
+            let actions = inner.storage.simulate_crash(ip, close_files);
+            let wakes = apply_storage_actions(&mut inner, actions);
+            (wakes, inner.block.existing_store(ip))
+        };
         wakes.wake();
+        if let Some(store) = block_store {
+            let reports = store.crash_all();
+            if reports.iter().any(|report| report.existed) {
+                self.inner
+                    .write()
+                    .record_fault(crate::chaos::SimFaultEvent::BlockDeviceCrash {
+                        ip: ip.to_string(),
+                    });
+            }
+        }
     }
 
-    /// Wipe all persistent storage for a specific process.
+    /// Wipe all persistent storage for a specific process, block devices
+    /// included.
     ///
     /// # Panics
     ///
     /// Panics if the simulation lock is poisoned by a prior task panic.
     #[instrument(skip(self))]
     pub fn wipe_storage_for_process(&self, ip: IpAddr) {
-        let mut inner = self.inner.write();
-        let actions = inner.storage.wipe_process(ip);
-        let wakes = apply_storage_actions(&mut inner, actions);
-        drop(inner);
+        let (wakes, block_store) = {
+            let mut inner = self.inner.write();
+            let actions = inner.storage.wipe_process(ip);
+            let wakes = apply_storage_actions(&mut inner, actions);
+            (wakes, inner.block.existing_store(ip))
+        };
         wakes.wake();
+        if let Some(store) = block_store
+            && store.wipe_all() > 0
+        {
+            self.inner
+                .write()
+                .record_fault(crate::chaos::SimFaultEvent::BlockDeviceWipe { ip: ip.to_string() });
+        }
+    }
+
+    /// Create a block-device provider scoped to a process IP.
+    ///
+    /// The per-process store is created lazily with a seed derived as a pure
+    /// function of the iteration seed and the IP, so first use never shifts
+    /// the counted sim RNG stream. Process crashes
+    /// ([`simulate_crash_for_process`](Self::simulate_crash_for_process))
+    /// resolve the store's buffered writes through the barrier-bounded crash
+    /// model; wipes remove its devices.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
+    pub fn block_device_provider(
+        &self,
+        ip: IpAddr,
+    ) -> crate::storage::block::SimBlockDeviceProvider {
+        crate::storage::block::SimBlockDeviceProvider::new(self.block_store(ip))
+    }
+
+    /// The per-process block store backing
+    /// [`block_device_provider`](Self::block_device_provider): targeted fault
+    /// injection, crash reports, and fault records live here.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
+    pub fn block_store(&self, ip: IpAddr) -> crate::storage::block::SimBlockStore {
+        self.inner.write().block.store_for(ip)
+    }
+
+    /// Replace the fault configuration for block stores created after this
+    /// call. The builder applies the per-seed chaos configuration here before
+    /// any process runs.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    pub fn set_block_fault_config(&self, config: crate::storage::block::BlockFaultConfig) {
+        self.inner.write().block.set_config(config);
     }
 
     /// Set storage configuration for a specific process.
