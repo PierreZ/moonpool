@@ -20,7 +20,7 @@ This models rolling deployments, planned maintenance, and well-behaved process m
 
 ### Crash
 
-The sudden death. The process task is immediately cancelled. All connections abort with no buffer drain. Peers see connection reset errors. Any in-memory state is lost. The process restarts after a recovery delay.
+The sudden death. The process task is cancelled at the crash instant -- before its connections abort, so nothing the crash disturbs can wake it again. All connections abort with no buffer drain. Peers see connection reset errors. Any in-memory state is lost. The process runs no further work until it restarts, after a recovery delay.
 
 This models kernel panics, OOM kills, and hardware failures. There is no warning and no cleanup. Code that assumes a graceful shutdown will always happen gets a rude surprise.
 

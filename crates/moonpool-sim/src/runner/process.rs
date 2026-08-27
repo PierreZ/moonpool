@@ -65,10 +65,12 @@ pub enum RebootKind {
     /// Send buffers drain during the grace period (FIN delivery).
     Graceful,
 
-    /// Instant kill: task cancelled, all connections abort immediately.
+    /// Instant kill: the task is cancelled and all connections abort at the
+    /// crash instant, not after the recovery delay.
     ///
     /// No buffer drain. Peers see connection reset errors. Unsynced storage
-    /// data may be lost (when per-IP storage scoping is implemented).
+    /// data may be lost. The process performs no further work until it is
+    /// restarted.
     Crash,
 
     /// Instant kill + wipe all storage for this process.

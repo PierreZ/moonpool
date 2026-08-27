@@ -291,6 +291,7 @@ mod tests {
             43,
             &SimFaultEvent::ProcessForceKill {
                 ip: "10.0.1.1".to_owned(),
+                cause: crate::sim::ProcessKillKind::Crash,
             },
         );
 
@@ -303,6 +304,7 @@ mod tests {
         assert_eq!(entries[0].str("to"), Some("10.0.1.2"));
         assert_eq!(entries[1].str("kind"), Some("process_force_kill"));
         assert_eq!(entries[1].str("ip"), Some("10.0.1.1"));
+        assert_eq!(entries[1].str("cause"), Some("crash"));
     }
 
     // ------------------------------------------------------------------

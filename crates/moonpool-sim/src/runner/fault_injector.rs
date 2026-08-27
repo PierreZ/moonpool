@@ -45,7 +45,7 @@ use crate::providers::{SimRandomProvider, SimTimeProvider};
 use crate::runner::locality::MachineRegistry;
 use crate::runner::process::{AttritionScope, RebootKind};
 use crate::runner::tags::TagRegistry;
-use crate::sim::SimWorld;
+use crate::sim::{ProcessKillKind, SimWorld};
 use crate::{assert_reachable, assert_sometimes_each};
 
 /// Process-related state for fault injection targeting.
@@ -185,8 +185,11 @@ impl FaultContext {
     /// a grace period to drain buffers and clean up. After the grace period,
     /// a force-kill aborts the task and connections, then schedules restart.
     ///
-    /// For [`RebootKind::Crash`] and [`RebootKind::CrashAndWipe`]: immediately
-    /// aborts all connections and schedules a `ProcessRestart` event.
+    /// For [`RebootKind::Crash`] and [`RebootKind::CrashAndWipe`]: schedules a
+    /// `ProcessForceKill` event at the crash instant. The orchestrator aborts
+    /// the process task before aborting its connections and crashing (or
+    /// wiping) its storage, then schedules the restart. The process runs no
+    /// further application work during the recovery delay.
     ///
     /// # Errors
     ///
@@ -240,24 +243,27 @@ impl FaultContext {
             }
             RebootKind::Crash | RebootKind::CrashAndWipe => {
                 assert_reachable!("reboot: crash path");
-                self.sim.abort_all_connections_for_ip(ip_addr);
-                // Crash storage for this process
-                self.sim.simulate_crash_for_process(ip_addr, true);
-                // Wipe storage if CrashAndWipe
-                if kind == RebootKind::CrashAndWipe {
-                    self.sim.wipe_storage_for_process(ip_addr);
-                }
                 self.process_info
                     .dead_count
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let delay_ms = crate::sim::sim_random_range(recovery_delay_range_ms.clone()) as u64;
-                let recovery_delay = Duration::from_millis(delay_ms);
-                self.sim.schedule_process_restart(ip_addr, recovery_delay);
-                tracing::info!(
-                    "Crashed process at IP {} (recovery in {:?})",
-                    ip,
-                    recovery_delay
+                let cause = if kind == RebootKind::CrashAndWipe {
+                    ProcessKillKind::CrashAndWipe
+                } else {
+                    ProcessKillKind::Crash
+                };
+                // A crash is a force-kill, not just a restart: the orchestrator
+                // owns the process handles, so route through ProcessForceKill so
+                // the task dies now instead of surviving the recovery delay.
+                self.sim.schedule_event(
+                    crate::sim::Event::ProcessForceKill {
+                        ip: ip_addr,
+                        recovery_delay_ms: delay_ms,
+                        cause,
+                    },
+                    Duration::from_nanos(1),
                 );
+                tracing::info!("Crashed process at IP {} (recovery in {}ms)", ip, delay_ms);
             }
         }
 
