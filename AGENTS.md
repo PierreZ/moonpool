@@ -229,6 +229,7 @@ Strategic placement: error handling, timeouts, retries, resource limits
 - `.tags(&[("key", &["val1", "val2"])])` — round-robin tag distribution
 - `.enable_chaos([Chaos::Attrition { config, mode }])` — built-in chaos reboots (requires `.chaos_duration()`)
 - `.enable_chaos([Chaos::Network(mode) | Chaos::Storage(mode)])` — network/storage faults per seed (`ChaosMode::Random` all-on, `ChaosMode::Swarm` per-seed subset)
+- `.fault_factory(|| Box::new(injector))` — fresh custom `FaultInjector` per root/explored timeline (exploration-compatible; `FaultContext` has split `crash`/`restart` primitives + workload `state()`)
 - `.swarm_operations()` — per-seed swarm of each workload's operation alphabet
 
 **Reboot lifecycle**: Graceful (signal token → grace period → force kill → restart) vs Crash (immediate abort → restart)

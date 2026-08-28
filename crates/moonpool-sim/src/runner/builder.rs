@@ -105,6 +105,7 @@ impl RunState {
             metrics_collector: MetricsCollector::new(),
             progress_milestone,
             pending_return_map: Vec::new(),
+            pending_instance_injector_count: 0,
             #[cfg(feature = "exploration")]
             explorer: None,
             #[cfg(feature = "exploration")]
@@ -140,6 +141,11 @@ struct RunState {
     /// stashed between [`SimulationBuilder::run_orchestrator_for_iteration`]
     /// and [`SimulationBuilder::handle_orchestration_result`].
     pending_return_map: Vec<Option<usize>>,
+    /// How many of the injectors handed to the current orchestration were
+    /// user instances (`.fault()`), i.e. the prefix of the returned injector
+    /// list that goes back to the builder. Factory-created and attrition
+    /// injectors past that prefix are dropped and rebuilt per timeline.
+    pending_instance_injector_count: usize,
     // Exploration state (only populated/read with the `exploration` feature).
     /// The frontier controller; lives across iterations so cumulative novelty
     /// (discovery latches, sancov history) spans the whole run.
@@ -225,6 +231,9 @@ pub struct SimulationBuilder {
     swarm_operations: bool,
     invariants: Vec<Box<dyn Invariant + Send>>,
     fault_injectors: Vec<Box<dyn FaultInjector>>,
+    /// Factories that build a fresh fault injector for every root and explored
+    /// timeline, mirroring `workload_factory`. Compatible with exploration.
+    fault_factories: Vec<Box<dyn Fn() -> Box<dyn FaultInjector> + 'static>>,
     chaos_duration: Option<Duration>,
     exploration_config: Option<crate::chaos::exploration_glue::ExplorationConfig>,
     /// Replay breakpoints staged for the next orchestration run. Installed
@@ -266,6 +275,7 @@ impl SimulationBuilder {
             swarm_operations: false,
             invariants: Vec::new(),
             fault_injectors: Vec::new(),
+            fault_factories: Vec::new(),
             chaos_duration: None,
             exploration_config: None,
             pending_replay: None,
@@ -539,9 +549,27 @@ impl SimulationBuilder {
     }
 
     /// Add a fault injector to run during the chaos phase.
+    ///
+    /// The same instance is reused across iterations, so its internal state
+    /// carries over. For exploration — or whenever the injector must start
+    /// from pristine state on every timeline — use
+    /// [`fault_factory`](Self::fault_factory) instead.
     #[must_use]
     pub fn fault(mut self, f: impl FaultInjector) -> Self {
         self.fault_injectors.push(Box::new(f));
+        self
+    }
+
+    /// Add a fault injector reconstructed from a factory for every timeline.
+    ///
+    /// Unlike [`fault`](Self::fault), this never reuses a previously-run
+    /// injector value: a fresh instance is built for every iteration and for
+    /// every explored continuation timeline, so scripted fault sequences
+    /// (crash → hold-down → milestone → restart) replay exactly from the root
+    /// seed plus recipe. This is the form exploration accepts.
+    #[must_use]
+    pub fn fault_factory(mut self, factory: impl Fn() -> Box<dyn FaultInjector> + 'static) -> Self {
+        self.fault_factories.push(Box::new(factory));
         self
     }
 
@@ -707,10 +735,14 @@ impl SimulationBuilder {
     /// different deterministic seeds. Set `config.workers` to zero for
     /// sequential, fork-free exploration. Requires the `exploration` feature.
     ///
-    /// Exploration requires factory-created workloads and built-in [`Chaos`]
-    /// surfaces. Instance workloads, `before_iteration` hooks, and custom fault
-    /// injector instances are rejected because the runner cannot reconstruct
-    /// those values with fresh state for every continuation timeline.
+    /// Exploration requires factory-created workloads, and factory-created or
+    /// built-in fault injection. Instance workloads, `before_iteration` hooks,
+    /// and custom fault injector instances are rejected because the runner
+    /// cannot reconstruct those values with fresh state for every continuation
+    /// timeline. Custom fault injectors registered through
+    /// [`Self::fault_factory`] are supported: a fresh injector is built for
+    /// every root and explored timeline (both in-process `workers: 0` and
+    /// forked-worker exploration).
     ///
     /// # Panics
     ///
@@ -719,7 +751,8 @@ impl SimulationBuilder {
     /// with instance workloads, `before_iteration` hooks, or custom fault
     /// injector instances, because those values cannot be reconstructed for
     /// each continuation timeline. Use [`Self::workload_factory`] or
-    /// [`Self::workloads`] and built-in [`Chaos`] surfaces instead.
+    /// [`Self::workloads`], and [`Self::fault_factory`] or built-in [`Chaos`]
+    /// surfaces instead.
     #[cfg(feature = "exploration")]
     #[must_use]
     pub fn enable_exploration(
@@ -894,19 +927,40 @@ impl SimulationBuilder {
         sim
     }
 
-    /// Drain user-provided fault injectors and, when present, append the
-    /// built-in attrition injector.
+    /// Drain user-provided fault injector instances, then append one fresh
+    /// injector per registered factory and, when present, the built-in
+    /// attrition injector.
+    ///
+    /// Only the leading instance injectors are returned to the builder after
+    /// the run (see `keep_returned_instance_injectors`); factory-created and
+    /// attrition injectors are rebuilt fresh for every timeline.
     fn collect_fault_injectors(
         user_injectors: &mut Vec<Box<dyn FaultInjector>>,
+        fault_factories: &[Box<dyn Fn() -> Box<dyn FaultInjector> + 'static>],
         attrition: Option<&Attrition>,
     ) -> Vec<Box<dyn FaultInjector>> {
         let mut fault_injectors = std::mem::take(user_injectors);
+        for factory in fault_factories {
+            fault_injectors.push(factory());
+        }
         if let Some(attrition) = attrition {
             fault_injectors.push(Box::new(
                 crate::runner::fault_injector::AttritionInjector::new(attrition.clone()),
             ));
         }
         fault_injectors
+    }
+
+    /// Return only the leading instance injectors to the builder, dropping
+    /// factory-created and built-in attrition injectors so the next timeline
+    /// rebuilds them with fresh state (mirroring factory workloads).
+    fn keep_returned_instance_injectors(
+        &mut self,
+        mut returned_injectors: Vec<Box<dyn FaultInjector>>,
+        instance_count: usize,
+    ) {
+        returned_injectors.truncate(instance_count);
+        self.fault_injectors = returned_injectors;
     }
 
     /// Build an early-exit report on deadlock: snapshot the assertion
@@ -963,7 +1017,8 @@ impl SimulationBuilder {
         assert!(
             self.fault_injectors.is_empty(),
             "exploration does not support custom fault injector instances because they cannot be \
-             reconstructed for every timeline; use built-in Chaos surfaces"
+             reconstructed for every timeline; use SimulationBuilder::fault_factory or built-in \
+             Chaos surfaces"
         );
     }
 
@@ -1483,7 +1538,10 @@ impl SimulationBuilder {
                     // forked worker this mutates the copy-on-write copy only.
                     let return_map = std::mem::take(&mut state.pending_return_map);
                     self.return_entries(output.workloads, return_map);
-                    self.fault_injectors = output.fault_injectors;
+                    self.keep_returned_instance_injectors(
+                        output.fault_injectors,
+                        state.pending_instance_injector_count,
+                    );
                     failed
                 }
                 Err(_) => true,
@@ -1591,8 +1649,12 @@ impl SimulationBuilder {
             (Some(base), ChaosMode::Random) => Some(base.clone()),
             (None, _) => None,
         };
-        let fault_injectors =
-            Self::collect_fault_injectors(&mut self.fault_injectors, attrition.as_ref());
+        state.pending_instance_injector_count = self.fault_injectors.len();
+        let fault_injectors = Self::collect_fault_injectors(
+            &mut self.fault_injectors,
+            &self.fault_factories,
+            attrition.as_ref(),
+        );
         let outcome = Self::run_orchestrator_blocking(RunOrchestratorInputs {
             seed,
             iteration_count,
@@ -1633,7 +1695,10 @@ impl SimulationBuilder {
             }) => {
                 let return_map = std::mem::take(&mut state.pending_return_map);
                 self.return_entries(returned_workloads, return_map);
-                self.fault_injectors = returned_injectors;
+                self.keep_returned_instance_injectors(
+                    returned_injectors,
+                    state.pending_instance_injector_count,
+                );
                 let wall_time = start_time.elapsed();
                 state.metrics_collector.record_iteration(
                     seed,

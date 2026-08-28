@@ -47,8 +47,11 @@ pub enum Event {
     ProcessForceKill {
         /// The IP address of the process to force-kill.
         ip: std::net::IpAddr,
-        /// Recovery delay in milliseconds before restart.
-        recovery_delay_ms: u64,
+        /// Recovery delay in milliseconds before restart. `None` holds the
+        /// process down indefinitely: no restart is scheduled until an
+        /// explicit [`Event::ProcessRestart`] arrives (scripted fault
+        /// injection via `FaultContext::restart`).
+        recovery_delay_ms: Option<u64>,
         /// Why the process is dying, and what that costs its storage.
         cause: ProcessKillKind,
     },

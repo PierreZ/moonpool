@@ -186,3 +186,44 @@ impl FaultInjector for RollingRestart {
 ```
 
 The `FaultContext` provides access to process reboots, network partitions, and tag-based targeting. You can combine built-in attrition with custom fault injectors by registering both on the builder.
+
+## Scripted Lifecycle Faults
+
+`reboot()` combines the kill with a timer-based restart, which is right for random attrition but cannot express a scripted sequence like "crash node X, let the workload make progress, then bring X back". For that, `FaultContext` splits the primitives:
+
+- **`ctx.crash(ip)`** force-kills the process **without scheduling a restart**. The node stays down — no application work runs — until an explicit restart.
+- **`ctx.restart(ip)`** boots a fresh instance from the process factory, ending the hold-down.
+- **`ctx.state()`** exposes the same per-iteration `StateHandle` that workloads and processes see, so the injector can wait on a deterministic workload milestone (an operation counter, a published flag) instead of a wall of sleeps.
+
+```rust
+async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
+    let target = ctx.process_ips()[0].clone();
+    ctx.crash(&target)?;                       // crash now, hold down
+
+    // Wait until the workload has executed 100 operations.
+    while ctx.state().get::<u64>("ops").unwrap_or(0) < 100 {
+        ctx.time().sleep(Duration::from_millis(20)).await
+            .map_err(|e| SimulationError::InvalidState(e.to_string()))?;
+        if ctx.chaos_shutdown().is_cancelled() { return Ok(()); }
+    }
+
+    ctx.restart(&target)?;                     // explicit recovery
+    Ok(())
+}
+```
+
+Everything the script reads is per-iteration simulated state, so the crash target, milestone, and restart point replay exactly from the seed.
+
+### Fault Factories and Exploration
+
+`.fault(injector)` registers one injector *instance* that is reused across iterations — fine for stateless injectors, but exploration rejects it because a mutated instance cannot be rewound for every explored timeline. Register a **factory** instead:
+
+```rust
+SimulationBuilder::new()
+    .processes(3, || Box::new(MyProcess))
+    .workload_factory(|| Box::new(MyWorkload))
+    .fault_factory(|| Box::new(ScriptedCrashInjector::new()))
+    .chaos_duration(Duration::from_secs(30))
+```
+
+Like `workload_factory`, the factory builds a fresh injector for every root seed and every explored continuation timeline, so scripted fault sequences replay exactly from the root seed plus recipe — with in-process exploration (`workers: 0`) and forked workers alike.

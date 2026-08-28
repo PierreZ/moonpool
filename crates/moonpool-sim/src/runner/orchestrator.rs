@@ -489,6 +489,7 @@ impl WorkloadOrchestrator {
             sim,
             process_manager,
             seed,
+            state,
             &chaos_shutdown,
         )
         .map_err(|()| (vec![seed], 1usize))?;
@@ -825,6 +826,7 @@ impl WorkloadOrchestrator {
         sim: &crate::sim::SimWorld,
         process_manager: &ProcessManager<'_>,
         seed: u64,
+        state: &StateHandle,
         chaos_shutdown: &tokio_util::sync::CancellationToken,
     ) -> Result<(InjectorHandleSlots, Vec<Box<dyn FaultInjector>>), ()> {
         let mut injector_handles: InjectorHandleSlots = Vec::new();
@@ -837,6 +839,7 @@ impl WorkloadOrchestrator {
                     process_manager.process_info(),
                     crate::SimRandomProvider::new(seed),
                     sim.time_provider(),
+                    state.clone(),
                     chaos_shutdown.clone(),
                 );
                 let handle = crate::executor::spawn("fault-injector", async move {
@@ -1289,7 +1292,7 @@ impl WorkloadOrchestrator {
                 sim.schedule_event(
                     crate::sim::Event::ProcessForceKill {
                         ip,
-                        recovery_delay_ms,
+                        recovery_delay_ms: Some(recovery_delay_ms),
                         cause: ProcessKillKind::GracePeriodExpired,
                     },
                     Duration::from_millis(grace_period_ms),
@@ -1319,7 +1322,11 @@ impl WorkloadOrchestrator {
                         sim.wipe_storage_for_process(ip);
                     }
                 }
-                sim.schedule_process_restart(ip, Duration::from_millis(recovery_delay_ms));
+                // A held-down crash (None) schedules no restart: the process
+                // stays dead until a fault injector explicitly restarts it.
+                if let Some(recovery_delay_ms) = recovery_delay_ms {
+                    sim.schedule_process_restart(ip, Duration::from_millis(recovery_delay_ms));
+                }
             }
             Some(crate::sim::Event::ProcessRestart { ip }) => {
                 assert_reachable!("event: ProcessRestart");

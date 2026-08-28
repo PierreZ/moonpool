@@ -22,7 +22,8 @@ The builder pattern for configuring and running simulation experiments. Created 
 | `attrition(config)` | `Attrition` | Enable automatic process reboots during chaos phase |
 | `invariant(i)` | `impl Invariant` | Add an invariant checked after every simulation event |
 | `invariant_fn(name, f)` | `String`, closure | Add a closure-based invariant |
-| `fault(f)` | `impl FaultInjector` | Add a custom fault injector for the chaos phase |
+| `fault(f)` | `impl FaultInjector` | Add a custom fault injector instance for the chaos phase (reused across iterations; rejected by exploration) |
+| `fault_factory(f)` | `Fn() -> Box<dyn FaultInjector>` | Add a fault injector rebuilt fresh for every root and explored timeline (exploration-compatible) |
 | `chaos_duration(dur)` | `Duration` | Set the chaos phase duration (faults run concurrently with workloads) |
 | `set_iterations(n)` | `usize` | Run exactly N iterations (default: 1) |
 | `set_iteration_control(ctrl)` | `IterationControl` | Set the iteration control strategy |

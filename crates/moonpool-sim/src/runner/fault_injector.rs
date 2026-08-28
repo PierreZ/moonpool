@@ -70,6 +70,7 @@ pub struct FaultContext {
     process_info: ProcessInfo,
     random: SimRandomProvider,
     time: SimTimeProvider,
+    state: crate::chaos::state_handle::StateHandle,
     chaos_shutdown: tokio_util::sync::CancellationToken,
 }
 
@@ -81,6 +82,7 @@ impl FaultContext {
         process_info: ProcessInfo,
         random: SimRandomProvider,
         time: SimTimeProvider,
+        state: crate::chaos::state_handle::StateHandle,
         chaos_shutdown: tokio_util::sync::CancellationToken,
     ) -> Self {
         Self {
@@ -88,8 +90,22 @@ impl FaultContext {
             process_info,
             random,
             time,
+            state,
             chaos_shutdown,
         }
+    }
+
+    /// The per-iteration shared state handle, also visible to workloads and
+    /// processes via `SimContext::state`.
+    ///
+    /// Lets a fault injector coordinate on deterministic workload milestones
+    /// (e.g. "crash node X, wait until the workload has executed N operations,
+    /// then restart X"). The values read here are per-iteration simulated
+    /// state, so scripted sequences replay exactly from the root seed plus
+    /// recipe.
+    #[must_use]
+    pub fn state(&self) -> &crate::chaos::state_handle::StateHandle {
+        &self.state
     }
 
     /// Get the number of currently dead (killed but not yet restarted) processes.
@@ -258,7 +274,7 @@ impl FaultContext {
                 self.sim.schedule_event(
                     crate::sim::Event::ProcessForceKill {
                         ip: ip_addr,
-                        recovery_delay_ms: delay_ms,
+                        recovery_delay_ms: Some(delay_ms),
                         cause,
                     },
                     Duration::from_nanos(1),
@@ -267,6 +283,67 @@ impl FaultContext {
             }
         }
 
+        Ok(())
+    }
+
+    /// Crash a process **without scheduling a restart** (hold-down).
+    ///
+    /// Unlike [`reboot`](Self::reboot) with [`RebootKind::Crash`] — which
+    /// combines the crash with a timer-based restart — this schedules only the
+    /// force-kill: the process task is aborted, its connections die, and its
+    /// unsynced storage state is lost, but no recovery timer is armed. The
+    /// process stays down until an explicit [`restart`](Self::restart), so a
+    /// scripted injector can hold a node down across a deterministic workload
+    /// milestone (observed via [`state`](Self::state)).
+    ///
+    /// The crashed process counts toward [`dead_count`](Self::dead_count)
+    /// until restarted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IP parsing fails.
+    pub fn crash(&self, ip: &str) -> SimulationResult<()> {
+        let ip_addr: std::net::IpAddr = ip
+            .parse()
+            .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{ip}': {e}")))?;
+        assert_reachable!("crash: hold-down path");
+        self.process_info
+            .dead_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.sim.schedule_event(
+            crate::sim::Event::ProcessForceKill {
+                ip: ip_addr,
+                recovery_delay_ms: None,
+                cause: ProcessKillKind::Crash,
+            },
+            Duration::from_nanos(1),
+        );
+        tracing::info!("Crashed process at IP {} (held down until restart)", ip);
+        Ok(())
+    }
+
+    /// Explicitly restart a process, typically one held down by
+    /// [`crash`](Self::crash).
+    ///
+    /// Schedules a `ProcessRestart` event: the orchestrator boots a fresh
+    /// instance from the process factory and the process leaves
+    /// [`dead_count`](Self::dead_count). Restarting a process that is still
+    /// running aborts it first and boots a fresh instance (a zero-downtime
+    /// reboot).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IP parsing fails.
+    pub fn restart(&self, ip: &str) -> SimulationResult<()> {
+        let ip_addr: std::net::IpAddr = ip
+            .parse()
+            .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{ip}': {e}")))?;
+        assert_reachable!("restart: explicit restart path");
+        self.sim.schedule_event(
+            crate::sim::Event::ProcessRestart { ip: ip_addr },
+            Duration::from_nanos(1),
+        );
+        tracing::info!("Explicitly restarting process at IP {}", ip);
         Ok(())
     }
 
