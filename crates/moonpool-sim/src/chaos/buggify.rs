@@ -1,66 +1,39 @@
-//! Deterministic fault injection following `FoundationDB`'s buggify approach.
+//! Simulation wiring for the standalone [`moonpool_buggify`] crate.
 //!
-//! Each buggify location is randomly activated once per simulation run.
-//! Active locations fire probabilistically on each call.
+//! The buggify state and the [`buggify!`](crate::buggify) /
+//! [`buggify_with_prob!`](crate::buggify_with_prob) macros live in
+//! `moonpool-buggify` (zero dependencies, usable from production and sans-I/O
+//! code). This module installs the simulation's deterministic seeded RNG into
+//! that crate for the duration of a run, and keeps the simulation-specific
+//! knob randomization ([`buggify_knob!`](crate::buggify_knob)).
+//!
+//! Because both crates share the one thread-local state in `moonpool-buggify`,
+//! macros imported through either crate observe the same activation decisions
+//! during a simulation.
 
-use crate::sim::rng::sim_random;
+use crate::sim::rng::sim_random_f64;
 use rand::distr::uniform::SampleUniform;
-use std::cell::RefCell;
-use std::collections::BTreeMap;
 
-thread_local! {
-    static STATE: RefCell<State> = RefCell::new(State::default());
+pub use moonpool_buggify::buggify_internal;
+
+/// Initialize buggify for a simulation run.
+///
+/// Installs the simulation's seeded RNG as the buggify random source, then
+/// enables buggify with the given activation probability. Each buggify
+/// location is randomly activated once per run; active locations fire
+/// probabilistically on each call.
+pub fn buggify_init(activation_prob: f64, firing_prob: f64) {
+    moonpool_buggify::set_random_source(sim_random_f64);
+    moonpool_buggify::buggify_init(activation_prob, firing_prob);
 }
 
-#[derive(Default)]
-struct State {
-    enabled: bool,
-    active_locations: BTreeMap<String, bool>,
-    activation_prob: f64,
-}
-
-/// Initialize buggify for simulation run
-pub fn buggify_init(activation_prob: f64, _firing_prob: f64) {
-    STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        state.enabled = true;
-        state.active_locations.clear();
-        state.activation_prob = activation_prob;
-    });
-}
-
-/// Reset/disable buggify
+/// Reset/disable buggify and uninstall the simulation random source.
+///
+/// Buggify is inert again after this call, as it is outside an active
+/// simulation.
 pub fn buggify_reset() {
-    STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        state.enabled = false;
-        state.active_locations.clear();
-        state.activation_prob = 0.0;
-    });
-}
-
-/// Internal buggify implementation
-#[must_use]
-pub fn buggify_internal(prob: f64, location: &'static str) -> bool {
-    STATE.with(|state| {
-        let mut state = state.borrow_mut();
-
-        if !state.enabled || prob <= 0.0 {
-            return false;
-        }
-
-        let location_str = location.to_string();
-        let activation_prob = state.activation_prob;
-
-        // Decide activation on first encounter
-        let is_active = *state
-            .active_locations
-            .entry(location_str)
-            .or_insert_with(|| sim_random::<f64>() < activation_prob);
-
-        // If active, fire probabilistically
-        is_active && sim_random::<f64>() < prob
-    })
+    moonpool_buggify::buggify_reset();
+    moonpool_buggify::clear_random_source();
 }
 
 /// Buggify a knob *value* within bounds.
@@ -83,29 +56,13 @@ where
     }
 }
 
-/// Buggify with 25% probability
-#[macro_export]
-macro_rules! buggify {
-    () => {
-        $crate::chaos::buggify::buggify_internal(0.25, concat!(file!(), ":", line!()))
-    };
-}
-
-/// Buggify with custom probability
-#[macro_export]
-macro_rules! buggify_with_prob {
-    ($prob:expr) => {
-        $crate::chaos::buggify::buggify_internal($prob as f64, concat!(file!(), ":", line!()))
-    };
-}
-
 /// Buggify a config knob *value* within bounds.
 ///
 /// `buggify_knob!(default, lo..hi)` evaluates to `default` on most seeds, but when
 /// buggify is enabled and this call site is activated + fires (same model as
-/// [`buggify!`]) it evaluates to a random value in `lo..hi`. Deterministic per
-/// `(location, seed)`, so replay is exact. Mirrors `FoundationDB`'s
-/// `if (randomize && BUGGIFY) KNOB = random(lo, hi)`.
+/// [`buggify!`](crate::buggify)) it evaluates to a random value in `lo..hi`.
+/// Deterministic per `(location, seed)`, so replay is exact. Mirrors
+/// `FoundationDB`'s `if (randomize && BUGGIFY) KNOB = random(lo, hi)`.
 #[macro_export]
 macro_rules! buggify_knob {
     ($default:expr, $range:expr) => {
@@ -170,6 +127,20 @@ mod tests {
         }
 
         assert_eq!(results1, results2);
+    }
+
+    #[test]
+    fn test_macro_paths_share_state() {
+        // The sim re-export and the standalone crate must hit the same state.
+        set_sim_seed(4242);
+        buggify_init(1.0, 1.0);
+        assert_eq!(
+            moonpool_buggify::buggify_internal(1.0, "shared_state"),
+            buggify_internal(1.0, "shared_state"),
+        );
+        assert!(moonpool_buggify::buggify_internal(1.0, "shared_state"));
+        buggify_reset();
+        assert!(!moonpool_buggify::buggify_internal(1.0, "shared_state"));
     }
 
     /// Collect a fixed sequence of `buggify_knob!` results for one seed.

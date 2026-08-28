@@ -1,0 +1,19 @@
+[package]
+name = "moonpool-buggify"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Standalone buggify fault-injection macros for the moonpool framework"
+documentation = "https://docs.rs/moonpool-buggify"
+
+# Pure std, zero dependencies — compiles on wasm32-unknown-unknown, macOS, and
+# Linux. Buggify is disabled by default and stays inert until a simulation
+# runtime (moonpool-sim) enables it and installs a deterministic random source,
+# so production and sans-I/O code can depend on this crate without pulling in
+# the simulation runtime.
+[dependencies]
+
+[lints]
+workspace = true
