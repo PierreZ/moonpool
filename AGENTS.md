@@ -76,6 +76,9 @@ crates/
 │                            (umbrella `tokio-providers`). wasm-clean with all off.
 ├── moonpool-assertions/   - Antithesis-style assertion accounting (pure std, ZERO deps, wasm-able).
 │                            Heap table by default; explorer overlays MAP_SHARED + a discovery hook.
+├── moonpool-buggify/      - Standalone buggify!/buggify_with_prob! macros + state (pure std, ZERO
+│                            deps, wasm-able). Inert by default; moonpool-sim installs its seeded
+│                            RNG per run and re-exports the macros. buggify_knob! stays in sim.
 ├── moonpool-sim/          - Simulation runtime, chaos testing, buggify, assertions wiring.
 │                            feature `exploration` (default ON) gates moonpool-explorer; without it
 │                            the sim compiles to wasm32-unknown-unknown.
@@ -226,6 +229,7 @@ Strategic placement: error handling, timeouts, retries, resource limits
 - `.tags(&[("key", &["val1", "val2"])])` — round-robin tag distribution
 - `.enable_chaos([Chaos::Attrition { config, mode }])` — built-in chaos reboots (requires `.chaos_duration()`)
 - `.enable_chaos([Chaos::Network(mode) | Chaos::Storage(mode)])` — network/storage faults per seed (`ChaosMode::Random` all-on, `ChaosMode::Swarm` per-seed subset)
+- `.fault_factory(|| Box::new(injector))` — fresh custom `FaultInjector` per root/explored timeline (exploration-compatible; `FaultContext` has split `crash`/`restart` primitives + workload `state()`)
 - `.swarm_operations()` — per-seed swarm of each workload's operation alphabet
 
 **Reboot lifecycle**: Graceful (signal token → grace period → force kill → restart) vs Crash (immediate abort → restart)

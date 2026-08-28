@@ -162,3 +162,16 @@ The default 25% firing probability works well for most injection points. Use `bu
 Buggify is gated behind simulation state. When the simulation is not running, `buggify!()` always returns `false`. There is no runtime cost in production: the check is a thread-local boolean read. You can leave buggify calls in your production code without worrying about them firing outside simulation.
 
 This is the same guarantee FoundationDB provides: BUGGIFY is gated behind `g_network->isSimulated()`, ensuring zero production impact regardless of how aggressively chaos is injected during testing.
+
+## The Standalone `moonpool-buggify` Crate
+
+The `buggify!()` and `buggify_with_prob!()` macros live in the zero-dependency `moonpool-buggify` crate. Sans-I/O and production code that wants buggify points can depend on it directly, without pulling the simulation runtime into its dependency graph:
+
+```toml
+[dependencies]
+moonpool-buggify = "0.8"
+```
+
+The crate owns only the disabled-by-default state and the macros. When a simulation run starts, `moonpool-sim` installs its deterministic seeded RNG into that shared state, so macros imported through either crate share activation decisions during simulation — and stay inert everywhere else. `moonpool-sim` re-exports both macros, so existing `moonpool_sim::buggify!` call sites are unchanged.
+
+`buggify_knob!` remains in `moonpool-sim`: knob randomization is simulation-specific configuration spiking, not application-level fault injection.

@@ -3,6 +3,7 @@
 members = [
     "crates/moonpool",
     "crates/moonpool-assertions",
+    "crates/moonpool-buggify",
     "crates/moonpool-core",
     "crates/moonpool-explorer",
     "crates/moonpool-hyper",

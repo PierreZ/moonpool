@@ -147,6 +147,11 @@ pub use runner::{
     WorkloadCount, WorkloadTopology,
 };
 
+// Buggify macros live in the standalone zero-dependency moonpool-buggify
+// crate; re-exported here so existing `moonpool_sim::buggify!` call sites keep
+// working and share the same state as direct moonpool-buggify users.
+pub use moonpool_buggify::{buggify, buggify_with_prob};
+
 // Chaos module re-exports
 pub use chaos::{
     AssertionStats, SIM_FAULT_EVENT_NAME, SimFaultEvent, StateHandle, assertion_results,
