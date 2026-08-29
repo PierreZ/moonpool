@@ -80,8 +80,8 @@ pub struct HyperTimer<T> {
     /// clock onto the `Instant` values hyper's `Timer` API requires. The
     /// anchor cancels out of every deadline computation hyper performs
     /// (deadlines come from `Timer::now() + interval` and return through
-    /// `sleep_until`), so despite being captured from the wall clock it
-    /// never influences behavior: provider time does.
+    /// `sleep_until`), so its actual value never influences behavior:
+    /// provider time does. See [`anchor_instant`] for how it is minted.
     anchor: Instant,
     /// Provider time at construction, subtracted so `now()` stays near the
     /// anchor instead of drifting `provider.now()` past it twice.
@@ -94,10 +94,38 @@ impl<T: TimeProvider> HyperTimer<T> {
         let epoch = time.now();
         Self {
             time,
-            anchor: Instant::now(),
+            anchor: anchor_instant(),
             epoch,
         }
     }
+}
+
+/// Mint the arbitrary per-timer anchor `Instant`.
+///
+/// Native targets take the wall clock — the obvious arbitrary value. Nothing
+/// depends on it: only *differences* between the `Instant`s [`HyperTimer`]
+/// returns are ever consumed (hyper mints every deadline from `Timer::now()`
+/// and hands it back through `sleep_until`/comparisons against later
+/// `Timer::now()` reads), and those differences are pure provider time.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn anchor_instant() -> Instant {
+    Instant::now()
+}
+
+/// On `wasm32-unknown-unknown` (the browser sim demos) std's `Instant::now()`
+/// panics — "time not implemented on this platform" — which used to abort
+/// every wasm run at the first `H2Server`/channel construction. The anchor is
+/// arbitrary by contract (see the native variant above), so fabricate one
+/// instead of touching the unavailable wall clock: on this target `Instant`
+/// is a newtype over `Duration` (`std::sys::time::unsupported`), for which
+/// the all-zero bit pattern is a valid value (`Duration::ZERO`).
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn anchor_instant() -> Instant {
+    // SAFETY: on this target `Instant` wraps a bare `Duration`, and
+    // `Duration::ZERO`'s bit pattern is a valid `Duration`. `transmute`
+    // enforces the size match at compile time, so a future std layout change
+    // fails the wasm build loudly instead of corrupting time.
+    unsafe { std::mem::transmute::<Duration, Instant>(Duration::ZERO) }
 }
 
 impl<T: TimeProvider> hyper::rt::Timer for HyperTimer<T> {
