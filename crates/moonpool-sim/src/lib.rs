@@ -142,10 +142,16 @@ pub use locality::{DomainLevel, LinkClass, LocalityInfo};
 // Runner module re-exports
 pub use runner::{
     Attrition, AttritionScope, Chaos, ChaosMode, ClientId, FaultContext, FaultInjector,
-    IterationControl, LocalityConfig, MachineRegistry, Process, ProcessTags, RebootKind,
-    SimContext, SimulationBuilder, SimulationMetrics, SimulationReport, TagRegistry, Workload,
-    WorkloadCount, WorkloadTopology,
+    INSTANCE_LABEL, IterationControl, LocalityConfig, MachineRegistry, MetricsHandle, Process,
+    ProcessTags, RebootKind, SimContext, SimulationBuilder, SimulationMetrics, SimulationReport,
+    TagRegistry, Workload, WorkloadCount, WorkloadTopology,
 };
+
+// Application-metrics vocabulary, re-exported from moonpool-core so a
+// simulation using `.metrics_factory()` needs one import path. Adapters over a
+// concrete registry (moonpool-prometheus, and OpenTelemetry later) implement
+// `MetricsSource` against these types.
+pub use moonpool_core::metrics::{HistogramValue, MetricSample, MetricValue, MetricsSource};
 
 // Buggify macros live in the standalone zero-dependency moonpool-buggify
 // crate; re-exported here so existing `moonpool_sim::buggify!` call sites keep
@@ -193,6 +199,6 @@ pub use moonpool_assertions::{AssertCmp, AssertKind};
 // Exploration-only re-exports (fork-based multiverse engine).
 #[cfg(feature = "exploration")]
 pub use moonpool_explorer::{ExplorationConfig, Recipe, format_timeline, parse_timeline};
-pub use runner::report::{BugRecipe, ExplorationReport};
+pub use runner::report::{BugRecipe, ExplorationReport, MetricAggregate};
 
 // Macros are automatically available at crate root when defined with #[macro_export]

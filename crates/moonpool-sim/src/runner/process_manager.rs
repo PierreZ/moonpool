@@ -7,6 +7,7 @@ use tracing::Instrument as _;
 
 use crate::chaos::state_handle::StateHandle;
 use crate::observability::SimulationLayerHandle;
+use crate::runner::app_metrics::MetricsHandle;
 use crate::runner::context::SimContext;
 use crate::runner::fault_injector::ProcessInfo;
 use crate::runner::locality::MachineRegistry;
@@ -22,6 +23,19 @@ pub(crate) struct ProcessConfig<'a> {
     pub(crate) ips: Vec<String>,
     pub(crate) tag_registry: TagRegistry,
     pub(crate) machine_registry: MachineRegistry,
+}
+
+/// Everything a restarted process needs to rebuild its [`SimContext`].
+///
+/// `Copy`, being nothing but shared borrows and a seed.
+#[derive(Clone, Copy)]
+pub(crate) struct RestartEnv<'a> {
+    pub(crate) sim: &'a crate::sim::WeakSimWorld,
+    pub(crate) seed: u64,
+    pub(crate) state: &'a StateHandle,
+    pub(crate) obs: &'a SimulationLayerHandle,
+    pub(crate) metrics: &'a MetricsHandle,
+    pub(crate) shutdown_signal: &'a tokio_util::sync::CancellationToken,
 }
 
 /// Owns running process tasks and their restart state.
@@ -116,15 +130,15 @@ impl<'a> ProcessManager<'a> {
         self.process_tokens[index] = None;
     }
 
-    pub(crate) fn restart(
-        &mut self,
-        ip: std::net::IpAddr,
-        sim: &crate::sim::WeakSimWorld,
-        seed: u64,
-        state: &StateHandle,
-        obs: &SimulationLayerHandle,
-        shutdown_signal: &tokio_util::sync::CancellationToken,
-    ) {
+    pub(crate) fn restart(&mut self, ip: std::net::IpAddr, env: &RestartEnv<'_>) {
+        let RestartEnv {
+            sim,
+            seed,
+            state,
+            obs,
+            metrics,
+            shutdown_signal,
+        } = *env;
         let ip_string = ip.to_string();
         let Some(index) = self.index_for_ip(ip) else {
             tracing::warn!(%ip, "ProcessRestart for unknown IP");
@@ -159,6 +173,7 @@ impl<'a> ProcessManager<'a> {
             topology,
             state.clone(),
             obs.clone(),
+            metrics.clone(),
         );
         let log_ip = ip_string.clone();
         let handle = crate::executor::spawn(

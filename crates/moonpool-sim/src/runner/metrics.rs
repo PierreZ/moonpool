@@ -7,8 +7,8 @@ use crate::chaos::AssertionStats;
 use crate::{SimulationError, SimulationResult};
 
 use super::report::{
-    AssertionDetail, BucketSiteSummary, ExplorationReport, SaturationReport, SimulationMetrics,
-    SimulationReport,
+    AssertionDetail, BucketSiteSummary, ExplorationReport, MetricAggregate, SaturationReport,
+    SimulationMetrics, SimulationReport,
 };
 
 /// Collects and aggregates metrics across simulation iterations.
@@ -18,6 +18,8 @@ pub(crate) struct MetricsCollector {
     aggregated_metrics: SimulationMetrics,
     individual_metrics: Vec<SimulationResult<SimulationMetrics>>,
     faulty_seeds: Vec<u64>,
+    /// Application-metric series folded across seeds, keyed by series identity.
+    app_metrics: BTreeMap<String, MetricAggregate>,
 }
 
 impl MetricsCollector {
@@ -29,6 +31,7 @@ impl MetricsCollector {
             aggregated_metrics: SimulationMetrics::default(),
             individual_metrics: Vec::new(),
             faulty_seeds: Vec::new(),
+            app_metrics: BTreeMap::new(),
         }
     }
 
@@ -55,6 +58,14 @@ impl MetricsCollector {
         self.aggregated_metrics.wall_time += wall_time;
         self.aggregated_metrics.simulated_time += metrics.simulated_time;
         self.aggregated_metrics.events_processed += metrics.events_processed;
+        // Only successful seeds contribute: a failed iteration's counters
+        // describe a run that did not finish, so folding them into the totals
+        // would misreport the system's steady-state behavior.
+        MetricAggregate::absorb_samples(
+            &mut self.app_metrics,
+            &metrics.app_metrics,
+            &metrics.app_series,
+        );
 
         let mut individual = metrics;
         individual.wall_time = wall_time;
@@ -119,7 +130,10 @@ impl MetricsCollector {
     }
 
     /// Consume the collector and assemble the public report.
-    pub(crate) fn generate_report(self, inputs: GenerateReportInputs) -> SimulationReport {
+    pub(crate) fn generate_report(mut self, inputs: GenerateReportInputs) -> SimulationReport {
+        let app_metrics = std::mem::take(&mut self.app_metrics)
+            .into_values()
+            .collect::<Vec<_>>();
         SimulationReport {
             iterations: inputs.iteration_count,
             successful_runs: self.successful_runs,
@@ -137,6 +151,7 @@ impl MetricsCollector {
             bucket_summaries: inputs.bucket_summaries,
             convergence_timeout: inputs.convergence_timeout,
             saturation: inputs.saturation,
+            app_metrics,
         }
     }
 }

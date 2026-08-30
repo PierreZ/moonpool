@@ -51,6 +51,7 @@ pub mod block;
 #[cfg(all(feature = "tokio-fs", unix))]
 mod block_tokio;
 mod error;
+pub mod metrics;
 mod network;
 mod providers;
 mod random;
@@ -85,6 +86,9 @@ pub use block_tokio::{TokioBlockDevice, TokioBlockDeviceProvider};
 
 // Error exports
 pub use error::{SimulationError, SimulationResult};
+
+// Application metrics seam (registry-agnostic; adapters live in their own crates).
+pub use metrics::{HistogramValue, MetricSample, MetricValue, MetricsSource};
 
 // Provider trait exports
 pub use network::{NetworkProvider, TcpListenerTrait};

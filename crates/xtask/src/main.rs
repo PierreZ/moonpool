@@ -42,6 +42,11 @@ const SIM_BINARIES: &[SimBinary] = &[
         "moonpool_explorer",
     ),
     SimBinary::new("sim-axum-web", SIM_EXAMPLES_PACKAGE, SIM_EXAMPLES_CRATE),
+    SimBinary::new(
+        "sim-metrics-service",
+        SIM_EXAMPLES_PACKAGE,
+        SIM_EXAMPLES_CRATE,
+    ),
     SimBinary::new("sim-topology", SIM_EXAMPLES_PACKAGE, SIM_EXAMPLES_CRATE),
     SimBinary::new("sim-tonic-grpc", SIM_EXAMPLES_PACKAGE, SIM_EXAMPLES_CRATE),
 ];

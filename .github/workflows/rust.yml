@@ -67,9 +67,11 @@ jobs:
           # rustflags must be able to build every published crate.
           RUSTFLAGS="" nix develop --command cargo check \
             -p moonpool-assertions \
+            -p moonpool-buggify \
             -p moonpool-core \
             -p moonpool-explorer \
             -p moonpool-hyper \
+            -p moonpool-prometheus \
             -p moonpool-sim \
             -p moonpool
       - name: Lean production dependency tree excludes sim/explorer
@@ -82,6 +84,10 @@ jobs:
           fi
           if echo "$tree" | grep -qE "moonpool-hyper|hyper v|h2 v"; then
             echo "::error::lean production build pulled in hyper"
+            exit 1
+          fi
+          if echo "$tree" | grep -qE "moonpool-prometheus|prometheus v"; then
+            echo "::error::lean production build pulled in prometheus"
             exit 1
           fi
 
@@ -112,6 +118,7 @@ jobs:
           - dungeon-explore
           - frontier-explore
           - axum-web
+          - metrics-service
           - topology
           - tonic-grpc
     steps:

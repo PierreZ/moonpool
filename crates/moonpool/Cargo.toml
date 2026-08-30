@@ -22,10 +22,16 @@ tokio = ["moonpool-core/tokio-providers", "moonpool-core/select"]
 # batteries-included default above: a stack that speaks no HTTP should not
 # compile h2 and tower, and the lean production tree stays free of hyper.
 hyper = ["dep:moonpool-hyper"]
+# Prometheus registry adapter (moonpool::prometheus): scrape the metrics your
+# code already keeps into the simulation report. Off by default, including in
+# the batteries-included default above — a stack that keeps no metrics should
+# not compile the prometheus crate.
+prometheus = ["dep:moonpool-prometheus"]
 
 [dependencies]
 moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false }
 moonpool-hyper = { path = "../moonpool-hyper", version = "0.8.0", optional = true }
+moonpool-prometheus = { path = "../moonpool-prometheus", version = "0.8.0", optional = true }
 moonpool-sim = { path = "../moonpool-sim", version = "0.8.0", optional = true }
 
 [dev-dependencies]

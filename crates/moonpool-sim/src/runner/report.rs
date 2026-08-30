@@ -7,6 +7,7 @@ use std::fmt;
 use std::time::Duration;
 
 use moonpool_assertions::AssertKind;
+use moonpool_core::metrics::{HistogramValue, MetricPoint, MetricSample, MetricValue};
 
 use crate::SimulationResult;
 use crate::chaos::AssertionStats;
@@ -31,6 +32,28 @@ pub struct SimulationMetrics {
     pub simulated_time: Duration,
     /// Number of events processed
     pub events_processed: u64,
+    /// Application metrics scraped from this iteration's
+    /// [`MetricsSource`](moonpool_core::metrics::MetricsSource)s, one entry
+    /// per series per node, sorted by
+    /// [`MetricSample::sort_key`]. Empty unless the simulation registered a
+    /// [`metrics_factory`](super::builder::SimulationBuilder::metrics_factory).
+    pub app_metrics: Vec<MetricSample>,
+    /// Per-series time series for this iteration, keyed by series identity and
+    /// ascending in simulated time.
+    ///
+    /// Points are pushed by instrumented metric handles as the application
+    /// mutates them — one per `inc()` / `set()` / `observe()`, stamped with
+    /// the simulated clock — so this is an exact history, not a sampled one,
+    /// and it replays identically for a given seed. Plot it, diff it between
+    /// seeds, or assert on its shape in a test.
+    ///
+    /// Only sources that hand out instrumented handles populate this; a source
+    /// wrapping a foreign registry appears in
+    /// [`app_metrics`](Self::app_metrics) only.
+    pub app_series: BTreeMap<String, Vec<MetricPoint>>,
+    /// Points dropped because a series hit its capacity. Non-zero means
+    /// [`app_series`](Self::app_series) is truncated.
+    pub dropped_metric_points: u64,
 }
 
 impl Default for SimulationMetrics {
@@ -39,6 +62,133 @@ impl Default for SimulationMetrics {
             wall_time: Duration::ZERO,
             simulated_time: Duration::ZERO,
             events_processed: 0,
+            app_metrics: Vec::new(),
+            app_series: BTreeMap::new(),
+            dropped_metric_points: 0,
+        }
+    }
+}
+
+/// One application-metric series, aggregated across every simulation seed
+/// that reported it.
+///
+/// Two sources feed this. [`total`](Self::total) comes from the end-of-run
+/// scrape, which is the right read for a counter (its run total) and a
+/// histogram (its sum). [`min`](Self::min), [`max`](Self::max) and
+/// [`mean`](Self::mean) come from the *recorded series* when one exists —
+/// every mutation, in simulated-time order — because a scrape catches a gauge
+/// only at its resting value and would report a queue that peaked at 50 as
+/// `0`.
+#[derive(Debug, Clone)]
+pub struct MetricAggregate {
+    /// Series identity: `name{key="value",...}`, including the
+    /// [`instance`](super::app_metrics::INSTANCE_LABEL) label naming the node.
+    pub key: String,
+    /// Metric name without labels.
+    pub name: String,
+    /// Value kind: `counter`, `gauge`, or `histogram`.
+    pub kind: &'static str,
+    /// Number of seeds that reported this series.
+    pub seeds: usize,
+    /// Sum of the per-seed scrape scalars (a histogram contributes its sum).
+    pub total: f64,
+    /// Smallest value observed, over recorded points when available.
+    pub min: f64,
+    /// Largest value observed, over recorded points when available.
+    pub max: f64,
+    /// Number of recorded points folded in; `0` when the source is
+    /// scrape-only.
+    pub observations: u64,
+    /// Sum of the recorded point values, for [`mean`](Self::mean).
+    pub observation_sum: f64,
+    /// Histogram buckets merged across seeds; `None` for counters and gauges.
+    pub histogram: Option<HistogramValue>,
+}
+
+impl MetricAggregate {
+    /// Mean value over the recorded series, falling back to the per-seed mean
+    /// of the scrape when nothing was recorded.
+    #[must_use]
+    pub fn mean(&self) -> f64 {
+        if self.observations > 0 {
+            // Precision loss acceptable: point counts fit well within 2^52.
+            return self.observation_sum
+                / u32::try_from(self.observations).map_or(f64::INFINITY, f64::from);
+        }
+        self.per_seed_mean()
+    }
+
+    /// Mean of the per-seed scrape scalars — a counter's average run total.
+    #[must_use]
+    pub fn per_seed_mean(&self) -> f64 {
+        if self.seeds == 0 {
+            0.0
+        } else {
+            // Precision loss acceptable: seed counts fit well within 2^52.
+            self.total / u32::try_from(self.seeds).map_or(f64::INFINITY, f64::from)
+        }
+    }
+
+    fn new(sample: &MetricSample) -> Self {
+        let scalar = sample.value.scalar();
+        Self {
+            key: sample.sort_key(),
+            name: sample.name.clone(),
+            kind: sample.value.kind(),
+            seeds: 1,
+            total: scalar,
+            min: f64::INFINITY,
+            max: f64::NEG_INFINITY,
+            observations: 0,
+            observation_sum: 0.0,
+            histogram: match &sample.value {
+                MetricValue::Histogram(h) => Some(h.clone()),
+                MetricValue::Counter(_) | MetricValue::Gauge(_) => None,
+            },
+        }
+    }
+
+    fn absorb(&mut self, sample: &MetricSample) {
+        self.seeds += 1;
+        self.total += sample.value.scalar();
+        if let (Some(existing), MetricValue::Histogram(h)) = (&mut self.histogram, &sample.value) {
+            existing.merge(h);
+        }
+    }
+
+    /// Fold recorded points, or the scrape scalar when this seed recorded none.
+    fn absorb_points(&mut self, points: Option<&Vec<MetricPoint>>, scalar: f64) {
+        match points {
+            Some(points) if !points.is_empty() => {
+                for point in points {
+                    self.min = self.min.min(point.value);
+                    self.max = self.max.max(point.value);
+                    self.observation_sum += point.value;
+                }
+                self.observations += points.len() as u64;
+            }
+            // Scrape-only source: the single end-of-run value is all there is.
+            _ => {
+                self.min = self.min.min(scalar);
+                self.max = self.max.max(scalar);
+            }
+        }
+    }
+
+    /// Fold one seed's scrape and recorded series into a keyed set of
+    /// aggregates.
+    pub(crate) fn absorb_samples(
+        into: &mut BTreeMap<String, MetricAggregate>,
+        samples: &[MetricSample],
+        series: &BTreeMap<String, Vec<MetricPoint>>,
+    ) {
+        for sample in samples {
+            let key = sample.sort_key();
+            let entry = into
+                .entry(key.clone())
+                .and_modify(|agg| agg.absorb(sample))
+                .or_insert_with(|| MetricAggregate::new(sample));
+            entry.absorb_points(series.get(&key), sample.value.scalar());
         }
     }
 }
@@ -192,6 +342,10 @@ pub struct SimulationReport {
     /// Saturation outcome for an `UntilCoverageStable` run (signal + coverage
     /// numbers); `None` for other iteration-control modes.
     pub saturation: Option<SaturationReport>,
+    /// Application metrics aggregated across every successful seed, sorted by
+    /// series key. Empty unless the simulation registered a
+    /// [`metrics_factory`](super::builder::SimulationBuilder::metrics_factory).
+    pub app_metrics: Vec<MetricAggregate>,
 }
 
 impl SimulationReport {

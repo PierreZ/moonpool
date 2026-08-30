@@ -24,6 +24,10 @@
 //! │  • hyper runtime adapters   • HyperIo over provider streams │
 //! │  • Reconnecting h2 channel  • Per-connection serve helper   │
 //! ├─────────────────────────────────────────────────────────────┤
+//! │    moonpool-prometheus (feature "prometheus", opt-in)       │
+//! │  • Scrapes a prometheus::Registry into the sim report       │
+//! │  • Instrumented handles record on the simulated clock       │
+//! ├─────────────────────────────────────────────────────────────┤
 //! │                     moonpool-core                           │
 //! │  Provider traits: Time, Task, Network, Random, Storage      │
 //! └─────────────────────────────────────────────────────────────┘
@@ -48,6 +52,7 @@
 //! | Provider traits only | `moonpool-core` |
 //! | Simulation runtime | `moonpool-sim` |
 //! | An HTTP/2 stack (tonic, axum, hyper) on the providers | `moonpool` with feature `hyper`, or `moonpool-hyper` |
+//! | Prometheus metrics in the simulation report | `moonpool` with feature `prometheus`, or `moonpool-prometheus` |
 //! | Fork-based exploration internals | `moonpool-explorer` |
 //!
 //! ## Documentation
@@ -55,6 +60,7 @@
 //! - [`moonpool_core`] - Provider traits and core types
 //! - [`moonpool_sim`] - Simulation runtime and chaos testing
 //! - `moonpool::hyper` - hyper 1.x integration, behind the `hyper` feature
+//! - `moonpool::prometheus` - Prometheus metrics adapter, behind the `prometheus` feature
 
 #![deny(missing_docs)]
 
@@ -84,6 +90,29 @@ pub use moonpool_sim::*;
 #[cfg(feature = "hyper")]
 pub mod hyper {
     pub use moonpool_hyper::*;
+}
+
+/// Prometheus metrics in the simulation report.
+///
+/// ```ignore
+/// use moonpool::prometheus::PrometheusSource;
+///
+/// SimulationBuilder::new()
+///     .metrics_factory(|_ip| Arc::new(PrometheusSource::default()))
+///     .processes(3, || Box::new(MyNode::new()))
+///     .workload(MyWorkload::default())
+///     .run();
+/// ```
+///
+/// Register a source per simulated node and the counters, gauges and
+/// histograms your code already keeps are reported at the end of the run.
+/// Metrics created through the source hand back instrumented handles that
+/// record every mutation on the *simulated* clock, giving an exact time
+/// series; anything else in the registry is caught by a final scrape.
+/// Requires the `prometheus` feature.
+#[cfg(feature = "prometheus")]
+pub mod prometheus {
+    pub use moonpool_prometheus::*;
 }
 
 /// Common imports for application code.

@@ -17,12 +17,14 @@ use crate::runner::process::{Attrition, Process};
 use crate::runner::tags::TagDistribution;
 use crate::runner::workload::Workload;
 
+use super::app_metrics::SourceFactory;
 pub use super::config::{
     Chaos, ChaosMode, ClientId, IterationControl, ProcessCount, WorkloadCount,
 };
 use super::iteration::IterationManager;
 use super::metrics::{GenerateReportInputs, MetricsCollector};
 use super::orchestrator::{OrchestrateInputs, OrchestrateOutput, WorkloadOrchestrator};
+use moonpool_core::metrics::MetricsSource;
 
 /// Client identity information for a single workload instance.
 #[derive(Debug, Clone, Copy)]
@@ -36,6 +38,7 @@ pub(crate) struct WorkloadClientInfo {
 /// Inputs to `run_orchestrator_blocking`.
 struct RunOrchestratorInputs<'a> {
     seed: u64,
+    metrics_factory: Option<&'a SourceFactory>,
     iteration_count: usize,
     workloads: Vec<Box<dyn Workload>>,
     workload_info: Vec<(String, String)>,
@@ -234,6 +237,9 @@ pub struct SimulationBuilder {
     /// Factories that build a fresh fault injector for every root and explored
     /// timeline, mirroring `workload_factory`. Compatible with exploration.
     fault_factories: Vec<Box<dyn Fn() -> Box<dyn FaultInjector> + 'static>>,
+    /// Builds one application-metrics source per node IP, rebuilt each
+    /// iteration so counters start from zero on every seed.
+    metrics_factory: Option<SourceFactory>,
     chaos_duration: Option<Duration>,
     exploration_config: Option<crate::chaos::exploration_glue::ExplorationConfig>,
     /// Replay breakpoints staged for the next orchestration run. Installed
@@ -276,6 +282,7 @@ impl SimulationBuilder {
             invariants: Vec::new(),
             fault_injectors: Vec::new(),
             fault_factories: Vec::new(),
+            metrics_factory: None,
             chaos_duration: None,
             exploration_config: None,
             pending_replay: None,
@@ -545,6 +552,54 @@ impl SimulationBuilder {
     ) -> Self {
         self.invariants
             .push(crate::observability::invariant_fn(name, f));
+        self
+    }
+
+    /// Register an application-metrics source per simulated node.
+    ///
+    /// `factory` is called once per node IP at the start of every iteration.
+    /// Whatever it returns — a `PrometheusSource` from `moonpool-prometheus`,
+    /// or any other [`MetricsSource`] implementation — is reachable from that
+    /// node's code as [`SimContext::metrics`](super::context::SimContext::metrics),
+    /// and is scraped after the check phase into
+    /// [`SimulationMetrics::app_metrics`](super::report::SimulationMetrics::app_metrics).
+    /// The report aggregates the samples across seeds and prints them.
+    ///
+    /// Per-node, because every simulated node shares one OS process: a single
+    /// registry would merge all of their counters into one number. Per
+    /// iteration, because most registries have no reset, so a reused instance
+    /// would make seed 50 report the sum of fifty runs.
+    ///
+    /// ```ignore
+    /// SimulationBuilder::new()
+    ///     .metrics_factory(|_ip| Arc::new(PrometheusSource::default()))
+    ///     .processes(3, || Box::new(MyNode::new()))
+    ///     .workload(MyWorkload::default())
+    ///     .run();
+    /// ```
+    ///
+    /// Metric values are reported, never used to steer the simulation: a
+    /// metric derived from the wall clock is not deterministic. Record
+    /// durations from `ctx.time()` for a metric that replays identically.
+    ///
+    /// Under fork-based exploration, only root timelines are scraped —
+    /// explored timelines report back through the shared assertion table,
+    /// which carries no metric values.
+    #[must_use]
+    pub fn metrics_factory<S, F>(mut self, factory: F) -> Self
+    where
+        S: MetricsSource,
+        F: Fn(&str) -> std::sync::Arc<S> + 'static,
+    {
+        self.metrics_factory = Some(Box::new(move |ip| {
+            let source = factory(ip);
+            // Kept twice: as the trait object the runner scrapes, and as `Any`
+            // so `ctx.metrics::<S>()` can hand the concrete type back.
+            (
+                source.clone() as std::sync::Arc<dyn MetricsSource>,
+                source as std::sync::Arc<dyn std::any::Any + Send + Sync>,
+            )
+        }));
         self
     }
 
@@ -830,6 +885,7 @@ impl SimulationBuilder {
     fn run_orchestrator_blocking(inputs: RunOrchestratorInputs<'_>) -> OrchestrationOutcome {
         let RunOrchestratorInputs {
             seed,
+            metrics_factory,
             iteration_count,
             workloads,
             workload_info,
@@ -856,6 +912,7 @@ impl SimulationBuilder {
                 seed,
                 sim,
                 chaos_duration,
+                metrics_factory,
                 iteration_count,
                 run_time_budget,
             })
@@ -1348,6 +1405,7 @@ impl SimulationBuilder {
             bucket_summaries: Vec::new(),
             convergence_timeout: false,
             saturation: None,
+            app_metrics: Vec::new(),
         }
     }
 
@@ -1657,6 +1715,7 @@ impl SimulationBuilder {
         );
         let outcome = Self::run_orchestrator_blocking(RunOrchestratorInputs {
             seed,
+            metrics_factory: self.metrics_factory.as_ref(),
             iteration_count,
             workloads,
             workload_info,
