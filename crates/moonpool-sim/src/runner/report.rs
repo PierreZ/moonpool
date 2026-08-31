@@ -7,6 +7,7 @@ use std::fmt;
 use std::time::Duration;
 
 use moonpool_assertions::AssertKind;
+use moonpool_core::metrics::query::MetricQueryReport;
 use moonpool_core::metrics::{HistogramValue, MetricPoint, MetricSample, MetricValue};
 
 use crate::SimulationResult;
@@ -346,6 +347,22 @@ pub struct SimulationReport {
     /// series key. Empty unless the simulation registered a
     /// [`metrics_factory`](super::builder::SimulationBuilder::metrics_factory).
     pub app_metrics: Vec<MetricAggregate>,
+    /// Identity of this `run()` invocation, carried on every
+    /// [`MetricQueryRow`](moonpool_core::metrics::query::MetricQueryRow) so a
+    /// value can be traced back to the execution that produced it.
+    ///
+    /// Distinct from a seed: the seed identifies one replayable iteration,
+    /// the run id identifies the whole exploration invocation those
+    /// iterations belonged to.
+    pub run_id: u64,
+    /// Evaluated metric queries, one per query registered with
+    /// [`metric`](super::builder::SimulationBuilder::metric), in registration
+    /// order.
+    ///
+    /// Each carries every per-seed row it produced plus the across-run
+    /// summary the report prints. Empty unless the simulation registered
+    /// queries.
+    pub metric_queries: Vec<MetricQueryReport>,
 }
 
 impl SimulationReport {
@@ -453,6 +470,47 @@ pub(crate) fn fmt_duration(d: Duration) -> String {
         let mins = d.as_secs() / 60;
         let secs = d.as_secs() % 60;
         format!("{mins}m {secs:02}s")
+    }
+}
+
+/// One metric-query window as a single line, for the plain `Display` path.
+///
+/// `min`/`max` carry the seed that produced them; the percentiles are across
+/// runs, not across the observations beneath each run's value.
+fn fmt_query_window(window: &moonpool_core::metrics::query::MetricWindowSummary) -> String {
+    // A whole-run value has no meaningful span; both bounds are WHOLE_RUN_MS.
+    let bounds = if window.bucket_start_ms == window.bucket_end_ms {
+        "whole run".to_owned()
+    } else {
+        format!(
+            "[{},{})",
+            fmt_sim_ms(window.bucket_start_ms),
+            fmt_sim_ms(window.bucket_end_ms)
+        )
+    };
+    let span = match &window.group {
+        Some(group) => format!("{group} {bounds}"),
+        None => bounds,
+    };
+    format!(
+        "{span}  min={:.2} (seed={})  mean={:.2}  max={:.2} (seed={})  p50={:.2}  p95={:.2}  p99={:.2}",
+        window.min,
+        window.min_seed,
+        window.mean,
+        window.max,
+        window.max_seed,
+        window.p50,
+        window.p95,
+        window.p99,
+    )
+}
+
+/// Simulated milliseconds as the shortest exact label, e.g. `60s` or `1500ms`.
+pub(crate) fn fmt_sim_ms(ms: u64) -> String {
+    if ms.is_multiple_of(1000) {
+        format!("{}s", ms / 1000)
+    } else {
+        format!("{ms}ms")
     }
 }
 
@@ -755,6 +813,25 @@ impl fmt::Display for SimulationReport {
                 f,
                 "  UntilCoverageStable hit the iteration cap without saturating."
             )?;
+        }
+
+        // === Metric Queries ===
+        if !self.metric_queries.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "--- Metric Queries ({}) ---", self.metric_queries.len())?;
+            for query in &self.metric_queries {
+                writeln!(
+                    f,
+                    "  {}  [{}]  {} per run  runs: {}",
+                    query.name,
+                    query.description,
+                    query.provenance.label(),
+                    query.runs
+                )?;
+                for window in &query.windows {
+                    writeln!(f, "    {}", fmt_query_window(window))?;
+                }
+            }
         }
 
         // === Per-Seed Metrics ===

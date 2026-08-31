@@ -25,6 +25,7 @@ use super::iteration::IterationManager;
 use super::metrics::{GenerateReportInputs, MetricsCollector};
 use super::orchestrator::{OrchestrateInputs, OrchestrateOutput, WorkloadOrchestrator};
 use moonpool_core::metrics::MetricsSource;
+use moonpool_core::metrics::query::MetricQueryPlan;
 
 /// Client identity information for a single workload instance.
 #[derive(Debug, Clone, Copy)]
@@ -103,9 +104,10 @@ impl RunState {
         let progress_milestone = iteration_manager
             .max_iterations()
             .map(|max| std::cmp::max(max / 10, 1));
+        let run_id = iteration_manager.run_id();
         Self {
             iteration_manager,
-            metrics_collector: MetricsCollector::new(),
+            metrics_collector: MetricsCollector::new(run_id, builder.metric_queries.clone()),
             progress_milestone,
             pending_return_map: Vec::new(),
             pending_instance_injector_count: 0,
@@ -240,6 +242,8 @@ pub struct SimulationBuilder {
     /// Builds one application-metrics source per node IP, rebuilt each
     /// iteration so counters start from zero on every seed.
     metrics_factory: Option<SourceFactory>,
+    /// Metric queries the runner evaluates against every successful seed.
+    metric_queries: Vec<MetricQueryPlan>,
     chaos_duration: Option<Duration>,
     exploration_config: Option<crate::chaos::exploration_glue::ExplorationConfig>,
     /// Replay breakpoints staged for the next orchestration run. Installed
@@ -283,6 +287,7 @@ impl SimulationBuilder {
             fault_injectors: Vec::new(),
             fault_factories: Vec::new(),
             metrics_factory: None,
+            metric_queries: Vec::new(),
             chaos_duration: None,
             exploration_config: None,
             pending_replay: None,
@@ -600,6 +605,47 @@ impl SimulationBuilder {
                 source as std::sync::Arc<dyn std::any::Any + Send + Sync>,
             )
         }));
+        self
+    }
+
+    /// Declare a metric query the runner evaluates after every successful
+    /// seed.
+    ///
+    /// The runner — not the report, not the CLI — decides what is worth
+    /// watching. Queries are declared once, before `run()`, and their results
+    /// travel with the report in
+    /// [`SimulationReport::metric_queries`](super::report::SimulationReport::metric_queries),
+    /// each row stamped with the seed that produced it so a bad number is
+    /// immediately replayable.
+    ///
+    /// ```ignore
+    /// use std::time::Duration;
+    /// use moonpool_core::metrics::query::{Mean, MetricQuery, Percentile};
+    ///
+    /// SimulationBuilder::new()
+    ///     .metrics_factory(|_ip| Arc::new(PrometheusSource::default()))
+    ///     .metric(
+    ///         MetricQuery::select("requests_total")
+    ///             .label("operation", "write")
+    ///             .rate()
+    ///             .bucketize(Duration::from_secs(60), Mean)
+    ///             .named("write_throughput"),
+    ///     )
+    ///     .metric(
+    ///         MetricQuery::select("request_latency_seconds")
+    ///             .bucketize(Duration::from_secs(60), Percentile(0.99))
+    ///             .named("write_p99"),
+    ///     )
+    ///     .workload(MyWorkload::default())
+    ///     .run();
+    /// ```
+    ///
+    /// Queries read the same data the report already collects, so this needs a
+    /// [`metrics_factory`](Self::metrics_factory); without one there are no
+    /// series to select and every query reports zero runs.
+    #[must_use]
+    pub fn metric(mut self, query: MetricQueryPlan) -> Self {
+        self.metric_queries.push(query);
         self
     }
 
@@ -1406,6 +1452,8 @@ impl SimulationBuilder {
             convergence_timeout: false,
             saturation: None,
             app_metrics: Vec::new(),
+            run_id: 0,
+            metric_queries: Vec::new(),
         }
     }
 
@@ -1779,8 +1827,10 @@ impl SimulationBuilder {
                     .metrics_collector
                     .add_faulty_seeds(faulty_seeds_from_deadlock);
                 state.metrics_collector.add_failed_runs(failed_count);
-                let metrics_collector =
-                    std::mem::replace(&mut state.metrics_collector, MetricsCollector::new());
+                let metrics_collector = std::mem::replace(
+                    &mut state.metrics_collector,
+                    MetricsCollector::new(0, Vec::new()),
+                );
                 Err(Box::new(Self::build_early_exit_report(
                     metrics_collector,
                     iteration_count,

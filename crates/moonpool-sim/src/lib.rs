@@ -151,7 +151,19 @@ pub use runner::{
 // simulation using `.metrics_factory()` needs one import path. Adapters over a
 // concrete registry (moonpool-prometheus, and OpenTelemetry later) implement
 // `MetricsSource` against these types.
-pub use moonpool_core::metrics::{HistogramValue, MetricSample, MetricValue, MetricsSource};
+pub use moonpool_core::metrics::{
+    HistogramValue, MetricClock, MetricPoint, MetricSample, MetricValue, MetricsSource,
+    SeriesRecorder,
+};
+
+// The metric query/report vocabulary, so a runner declaring
+// `.metric(MetricQuery::select(...))` imports from one place. `Min`, `Mean`,
+// `Max` and `Percentile` are the aggregator markers the builder accepts;
+// `Percentile` deliberately only applies where the observations survive.
+pub use moonpool_core::metrics::query::{
+    Aggregator, Max, Mean, MetricQuery, MetricQueryPlan, MetricQueryReport, MetricQueryRow,
+    MetricSnapshot, MetricWindowSummary, Min, Percentile, Provenance, SeriesKey,
+};
 
 // Buggify macros live in the standalone zero-dependency moonpool-buggify
 // crate; re-exported here so existing `moonpool_sim::buggify!` call sites keep

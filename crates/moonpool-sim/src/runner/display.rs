@@ -7,11 +7,12 @@ use std::io::{IsTerminal, Write};
 
 use moonpool_assertions::AssertKind;
 use moonpool_core::metrics::HistogramValue;
+use moonpool_core::metrics::query::{MetricQueryReport, MetricWindowSummary};
 
 use super::report::{
     AssertionDetail, AssertionStatus, BucketSiteSummary, ExplorationReport, SaturationSignal,
-    SimulationReport, f64_to_u64_saturating, fmt_duration, fmt_num, format_recipe, kind_label,
-    kind_sort_order,
+    SimulationReport, f64_to_u64_saturating, fmt_duration, fmt_num, fmt_sim_ms, format_recipe,
+    kind_label, kind_sort_order,
 };
 
 // ---------------------------------------------------------------------------
@@ -295,6 +296,11 @@ fn write_report(w: &mut impl Write, report: &SimulationReport, color: bool) {
         write_app_metrics(w, report, color);
     }
 
+    // === Metric Queries ===
+    if !report.metric_queries.is_empty() {
+        write_metric_queries(w, &report.metric_queries, color);
+    }
+
     // === Per-Seed Metrics ===
     if report.seeds_used.len() > 1 {
         write_seeds(w, report, color);
@@ -545,6 +551,120 @@ fn write_app_metrics(w: &mut impl Write, report: &SimulationReport, color: bool)
             metrics.len() - MAX_METRIC_ROWS,
         );
     }
+}
+
+/// Largest number of per-bucket rows printed for one query before the rest
+/// are elided. A long run bucketized at 60s produces a lot of them; the full
+/// set is always on the report.
+const MAX_QUERY_WINDOWS: usize = 12;
+
+/// Render every registered metric query's across-run summary.
+///
+/// A query that collapsed to a single window per run gets the flat form — one
+/// distribution over runs. One that kept its buckets gets a row per bucket, so
+/// a throughput that decays over simulated time is visible as a shape rather
+/// than as one averaged-away number.
+fn write_metric_queries(w: &mut impl Write, queries: &[MetricQueryReport], color: bool) {
+    section_header(
+        w,
+        &format!("Metric Queries ({})", queries.len()),
+        color,
+        ansi::BOLD_CYAN,
+    );
+
+    let dim = if color { ansi::DIM } else { "" };
+    let bold = if color { ansi::BOLD } else { "" };
+    let reset = if color { ansi::RESET } else { "" };
+
+    for (i, query) in queries.iter().enumerate() {
+        if i > 0 {
+            let _ = writeln!(w);
+        }
+        let _ = writeln!(w, "  {bold}{}{reset}", query.name);
+        let _ = writeln!(
+            w,
+            "    {dim}{}  ·  {} per run  ·  runs: {}{reset}",
+            query.description,
+            query.provenance.label(),
+            fmt_num(u64::try_from(query.runs).unwrap_or(u64::MAX)),
+        );
+
+        if query.windows.is_empty() {
+            let _ = writeln!(w, "    {dim}no series matched{reset}");
+            continue;
+        }
+
+        // One window per run: the whole query is a single distribution over
+        // runs, so print it as one block rather than as a table of one row.
+        if query.windows.len() == 1 {
+            write_query_stats(w, &query.windows[0], "    ", color);
+            continue;
+        }
+
+        for window in query.windows.iter().take(MAX_QUERY_WINDOWS) {
+            let _ = writeln!(w, "    {}", window_label(window));
+            write_query_stats(w, window, "      ", color);
+        }
+        if query.windows.len() > MAX_QUERY_WINDOWS {
+            let _ = writeln!(
+                w,
+                "    {dim}... {} more windows (see SimulationReport::metric_queries){reset}",
+                query.windows.len() - MAX_QUERY_WINDOWS,
+            );
+        }
+    }
+}
+
+/// `[0s,60s)` for a bucket, `eu [0s,60s)` when the query kept groups.
+///
+/// A whole-run value has no meaningful span (both bounds are
+/// `WHOLE_RUN_MS`), so it is labelled by its group alone.
+fn window_label(window: &MetricWindowSummary) -> String {
+    if window.bucket_start_ms == window.bucket_end_ms {
+        return window
+            .group
+            .clone()
+            .unwrap_or_else(|| "whole run".to_owned());
+    }
+    let span = format!(
+        "[{},{})",
+        fmt_sim_ms(window.bucket_start_ms),
+        fmt_sim_ms(window.bucket_end_ms),
+    );
+    match &window.group {
+        Some(group) => format!("{group} {span}"),
+        None => span,
+    }
+}
+
+/// One window's distribution across runs, with the seed behind each extremum.
+///
+/// The percentiles are over runs — each seed contributes one value — which is
+/// why they are printed for a percentile-derived query too: `p95` here names
+/// the 95th-percentile *run*, not a percentile of the observations beneath it.
+fn write_query_stats(w: &mut impl Write, window: &MetricWindowSummary, indent: &str, color: bool) {
+    let dim = if color { ansi::DIM } else { "" };
+    let reset = if color { ansi::RESET } else { "" };
+    let _ = writeln!(
+        w,
+        "{indent}min   {:>14}   {dim}seed={}{reset}",
+        fmt_metric(window.min),
+        window.min_seed,
+    );
+    let _ = writeln!(w, "{indent}mean  {:>14}", fmt_metric(window.mean));
+    let _ = writeln!(
+        w,
+        "{indent}max   {:>14}   {dim}seed={}{reset}",
+        fmt_metric(window.max),
+        window.max_seed,
+    );
+    let _ = writeln!(
+        w,
+        "{indent}{dim}across runs:{reset}  p50 {}  p95 {}  p99 {}",
+        fmt_metric(window.p50),
+        fmt_metric(window.p95),
+        fmt_metric(window.p99),
+    );
 }
 
 /// Format a metric scalar: integral values print without a decimal tail, so a

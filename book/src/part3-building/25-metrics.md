@@ -101,6 +101,114 @@ Series are capped (10,000 points each by default; see
 memory without bound. `SimulationMetrics::dropped_metric_points` is non-zero
 when a series was truncated.
 
+## Asking questions: metric queries
+
+A raw series is data, not an answer. After five hundred seeds the question is
+usually "what throughput did this hold, and which seed was the worst?" — so the
+**runner declares what it wants to know**, and the report answers it.
+
+```rust,ignore
+use std::time::Duration;
+use moonpool_sim::{Mean, MetricQuery, Percentile};
+
+let report = SimulationBuilder::new()
+    .metrics_factory(|_ip| Arc::new(PrometheusSource::default()))
+    .metric(
+        MetricQuery::select("requests_total")
+            .label("operation", "write")
+            .rate()
+            .bucketize(Duration::from_secs(60), Mean)
+            .reduce(Mean)
+            .named("write_throughput"),
+    )
+    .metric(
+        MetricQuery::select("request_latency_seconds")
+            .bucketize(Duration::from_secs(60), Percentile(0.99))
+            .named("write_p99"),
+    )
+    .processes(3, || Box::new(MyNode::new()))
+    .workload(MyWorkload::default())
+    .set_iterations(500)
+    .run();
+```
+
+```text
+━━━ Metric Queries (2) ━━━━━━━━━━━━━━━━━━━━━━━━━━
+  write_throughput
+    requests_total{operation="write"} → rate → 60s buckets (mean) → reduce (mean)  ·  scalar per run  ·  runs: 500
+    min            5,421   seed=9182
+    mean           5,973
+    max            6,102   seed=224
+    across runs:  p50 5,991  p95 6,071  p99 6,094
+```
+
+`min` and `max` name the seed that produced them, so the worst run goes
+straight into `set_debug_seeds(vec![9182])`.
+
+Queries are declared before `run()` and their results travel with the report,
+in `SimulationReport::metric_queries`. Nothing reconstructs them afterwards
+from raw snapshots: the runner already knew what mattered.
+
+### The five operations
+
+| Op | What it does |
+|----|--------------|
+| `select(name)` + `.label(k, v)` | pick series by name and label subset |
+| `.rate()` | monotonic counter → per-second rate, on simulated time |
+| `.bucketize(width, agg)` | regularize into fixed simulated-time buckets |
+| `.map(window, agg)` | rolling window over one series' points |
+| `.reduce(agg)` / `.reduce_by(label, agg)` | combine across series |
+
+The aggregators are `Min`, `Mean`, `Max` and `Percentile(p)` — nothing else.
+
+**Counter semantics are explicit.** `.rate()` is the only place a series is
+read as a counter; `bucketize(_, Mean)` on a raw counter honestly reports the
+mean *cumulative value*, not a throughput. A drop in a counter's value is read
+as a reset, Prometheus style. Because a fresh source is built per iteration,
+every counter is zero at simulated time zero, so the very first increment is
+rated too.
+
+**Series identity is name plus label set**, canonically ordered, so two
+label sets that differ only in insertion order are the same series. Matching is
+by subset: a query naming `operation="write"` also matches a series carrying
+`instance="10.0.1.1"`.
+
+**Moonpool's own metadata stays out of your labels.** Every result row carries
+`seed` (the replayable identity of one iteration) and `run_id` (the identity of
+the whole `run()` invocation) as moonpool-side fields, never injected into the
+application's Prometheus labels.
+
+### Percentiles that mean something
+
+`mean(p99(node_a), p99(node_b))` is not a p99, and `p99(p99(a), p99(b))` is not
+one either. Once observations are collapsed into a percentile, the percentile
+of *that* is a number without a meaning.
+
+The builder enforces this at compile time. Each stage tracks what its values
+are, and `Percentile` only applies where the individual observations survive:
+
+```rust,ignore
+// Compiles: the raw histogram observations are still there.
+MetricQuery::select("request_latency_seconds")
+    .bucketize(Duration::from_secs(60), Percentile(0.99))
+    .named("p99");
+
+// Does NOT compile: p99 of per-bucket p99s.
+MetricQuery::select("request_latency_seconds")
+    .bucketize(Duration::from_secs(60), Percentile(0.99))
+    .reduce(Percentile(0.99))
+    .named("nonsense");
+```
+
+`Min`, `Mean` and `Max` apply anywhere — "the mean of each node's p99" is a
+useful number as long as nobody calls it a p99, which is why the report prints
+each query's provenance (`observations`, `scalar` or `percentile-derived`).
+
+The percentiles in the summary block are a different dimension: they are taken
+*across runs*, where every seed contributes one equally-weighted value. `p95`
+there names the 95th-percentile run, which is why the report labels it
+`across runs`.
+
 ## Timing on the simulated clock
 
 Use `start_timer` from this crate, not `prometheus`' own:
