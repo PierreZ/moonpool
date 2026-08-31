@@ -195,6 +195,8 @@ Each per-operation latency field above is a `LatencyDistribution`, not a plain r
 
 `default()` and `fast_local()` keep every field `Uniform`, so behavior is unchanged unless you opt in. `random_for_seed()` mixes all three shapes per field for chaos seeds. The same `LatencyDistribution` type configures storage `read_latency`, `write_latency`, and `sync_latency`.
 
+To replace the hand-picked defaults with values measured on a real machine, see [Calibrating Against a Real Machine](./07-calibration.md).
+
 Every sampled delay enters the global `Scheduler<Event>`. Same-time events keep
 their insertion order through stable schedule IDs, and dropping a delayed
 network future cancels its live schedule.

@@ -25,6 +25,7 @@ usually need.
 
   moonpool-sim-examples  (raw TCP, axum, tonic, topology)
   moonpool-wasm-demo      (browser simulation over raw TCP)
+  moonpool-calibrate      (measures the real host; depends on no moonpool crate)
   xtask                   (simulation command runner)
 ```
 
@@ -144,6 +145,16 @@ dependencies.
 
 A single-seed raw TCP ping/pong simulation compiled to wasm. It exports a JSON
 timeline consumed by the browser animation embedded in the book.
+
+### moonpool-calibrate
+
+A calibration CLI that measures the real host and prints
+`LatencyDistribution` constants for moonpool's storage and network latency
+knobs. Uniquely in this workspace it depends on **no moonpool crate at
+runtime**: the measurement path is raw `std::fs`, `std::net`, and
+`std::time::Instant`, because measuring through the providers would measure the
+simulator rather than the machine. See
+[Calibrating Against a Real Machine](./07-calibration.md).
 
 ### xtask
 

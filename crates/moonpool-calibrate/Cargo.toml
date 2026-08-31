@@ -1,0 +1,29 @@
+[package]
+name = "moonpool-calibrate"
+version.workspace = true
+publish = false
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Measure real storage and network latency, emit moonpool LatencyDistribution constants"
+readme = "README.md"
+
+# Deliberately minimal. The measurement path is raw std (std::fs, std::net,
+# std::time::Instant) so that what is measured is the *real* host, not a
+# simulation of it: no moonpool crate is a runtime dependency here. hdrhistogram
+# keeps the percentile accounting bounded instead of retaining every sample.
+[dependencies]
+hdrhistogram = { version = "7.6", default-features = false }
+
+# Only to type-check that the generated constants match the real moonpool API
+# (tests/generated_api.rs). Never used on the measurement path.
+[dev-dependencies]
+moonpool = { path = "../moonpool", version = "0.8.0" }
+
+[[bin]]
+name = "moonpool-calibrate"
+path = "src/main.rs"
+
+[lints]
+workspace = true
