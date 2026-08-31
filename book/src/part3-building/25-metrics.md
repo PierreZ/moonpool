@@ -101,6 +101,177 @@ Series are capped (10,000 points each by default; see
 memory without bound. `SimulationMetrics::dropped_metric_points` is non-zero
 when a series was truncated.
 
+## Asking questions: metric queries
+
+A raw series is data, not an answer. After five hundred seeds the question is
+usually "what throughput did this hold, and which seed was the worst?" — so the
+**runner declares what it wants to know**, and the report answers it.
+
+```rust,ignore
+use std::time::Duration;
+use moonpool_sim::{Fill, Mean, MetricQuery, Percentile};
+
+let report = SimulationBuilder::new()
+    .metrics_factory(|_ip| Arc::new(PrometheusSource::default()))
+    .metric(
+        MetricQuery::select("requests_total")
+            .label("operation", "write")
+            .rate()
+            .bucketize(Duration::from_secs(60), Mean)
+            // A minute with no requests is zero per second, not missing data.
+            .fill(Fill::Value(0.0))
+            .reduce(Mean)
+            .named("write_throughput"),
+    )
+    .metric(
+        MetricQuery::select("request_latency_seconds")
+            .bucketize(Duration::from_secs(60), Percentile(0.99))
+            .named("write_p99"),
+    )
+    .processes(3, || Box::new(MyNode::new()))
+    .workload(MyWorkload::default())
+    .set_iterations(500)
+    .run();
+```
+
+```text
+━━━ Metric Queries (2) ━━━━━━━━━━━━━━━━━━━━━━━━━━
+  write_throughput
+    requests_total{operation="write"} → rate → 60s buckets (mean) → reduce (mean)  ·  scalar per run  ·  runs: 500
+    min            5,421   seed=9182
+    mean           5,973
+    max            6,102   seed=224
+    across runs:  p50 5,991  p95 6,071  p99 6,094
+```
+
+`min` and `max` name the seed that produced them, so the worst run goes
+straight into `set_debug_seeds(vec![9182])`.
+
+Queries are declared before `run()` and their results travel with the report,
+in `SimulationReport::metric_queries`. Nothing reconstructs them afterwards
+from raw snapshots: the runner already knew what mattered.
+
+### The five operations
+
+| Op | What it does |
+|----|--------------|
+| `select(name)` + `.label(k, v)` | pick series by name and label subset |
+| `.rate()` | monotonic counter → per-second rate, on simulated time |
+| `.bucketize(width, agg)` | regularize into fixed simulated-time buckets |
+| `.fill(policy)` | repeat an existing value into the empty buckets |
+| `.interpolate()` | compute the empty buckets from their neighbours |
+| `.map(window, agg)` | rolling window over one series' points |
+| `.reduce(agg)` / `.reduce_by(label, agg)` | combine across series |
+
+The aggregators are `Min`, `Mean`, `Max` and `Percentile(p)` — nothing else.
+
+**Counter semantics are explicit.** `.rate()` is the only place a series is
+read as a counter; `bucketize(_, Mean)` on a raw counter honestly reports the
+mean *cumulative value*, not a throughput. A drop in a counter's value is read
+as a reset, Prometheus style. Because a fresh source is built per iteration,
+every counter is zero at simulated time zero, so the very first increment is
+rated too.
+
+### Empty buckets
+
+`bucketize` omits a bucket nothing landed in, because a gap and a zero are
+different facts: a workload that stopped reporting is not a workload reporting
+zero. Two ops say which one this metric means, split the way Warp 10 splits
+them — `.fill(policy)` **repeats a value the series already has**, while
+`.interpolate()` **computes one it never had**:
+
+| Op | Gives empty buckets | Leaves empty |
+|----|---------------------|--------------|
+| `.fill(Fill::Previous)` | the last known value | leading gaps |
+| `.fill(Fill::Next)` | the next known value | trailing gaps |
+| `.fill(Fill::Value(v))` | `v` — no neighbour needed | nothing |
+| `.interpolate()` | a point on the line between the two neighbours | leading and trailing gaps |
+
+Reach for a fill when the quantity holds its value between observations (or is
+simply zero when nothing happened), and `.interpolate()` when it moves
+continuously — a queue depth, a replication lag.
+
+```text
+bucket                     0 |    1 |    2 |    3 |    4
+no fill                   10 |    - |    - |   40 |    -
+.fill(Fill::Previous)     10 |   10 |   10 |   40 |   40
+.fill(Fill::Next)         10 |   40 |   40 |   40 |    -
+.fill(Fill::Value(0.0))   10 |    0 |    0 |   40 |    0
+.interpolate()            10 |   20 |   30 |   40 |    -
+```
+
+They compose, in call order: `.interpolate().fill(Fill::Value(0.0))` draws the
+line through the interior gaps and zeroes the ends interpolation cannot reach.
+
+Either way the grid runs from bucket zero to the bucket holding the run's end,
+so a workload that went quiet halfway through gets buckets for the silence
+instead of the series just stopping.
+
+That matters for more than tidiness. Without a fill, a seed's bucket set
+depends on when *that* seed happened to be busy, so the across-run summary
+splits one window into several — each with a fraction of the runs in it, and
+`min`/`max` no longer comparing like with like:
+
+```text
+# unfilled: two seeds busy in different minutes
+[0s,60s)     runs: 1
+[120s,180s)  runs: 1
+
+# Fill::Value(0.0): one grid, every window sees every seed
+[0s,60s)     runs: 2   min 0  max 5
+[60s,120s)   runs: 2   min 0  max 0
+[120s,180s)  runs: 2   min 0  max 5
+```
+
+Neither op collapses nor restores a distribution, so both leave the stage — and
+with it whether `Percentile` still applies — unchanged. Both read the
+*recorded* buckets only, never the ones they just synthesized, so a carried
+value is the last real observation and a run of interpolated gaps is one
+straight line rather than a curve that drifts. A series that recorded nothing
+at all stays empty: a policy alone must not conjure a metric the run never
+touched.
+
+**Series identity is name plus label set**, canonically ordered, so two
+label sets that differ only in insertion order are the same series. Matching is
+by subset: a query naming `operation="write"` also matches a series carrying
+`instance="10.0.1.1"`.
+
+**Moonpool's own metadata stays out of your labels.** Every result row carries
+`seed` (the replayable identity of one iteration) and `run_id` (the identity of
+the whole `run()` invocation) as moonpool-side fields, never injected into the
+application's Prometheus labels.
+
+### Percentiles that mean something
+
+`mean(p99(node_a), p99(node_b))` is not a p99, and `p99(p99(a), p99(b))` is not
+one either. Once observations are collapsed into a percentile, the percentile
+of *that* is a number without a meaning.
+
+The builder enforces this at compile time. Each stage tracks what its values
+are, and `Percentile` only applies where the individual observations survive:
+
+```rust,ignore
+// Compiles: the raw histogram observations are still there.
+MetricQuery::select("request_latency_seconds")
+    .bucketize(Duration::from_secs(60), Percentile(0.99))
+    .named("p99");
+
+// Does NOT compile: p99 of per-bucket p99s.
+MetricQuery::select("request_latency_seconds")
+    .bucketize(Duration::from_secs(60), Percentile(0.99))
+    .reduce(Percentile(0.99))
+    .named("nonsense");
+```
+
+`Min`, `Mean` and `Max` apply anywhere — "the mean of each node's p99" is a
+useful number as long as nobody calls it a p99, which is why the report prints
+each query's provenance (`observations`, `scalar` or `percentile-derived`).
+
+The percentiles in the summary block are a different dimension: they are taken
+*across runs*, where every seed contributes one equally-weighted value. `p95`
+there names the 95th-percentile run, which is why the report labels it
+`across runs`.
+
 ## Timing on the simulated clock
 
 Use `start_timer` from this crate, not `prometheus`' own:

@@ -5,7 +5,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_prometheus::PrometheusSource;
-use moonpool_sim::{SimContext, SimulationBuilder, SimulationResult, TimeProvider, Workload};
+use moonpool_sim::{
+    Mean, MetricQuery, Percentile, SimContext, SimulationBuilder, SimulationResult, TimeProvider,
+    Workload,
+};
 
 /// Drives a fixed number of "requests", recording each one the way production
 /// code would: a counter, a gauge, and a latency histogram.
@@ -166,4 +169,67 @@ fn series_is_identical_across_replays_of_a_seed() {
             "series {key} must replay bit-for-bit from the same seed"
         );
     }
+}
+
+/// The same workload, plus two metric queries declared on the runner: a
+/// counter read as a throughput and the latency histogram's tail.
+fn run_queried(requests: u64, seeds: &[u64]) -> moonpool_sim::SimulationReport {
+    SimulationBuilder::new()
+        .set_debug_seeds(seeds.to_vec())
+        .set_iterations(seeds.len())
+        .metrics_factory(|_ip| Arc::new(PrometheusSource::default()))
+        .metric(
+            MetricQuery::select("requests_total")
+                .rate()
+                .bucketize(Duration::from_mins(1), Mean)
+                .reduce(Mean)
+                .named("write_throughput"),
+        )
+        .metric(
+            MetricQuery::select("request_latency_seconds")
+                .reduce(Percentile(0.99))
+                .named("write_p99"),
+        )
+        .workload(MeteredWorkload { requests })
+        .run()
+}
+
+#[test]
+fn queries_select_the_series_a_prometheus_source_recorded() {
+    let report = run_queried(5, &[1, 2, 3]);
+    assert_eq!(report.failed_runs, 0);
+
+    let by_name = |name: &str| {
+        report
+            .metric_queries
+            .iter()
+            .find(|q| q.name == name)
+            .unwrap_or_else(|| panic!("{name} missing: {:?}", report.metric_queries))
+    };
+
+    // The instrumented handle records `requests_total`; the runner splices in
+    // the `instance` label, and selection by bare metric name still finds it.
+    let throughput = by_name("write_throughput");
+    assert_eq!(throughput.runs, 3);
+    assert_eq!(throughput.windows.len(), 1);
+    // 5 requests, 10ms of simulated sleep each: 100 per simulated second.
+    assert!(
+        (throughput.windows[0].mean - 100.0).abs() < 1e-6,
+        "expected 100 req/s, got {}",
+        throughput.windows[0].mean
+    );
+
+    // A histogram records one point per observation, so the p99 is taken over
+    // the real distribution rather than interpolated from bucket counts.
+    let tail = by_name("write_p99");
+    assert_eq!(tail.provenance, moonpool_sim::Provenance::Quantile);
+    assert!(
+        (tail.windows[0].mean - 0.010).abs() < 1e-9,
+        "every request took 10ms of simulated time, got {}",
+        tail.windows[0].mean
+    );
+    assert!(
+        tail.rows.iter().all(|row| row.run_id == report.run_id),
+        "rows carry the run id"
+    );
 }

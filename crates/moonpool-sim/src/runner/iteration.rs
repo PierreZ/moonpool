@@ -64,6 +64,18 @@ impl IterationManager {
         seed
     }
 
+    /// Identity of this whole `run()` invocation.
+    ///
+    /// The base seed every generated iteration seed is derived from — fresh
+    /// per invocation (wall-clock entropy) even when the caller pins explicit
+    /// debug seeds, which is exactly what distinguishes one execution from
+    /// another. Metric query results carry it alongside the per-iteration
+    /// seed: the seed says *what* to replay, the run id says *which run* the
+    /// number came from.
+    pub(crate) fn run_id(&self) -> u64 {
+        self.base_seed
+    }
+
     /// Return the number of iterations started so far.
     pub(crate) fn current_iteration(&self) -> usize {
         self.iteration_count

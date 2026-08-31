@@ -54,6 +54,12 @@ select only `tokio`, then add `hyper` if it speaks HTTP or gRPC.
 The Tokio implementations provide real production I/O. Simulation supplies
 deterministic implementations of the same traits.
 
+It also holds the registry-agnostic metrics vocabulary (`MetricsSource`,
+`MetricSample`, `SeriesRecorder`) and, in `metrics::query`, the typed
+SELECT / RATE / BUCKETIZE / MAP / REDUCE model a runner uses to declare what it
+wants summarized. Both are pure std and wasm-clean. See
+[Application Metrics](../part3-building/25-metrics.md).
+
 ### moonpool-assertions
 
 **Role**: Antithesis-style assertion accounting with no dependencies.

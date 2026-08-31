@@ -21,10 +21,18 @@
 //! noise and vary run to run. Record durations from the simulated clock
 //! (`ctx.time()`) if you want a metric that is stable across replays of a seed.
 //!
+//! # Asking questions of the recorded series
+//!
+//! [`query`] turns the points a run recorded into numbers a report can print:
+//! a small typed SELECT / RATE / BUCKETIZE / FILL / MAP / REDUCE model,
+//! evaluated against one run's [`query::MetricSnapshot`].
+//!
 //! Adapters must emit samples in a deterministic order — sort by
 //! [`MetricSample::sort_key`] if the backing registry does not already
 //! guarantee one — so that two replays of the same seed produce byte-identical
 //! reports.
+
+pub mod query;
 
 /// The value carried by a single metric sample.
 ///
