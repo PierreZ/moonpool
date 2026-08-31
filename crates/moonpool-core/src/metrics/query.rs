@@ -14,7 +14,8 @@
 //! | `SELECT` | pick series by metric name and label matchers |
 //! | `RATE` | monotonic counter → per-second rate, on simulated time |
 //! | `BUCKETIZE` | regularize points into fixed simulated-time buckets |
-//! | `FILL` | give the empty buckets a value, Warp 10 style |
+//! | `FILL` | repeat an existing value into the empty buckets |
+//! | `INTERPOLATE` | compute the empty buckets from their neighbours |
 //! | `MAP` | rolling window over one series' points |
 //! | `REDUCE` | combine across series, optionally grouped by a label |
 //!
@@ -406,15 +407,19 @@ fn trim_float(v: f64) -> String {
     }
 }
 
-/// What to put in a bucket that no observation landed in.
+/// Which existing value to repeat into a bucket that no observation landed in.
 ///
 /// [`bucketize`](MetricQuery::bucketize) omits empty buckets, because a gap
 /// and a zero are different facts: a workload that stopped reporting is not a
 /// workload reporting zero. [`fill`](MetricQuery::fill) is where you say which
 /// of the two this metric means.
 ///
-/// The names and the edge behaviour follow Warp 10's `FILLPREVIOUS`,
-/// `FILLNEXT`, `FILLVALUE` and `INTERPOLATE`: carrying a value forward cannot
+/// Every policy here *repeats* a value that is already there — which is the
+/// line Warp 10 draws between its `FILLPREVIOUS` / `FILLNEXT` / `FILLVALUE`
+/// and its separate `INTERPOLATE`. To compute a new value from the shape of
+/// the series instead, use [`interpolate`](MetricQuery::interpolate).
+///
+/// The edge behaviour follows Warp 10 too: carrying a value forward cannot
 /// invent one before the series started, and carrying backward cannot invent
 /// one after it ended.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -424,9 +429,6 @@ pub enum Fill {
     Previous,
     /// Carry the next known value backward. Trailing gaps stay empty.
     Next,
-    /// Linearly interpolate between the surrounding known values. Only
-    /// interior gaps are filled: both neighbours must exist.
-    Interpolate,
     /// A constant. `Fill::Value(0.0)` is the honest answer for a rate — no
     /// requests in that minute really is zero per second — and the only policy
     /// that fills leading and trailing gaps, since it needs no neighbour.
@@ -440,7 +442,6 @@ impl Fill {
         match self {
             Self::Previous => "previous".to_owned(),
             Self::Next => "next".to_owned(),
-            Self::Interpolate => "interpolate".to_owned(),
             Self::Value(v) => trim_float(v),
         }
     }
@@ -602,6 +603,7 @@ enum QueryOp {
     Map { window: usize, agg: Aggregator },
     Reduce { by: Option<String>, agg: Aggregator },
     Fill { policy: Fill },
+    Interpolate,
 }
 
 /// A metric query under construction.
@@ -753,7 +755,8 @@ impl<S: Stage> MetricQuery<S> {
         self.retag()
     }
 
-    /// Give every empty bucket a value, so the series has no holes.
+    /// Repeat an existing value into every empty bucket, so the series has no
+    /// holes.
     ///
     /// Two things go wrong with holes. A gap reads as "no data" where the
     /// metric may well mean "zero", and — because a bucket set that depends on
@@ -777,6 +780,10 @@ impl<S: Stage> MetricQuery<S> {
     ///     .named("write_throughput");
     /// ```
     ///
+    /// This only ever repeats a value the series already has. To compute one
+    /// from the slope between the surrounding buckets, use
+    /// [`interpolate`](Self::interpolate).
+    ///
     /// Filling neither collapses nor un-collapses anything, so the stage — and
     /// with it whether [`Percentile`] still applies — is unchanged. Without a
     /// preceding [`bucketize`](Self::bucketize) there is no grid and so no
@@ -784,6 +791,39 @@ impl<S: Stage> MetricQuery<S> {
     #[must_use]
     pub fn fill(mut self, policy: Fill) -> Self {
         self.ops.push(QueryOp::Fill { policy });
+        self
+    }
+
+    /// Give every empty bucket a value on the straight line between its two
+    /// recorded neighbours.
+    ///
+    /// Separate from [`fill`](Self::fill), as `INTERPOLATE` is in Warp 10,
+    /// because it is a different kind of operation: a fill repeats a value the
+    /// series already has, while this computes one it never had. Use it for a
+    /// quantity that moves continuously between observations — a queue depth,
+    /// a replication lag — and a fill for one that does not.
+    ///
+    /// Only interior gaps are filled: interpolation needs a neighbour on each
+    /// side, so a leading or trailing gap stays empty. Neighbours are the
+    /// *recorded* buckets, never previously-interpolated ones, so a run of
+    /// gaps is one straight line rather than a curve that drifts.
+    ///
+    /// ```
+    /// # use std::time::Duration;
+    /// # use moonpool_core::metrics::query::{Fill, Mean, MetricQuery};
+    /// MetricQuery::select("replication_lag_seconds")
+    ///     .bucketize(Duration::from_secs(60), Mean)
+    ///     .interpolate()
+    ///     // Interpolation cannot reach past the ends; a fill can.
+    ///     .fill(Fill::Value(0.0))
+    ///     .named("lag");
+    /// ```
+    ///
+    /// Like a fill, this changes no stage, and does nothing without a
+    /// preceding [`bucketize`](Self::bucketize).
+    #[must_use]
+    pub fn interpolate(mut self) -> Self {
+        self.ops.push(QueryOp::Interpolate);
         self
     }
 
@@ -856,6 +896,7 @@ impl MetricQueryPlan {
                     format!("reduce by {label} ({})", agg.label())
                 }
                 QueryOp::Fill { policy } => format!("fill ({})", policy.label()),
+                QueryOp::Interpolate => "interpolate".to_owned(),
             }))
             .collect::<Vec<_>>()
             .join(" → ")
@@ -996,6 +1037,13 @@ impl EvalState {
                 if let Some(every_ms) = self.grid {
                     for s in &mut self.series {
                         s.windows = fill_gaps(&s.windows, every_ms, self.end_time_ms, *policy);
+                    }
+                }
+            }
+            QueryOp::Interpolate => {
+                if let Some(every_ms) = self.grid {
+                    for s in &mut self.series {
+                        s.windows = interpolate_gaps(&s.windows, every_ms, self.end_time_ms);
                     }
                 }
             }
@@ -1149,13 +1197,23 @@ fn bucketize(windows: &[Window], every_ms: u64, agg: Aggregator) -> Vec<Window> 
         .collect()
 }
 
-/// Give every empty bucket in the grid a value, per `policy`.
+/// Walk the whole bucket grid, giving each empty bucket whatever `value_for`
+/// returns for it — `None` leaving it empty.
 ///
 /// The grid runs from bucket zero to whichever is later: the bucket holding
 /// the run's end, or the last bucket that actually has data. Bucket zero
 /// rather than the series' first bucket, so two seeds that started producing
 /// at different moments still land on the same windows.
-fn fill_gaps(windows: &[Window], every_ms: u64, end_time_ms: u64, policy: Fill) -> Vec<Window> {
+///
+/// `value_for` is handed the *recorded* buckets only, never the ones this walk
+/// has already synthesized, so neither a carried value nor an interpolated one
+/// is ever computed from another synthetic value.
+fn regrid(
+    windows: &[Window],
+    every_ms: u64,
+    end_time_ms: u64,
+    value_for: impl Fn(&BTreeMap<u64, f64>, u64) -> Option<f64>,
+) -> Vec<Window> {
     let known: BTreeMap<u64, f64> = windows
         .iter()
         .map(|w| (w.start_ms / every_ms, w.value))
@@ -1172,7 +1230,7 @@ fn fill_gaps(windows: &[Window], every_ms: u64, end_time_ms: u64, policy: Fill) 
         .filter_map(|index| {
             let value = match known.get(&index) {
                 Some(value) => Some(*value),
-                None => fill_value(&known, index, policy),
+                None => value_for(&known, index),
             }?;
             let start_ms = index.saturating_mul(every_ms);
             Some(Window {
@@ -1184,28 +1242,37 @@ fn fill_gaps(windows: &[Window], every_ms: u64, end_time_ms: u64, policy: Fill) 
         .collect()
 }
 
-/// The value `policy` puts in empty bucket `index`, or `None` when the policy
-/// has no neighbour to work from — a leading gap for [`Fill::Previous`], a
-/// trailing one for [`Fill::Next`], either for [`Fill::Interpolate`].
+/// Repeat an existing value into every empty bucket, per `policy`.
 ///
-/// Neighbours are always looked up among the *recorded* buckets, never among
-/// already-filled ones, so carrying a value forward carries the last real
-/// observation rather than a copy of a copy.
-fn fill_value(known: &BTreeMap<u64, f64>, index: u64, policy: Fill) -> Option<f64> {
-    let previous = || known.range(..index).next_back().map(|(i, v)| (*i, *v));
-    let next = || known.range(index..).next().map(|(i, v)| (*i, *v));
-    match policy {
-        Fill::Value(value) => Some(value),
-        Fill::Previous => previous().map(|(_, v)| v),
-        Fill::Next => next().map(|(_, v)| v),
-        Fill::Interpolate => {
-            let (before, before_value) = previous()?;
-            let (after, after_value) = next()?;
-            let span = u32::try_from(after - before).map_or(f64::INFINITY, f64::from);
-            let offset = u32::try_from(index - before).map_or(f64::INFINITY, f64::from);
-            Some(before_value + (after_value - before_value) * (offset / span))
-        }
-    }
+/// A policy with no neighbour to repeat leaves the bucket empty: a leading gap
+/// for [`Fill::Previous`], a trailing one for [`Fill::Next`].
+/// [`Fill::Value`] needs no neighbour and so fills the whole grid.
+fn fill_gaps(windows: &[Window], every_ms: u64, end_time_ms: u64, policy: Fill) -> Vec<Window> {
+    regrid(
+        windows,
+        every_ms,
+        end_time_ms,
+        |known, index| match policy {
+            Fill::Value(value) => Some(value),
+            Fill::Previous => known.range(..index).next_back().map(|(_, v)| *v),
+            Fill::Next => known.range(index..).next().map(|(_, v)| *v),
+        },
+    )
+}
+
+/// Put every empty bucket on the straight line between its two recorded
+/// neighbours.
+///
+/// Interior gaps only: a bucket with no recorded neighbour on one side has no
+/// line to sit on and stays empty.
+fn interpolate_gaps(windows: &[Window], every_ms: u64, end_time_ms: u64) -> Vec<Window> {
+    regrid(windows, every_ms, end_time_ms, |known, index| {
+        let (&before, &before_value) = known.range(..index).next_back()?;
+        let (&after, &after_value) = known.range(index..).next()?;
+        let span = u32::try_from(after - before).map_or(f64::INFINITY, f64::from);
+        let offset = u32::try_from(index - before).map_or(f64::INFINITY, f64::from);
+        Some(before_value + (after_value - before_value) * (offset / span))
+    })
 }
 
 /// Trailing rolling window of `window` consecutive points.
@@ -1703,11 +1770,16 @@ mod tests {
     }
 
     fn filled(policy: Fill) -> Vec<(u64, f64)> {
-        MetricQuery::select("v")
-            .bucketize(Duration::from_mins(1), Mean)
-            .fill(policy)
-            .named("q")
-            .evaluate(&gapped(), 1, 1)
+        buckets_of(
+            &MetricQuery::select("v")
+                .bucketize(Duration::from_mins(1), Mean)
+                .fill(policy)
+                .named("q"),
+        )
+    }
+
+    fn buckets_of(plan: &MetricQueryPlan) -> Vec<(u64, f64)> {
+        plan.evaluate(&gapped(), 1, 1)
             .into_iter()
             .map(|row| (row.bucket_start_ms / 60_000, row.value))
             .collect()
@@ -1771,11 +1843,33 @@ mod tests {
     }
 
     #[test]
-    fn interpolate_fills_only_between_known_values() {
+    fn interpolate_computes_only_between_known_values() {
         assert_eq!(
-            filled(Fill::Interpolate),
+            buckets_of(
+                &MetricQuery::select("v")
+                    .bucketize(Duration::from_mins(1), Mean)
+                    .interpolate()
+                    .named("q")
+            ),
             vec![(0, 10.0), (1, 20.0), (2, 30.0), (3, 40.0)],
             "linear between bucket 0 and bucket 3; nothing to interpolate after"
+        );
+    }
+
+    #[test]
+    fn interpolate_and_fill_compose_to_cover_the_ends() {
+        // Interpolation cannot reach past the last recorded bucket, so the
+        // trailing gap needs a fill — and the two ops apply in call order.
+        assert_eq!(
+            buckets_of(
+                &MetricQuery::select("v")
+                    .bucketize(Duration::from_mins(1), Mean)
+                    .interpolate()
+                    .fill(Fill::Value(0.0))
+                    .named("q")
+            ),
+            vec![(0, 10.0), (1, 20.0), (2, 30.0), (3, 40.0), (4, 0.0)],
+            "interior gaps interpolated, the trailing one zero-filled"
         );
     }
 
@@ -1787,7 +1881,7 @@ mod tests {
         let snap = snapshot(&[("v", &[(0, 0.0), (240_000, 100.0)])], 240_000);
         let values: Vec<f64> = MetricQuery::select("v")
             .bucketize(Duration::from_mins(1), Mean)
-            .fill(Fill::Interpolate)
+            .interpolate()
             .named("q")
             .evaluate(&snap, 1, 1)
             .into_iter()
@@ -1815,7 +1909,7 @@ mod tests {
     }
 
     #[test]
-    fn filling_a_series_that_never_reported_stays_empty() {
+    fn a_series_that_never_reported_stays_empty() {
         // No observations at all: there is nothing to have holes in, and a
         // policy alone must not conjure a series the run never touched.
         let snap = snapshot(&[("other", &[(0, 1.0)])], 120_000);
@@ -1828,29 +1922,35 @@ mod tests {
     }
 
     #[test]
-    fn fill_without_bucketize_does_nothing() {
+    fn fill_and_interpolate_without_bucketize_do_nothing() {
         let snap = snapshot(&[("v", &[(0, 1.0), (5_000, 2.0)])], 10_000);
-        let rows = MetricQuery::select("v")
-            .fill(Fill::Value(0.0))
-            .named("q")
-            .evaluate(&snap, 1, 1);
-        assert_eq!(rows.len(), 2, "no grid means no empty buckets to fill");
+        for plan in [
+            MetricQuery::select("v").fill(Fill::Value(0.0)).named("q"),
+            MetricQuery::select("v").interpolate().named("q"),
+        ] {
+            assert_eq!(
+                plan.evaluate(&snap, 1, 1).len(),
+                2,
+                "no grid means no empty buckets to give a value to"
+            );
+        }
     }
 
     #[test]
-    fn fill_preserves_the_stage_so_percentiles_stay_gated() {
+    fn fill_and_interpolate_preserve_the_stage_so_percentiles_stay_gated() {
         let quantile = MetricQuery::select("v")
             .bucketize(Duration::from_mins(1), Percentile(0.99))
+            .interpolate()
             .fill(Fill::Previous)
             .named("q");
         assert_eq!(
             quantile.provenance(),
             Provenance::Quantile,
-            "filling neither collapses nor restores a distribution"
+            "neither op collapses nor restores a distribution"
         );
         assert_eq!(
             quantile.description(),
-            "v → 60s buckets (p99) → fill (previous)"
+            "v → 60s buckets (p99) → interpolate → fill (previous)"
         );
     }
 

@@ -158,7 +158,8 @@ from raw snapshots: the runner already knew what mattered.
 | `select(name)` + `.label(k, v)` | pick series by name and label subset |
 | `.rate()` | monotonic counter → per-second rate, on simulated time |
 | `.bucketize(width, agg)` | regularize into fixed simulated-time buckets |
-| `.fill(policy)` | give the empty buckets a value |
+| `.fill(policy)` | repeat an existing value into the empty buckets |
+| `.interpolate()` | compute the empty buckets from their neighbours |
 | `.map(window, agg)` | rolling window over one series' points |
 | `.reduce(agg)` / `.reduce_by(label, agg)` | combine across series |
 
@@ -175,19 +176,36 @@ rated too.
 
 `bucketize` omits a bucket nothing landed in, because a gap and a zero are
 different facts: a workload that stopped reporting is not a workload reporting
-zero. `.fill(policy)` is where you say which one this metric means, with the
-four Warp 10 policies:
+zero. Two ops say which one this metric means, split the way Warp 10 splits
+them — `.fill(policy)` **repeats a value the series already has**, while
+`.interpolate()` **computes one it never had**:
 
-| Policy | Fills | Leaves empty |
-|--------|-------|--------------|
-| `Fill::Previous` | interior and trailing gaps, with the last known value | leading gaps |
-| `Fill::Next` | interior and leading gaps, with the next known value | trailing gaps |
-| `Fill::Interpolate` | interior gaps, linearly between neighbours | leading and trailing gaps |
-| `Fill::Value(v)` | every gap — it needs no neighbour | nothing |
+| Op | Gives empty buckets | Leaves empty |
+|----|---------------------|--------------|
+| `.fill(Fill::Previous)` | the last known value | leading gaps |
+| `.fill(Fill::Next)` | the next known value | trailing gaps |
+| `.fill(Fill::Value(v))` | `v` — no neighbour needed | nothing |
+| `.interpolate()` | a point on the line between the two neighbours | leading and trailing gaps |
 
-The grid runs from bucket zero to the bucket holding the run's end, so a
-workload that went quiet halfway through gets buckets for the silence instead
-of the series just stopping.
+Reach for a fill when the quantity holds its value between observations (or is
+simply zero when nothing happened), and `.interpolate()` when it moves
+continuously — a queue depth, a replication lag.
+
+```text
+bucket                     0 |    1 |    2 |    3 |    4
+no fill                   10 |    - |    - |   40 |    -
+.fill(Fill::Previous)     10 |   10 |   10 |   40 |   40
+.fill(Fill::Next)         10 |   40 |   40 |   40 |    -
+.fill(Fill::Value(0.0))   10 |    0 |    0 |   40 |    0
+.interpolate()            10 |   20 |   30 |   40 |    -
+```
+
+They compose, in call order: `.interpolate().fill(Fill::Value(0.0))` draws the
+line through the interior gaps and zeroes the ends interpolation cannot reach.
+
+Either way the grid runs from bucket zero to the bucket holding the run's end,
+so a workload that went quiet halfway through gets buckets for the silence
+instead of the series just stopping.
 
 That matters for more than tidiness. Without a fill, a seed's bucket set
 depends on when *that* seed happened to be busy, so the across-run summary
@@ -205,10 +223,13 @@ splits one window into several — each with a fraction of the runs in it, and
 [120s,180s)  runs: 2   min 0  max 5
 ```
 
-Filling neither collapses nor restores a distribution, so it leaves the stage —
-and with it whether `Percentile` still applies — unchanged. A series that
-recorded nothing at all stays empty: a policy alone must not conjure a metric
-the run never touched.
+Neither op collapses nor restores a distribution, so both leave the stage — and
+with it whether `Percentile` still applies — unchanged. Both read the
+*recorded* buckets only, never the ones they just synthesized, so a carried
+value is the last real observation and a run of interpolated gaps is one
+straight line rather than a curve that drifts. A series that recorded nothing
+at all stays empty: a policy alone must not conjure a metric the run never
+touched.
 
 **Series identity is name plus label set**, canonically ordered, so two
 label sets that differ only in insertion order are the same series. Matching is
