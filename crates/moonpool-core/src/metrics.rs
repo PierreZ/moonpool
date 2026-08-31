@@ -24,8 +24,8 @@
 //! # Asking questions of the recorded series
 //!
 //! [`query`] turns the points a run recorded into numbers a report can print:
-//! a small typed SELECT / RATE / BUCKETIZE / MAP / REDUCE model, evaluated
-//! against one run's [`query::MetricSnapshot`].
+//! a small typed SELECT / RATE / BUCKETIZE / FILL / MAP / REDUCE model,
+//! evaluated against one run's [`query::MetricSnapshot`].
 //!
 //! Adapters must emit samples in a deterministic order — sort by
 //! [`MetricSample::sort_key`] if the backing registry does not already

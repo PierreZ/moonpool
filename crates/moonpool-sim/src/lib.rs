@@ -161,8 +161,8 @@ pub use moonpool_core::metrics::{
 // `Max` and `Percentile` are the aggregator markers the builder accepts;
 // `Percentile` deliberately only applies where the observations survive.
 pub use moonpool_core::metrics::query::{
-    Aggregator, Max, Mean, MetricQuery, MetricQueryPlan, MetricQueryReport, MetricQueryRow,
-    MetricSnapshot, MetricWindowSummary, Min, Percentile, Provenance, SeriesKey,
+    Aggregator, Fill, Max, Mean, MetricQuery, MetricQueryPlan, MetricQueryReport, MetricQueryRow,
+    MetricSnapshot, MetricWindowSummary, Min, Percentile, Provenance, SeriesKey, WHOLE_RUN_MS,
 };
 
 // Buggify macros live in the standalone zero-dependency moonpool-buggify

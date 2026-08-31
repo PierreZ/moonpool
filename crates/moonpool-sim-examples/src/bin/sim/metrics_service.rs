@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use moonpool_prometheus::PrometheusSource;
-use moonpool_sim::{Chaos, ChaosMode, Mean, MetricQuery, Percentile, SimulationBuilder};
+use moonpool_sim::{Chaos, ChaosMode, Fill, Mean, MetricQuery, Percentile, SimulationBuilder};
 use moonpool_sim_examples::metrics_service::{MeteredKvNode, MeteredKvWorkload};
 
 fn main() {
@@ -31,6 +31,10 @@ fn main() {
                 // average the cumulative total, not the throughput.
                 .rate()
                 .bucketize(Duration::from_secs(1), Mean)
+                // A second in which chaos stalled every node served zero
+                // requests; without this it would read as missing data and
+                // drop out of the summary for that seed.
+                .fill(Fill::Value(0.0))
                 .reduce(Mean)
                 .named("served_throughput"),
         )

@@ -109,7 +109,7 @@ usually "what throughput did this hold, and which seed was the worst?" — so th
 
 ```rust,ignore
 use std::time::Duration;
-use moonpool_sim::{Mean, MetricQuery, Percentile};
+use moonpool_sim::{Fill, Mean, MetricQuery, Percentile};
 
 let report = SimulationBuilder::new()
     .metrics_factory(|_ip| Arc::new(PrometheusSource::default()))
@@ -118,6 +118,8 @@ let report = SimulationBuilder::new()
             .label("operation", "write")
             .rate()
             .bucketize(Duration::from_secs(60), Mean)
+            // A minute with no requests is zero per second, not missing data.
+            .fill(Fill::Value(0.0))
             .reduce(Mean)
             .named("write_throughput"),
     )
@@ -156,6 +158,7 @@ from raw snapshots: the runner already knew what mattered.
 | `select(name)` + `.label(k, v)` | pick series by name and label subset |
 | `.rate()` | monotonic counter → per-second rate, on simulated time |
 | `.bucketize(width, agg)` | regularize into fixed simulated-time buckets |
+| `.fill(policy)` | give the empty buckets a value |
 | `.map(window, agg)` | rolling window over one series' points |
 | `.reduce(agg)` / `.reduce_by(label, agg)` | combine across series |
 
@@ -167,6 +170,45 @@ mean *cumulative value*, not a throughput. A drop in a counter's value is read
 as a reset, Prometheus style. Because a fresh source is built per iteration,
 every counter is zero at simulated time zero, so the very first increment is
 rated too.
+
+### Empty buckets
+
+`bucketize` omits a bucket nothing landed in, because a gap and a zero are
+different facts: a workload that stopped reporting is not a workload reporting
+zero. `.fill(policy)` is where you say which one this metric means, with the
+four Warp 10 policies:
+
+| Policy | Fills | Leaves empty |
+|--------|-------|--------------|
+| `Fill::Previous` | interior and trailing gaps, with the last known value | leading gaps |
+| `Fill::Next` | interior and leading gaps, with the next known value | trailing gaps |
+| `Fill::Interpolate` | interior gaps, linearly between neighbours | leading and trailing gaps |
+| `Fill::Value(v)` | every gap — it needs no neighbour | nothing |
+
+The grid runs from bucket zero to the bucket holding the run's end, so a
+workload that went quiet halfway through gets buckets for the silence instead
+of the series just stopping.
+
+That matters for more than tidiness. Without a fill, a seed's bucket set
+depends on when *that* seed happened to be busy, so the across-run summary
+splits one window into several — each with a fraction of the runs in it, and
+`min`/`max` no longer comparing like with like:
+
+```text
+# unfilled: two seeds busy in different minutes
+[0s,60s)     runs: 1
+[120s,180s)  runs: 1
+
+# Fill::Value(0.0): one grid, every window sees every seed
+[0s,60s)     runs: 2   min 0  max 5
+[60s,120s)   runs: 2   min 0  max 0
+[120s,180s)  runs: 2   min 0  max 5
+```
+
+Filling neither collapses nor restores a distribution, so it leaves the stage —
+and with it whether `Percentile` still applies — unchanged. A series that
+recorded nothing at all stays empty: a policy alone must not conjure a metric
+the run never touched.
 
 **Series identity is name plus label set**, canonically ordered, so two
 label sets that differ only in insertion order are the same series. Matching is
