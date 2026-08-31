@@ -272,6 +272,39 @@ The percentiles in the summary block are a different dimension: they are taken
 there names the 95th-percentile run, which is why the report labels it
 `across runs`.
 
+## Worked example: watching a metastable failure
+
+Totals tell you what a run did; the recorded series tells you *when* it went
+wrong, which is the only way to see a failure that outlives its cause.
+[`crates/moonpool/examples/metastable_grpc_retry_storm.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool/examples/metastable_grpc_retry_storm.rs)
+is the demonstration: a real gRPC service with a bounded worker pool, an
+open-loop client with an aggressive timeout and retries, and exactly one
+temporary slowdown in the middle of the run.
+
+```bash
+cargo run --release --example metastable_grpc_retry_storm \
+    --features hyper,prometheus -- --seed 4
+```
+
+It reads back the series the run recorded, runs the query pipelines above over
+them — `.rate().bucketize(1s, Mean).fill(Fill::Value(0.0))` for counters,
+`.bucketize(1s, Mean).fill(Fill::Previous)` for gauges — and prints the buckets
+as an ASCII graph on stdout, one column per simulated second, with the trigger
+window marked. No Grafana, no browser, no export step.
+
+What the graph shows is a *metastable* failure. The slowdown lasts 650 ms. The
+service never recovers from it: retries provoked by that excursion keep the
+server saturated for the remaining 29 seconds, at exactly the offered load it
+carried comfortably before. The trigger is gone; the bad state is not.
+
+`--search 0..64` runs a range of seeds and prints one summary line each. The
+trigger sits on the tipping point, so some seeds absorb it and return to the
+healthy operating point while others fall into the storm and stay there — same
+code, same configuration, different seed. That is the clearest evidence
+available that the bad state is a second stable operating point rather than a
+broken setting, and it is exactly the kind of question the recorded series is
+there to answer.
+
 ## Timing on the simulated clock
 
 Use `start_timer` from this crate, not `prometheus`' own:
