@@ -957,6 +957,9 @@ example:
   compound guidance, and quality watermarks.
 - `crates/moonpool-sim/tests/chaos/swarm.rs`: layering
   `Chaos::BuggifyKnobs` onto enabled fault surfaces.
+- `crates/moonpool/examples/metastable_grpc_retry_storm.rs`: open-loop load over
+  gRPC, Prometheus series read back through `MetricQuery`, and an ASCII
+  time-series graph printed to stdout.
 
 Then use the detailed chapters on [Process and Workload](part2-foundations/08-process-workload.md),
 [assertion concepts](part3-building/13-assertion-concepts.md),

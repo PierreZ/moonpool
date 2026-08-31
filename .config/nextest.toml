@@ -11,6 +11,14 @@ success-output = "never"
 # Run tests in parallel
 test-threads = "num-cpus"
 
+# The metastable retry-storm example drives thousands of real gRPC calls through
+# the simulator per run — under half a second in release, but several seconds in
+# the debug profile tests are built with, and its determinism test does two runs.
+# A wider budget for that one binary, still far short of a genuine hang.
+[[profile.default.overrides]]
+filter = 'binary(metastable_grpc_retry_storm)'
+slow-timeout = { period = "10s", terminate-after = 6 }
+
 [profile.default.junit]
 # Store test results
 path = "target/nextest/default/junit.xml"
