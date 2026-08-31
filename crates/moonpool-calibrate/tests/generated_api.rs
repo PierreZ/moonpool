@@ -18,40 +18,40 @@ use std::time::Duration;
 
 /// Measured latency of a 4096-byte read.
 ///
-/// p01 308ns, p50 556ns, p95 1.021µs, p99 1.616µs, max 77.695µs, n = 5000.
+/// p01 282ns, p50 484ns, p95 1.159µs, p99 1.704µs, max 31.583µs, n = 5000.
 pub const STORAGE_READ_LATENCY: LatencyDistribution = LatencyDistribution::Uniform {
-    start: Duration::from_nanos(308),
-    end: Duration::from_nanos(1_616),
+    start: Duration::from_nanos(282),
+    end: Duration::from_nanos(1_704),
 };
 
 /// Measured latency of a 4096-byte write.
 ///
-/// p01 391ns, p50 503ns, p95 853ns, p99 1.201µs, max 31.999µs, n = 5000.
+/// p01 373ns, p50 541ns, p95 880ns, p99 1.266µs, max 40.319µs, n = 5000.
 pub const STORAGE_WRITE_LATENCY: LatencyDistribution = LatencyDistribution::Uniform {
-    start: Duration::from_nanos(391),
-    end: Duration::from_nanos(1_201),
+    start: Duration::from_nanos(373),
+    end: Duration::from_nanos(1_266),
 };
 
 /// Measured latency of `sync_all` with one dirty block outstanding.
 ///
-/// p01 99.263µs, p50 129.855µs, p95 202.623µs, p99 261.503µs, max 2.092031ms, n = 5000.
+/// p01 109.695µs, p50 140.927µs, p95 202.623µs, p99 253.311µs, max 3.248127ms, n = 5000.
 pub const STORAGE_SYNC_LATENCY: LatencyDistribution = LatencyDistribution::Uniform {
-    start: Duration::from_nanos(99_263),
-    end: Duration::from_nanos(261_503),
+    start: Duration::from_nanos(109_695),
+    end: Duration::from_nanos(253_311),
 };
 
 /// Measured small-message TCP round-trip time.
 ///
-/// p01 40.223µs, p50 44.031µs, p95 60.575µs, p99 94.079µs, max 284.671µs, n = 10000.
+/// p01 40.415µs, p50 44.671µs, p95 62.911µs, p99 93.695µs, max 201.471µs, n = 10000.
 pub const NETWORK_RTT_LATENCY: LatencyDistribution = LatencyDistribution::Uniform {
-    start: Duration::from_nanos(40_223),
-    end: Duration::from_nanos(94_079),
+    start: Duration::from_nanos(40_415),
+    end: Duration::from_nanos(93_695),
 };
 
 /// One-way delay (round trip halved), for moonpool's one-way link knobs.
 pub const NETWORK_LATENCY: LatencyDistribution = LatencyDistribution::Uniform {
-    start: Duration::from_nanos(20_111),
-    end: Duration::from_nanos(47_039),
+    start: Duration::from_nanos(20_207),
+    end: Duration::from_nanos(46_847),
 };
 
 /// The generated constants drop straight into the existing configuration types.

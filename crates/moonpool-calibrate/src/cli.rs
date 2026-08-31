@@ -1,10 +1,13 @@
-//! Argument parsing.
+//! Argument parsing, built on `clap`'s derive API.
 //!
-//! Hand-rolled, matching the workspace's existing CLI convention (`xtask` parses
-//! its own arguments and takes no dependency to do it).
+//! One rule shapes the surface: **stdout belongs to generated Rust**. Help,
+//! version, and parse errors are rendered by the caller onto stderr rather than
+//! clap's default stdout, so `moonpool-calibrate storage > measured_storage.rs`
+//! can never be corrupted by usage text.
 
-use std::fmt;
 use std::path::PathBuf;
+
+use clap::{Parser, Subcommand};
 
 use crate::network::DEFAULT_PORT;
 
@@ -14,249 +17,131 @@ pub const DEFAULT_SAMPLES: u64 = 1_000;
 /// Unrecorded warmup iterations per operation when `--warmup` is not given.
 pub const DEFAULT_WARMUP: u64 = 100;
 
+/// Measure the real host and emit moonpool `LatencyDistribution` constants.
+#[derive(Debug, Parser)]
+#[command(
+    name = "moonpool-calibrate",
+    version,
+    about = "Measure the real host and emit moonpool LatencyDistribution constants",
+    long_about = "Measure the real host with raw std I/O and emit moonpool LatencyDistribution \
+constants on stdout.\n\n\
+Diagnostics go to stderr, so stdout can be redirected straight into a source file:\n  \
+moonpool-calibrate storage > measured_storage.rs",
+    arg_required_else_help = true
+)]
+pub struct Cli {
+    /// What to measure.
+    #[command(subcommand)]
+    pub command: Command,
+}
+
 /// What the binary was asked to do.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum Command {
-    /// Print usage on stderr and exit successfully.
-    Help,
-    /// Measure storage latency and generate Rust on stdout.
+    /// Measure read, write and sync latency against a scratch file.
     Storage {
         /// Scratch file to measure against.
+        #[arg(long, value_name = "PATH", default_value_os_t = crate::storage::default_file())]
         file: PathBuf,
+
         /// Recorded samples per operation.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_SAMPLES, value_parser = at_least_one())]
         samples: u64,
+
         /// Unrecorded warmup iterations per operation.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_WARMUP)]
         warmup: u64,
     },
+
+    /// Measure small-message TCP round-trip time.
+    Network {
+        /// Which side of the measurement to run.
+        #[command(subcommand)]
+        command: NetworkCommand,
+    },
+}
+
+/// The two halves of a network calibration.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum NetworkCommand {
     /// Run the ping/pong responder the measuring side connects to.
-    NetworkListen {
+    Listen {
         /// TCP port to bind on all interfaces.
+        #[arg(long, value_name = "PORT", default_value_t = DEFAULT_PORT)]
         port: u16,
     },
-    /// Measure round-trip time against a listener and generate Rust on stdout.
-    NetworkMeasure {
+
+    /// Measure round-trip time against a listener.
+    Measure {
         /// `host:port` of the listener.
+        #[arg(value_name = "HOST:PORT")]
         address: String,
+
         /// Recorded samples.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_SAMPLES, value_parser = at_least_one())]
         samples: u64,
+
         /// Unrecorded warmup round trips.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_WARMUP)]
         warmup: u64,
     },
 }
 
-/// Why a command line could not be understood.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CliError {
-    /// The first argument is not a known command.
-    UnknownCommand(String),
-    /// `network` was given without (or with an unknown) subcommand.
-    UnknownNetworkSubcommand(String),
-    /// A flag that this command does not accept.
-    UnknownFlag(String),
-    /// A flag that needs a value was the last argument.
-    MissingValue(String),
-    /// A flag's value could not be parsed.
-    InvalidValue {
-        /// The flag whose value was rejected.
-        flag: String,
-        /// The offending value.
-        value: String,
-    },
-    /// `--samples` or `--warmup` was zero where at least one is required.
-    ZeroSamples,
-    /// `network measure` was given no `host:port`.
-    MissingAddress,
-    /// A positional argument appeared where none is accepted.
-    UnexpectedArgument(String),
-}
-
-impl fmt::Display for CliError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnknownCommand(command) => write!(formatter, "unknown command: {command}"),
-            Self::UnknownNetworkSubcommand(subcommand) => {
-                write!(formatter, "unknown network subcommand: {subcommand}")
-            }
-            Self::UnknownFlag(flag) => write!(formatter, "unknown flag: {flag}"),
-            Self::MissingValue(flag) => write!(formatter, "{flag} requires a value"),
-            Self::InvalidValue { flag, value } => {
-                write!(formatter, "invalid value for {flag}: {value}")
-            }
-            Self::ZeroSamples => write!(formatter, "--samples must be at least 1"),
-            Self::MissingAddress => {
-                write!(formatter, "network measure requires a <host:port> address")
-            }
-            Self::UnexpectedArgument(argument) => {
-                write!(formatter, "unexpected argument: {argument}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for CliError {}
-
-/// Parse the arguments following the binary name.
-///
-/// # Errors
-///
-/// Returns a [`CliError`] describing the first problem found.
-pub fn parse(args: &[String]) -> Result<Command, CliError> {
-    match args.first().map(String::as_str) {
-        None | Some("help" | "--help" | "-h") => Ok(Command::Help),
-        Some("storage") => parse_storage(&args[1..]),
-        Some("network") => parse_network(&args[1..]),
-        Some(other) => Err(CliError::UnknownCommand(other.to_owned())),
-    }
-}
-
-fn parse_storage(args: &[String]) -> Result<Command, CliError> {
-    let mut file = crate::storage::default_file();
-    let mut samples = DEFAULT_SAMPLES;
-    let mut warmup = DEFAULT_WARMUP;
-
-    let mut index = 0;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--file" => file = PathBuf::from(value(args, &mut index)?),
-            "--samples" => samples = number(args, &mut index)?,
-            "--warmup" => warmup = number(args, &mut index)?,
-            flag if flag.starts_with('-') => return Err(CliError::UnknownFlag(flag.to_owned())),
-            other => return Err(CliError::UnexpectedArgument(other.to_owned())),
-        }
-        index += 1;
-    }
-
-    if samples == 0 {
-        return Err(CliError::ZeroSamples);
-    }
-    Ok(Command::Storage {
-        file,
-        samples,
-        warmup,
-    })
-}
-
-fn parse_network(args: &[String]) -> Result<Command, CliError> {
-    match args.first().map(String::as_str) {
-        Some("listen") => parse_network_listen(&args[1..]),
-        Some("measure") => parse_network_measure(&args[1..]),
-        Some(other) => Err(CliError::UnknownNetworkSubcommand(other.to_owned())),
-        None => Err(CliError::UnknownNetworkSubcommand(String::new())),
-    }
-}
-
-fn parse_network_listen(args: &[String]) -> Result<Command, CliError> {
-    let mut port = DEFAULT_PORT;
-
-    let mut index = 0;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--port" => port = number(args, &mut index)?,
-            flag if flag.starts_with('-') => return Err(CliError::UnknownFlag(flag.to_owned())),
-            other => return Err(CliError::UnexpectedArgument(other.to_owned())),
-        }
-        index += 1;
-    }
-
-    Ok(Command::NetworkListen { port })
-}
-
-fn parse_network_measure(args: &[String]) -> Result<Command, CliError> {
-    let mut address = None;
-    let mut samples = DEFAULT_SAMPLES;
-    let mut warmup = DEFAULT_WARMUP;
-
-    let mut index = 0;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--samples" => samples = number(args, &mut index)?,
-            "--warmup" => warmup = number(args, &mut index)?,
-            flag if flag.starts_with('-') => return Err(CliError::UnknownFlag(flag.to_owned())),
-            other if address.is_none() => address = Some(other.to_owned()),
-            other => return Err(CliError::UnexpectedArgument(other.to_owned())),
-        }
-        index += 1;
-    }
-
-    if samples == 0 {
-        return Err(CliError::ZeroSamples);
-    }
-    let address = address.ok_or(CliError::MissingAddress)?;
-    Ok(Command::NetworkMeasure {
-        address,
-        samples,
-        warmup,
-    })
-}
-
-/// Consume the value that follows the flag at `index`, advancing past it.
-fn value(args: &[String], index: &mut usize) -> Result<String, CliError> {
-    let flag = args[*index].clone();
-    *index += 1;
-    args.get(*index)
-        .cloned()
-        .ok_or(CliError::MissingValue(flag))
-}
-
-/// Consume and parse a numeric flag value.
-fn number<T: std::str::FromStr>(args: &[String], index: &mut usize) -> Result<T, CliError> {
-    let flag = args[*index].clone();
-    let raw = value(args, index)?;
-    raw.parse().map_err(|_| CliError::InvalidValue {
-        flag,
-        value: raw.clone(),
-    })
-}
-
-/// Usage text, written to stderr so stdout stays a clean Rust stream.
-#[must_use]
-pub fn usage() -> &'static str {
-    "\
-Usage: moonpool-calibrate <command>
-
-Measure the real host with raw std I/O and emit moonpool LatencyDistribution
-constants on stdout. Diagnostics go to stderr, so stdout can be redirected
-straight into a source file.
-
-Commands:
-  storage [--file PATH] [--samples N] [--warmup N]
-      Measure read, write and sync latency against a scratch file.
-
-  network listen [--port P]
-      Run the ping/pong responder the measuring side connects to.
-
-  network measure <host:port> [--samples N] [--warmup N]
-      Measure small-message TCP round-trip time against a listener.
-
-Examples:
-  moonpool-calibrate storage > measured_storage.rs
-  moonpool-calibrate network listen
-  moonpool-calibrate network measure host-b:7777 > measured_network.rs
-"
+/// Value parser rejecting a sample count of zero: there is nothing to take
+/// percentiles of.
+fn at_least_one() -> clap::builder::RangedU64ValueParser {
+    clap::value_parser!(u64).range(1..)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CliError, Command, DEFAULT_SAMPLES, DEFAULT_WARMUP, parse, usage};
+    use super::{Cli, Command, DEFAULT_SAMPLES, DEFAULT_WARMUP, NetworkCommand};
+    use clap::error::ErrorKind;
+    use clap::{CommandFactory, Parser as _};
     use std::path::PathBuf;
 
-    fn args(raw: &[&str]) -> Vec<String> {
-        raw.iter().map(|item| (*item).to_owned()).collect()
+    fn parse(tokens: &[&str]) -> Result<Command, clap::Error> {
+        let mut command_line = vec!["moonpool-calibrate"];
+        command_line.extend_from_slice(tokens);
+        Cli::try_parse_from(command_line).map(|cli| cli.command)
     }
 
     #[test]
-    fn no_arguments_prints_help() {
-        assert_eq!(parse(&[]).expect("help"), Command::Help);
-        assert_eq!(parse(&args(&["--help"])).expect("help"), Command::Help);
-        assert_eq!(parse(&args(&["-h"])).expect("help"), Command::Help);
-        assert!(usage().contains("moonpool-calibrate storage"));
+    fn the_command_definition_is_valid() {
+        // clap's own consistency checks: duplicate flags, bad defaults, and
+        // conflicting settings all surface here rather than at runtime.
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn no_arguments_shows_help_and_reports_a_usage_error() {
+        let error = parse(&[]).expect_err("bare invocation");
+        assert_eq!(
+            error.kind(),
+            ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
+        // `arg_required_else_help` shows the help text but still reports a
+        // non-zero exit: naming no subcommand is a usage error, not a request.
+        assert_ne!(error.exit_code(), 0);
+        assert!(error.render().to_string().contains("storage"));
+    }
+
+    #[test]
+    fn help_is_rendered_without_touching_stdout() {
+        let error = parse(&["--help"]).expect_err("help is reported as an Error");
+        assert_eq!(error.kind(), ErrorKind::DisplayHelp);
+        assert_eq!(error.exit_code(), 0);
+
+        let rendered = error.render().to_string();
+        assert!(rendered.contains("moonpool-calibrate storage > measured_storage.rs"));
+        assert!(rendered.contains("storage"));
+        assert!(rendered.contains("network"));
     }
 
     #[test]
     fn storage_defaults_are_applied() {
-        let command = parse(&args(&["storage"])).expect("storage");
         assert_eq!(
-            command,
+            parse(&["storage"]).expect("storage"),
             Command::Storage {
                 file: crate::storage::default_file(),
                 samples: DEFAULT_SAMPLES,
@@ -267,7 +152,7 @@ mod tests {
 
     #[test]
     fn storage_flags_are_honoured() {
-        let command = parse(&args(&[
+        let command = parse(&[
             "storage",
             "--samples",
             "42",
@@ -275,7 +160,7 @@ mod tests {
             "7",
             "--file",
             "/tmp/scratch",
-        ]))
+        ])
         .expect("storage");
         assert_eq!(
             command,
@@ -289,20 +174,15 @@ mod tests {
 
     #[test]
     fn network_measure_takes_a_positional_address() {
-        let command = parse(&args(&[
-            "network",
-            "measure",
-            "host-b:7777",
-            "--samples",
-            "9",
-        ]))
-        .expect("network measure");
         assert_eq!(
-            command,
-            Command::NetworkMeasure {
-                address: "host-b:7777".to_owned(),
-                samples: 9,
-                warmup: DEFAULT_WARMUP,
+            parse(&["network", "measure", "host-b:7777", "--samples", "9"])
+                .expect("network measure"),
+            Command::Network {
+                command: NetworkCommand::Measure {
+                    address: "host-b:7777".to_owned(),
+                    samples: 9,
+                    warmup: DEFAULT_WARMUP,
+                },
             }
         );
     }
@@ -310,94 +190,102 @@ mod tests {
     #[test]
     fn network_listen_defaults_to_the_documented_port() {
         assert_eq!(
-            parse(&args(&["network", "listen"])).expect("listen"),
-            Command::NetworkListen { port: 7777 }
+            parse(&["network", "listen"]).expect("listen"),
+            Command::Network {
+                command: NetworkCommand::Listen { port: 7777 },
+            }
         );
         assert_eq!(
-            parse(&args(&["network", "listen", "--port", "9001"])).expect("listen"),
-            Command::NetworkListen { port: 9001 }
-        );
-    }
-
-    #[test]
-    fn unknown_command_is_rejected() {
-        assert_eq!(
-            parse(&args(&["bandwidth"])).expect_err("unknown"),
-            CliError::UnknownCommand("bandwidth".to_owned())
+            parse(&["network", "listen", "--port", "9001"]).expect("listen"),
+            Command::Network {
+                command: NetworkCommand::Listen { port: 9001 },
+            }
         );
     }
 
     #[test]
-    fn unknown_network_subcommand_is_rejected() {
+    fn unknown_commands_and_subcommands_are_rejected() {
         assert_eq!(
-            parse(&args(&["network"])).expect_err("missing subcommand"),
-            CliError::UnknownNetworkSubcommand(String::new())
+            parse(&["bandwidth"]).expect_err("unknown command").kind(),
+            ErrorKind::InvalidSubcommand
         );
         assert_eq!(
-            parse(&args(&["network", "flood"])).expect_err("unknown subcommand"),
-            CliError::UnknownNetworkSubcommand("flood".to_owned())
+            parse(&["network"]).expect_err("missing subcommand").kind(),
+            ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
+        assert_eq!(
+            parse(&["network", "flood"])
+                .expect_err("unknown subcommand")
+                .kind(),
+            ErrorKind::InvalidSubcommand
         );
     }
 
     #[test]
     fn unknown_flags_and_stray_positionals_are_rejected() {
         assert_eq!(
-            parse(&args(&["storage", "--iops", "10"])).expect_err("unknown flag"),
-            CliError::UnknownFlag("--iops".to_owned())
+            parse(&["storage", "--iops", "10"])
+                .expect_err("unknown flag")
+                .kind(),
+            ErrorKind::UnknownArgument
         );
         assert_eq!(
-            parse(&args(&["storage", "extra"])).expect_err("stray positional"),
-            CliError::UnexpectedArgument("extra".to_owned())
+            parse(&["storage", "extra"])
+                .expect_err("stray positional")
+                .kind(),
+            ErrorKind::UnknownArgument
         );
         assert_eq!(
-            parse(&args(&["network", "measure", "a:1", "b:2"])).expect_err("second address"),
-            CliError::UnexpectedArgument("b:2".to_owned())
+            parse(&["network", "measure", "a:1", "b:2"])
+                .expect_err("second address")
+                .kind(),
+            ErrorKind::UnknownArgument
         );
     }
 
     #[test]
     fn flag_values_are_validated() {
         assert_eq!(
-            parse(&args(&["storage", "--samples"])).expect_err("missing value"),
-            CliError::MissingValue("--samples".to_owned())
+            parse(&["storage", "--samples"])
+                .expect_err("missing value")
+                .kind(),
+            ErrorKind::InvalidValue
         );
         assert_eq!(
-            parse(&args(&["storage", "--samples", "many"])).expect_err("not a number"),
-            CliError::InvalidValue {
-                flag: "--samples".to_owned(),
-                value: "many".to_owned(),
-            }
+            parse(&["storage", "--samples", "many"])
+                .expect_err("not a number")
+                .kind(),
+            ErrorKind::ValueValidation
         );
         assert_eq!(
-            parse(&args(&["network", "listen", "--port", "70000"])).expect_err("port overflow"),
-            CliError::InvalidValue {
-                flag: "--port".to_owned(),
-                value: "70000".to_owned(),
-            }
+            parse(&["network", "listen", "--port", "70000"])
+                .expect_err("port overflow")
+                .kind(),
+            ErrorKind::ValueValidation
         );
+    }
+
+    #[test]
+    fn a_zero_sample_count_is_rejected() {
+        let error = parse(&["storage", "--samples", "0"]).expect_err("zero samples");
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        assert_ne!(error.exit_code(), 0);
+
         assert_eq!(
-            parse(&args(&["storage", "--samples", "0"])).expect_err("zero samples"),
-            CliError::ZeroSamples
+            parse(&["network", "measure", "a:1", "--samples", "0"])
+                .expect_err("zero samples")
+                .kind(),
+            ErrorKind::ValueValidation
         );
     }
 
     #[test]
     fn network_measure_requires_an_address() {
         assert_eq!(
-            parse(&args(&["network", "measure"])).expect_err("missing address"),
-            CliError::MissingAddress
-        );
-    }
-
-    #[test]
-    fn errors_render_a_useful_message() {
-        assert_eq!(
-            CliError::UnknownFlag("--nope".to_owned()).to_string(),
-            "unknown flag: --nope"
-        );
-        assert_eq!(
-            CliError::ZeroSamples.to_string(),
-            "--samples must be at least 1"
+            parse(&["network", "measure"])
+                .expect_err("missing address")
+                .kind(),
+            ErrorKind::MissingRequiredArgument
         );
     }
 }

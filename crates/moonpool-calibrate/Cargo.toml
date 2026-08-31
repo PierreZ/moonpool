@@ -14,6 +14,18 @@ readme = "README.md"
 # simulation of it: no moonpool crate is a runtime dependency here. hdrhistogram
 # keeps the percentile accounting bounded instead of retaining every sample.
 [dependencies]
+# `derive` is the feature that lets the CLI be expressed as enums
+# (`#[derive(Parser)]` / `#[derive(Subcommand)]` on `Cli` / `Command` /
+# `NetworkCommand`) rather than through the builder API. The rest of clap's
+# defaults are off: no color, no wrap_help, no suggestions — a two-command
+# calibration tool needs none of them.
+clap = { version = "4.6", default-features = false, features = [
+    "std",
+    "help",
+    "usage",
+    "error-context",
+    "derive",
+] }
 hdrhistogram = { version = "7.6", default-features = false }
 
 # Only to type-check that the generated constants match the real moonpool API

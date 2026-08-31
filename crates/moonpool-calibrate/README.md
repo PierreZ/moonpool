@@ -37,6 +37,11 @@ moonpool appears only in the *generated output* — and in
 
 ## Usage
 
+The CLI is defined with `clap`'s `derive` feature, so the command surface *is*
+the `Command` / `NetworkCommand` enums in `src/cli.rs` — adding a subcommand
+means adding a variant. clap's own help and error rendering is redirected onto
+stderr, because stdout is reserved for generated Rust.
+
 Diagnostics go to stderr and generated Rust goes to stdout, so a run can be
 redirected straight into a source file.
 

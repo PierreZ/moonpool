@@ -8,25 +8,31 @@ use std::net::TcpListener;
 use std::path::Path;
 use std::process::ExitCode;
 
-use moonpool_calibrate::cli::{self, Command};
+use clap::Parser;
+use moonpool_calibrate::cli::{Cli, Command, NetworkCommand};
 use moonpool_calibrate::codegen::{Constant, GeneratedFile};
 use moonpool_calibrate::network;
 use moonpool_calibrate::stats::Summary;
 use moonpool_calibrate::storage::{self, BLOCK_SIZE};
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let command = match cli::parse(&args) {
-        Ok(command) => command,
+    // `try_parse` rather than `parse`: clap writes help and version to *stdout*,
+    // which this binary reserves for generated Rust. Rendering it here keeps
+    // `moonpool-calibrate storage > measured_storage.rs` uncorruptible.
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
         Err(error) => {
-            eprintln!("moonpool-calibrate: {error}");
-            eprintln!();
-            eprint!("{}", cli::usage());
-            return ExitCode::FAILURE;
+            eprint!("{}", error.render());
+            // Help and version report success; a genuine parse error does not.
+            return if error.exit_code() == 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            };
         }
     };
 
-    match run(command) {
+    match run(cli.command) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("moonpool-calibrate: {error}");
@@ -37,20 +43,21 @@ fn main() -> ExitCode {
 
 fn run(command: Command) -> std::io::Result<()> {
     match command {
-        Command::Help => {
-            eprint!("{}", cli::usage());
-            Ok(())
-        }
         Command::Storage {
             file,
             samples,
             warmup,
         } => run_storage(&file, samples, warmup),
-        Command::NetworkListen { port } => run_listen(port),
-        Command::NetworkMeasure {
-            address,
-            samples,
-            warmup,
+        Command::Network {
+            command: NetworkCommand::Listen { port },
+        } => run_listen(port),
+        Command::Network {
+            command:
+                NetworkCommand::Measure {
+                    address,
+                    samples,
+                    warmup,
+                },
         } => run_network_measure(&address, samples, warmup),
     }
 }

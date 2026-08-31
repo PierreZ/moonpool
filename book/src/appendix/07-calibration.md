@@ -3,13 +3,13 @@
 <!-- toc -->
 
 Every latency knob in the [Configuration Reference](./03-configuration.md) ships
-with a hand-picked default: storage reads at 50–200µs, cross-datacenter links at
-20–80ms. Those numbers are plausible, but they are not *your* numbers. A
-simulation whose disk is ten times faster than production will never surface the
-timeout cascade production is one bad afternoon away from.
+with a hand-picked default: storage reads at 50-200µs, cross-datacenter links at
+20-80ms. Those numbers are plausible, but they are not your numbers. A simulation
+whose disk is ten times faster than production will never surface the timeout
+cascade production is one bad afternoon away from.
 
 `moonpool-calibrate` closes that gap. It measures the machine it runs on and
-prints Rust source containing `LatencyDistribution` constants you paste into the
+prints Rust source containing `LatencyDistribution` constants we paste into the
 configuration types moonpool already has.
 
 ```text
@@ -31,10 +31,10 @@ hand-written defaults. Nothing about determinism or replay changes.
 
 ## moonpool is deliberately bypassed during measurement
 
-This is the architectural rule of the tool, and it is worth stating plainly: a
-measurement taken through moonpool's providers would measure the *simulator*, not
-the machine, and the result would be circular. So the measurement path touches no
-moonpool code at all.
+This is the architectural rule of the tool, and it is worth stating plainly. A
+measurement taken through moonpool's providers would measure the **simulator**,
+not the machine, and the result would be circular. So the measurement path
+touches no moonpool code at all.
 
 | Concern | What the calibrator uses |
 |---------|--------------------------|
@@ -44,19 +44,29 @@ moonpool code at all.
 
 No `StorageProvider`, no `NetworkProvider`, no `TimeProvider`, no simulated
 clock, no simulated randomness, no async runtime. moonpool appears only in the
-*generated output*.
+generated output, and in the crate's `tests/generated_api.rs`, which type-checks
+that output against the real API.
 
 ## Bounds are p01 .. p99, not min .. max
 
-The generated range is the 1st-to-99th percentile envelope of the samples.
-Raw extremes are dominated by scheduler preemption, page faults, and one-off
-kernel work; feeding them into a simulation stretches the simulated world far
-past what the machine does on an ordinary day. Full diagnostics — `p01`, `p50`,
-`p95`, `p99`, `max`, and the sample count — are printed to stderr so you can see
-the tail you chose not to encode.
+The generated range is the 1st-to-99th percentile envelope of the samples. Raw
+extremes are dominated by scheduler preemption, page faults, and one-off kernel
+work. Feeding them into a simulation stretches the simulated world far past what
+the machine does on an ordinary day. Full diagnostics (`p01`, `p50`, `p95`,
+`p99`, `max`, and the sample count) go to stderr, so we can see the tail we chose
+not to encode.
 
-Samples are accumulated into an HDR histogram (1ns–60s, three significant
-figures) rather than a growing vector, so sample count costs nothing in memory.
+Samples accumulate into an HDR histogram (1ns to 60s, three significant figures)
+rather than a growing vector, so sample count costs nothing in memory.
+
+## The command surface
+
+The CLI is a `clap` derive: the commands are enum variants (`Command`,
+`NetworkCommand`), so the parser and the dispatch `match` cannot drift apart.
+One deviation from clap's defaults is deliberate. Help, version, and parse errors
+are rendered onto **stderr** rather than stdout, because stdout belongs to
+generated Rust. `moonpool-calibrate --help > out.rs` leaves `out.rs` empty rather
+than full of usage text.
 
 ## Storage
 
@@ -77,13 +87,25 @@ produces a compilable file.
 
 The methodology maps one-to-one onto moonpool's three storage latency knobs:
 
-- **`read`** — seek to a block, `read_exact` 4096 bytes, fold the bytes into a
+- **read**: seek to a block, `read_exact` 4096 bytes, fold the bytes into a
   checksum handed to `std::hint::black_box` so the work cannot be optimised away.
-- **`write`** — seek to a block, `write_all` 4096 bytes. `sync` is not included.
-- **`sync`** — dirty one block *untimed*, then time `sync_all` on its own.
+- **write**: seek to a block, `write_all` 4096 bytes. `sync` is not included.
+- **sync**: dirty one block untimed, then time `sync_all` on its own.
 
 The 4 MiB scratch file is created and filled before timing starts, and removed by
 a drop guard even when the run fails.
+
+A real run on a container filesystem, 5000 samples per operation:
+
+```text
+  operation         p01         p50         p95         p99         max  samples
+  read            282ns       484ns     1.159µs     1.704µs    31.583µs     5000
+  write           373ns       541ns       880ns     1.266µs    40.319µs     5000
+  sync        109.695µs   140.927µs   202.623µs   253.311µs  3.248127ms     5000
+```
+
+Note how far the `max` column sits from `p99`. That gap is exactly why the
+generated bounds stop at p99.
 
 ## Network
 
@@ -130,10 +152,10 @@ use std::time::Duration;
 
 /// Measured latency of a 4096-byte read.
 ///
-/// p01 308ns, p50 556ns, p95 1.021µs, p99 1.616µs, max 77.695µs, n = 5000.
+/// p01 282ns, p50 484ns, p95 1.159µs, p99 1.704µs, max 31.583µs, n = 5000.
 pub const STORAGE_READ_LATENCY: LatencyDistribution = LatencyDistribution::Uniform {
-    start: Duration::from_nanos(308),
-    end: Duration::from_nanos(1_616),
+    start: Duration::from_nanos(282),
+    end: Duration::from_nanos(1_704),
 };
 ```
 
@@ -162,10 +184,10 @@ let network = NetworkConfiguration {
 ### RTT versus one-way
 
 The network command emits two constants. `NETWORK_RTT_LATENCY` is the round trip
-as measured; `NETWORK_LATENCY` is that round trip halved. moonpool's link knobs
+as measured. `NETWORK_LATENCY` is that round trip halved. moonpool's link knobs
 are documented as **one-way** delays, so `NETWORK_LATENCY` is the one that
-belongs in `LinkLatencyConfig` and `write_latency`. The RTT is kept for reference,
-because it is the number you can compare against `ping`.
+belongs in `LinkLatencyConfig` and `write_latency`. The RTT is kept for
+reference, because it is the number we can compare against `ping`.
 
 ## What this tool is not
 
@@ -174,10 +196,10 @@ because it is the number you can compare against `ping`.
   page cache. There is no `O_DIRECT`, no queue-depth exploration, no payload
   sweep, no bandwidth or IOPS measurement.
 - Not `iperf`. Network calibration measures small-message TCP round-trip time
-  only. Connection establishment is not timed — moonpool has a separate
-  `connect_latency` knob — and there is no bandwidth or packet-loss measurement.
-- Not a distribution fitter. The output is always `Uniform`. If your workload
-  needs the `Exponential` or `Bimodal` tail shapes, pick them by hand from the
-  percentile diagnostics; the calibrator will not guess a shape for you.
+  only. Connection establishment is not timed, because moonpool has a separate
+  `connect_latency` knob, and there is no bandwidth or packet-loss measurement.
+- Not a distribution fitter. The output is always `Uniform`. A workload that
+  needs the `Exponential` or `Bimodal` tail shapes picks them by hand from the
+  percentile diagnostics. The calibrator will not guess a shape.
 - Not a new configuration mechanism. It emits values for the knobs that already
   exist, and those knobs are still sampled by the same seed-driven RNG.
