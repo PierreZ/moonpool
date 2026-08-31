@@ -72,6 +72,11 @@ changelog_path = "crates/moonpool/CHANGELOG.md"
 version_group = "moonpool"
 
 [[package]]
+name = "moonpool-calibrate"
+release = false
+publish = false
+
+[[package]]
 name = "moonpool-sim-examples"
 release = false
 publish = false

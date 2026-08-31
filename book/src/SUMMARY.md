@@ -104,3 +104,4 @@
 - [Fault Reference](./appendix/04-fault-reference.md)
 - [Glossary](./appendix/05-glossary.md)
 - [Sim Compatibility Checklist](./appendix/06-sim-compatibility.md)
+- [Calibrating Against a Real Machine](./appendix/07-calibration.md)

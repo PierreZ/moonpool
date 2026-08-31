@@ -101,3 +101,4 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 - [Fault Reference](./appendix/04-fault-reference.md) — Every fault by category with config fields and defaults
 - [Glossary](./appendix/05-glossary.md) — Alphabetical definitions: adaptive forking, always assertion, attrition, buggify, coverage bitmap, etc.
 - [Sim Compatibility Checklist](./appendix/06-sim-compatibility.md) — Reference checklist for bringing existing Rust code into a moonpool simulation: forbidden APIs vs the provider seam
+- [Calibrating Against a Real Machine](./appendix/07-calibration.md) — Measuring real storage and network latency with raw std I/O, then generating LatencyDistribution constants
