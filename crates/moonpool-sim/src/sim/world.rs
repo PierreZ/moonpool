@@ -351,6 +351,11 @@ impl SimWorld {
             wall_time: Duration::ZERO,
             simulated_time: inner.now(),
             events_processed: inner.events_processed,
+            // Filled in by the runner, which owns the per-node metrics
+            // sources; the engine has no view of application registries.
+            app_metrics: Vec::new(),
+            app_series: std::collections::BTreeMap::new(),
+            dropped_metric_points: 0,
         }
     }
 

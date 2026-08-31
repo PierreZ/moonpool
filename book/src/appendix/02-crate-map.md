@@ -14,7 +14,7 @@ usually need.
                            (facade crate)
                          /       |       \
                         v        v        v
-             moonpool-core  moonpool-sim  moonpool-hyper
+             moonpool-core  moonpool-sim  moonpool-hyper  moonpool-prometheus
                     ^          /     \          |
                     |         v       v         |
                     |  moonpool-   moonpool-     |
@@ -98,6 +98,24 @@ moonpool-explorer. Disable it for `wasm32-unknown-unknown`.
 
 Client and server features are individually selectable. The featureless crate
 contains only the runtime adapters.
+
+### moonpool-prometheus
+
+**Role**: Report the metrics your application already keeps as simulation
+output.
+
+**Key types**:
+
+- `PrometheusSource` wraps a `prometheus::Registry` and implements
+  `MetricsSource`
+- `SimCounter`, `SimGauge`, `SimHistogram` are instrumented handles that record
+  every mutation on the simulated clock
+- `SimTimer` times a histogram observation from `TimeProvider`, not the wall
+  clock
+
+It depends only on moonpool-core, never on moonpool-sim, so the adapter is
+equally usable in production and moonpool-sim stays wasm-clean. See
+[Application Metrics](../part3-building/25-metrics.md).
 
 ### moonpool-explorer
 

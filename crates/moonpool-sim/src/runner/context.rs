@@ -16,6 +16,10 @@
 //! }
 //! ```
 
+use std::sync::Arc;
+
+use moonpool_core::metrics::MetricsSource;
+
 use crate::chaos::state_handle::StateHandle;
 use crate::network::SimNetworkProvider;
 use crate::observability::SimulationLayerHandle;
@@ -24,6 +28,7 @@ use crate::storage::SimStorageProvider;
 
 use moonpool_core::Providers;
 
+use super::app_metrics::MetricsHandle;
 use super::topology::WorkloadTopology;
 
 /// Simulation context provided to workloads.
@@ -35,6 +40,7 @@ pub struct SimContext {
     topology: WorkloadTopology,
     state: StateHandle,
     obs: SimulationLayerHandle,
+    metrics: MetricsHandle,
 }
 
 impl SimContext {
@@ -45,12 +51,14 @@ impl SimContext {
         topology: WorkloadTopology,
         state: StateHandle,
         obs: SimulationLayerHandle,
+        metrics: MetricsHandle,
     ) -> Self {
         Self {
             providers,
             topology,
             state,
             obs,
+            metrics,
         }
     }
 
@@ -172,5 +180,35 @@ impl SimContext {
     #[must_use]
     pub fn observability(&self) -> &SimulationLayerHandle {
         &self.obs
+    }
+
+    /// Get this node's application metrics source, downcast to its type.
+    ///
+    /// The source is the one
+    /// [`metrics_factory`](super::builder::SimulationBuilder::metrics_factory)
+    /// built for [`my_ip`](Self::my_ip), so each simulated node counts
+    /// independently. Returns `None` when no factory was configured, or when
+    /// `S` is not the type the factory produced.
+    ///
+    /// ```ignore
+    /// let metrics = ctx.metrics::<PrometheusSource>().expect("metrics configured");
+    /// metrics.int_counter("requests_total", "Requests served")?.inc();
+    /// ```
+    ///
+    /// The source outlives process reboots (it is keyed by IP, not by process
+    /// instance), so a metric registered on first boot is still registered
+    /// after a restart — look counters up rather than re-registering them.
+    #[must_use]
+    pub fn metrics<S: MetricsSource>(&self) -> Option<Arc<S>> {
+        self.metrics.get(self.my_ip())
+    }
+
+    /// Get the raw handle to every node's metrics sources.
+    ///
+    /// Workloads use this to read a *server's* counters in `check()`;
+    /// [`metrics`](Self::metrics) is the usual per-node accessor.
+    #[must_use]
+    pub fn metrics_handle(&self) -> &MetricsHandle {
+        &self.metrics
     }
 }

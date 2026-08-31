@@ -7,9 +7,11 @@
 //!
 //! - `builder` - SimulationBuilder for configuring experiments
 //! - `report` - SimulationMetrics and SimulationReport types
+//! - `app_metrics` - per-node application metrics scraped from a user registry
 //! - `topology` - WorkloadTopology and workload configuration
 //! - `orchestrator` - Internal workload orchestration
 
+pub mod app_metrics;
 pub mod builder;
 mod config;
 pub mod context;
@@ -29,6 +31,7 @@ pub(crate) mod wall_clock;
 pub mod workload;
 
 // Re-export main types at module level
+pub use app_metrics::{INSTANCE_LABEL, MetricsHandle};
 pub use builder::{Chaos, ChaosMode, ClientId, WorkloadCount};
 pub use builder::{IterationControl, SimulationBuilder};
 pub use context::SimContext;

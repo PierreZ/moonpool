@@ -36,6 +36,20 @@ version_group = "moonpool"
 name = "moonpool-hyper"
 version_group = "moonpool"
 
+# Prometheus registry adapter for simulation metrics; depends only on
+# moonpool-core, so it publishes in the same tier as moonpool-hyper.
+[[package]]
+name = "moonpool-prometheus"
+changelog_path = "crates/moonpool-prometheus/CHANGELOG.md"
+version_group = "moonpool"
+
+# Standalone buggify state + macros. moonpool-sim depends on it, so it must
+# publish first.
+[[package]]
+name = "moonpool-buggify"
+changelog_path = "crates/moonpool-buggify/CHANGELOG.md"
+version_group = "moonpool"
+
 # Leaf accounting crate; moonpool-explorer depends on it, so it must publish first.
 [[package]]
 name = "moonpool-assertions"

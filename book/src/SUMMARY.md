@@ -55,6 +55,7 @@
   - [Numeric Assertions](./part3-building/15-numeric-assertions.md)
   - [Compound Assertions](./part3-building/16-compound-assertions.md)
 - [Events and Invariants](./part3-building/17-events-and-invariants.md)
+- [Application Metrics](./part3-building/25-metrics.md)
 - [Designing Workloads That Find Bugs](./part3-building/19-designing-workloads.md)
 - [Debugging a Failing Seed](./part3-building/20-debugging.md)
   - [Reproducing with FixedCount](./part3-building/21-reproducing.md)

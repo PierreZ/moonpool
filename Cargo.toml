@@ -7,6 +7,7 @@ members = [
     "crates/moonpool-core",
     "crates/moonpool-explorer",
     "crates/moonpool-hyper",
+    "crates/moonpool-prometheus",
     "crates/moonpool-sim",
     "crates/moonpool-sim-examples",
     "crates/moonpool-wasm-demo",

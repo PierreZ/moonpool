@@ -6,6 +6,7 @@
 use std::io::{IsTerminal, Write};
 
 use moonpool_assertions::AssertKind;
+use moonpool_core::metrics::HistogramValue;
 
 use super::report::{
     AssertionDetail, AssertionStatus, BucketSiteSummary, ExplorationReport, SaturationSignal,
@@ -289,6 +290,11 @@ fn write_report(w: &mut impl Write, report: &SimulationReport, color: bool) {
         );
     }
 
+    // === Application Metrics ===
+    if !report.app_metrics.is_empty() {
+        write_app_metrics(w, report, color);
+    }
+
     // === Per-Seed Metrics ===
     if report.seeds_used.len() > 1 {
         write_seeds(w, report, color);
@@ -485,6 +491,85 @@ fn write_buckets(w: &mut impl Write, summaries: &[BucketSiteSummary], color: boo
             fmt_num(bs.total_hits),
         );
     }
+}
+
+/// Largest number of metric series printed before the rest are elided.
+///
+/// One series per node per label combination adds up fast; the full set is
+/// always available on the report itself.
+const MAX_METRIC_ROWS: usize = 30;
+
+fn write_app_metrics(w: &mut impl Write, report: &SimulationReport, color: bool) {
+    let metrics = &report.app_metrics;
+    section_header(
+        w,
+        &format!("Metrics ({} series)", metrics.len()),
+        color,
+        ansi::BOLD_CYAN,
+    );
+
+    for agg in metrics.iter().take(MAX_METRIC_ROWS) {
+        // Counters read as a run total; gauges as the range they moved over.
+        // A histogram adds its observation count, which its sum alone hides.
+        let summary = match agg.kind {
+            "gauge" => format!(
+                "{:>12} avg  {:>12} min  {:>12} max",
+                fmt_metric(agg.mean()),
+                fmt_metric(agg.min),
+                fmt_metric(agg.max),
+            ),
+            "histogram" => {
+                let count = agg.histogram.as_ref().map_or(0, |h| h.count);
+                format!(
+                    "{:>12} total  {:>12} obs  {:>12} avg",
+                    fmt_metric(agg.total),
+                    fmt_num(count),
+                    fmt_metric(agg.histogram.as_ref().map_or(0.0, HistogramValue::mean)),
+                )
+            }
+            _ => format!(
+                "{:>12} total  {:>12} per seed",
+                fmt_metric(agg.total),
+                fmt_metric(agg.per_seed_mean()),
+            ),
+        };
+        let _ = writeln!(w, "  {:<52}  {summary}", truncate_key(&agg.key, 52));
+    }
+
+    if metrics.len() > MAX_METRIC_ROWS {
+        let dim = if color { ansi::DIM } else { "" };
+        let reset = if color { ansi::RESET } else { "" };
+        let _ = writeln!(
+            w,
+            "  {dim}... {} more series (see SimulationReport::app_metrics){reset}",
+            metrics.len() - MAX_METRIC_ROWS,
+        );
+    }
+}
+
+/// Format a metric scalar: integral values print without a decimal tail, so a
+/// counter reads `1,234` rather than `1234.00`.
+fn fmt_metric(v: f64) -> String {
+    if v.is_finite() && v.fract() == 0.0 && v.abs() < 1e15 {
+        let magnitude = fmt_num(f64_to_u64_saturating(v.abs()));
+        if v.is_sign_negative() && v != 0.0 {
+            format!("-{magnitude}")
+        } else {
+            magnitude
+        }
+    } else {
+        format!("{v:.2}")
+    }
+}
+
+/// Shorten a series key to `width`, keeping the head (metric name plus the
+/// first labels) since that is what identifies the series.
+fn truncate_key(key: &str, width: usize) -> String {
+    if key.chars().count() <= width {
+        return key.to_owned();
+    }
+    let head: String = key.chars().take(width.saturating_sub(1)).collect();
+    format!("{head}…")
 }
 
 fn write_seeds(w: &mut impl Write, report: &SimulationReport, color: bool) {
