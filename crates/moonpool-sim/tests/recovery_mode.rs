@@ -665,7 +665,230 @@ fn disabling_clock_drift_never_rewinds_the_clock() {
 }
 
 // ===========================================================================
-// 5. The runner crosses the boundary for real
+// 5. The boundary cannot be reconfigured away
+// ===========================================================================
+
+/// Reconfiguring a disk after the boundary must install the performance half
+/// and drop the fault half. Otherwise `enter_recovery_mode` would only hold
+/// until the next `set_storage_config` call, and its promise is for the rest of
+/// the run.
+#[test]
+fn set_storage_config_cannot_rearm_faults_after_recovery() {
+    let mut sim = SimWorld::new_with_seed(20_260_901);
+    sim.set_storage_config(StorageConfiguration::fast_local());
+    sim.enter_recovery_mode();
+
+    let mut rearmed = StorageConfiguration::fast_local();
+    rearmed.write_fault_probability = 1.0;
+    rearmed.read_fault_probability = 1.0;
+    rearmed.phantom_write_probability = 1.0;
+    rearmed.disk_stall_probability = 1.0;
+    rearmed.iops = 4321;
+    sim.set_storage_config(rearmed);
+
+    sim.with_storage_config(|config| {
+        assert_zero(
+            config.write_fault_probability,
+            "write faults must not be re-armable after the boundary",
+        );
+        assert_zero(
+            config.read_fault_probability,
+            "read faults must not be re-armable after the boundary",
+        );
+        assert_zero(
+            config.phantom_write_probability,
+            "phantom writes must not be re-armable after the boundary",
+        );
+        assert_zero(
+            config.disk_stall_probability,
+            "stall episodes must not be re-armable after the boundary",
+        );
+        assert_eq!(
+            config.iops, 4321,
+            "the performance half of the new configuration is installed as given"
+        );
+    });
+
+    // And behaviorally: a write/read round trip takes no damage.
+    let provider = sim.storage_provider(ip(1));
+    let payload = vec![0x77_u8; SECTOR_SIZE];
+    let read_back = drive(&mut sim, async {
+        let mut file = provider
+            .open(
+                "rearmed.bin",
+                OpenOptions::new().read(true).write(true).create(true),
+            )
+            .await
+            .expect("open");
+        file.write_all(&payload).await.expect("write");
+        file.sync_all().await.expect("sync");
+        file.seek(SeekFrom::Start(0)).await.expect("seek");
+        let mut buf = vec![0_u8; SECTOR_SIZE];
+        file.read_exact(&mut buf).await.expect("read");
+        buf
+    });
+    assert_eq!(
+        read_back, payload,
+        "a re-armed configuration must not corrupt anything after the boundary"
+    );
+    assert!(
+        sim.disk_episode_for(ip(1)).is_none(),
+        "no degradation episode may be entered after the boundary"
+    );
+}
+
+/// The per-IP setters are the same hole with a narrower blast radius. Both
+/// spellings — `set_storage_config_for` and `set_process_storage_config` —
+/// reach the same per-process map, so both are checked.
+#[test]
+fn per_process_storage_setters_cannot_rearm_faults_after_recovery() {
+    let mut sim = SimWorld::new_with_seed(20_260_901);
+    sim.set_storage_config(StorageConfiguration::fast_local());
+    sim.enter_recovery_mode();
+
+    let mut rearmed = StorageConfiguration::fast_local();
+    rearmed.write_fault_probability = 1.0;
+    rearmed.disk_stall_probability = 1.0;
+    rearmed.iops = 8765;
+    sim.set_storage_config_for(ip(1), rearmed.clone());
+    sim.set_process_storage_config(ip(2), rearmed);
+
+    let payload = vec![0x33_u8; SECTOR_SIZE];
+    for host in [ip(1), ip(2)] {
+        let provider = sim.storage_provider(host);
+        let path = format!("rearmed-{host}.bin");
+        let read_back = drive(&mut sim, async {
+            let mut file = provider
+                .open(
+                    &path,
+                    OpenOptions::new().read(true).write(true).create(true),
+                )
+                .await
+                .expect("open");
+            file.write_all(&payload).await.expect("write");
+            file.sync_all().await.expect("sync");
+            file.seek(SeekFrom::Start(0)).await.expect("seek");
+            let mut buf = vec![0_u8; SECTOR_SIZE];
+            file.read_exact(&mut buf).await.expect("read");
+            buf
+        });
+        assert_eq!(
+            read_back, payload,
+            "a per-process configuration installed after the boundary must not corrupt {host}"
+        );
+        assert!(
+            sim.disk_episode_for(host).is_none(),
+            "no degradation episode may be entered for {host} after the boundary"
+        );
+    }
+}
+
+/// The network configuration has the same shape of hole, and the same fix.
+#[test]
+fn set_network_config_cannot_rearm_faults_after_recovery() {
+    const CONNECT: Duration = Duration::from_millis(3);
+
+    let mut sim =
+        SimWorld::new_with_network_config_and_seed(NetworkConfiguration::fast_local(), 20_260_901);
+    let server = sim.network_provider(ip(2));
+    let listener = drive(&mut sim, server.bind("10.0.1.2:8080")).expect("bind");
+    let client = sim.network_provider(ip(1));
+    let _client_stream = drive(&mut sim, client.connect("10.0.1.2:8080")).expect("connect");
+    let (_server_stream, _) = drive(&mut sim, listener.accept()).expect("accept");
+
+    sim.enter_recovery_mode();
+
+    let mut rearmed = NetworkConfiguration::fast_local();
+    rearmed.chaos.partition_probability = 1.0;
+    rearmed.chaos.partition_strategy = PartitionStrategy::IsolateSingle;
+    rearmed.chaos.clog_probability = 1.0;
+    rearmed.chaos.clock_drift_enabled = true;
+    rearmed.connect_latency = LatencyDistribution::Uniform {
+        start: CONNECT,
+        end: CONNECT,
+    };
+    sim.set_network_config(rearmed);
+
+    sim.with_network_config(|config| {
+        assert_zero(
+            config.chaos.partition_probability,
+            "partitioning must not be re-armable after the boundary",
+        );
+        assert_zero(
+            config.chaos.clog_probability,
+            "clogging must not be re-armable after the boundary",
+        );
+        assert!(
+            !config.chaos.clock_drift_enabled,
+            "clock drift must not be re-armable after the boundary"
+        );
+        assert_eq!(
+            config.connect_latency,
+            LatencyDistribution::Uniform {
+                start: CONNECT,
+                end: CONNECT
+            },
+            "the performance half of the new configuration is installed as given"
+        );
+    });
+
+    tick_maintenance(&mut sim, 200);
+    assert!(
+        !sim.is_partitioned(ip(1), ip(2)) && !sim.is_partitioned(ip(2), ip(1)),
+        "a re-armed configuration must not partition after the boundary"
+    );
+}
+
+/// Block stores are created lazily, so the registry's default configuration is
+/// what a process touching a device in the quiet tail inherits.
+#[test]
+fn set_block_fault_config_cannot_rearm_faults_after_recovery() {
+    let mut sim = SimWorld::new_with_seed(20_260_901);
+    sim.enter_recovery_mode();
+    // Pinned to 1.0 rather than `BlockFaultConfig::chaos()`: at that profile's
+    // 0.5% the fault would usually miss, and the test would pass whether or not
+    // the guard exists.
+    sim.set_block_fault_config(BlockFaultConfig {
+        read_corruption_probability: 1.0,
+        ..BlockFaultConfig::default()
+    });
+
+    // A store this process has never touched is created from the registry
+    // default *after* the boundary — the exact path the guard protects.
+    let provider = sim.block_device_provider(ip(5));
+    let spec = [RegionSpec {
+        name: "data",
+        size: 8 * BLOCK_SECTOR_SIZE as u64,
+    }];
+    let written = vec![0x6E_u8; BLOCK_SECTOR_SIZE];
+
+    let read_back = Executor::new(20_260_901).block_on({
+        let written = written.clone();
+        async move {
+            let device = provider.create("db", &spec).await.expect("create");
+            device.persist().await.expect("persist");
+            device
+                .write(RegionId(0), 0, &written)
+                .await
+                .expect("write sector 0");
+            device.persist().await.expect("persist");
+            let mut buf = vec![0_u8; BLOCK_SECTOR_SIZE];
+            device
+                .read(RegionId(0), 0, &mut buf)
+                .await
+                .expect("read sector 0");
+            buf
+        }
+    });
+
+    assert_eq!(
+        read_back, written,
+        "a store born after the boundary must inherit a fault-free configuration"
+    );
+}
+
+// ===========================================================================
+// 6. The runner crosses the boundary for real
 // ===========================================================================
 
 struct EchoProcess;

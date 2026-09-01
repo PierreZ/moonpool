@@ -109,6 +109,16 @@ impl SimInner {
         self.scheduler.now()
     }
 
+    /// Whether [`SimWorld::enter_recovery_mode`] has run.
+    ///
+    /// Every setter that installs a caller-supplied fault configuration has to
+    /// consult this: the recovery boundary promises no new simulator faults for
+    /// the rest of the run, and a configuration installed after it must not be
+    /// able to re-arm one.
+    pub(crate) fn recovery_mode(&self) -> bool {
+        self.recovery_mode
+    }
+
     pub(crate) fn schedule_after(&mut self, event: Event, delay: Duration) {
         if let Err(error) = self.scheduler.schedule_after(delay, event) {
             tracing::error!(%error, "failed to schedule simulation event");
@@ -393,17 +403,34 @@ impl SimWorld {
     }
 
     /// Replaces the default storage configuration.
-    pub fn set_storage_config(&mut self, config: crate::storage::StorageConfiguration) {
-        self.inner.write().storage.set_config(config);
+    ///
+    /// After [`enter_recovery_mode`](Self::enter_recovery_mode) the fault
+    /// probabilities in `config` are stripped before it is installed, so the
+    /// no-new-faults promise survives a later reconfiguration. Performance
+    /// knobs (IOPS, bandwidth, latencies, throttle multipliers) are installed
+    /// as given.
+    pub fn set_storage_config(&mut self, mut config: crate::storage::StorageConfiguration) {
+        let mut inner = self.inner.write();
+        if inner.recovery_mode() {
+            config.disable_fault_injection();
+        }
+        inner.storage.set_config(config);
     }
 
     /// Replaces storage configuration for one IP.
+    ///
+    /// Recovery-aware in the same way as
+    /// [`set_storage_config`](Self::set_storage_config).
     pub fn set_storage_config_for(
         &mut self,
         ip: IpAddr,
-        config: crate::storage::StorageConfiguration,
+        mut config: crate::storage::StorageConfiguration,
     ) {
-        self.inner.write().storage.set_config_for(ip, config);
+        let mut inner = self.inner.write();
+        if inner.recovery_mode() {
+            config.disable_fault_injection();
+        }
+        inner.storage.set_config_for(ip, config);
     }
 
     /// Returns an active disk episode for one IP.
@@ -519,6 +546,26 @@ impl SimWorld {
     /// This is emphatically **not** "the cluster is now healthy": it is only
     /// "the environment stops making it worse". Recovering from the damage is
     /// the simulated system's job.
+    ///
+    /// # It stays entered
+    ///
+    /// The promise holds for the rest of the run, not just for the instant it
+    /// is made. Every setter that installs a caller-supplied fault
+    /// configuration — [`set_network_config`](Self::set_network_config),
+    /// [`set_storage_config`](Self::set_storage_config),
+    /// [`set_storage_config_for`](Self::set_storage_config_for),
+    /// [`set_process_storage_config`](Self::set_process_storage_config),
+    /// [`set_block_fault_config`](Self::set_block_fault_config) — strips the
+    /// fault knobs out of what it is handed once recovery mode is on, while
+    /// installing the performance half unchanged. Reconfiguring a disk or link
+    /// in the quiet tail therefore cannot re-arm chaos.
+    ///
+    /// Directed fault APIs are deliberately left alone: a caller that reaches
+    /// for [`partition_pair`](Self::partition_pair),
+    /// [`simulate_crash_for_process`](Self::simulate_crash_for_process), or the
+    /// [`SimBlockStore`](crate::SimBlockStore) targeted-fault methods is
+    /// scripting a specific fault by hand rather than asking the simulator to
+    /// generate one, and red tests depend on that still working.
     ///
     /// Idempotent, and consumes no randomness.
     ///
