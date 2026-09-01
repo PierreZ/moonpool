@@ -127,6 +127,35 @@ impl BlockFaultConfig {
         self
     }
 
+    /// Turn off every fault family that fires during normal device I/O.
+    ///
+    /// This is the block-device half of the recovery-mode transition
+    /// ([`SimWorld::enter_recovery_mode`](crate::SimWorld::enter_recovery_mode)):
+    /// reads stop returning EIO or planting latent faults, writes stop being
+    /// misdirected or turned into phantoms, `persist()` stops failing, and it
+    /// stops lying about barriers.
+    ///
+    /// The **crash-shape** parameters (`clean_crash_probability`,
+    /// `crash_lost_probability`, `crash_latent_fault_probability`,
+    /// `shorn_write_probability`, `correlated_rollback_*`,
+    /// `grow_survives_crash_probability`, `garbage_fill_probability`) are left
+    /// alone on purpose: they describe what a crash *does* to buffered data,
+    /// not an environment that generates crashes. Recovery mode stops the
+    /// simulator from generating crashes; if one still happens it must resolve
+    /// with the same physics it would have had before the cutoff.
+    ///
+    /// Damage already on the device — corrupted sectors, lost or misdirected
+    /// writes, sectors a lying `persist()` left volatile — is untouched.
+    pub fn disable_fault_injection(&mut self) {
+        self.eio_read_probability = 0.0;
+        self.eio_write_probability = 0.0;
+        self.read_corruption_probability = 0.0;
+        self.misdirected_write_probability = 0.0;
+        self.phantom_write_probability = 0.0;
+        self.persist_failure_probability = 0.0;
+        self.barrier_violation_probability = 0.0;
+    }
+
     /// Apply a per-seed swarm subset: each enabled fault family is
     /// independently kept or zeroed with probability 0.5, drawn from the
     /// configuration RNG stream (never the counted sim RNG). The barrier

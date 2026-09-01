@@ -943,9 +943,6 @@ impl NetworkSimulation {
     pub(crate) fn connection_base_latency(&mut self, id: ConnectionId) -> Duration {
         let range = self.state.config.chaos.max_pair_latency.clone();
         let link = self.state.config.link_latency.clone();
-        if range.end.is_zero() && link.is_none() {
-            return Duration::ZERO;
-        }
         let Some((local, remote)) = self
             .state
             .connections
@@ -954,8 +951,15 @@ impl NetworkSimulation {
         else {
             return Duration::ZERO;
         };
+        // A pair samples its fixed extra latency once and keeps it for the rest
+        // of the run. Checking the cache *before* the configuration means
+        // recovery mode (which zeroes `max_pair_latency`) stops new pairs from
+        // degrading without healing a link that is already slow.
         if let Some(latency) = self.pair_latency(local, remote) {
             return latency;
+        }
+        if range.end.is_zero() && link.is_none() {
+            return Duration::ZERO;
         }
         let mut latency = if range.end.is_zero() {
             Duration::ZERO
@@ -1332,6 +1336,39 @@ impl NetworkSimulation {
         });
         self.resume_stalled_sends(now, &mut actions);
         actions
+    }
+
+    /// Heal every environmental partition currently in force: directed pair
+    /// cuts plus the send-side and receive-side blocks that
+    /// [`restore_partition`](Self::restore_partition) cannot reach.
+    ///
+    /// Connections held back by a partition are re-driven, so a stalled send
+    /// resumes instead of waiting out a deadline that no longer applies.
+    pub(crate) fn heal_all_partitions(&mut self, now: Duration) -> NetworkActions {
+        let mut actions = NetworkActions::default();
+        for (from, to) in std::mem::take(&mut self.state.ip_partitions).into_keys() {
+            actions.record(SimFaultEvent::PartitionHealed {
+                from: from.to_string(),
+                to: to.to_string(),
+            });
+        }
+        for ip in std::mem::take(&mut self.state.send_partitions).into_keys() {
+            actions.record(SimFaultEvent::SendPartitionHealed { ip: ip.to_string() });
+        }
+        for ip in std::mem::take(&mut self.state.recv_partitions).into_keys() {
+            actions.record(SimFaultEvent::RecvPartitionHealed { ip: ip.to_string() });
+        }
+        self.resume_stalled_sends(now, &mut actions);
+        actions
+    }
+
+    /// Stop sampling new network faults (see
+    /// [`ChaosConfiguration::disable_fault_injection`](crate::network::ChaosConfiguration::disable_fault_injection)).
+    ///
+    /// Consumes no randomness and leaves every already-produced effect in
+    /// place, including the per-pair latencies sampled so far.
+    pub(crate) fn disable_fault_injection(&mut self) {
+        self.state.config.disable_fault_injection();
     }
 
     pub(crate) fn is_partitioned(&self, from: IpAddr, to: IpAddr, now: Duration) -> bool {

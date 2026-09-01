@@ -96,6 +96,21 @@ impl StorageEngine {
         self.state.per_process_configs.insert(ip, config);
     }
 
+    /// Stop sampling new storage faults on every disk, default and per-process
+    /// alike (see
+    /// [`StorageConfiguration::disable_fault_injection`](crate::storage::StorageConfiguration::disable_fault_injection)).
+    ///
+    /// Disk-degradation episodes already in force are deliberately left in
+    /// `disk_episodes`: they carry an expiry and clear themselves on the next
+    /// operation past it, so a stall that started under chaos still has to be
+    /// waited out.
+    pub(crate) fn disable_fault_injection(&mut self) {
+        self.state.config.disable_fault_injection();
+        for config in self.state.per_process_configs.values_mut() {
+            config.disable_fault_injection();
+        }
+    }
+
     pub(crate) fn disk_episode_for(&self, ip: IpAddr) -> Option<DiskDegradationState> {
         self.state.disk_episodes.get(&ip).copied()
     }

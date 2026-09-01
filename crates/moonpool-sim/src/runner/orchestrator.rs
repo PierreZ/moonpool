@@ -88,7 +88,6 @@ struct RunPhaseInputs<'a, 'pm> {
     shutdown_signal: &'a tokio_util::sync::CancellationToken,
     chaos_shutdown: &'a tokio_util::sync::CancellationToken,
     chaos_duration: Option<Duration>,
-    all_ips: &'a [String],
     workload_handles: &'a mut WorkloadHandleSlots,
     workload_collected: &'a mut [Option<WorkloadResult>],
     injector_handles: &'a mut InjectorHandleSlots,
@@ -248,7 +247,6 @@ struct ChaosAndRunInputs<'a, 'pm> {
     contexts: Vec<SimContext>,
     fault_injectors: Vec<Box<dyn FaultInjector>>,
     chaos_duration: Option<Duration>,
-    all_entities: &'a [(String, String)],
     state: &'a StateHandle,
     obs: &'a SimulationLayerHandle,
     shutdown_signal: &'a tokio_util::sync::CancellationToken,
@@ -353,7 +351,6 @@ impl WorkloadOrchestrator {
             contexts,
             fault_injectors,
             chaos_duration,
-            all_entities: &all_entities,
             state: &state,
             obs: &obs,
             shutdown_signal: &shutdown_signal,
@@ -504,7 +501,6 @@ impl WorkloadOrchestrator {
             contexts,
             fault_injectors,
             chaos_duration,
-            all_entities,
             state,
             obs,
             shutdown_signal,
@@ -515,7 +511,6 @@ impl WorkloadOrchestrator {
 
         let chaos_shutdown = tokio_util::sync::CancellationToken::new();
         sim.start_buggified_delay_window(chaos_duration);
-        let all_ips: Vec<String> = all_entities.iter().map(|(_, ip)| ip.clone()).collect();
         let (mut injector_handles, parked_injectors) = Self::start_fault_injectors(
             fault_injectors,
             chaos_duration,
@@ -540,7 +535,6 @@ impl WorkloadOrchestrator {
             shutdown_signal,
             chaos_shutdown: &chaos_shutdown,
             chaos_duration,
-            all_ips: &all_ips,
             workload_handles: &mut workload_handles,
             workload_collected: &mut workload_collected,
             injector_handles: &mut injector_handles,
@@ -746,7 +740,6 @@ impl WorkloadOrchestrator {
             shutdown_signal,
             chaos_shutdown,
             chaos_duration,
-            all_ips,
             workload_handles,
             workload_collected,
             injector_handles,
@@ -787,8 +780,15 @@ impl WorkloadOrchestrator {
 
             if !chaos_ended && Self::should_end_chaos(sim, chaos_start, chaos_duration) {
                 tracing::debug!("Chaos phase ended");
+                // Stop the two sources of new faults together: the explicit
+                // injector loops (token) and the configuration-driven network,
+                // storage, and block-device families (recovery mode, which
+                // also heals the partitions the simulator is holding). Damage
+                // already done stays done — the quiet tail that follows is
+                // where the system under test has to recover from it, while
+                // its processes are still alive.
                 chaos_shutdown.cancel();
-                Self::heal_all_partitions(sim, all_ips);
+                sim.enter_recovery_mode();
                 chaos_ended = true;
                 assert_reachable!("phase: chaos ended");
             }
@@ -1283,6 +1283,13 @@ impl WorkloadOrchestrator {
     /// Drain remaining simulation events synchronously after all workloads
     /// have completed.
     ///
+    /// This is **not** a recovery window. `abort_all()` has already killed
+    /// every process by the time settle runs, so no protocol work can happen
+    /// here — it only surfaces cleanup bugs in what the run left behind. The
+    /// window in which the system under test can actually recover from chaos
+    /// is the quiet tail between the `chaos_duration` cutoff and workload
+    /// completion, while the processes are still alive.
+    ///
     /// Returns `Some(SettleTimeout)` if the queue does not converge within
     /// the timeout, otherwise `None` on a clean drain.
     fn settle_phase(sim: &mut crate::sim::SimWorld) -> Option<crate::SimulationError> {
@@ -1451,19 +1458,5 @@ impl WorkloadOrchestrator {
         shutdown_signal.cancel();
 
         sim.schedule_event(crate::sim::Event::Shutdown, Duration::from_nanos(1));
-    }
-
-    /// Heal all network partitions between all IP pairs.
-    fn heal_all_partitions(sim: &mut crate::sim::SimWorld, all_ips: &[String]) {
-        for i in 0..all_ips.len() {
-            for j in (i + 1)..all_ips.len() {
-                if let (Ok(a_ip), Ok(b_ip)) = (
-                    all_ips[i].parse::<std::net::IpAddr>(),
-                    all_ips[j].parse::<std::net::IpAddr>(),
-                ) {
-                    sim.restore_partition(a_ip, b_ip);
-                }
-            }
-        }
     }
 }

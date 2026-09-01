@@ -90,6 +90,16 @@ pub enum SimFaultEvent {
         /// The partitioned IP.
         ip: String,
     },
+    /// Send partition healed (outgoing traffic from an IP flows again).
+    SendPartitionHealed {
+        /// The restored IP.
+        ip: String,
+    },
+    /// Receive partition healed (incoming traffic to an IP flows again).
+    RecvPartitionHealed {
+        /// The restored IP.
+        ip: String,
+    },
     /// Connection randomly closed by chaos.
     RandomClose {
         /// The connection that was closed.
@@ -165,6 +175,8 @@ impl SimFaultEvent {
             Self::PartitionHealed { .. } => "partition_healed",
             Self::SendPartitionCreated { .. } => "send_partition_created",
             Self::RecvPartitionCreated { .. } => "recv_partition_created",
+            Self::SendPartitionHealed { .. } => "send_partition_healed",
+            Self::RecvPartitionHealed { .. } => "recv_partition_healed",
             Self::RandomClose { .. } => "random_close",
             Self::BitFlip { .. } => "bit_flip",
             Self::StorageReadFault { .. } => "storage_read_fault",

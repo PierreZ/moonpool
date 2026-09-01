@@ -574,6 +574,28 @@ impl ChaosConfiguration {
         self.random_close_probability =
             crate::buggify_knob!(self.random_close_probability, 0.01..0.1);
     }
+
+    /// Turn every network fault family off, leaving performance shaping alone.
+    ///
+    /// This is the chaos half of the recovery-mode transition
+    /// ([`SimWorld::enter_recovery_mode`](crate::SimWorld::enter_recovery_mode)):
+    /// after this call the engine samples no new partitions, clogs, bit flips,
+    /// spontaneous closes, connect failures, clock drift, sleep delays, or
+    /// per-pair latency degradations. It is exactly
+    /// [`NetworkFaultMask::none()`](crate::NetworkFaultMask::none) applied to
+    /// this configuration and consumes no randomness.
+    ///
+    /// It only stops *new* faults. Everything already produced stays: a
+    /// partition still in force, a clog still ticking down, corrupted bytes
+    /// already delivered, a connection the application already saw close, and
+    /// the fixed extra latency a slow pair already sampled.
+    ///
+    /// Latencies (`bind`/`accept`/`connect`/`write`, `link_latency`) and the
+    /// TCP-realistic partial read/write sizes are untouched: they are the
+    /// deployment's normal characteristics, not injected damage.
+    pub fn disable_fault_injection(&mut self) {
+        NetworkFaultMask::none().apply_to(self);
+    }
 }
 
 /// Distance-based latency, one [`LatencyDistribution`] per locality class.
@@ -675,6 +697,17 @@ impl Default for NetworkConfiguration {
             link_latency: None,
             chaos: ChaosConfiguration::default(),
         }
+    }
+}
+
+impl NetworkConfiguration {
+    /// Turn every network fault family off while keeping latency, link, and
+    /// other performance characteristics intact.
+    ///
+    /// See [`ChaosConfiguration::disable_fault_injection`] for the precise
+    /// contract.
+    pub fn disable_fault_injection(&mut self) {
+        self.chaos.disable_fault_injection();
     }
 }
 

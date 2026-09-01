@@ -303,20 +303,36 @@ impl SimWorld {
     /// call. The builder applies the per-seed chaos configuration here before
     /// any process runs.
     ///
+    /// After [`enter_recovery_mode`](Self::enter_recovery_mode) the fault
+    /// probabilities in `config` are stripped before it is installed, so a
+    /// store created in the quiet tail is born fault-free. The crash-shape
+    /// parameters are installed as given.
+    ///
     /// # Panics
     ///
     /// Panics if the simulation lock is poisoned by a prior task panic.
-    pub fn set_block_fault_config(&self, config: crate::storage::block::BlockFaultConfig) {
-        self.inner.write().block.set_config(config);
+    pub fn set_block_fault_config(&self, mut config: crate::storage::block::BlockFaultConfig) {
+        let mut inner = self.inner.write();
+        if inner.recovery_mode() {
+            config.disable_fault_injection();
+        }
+        inner.block.set_config(config);
     }
 
     /// Set storage configuration for a specific process.
+    ///
+    /// Recovery-aware in the same way as
+    /// [`set_storage_config`](Self::set_storage_config).
     ///
     /// # Panics
     ///
     /// Panics if the simulation lock is poisoned by a prior task panic.
     #[instrument(skip(self, config))]
-    pub fn set_process_storage_config(&self, ip: IpAddr, config: StorageConfiguration) {
-        self.inner.write().storage.set_config_for(ip, config);
+    pub fn set_process_storage_config(&self, ip: IpAddr, mut config: StorageConfiguration) {
+        let mut inner = self.inner.write();
+        if inner.recovery_mode() {
+            config.disable_fault_injection();
+        }
+        inner.storage.set_config_for(ip, config);
     }
 }

@@ -375,6 +375,35 @@ impl StorageConfiguration {
         );
     }
 
+    /// Turn every storage fault family off, leaving disk performance alone.
+    ///
+    /// This is the storage half of the recovery-mode transition
+    /// ([`SimWorld::enter_recovery_mode`](crate::SimWorld::enter_recovery_mode)):
+    /// after this call no operation samples a read/write/sync/crash fault, no
+    /// write is misdirected or turned into a phantom, and no new disk stall or
+    /// throttle episode is entered. It consumes no randomness.
+    ///
+    /// It only stops *new* faults. Sectors already corrupted stay corrupted,
+    /// bytes already lost stay lost, misdirected and phantom writes already
+    /// applied are not undone, and an episode already in force runs to its
+    /// expiry.
+    ///
+    /// IOPS, bandwidth, and the read/write/sync latency distributions are
+    /// untouched — they are the disk's normal characteristics. So are the
+    /// throttle multipliers, which an episode still ticking down needs in order
+    /// to keep behaving the way it did before the cutoff.
+    pub fn disable_fault_injection(&mut self) {
+        self.read_fault_probability = 0.0;
+        self.write_fault_probability = 0.0;
+        self.crash_fault_probability = 0.0;
+        self.misdirect_write_probability = 0.0;
+        self.misdirect_read_probability = 0.0;
+        self.phantom_write_probability = 0.0;
+        self.sync_failure_probability = 0.0;
+        self.disk_stall_probability = 0.0;
+        self.disk_throttle_probability = 0.0;
+    }
+
     /// Create a configuration optimized for fast local testing.
     ///
     /// Minimal latencies and no fault injection for predictable,

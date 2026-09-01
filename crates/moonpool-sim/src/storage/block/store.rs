@@ -297,6 +297,13 @@ struct DeviceState {
 struct StoreState {
     rng: ChaCha8Rng,
     config: BlockFaultConfig,
+    /// Whether the barrier-violation family was ever armed on this store.
+    ///
+    /// Latched at construction rather than read back off `config`, so
+    /// [`SimBlockStore::disable_fault_injection`] can stop *new* lies without
+    /// retroactively turning a sector a pre-cutoff `persist()` already lied
+    /// about into an impossible-state panic in the crash oracle.
+    barrier_violation_armed: bool,
     devices: BTreeMap<String, DeviceState>,
     eligibility: Option<BlockEligibilityMask>,
     fault_records: Vec<BlockFaultRecord>,
@@ -356,6 +363,7 @@ impl SimBlockStore {
         Self {
             inner: Arc::new(Mutex::new(StoreState {
                 rng: ChaCha8Rng::seed_from_u64(seed),
+                barrier_violation_armed: config.barrier_violation_probability > 0.0,
                 config,
                 devices: BTreeMap::new(),
                 eligibility: None,
@@ -372,6 +380,15 @@ impl SimBlockStore {
     /// Remove the fault eligibility mask: every sector becomes eligible.
     pub fn clear_eligibility_mask(&self) {
         self.inner.lock().eligibility = None;
+    }
+
+    /// Stop injecting new device faults (see
+    /// [`BlockFaultConfig::disable_fault_injection`]).
+    ///
+    /// Damage already on the device is untouched, and the crash model keeps
+    /// the shape it was built with.
+    pub fn disable_fault_injection(&self) {
+        self.inner.lock().config.disable_fault_injection();
     }
 
     /// Drain the fault records accumulated so far.
@@ -1038,7 +1055,7 @@ impl SimBlockStore {
             }
         }
 
-        let armed = inner.config.barrier_violation_probability > 0.0;
+        let armed = inner.barrier_violation_armed;
         for (index, state) in device.regions.iter_mut().enumerate() {
             let region = RegionId(u32::try_from(index).expect("region count fits in u32"));
             oracle_sweep(

@@ -674,12 +674,43 @@ impl SimulationBuilder {
         self
     }
 
-    /// Set the chaos phase duration.
+    /// Set the chaos phase duration: the window in which Moonpool may inject
+    /// *new* faults.
     ///
-    /// When set, fault injectors run concurrently with workloads for this
-    /// duration. After it elapses, faults stop and the system continues
-    /// until all workloads complete. A settle phase then drains remaining
-    /// events before checks run.
+    /// Fault injectors run concurrently with the workloads for this long. When
+    /// it elapses the runner ends chaos in one step: it cancels
+    /// [`ctx.chaos_shutdown()`](crate::FaultContext::chaos_shutdown), so
+    /// injector loops wind down, and calls
+    /// [`SimWorld::enter_recovery_mode`](crate::SimWorld::enter_recovery_mode),
+    /// which turns off every configuration-driven network, storage, and
+    /// block-device fault family and heals the partitions the simulator is
+    /// holding.
+    ///
+    /// # The contract
+    ///
+    /// The cutoff bounds *fault generation*, nothing else. The persistent
+    /// consequences of faults already injected stay part of the simulated
+    /// state: corrupted sectors, lost or misdirected writes, connections the
+    /// application already saw close, processes already killed, and whatever
+    /// state the system was left in. Finite effects already started — a disk
+    /// stall or throttle episode, a clog, a delayed packet — keep their
+    /// deadlines and expire naturally.
+    ///
+    /// So the cutoff does **not** mean the cluster is healthy. It means the
+    /// environment stopped making it worse, and recovering is now the system
+    /// under test's job.
+    ///
+    /// # Where recovery actually happens
+    ///
+    /// Between the cutoff and workload completion — the quiet tail — because
+    /// that is the only window where the processes are still running and can
+    /// re-elect, re-replicate, or re-sync. Give the workloads enough simulated
+    /// time after the cutoff to converge, then assert on convergence from
+    /// them.
+    ///
+    /// The settle phase that follows is *not* a recovery window: processes are
+    /// aborted before it, so it only drains the events left in the scheduler
+    /// before `check()` runs.
     #[must_use]
     pub fn chaos_duration(mut self, duration: Duration) -> Self {
         self.chaos_duration = Some(duration);

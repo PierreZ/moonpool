@@ -67,6 +67,9 @@ pub(crate) struct SimInner {
     pub(crate) last_processed_event: Option<Event>,
     pub(crate) pending_faults: Vec<SimFaultRecord>,
     buggified_delay_window: BuggifiedDelayWindow,
+    /// Set once [`SimWorld::enter_recovery_mode`] has run. The simulator
+    /// injects no new faults from that point on.
+    recovery_mode: bool,
 }
 
 /// Campaign lifetime for the global sleep-delay fault.
@@ -98,11 +101,22 @@ impl SimInner {
             last_processed_event: None,
             pending_faults: Vec::new(),
             buggified_delay_window: BuggifiedDelayWindow::Unbounded,
+            recovery_mode: false,
         }
     }
 
     pub(crate) fn now(&self) -> Duration {
         self.scheduler.now()
+    }
+
+    /// Whether [`SimWorld::enter_recovery_mode`] has run.
+    ///
+    /// Every setter that installs a caller-supplied fault configuration has to
+    /// consult this: the recovery boundary promises no new simulator faults for
+    /// the rest of the run, and a configuration installed after it must not be
+    /// able to re-arm one.
+    pub(crate) fn recovery_mode(&self) -> bool {
+        self.recovery_mode
     }
 
     pub(crate) fn schedule_after(&mut self, event: Event, delay: Duration) {
@@ -290,7 +304,12 @@ impl SimWorld {
         let mut inner = self.inner.write();
         let chaos = &inner.network.config().chaos;
         if !chaos.clock_drift_enabled {
-            return inner.now();
+            // Never hand back a reading below one already given out. Drift that
+            // accumulated before it was switched off (recovery mode) is a real
+            // skew the node still has to live with; rewinding the clock instead
+            // would be a *new* fault, and a nastier one than the drift.
+            inner.timer_time = inner.timer_time.max(inner.now());
+            return inner.timer_time;
         }
         let max_timer = inner.now().saturating_add(chaos.clock_drift_max);
         if inner.timer_time < max_timer {
@@ -384,17 +403,34 @@ impl SimWorld {
     }
 
     /// Replaces the default storage configuration.
-    pub fn set_storage_config(&mut self, config: crate::storage::StorageConfiguration) {
-        self.inner.write().storage.set_config(config);
+    ///
+    /// After [`enter_recovery_mode`](Self::enter_recovery_mode) the fault
+    /// probabilities in `config` are stripped before it is installed, so the
+    /// no-new-faults promise survives a later reconfiguration. Performance
+    /// knobs (IOPS, bandwidth, latencies, throttle multipliers) are installed
+    /// as given.
+    pub fn set_storage_config(&mut self, mut config: crate::storage::StorageConfiguration) {
+        let mut inner = self.inner.write();
+        if inner.recovery_mode() {
+            config.disable_fault_injection();
+        }
+        inner.storage.set_config(config);
     }
 
     /// Replaces storage configuration for one IP.
+    ///
+    /// Recovery-aware in the same way as
+    /// [`set_storage_config`](Self::set_storage_config).
     pub fn set_storage_config_for(
         &mut self,
         ip: IpAddr,
-        config: crate::storage::StorageConfiguration,
+        mut config: crate::storage::StorageConfiguration,
     ) {
-        self.inner.write().storage.set_config_for(ip, config);
+        let mut inner = self.inner.write();
+        if inner.recovery_mode() {
+            config.disable_fault_injection();
+        }
+        inner.storage.set_config_for(ip, config);
     }
 
     /// Returns an active disk episode for one IP.
@@ -470,6 +506,97 @@ impl SimWorld {
             .map_or(BuggifiedDelayWindow::Inactive, |duration| {
                 BuggifiedDelayWindow::ActiveUntil(inner.now().saturating_add(duration))
             });
+    }
+
+    /// End fault injection for the rest of the run: the simulator stops
+    /// generating new faults and heals the environmental partitions it is
+    /// holding, so the system under test gets a quiet tail to recover in.
+    ///
+    /// The runner calls this once, at the [`chaos_duration`] cutoff, together
+    /// with cancelling the fault-injector shutdown token. Calling it directly
+    /// is the raw-`SimWorld` equivalent.
+    ///
+    /// # What stops
+    ///
+    /// - network: partitions, clogs, bit flips, spontaneous closes, connect
+    ///   failures, clock drift, buggified sleep delays, and new per-pair
+    ///   latency degradation;
+    /// - storage: read/write/sync/crash faults, misdirected and phantom
+    ///   writes, and new disk stall or throttle episodes;
+    /// - block devices: EIO, read corruption, misdirected and phantom writes,
+    ///   persist failures, and barrier violations.
+    ///
+    /// # What is healed
+    ///
+    /// Every partition currently in force — directed pair cuts and the
+    /// asymmetric send-side and receive-side blocks alike. A partition is
+    /// environmental: nothing in the system under test can clear it, so
+    /// leaving one up would make the quiet tail untestable rather than quiet.
+    ///
+    /// # What survives
+    ///
+    /// Everything already done. Corrupted sectors stay corrupted, lost writes
+    /// stay lost, misdirected and phantom writes are not undone, a connection
+    /// the application already saw close stays closed, a process already
+    /// killed is not resurrected, and application state is left exactly as the
+    /// chaos phase left it. Finite effects already started — a disk stall or
+    /// throttle episode, a clog, a packet already scheduled with delay — keep
+    /// their deadlines and expire on their own rather than being rewritten.
+    ///
+    /// This is emphatically **not** "the cluster is now healthy": it is only
+    /// "the environment stops making it worse". Recovering from the damage is
+    /// the simulated system's job.
+    ///
+    /// # It stays entered
+    ///
+    /// The promise holds for the rest of the run, not just for the instant it
+    /// is made. Every setter that installs a caller-supplied fault
+    /// configuration — [`set_network_config`](Self::set_network_config),
+    /// [`set_storage_config`](Self::set_storage_config),
+    /// [`set_storage_config_for`](Self::set_storage_config_for),
+    /// [`set_process_storage_config`](Self::set_process_storage_config),
+    /// [`set_block_fault_config`](Self::set_block_fault_config) — strips the
+    /// fault knobs out of what it is handed once recovery mode is on, while
+    /// installing the performance half unchanged. Reconfiguring a disk or link
+    /// in the quiet tail therefore cannot re-arm chaos.
+    ///
+    /// Directed fault APIs are deliberately left alone: a caller that reaches
+    /// for [`partition_pair`](Self::partition_pair),
+    /// [`simulate_crash_for_process`](Self::simulate_crash_for_process), or the
+    /// [`SimBlockStore`](crate::SimBlockStore) targeted-fault methods is
+    /// scripting a specific fault by hand rather than asking the simulator to
+    /// generate one, and red tests depend on that still working.
+    ///
+    /// Idempotent, and consumes no randomness.
+    ///
+    /// [`chaos_duration`]: crate::SimulationBuilder::chaos_duration
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    pub fn enter_recovery_mode(&mut self) {
+        let mut inner = self.inner.write();
+        if inner.recovery_mode {
+            return;
+        }
+        inner.recovery_mode = true;
+        inner.buggified_delay_window = BuggifiedDelayWindow::Inactive;
+        inner.network.disable_fault_injection();
+        inner.storage.disable_fault_injection();
+        inner.block.disable_fault_injection();
+        let now = inner.now();
+        let actions = inner.network.heal_all_partitions(now);
+        inner.apply_network(actions);
+    }
+
+    /// Whether [`enter_recovery_mode`](Self::enter_recovery_mode) has run.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
+    pub fn is_in_recovery_mode(&self) -> bool {
+        self.inner.read().recovery_mode
     }
 
     pub(crate) fn poll_sleep(&self, task_id: u64, waker: &Waker) -> bool {

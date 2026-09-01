@@ -726,10 +726,23 @@ when the model permits losing that process's durable state. Failure-domain
 attrition needs `.cluster(...)` and a budget large enough to remove the chosen
 machine, zone, or datacenter.
 
-`.chaos_duration(...)` controls the phase in which attrition and custom fault
-injectors run. Network/storage configuration faults are part of their provider
-models. Leave a recovery segment inside `Workload::run` for final live queries,
-then use `check` for retained state and timeline assertions.
+`.chaos_duration(...)` bounds the window in which Moonpool may inject **new**
+faults of any kind. At the cutoff the runner stops attrition and custom fault
+injectors *and* calls `SimWorld::enter_recovery_mode()`, which switches off every
+configuration-driven network, storage, and block-device fault family and heals
+the partitions in force.
+
+It stops fault generation, it does not repair anything: corrupted sectors, lost
+or misdirected writes, connections already closed, and processes already killed
+all survive the cutoff, and finite effects already started (disk stall/throttle
+episodes, clogs, delayed packets) expire on their own schedule. The cluster is
+not healthy at the cutoff — the environment merely stops making it worse.
+
+Leave a recovery segment inside `Workload::run` after the cutoff for
+reconvergence and final live queries: that quiet tail, with the processes still
+alive, is the only window where protocol recovery can happen (settle runs after
+the processes are aborted). Then use `check` for retained state and timeline
+assertions.
 
 ### Swarm the operation alphabet
 

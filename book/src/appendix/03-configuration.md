@@ -24,7 +24,7 @@ The builder pattern for configuring and running simulation experiments. Created 
 | `invariant_fn(name, f)` | `String`, closure | Add a closure-based invariant |
 | `fault(f)` | `impl FaultInjector` | Add a custom fault injector instance for the chaos phase (reused across iterations; rejected by exploration) |
 | `fault_factory(f)` | `Fn() -> Box<dyn FaultInjector>` | Add a fault injector rebuilt fresh for every root and explored timeline (exploration-compatible) |
-| `chaos_duration(dur)` | `Duration` | Set the chaos phase duration (faults run concurrently with workloads) |
+| `chaos_duration(dur)` | `Duration` | Bound the window in which new faults may be injected (see [Chaos duration and recovery mode](#chaos-duration-and-recovery-mode)) |
 | `set_iterations(n)` | `usize` | Run exactly N iterations (default: 1) |
 | `set_iteration_control(ctrl)` | `IterationControl` | Set the iteration control strategy |
 | `set_time_limit(dur)` | `Duration` | Run for a wall-clock time duration |
@@ -88,6 +88,34 @@ Strategy for assigning client IDs to workload instances.
 | `RandomRange(range)` | `Range<usize>` | Random ID drawn from `[start..end)` per instance (not guaranteed unique) |
 
 **Default**: `Fixed(0)` (sequential starting from 0, matching FoundationDB's `WorkloadContext.clientId`).
+
+## Chaos duration and recovery mode
+
+`.chaos_duration(dur)` bounds the period during which Moonpool may inject **new**
+faults. When it expires the runner crosses the chaos → recovery boundary in one
+step: `ctx.chaos_shutdown()` is cancelled so fault injectors wind down, and
+`SimWorld::enter_recovery_mode()` switches off every configuration-driven fault
+family and heals the partitions the simulator is holding.
+
+| At the cutoff | |
+|---|---|
+| Stopped | Network: partitions, clogs, bit flips, spontaneous closes, connect failures, clock drift, buggified sleep delays, new per-pair latency degradation |
+| Stopped | Storage: read/write/sync/crash faults, misdirected and phantom writes, new disk stall and throttle episodes |
+| Stopped | Block devices: EIO, read corruption, misdirected and phantom writes, persist failures, barrier violations |
+| Stopped | Fault injectors, including built-in attrition |
+| Healed | Every partition in force — directed pair cuts and asymmetric send-side / receive-side blocks alike |
+| Preserved | Corrupted sectors, lost/misdirected/phantom writes already applied, connections already closed, processes already killed, application state, the fixed extra latency a slow link already sampled |
+| Left to expire | Finite effects already started: disk stall and throttle episodes, clogs, packets already scheduled with a delay |
+
+The persistent consequences of faults already injected remain part of the
+simulated state. **The cluster is not healthy at the cutoff** — only the
+environment stops generating new faults. Recovering from the damage is the
+simulated system's job.
+
+The recovery window is the quiet tail between the cutoff and workload
+completion, while the processes are still alive. The settle phase that follows
+is *not* a recovery window: processes are aborted before it, so it only drains
+the events left in the scheduler.
 
 ## Attrition
 
@@ -287,8 +315,10 @@ Each ordered IP pair samples one fixed latency from this range at first contact 
 
 Builder campaigns apply this fault only to sleeps scheduled inside
 `.chaos_duration()`. Setup and the post-chaos quiet tail do not consume its RNG
-draws or receive extra delay. A directly constructed `SimWorld` has no campaign
-window and applies the configured fault for its whole lifetime.
+draws or receive extra delay (recovery mode also clears the flag outright at the
+cutoff). A directly constructed `SimWorld` has no campaign window and applies the
+configured fault for its whole lifetime, unless you call
+`SimWorld::enter_recovery_mode()` yourself.
 
 ### Connection Failures
 

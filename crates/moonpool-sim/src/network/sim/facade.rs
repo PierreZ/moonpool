@@ -32,8 +32,16 @@ impl SimWorld {
     }
 
     /// Replaces the network configuration without discarding live connections.
-    pub fn set_network_config(&mut self, config: NetworkConfiguration) {
+    ///
+    /// After [`enter_recovery_mode`](Self::enter_recovery_mode) the chaos
+    /// families in `config` are stripped before it is installed, so the
+    /// no-new-faults promise survives a later reconfiguration. Latency
+    /// distributions and link shaping are installed as given.
+    pub fn set_network_config(&mut self, mut config: NetworkConfiguration) {
         let mut inner = self.inner.write();
+        if inner.recovery_mode() {
+            config.disable_fault_injection();
+        }
         let now = inner.now();
         let actions = inner.network.set_config(config, now);
         inner.apply_network(actions);
