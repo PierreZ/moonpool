@@ -127,6 +127,22 @@
 //! // Randomized per seed
 //! let chaos = ChaosConfiguration::random_for_seed();
 //! ```
+//!
+//! # The Chaos → Recovery Boundary
+//!
+//! Every mechanism above is bounded by
+//! [`SimulationBuilder::chaos_duration`](crate::SimulationBuilder::chaos_duration).
+//! When it expires the runner calls
+//! [`SimWorld::enter_recovery_mode`](crate::SimWorld::enter_recovery_mode),
+//! which stops all fault injectors, switches off every configuration-driven
+//! network, storage, and block-device fault family, and heals the partitions in
+//! force — giving the system under test a quiet tail to recover in.
+//!
+//! The boundary bounds *fault generation only*. It repairs nothing: corrupted
+//! sectors, lost writes, closed connections, and killed processes all survive
+//! it, and finite effects already running expire on their own schedule. The
+//! cluster is not healthy at the cutoff; the environment has merely stopped
+//! making it worse.
 
 pub mod assertions;
 pub mod buggify;

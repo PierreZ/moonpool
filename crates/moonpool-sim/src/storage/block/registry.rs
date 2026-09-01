@@ -32,6 +32,18 @@ impl BlockDeviceRegistry {
         self.config = config;
     }
 
+    /// Stop injecting new faults on every block store: the configuration
+    /// future stores are born with, and every store already created.
+    ///
+    /// Damage already written to a device stays (see
+    /// [`BlockFaultConfig::disable_fault_injection`]).
+    pub(crate) fn disable_fault_injection(&mut self) {
+        self.config.disable_fault_injection();
+        for store in self.stores.values() {
+            store.disable_fault_injection();
+        }
+    }
+
     /// The store for `ip`, created on first access.
     pub(crate) fn store_for(&mut self, ip: IpAddr) -> SimBlockStore {
         self.stores

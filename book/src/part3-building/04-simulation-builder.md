@@ -156,13 +156,19 @@ SimulationBuilder::new()
 
 The simulation lifecycle:
 
-1. **Chaos phase** (30 simulated seconds): Workloads run concurrently with fault injectors. Attrition randomly kills and restarts processes, respecting `max_dead` to avoid killing everything at once.
+1. **Chaos phase** (30 simulated seconds): Workloads run concurrently with fault injectors. Attrition randomly kills and restarts processes, respecting `max_dead` to avoid killing everything at once. Configuration-driven network and storage faults fire in this window too.
 
-2. **Workload completion**: After chaos ends, faults stop and the system continues until all workloads finish. Workloads should be finite (do N operations, or sleep for a sim-time duration, then return).
+2. **Chaos cutoff**: `chaos_duration` expires and the simulation enters *recovery mode*. Fault injectors are told to stop, every configuration-driven fault family (network, storage, block device) is switched off, and the partitions the simulator is holding are healed.
 
-3. **Settle**: The orchestrator drains remaining events. If the system does not settle within 30 seconds (sim time), the test fails with diagnostics, surfacing cleanup bugs like leaked tasks or unclosed connections.
+   The cutoff bounds *fault generation only*. It does not repair anything: corrupted sectors stay corrupted, lost writes stay lost, connections the application already saw close stay closed, and a disk stall or clog already running is waited out rather than erased. The cluster is not healthy at the cutoff — the environment has merely stopped making it worse.
 
-4. **Check**: The `check()` methods run inside the event loop, so network RPCs work normally.
+3. **Recovery tail**: The processes are still running, so this is the window where the system under test re-elects, re-replicates, and re-syncs. Give your workloads enough simulated time after the cutoff to converge, and assert on convergence from them.
+
+4. **Workload completion**: Workloads should be finite (do N operations, or sleep for a sim-time duration, then return).
+
+5. **Settle**: Processes are aborted, then the orchestrator drains remaining events. If the system does not settle within the timeout (sim time), the test fails with diagnostics, surfacing cleanup bugs like leaked tasks or unclosed connections. Because the processes are already gone, settle is *not* a recovery window — no protocol work can happen there.
+
+6. **Check**: The `check()` methods run inside the event loop, so network RPCs work normally.
 
 `max_dead: 1` means at most one process is down at any time. The probability weights control the mix of graceful shutdowns (shutdown token fired, grace period) versus instant crashes (no warning, connections abort).
 

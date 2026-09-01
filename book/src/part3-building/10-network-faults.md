@@ -85,7 +85,18 @@ The gate is checked before either buggified-delay RNG draw. A configuration that
 disables the fault, a `NetworkFaultMask` without `BuggifiedDelay`, and sleeps
 outside the chaos window therefore leave the counted simulation RNG untouched.
 Direct low-level `SimWorld` construction has no campaign phases and retains the
-historical whole-run behavior.
+historical whole-run behavior, unless you call `SimWorld::enter_recovery_mode()`
+yourself.
+
+The same quiet-tail guarantee holds for every other network fault family, not
+just this one: at the `chaos_duration` cutoff the runner calls
+`SimWorld::enter_recovery_mode()`, which zeroes the whole
+`ChaosConfiguration` fault surface and heals any partition in force. What it
+does **not** do is repair damage: bytes already corrupted stay corrupted, a
+connection the application already saw close stays closed, and a link that has
+already sampled its permanent extra latency stays slow. See the
+[configuration appendix](../appendix/03-configuration.md#chaos-duration-and-recovery-mode)
+for the full boundary contract.
 
 ### Network Partitions
 

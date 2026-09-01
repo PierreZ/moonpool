@@ -67,6 +67,9 @@ pub(crate) struct SimInner {
     pub(crate) last_processed_event: Option<Event>,
     pub(crate) pending_faults: Vec<SimFaultRecord>,
     buggified_delay_window: BuggifiedDelayWindow,
+    /// Set once [`SimWorld::enter_recovery_mode`] has run. The simulator
+    /// injects no new faults from that point on.
+    recovery_mode: bool,
 }
 
 /// Campaign lifetime for the global sleep-delay fault.
@@ -98,6 +101,7 @@ impl SimInner {
             last_processed_event: None,
             pending_faults: Vec::new(),
             buggified_delay_window: BuggifiedDelayWindow::Unbounded,
+            recovery_mode: false,
         }
     }
 
@@ -290,7 +294,12 @@ impl SimWorld {
         let mut inner = self.inner.write();
         let chaos = &inner.network.config().chaos;
         if !chaos.clock_drift_enabled {
-            return inner.now();
+            // Never hand back a reading below one already given out. Drift that
+            // accumulated before it was switched off (recovery mode) is a real
+            // skew the node still has to live with; rewinding the clock instead
+            // would be a *new* fault, and a nastier one than the drift.
+            inner.timer_time = inner.timer_time.max(inner.now());
+            return inner.timer_time;
         }
         let max_timer = inner.now().saturating_add(chaos.clock_drift_max);
         if inner.timer_time < max_timer {
@@ -470,6 +479,77 @@ impl SimWorld {
             .map_or(BuggifiedDelayWindow::Inactive, |duration| {
                 BuggifiedDelayWindow::ActiveUntil(inner.now().saturating_add(duration))
             });
+    }
+
+    /// End fault injection for the rest of the run: the simulator stops
+    /// generating new faults and heals the environmental partitions it is
+    /// holding, so the system under test gets a quiet tail to recover in.
+    ///
+    /// The runner calls this once, at the [`chaos_duration`] cutoff, together
+    /// with cancelling the fault-injector shutdown token. Calling it directly
+    /// is the raw-`SimWorld` equivalent.
+    ///
+    /// # What stops
+    ///
+    /// - network: partitions, clogs, bit flips, spontaneous closes, connect
+    ///   failures, clock drift, buggified sleep delays, and new per-pair
+    ///   latency degradation;
+    /// - storage: read/write/sync/crash faults, misdirected and phantom
+    ///   writes, and new disk stall or throttle episodes;
+    /// - block devices: EIO, read corruption, misdirected and phantom writes,
+    ///   persist failures, and barrier violations.
+    ///
+    /// # What is healed
+    ///
+    /// Every partition currently in force — directed pair cuts and the
+    /// asymmetric send-side and receive-side blocks alike. A partition is
+    /// environmental: nothing in the system under test can clear it, so
+    /// leaving one up would make the quiet tail untestable rather than quiet.
+    ///
+    /// # What survives
+    ///
+    /// Everything already done. Corrupted sectors stay corrupted, lost writes
+    /// stay lost, misdirected and phantom writes are not undone, a connection
+    /// the application already saw close stays closed, a process already
+    /// killed is not resurrected, and application state is left exactly as the
+    /// chaos phase left it. Finite effects already started — a disk stall or
+    /// throttle episode, a clog, a packet already scheduled with delay — keep
+    /// their deadlines and expire on their own rather than being rewritten.
+    ///
+    /// This is emphatically **not** "the cluster is now healthy": it is only
+    /// "the environment stops making it worse". Recovering from the damage is
+    /// the simulated system's job.
+    ///
+    /// Idempotent, and consumes no randomness.
+    ///
+    /// [`chaos_duration`]: crate::SimulationBuilder::chaos_duration
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    pub fn enter_recovery_mode(&mut self) {
+        let mut inner = self.inner.write();
+        if inner.recovery_mode {
+            return;
+        }
+        inner.recovery_mode = true;
+        inner.buggified_delay_window = BuggifiedDelayWindow::Inactive;
+        inner.network.disable_fault_injection();
+        inner.storage.disable_fault_injection();
+        inner.block.disable_fault_injection();
+        let now = inner.now();
+        let actions = inner.network.heal_all_partitions(now);
+        inner.apply_network(actions);
+    }
+
+    /// Whether [`enter_recovery_mode`](Self::enter_recovery_mode) has run.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
+    pub fn is_in_recovery_mode(&self) -> bool {
+        self.inner.read().recovery_mode
     }
 
     pub(crate) fn poll_sleep(&self, task_id: u64, waker: &Waker) -> bool {
