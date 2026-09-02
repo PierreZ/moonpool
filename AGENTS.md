@@ -225,9 +225,9 @@ Strategic placement: error handling, timeouts, retries, resource limits
 **Workload** — test driver. Survives reboots. Drives requests and validates correctness.
 
 **Builder API**:
-- `.processes(count, factory)` — register server processes (IPs: `10.0.1.{1..N}`)
-- `.tags(&[("key", &["val1", "val2"])])` — round-robin tag distribution
-- `.enable_chaos([Chaos::Attrition { config, mode }])` — built-in chaos reboots (requires `.chaos_duration()`)
+- `.processes(count, factory)` — register one server-process group (IPs: `10.0.1.{1..N}`); call once per role — the *g*-th group lives on `10.0.{g+1}.x`, draws its own per-seed count, and is queried with `topology().ips_in_group(name)`
+- `.tags(&[("key", &["val1", "val2"])])` — round-robin tag distribution over the last group
+- `.enable_chaos([Chaos::Attrition { config, mode }])` — built-in chaos reboots (requires `.chaos_duration()`); one injector per entry, `config.victims` (`AttritionVictims::group(..)` / `::tagged(..)`) scopes both the draw and `max_dead` to one pool
 - `.enable_chaos([Chaos::Network(mode) | Chaos::Storage(mode)])` — network/storage faults per seed (`ChaosMode::Random` all-on, `ChaosMode::Swarm` per-seed subset)
 - `.fault_factory(|| Box::new(injector))` — fresh custom `FaultInjector` per root/explored timeline (exploration-compatible; `FaultContext` has split `crash`/`restart` primitives + workload `state()`)
 - `.swarm_operations()` — per-seed swarm of each workload's operation alphabet

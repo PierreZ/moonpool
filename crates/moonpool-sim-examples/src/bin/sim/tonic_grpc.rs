@@ -6,7 +6,7 @@
 use std::process;
 use std::time::Duration;
 
-use moonpool_sim::{Attrition, AttritionScope, Chaos, ChaosMode};
+use moonpool_sim::{Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode};
 
 fn main() {
     moonpool_sim::init_sim_tracing(tracing::Level::WARN);
@@ -28,6 +28,7 @@ fn main() {
                 recovery_delay_ms: None,
                 grace_period_ms: None,
                 scope: AttritionScope::PerProcess,
+                victims: AttritionVictims::Any,
             },
             mode: ChaosMode::Random,
         }])

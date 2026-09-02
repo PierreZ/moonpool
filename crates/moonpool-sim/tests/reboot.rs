@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Attrition, AttritionScope, Chaos, ChaosMode, FaultContext, FaultInjector, Invariant,
-    NetworkProvider, Process, RebootKind, SIM_FAULT_EVENT_NAME, SimContext, SimulationBuilder,
-    SimulationResult, TcpListenerTrait, TimeProvider, TraceQuery, Workload, assert_always,
+    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, FaultContext, FaultInjector,
+    Invariant, NetworkProvider, Process, RebootKind, SIM_FAULT_EVENT_NAME, SimContext,
+    SimulationBuilder, SimulationResult, TcpListenerTrait, TimeProvider, TraceQuery, Workload,
+    assert_always,
 };
 
 use std::cell::Cell;
@@ -223,6 +224,7 @@ fn test_builtin_attrition() {
                 recovery_delay_ms: None,
                 grace_period_ms: None,
                 scope: AttritionScope::PerProcess,
+                victims: AttritionVictims::Any,
             },
             mode: ChaosMode::Random,
         }])
@@ -571,6 +573,7 @@ fn test_attrition_timing_invariant() {
                 recovery_delay_ms: Some(500..2000),
                 grace_period_ms: Some(1000..3000),
                 scope: AttritionScope::PerProcess,
+                victims: AttritionVictims::Any,
             },
             mode: ChaosMode::Random,
         }])
@@ -602,6 +605,7 @@ fn test_max_dead_limits_concurrent_kills_via_attrition() {
                 recovery_delay_ms: Some(500..2000),
                 grace_period_ms: None,
                 scope: AttritionScope::PerProcess,
+                victims: AttritionVictims::Any,
             },
             mode: ChaosMode::Random,
         }])

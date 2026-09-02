@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Attrition, AttritionScope, Chaos, ChaosMode, DomainLevel, FaultContext, FaultInjector,
-    LocalityConfig, NetworkProvider, Process, RebootKind, SimContext, SimulationBuilder,
-    SimulationError, SimulationResult, TcpListenerTrait, TimeProvider, Workload,
+    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, DomainLevel, FaultContext,
+    FaultInjector, LocalityConfig, NetworkProvider, Process, RebootKind, SimContext,
+    SimulationBuilder, SimulationError, SimulationResult, TcpListenerTrait, TimeProvider, Workload,
 };
 
 // ============================================================================
@@ -220,6 +220,7 @@ fn per_machine_attrition_respects_group_budget() {
                 recovery_delay_ms: None,
                 grace_period_ms: None,
                 scope: AttritionScope::PerMachine,
+                victims: AttritionVictims::Any,
             },
             mode: ChaosMode::Random,
         }])
@@ -258,6 +259,7 @@ fn per_datacenter_attrition_reboots_a_whole_region() {
                 recovery_delay_ms: None,
                 grace_period_ms: None,
                 scope: AttritionScope::PerDatacenter,
+                victims: AttritionVictims::Any,
             },
             mode: ChaosMode::Random,
         }])

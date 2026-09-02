@@ -11,9 +11,9 @@ use async_trait::async_trait;
 use futures::Stream;
 use moonpool_hyper::{ChannelConfig, ChannelError, H2Server, ReconnectingChannel};
 use moonpool_sim::{
-    Attrition, AttritionScope, Chaos, ChaosMode, NetworkProvider, Process, SIM_FAULT_EVENT_NAME,
-    SimContext, SimProviders, SimulationBuilder, SimulationError, SimulationResult, TaskProvider,
-    TcpListenerTrait, Workload,
+    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, NetworkProvider, Process,
+    SIM_FAULT_EVENT_NAME, SimContext, SimProviders, SimulationBuilder, SimulationError,
+    SimulationResult, TaskProvider, TcpListenerTrait, Workload,
 };
 use moonpool_sim_examples::tonic_grpc::proto::echo_client::EchoClient;
 use moonpool_sim_examples::tonic_grpc::proto::echo_server::{Echo, EchoServer};
@@ -310,6 +310,7 @@ fn run_once(seed: u64) -> Vec<TraceEntry> {
                     recovery_delay_ms: None,
                     grace_period_ms: None,
                     scope: AttritionScope::PerProcess,
+                    victims: AttritionVictims::Any,
                 },
                 mode: ChaosMode::Random,
             },

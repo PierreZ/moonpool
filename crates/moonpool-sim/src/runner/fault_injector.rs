@@ -34,6 +34,8 @@
 //! }
 //! ```
 
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -42,11 +44,12 @@ use moonpool_core::TimeProvider;
 use crate::SimulationResult;
 use crate::locality::DomainLevel;
 use crate::providers::{SimRandomProvider, SimTimeProvider};
+use crate::runner::groups::GroupRegistry;
 use crate::runner::locality::MachineRegistry;
-use crate::runner::process::{AttritionScope, RebootKind};
+use crate::runner::process::{AttritionScope, AttritionVictims, RebootKind};
 use crate::runner::tags::TagRegistry;
 use crate::sim::{ProcessKillKind, SimWorld};
-use crate::{assert_reachable, assert_sometimes_each};
+use crate::{assert_always, assert_reachable, assert_sometimes_each};
 
 /// Process-related state for fault injection targeting.
 pub struct ProcessInfo {
@@ -56,9 +59,20 @@ pub struct ProcessInfo {
     pub tag_registry: TagRegistry,
     /// Machine registry mapping process IPs to their failure-domain locality.
     pub machine_registry: MachineRegistry,
-    /// Shared count of currently dead (killed but not yet restarted) processes.
-    pub dead_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Group registry mapping process IPs to their `.processes()` / `.cluster()`
+    /// registration.
+    pub group_registry: GroupRegistry,
+    /// The processes currently dead (killed but not yet restarted), shared
+    /// with the process manager.
+    pub dead: DeadSet,
 }
+
+/// The set of currently dead process IPs, shared between the process manager
+/// (which records kills and restarts) and every fault context (which reads
+/// it to budget kills). A set rather than a counter so a budget can be
+/// scoped to one victim pool — "at most one dead acceptor" — and so a
+/// second kill of an already-dead process cannot skew the count.
+pub type DeadSet = Arc<Mutex<BTreeSet<std::net::IpAddr>>>;
 
 /// Context for fault injectors — gives access to `SimWorld` fault injection methods.
 ///
@@ -109,11 +123,44 @@ impl FaultContext {
     }
 
     /// Get the number of currently dead (killed but not yet restarted) processes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared dead set's lock is poisoned (a prior task panicked).
     #[must_use]
     pub fn dead_count(&self) -> usize {
         self.process_info
-            .dead_count
-            .load(std::sync::atomic::Ordering::Relaxed)
+            .dead
+            .lock()
+            .expect("Mutex poisoned: prior task panicked")
+            .len()
+    }
+
+    /// Whether the process at `ip` is currently dead (killed but not yet
+    /// restarted). An unparsable IP is never dead.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared dead set's lock is poisoned (a prior task panicked).
+    #[must_use]
+    pub fn is_dead(&self, ip: &str) -> bool {
+        ip.parse::<std::net::IpAddr>().is_ok_and(|ip| {
+            self.process_info
+                .dead
+                .lock()
+                .expect("Mutex poisoned: prior task panicked")
+                .contains(&ip)
+        })
+    }
+
+    /// Record `ip` as dead: the kill has been scheduled, so it counts against
+    /// every injector's budget from this instant, not from when the event runs.
+    fn mark_dead(&self, ip: std::net::IpAddr) {
+        self.process_info
+            .dead
+            .lock()
+            .expect("Mutex poisoned: prior task panicked")
+            .insert(ip);
     }
 
     /// Create a bidirectional network partition between two IPs.
@@ -194,6 +241,24 @@ impl FaultContext {
         &self.process_info.process_ips
     }
 
+    /// The group registry, for process-group queries during fault injection.
+    #[must_use]
+    pub fn group_registry(&self) -> &GroupRegistry {
+        &self.process_info.group_registry
+    }
+
+    /// Get the IPs of every process in a group (a `.processes()` /
+    /// `.cluster()` registration, named after its process type), ascending.
+    #[must_use]
+    pub fn ips_in_group(&self, group: &str) -> Vec<String> {
+        self.process_info
+            .group_registry
+            .ips_in_group(group)
+            .into_iter()
+            .map(|ip| ip.to_string())
+            .collect()
+    }
+
     /// Reboot a specific process by IP.
     ///
     /// For [`RebootKind::Graceful`]: schedules a `ProcessGracefulShutdown` event.
@@ -259,9 +324,7 @@ impl FaultContext {
             }
             RebootKind::Crash | RebootKind::CrashAndWipe => {
                 assert_reachable!("reboot: crash path");
-                self.process_info
-                    .dead_count
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.mark_dead(ip_addr);
                 let delay_ms = crate::sim::sim_random_range(recovery_delay_range_ms.clone()) as u64;
                 let cause = if kind == RebootKind::CrashAndWipe {
                     ProcessKillKind::CrashAndWipe
@@ -307,9 +370,7 @@ impl FaultContext {
             .parse()
             .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{ip}': {e}")))?;
         assert_reachable!("crash: hold-down path");
-        self.process_info
-            .dead_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.mark_dead(ip_addr);
         self.sim.schedule_event(
             crate::sim::Event::ProcessForceKill {
                 ip: ip_addr,
@@ -461,16 +522,34 @@ pub trait FaultInjector: Send + Sync + 'static {
 /// Built-in fault injector that randomly reboots server processes.
 ///
 /// Active only during the chaos phase. Respects `max_dead` to limit the
-/// number of simultaneously dead processes. The reboot type is chosen by
-/// weighted probability from the [`Attrition`](super::process::Attrition) config.
+/// number of simultaneously dead processes **among its victim pool**: with
+/// [`AttritionVictims::Any`] that is every process, so the budget is
+/// cluster-wide; with a group or tag filter it is that pool alone, so two
+/// injectors with different pools budget independently. The reboot type is
+/// chosen by weighted probability from the
+/// [`Attrition`](super::process::Attrition) config.
 pub(crate) struct AttritionInjector {
     config: super::process::Attrition,
+    /// `attrition`, or `attrition[group=…]` / `attrition[tag=k=v]` for a
+    /// filtered injector, so a report tells the campaign's injectors apart.
+    name: String,
 }
 
 impl AttritionInjector {
     /// Create a new attrition injector from the given configuration.
     pub(crate) fn new(config: super::process::Attrition) -> Self {
-        Self { config }
+        let name = match &config.victims {
+            AttritionVictims::Any => "attrition".to_string(),
+            AttritionVictims::Group(group) => format!("attrition[group={group}]"),
+            AttritionVictims::Tagged { key, value } => format!("attrition[tag={key}={value}]"),
+        };
+        Self { config, name }
+    }
+
+    /// How many of `ips` are currently dead: the injector's `max_dead` budget
+    /// is spent against its own victim pool.
+    fn dead_among(ctx: &FaultContext, ips: &[&String]) -> usize {
+        ips.iter().filter(|ip| ctx.is_dead(ip)).count()
     }
 
     /// Draw a reboot kind by weighted probability and record coverage.
@@ -489,45 +568,91 @@ impl AttritionInjector {
         )
     }
 
-    /// Reboot a single random process, respecting the `max_dead` budget.
+    /// Whether the victim filter admits `ip`; an unparsable IP is never
+    /// eligible.
+    fn admits(&self, ctx: &FaultContext, ip: &str) -> bool {
+        ip.parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| self.config.victims.admits(ip, &ctx.process_info))
+    }
+
+    /// The processes among `ips` the victim filter admits.
+    ///
+    /// With [`AttritionVictims::Any`] this is `ips` itself, so the draw over
+    /// it is the same draw an unfiltered campaign makes: the filter consumes
+    /// no randomness and, when it excludes nothing, shifts no seed.
+    fn eligible<'i>(&self, ctx: &FaultContext, ips: &'i [String]) -> Vec<&'i String> {
+        ips.iter().filter(|ip| self.admits(ctx, ip)).collect()
+    }
+
+    /// Record and guard the filter contract for one chosen victim.
+    fn check_victim(&self, ctx: &FaultContext, ip: &str) {
+        assert_always!(
+            self.admits(ctx, ip),
+            "attrition: victim admitted by the victim filter",
+            { "ip" => ip, "victims" => format!("{:?}", self.config.victims) }
+        );
+        if self.config.victims != AttritionVictims::Any {
+            assert_reachable!("attrition: victim filter narrowed the pool");
+        }
+    }
+
+    /// Reboot a single random eligible process, respecting the `max_dead`
+    /// budget over the eligible pool.
     fn inject_process(&self, ctx: &FaultContext) -> SimulationResult<()> {
-        if ctx.dead_count() >= self.config.max_dead {
+        let eligible = self.eligible(ctx, ctx.process_ips());
+        if Self::dead_among(ctx, &eligible) >= self.config.max_dead {
             assert_reachable!("attrition: max_dead limit enforced");
+            return Ok(());
+        }
+        if eligible.is_empty() {
+            assert_reachable!("attrition: no eligible victim");
             return Ok(());
         }
         let kind = self.choose_kind();
         let (recovery_range, grace_range) = self.delay_ranges();
-        let idx = crate::sim::sim_random_range(0..ctx.process_ips().len());
-        let ip = ctx.process_ips()[idx].clone();
+        let idx = crate::sim::sim_random_range(0..eligible.len());
+        let ip = eligible[idx].clone();
         assert_sometimes_each!(
             "attrition_process_targeted",
             [("process_idx", i64::try_from(idx).unwrap_or(i64::MAX))]
         );
+        self.check_victim(ctx, &ip);
         ctx.reboot_with_delays(&ip, kind, &recovery_range, &grace_range)
     }
 
-    /// Reboot every process in a random failure domain *together*, only if the
-    /// whole group fits within the `max_dead` budget. A no-op when no locality
-    /// topology is configured (`domains` empty).
+    /// Reboot every eligible process in a random failure domain *together*,
+    /// only if the group fits within the `max_dead` budget over the eligible
+    /// pool. A no-op when no locality topology is configured (`domains`
+    /// empty). Domains holding no eligible process are never drawn, so the
+    /// victim filter cannot make a round silently pick an empty group.
     fn inject_domain(
         &self,
         ctx: &FaultContext,
         level: DomainLevel,
         domains: &[String],
     ) -> SimulationResult<()> {
+        let domain_ips = |domain: &String| -> Vec<String> {
+            let all: Vec<String> = ctx
+                .machine_registry()
+                .ips_in_domain(level, domain)
+                .into_iter()
+                .map(|ip| ip.to_string())
+                .collect();
+            self.eligible(ctx, &all).into_iter().cloned().collect()
+        };
+        let domains: Vec<&String> = domains
+            .iter()
+            .filter(|domain| !domain_ips(domain).is_empty())
+            .collect();
         if domains.is_empty() {
             return Ok(());
         }
         let di = crate::sim::sim_random_range(0..domains.len());
-        let ips: Vec<String> = ctx
-            .machine_registry()
-            .ips_in_domain(level, &domains[di])
-            .into_iter()
-            .map(|ip| ip.to_string())
-            .collect();
+        let ips = domain_ips(domains[di]);
         // Whole-group gate: reboot the group atomically only if all of its
-        // processes fit within the remaining budget.
-        if ctx.dead_count() + ips.len() > self.config.max_dead {
+        // processes fit within the remaining budget of the eligible pool.
+        let eligible = self.eligible(ctx, ctx.process_ips());
+        if Self::dead_among(ctx, &eligible) + ips.len() > self.config.max_dead {
             assert_reachable!("attrition: max_dead limit enforced (group)");
             return Ok(());
         }
@@ -538,6 +663,7 @@ impl AttritionInjector {
             [("group_size", i64::try_from(ips.len()).unwrap_or(i64::MAX))]
         );
         for ip in &ips {
+            self.check_victim(ctx, ip);
             ctx.reboot_with_delays(ip, kind, &recovery_range, &grace_range)?;
         }
         Ok(())
@@ -546,8 +672,8 @@ impl AttritionInjector {
 
 #[async_trait]
 impl FaultInjector for AttritionInjector {
-    fn name(&self) -> &'static str {
-        "attrition"
+    fn name(&self) -> &str {
+        &self.name
     }
 
     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
