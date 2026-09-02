@@ -12,6 +12,21 @@
 //! drains them from the simulation engine and records them via
 //! [`SimulationLayerHandle::record_sim_fault`] with `source = "sim"`.
 //!
+//! The first rule is a configurable floor, `INFO` by default
+//! ([`SimulationLayer::with_level`], [`SimulationBuilder::trace_level`]), and
+//! [`SimulationLayer::install`] applies it at the subscriber, not just at
+//! capture: the layer is stacked on a `LevelFilter` at that level, so every
+//! span and event below it is disabled before the registry allocates anything
+//! for it. A process may therefore carry `#[tracing::instrument(level =
+//! "debug")]` / `level = "trace"` spans on its hot paths (a consensus state
+//! machine's per-message handlers, a storage engine's per-record writes) at
+//! the cost of one level compare per call in simulation, and the timeline
+//! captures exactly what it did before. Lowering the floor to `DEBUG` or
+//! `TRACE` while debugging one seed turns those spans and events on and
+//! captures the events into the timeline.
+//!
+//! [`SimulationBuilder::trace_level`]: crate::SimulationBuilder::trace_level
+//!
 //! Simulation time is stamped from the layer's internal clock, advanced by
 //! the orchestrator via [`SimulationLayerHandle::set_sim_time_ms`] after each
 //! step. Invariants are run by the orchestrator through
@@ -29,6 +44,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tracing::Subscriber;
 use tracing::field::{Field, Visit};
+use tracing::level_filters::LevelFilter;
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
@@ -88,16 +104,48 @@ impl EventStore {
 pub struct SimulationLayer {
     events: Arc<Mutex<EventStore>>,
     invariants: Arc<Mutex<Vec<Box<dyn Invariant + Send>>>>,
+    /// The capture floor: events below it are dropped, and [`install`] makes it
+    /// the subscriber's global floor too. `INFO` by default.
+    ///
+    /// [`install`]: SimulationLayer::install
+    level: LevelFilter,
 }
 
 impl SimulationLayer {
-    /// Create a fresh layer with no events and no invariants.
+    /// Create a fresh layer with no events, no invariants, and an `INFO` floor.
     #[must_use]
     pub fn new() -> Self {
         Self {
             events: Arc::new(Mutex::new(EventStore::new())),
             invariants: Arc::new(Mutex::new(Vec::new())),
+            level: LevelFilter::INFO,
         }
+    }
+
+    /// Set the trace floor: the most verbose level this layer captures, and
+    /// the level [`install`] floors the whole subscriber at.
+    ///
+    /// `INFO` (the default) keeps the timeline to the events invariants read
+    /// and makes every `DEBUG`/`TRACE` span or event in process code free.
+    /// `LevelFilter::DEBUG` or `LevelFilter::TRACE` is the seed-debugging
+    /// setting: hot-path spans are then live and their events land in the
+    /// timeline, so expect a slower run and a much larger capture.
+    /// [`SimulationBuilder::trace_level`] sets this for a whole run.
+    ///
+    /// [`install`]: SimulationLayer::install
+    /// [`SimulationBuilder::trace_level`]: crate::SimulationBuilder::trace_level
+    #[must_use]
+    pub fn with_level(mut self, level: LevelFilter) -> Self {
+        self.level = level;
+        self
+    }
+
+    /// The trace floor this layer captures at (see [`with_level`]).
+    ///
+    /// [`with_level`]: SimulationLayer::with_level
+    #[must_use]
+    pub fn level(&self) -> LevelFilter {
+        self.level
     }
 
     /// Get a clonable handle for registering invariants and reading captured events.
@@ -110,7 +158,19 @@ impl SimulationLayer {
     }
 
     /// Install this layer as the per-thread default subscriber without any
-    /// additional layers.
+    /// additional layers, floored at the layer's [`level`] (`INFO` unless
+    /// [`with_level`] changed it).
+    ///
+    /// The floor is the capture rule applied early: the layer only records
+    /// events at its level or more severe, so anything below is disabled at
+    /// the subscriber and never reaches the registry. At the default `INFO`,
+    /// spans and events at `DEBUG`/`TRACE` in process or workload code cost a
+    /// level compare and nothing else while a simulation runs. The floor
+    /// belongs to the subscriber `install` builds, so a caller composing its
+    /// own (`registry().with(SimulationLayer::new())`) decides its own.
+    ///
+    /// [`level`]: SimulationLayer::level
+    /// [`with_level`]: SimulationLayer::with_level
     #[must_use]
     pub fn install(self) -> (SimulationLayerHandle, InstallGuard) {
         let handle = self.handle();
@@ -125,7 +185,12 @@ impl SimulationLayer {
         // callsite guarantees the cache can never collapse to `never` while a
         // layer is installed. See issue #112.
         let interest_anchor = tracing::Dispatch::new(tracing_subscriber::registry());
-        let subscriber = tracing_subscriber::registry().with(self);
+        // A global floor, not a per-layer filter: `LevelFilter` as a layer in
+        // the stack makes the whole subscriber's `enabled` false below the
+        // floor, so the registry never allocates the span. (A `Filtered`
+        // wrapper around this layer alone would only hide the span from it;
+        // the registry would still create it.)
+        let subscriber = tracing_subscriber::registry().with(self.level).with(self);
         let guard = tracing::subscriber::set_default(subscriber);
         // `set_default` is thread-local and does not rebuild the interest cache,
         // so re-evaluate every callsite now against this capturing subscriber to
@@ -391,9 +456,9 @@ where
     }
 
     fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
-        // 1. INFO or more severe only (Level::TRACE > Level::INFO in tracing's
-        //    ordering).
-        if *event.metadata().level() > tracing::Level::INFO {
+        // 1. At the floor or more severe only (Level::TRACE > Level::INFO in
+        //    tracing's ordering; a `LevelFilter` compares the same way).
+        if *event.metadata().level() > self.level {
             return;
         }
         // 2. Only events attributable to an actor span carrying an `ip`.

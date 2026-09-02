@@ -234,6 +234,9 @@ pub struct SimulationBuilder {
     /// `enable_chaos`/`Chaos` model.
     buggify_knobs: bool,
     swarm_operations: bool,
+    /// The trace floor for the run's subscriber and timeline (see
+    /// [`SimulationBuilder::trace_level`]). `INFO` by default.
+    trace_level: tracing::level_filters::LevelFilter,
     invariants: Vec<Box<dyn Invariant + Send>>,
     fault_injectors: Vec<Box<dyn FaultInjector>>,
     /// Factories that build a fresh fault injector for every root and explored
@@ -283,6 +286,7 @@ impl SimulationBuilder {
             link_latency: None,
             buggify_knobs: false,
             swarm_operations: false,
+            trace_level: tracing::level_filters::LevelFilter::INFO,
             invariants: Vec::new(),
             fault_injectors: Vec::new(),
             fault_factories: Vec::new(),
@@ -538,6 +542,24 @@ impl SimulationBuilder {
             client_id: ClientId::default(),
             factory: Box::new(factory),
         });
+        self
+    }
+
+    /// Set the trace floor for the run: the most verbose `tracing` level the
+    /// simulation subscriber enables and the timeline captures.
+    ///
+    /// `INFO` (the default) is the sweep setting: invariants read `INFO`+
+    /// events, and every `DEBUG`/`TRACE` span or event in process and workload
+    /// code is disabled before the registry allocates it, so hot-path
+    /// `#[tracing::instrument(level = "trace")]` costs one level compare.
+    /// Lower it to `LevelFilter::DEBUG` or `LevelFilter::TRACE` when debugging
+    /// one seed: those spans come alive and their events join the timeline,
+    /// at the price of a slower run and a much larger capture. The floor
+    /// never changes scheduling or randomness, so a seed replays identically
+    /// at any level.
+    #[must_use]
+    pub fn trace_level(mut self, level: tracing::level_filters::LevelFilter) -> Self {
+        self.trace_level = level;
         self
     }
 
@@ -1523,7 +1545,7 @@ impl SimulationBuilder {
         // Install the observability layer once for the entire run. The guard
         // is dropped when run() returns, restoring the previous subscriber.
         // All registered invariants live on the layer handle.
-        let layer = SimulationLayer::new();
+        let layer = SimulationLayer::new().with_level(self.trace_level);
         let (obs_handle, _obs_guard) = layer.install();
         for inv in self.invariants.drain(..) {
             obs_handle.register(inv);
