@@ -12,6 +12,15 @@
 //! drains them from the simulation engine and records them via
 //! [`SimulationLayerHandle::record_sim_fault`] with `source = "sim"`.
 //!
+//! [`SimulationLayer::install`] applies that first rule at the subscriber,
+//! not just at capture: the layer is registered behind a
+//! `LevelFilter::INFO`, so every span and event below `INFO` is disabled
+//! before the registry allocates anything for it. A process may therefore
+//! carry `#[tracing::instrument(level = "debug")]` / `level = "trace"` spans
+//! on its hot paths (a consensus state machine's per-message handlers, a
+//! storage engine's per-record writes) at the cost of one level compare per
+//! call in simulation, and the timeline captures exactly what it did before.
+//!
 //! Simulation time is stamped from the layer's internal clock, advanced by
 //! the orchestrator via [`SimulationLayerHandle::set_sim_time_ms`] after each
 //! step. Invariants are run by the orchestrator through
@@ -110,7 +119,16 @@ impl SimulationLayer {
     }
 
     /// Install this layer as the per-thread default subscriber without any
-    /// additional layers.
+    /// additional layers, filtered at `INFO`.
+    ///
+    /// The filter is the capture rule applied early: the layer only ever
+    /// records `INFO`-or-more-severe events, so anything below that level is
+    /// disabled at the subscriber and never reaches the registry. Spans and
+    /// events at `DEBUG`/`TRACE` in process or workload code cost a level
+    /// compare and nothing else while a simulation runs; the timeline is
+    /// unchanged. The floor belongs to the subscriber `install` builds, so a
+    /// caller composing its own (`registry().with(SimulationLayer::new())`)
+    /// decides its own.
     #[must_use]
     pub fn install(self) -> (SimulationLayerHandle, InstallGuard) {
         let handle = self.handle();
@@ -125,7 +143,14 @@ impl SimulationLayer {
         // callsite guarantees the cache can never collapse to `never` while a
         // layer is installed. See issue #112.
         let interest_anchor = tracing::Dispatch::new(tracing_subscriber::registry());
-        let subscriber = tracing_subscriber::registry().with(self);
+        // A global floor, not a per-layer filter: `LevelFilter` as a layer in
+        // the stack makes the whole subscriber's `enabled` false below INFO, so
+        // the registry never allocates the span. (A `Filtered` wrapper around
+        // this layer alone would only hide the span from it; the registry
+        // would still create it.)
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::INFO)
+            .with(self);
         let guard = tracing::subscriber::set_default(subscriber);
         // `set_default` is thread-local and does not rebuild the interest cache,
         // so re-evaluate every callsite now against this capturing subscriber to

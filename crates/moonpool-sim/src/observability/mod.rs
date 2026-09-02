@@ -109,6 +109,37 @@ mod tests {
     }
 
     #[test]
+    fn install_disables_spans_and_events_below_info() {
+        // `install` filters at INFO, so a hot-path `#[instrument(level =
+        // "trace")]` span in a process costs a level compare and no registry
+        // allocation. `is_disabled` is the observable: an enabled span gets an
+        // id from the registry, a filtered one does not.
+        let (handle, _guard) = SimulationLayer::new().install();
+
+        in_actor_span("10.0.1.1", || {
+            let trace_span = tracing::trace_span!("handler");
+            let debug_span = tracing::debug_span!("handler");
+            let info_span = tracing::info_span!("stage");
+            assert!(trace_span.is_disabled());
+            assert!(debug_span.is_disabled());
+            assert!(!info_span.is_disabled());
+            assert!(!tracing::enabled!(tracing::Level::DEBUG));
+            assert!(tracing::enabled!(tracing::Level::INFO));
+
+            // An INFO event nested under a filtered span is still captured,
+            // with the source resolved through the surviving actor span.
+            let _enter = debug_span.enter();
+            tracing::debug!("debug_only");
+            tracing::info!(term = 1_u64, "leader_elected");
+        });
+
+        assert!(handle.snapshot("debug_only").is_empty());
+        let entries = handle.snapshot("leader_elected");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].source, "10.0.1.1");
+    }
+
+    #[test]
     fn event_outside_actor_span_is_dropped() {
         let (handle, _guard) = SimulationLayer::new().install();
 

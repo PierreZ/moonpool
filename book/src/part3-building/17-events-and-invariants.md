@@ -48,6 +48,8 @@ The `seq` field gives total ordering across all event names. If `leader_elected`
 
 **One emission, two audiences.** In simulation, `SimulationLayer` captures the event into the timeline and invariants cross-validate it. In production, where no `SimulationLayer` is installed, the same event flows to whatever subscriber is configured: `fmt`, OpenTelemetry, structured JSON. Nothing in the emission is moonpool-specific.
 
+**Below `INFO` is free in simulation.** `SimulationLayer::install` (what `SimulationBuilder::run` calls) registers the layer behind a `LevelFilter::INFO`, so a `DEBUG` or `TRACE` span or event is disabled at the subscriber and never reaches the registry. Instrument hot paths freely with `#[tracing::instrument(level = "trace")]`: in a simulation each call costs one level compare, and the timeline captures exactly the `INFO`-and-above events it always did.
+
 ## The Invariant Trait
 
 An invariant is a check the orchestrator runs **after every simulation step**. If the invariant records a failure, the simulation reports the failing seed.
