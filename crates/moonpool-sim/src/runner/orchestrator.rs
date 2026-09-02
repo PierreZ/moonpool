@@ -14,6 +14,7 @@ use crate::runner::app_metrics::{MetricsHandle, SourceFactory};
 use crate::runner::builder::WorkloadClientInfo;
 use crate::runner::context::SimContext;
 use crate::runner::fault_injector::{FaultContext, FaultInjector};
+use crate::runner::groups::GroupRegistry;
 use crate::runner::locality::MachineRegistry;
 use crate::runner::tags::{ProcessTags, TagRegistry};
 use crate::runner::topology::{TopologyFactory, TopologyInputs};
@@ -57,10 +58,7 @@ struct CheckPhaseInputs<'a> {
     workloads: Vec<Box<dyn Workload>>,
     workload_info: &'a [(String, String)],
     client_info: &'a [WorkloadClientInfo],
-    all_entities: &'a [(String, String)],
-    process_ips: &'a [String],
-    tag_registry: &'a TagRegistry,
-    machine_registry: &'a MachineRegistry,
+    topology: &'a TopologyMetadata,
     shutdown_signal: &'a tokio_util::sync::CancellationToken,
     seed: u64,
     state: &'a StateHandle,
@@ -101,10 +99,7 @@ struct WorkloadContextEnv<'a> {
     metrics: &'a MetricsHandle,
     workload_info: &'a [(String, String)],
     client_info: &'a [WorkloadClientInfo],
-    all_entities: &'a [(String, String)],
-    process_ips: &'a [String],
-    tag_registry: &'a TagRegistry,
-    machine_registry: &'a MachineRegistry,
+    topology: &'a TopologyMetadata,
     shutdown_signal: &'a tokio_util::sync::CancellationToken,
     sim: &'a crate::sim::SimWorld,
     seed: u64,
@@ -172,17 +167,16 @@ struct FinalizeOrchestration<'a, 'pm> {
     shutdown_signal: &'a tokio_util::sync::CancellationToken,
     workload_info: &'a [(String, String)],
     client_info: &'a [WorkloadClientInfo],
-    all_entities: &'a [(String, String)],
-    process_ips: &'a [String],
-    tag_registry: &'a TagRegistry,
-    machine_registry: &'a MachineRegistry,
+    topology: &'a TopologyMetadata,
 }
 
-/// Topology metadata derived from a workload/process configuration.
+/// Topology metadata derived from a workload/process configuration: the
+/// per-iteration registries every workload and process context is built from.
 struct TopologyMetadata {
     process_ips: Vec<String>,
     tag_registry: TagRegistry,
     machine_registry: MachineRegistry,
+    group_registry: GroupRegistry,
     all_entities: Vec<(String, String)>,
 }
 
@@ -208,10 +202,7 @@ struct BootAndSetupInputs<'a, 'pm> {
     workloads: Vec<Box<dyn Workload>>,
     workload_info: &'a [(String, String)],
     client_info: &'a [WorkloadClientInfo],
-    all_entities: &'a [(String, String)],
-    process_ips: &'a [String],
-    tag_registry: &'a TagRegistry,
-    machine_registry: &'a MachineRegistry,
+    topology: &'a TopologyMetadata,
     sim: &'a mut crate::sim::SimWorld,
     seed: u64,
     state: &'a StateHandle,
@@ -292,17 +283,12 @@ impl WorkloadOrchestrator {
 
         Self::log_orchestration_start(&workloads, &fault_injectors, process_config.as_ref());
 
-        let TopologyMetadata {
-            process_ips,
-            tag_registry,
-            machine_registry,
-            all_entities,
-        } = Self::build_topology_metadata(workload_info, process_config.as_ref());
+        let topology = Self::build_topology_metadata(workload_info, process_config.as_ref());
 
         // Shared state for cross-workload publish/get communication. Event
         // timelines and invariants live on `obs` (SimulationLayer).
         let state = StateHandle::new();
-        let metrics = Self::build_metrics(metrics_factory, &all_entities, &obs);
+        let metrics = Self::build_metrics(metrics_factory, &topology.all_entities, &obs);
         let shutdown_signal = tokio_util::sync::CancellationToken::new();
 
         let (workloads, contexts, mut process_manager) =
@@ -312,10 +298,7 @@ impl WorkloadOrchestrator {
                 workloads,
                 workload_info,
                 client_info,
-                all_entities: &all_entities,
-                process_ips: &process_ips,
-                tag_registry: &tag_registry,
-                machine_registry: &machine_registry,
+                topology: &topology,
                 sim: &mut sim,
                 seed,
                 state: &state,
@@ -373,10 +356,7 @@ impl WorkloadOrchestrator {
             shutdown_signal: &shutdown_signal,
             workload_info,
             client_info,
-            all_entities: &all_entities,
-            process_ips: &process_ips,
-            tag_registry: &tag_registry,
-            machine_registry: &machine_registry,
+            topology: &topology,
         })
         .await
     }
@@ -394,6 +374,9 @@ impl WorkloadOrchestrator {
         let machine_registry = process_config
             .map(|pc| pc.machine_registry.clone())
             .unwrap_or_default();
+        let group_registry = process_config
+            .map(|pc| pc.group_registry.clone())
+            .unwrap_or_default();
         let all_entities = workload_info
             .iter()
             .chain(process_config.map_or(&[][..], |pc| pc.info.as_slice()))
@@ -403,6 +386,7 @@ impl WorkloadOrchestrator {
             process_ips,
             tag_registry,
             machine_registry,
+            group_registry,
             all_entities,
         }
     }
@@ -419,10 +403,7 @@ impl WorkloadOrchestrator {
             workloads,
             workload_info,
             client_info,
-            all_entities,
-            process_ips,
-            tag_registry,
-            machine_registry,
+            topology,
             sim,
             seed,
             state,
@@ -432,7 +413,7 @@ impl WorkloadOrchestrator {
 
         let mut process_manager = Self::boot_and_wrap_process_manager(
             process_config,
-            all_entities,
+            &topology.all_entities,
             &ProcessBootEnv {
                 sim,
                 seed,
@@ -448,10 +429,7 @@ impl WorkloadOrchestrator {
             metrics,
             workload_info,
             client_info,
-            all_entities,
-            process_ips,
-            tag_registry,
-            machine_registry,
+            topology,
             shutdown_signal,
             sim,
             seed,
@@ -573,10 +551,7 @@ impl WorkloadOrchestrator {
             shutdown_signal,
             workload_info,
             client_info,
-            all_entities,
-            process_ips,
-            tag_registry,
-            machine_registry,
+            topology,
         } = inputs;
 
         // === 5. ABORT ALL PROCESSES ===
@@ -602,10 +577,7 @@ impl WorkloadOrchestrator {
             workloads: returned_workloads,
             workload_info,
             client_info,
-            all_entities,
-            process_ips,
-            tag_registry,
-            machine_registry,
+            topology,
             shutdown_signal,
             seed,
             state,
@@ -639,10 +611,7 @@ impl WorkloadOrchestrator {
             workloads,
             workload_info,
             client_info,
-            all_entities,
-            process_ips,
-            tag_registry,
-            machine_registry,
+            topology,
             shutdown_signal,
             seed,
             state,
@@ -652,10 +621,7 @@ impl WorkloadOrchestrator {
             metrics,
             workload_info,
             client_info,
-            all_entities,
-            process_ips,
-            tag_registry,
-            machine_registry,
+            topology,
             shutdown_signal,
             sim,
             seed,
@@ -902,15 +868,9 @@ impl WorkloadOrchestrator {
         let (process_handles, process_tokens) =
             Self::boot_processes(process_config.as_ref(), all_entities, env)?;
         Ok(match process_config {
-            Some(pc) => ProcessManager::new(
-                pc.factory,
-                process_handles,
-                process_tokens,
-                pc.ips,
-                pc.tag_registry,
-                pc.machine_registry,
-                all_entities.to_vec(),
-            ),
+            Some(pc) => {
+                ProcessManager::new(pc, process_handles, process_tokens, all_entities.to_vec())
+            }
             None => ProcessManager::empty(),
         })
     }
@@ -941,8 +901,11 @@ impl WorkloadOrchestrator {
             return Ok((process_handles, process_tokens));
         };
         for (i, ip) in pc.ips.iter().enumerate() {
-            let mut process = (pc.factory)();
+            let mut process = (pc.factories[i])();
             let ip_addr: std::net::IpAddr = ip.parse().map_err(|_| ())?;
+            // A process is numbered within its own group, so a role can index
+            // its instances without knowing what the other groups drew.
+            let (client_id, client_count) = pc.position_in_group(ip_addr);
             let process_tags = pc
                 .tag_registry
                 .tags_for(ip_addr)
@@ -953,14 +916,15 @@ impl WorkloadOrchestrator {
             let process_token = shutdown_signal.child_token();
             let topology = TopologyFactory::create_topology_with_processes(TopologyInputs {
                 ip,
-                client_id: i,
-                client_count: pc.ips.len(),
+                client_id,
+                client_count,
                 all_entities,
                 process_ips: &pc.ips,
                 my_tags: process_tags,
                 tag_registry: pc.tag_registry.clone(),
                 my_locality: process_locality,
                 machine_registry: pc.machine_registry.clone(),
+                group_registry: pc.group_registry.clone(),
                 shutdown_signal: process_token.clone(),
             });
             let providers = crate::SimProviders::new(sim.downgrade(), seed, ip_addr);
@@ -1061,12 +1025,13 @@ impl WorkloadOrchestrator {
                 ip,
                 client_id,
                 client_count,
-                all_entities: env.all_entities,
-                process_ips: env.process_ips,
+                all_entities: &env.topology.all_entities,
+                process_ips: &env.topology.process_ips,
                 my_tags: ProcessTags::default(),
-                tag_registry: env.tag_registry.clone(),
+                tag_registry: env.topology.tag_registry.clone(),
                 my_locality: None,
-                machine_registry: env.machine_registry.clone(),
+                machine_registry: env.topology.machine_registry.clone(),
+                group_registry: env.topology.group_registry.clone(),
                 shutdown_signal: env.shutdown_signal.clone(),
             });
             let providers = crate::SimProviders::new(env.sim.downgrade(), env.seed, ip_addr);

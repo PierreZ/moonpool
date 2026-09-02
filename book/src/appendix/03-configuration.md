@@ -14,12 +14,12 @@ The builder pattern for configuring and running simulation experiments. Created 
 | `workload_with_client_id(cid, w)` | `ClientId`, `impl Workload` | Single workload with custom client ID strategy |
 | `workloads(count, factory)` | `WorkloadCount`, `Fn(usize) -> Box<dyn Workload>` | Add factory-created workload instances |
 | `workloads_with_client_id(count, cid, factory)` | `WorkloadCount`, `ClientId`, factory | Factory workloads with custom client IDs |
-| `processes(count, factory)` | `impl Into<ProcessCount>`, `Fn() -> Box<dyn Process>` | Add server processes (system under test) |
-| `cluster(config, factory)` | `LocalityConfig`, `Fn() -> Box<dyn Process>` | Add processes laid out across a datacenter/zone/machine topology (replaces `processes`) |
+| `processes(count, factory)` | `impl Into<ProcessCount>`, `Fn() -> Box<dyn Process>` | Add one group of server processes (system under test); repeatable, one group per role, each on its own `10.0.{group}.x` range |
+| `cluster(config, factory)` | `LocalityConfig`, `Fn() -> Box<dyn Process>` | Add one group of processes laid out across a datacenter/zone/machine topology (repeatable like `processes`) |
 | `link_latency(config)` | `LinkLatencyConfig` | Give links a distance-dependent latency, resolved through the `cluster` topology |
 | `network_fault_mask(mask)` | `NetworkFaultMask` | Suppress selected families after each Random/Swarm network profile is sampled; deterministic and exploration-safe |
 | `tags(dimensions)` | `&[(&str, &[&str])]` | Attach round-robin tag distribution to processes |
-| `attrition(config)` | `Attrition` | Enable automatic process reboots during chaos phase |
+| `attrition(config)` | `Attrition` | Add one automatic process-reboot injector for the chaos phase (repeatable: one per victim pool) |
 | `invariant(i)` | `impl Invariant` | Add an invariant checked after every simulation event |
 | `invariant_fn(name, f)` | `String`, closure | Add a closure-based invariant |
 | `fault(f)` | `impl FaultInjector` | Add a custom fault injector instance for the chaos phase (reused across iterations; rejected by exploration) |
@@ -130,6 +130,7 @@ Built-in configuration for automatic process reboots during the chaos phase. Req
 | `recovery_delay_ms` | `Option<Range<usize>>` | `1000..10000` | Delay before restarting a killed process (ms) |
 | `grace_period_ms` | `Option<Range<usize>>` | `2000..5000` | Time allowed for graceful shutdown before force-kill (ms) |
 | `scope` | `AttritionScope` | `PerProcess` | Failure domain each reboot targets (see below) |
+| `victims` | `AttritionVictims` | `Any` | Eligible victims: `Any`, `group(name)`, or `tagged(key, value)`; scopes the draw and `max_dead` to that pool |
 
 The `prob_*` fields are **weights**, not probabilities. They are normalized internally and do not need to sum to 1.0.
 

@@ -31,6 +31,8 @@ let report = SimulationBuilder::new()
 
 The builder creates 3 server processes at `10.0.1.1` through `10.0.1.3` and one workload at `10.0.0.1`. The workload finds server IPs through `ctx.topology().all_process_ips()`.
 
+Call `.processes()` once per **role** of the system under test. Each call is an independent group with its own factory and per-seed count, laid out on its own `10.0.{group}.x` range, and `ctx.topology().ips_in_group("matchmaker")` answers a group by name. [Defining a Process](02-defining-process.md#process-groups) covers the layout, and [Attrition](09-attrition.md#role-aware-victims-one-regime-per-group) shows how each group gets its own reboot regime.
+
 ## Iteration Control
 
 One iteration is not enough. Different seeds produce different scheduling orders, different random choices, different failure patterns. You need hundreds or thousands of iterations to find bugs hiding in rare interleavings.

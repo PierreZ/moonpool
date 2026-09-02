@@ -12,6 +12,7 @@ use tracing::instrument;
 use crate::SimulationError;
 use crate::observability::{Invariant, SimulationLayer, SimulationLayerHandle, TraceQuery};
 use crate::runner::fault_injector::FaultInjector;
+use crate::runner::groups::GroupRegistry;
 use crate::runner::locality::{LocalityConfig, MachineRegistry};
 use crate::runner::process::{Attrition, Process};
 use crate::runner::tags::TagDistribution;
@@ -192,15 +193,49 @@ struct ResolvedEntries {
 }
 use super::report::{SimulationMetrics, SimulationReport};
 
-/// Internal storage for a process entry in the builder.
+/// Internal storage for one process group in the builder: a `.processes()` or
+/// `.cluster()` registration.
 pub(crate) struct ProcessEntry {
     pub(crate) count: ProcessCount,
     pub(crate) factory: Box<dyn Fn() -> Box<dyn Process>>,
     pub(crate) tags: TagDistribution,
+    /// The group's name: its process type's [`Process::name`].
     pub(crate) name: String,
     /// Failure-domain topology. When `Some`, it determines the process count
     /// (sampled per seed) and `count` is ignored.
     pub(crate) locality: Option<LocalityConfig>,
+}
+
+impl ProcessEntry {
+    /// Resolve this group's process count for the current seed, drawing from
+    /// the sim RNG (already seeded) when the count or topology is a range.
+    fn resolve_shape(&self) -> (usize, Option<Vec<crate::LocalityInfo>>) {
+        // When a topology is configured it owns the process count (sampled per
+        // seed); otherwise fall back to the flat `.processes()` count.
+        let localities = self.locality.as_ref().map(LocalityConfig::resolve_topology);
+        let count = localities
+            .as_ref()
+            .map_or_else(|| self.count.resolve(), Vec::len);
+        (count, localities)
+    }
+}
+
+/// The IP of process `index` (0-based) in process group `group` (0-based).
+///
+/// Every group owns its own `/24`: the first group registered is
+/// `10.0.1.{1..=N}`, the second `10.0.2.{1..=N}`, and so on, so a group's
+/// members are contiguous and a single-group builder keeps its historical
+/// addresses. Workloads live on `10.0.0.x`.
+fn process_ip(group: usize, index: usize) -> String {
+    assert!(
+        group < 255,
+        "at most 255 process groups fit the 10.0.{{group}}.x address plan (got group #{group})"
+    );
+    assert!(
+        index < 255,
+        "at most 255 processes per group fit the 10.0.{{group}}.x address plan (got index {index})"
+    );
+    format!("10.0.{}.{}", group + 1, index + 1)
 }
 
 /// Internal storage for workload entries in the builder.
@@ -219,9 +254,12 @@ enum WorkloadEntry {
 pub struct SimulationBuilder {
     iteration_control: IterationControl,
     entries: Vec<WorkloadEntry>,
-    process_entry: Option<ProcessEntry>,
-    attrition: Option<Attrition>,
-    attrition_mode: ChaosMode,
+    /// Server-process groups in registration order; each gets its own IP range.
+    process_entries: Vec<ProcessEntry>,
+    /// Built-in attrition regimes, one injector each, with their per-seed
+    /// sampling mode. Several entries let each process group (or tag) carry
+    /// its own reboot regime and `max_dead` budget.
+    attritions: Vec<(Attrition, ChaosMode)>,
     seeds: Vec<u64>,
     network_chaos: Option<ChaosMode>,
     storage_chaos: Option<ChaosMode>,
@@ -276,9 +314,8 @@ impl SimulationBuilder {
                 max_iterations: 1000,
             },
             entries: Vec::new(),
-            process_entry: None,
-            attrition: None,
-            attrition_mode: ChaosMode::Random,
+            process_entries: Vec::new(),
+            attritions: Vec::new(),
             seeds: Vec::new(),
             network_chaos: None,
             storage_chaos: None,
@@ -341,7 +378,7 @@ impl SimulationBuilder {
         self
     }
 
-    /// Add server processes to the simulation.
+    /// Add a group of server processes to the simulation.
     ///
     /// Processes represent the **system under test** — they can be killed and
     /// restarted (rebooted). A fresh instance is created from the factory on
@@ -350,8 +387,31 @@ impl SimulationBuilder {
     /// The `count` parameter accepts either a fixed `usize` or a
     /// `RangeInclusive<usize>` for seeded random count per iteration.
     ///
-    /// Only one `.processes()` call is supported per builder. Subsequent calls
-    /// overwrite the previous one.
+    /// # Process groups
+    ///
+    /// Each call registers one independent **group**, named after its process
+    /// type ([`Process::name`]), with its own factory and its own per-seed
+    /// count draw. Call it once per role of the system under test — acceptors
+    /// and matchmakers, a primary tier and a spare pool — and each role's
+    /// cluster size varies per seed independently of the others'. Groups draw
+    /// their counts in registration order, so a seed replays the same shape.
+    ///
+    /// Every group owns its own IP range: the first group registered is
+    /// `10.0.1.{1..=N}`, the second `10.0.2.{1..=N}`, and so on, so a group's
+    /// members are contiguous. Inside the simulation,
+    /// [`WorkloadTopology::ips_in_group`](crate::WorkloadTopology::ips_in_group)
+    /// and [`FaultContext::ips_in_group`](crate::FaultContext::ips_in_group)
+    /// answer the group by name, and a process's
+    /// [`client_id`](crate::SimContext::client_id) /
+    /// [`client_count`](crate::SimContext::client_count) are its index within
+    /// and the size of its own group. [`Attrition::victims`](crate::Attrition::victims)
+    /// keeps the built-in attrition on one group.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a group with the same process name was already registered:
+    /// the name is the group's identity, so each role needs its own process
+    /// type (or a distinct [`Process::name`]).
     ///
     /// # Examples
     ///
@@ -361,35 +421,61 @@ impl SimulationBuilder {
     ///
     /// // 3 to 7 processes, randomized per iteration
     /// builder.processes(3..=7, || Box::new(MyNode::new()))
+    ///
+    /// // Two roles: 3–5 acceptors on 10.0.1.x, 0–3 matchmakers on 10.0.2.x
+    /// builder
+    ///     .processes(3..=5, || Box::new(Acceptor::new()))
+    ///     .processes(0..=3, || Box::new(Matchmaker::new()))
     /// ```
     #[must_use]
     pub fn processes(
-        mut self,
+        self,
         count: impl Into<ProcessCount>,
         factory: impl Fn() -> Box<dyn Process> + 'static,
+    ) -> Self {
+        self.register_group(count.into(), factory, None)
+    }
+
+    /// Push one process group, rejecting a duplicate group name.
+    fn register_group(
+        mut self,
+        count: ProcessCount,
+        factory: impl Fn() -> Box<dyn Process> + 'static,
+        locality: Option<LocalityConfig>,
     ) -> Self {
         let sample = factory();
         let name = sample.name().to_string();
         drop(sample);
-        self.process_entry = Some(ProcessEntry {
-            count: count.into(),
+        assert!(
+            !self.process_entries.iter().any(|entry| entry.name == name),
+            "process group {name:?} is already registered: each .processes() / .cluster() call \
+             is one group, named after its process type, so give each role its own name"
+        );
+        self.process_entries.push(ProcessEntry {
+            count,
             factory: Box::new(factory),
             tags: TagDistribution::new(),
             name,
-            locality: None,
+            locality,
         });
         self
     }
 
-    /// Register server processes laid out across a failure-domain topology.
+    /// Register a group of server processes laid out across a failure-domain
+    /// topology.
     ///
     /// Unlike [`processes`](Self::processes), the [`LocalityConfig`] *is* the
     /// spawn spec: it determines the process count (sampled per seed), assigns
     /// each process a datacenter / zone / machine, and lets machine- and
-    /// zone-scoped attrition reboot collocated processes together. Calling this
-    /// replaces any prior `.processes()` / `.cluster()` registration.
+    /// zone-scoped attrition reboot collocated processes together. Like
+    /// `.processes()`, each call registers one independent group with its own
+    /// IP range, and the two may be mixed on one builder.
     ///
     /// Tags ([`tags`](Self::tags)) remain orthogonal and may still be chained.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a group with the same process name was already registered.
     ///
     /// # Examples
     ///
@@ -403,22 +489,12 @@ impl SimulationBuilder {
     /// ```
     #[must_use]
     pub fn cluster(
-        mut self,
+        self,
         config: LocalityConfig,
         factory: impl Fn() -> Box<dyn Process> + 'static,
     ) -> Self {
-        let sample = factory();
-        let name = sample.name().to_string();
-        drop(sample);
-        self.process_entry = Some(ProcessEntry {
-            // `count` is unused when locality is present; the topology decides it.
-            count: ProcessCount::Fixed(0),
-            factory: Box::new(factory),
-            tags: TagDistribution::new(),
-            name,
-            locality: Some(config),
-        });
-        self
+        // `count` is unused when locality is present; the topology decides it.
+        self.register_group(ProcessCount::Fixed(0), factory, Some(config))
     }
 
     /// Give links a distance-dependent latency, resolved through the
@@ -467,15 +543,16 @@ impl SimulationBuilder {
         self
     }
 
-    /// Attach tag distribution to the last `.processes()` call.
+    /// Attach tag distribution to the last `.processes()` / `.cluster()` call.
     ///
-    /// Tags are distributed round-robin across process instances. Each tag
-    /// dimension is distributed independently.
+    /// Tags are distributed round-robin across that group's process instances
+    /// (each group's round-robin starts over). Each tag dimension is
+    /// distributed independently.
     ///
     /// # Errors
     ///
     /// Returns `SimulationError::InvalidState` if called without a preceding
-    /// `.processes()` call.
+    /// `.processes()` / `.cluster()` call.
     ///
     /// # Examples
     ///
@@ -488,7 +565,7 @@ impl SimulationBuilder {
     ///     ])?
     /// ```
     pub fn tags(mut self, dimensions: &[(&str, &[&str])]) -> Result<Self, SimulationError> {
-        let entry = self.process_entry.as_mut().ok_or_else(|| {
+        let entry = self.process_entries.last_mut().ok_or_else(|| {
             SimulationError::InvalidState("tags() must be called after processes()".into())
         })?;
         for (key, values) in dimensions {
@@ -497,10 +574,15 @@ impl SimulationBuilder {
         Ok(self)
     }
 
-    /// Set built-in attrition for automatic process reboots during chaos phase.
+    /// Add built-in attrition for automatic process reboots during the chaos
+    /// phase, sampled as written every seed ([`ChaosMode::Random`]).
     ///
     /// Attrition randomly kills and restarts server processes. It respects
-    /// `max_dead` to limit the number of simultaneously dead processes.
+    /// `max_dead` to limit the number of simultaneously dead processes among
+    /// its victims. Each call adds one independent injector, so a campaign can
+    /// give every process group its own regime — see
+    /// [`Attrition::victims`](crate::Attrition::victims) and
+    /// [`enable_chaos`](Self::enable_chaos).
     ///
     /// **Requires** [`.chaos_duration()`](Self::chaos_duration) — attrition injectors
     /// only run during the chaos phase. Without a chaos duration, the injector
@@ -509,7 +591,7 @@ impl SimulationBuilder {
     /// For custom fault injection, use `.fault()` with a [`FaultInjector`] instead.
     #[must_use]
     pub fn attrition(mut self, config: Attrition) -> Self {
-        self.attrition = Some(config);
+        self.attritions.push((config, ChaosMode::Random));
         self
     }
 
@@ -833,7 +915,10 @@ impl SimulationBuilder {
     /// in a given [`ChaosMode`] — `Random` (full surface every seed) or `Swarm`
     /// (a per-seed random *subset* of sub-families, the rest fully off). A surface
     /// not listed stays off. Later entries override earlier ones for the same
-    /// surface.
+    /// surface, except attrition: every [`Chaos::Attrition`] entry adds one
+    /// independent injector, so a campaign with several process groups can
+    /// give each its own reboot regime, victim filter, and `max_dead` budget
+    /// (a filtered injector spends its budget on its own pool only).
     ///
     /// `Swarm` mode defeats passive suppression: when every fault is always
     /// slightly on (`Random`) families crowd each other out and the extreme
@@ -852,6 +937,27 @@ impl SimulationBuilder {
     ///     Chaos::Network(ChaosMode::Swarm),
     ///     Chaos::Storage(ChaosMode::Swarm),
     /// ]);
+    ///
+    /// // One reboot regime per process group: acceptors lose at most one
+    /// // node at a time, matchmakers are hammered independently.
+    /// builder.enable_chaos([
+    ///     Chaos::Attrition {
+    ///         config: Attrition {
+    ///             max_dead: 1,
+    ///             victims: AttritionVictims::group("acceptor"),
+    ///             ..acceptor_regime
+    ///         },
+    ///         mode: ChaosMode::Swarm,
+    ///     },
+    ///     Chaos::Attrition {
+    ///         config: Attrition {
+    ///             max_dead: 3,
+    ///             victims: AttritionVictims::group("matchmaker"),
+    ///             ..matchmaker_regime
+    ///         },
+    ///         mode: ChaosMode::Random,
+    ///     },
+    /// ]);
     /// ```
     #[must_use]
     pub fn enable_chaos(mut self, surfaces: impl IntoIterator<Item = Chaos>) -> Self {
@@ -859,10 +965,7 @@ impl SimulationBuilder {
             match surface {
                 Chaos::Network(mode) => self.network_chaos = Some(mode),
                 Chaos::Storage(mode) => self.storage_chaos = Some(mode),
-                Chaos::Attrition { config, mode } => {
-                    self.attrition = Some(config);
-                    self.attrition_mode = mode;
-                }
+                Chaos::Attrition { config, mode } => self.attritions.push((config, mode)),
                 Chaos::BuggifyKnobs => self.buggify_knobs = true,
             }
         }
@@ -1084,8 +1187,8 @@ impl SimulationBuilder {
     }
 
     /// Drain user-provided fault injector instances, then append one fresh
-    /// injector per registered factory and, when present, the built-in
-    /// attrition injector.
+    /// injector per registered factory and one built-in attrition injector
+    /// per resolved attrition regime.
     ///
     /// Only the leading instance injectors are returned to the builder after
     /// the run (see `keep_returned_instance_injectors`); factory-created and
@@ -1093,15 +1196,15 @@ impl SimulationBuilder {
     fn collect_fault_injectors(
         user_injectors: &mut Vec<Box<dyn FaultInjector>>,
         fault_factories: &[Box<dyn Fn() -> Box<dyn FaultInjector> + 'static>],
-        attrition: Option<&Attrition>,
+        attritions: Vec<Attrition>,
     ) -> Vec<Box<dyn FaultInjector>> {
         let mut fault_injectors = std::mem::take(user_injectors);
         for factory in fault_factories {
             fault_injectors.push(factory());
         }
-        if let Some(attrition) = attrition {
+        for attrition in attritions {
             fault_injectors.push(Box::new(
-                crate::runner::fault_injector::AttritionInjector::new(attrition.clone()),
+                crate::runner::fault_injector::AttritionInjector::new(attrition),
             ));
         }
         fault_injectors
@@ -1323,47 +1426,57 @@ impl SimulationBuilder {
         crate::chaos::buggify_init(0.5, 0.25);
     }
 
-    /// Resolve a process entry into a `ProcessConfig` for the current
-    /// iteration, sampling the count/tags from the sim RNG (already seeded).
-    fn resolve_process_config(entry: &ProcessEntry) -> super::process_manager::ProcessConfig<'_> {
-        // When a topology is configured it owns the process count (sampled per
-        // seed); otherwise fall back to the flat `.processes()` count.
-        let localities = entry
-            .locality
-            .as_ref()
-            .map(LocalityConfig::resolve_topology);
-        let count = localities
-            .as_ref()
-            .map_or_else(|| entry.count.resolve(), Vec::len);
-
+    /// Resolve the process groups into one `ProcessConfig` for the current
+    /// iteration, sampling each group's count/topology/tags from the sim RNG
+    /// (already seeded) in registration order. Returns `None` when no group
+    /// was registered.
+    ///
+    /// Group *g* lands on `10.0.{g + 1}.{1..=N}` (see [`process_ip`]), so a
+    /// group's members are contiguous and a single-group builder keeps its
+    /// historical `10.0.1.x` addresses.
+    fn resolve_process_config(
+        entries: &[ProcessEntry],
+    ) -> Option<super::process_manager::ProcessConfig<'_>> {
+        if entries.is_empty() {
+            return None;
+        }
+        let mut factories = Vec::new();
         let mut registry = crate::runner::tags::TagRegistry::new();
         let mut machine_registry = MachineRegistry::new();
-        let mut ips = Vec::with_capacity(count);
-        let mut info = Vec::with_capacity(count);
-        let base_name = &entry.name;
-        for i in 0..count {
-            let ip = format!("10.0.1.{}", i + 1);
-            let ip_addr: std::net::IpAddr = ip.parse().expect("valid process IP");
-            let tags = entry.tags.resolve(i);
-            registry.register(ip_addr, tags);
-            if let Some(localities) = &localities {
-                machine_registry.register(ip_addr, localities[i].clone());
+        let mut group_registry = GroupRegistry::new();
+        let mut ips = Vec::new();
+        let mut info = Vec::new();
+        for (group, entry) in entries.iter().enumerate() {
+            let (count, localities) = entry.resolve_shape();
+            let base_name = &entry.name;
+            // Listed even when this seed drew zero members.
+            group_registry.declare(base_name);
+            for i in 0..count {
+                let ip = process_ip(group, i);
+                let ip_addr: std::net::IpAddr = ip.parse().expect("valid process IP");
+                registry.register(ip_addr, entry.tags.resolve(i));
+                if let Some(localities) = &localities {
+                    machine_registry.register(ip_addr, localities[i].clone());
+                }
+                group_registry.register(ip_addr, base_name);
+                factories.push(&*entry.factory);
+                ips.push(ip.clone());
+                let name = if count == 1 {
+                    base_name.clone()
+                } else {
+                    format!("{base_name}-{i}")
+                };
+                info.push((name, ip));
             }
-            ips.push(ip.clone());
-            let name = if count == 1 {
-                base_name.clone()
-            } else {
-                format!("{base_name}-{i}")
-            };
-            info.push((name, ip));
         }
-        super::process_manager::ProcessConfig {
-            factory: &*entry.factory,
+        Some(super::process_manager::ProcessConfig {
+            factories,
             info,
             ips,
             tag_registry: registry,
             machine_registry,
-        }
+            group_registry,
+        })
     }
 
     /// Initialise the assertion region (heap, or `MAP_SHARED` + explorer), and
@@ -1522,7 +1635,8 @@ impl SimulationBuilder {
     /// Panics if a simulation invariant fails, a workload panics, or exploration
     /// is configured with lifecycle state that cannot be reconstructed for each
     /// timeline (an instance workload, a `before_iteration` hook, or a custom
-    /// fault injector instance).
+    /// fault injector instance). Also panics when a process group draws more
+    /// than 255 processes, the most its `10.0.{group}.x` range can address.
     pub fn run(mut self) -> SimulationReport {
         self.validate_exploration_lifecycle();
         if self.entries.is_empty() {
@@ -1768,10 +1882,7 @@ impl SimulationBuilder {
             .map(|(i, w)| (w.name().to_string(), format!("10.0.0.{}", i + 1)))
             .collect();
 
-        let process_config = self
-            .process_entry
-            .as_ref()
-            .map(Self::resolve_process_config);
+        let process_config = Self::resolve_process_config(&self.process_entries);
 
         let mut sim = Self::build_sim_for_iteration(
             self.network_chaos,
@@ -1794,25 +1905,27 @@ impl SimulationBuilder {
             sim.set_localities(config.machine_registry.locality_map());
         }
         let start_time = Instant::now();
-        // Derive the per-seed attrition regime: `Swarm` draws a fresh reboot regime
-        // from `CONFIG_RNG` (after the network/storage masks, keeping the draw order
-        // fixed); `Random` uses the configured weights as written.
-        let attrition = match (self.attrition.as_ref(), self.attrition_mode) {
-            (Some(base), ChaosMode::Swarm) => Some(
-                base.swarm_for_seed_with_topology(
+        // Derive the per-seed attrition regimes, in registration order: `Swarm`
+        // draws a fresh reboot regime from `CONFIG_RNG` (after the network/storage
+        // masks, keeping the draw order fixed); `Random` uses the configured
+        // weights as written.
+        let attritions: Vec<Attrition> = self
+            .attritions
+            .iter()
+            .map(|(base, mode)| match mode {
+                ChaosMode::Swarm => base.swarm_for_seed_with_topology(
                     process_config
                         .as_ref()
                         .map(|config| &config.machine_registry),
                 ),
-            ),
-            (Some(base), ChaosMode::Random) => Some(base.clone()),
-            (None, _) => None,
-        };
+                ChaosMode::Random => base.clone(),
+            })
+            .collect();
         state.pending_instance_injector_count = self.fault_injectors.len();
         let fault_injectors = Self::collect_fault_injectors(
             &mut self.fault_injectors,
             &self.fault_factories,
-            attrition.as_ref(),
+            attritions,
         );
         let outcome = Self::run_orchestrator_blocking(RunOrchestratorInputs {
             seed,

@@ -105,6 +105,67 @@ pub enum AttritionScope {
     PerDatacenter,
 }
 
+/// Which server processes the built-in attrition may reboot.
+///
+/// A system under test with more than one **role** — a consensus tier plus a
+/// pool of spares, acceptors plus matchmakers — rarely wants every process to
+/// be an equally likely victim: a campaign that draws uniformly over the whole
+/// pool spends most of its kills on idle spares. The filter narrows the draw to
+/// one process group (a `.processes()` / `.cluster()` registration, named after
+/// its process type) or to processes carrying one tag.
+///
+/// The filter never consumes randomness of its own. The victim is drawn
+/// uniformly over the *eligible* processes, so a filter that excludes nothing
+/// leaves every seed's draw schedule exactly as it was, and a filter that
+/// leaves nothing eligible makes the injector skip the round without drawing.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AttritionVictims {
+    /// Every server process is eligible (the default).
+    #[default]
+    Any,
+    /// Only processes registered in the named group — see
+    /// [`SimulationBuilder::processes`](super::builder::SimulationBuilder::processes).
+    Group(String),
+    /// Only processes tagged `key=value` — see
+    /// [`SimulationBuilder::tags`](super::builder::SimulationBuilder::tags).
+    Tagged {
+        /// The tag key.
+        key: String,
+        /// The tag value.
+        value: String,
+    },
+}
+
+impl AttritionVictims {
+    /// Restrict attrition to the process group named `group`.
+    #[must_use]
+    pub fn group(group: impl Into<String>) -> Self {
+        Self::Group(group.into())
+    }
+
+    /// Restrict attrition to processes tagged `key=value`.
+    #[must_use]
+    pub fn tagged(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self::Tagged {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    /// Whether `ip` may be rebooted under this filter.
+    #[must_use]
+    pub fn admits(&self, ip: std::net::IpAddr, info: &super::fault_injector::ProcessInfo) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Group(group) => info.group_registry.group_for(ip) == Some(group.as_str()),
+            Self::Tagged { key, value } => info
+                .tag_registry
+                .tags_for(ip)
+                .is_some_and(|tags| tags.matches(key, value)),
+        }
+    }
+}
+
 /// Built-in attrition configuration for automatic process reboots.
 ///
 /// Provides a default chaos mechanism that randomly kills and restarts server
@@ -127,14 +188,20 @@ pub enum AttritionScope {
 ///     recovery_delay_ms: None,
 ///     grace_period_ms: None,
 ///     scope: AttritionScope::PerProcess,
+///     victims: AttritionVictims::Any,
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct Attrition {
-    /// Maximum number of simultaneously dead processes.
+    /// Maximum number of simultaneously dead processes **among this
+    /// injector's victims**.
     ///
     /// The attrition injector will not kill a process if the number of currently
-    /// dead (not yet restarted) processes is already at this limit.
+    /// dead (not yet restarted) processes in its victim pool is already at this
+    /// limit. With [`AttritionVictims::Any`] the pool is the whole cluster; with
+    /// a group or tag filter it is that pool alone, so two injectors with
+    /// different pools budget independently ("at most one dead acceptor *and*
+    /// at most two dead matchmakers").
     pub max_dead: usize,
 
     /// Weight for [`RebootKind::Graceful`] reboots.
@@ -172,6 +239,17 @@ pub struct Attrition {
     /// [`.cluster()`](super::builder::SimulationBuilder::cluster) topology and
     /// respect `max_dead` as a whole-group budget.
     pub scope: AttritionScope,
+
+    /// Which processes may be chosen as victims.
+    ///
+    /// [`AttritionVictims::Any`] (the default) draws over every server
+    /// process. A group or tag filter keeps attrition on the role under test
+    /// — "acceptors, never spares" — scopes `max_dead` to that pool, and
+    /// applies to every scope: a machine-, zone-, or datacenter-scoped reboot
+    /// only picks domains holding an eligible process and only reboots the
+    /// eligible processes in it. Register one [`Chaos::Attrition`](super::config::Chaos::Attrition)
+    /// entry per pool to give each process group its own regime.
+    pub victims: AttritionVictims,
 }
 
 impl Attrition {
@@ -306,7 +384,7 @@ impl Attrition {
 mod swarm_tests {
     use std::net::IpAddr;
 
-    use super::{Attrition, AttritionScope};
+    use super::{Attrition, AttritionScope, AttritionVictims};
     use crate::sim::rng::{rng_call_count, set_config_seed, set_sim_seed};
     use crate::{LocalityInfo, runner::locality::MachineRegistry};
 
@@ -320,7 +398,19 @@ mod swarm_tests {
             recovery_delay_ms: None,
             grace_period_ms: None,
             scope: AttritionScope::PerProcess,
+            victims: AttritionVictims::Any,
         }
+    }
+
+    #[test]
+    fn swarm_keeps_the_victim_filter() {
+        set_config_seed(7);
+        let mut filtered = base();
+        filtered.victims = AttritionVictims::group("acceptor");
+        assert_eq!(
+            filtered.swarm_for_seed().victims,
+            AttritionVictims::group("acceptor")
+        );
     }
 
     /// Build a swarm regime the way the runner does: config stream seeded per iteration.

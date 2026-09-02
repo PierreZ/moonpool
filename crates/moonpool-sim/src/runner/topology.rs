@@ -5,6 +5,7 @@
 
 use crate::locality::{DomainLevel, LocalityInfo};
 
+use super::groups::GroupRegistry;
 use super::locality::MachineRegistry;
 use super::tags::{ProcessTags, TagRegistry};
 
@@ -14,10 +15,10 @@ pub struct WorkloadTopology {
     /// The IP address assigned to this workload or process.
     pub my_ip: String,
     /// This workload's client ID (assigned by the builder's [`ClientId`] strategy).
-    /// For processes, this is the process index.
+    /// For processes, this is the process's index **within its group**.
     pub client_id: usize,
     /// Total number of workload instances sharing this entry (factory count or 1).
-    /// For processes, this is the total process count.
+    /// For processes, this is the size of the process's group.
     pub client_count: usize,
     /// The IP addresses of all other peers in the simulation (workloads + processes).
     pub peer_ips: Vec<String>,
@@ -34,11 +35,49 @@ pub struct WorkloadTopology {
     pub my_locality: Option<LocalityInfo>,
     /// Machine registry for querying failure-domain membership.
     pub machine_registry: MachineRegistry,
+    /// Group registry: which `.processes()` / `.cluster()` registration each
+    /// process belongs to.
+    pub group_registry: GroupRegistry,
     /// Shutdown signal that gets triggered when the first workload exits with Ok.
     pub shutdown_signal: tokio_util::sync::CancellationToken,
 }
 
 impl WorkloadTopology {
+    /// All process groups in registration order.
+    ///
+    /// Every `.processes()` / `.cluster()` call on the builder is one group,
+    /// named after its process type ([`Process::name`](super::process::Process::name)).
+    #[must_use]
+    pub fn groups(&self) -> &[String] {
+        self.group_registry.groups()
+    }
+
+    /// Get the IPs of every process in `group`, ascending.
+    ///
+    /// Unlike [`all_process_ips`](Self::all_process_ips), this includes the
+    /// caller itself when it is a member of the group. Unknown groups are empty.
+    #[must_use]
+    pub fn ips_in_group(&self, group: &str) -> Vec<String> {
+        self.group_registry
+            .ips_in_group(group)
+            .into_iter()
+            .map(|ip| ip.to_string())
+            .collect()
+    }
+
+    /// Get the group a process IP was registered in.
+    #[must_use]
+    pub fn group_for(&self, ip: &str) -> Option<&str> {
+        let ip_addr: std::net::IpAddr = ip.parse().ok()?;
+        self.group_registry.group_for(ip_addr)
+    }
+
+    /// Get this process's own group (`None` for workloads).
+    #[must_use]
+    pub fn my_group(&self) -> Option<&str> {
+        self.group_for(&self.my_ip)
+    }
+
     /// Find the IP address of a peer by its workload name.
     #[must_use]
     pub fn peer_by_name(&self, name: &str) -> Option<String> {
@@ -138,6 +177,8 @@ pub(crate) struct TopologyInputs<'a> {
     pub(crate) my_locality: Option<LocalityInfo>,
     /// Machine registry for failure-domain queries.
     pub(crate) machine_registry: MachineRegistry,
+    /// Group registry for process-group queries.
+    pub(crate) group_registry: GroupRegistry,
     /// Shutdown signal observed by this workload/process.
     pub(crate) shutdown_signal: tokio_util::sync::CancellationToken,
 }
@@ -158,6 +199,7 @@ impl TopologyFactory {
             tag_registry,
             my_locality,
             machine_registry,
+            group_registry,
             shutdown_signal,
         } = inputs;
 
@@ -178,6 +220,7 @@ impl TopologyFactory {
             tag_registry,
             my_locality,
             machine_registry,
+            group_registry,
             shutdown_signal,
         }
     }

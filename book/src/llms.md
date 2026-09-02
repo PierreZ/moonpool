@@ -302,7 +302,13 @@ buggified delay, while baseline storage faults are off. `Chaos::Network` and
 `Chaos::Storage` select per-seed randomized or swarm configurations.
 
 If a process topology matters, replace `.processes` with `.cluster` and add
-`.link_latency`. If roles matter, call `.tags(...)` after process registration;
+`.link_latency`. If the system has several kinds of server (acceptors and
+matchmakers, a tier and a spare pool), call `.processes` once per role: each
+call is an independent group named after its process type, with its own
+per-seed count and its own `10.0.{group}.x` IP range, queried with
+`ctx.topology().ips_in_group("name")`; a process's `client_id` /
+`client_count` are its index within and the size of its own group. If roles
+inside one group matter, call `.tags(...)` after that group's registration;
 remember that `.tags` returns a `Result`.
 
 Exit criterion: the seed succeeds repeatedly and the report has no safety
@@ -698,7 +704,7 @@ breadth gradually:
 ```rust,ignore
 use std::time::Duration;
 
-use moonpool_sim::{Attrition, AttritionScope, Chaos, ChaosMode};
+use moonpool_sim::{Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode};
 
 let report = SimulationBuilder::new()
     .processes(3, || Box::new(Node))
@@ -716,6 +722,7 @@ let report = SimulationBuilder::new()
                 recovery_delay_ms: None,
                 grace_period_ms: None,
                 scope: AttritionScope::PerProcess,
+                victims: AttritionVictims::Any,
             },
             mode: ChaosMode::Swarm,
         },
@@ -728,7 +735,11 @@ let report = SimulationBuilder::new()
 The attrition `prob_*` values are weights, not percentages. Wipe is only valid
 when the model permits losing that process's durable state. Failure-domain
 attrition needs `.cluster(...)` and a budget large enough to remove the chosen
-machine, zone, or datacenter.
+machine, zone, or datacenter. With several process groups, set `victims` to
+`AttritionVictims::group("acceptor")` (or `::tagged(key, value)`) so kills land
+on the role under test rather than on spares; `max_dead` then counts dead
+processes in that pool only, and one `Chaos::Attrition` entry per group gives
+each role its own regime and budget.
 
 `.chaos_duration(...)` bounds the window in which Moonpool may inject **new**
 faults of any kind. At the cutoff the runner stops attrition and custom fault

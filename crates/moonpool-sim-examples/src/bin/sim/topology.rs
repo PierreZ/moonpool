@@ -7,7 +7,8 @@ use std::process;
 use std::time::Duration;
 
 use moonpool_sim::{
-    Attrition, AttritionScope, Chaos, ChaosMode, LocalityConfig, SimulationBuilder,
+    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, LocalityConfig,
+    SimulationBuilder,
 };
 use moonpool_sim_examples::topology::{PROCESSES_PER_MACHINE, TopologyProcess, TopologyWorkload};
 
@@ -28,6 +29,7 @@ fn main() {
                 recovery_delay_ms: None,
                 grace_period_ms: None,
                 scope: AttritionScope::PerMachine,
+                victims: AttritionVictims::Any,
             },
             mode: ChaosMode::Random,
         }])

@@ -136,6 +136,20 @@ For variable cluster sizes, pass a range:
 
 Now each iteration randomly picks between 3 and 7 servers, deterministically based on the seed.
 
+## Process Groups
+
+Most systems have more than one kind of server. A consensus tier and a pool of spares. Acceptors and the matchmakers that reconfigure them. Each `.processes()` call registers one **group**, named after its process type, with its own factory and its own per-seed count:
+
+```rust
+SimulationBuilder::new()
+    .processes(3..=5, || Box::new(Acceptor))
+    .processes(0..=3, || Box::new(Matchmaker))
+```
+
+Every group owns its own IP range. The first group registered lives on `10.0.1.x`, the second on `10.0.2.x`, and so on, so a group's members are contiguous and a single-group simulation keeps the addresses it always had. Inside a process, `ctx.topology().my_group()` names the group it belongs to and `ctx.topology().ips_in_group("acceptor")` lists a group's members. `ctx.client_id()` and `ctx.client_count()` are the process's index within and the size of **its own group**, so an acceptor can number itself `0..n` without knowing how many matchmakers this seed drew.
+
+The counts are drawn in registration order from the seed, which keeps two things true at once: a seed replays the same shape, and each role's cluster size varies independently of the others'. A `0..=3` group really can draw zero on a plain seed, and it still appears in `ctx.topology().groups()` so the workload can tell "no matchmakers this seed" from "this system has no matchmakers".
+
 ## What the Shutdown Token Gives You
 
 Checking `ctx.shutdown()` is optional but valuable. During graceful reboots, the simulation cancels the token and gives a grace period. Your process can:

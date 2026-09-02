@@ -43,6 +43,7 @@ Attrition {
     recovery_delay_ms: Some(1000..10000),
     grace_period_ms: Some(2000..5000),
     scope: AttritionScope::PerProcess,
+    victims: AttritionVictims::Any,
 }
 ```
 
@@ -54,7 +55,9 @@ Attrition {
 
 **`grace_period_ms`** controls how long a graceful shutdown has to complete. Again, drawn randomly from the range. The default is 2 to 5 seconds.
 
-**`scope`** decides which failure domain each reboot targets. The default, `AttritionScope::PerProcess`, kills one random process at a time. `PerMachine`, `PerZone`, and `PerDatacenter` kill **all collocated processes together**, which is the subject of the next section.
+**`scope`** decides which failure domain each reboot targets. The default, `AttritionScope::PerProcess`, kills one random process at a time. `PerMachine`, `PerZone`, and `PerDatacenter` kill **all collocated processes together**, which is the subject of a later section.
+
+**`victims`** decides which processes are eligible at all. The default, `AttritionVictims::Any`, draws over every server process. A group or tag filter keeps attrition on one role, which is the subject of [Role-Aware Victims](#role-aware-victims-one-regime-per-group).
 
 ## Using Attrition
 
@@ -74,6 +77,7 @@ SimulationBuilder::new()
             recovery_delay_ms: None,  // use defaults
             grace_period_ms: None,    // use defaults
             scope: AttritionScope::PerProcess,
+            victims: AttritionVictims::Any,
         },
         mode: ChaosMode::Random,
     }])
@@ -106,6 +110,43 @@ faults](10-network-faults.md#swarm-testing-less-is-more).
 `max_dead` deserves special attention because it is the bridge between chaos and correctness. Without it, attrition could kill all your nodes simultaneously, which is technically chaos but not useful chaos. No distributed system survives simultaneous failure of all replicas.
 
 Set `max_dead` to match your system's fault tolerance. A system with replication factor 3 can tolerate 1 failure, so `max_dead: 1`. A system that needs 3 of 5 nodes alive should use `max_dead: 2`. This ensures attrition tests failures your system **should** survive, not failures that are inherently unrecoverable.
+
+The budget counts dead processes **among the injector's victims**. With `AttritionVictims::Any` that is the whole cluster. With a group or tag filter it is that pool alone, so "at most one dead acceptor" is exactly what it says, whatever is happening to the matchmakers.
+
+## Role-Aware Victims: One Regime per Group
+
+A cluster rarely has one kind of node. Once you register [process groups](02-defining-process.md#process-groups), uniform attrition has a problem: it draws its victim over **every** process, so on a seed with three acceptors and five spares most kills land on the spares, and the consensus tier you meant to stress barely notices. The fix is to tell attrition who it is allowed to kill:
+
+```rust
+use moonpool_sim::AttritionVictims;
+
+Attrition {
+    max_dead: 1,
+    victims: AttritionVictims::group("acceptor"),   // never a spare
+    ..base
+}
+```
+
+`AttritionVictims::group("acceptor")` restricts the draw to one `.processes()` / `.cluster()` group, named after its process type. `AttritionVictims::tagged("role", "voter")` restricts it to processes carrying a tag. The filter costs no randomness of its own: the victim is drawn uniformly over the **eligible** processes, so a filter that excludes nothing leaves every existing seed's draw schedule untouched, and a filter that leaves nothing eligible skips the round without drawing. It applies to every scope too. A machine-scoped reboot only picks machines that host an eligible process and only kills the eligible processes on it.
+
+Because the budget is per pool, you can give each group its own regime. Every `Chaos::Attrition` entry adds one independent injector:
+
+```rust
+.enable_chaos([
+    Chaos::Attrition {
+        // Acceptors: at most one down at a time, regime swarmed per seed.
+        config: Attrition { max_dead: 1, victims: AttritionVictims::group("acceptor"), ..base.clone() },
+        mode: ChaosMode::Swarm,
+    },
+    Chaos::Attrition {
+        // Matchmakers: hammered independently, up to three down at once.
+        config: Attrition { max_dead: 3, victims: AttritionVictims::group("matchmaker"), ..base },
+        mode: ChaosMode::Random,
+    },
+])
+```
+
+The two injectors run side by side during the chaos phase and never block each other: a dead matchmaker does not spend the acceptors' budget. Swarm regimes are drawn in registration order from `CONFIG_RNG`, so a campaign with several injectors replays exactly like one with a single injector. In the report each injector carries its filter in its name (`attrition[group=acceptor]`), so a failing seed says which regime was active.
 
 ## Failure Domains: Correlated Reboots
 
@@ -149,6 +190,7 @@ Now `scope` earns its keep. With `AttritionScope::PerMachine`, attrition picks a
         recovery_delay_ms: None,
         grace_period_ms: None,
         scope: AttritionScope::PerMachine,
+        victims: AttritionVictims::Any,
     },
     mode: ChaosMode::Random,
 }])
