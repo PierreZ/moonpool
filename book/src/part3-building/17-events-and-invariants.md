@@ -48,7 +48,9 @@ The `seq` field gives total ordering across all event names. If `leader_elected`
 
 **One emission, two audiences.** In simulation, `SimulationLayer` captures the event into the timeline and invariants cross-validate it. In production, where no `SimulationLayer` is installed, the same event flows to whatever subscriber is configured: `fmt`, OpenTelemetry, structured JSON. Nothing in the emission is moonpool-specific.
 
-**Below `INFO` is free in simulation.** `SimulationLayer::install` (what `SimulationBuilder::run` calls) registers the layer behind a `LevelFilter::INFO`, so a `DEBUG` or `TRACE` span or event is disabled at the subscriber and never reaches the registry. Instrument hot paths freely with `#[tracing::instrument(level = "trace")]`: in a simulation each call costs one level compare, and the timeline captures exactly the `INFO`-and-above events it always did.
+**Below the floor is free in simulation.** `SimulationLayer::install` (what `SimulationBuilder::run` calls) stacks the layer on a `LevelFilter` at the run's trace floor, `INFO` by default, so a `DEBUG` or `TRACE` span or event is disabled at the subscriber and never reaches the registry. Instrument hot paths freely with `#[tracing::instrument(level = "trace")]`: in a sweep each call costs one level compare, and the timeline captures exactly the `INFO`-and-above events it always did.
+
+**Lowering the floor to debug one seed.** `SimulationBuilder::trace_level(LevelFilter::DEBUG)` (or `TRACE`) turns those spans on and captures their events into the timeline for the whole run; `SimulationLayer::new().with_level(..)` does the same for a hand-built layer. The floor never touches scheduling or randomness, so the seed replays identically at any level — only the run is slower and the capture larger, which is why it is a per-investigation setting rather than a sweep default.
 
 ## The Invariant Trait
 

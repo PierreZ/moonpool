@@ -349,6 +349,10 @@ tracing::info!(
 ```
 
 The event message must be a non-empty constant name. Use `%` for string values.
+The run's subscriber is floored at `INFO` by default, so `DEBUG`/`TRACE` spans
+and events (`#[tracing::instrument(level = "trace")]` on hot paths) cost one
+level compare and are never allocated; `.trace_level(LevelFilter::DEBUG)` on
+the builder lowers the floor to debug one seed, capturing those events too.
 Do not add simulated time manually; the observability layer stamps it. Actor
 spans provide source attribution automatically.
 

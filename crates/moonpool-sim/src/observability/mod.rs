@@ -140,6 +140,35 @@ mod tests {
     }
 
     #[test]
+    fn with_level_lowers_the_floor_for_spans_and_capture() {
+        // The seed-debugging setting: at DEBUG the debug span is live, the
+        // debug event is captured, and trace stays off.
+        let (handle, _guard) = SimulationLayer::new()
+            .with_level(tracing::level_filters::LevelFilter::DEBUG)
+            .install();
+
+        in_actor_span("10.0.1.2", || {
+            let trace_span = tracing::trace_span!("handler");
+            let debug_span = tracing::debug_span!("handler");
+            assert!(trace_span.is_disabled());
+            assert!(!debug_span.is_disabled());
+            assert!(tracing::enabled!(tracing::Level::DEBUG));
+            assert!(!tracing::enabled!(tracing::Level::TRACE));
+
+            let _enter = debug_span.enter();
+            tracing::debug!(slot = 3_u64, "accept_seen");
+            tracing::trace!("trace_only");
+        });
+
+        let entries = handle.snapshot("accept_seen");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].level, tracing::Level::DEBUG);
+        assert_eq!(entries[0].source, "10.0.1.2");
+        assert_eq!(entries[0].u64("slot"), Some(3));
+        assert!(handle.snapshot("trace_only").is_empty());
+    }
+
+    #[test]
     fn event_outside_actor_span_is_dropped() {
         let (handle, _guard) = SimulationLayer::new().install();
 
