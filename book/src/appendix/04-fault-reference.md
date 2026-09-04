@@ -122,6 +122,14 @@ Episodic degradation layered on top of steady-state timing (FoundationDB's `Disk
 | Throttle | `disk_throttle_probability` / `disk_throttle_duration` | 0%, 0ms | Effective IOPS/bandwidth divided by the multipliers |
 | Throttle factor | `disk_throttle_iops_multiplier` / `disk_throttle_bandwidth_multiplier` | 1.0 | Divisor applied to IOPS / bandwidth during a throttle |
 
+### Disk Failure
+
+A disk that never answers (FoundationDB's `failedDisk`, where `waitUntilDiskReady()` returns `Never()`). Off by default and scoped per process: every read, write, sync, or `set_len` issued to a failed disk is accepted and stays `Pending` for the rest of the run, with no error and no scheduled completion. At most one disk is failed at a time; a crash or wipe of the owning process replaces it and fails the parked operations with `OperationInterrupted`. Recovery mode stops new failures but keeps one already in force. `SimWorld::fail_disk_for_process(ip)` is the scripted form.
+
+| Fault | Config Field | Default | Effect |
+|-------|-------------|---------|--------|
+| Disk failure | `disk_failure_probability` | 0% | Every later I/O on that process's disk parks forever; only the caller's timeout or a process kill unblocks it |
+
 ## Process Lifecycle Faults
 
 Configured via [`Attrition`](../part3-building/09-attrition.md) (built-in) or

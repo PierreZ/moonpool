@@ -100,11 +100,11 @@ family and heals the partitions the simulator is holding.
 | At the cutoff | |
 |---|---|
 | Stopped | Network: partitions, clogs, bit flips, spontaneous closes, connect failures, clock drift, buggified sleep delays, new per-pair latency degradation |
-| Stopped | Storage: read/write/sync/crash faults, misdirected and phantom writes, new disk stall and throttle episodes |
+| Stopped | Storage: read/write/sync/crash faults, misdirected and phantom writes, new disk stall and throttle episodes, new disk failures |
 | Stopped | Block devices: EIO, read corruption, misdirected and phantom writes, persist failures, barrier violations |
 | Stopped | Fault injectors, including built-in attrition |
 | Healed | Every partition in force — directed pair cuts and asymmetric send-side / receive-side blocks alike |
-| Preserved | Corrupted sectors, lost/misdirected/phantom writes already applied, connections already closed, processes already killed, application state, the fixed extra latency a slow link already sampled |
+| Preserved | Corrupted sectors, lost/misdirected/phantom writes already applied, connections already closed, processes already killed, a disk that already failed (and the operations it parked), application state, the fixed extra latency a slow link already sampled |
 | Left to expire | Finite effects already started: disk stall and throttle episodes, clogs, packets already scheduled with a delay |
 
 The persistent consequences of faults already injected remain part of the

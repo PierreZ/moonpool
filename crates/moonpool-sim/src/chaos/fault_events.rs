@@ -139,6 +139,11 @@ pub enum SimFaultEvent {
         /// File identifier.
         file_id: u64,
     },
+    /// A process's disk failed: every later I/O on it parks forever.
+    StorageDiskFailure {
+        /// IP of the process whose disk failed.
+        ip: String,
+    },
     /// Storage crash simulated for a process.
     StorageCrash {
         /// IP of the crashed process.
@@ -182,6 +187,7 @@ impl SimFaultEvent {
             Self::StorageReadFault { .. } => "storage_read_fault",
             Self::StorageWriteFault { .. } => "storage_write_fault",
             Self::StorageSyncFault { .. } => "storage_sync_fault",
+            Self::StorageDiskFailure { .. } => "storage_disk_failure",
             Self::StorageCrash { .. } => "storage_crash",
             Self::StorageWipe { .. } => "storage_wipe",
             Self::BlockDeviceCrash { .. } => "block_device_crash",

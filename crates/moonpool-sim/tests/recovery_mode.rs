@@ -90,6 +90,28 @@ fn poll_read_once(
     std::pin::Pin::new(stream).poll_read(&mut context, data)
 }
 
+/// Poll a simulation-backed future until it resolves or the world runs out of
+/// events. `Pending` means it is parked for good: nothing is left to wake it.
+fn settle<F: Future + ?Sized>(
+    sim: &mut SimWorld,
+    mut future: std::pin::Pin<&mut F>,
+) -> Poll<F::Output> {
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+
+    for _ in 0..MAX_DRIVER_STEPS {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return Poll::Ready(output);
+        }
+        if !sim.has_pending_events() {
+            return Poll::Pending;
+        }
+        sim.step();
+    }
+
+    panic!("simulation-backed future exceeded {MAX_DRIVER_STEPS} events")
+}
+
 /// Pump the scheduler by feeding it network maintenance ticks, which is where
 /// the engine rolls for a new random partition.
 fn tick_maintenance(sim: &mut SimWorld, ticks: usize) {
@@ -316,6 +338,66 @@ fn storage_damage_survives_recovery_mode_while_new_faults_stop() {
     assert_eq!(
         reread, corrupted,
         "recovery mode must not repair a sector that was already corrupted"
+    );
+}
+
+/// A failed disk has no expiry, so it is damage the boundary keeps, and the
+/// coin that failed it stops: once the process is crashed and the one-at-a-time
+/// budget is free again, no other disk fails in the quiet tail.
+#[test]
+fn a_failed_disk_outlives_the_boundary_and_no_other_disk_fails() {
+    let mut config = StorageConfiguration::fast_local();
+    config.disk_failure_probability = 1.0;
+    let mut sim = SimWorld::new_with_seed(20_260_901);
+    sim.set_storage_config(config);
+    let provider = sim.storage_provider(ip(1));
+    let mut file = drive(
+        &mut sim,
+        provider.open("hung.bin", OpenOptions::create_write()),
+    )
+    .expect("open");
+
+    // --- chaos phase: the first I/O fails disk 1 and parks ---
+    let mut parked = pin!(file.write_all(b"never"));
+    assert!(
+        settle(&mut sim, parked.as_mut()).is_pending(),
+        "the chaos phase must actually fail the disk, or the test proves nothing"
+    );
+    assert!(sim.is_disk_failed(ip(1)));
+
+    sim.enter_recovery_mode();
+
+    // --- the failure is damage, not a fault to stop ---
+    assert!(
+        sim.is_disk_failed(ip(1)),
+        "recovery mode must not replace a disk that already failed"
+    );
+    assert!(
+        settle(&mut sim, parked.as_mut()).is_pending(),
+        "an operation parked before the boundary stays parked"
+    );
+
+    // --- only the process reboot replaces the disk ---
+    sim.simulate_crash_for_process(ip(1), true);
+    assert!(
+        matches!(settle(&mut sim, parked.as_mut()), Poll::Ready(Err(_))),
+        "the crash fails the operations the disk parked"
+    );
+    assert!(!sim.is_disk_failed(ip(1)));
+
+    // --- quiet tail: the budget is free, and still nobody's disk fails ---
+    let provider = sim.storage_provider(ip(2));
+    drive(&mut sim, async {
+        let mut file = provider
+            .open("quiet.bin", OpenOptions::create_write())
+            .await
+            .expect("open");
+        file.write_all(b"ok").await.expect("write");
+        file.sync_all().await.expect("sync");
+    });
+    assert!(
+        !sim.is_disk_failed(ip(2)),
+        "no disk may fail after the recovery boundary"
     );
 }
 
@@ -683,6 +765,7 @@ fn set_storage_config_cannot_rearm_faults_after_recovery() {
     rearmed.read_fault_probability = 1.0;
     rearmed.phantom_write_probability = 1.0;
     rearmed.disk_stall_probability = 1.0;
+    rearmed.disk_failure_probability = 1.0;
     rearmed.iops = 4321;
     sim.set_storage_config(rearmed);
 
@@ -702,6 +785,10 @@ fn set_storage_config_cannot_rearm_faults_after_recovery() {
         assert_zero(
             config.disk_stall_probability,
             "stall episodes must not be re-armable after the boundary",
+        );
+        assert_zero(
+            config.disk_failure_probability,
+            "disk failures must not be re-armable after the boundary",
         );
         assert_eq!(
             config.iops, 4321,
@@ -734,6 +821,10 @@ fn set_storage_config_cannot_rearm_faults_after_recovery() {
     assert!(
         sim.disk_episode_for(ip(1)).is_none(),
         "no degradation episode may be entered after the boundary"
+    );
+    assert!(
+        !sim.is_disk_failed(ip(1)),
+        "no disk may fail after the boundary"
     );
 }
 
