@@ -103,7 +103,8 @@ impl StorageEngine {
     /// Disk-degradation episodes already in force are deliberately left in
     /// `disk_episodes`: they carry an expiry and clear themselves on the next
     /// operation past it, so a stall that started under chaos still has to be
-    /// waited out.
+    /// waited out. A disk that already failed stays in `failed_disks`: it has
+    /// no expiry, and only a crash or wipe of its process replaces it.
     pub(crate) fn disable_fault_injection(&mut self) {
         self.state.config.disable_fault_injection();
         for config in self.state.per_process_configs.values_mut() {
@@ -113,6 +114,21 @@ impl StorageEngine {
 
     pub(crate) fn disk_episode_for(&self, ip: IpAddr) -> Option<DiskDegradationState> {
         self.state.disk_episodes.get(&ip).copied()
+    }
+
+    pub(crate) fn is_disk_failed(&self, ip: IpAddr) -> bool {
+        self.state.failed_disks.contains(&ip)
+    }
+
+    /// Fail `ip`'s disk outright: every later operation on a file it owns is
+    /// parked forever. A scripted injection, so it ignores the one-at-a-time
+    /// budget the per-operation coin honors and consumes no randomness.
+    pub(crate) fn fail_disk(&mut self, ip: IpAddr) -> StorageActions {
+        let mut actions = StorageActions::default();
+        if self.state.failed_disks.insert(ip) {
+            actions.fault(SimFaultEvent::StorageDiskFailure { ip: ip.to_string() });
+        }
+        actions
     }
 
     pub(crate) fn open_file(
@@ -226,6 +242,18 @@ impl StorageEngine {
         self.ensure_readable(handle_id)?;
         let file_id = self.open_file_id(handle_id)?;
         let owner_ip = self.owner_ip(file_id)?;
+        let pending = PendingStorageOp {
+            handle_id,
+            file_id,
+            op_type: PendingOpType::Read,
+            offset,
+            len,
+            data: None,
+            append: false,
+        };
+        if let Some(actions) = self.roll_disk_failure(owner_ip) {
+            return self.park_operation(pending, actions);
+        }
         let episode = self.update_disk_episode(owner_ip, now);
         let latency = Self::calculate_storage_latency(
             self.state.config_for(owner_ip),
@@ -235,15 +263,7 @@ impl StorageEngine {
             now,
         );
         self.schedule_operation(
-            PendingStorageOp {
-                handle_id,
-                file_id,
-                op_type: PendingOpType::Read,
-                offset,
-                len,
-                data: None,
-                append: false,
-            },
+            pending,
             StorageOperation::ReadComplete {
                 len: u32::try_from(len).expect("read length fits in u32"),
             },
@@ -263,6 +283,18 @@ impl StorageEngine {
         let append = self.open_handle(handle_id)?.options.is_append();
         let owner_ip = self.owner_ip(file_id)?;
         let len = data.len();
+        let pending = PendingStorageOp {
+            handle_id,
+            file_id,
+            op_type: PendingOpType::Write,
+            offset,
+            len,
+            data: Some(data),
+            append,
+        };
+        if let Some(actions) = self.roll_disk_failure(owner_ip) {
+            return self.park_operation(pending, actions);
+        }
         let episode = self.update_disk_episode(owner_ip, now);
         let latency = Self::calculate_storage_latency(
             self.state.config_for(owner_ip),
@@ -272,15 +304,7 @@ impl StorageEngine {
             now,
         );
         self.schedule_operation(
-            PendingStorageOp {
-                handle_id,
-                file_id,
-                op_type: PendingOpType::Write,
-                offset,
-                len,
-                data: Some(data),
-                append,
-            },
+            pending,
             StorageOperation::WriteComplete {
                 len: u32::try_from(len).expect("write length fits in u32"),
             },
@@ -295,6 +319,18 @@ impl StorageEngine {
     ) -> Result<(OperationId, StorageActions), StorageError> {
         let file_id = self.open_file_id(handle_id)?;
         let owner_ip = self.owner_ip(file_id)?;
+        let pending = PendingStorageOp {
+            handle_id,
+            file_id,
+            op_type: PendingOpType::Sync,
+            offset: 0,
+            len: 0,
+            data: None,
+            append: false,
+        };
+        if let Some(actions) = self.roll_disk_failure(owner_ip) {
+            return self.park_operation(pending, actions);
+        }
         let episode = self.update_disk_episode(owner_ip, now);
         let mut latency = sample_latency(&self.state.config_for(owner_ip).sync_latency);
         if let Some(DiskDegradationState {
@@ -305,15 +341,7 @@ impl StorageEngine {
             latency = latency.saturating_add(expires_at.saturating_sub(now));
         }
         self.schedule_operation(
-            PendingStorageOp {
-                handle_id,
-                file_id,
-                op_type: PendingOpType::Sync,
-                offset: 0,
-                len: 0,
-                data: None,
-                append: false,
-            },
+            pending,
             StorageOperation::SyncComplete,
             now.saturating_add(latency),
         )
@@ -328,20 +356,65 @@ impl StorageEngine {
         self.ensure_writable(handle_id, "set_len")?;
         let file_id = self.open_file_id(handle_id)?;
         let owner_ip = self.owner_ip(file_id)?;
+        let pending = PendingStorageOp {
+            handle_id,
+            file_id,
+            op_type: PendingOpType::SetLen,
+            offset: new_len,
+            len: 0,
+            data: None,
+            append: false,
+        };
+        if let Some(actions) = self.roll_disk_failure(owner_ip) {
+            return self.park_operation(pending, actions);
+        }
         let latency = sample_latency(&self.state.config_for(owner_ip).write_latency);
         self.schedule_operation(
-            PendingStorageOp {
-                handle_id,
-                file_id,
-                op_type: PendingOpType::SetLen,
-                offset: new_len,
-                len: 0,
-                data: None,
-                append: false,
-            },
+            pending,
             StorageOperation::SetLenComplete { new_len },
             now.saturating_add(latency),
         )
+    }
+
+    /// Whether `owner_ip`'s disk is failed, drawing the failure coin first if
+    /// the disk is healthy and the budget allows. A failed disk answers with
+    /// the actions to apply (the fault event, on the operation that failed
+    /// it); a healthy one answers `None`.
+    ///
+    /// The coin is drawn only while `disk_failure_probability` is positive, so
+    /// a configuration with the family off consumes no randomness here.
+    fn roll_disk_failure(&mut self, owner_ip: IpAddr) -> Option<StorageActions> {
+        if self.state.failed_disks.contains(&owner_ip) {
+            return Some(StorageActions::default());
+        }
+        // Floor: one failed disk at a time. The coin never takes a second
+        // member of a quorum system down while the first is still hung; a
+        // crash or wipe of the first frees the budget.
+        if !self.state.failed_disks.is_empty() {
+            return None;
+        }
+        let probability = self.state.config_for(owner_ip).disk_failure_probability;
+        if probability <= 0.0 || sim_random::<f64>() >= probability {
+            return None;
+        }
+        assert_reachable!("disk: failed, every later I/O parks forever");
+        Some(self.fail_disk(owner_ip))
+    }
+
+    /// Register `pending` as in flight without scheduling its completion.
+    ///
+    /// The operation stays `Pending` for good: nothing in the engine will ever
+    /// resolve it. It leaves `pending_ops` only when its future is dropped
+    /// (`cancel_operation`), when a crash or wipe of the owning process fails
+    /// the handle's operations, or at simulation shutdown. It samples no
+    /// latency and enters no episode, so a hung I/O draws nothing.
+    fn park_operation(
+        &mut self,
+        pending: PendingStorageOp,
+        actions: StorageActions,
+    ) -> Result<(OperationId, StorageActions), StorageError> {
+        let operation_id = self.register_operation(pending)?;
+        Ok((operation_id, actions))
     }
 
     fn schedule_operation(
@@ -350,15 +423,23 @@ impl StorageEngine {
         operation: StorageOperation,
         at: Duration,
     ) -> Result<(OperationId, StorageActions), StorageError> {
+        let handle_id = pending.handle_id;
+        let operation_id = self.register_operation(pending)?;
+        let mut actions = StorageActions::default();
+        actions.schedule(at, StorageEvent::new(operation_id, handle_id, operation));
+        Ok((operation_id, actions))
+    }
+
+    fn register_operation(
+        &mut self,
+        pending: PendingStorageOp,
+    ) -> Result<OperationId, StorageError> {
         let operation_id = OperationId(self.state.next_operation_id);
         self.state.next_operation_id += 1;
         let handle = self.open_handle_mut(pending.handle_id)?;
         handle.pending_ops.insert(operation_id);
-        let handle_id = pending.handle_id;
         self.state.pending_ops.insert(operation_id, pending);
-        let mut actions = StorageActions::default();
-        actions.schedule(at, StorageEvent::new(operation_id, handle_id, operation));
-        Ok((operation_id, actions))
+        Ok(operation_id)
     }
 
     pub(crate) fn handle_event(&mut self, event: StorageEvent) -> StorageActions {
@@ -689,6 +770,9 @@ impl StorageEngine {
     }
 
     pub(crate) fn simulate_crash(&mut self, ip: IpAddr, close_files: bool) -> StorageActions {
+        // The reboot replaces a failed disk; the operations it parked are
+        // failed below with the rest of the process's in-flight I/O.
+        self.state.failed_disks.remove(&ip);
         let probability = self.state.config_for(ip).crash_fault_probability;
         let file_ids = self
             .state
@@ -717,6 +801,7 @@ impl StorageEngine {
     }
 
     pub(crate) fn wipe_process(&mut self, ip: IpAddr) -> StorageActions {
+        self.state.failed_disks.remove(&ip);
         let files = self
             .state
             .files

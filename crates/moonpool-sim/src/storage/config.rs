@@ -40,6 +40,16 @@
 //! | Throttle | `disk_throttle_probability` / `disk_throttle_duration` | 0% | Effective IOPS/bandwidth divided by the multipliers |
 //! | Throttle factor | `disk_throttle_iops_multiplier` / `disk_throttle_bandwidth_multiplier` | 1.0 | Divisor applied to IOPS / bandwidth |
 //!
+//! ## Disk Failure
+//!
+//! A disk that *fails* is not slow, it is gone: every I/O issued to it after
+//! the failure is accepted and never completes. FDB ref: `failedDisk` /
+//! `waitUntilDiskReady()` returning `Never()`. Off by default.
+//!
+//! | Fault | Config Field | Default | Effect while active |
+//! |-------|--------------|---------|---------------------|
+//! | Disk failure | `disk_failure_probability` | 0% | Every later read/write/sync/`set_len` on that process's disk stays pending forever |
+//!
 //! ## Configuration Examples
 //!
 //! ### Fast Local Testing (No Chaos)
@@ -200,6 +210,32 @@ pub struct StorageConfiguration {
 
     /// Divisor applied to effective bandwidth during a throttle episode (>= 1.0).
     pub disk_throttle_bandwidth_multiplier: f64,
+
+    // =========================================================================
+    // Disk Failure
+    // =========================================================================
+    /// Per-operation probability that the owning process's disk *fails*
+    /// (0.0 - 1.0).
+    ///
+    /// A failed disk answers nothing: the operation that failed it and every
+    /// read, write, sync, or `set_len` issued to that process's files afterwards
+    /// is accepted and never completes — the future stays `Pending` for the
+    /// rest of the run. Nothing errors, nothing times out on the disk's behalf;
+    /// only the caller's own timeout (or the process being killed) unblocks it.
+    /// This is `FoundationDB`'s `failedDisk`, where `waitUntilDiskReady()`
+    /// returns `Never()`.
+    ///
+    /// Scope and floor: the failure is keyed by the owning process IP, like a
+    /// degradation episode, and **at most one disk is failed at a time** across
+    /// the whole simulation, so a quorum system never loses more than one
+    /// member to a hung disk. A crash or wipe of the owning process clears it
+    /// (the reboot is the disk replacement) and fails the parked operations
+    /// with `OperationInterrupted`; the next process to draw the coin may then
+    /// fail its own disk. Recovery mode stops new failures but keeps one
+    /// already in force.
+    ///
+    /// While `0.0` (the default) no operation draws from the RNG stream.
+    pub disk_failure_probability: f64,
 }
 
 impl Default for StorageConfiguration {
@@ -237,6 +273,9 @@ impl Default for StorageConfiguration {
             disk_throttle_duration: Duration::ZERO,
             disk_throttle_iops_multiplier: 1.0,
             disk_throttle_bandwidth_multiplier: 1.0,
+
+            // Disk failure - disabled by default
+            disk_failure_probability: 0.0,
         }
     }
 }
@@ -292,6 +331,10 @@ impl StorageConfiguration {
             disk_throttle_duration: Duration::from_millis(sim_random_range(500..5000)),
             disk_throttle_iops_multiplier: f64::from(sim_random_range(2..20)),
             disk_throttle_bandwidth_multiplier: f64::from(sim_random_range(2..20)),
+
+            // Disk failure: 0 to 0.01% per operation, drawn last so every field
+            // above keeps its per-seed value.
+            disk_failure_probability: f64::from(sim_random_range(0..10)) / 100_000.0,
         }
     }
 
@@ -313,9 +356,10 @@ impl StorageConfiguration {
     /// Disable each fault family with ~50% probability using the `CONFIG_RNG`
     /// stream (see [`swarm_for_seed`](Self::swarm_for_seed)).
     ///
-    /// Draws exactly nine `config_random_bool` values (one per family: the seven
-    /// per-op faults plus the stall and throttle episode families) so the
-    /// `CONFIG_RNG` call sequence is fixed and reproducible per seed. Performance
+    /// Draws exactly ten `config_random_bool` values (one per family: the seven
+    /// per-op faults, the stall and throttle episode families, and the disk
+    /// failure) so the `CONFIG_RNG` call sequence is fixed and reproducible per
+    /// seed. Performance
     /// parameters (IOPS, bandwidth, latencies) stay as sampled — only the fault
     /// families are masked.
     fn apply_swarm_mask(&mut self) {
@@ -346,6 +390,10 @@ impl StorageConfiguration {
         if !config_random_bool(0.5) {
             self.disk_throttle_probability = 0.0;
         }
+        // Appended last: keeps the nine draws above stable across seeds.
+        if !config_random_bool(0.5) {
+            self.disk_failure_probability = 0.0;
+        }
     }
 
     /// Spike selected disk knob *magnitudes* under buggify (FDB's
@@ -373,6 +421,10 @@ impl StorageConfiguration {
             self.disk_throttle_duration,
             Duration::from_secs(1)..Duration::from_secs(5)
         );
+        // A failed disk is bounded by count (one at a time), not by rate, so a
+        // spiked rate only moves the failure earlier in the run.
+        self.disk_failure_probability =
+            crate::buggify_knob!(self.disk_failure_probability, 0.001..0.01);
     }
 
     /// Turn every storage fault family off, leaving disk performance alone.
@@ -380,13 +432,15 @@ impl StorageConfiguration {
     /// This is the storage half of the recovery-mode transition
     /// ([`SimWorld::enter_recovery_mode`](crate::SimWorld::enter_recovery_mode)):
     /// after this call no operation samples a read/write/sync/crash fault, no
-    /// write is misdirected or turned into a phantom, and no new disk stall or
-    /// throttle episode is entered. It consumes no randomness.
+    /// write is misdirected or turned into a phantom, no new disk stall or
+    /// throttle episode is entered, and no disk fails. It consumes no
+    /// randomness.
     ///
     /// It only stops *new* faults. Sectors already corrupted stay corrupted,
     /// bytes already lost stay lost, misdirected and phantom writes already
-    /// applied are not undone, and an episode already in force runs to its
-    /// expiry.
+    /// applied are not undone, an episode already in force runs to its
+    /// expiry, and a disk that already failed stays failed until its process
+    /// is crashed or wiped.
     ///
     /// IOPS, bandwidth, and the read/write/sync latency distributions are
     /// untouched — they are the disk's normal characteristics. So are the
@@ -402,6 +456,7 @@ impl StorageConfiguration {
         self.sync_failure_probability = 0.0;
         self.disk_stall_probability = 0.0;
         self.disk_throttle_probability = 0.0;
+        self.disk_failure_probability = 0.0;
     }
 
     /// Create a configuration optimized for fast local testing.
@@ -438,6 +493,9 @@ impl StorageConfiguration {
             disk_throttle_duration: Duration::ZERO,
             disk_throttle_iops_multiplier: 1.0,
             disk_throttle_bandwidth_multiplier: 1.0,
+
+            // Disk failure disabled
+            disk_failure_probability: 0.0,
         }
     }
 }
@@ -448,7 +506,7 @@ mod swarm_tests {
     use crate::sim::rng::{reset_sim_rng, set_config_seed, set_sim_seed};
 
     /// The on/off state of each swarmed fault family, in mask order.
-    fn enabled_families(config: &StorageConfiguration) -> [bool; 9] {
+    fn enabled_families(config: &StorageConfiguration) -> [bool; 10] {
         [
             config.read_fault_probability > 0.0,
             config.write_fault_probability > 0.0,
@@ -459,6 +517,7 @@ mod swarm_tests {
             config.sync_failure_probability > 0.0,
             config.disk_stall_probability > 0.0,
             config.disk_throttle_probability > 0.0,
+            config.disk_failure_probability > 0.0,
         ]
     }
 
@@ -525,6 +584,17 @@ mod swarm_tests {
         assert_zero(config.sync_failure_probability);
         assert_zero(config.disk_stall_probability);
         assert_zero(config.disk_throttle_probability);
+        assert_zero(config.disk_failure_probability);
+    }
+
+    #[test]
+    fn disable_fault_injection_turns_off_the_disk_failure_family() {
+        let mut config = StorageConfiguration {
+            disk_failure_probability: 1.0,
+            ..StorageConfiguration::fast_local()
+        };
+        config.disable_fault_injection();
+        assert_zero(config.disk_failure_probability);
     }
 
     /// Assert an f64 is exactly `+0.0` (bit-exact, avoiding the float-cmp lint).

@@ -269,6 +269,9 @@ impl AsyncRead for SimTcpStream {
         if let Some(true) = sim.roll_random_close(self.connection_id) {
             return Poll::Ready(Err(random_connection_failure_error()));
         }
+        // The black hole rolls beside the close, under the same progress
+        // rule, on its own coin. It changes nothing about this operation.
+        sim.roll_black_hole(self.connection_id);
         if sim.is_connection_closed(self.connection_id)
             && sim.close_reason(self.connection_id) == CloseReason::Aborted
         {
@@ -416,6 +419,9 @@ impl AsyncWrite for SimTcpStream {
         if let Some(true) = sim.roll_random_close(self.connection_id) {
             return Poll::Ready(Err(random_connection_failure_error()));
         }
+        // The black hole rolls beside the close, under the same progress
+        // rule, on its own coin. It changes nothing about this operation.
+        sim.roll_black_hole(self.connection_id);
         if let Some(poll) = self.write_guard_pre_backpressure(&sim) {
             return poll;
         }
@@ -471,6 +477,9 @@ impl AsyncWrite for SimTcpStream {
         if let Some(true) = sim.roll_random_close(self.connection_id) {
             return Poll::Ready(Err(random_connection_failure_error()));
         }
+        // The black hole rolls beside the close, under the same progress
+        // rule, on its own coin. It changes nothing about this operation.
+        sim.roll_black_hole(self.connection_id);
         if let Some(poll) = self.write_guard_pre_backpressure(&sim) {
             return poll;
         }

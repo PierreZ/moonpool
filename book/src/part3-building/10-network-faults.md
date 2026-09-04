@@ -50,6 +50,18 @@ Fault decisions are sampled only when an operation can make progress. Re-polling
 
 A cooldown period prevents cascading closes from overwhelming the system. The goal is to test recovery, not to make the system completely inoperable.
 
+### Black Holes
+
+A silent close still ends: the peer eventually reads EOF and learns something. A **black hole** never ends. When `black_hole_probability` fires, one direction of a connection (this side's sends, the peer's, or both, the same three-way draw random close makes) starts accepting every write and delivering nothing. The bytes are acknowledged into the sender's buffer and vanish, the peer's reads stay `Pending` with no data and no EOF, and a graceful close from the holed side never arrives either. Both ends see a connection that looks perfectly alive. That is what a peer whose kernel keeps acknowledging into a frozen application looks like, or a middlebox that dropped its connection state, and it is the fault that finds a request without a timeout: nothing errors, nothing closes, and only the caller's own deadline can notice. An application-level timeout, an HTTP/2 keep-alive ping, a heartbeat: whatever detects it in production is what has to detect it here.
+
+```rust
+let mut config = NetworkConfiguration::fast_local();
+config.chaos.black_hole_probability = 0.0001; // per I/O, like random close
+config.chaos.black_hole_cooldown = Duration::from_secs(5);
+```
+
+The coin is rolled on the same operations as random close, under the same progress rule, with its own cooldown, and it is recorded once as a `black_hole` fault event. Three properties keep it honest. A black hole is **permanent for the connection**: it never recovers, and the only way out is the one production has, a new connection. An **abort still crosses**: a process kill resets its connections and the peer finds out, as a kernel `RST` would once the host is back, so a hung peer is never mistaken for a dead one at the wrong time. And **recovery mode stops new black holes but keeps the ones in force**, like a closed connection; the quiet tail is where the reconnect has to happen. `SimWorld::black_hole_connection(id, hole_send, hole_recv)` is the scripted form for fault injectors, and the family is off by default, masked as `NetworkFault::BlackHole`.
+
 ### Clogging
 
 Write clogging stalls data delivery on a connection for a random duration (100-300ms by default). This simulates network congestion, TCP backpressure, and flow control contention. Code that assumes writes complete promptly will fail under clogging.

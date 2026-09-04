@@ -105,6 +105,14 @@ pub enum SimFaultEvent {
         /// The connection that was closed.
         connection_id: u64,
     },
+    /// A connection was black-holed: the named sends vanish from now on.
+    BlackHole {
+        /// The connection whose I/O drew the fault.
+        connection_id: u64,
+        /// Which sends vanish: `"send"` (this endpoint's), `"recv"` (the
+        /// peer's, so this endpoint receives nothing), or `"both"`.
+        direction: String,
+    },
     /// Bit flip corruption injected during data delivery.
     BitFlip {
         /// The connection carrying corrupted data.
@@ -138,6 +146,11 @@ pub enum SimFaultEvent {
         ip: String,
         /// File identifier.
         file_id: u64,
+    },
+    /// A process's disk failed: every later I/O on it parks forever.
+    StorageDiskFailure {
+        /// IP of the process whose disk failed.
+        ip: String,
     },
     /// Storage crash simulated for a process.
     StorageCrash {
@@ -178,10 +191,12 @@ impl SimFaultEvent {
             Self::SendPartitionHealed { .. } => "send_partition_healed",
             Self::RecvPartitionHealed { .. } => "recv_partition_healed",
             Self::RandomClose { .. } => "random_close",
+            Self::BlackHole { .. } => "black_hole",
             Self::BitFlip { .. } => "bit_flip",
             Self::StorageReadFault { .. } => "storage_read_fault",
             Self::StorageWriteFault { .. } => "storage_write_fault",
             Self::StorageSyncFault { .. } => "storage_sync_fault",
+            Self::StorageDiskFailure { .. } => "storage_disk_failure",
             Self::StorageCrash { .. } => "storage_crash",
             Self::StorageWipe { .. } => "storage_wipe",
             Self::BlockDeviceCrash { .. } => "block_device_crash",

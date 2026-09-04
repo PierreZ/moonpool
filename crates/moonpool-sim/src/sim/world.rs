@@ -442,6 +442,13 @@ impl SimWorld {
         self.inner.read().storage.disk_episode_for(ip)
     }
 
+    /// Whether `ip`'s disk has failed and parks every operation forever (see
+    /// [`StorageConfiguration::disk_failure_probability`](crate::StorageConfiguration::disk_failure_probability)).
+    #[must_use]
+    pub fn is_disk_failed(&self, ip: IpAddr) -> bool {
+        self.inner.read().storage.is_disk_failed(ip)
+    }
+
     /// Creates a cancellable simulation sleep.
     #[must_use]
     pub fn sleep(&self, duration: Duration) -> SleepFuture {

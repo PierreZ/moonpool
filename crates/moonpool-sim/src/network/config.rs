@@ -10,6 +10,7 @@
 //! |---------|--------------|---------|---------------------|
 //! | Random close | `random_close_probability` | 0.001% | Reconnection logic, message redelivery, connection pooling |
 //! | Close error surfacing | `random_close_explicit_ratio` | 30% explicit | Immediate-error vs timeout-based detection |
+//! | Black hole | `black_hole_probability` + `black_hole_cooldown` | 0% | Missing request timeouts, keep-alive / heartbeat detection, half-open connections |
 //! | Connect failure | `connect_failure_mode` | Probabilistic | Connection establishment retries, timeout handling |
 //!
 //! ## Network Latency & Congestion
@@ -189,10 +190,12 @@ pub enum NetworkFault {
     BuggifiedDelay,
     /// Permanent per-IP-pair latency degradation.
     PairLatency,
+    /// Connections whose sends vanish silently and forever.
+    BlackHole,
 }
 
 impl NetworkFault {
-    const fn bit(self) -> u8 {
+    const fn bit(self) -> u16 {
         match self {
             Self::Clog => 1 << 0,
             Self::Partition => 1 << 1,
@@ -202,6 +205,7 @@ impl NetworkFault {
             Self::ClockDrift => 1 << 5,
             Self::BuggifiedDelay => 1 << 6,
             Self::PairLatency => 1 << 7,
+            Self::BlackHole => 1 << 8,
         }
     }
 }
@@ -227,7 +231,7 @@ impl NetworkFault {
 /// assert!(mask.contains(NetworkFault::Partition));
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NetworkFaultMask(u8);
+pub struct NetworkFaultMask(u16);
 
 impl Default for NetworkFaultMask {
     fn default() -> Self {
@@ -236,7 +240,7 @@ impl Default for NetworkFaultMask {
 }
 
 impl NetworkFaultMask {
-    const ALL: u8 = u8::MAX;
+    const ALL: u16 = (1 << 9) - 1;
 
     /// Retain every selected network fault family.
     #[must_use]
@@ -293,6 +297,9 @@ impl NetworkFaultMask {
         }
         if !self.contains(NetworkFault::PairLatency) {
             chaos.max_pair_latency = Duration::ZERO..Duration::ZERO;
+        }
+        if !self.contains(NetworkFault::BlackHole) {
+            chaos.black_hole_probability = 0.0;
         }
     }
 }
@@ -355,6 +362,30 @@ pub struct ChaosConfiguration {
     /// Ratio of explicit exceptions vs silent failures (0.0 - 1.0)
     /// FDB default: 0.3 (30% explicit) - see sim2.actor.cpp:602
     pub random_close_explicit_ratio: f64,
+
+    /// Per-I/O probability that a connection is *black-holed* (0.0 - 1.0).
+    ///
+    /// A black-holed direction accepts every write and delivers nothing: the
+    /// bytes are acknowledged locally and vanish, the peer's reads stay
+    /// `Pending` with no data and no EOF, and a graceful close on the holed
+    /// side never reaches the peer either. The connection looks alive to both
+    /// ends. That is what a peer whose kernel keeps acknowledging into a frozen
+    /// application, or a middlebox that dropped its state, looks like — and
+    /// it is the fault that finds a request without a timeout: nothing errors,
+    /// nothing closes, and only the caller's own deadline (an application
+    /// timeout, an HTTP/2 keep-alive ping) can notice.
+    ///
+    /// Rolled on the same I/O operations as [`random_close_probability`]
+    /// (`Self::random_close_probability`), with its own cooldown, and it picks
+    /// a direction the way random close does: this side's sends, the peer's
+    /// sends, or both. A black-holed connection never recovers; only a new
+    /// connection is clean. An abort (`RST`) still reaches the peer, as a
+    /// kernel reset would once the host is back. Recovery mode stops new
+    /// black holes but keeps the ones in force. Off by default.
+    pub black_hole_probability: f64,
+
+    /// Cooldown after a black hole before another connection may be holed.
+    pub black_hole_cooldown: Duration,
 
     /// Enable clock drift simulation
     /// When enabled, `timer()` can return a time up to `clock_drift_max` ahead of `now()`
@@ -421,9 +452,11 @@ impl Default for ChaosConfiguration {
             random_close_probability: 0.00001, // 0.001% - matches FDB's sim2.actor.cpp:584
             random_close_cooldown: Duration::from_secs(5), // Reasonable default
             random_close_explicit_ratio: 0.3,  // 30% explicit - matches FDB's sim2.actor.cpp:602
-            clock_drift_enabled: true,         // Enable by default for chaos testing
+            black_hole_probability: 0.0,       // Off by default: opt-in, like clogs and partitions
+            black_hole_cooldown: Duration::from_secs(5),
+            clock_drift_enabled: true, // Enable by default for chaos testing
             clock_drift_max: Duration::from_millis(100), // FDB default: 0.1 seconds
-            buggified_delay_enabled: true,     // Enable by default for chaos testing
+            buggified_delay_enabled: true, // Enable by default for chaos testing
             buggified_delay_max: Duration::from_millis(100), // FDB: MAX_BUGGIFIED_DELAY
             buggified_delay_probability: 0.25, // FDB: random01() < 0.25
             connect_failure_mode: ConnectFailureMode::Probabilistic, // FDB: SIM_CONNECT_ERROR_MODE = 2
@@ -452,6 +485,8 @@ impl ChaosConfiguration {
             random_close_probability: 0.0,
             random_close_cooldown: Duration::ZERO,
             random_close_explicit_ratio: 0.3,
+            black_hole_probability: 0.0,
+            black_hole_cooldown: Duration::ZERO,
             clock_drift_enabled: false,
             clock_drift_max: Duration::from_millis(100),
             buggified_delay_enabled: false,
@@ -510,6 +545,10 @@ impl ChaosConfiguration {
             // Vary max bytes for different scenarios. Appended last (after
             // max_pair_latency) so the RNG draws above keep their per-seed values.
             partial_read_max_bytes: sim_random_range(100..2000),
+            // Black holes: as rare as random closes, with the same cooldown
+            // range. Drawn after partial_read_max_bytes for the same reason.
+            black_hole_probability: f64::from(sim_random_range(1..100)) / 1_000_000.0,
+            black_hole_cooldown: Duration::from_millis(sim_random_range(1000..10_000)),
         }
     }
 
@@ -531,7 +570,7 @@ impl ChaosConfiguration {
     /// Disable each fault family with ~50% probability using the `CONFIG_RNG`
     /// stream (see [`swarm_for_seed`](Self::swarm_for_seed)).
     ///
-    /// Draws exactly eight `config_random_bool` values (one per family) so the
+    /// Draws exactly nine `config_random_bool` values (one per family) so the
     /// `CONFIG_RNG` call sequence is fixed and reproducible per seed. Durations,
     /// cooldowns, and strategy stay as sampled — they are inert once their family
     /// is off.
@@ -554,9 +593,13 @@ impl ChaosConfiguration {
         }
         self.clock_drift_enabled = config_random_bool(0.5);
         self.buggified_delay_enabled = config_random_bool(0.5);
-        // Appended last: keeps the seven draws above stable across seeds.
+        // Appended after the seven draws above so they stay stable across seeds.
         if !config_random_bool(0.5) {
             self.max_pair_latency = Duration::ZERO..Duration::ZERO;
+        }
+        // Appended last, for the same reason.
+        if !config_random_bool(0.5) {
+            self.black_hole_probability = 0.0;
         }
     }
 
@@ -573,6 +616,7 @@ impl ChaosConfiguration {
         self.partition_probability = crate::buggify_knob!(self.partition_probability, 0.3..0.8);
         self.random_close_probability =
             crate::buggify_knob!(self.random_close_probability, 0.01..0.1);
+        self.black_hole_probability = crate::buggify_knob!(self.black_hole_probability, 0.01..0.1);
     }
 
     /// Turn every network fault family off, leaving performance shaping alone.
@@ -580,15 +624,16 @@ impl ChaosConfiguration {
     /// This is the chaos half of the recovery-mode transition
     /// ([`SimWorld::enter_recovery_mode`](crate::SimWorld::enter_recovery_mode)):
     /// after this call the engine samples no new partitions, clogs, bit flips,
-    /// spontaneous closes, connect failures, clock drift, sleep delays, or
-    /// per-pair latency degradations. It is exactly
+    /// spontaneous closes, black holes, connect failures, clock drift, sleep
+    /// delays, or per-pair latency degradations. It is exactly
     /// [`NetworkFaultMask::none()`](crate::NetworkFaultMask::none) applied to
     /// this configuration and consumes no randomness.
     ///
     /// It only stops *new* faults. Everything already produced stays: a
     /// partition still in force, a clog still ticking down, corrupted bytes
-    /// already delivered, a connection the application already saw close, and
-    /// the fixed extra latency a slow pair already sampled.
+    /// already delivered, a connection the application already saw close, a
+    /// black-holed connection (it never recovers), and the fixed extra latency
+    /// a slow pair already sampled.
     ///
     /// Latencies (`bind`/`accept`/`connect`/`write`, `link_latency`) and the
     /// TCP-realistic partial read/write sizes are untouched: they are the
@@ -941,7 +986,7 @@ mod swarm_tests {
     use crate::sim::rng::{reset_sim_rng, set_config_seed, set_sim_seed};
 
     /// The on/off state of each swarmed fault family, in mask order.
-    fn enabled_families(chaos: &ChaosConfiguration) -> [bool; 7] {
+    fn enabled_families(chaos: &ChaosConfiguration) -> [bool; 8] {
         [
             chaos.clog_probability > 0.0,
             chaos.partition_probability > 0.0,
@@ -950,6 +995,7 @@ mod swarm_tests {
             chaos.connect_failure_mode != ConnectFailureMode::Disabled,
             chaos.clock_drift_enabled,
             chaos.buggified_delay_enabled,
+            chaos.black_hole_probability > 0.0,
         ]
     }
 
@@ -1015,6 +1061,28 @@ mod swarm_tests {
         assert_zero(chaos.connect_failure_probability);
         assert!(!chaos.clock_drift_enabled);
         assert!(!chaos.buggified_delay_enabled);
+        assert_zero(chaos.black_hole_probability);
+    }
+
+    #[test]
+    fn the_mask_can_suppress_black_holes_alone() {
+        use crate::{NetworkFault, NetworkFaultMask};
+
+        let mut chaos = ChaosConfiguration {
+            black_hole_probability: 1.0,
+            random_close_probability: 1.0,
+            ..ChaosConfiguration::disabled()
+        };
+        NetworkFaultMask::all()
+            .without(NetworkFault::BlackHole)
+            .apply_to(&mut chaos);
+        assert_zero(chaos.black_hole_probability);
+        assert!(
+            chaos.random_close_probability > 0.0,
+            "removing one family must leave the others alone"
+        );
+        assert!(NetworkFaultMask::all().contains(NetworkFault::BlackHole));
+        assert!(!NetworkFaultMask::none().contains(NetworkFault::BlackHole));
     }
 
     /// Assert an f64 is exactly `+0.0` (bit-exact, avoiding the float-cmp lint).

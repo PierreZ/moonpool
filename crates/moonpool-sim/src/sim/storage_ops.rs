@@ -243,6 +243,27 @@ impl SimWorld {
         }
     }
 
+    /// Fail `ip`'s disk outright: every read, write, sync, or `set_len` issued
+    /// to a file it owns from now on is accepted and never completes, until
+    /// [`simulate_crash_for_process`](Self::simulate_crash_for_process) or
+    /// [`wipe_storage_for_process`](Self::wipe_storage_for_process) replaces
+    /// the disk. This is the scripted counterpart of
+    /// [`StorageConfiguration::disk_failure_probability`](crate::StorageConfiguration::disk_failure_probability):
+    /// it consumes no randomness and ignores the coin's one-at-a-time budget.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(skip(self))]
+    pub fn fail_disk_for_process(&self, ip: IpAddr) {
+        let wakes = {
+            let mut inner = self.inner.write();
+            let actions = inner.storage.fail_disk(ip);
+            apply_storage_actions(&mut inner, actions)
+        };
+        wakes.wake();
+    }
+
     /// Wipe all persistent storage for a specific process, block devices
     /// included.
     ///

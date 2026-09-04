@@ -26,6 +26,8 @@ Configured via `ChaosConfiguration` (nested under `NetworkConfiguration::chaos`)
 | Random connection close | `random_close_probability` | 0.001% | Reconnection logic, message redelivery, connection pooling |
 | Close error surfacing | `random_close_explicit_ratio` | 30% immediate error, 70% silent close | Explicit-error and timeout-based detection |
 | Close cooldown | `random_close_cooldown` | 5s | Prevents cascading failures after a close event |
+| Black hole | `black_hole_probability` | 0% (off) | A direction that accepts every write and delivers nothing, forever: missing request timeouts, keep-alive and heartbeat detection, half-open connections |
+| Black hole cooldown | `black_hole_cooldown` | 5s | Spaces out black holes across connections |
 | Connect failure | `connect_failure_mode` | `Probabilistic` (50% refused, 50% hang) | Connection establishment retries, timeout handling |
 | Connect failure probability | `connect_failure_probability` | 50% | Ratio of failed vs hanging connections |
 | Stable connection exemption | `mark_connection_stable()` | Manual | Exempt supervision channels from random-close chaos |
@@ -121,6 +123,14 @@ Episodic degradation layered on top of steady-state timing (FoundationDB's `Disk
 | Stall | `disk_stall_probability` / `disk_stall_duration` | 0%, 0ms | Disk frozen until expiry; I/O waits out the window |
 | Throttle | `disk_throttle_probability` / `disk_throttle_duration` | 0%, 0ms | Effective IOPS/bandwidth divided by the multipliers |
 | Throttle factor | `disk_throttle_iops_multiplier` / `disk_throttle_bandwidth_multiplier` | 1.0 | Divisor applied to IOPS / bandwidth during a throttle |
+
+### Disk Failure
+
+A disk that never answers (FoundationDB's `failedDisk`, where `waitUntilDiskReady()` returns `Never()`). Off by default and scoped per process: every read, write, sync, or `set_len` issued to a failed disk is accepted and stays `Pending` for the rest of the run, with no error and no scheduled completion. At most one disk is failed at a time; a crash or wipe of the owning process replaces it and fails the parked operations with `OperationInterrupted`. Recovery mode stops new failures but keeps one already in force. `SimWorld::fail_disk_for_process(ip)` is the scripted form.
+
+| Fault | Config Field | Default | Effect |
+|-------|-------------|---------|--------|
+| Disk failure | `disk_failure_probability` | 0% | Every later I/O on that process's disk parks forever; only the caller's timeout or a process kill unblocks it |
 
 ## Process Lifecycle Faults
 

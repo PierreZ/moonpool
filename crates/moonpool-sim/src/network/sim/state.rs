@@ -47,6 +47,7 @@ impl ConnectionFlags {
     const REMOTE_FIN_RECEIVED: u16 = 1 << 7;
     const SEND_IN_PROGRESS: u16 = 1 << 8;
     const SEND_STALLED: u16 = 1 << 9;
+    const SEND_BLACK_HOLED: u16 = 1 << 10;
 
     fn get(self, mask: u16) -> bool {
         (self.0 & mask) != 0
@@ -127,6 +128,19 @@ impl ConnectionFlags {
     pub(crate) fn set_send_stalled(&mut self, value: bool) {
         self.set_bit(Self::SEND_STALLED, value);
     }
+
+    /// Whether this endpoint's sends vanish: every chunk drained from the send
+    /// buffer is dropped instead of delivered, and its FIN never leaves.
+    ///
+    /// The flag is permanent for the connection's lifetime; only a fresh
+    /// connection is clean again.
+    pub(crate) fn send_black_holed(self) -> bool {
+        self.get(Self::SEND_BLACK_HOLED)
+    }
+
+    pub(crate) fn set_send_black_holed(&mut self, value: bool) {
+        self.set_bit(Self::SEND_BLACK_HOLED, value);
+    }
 }
 
 /// State for one endpoint of a simulated TCP connection.
@@ -161,6 +175,7 @@ pub(crate) struct NetworkState {
     pub(crate) send_partitions: BTreeMap<IpAddr, Duration>,
     pub(crate) recv_partitions: BTreeMap<IpAddr, Duration>,
     pub(crate) last_random_close_time: Duration,
+    pub(crate) last_black_hole_time: Duration,
     pub(crate) pair_latencies: BTreeMap<(IpAddr, IpAddr), Duration>,
 }
 
@@ -179,6 +194,7 @@ impl NetworkState {
             send_partitions: BTreeMap::new(),
             recv_partitions: BTreeMap::new(),
             last_random_close_time: Duration::ZERO,
+            last_black_hole_time: Duration::ZERO,
             pair_latencies: BTreeMap::new(),
         }
     }

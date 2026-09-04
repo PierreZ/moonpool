@@ -94,6 +94,27 @@ let stalling = StorageConfiguration {
 
 The key property is that **a disabled disk never touches the random number stream**. When both probabilities are zero, the state machine returns before drawing any randomness, so steady-state runs stay byte-for-byte deterministic. Chaos runs enable low-rate episodes through `random_for_seed()`, swarm masking, and buggify knob spikes, the same machinery every other storage fault family uses.
 
+## Disk Failure: I/O That Never Completes
+
+A stall is a disk that answers late. A **failed disk** is a disk that never answers. Every read, write, sync, or `set_len` issued to it after the failure is accepted and stays `Pending` for the rest of the run. Nothing returns an error, nothing times out on the disk's behalf, and the world's event queue is empty while the caller waits. FoundationDB models this with `failedDisk`, where `waitUntilDiskReady()` returns `Never()`; moonpool does the same through `disk_failure_probability`, a per-operation coin that is off by default.
+
+This is the storage fault that finds a missing timeout. Code that awaits an `fsync` inline, with no deadline and no way for the rest of the process to notice, hangs. The runner's stall detector then sees a world with no events and no progress, requests a graceful shutdown, and reports a **deadlock**. That verdict is the point: a disk that stops answering is something a real machine does, and a process that cannot survive it has a bug.
+
+```rust
+// A disk that fails on its first operation
+let failing = StorageConfiguration {
+    disk_failure_probability: 1.0,
+    ..StorageConfiguration::fast_local()
+};
+```
+
+The failure is keyed by the owning process, like an episode: one failure hangs every file the machine owns. Two rules keep it a fault a system can be expected to survive rather than a way to make a run unwinnable:
+
+- **At most one disk is failed at a time.** The coin is not drawn while another disk is failed, so a quorum system never loses more than one member to a hung disk. This is the family's floor.
+- **A crash or wipe of the owning process replaces the disk.** The operations it parked fail with `OperationInterrupted` along with the rest of the process's in-flight I/O, the failure is cleared, and the budget is free for the next disk to draw the coin. Until then the failure has no expiry: recovery mode stops new failures but keeps one already in force, exactly as it keeps a killed process.
+
+A scripted fault injector can fail a disk directly with `SimWorld::fail_disk_for_process(ip)`. That path consumes no randomness and ignores the one-at-a-time budget, because the injector owns its own budget. A parked operation samples no latency and enters no episode, so a hung I/O never moves the seed's random stream either.
+
 ## Exact Asynchronous Operations
 
 Read, write, sync, and set-length calls schedule work and return

@@ -93,6 +93,9 @@ pub(crate) struct StorageState {
     pub(crate) config: StorageConfiguration,
     pub(crate) per_process_configs: BTreeMap<IpAddr, StorageConfiguration>,
     pub(crate) disk_episodes: BTreeMap<IpAddr, DiskDegradationState>,
+    /// Disks that failed: every later operation on them parks forever. Only a
+    /// crash or wipe of the owning process removes an entry.
+    pub(crate) failed_disks: BTreeSet<IpAddr>,
     pub(crate) files: BTreeMap<FileId, FileState>,
     pub(crate) handles: BTreeMap<HandleId, HandleState>,
     pub(crate) path_to_file: BTreeMap<String, FileId>,
@@ -108,6 +111,7 @@ impl StorageState {
             config,
             per_process_configs: BTreeMap::new(),
             disk_episodes: BTreeMap::new(),
+            failed_disks: BTreeSet::new(),
             files: BTreeMap::new(),
             handles: BTreeMap::new(),
             path_to_file: BTreeMap::new(),

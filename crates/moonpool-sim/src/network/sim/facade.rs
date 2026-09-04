@@ -342,6 +342,35 @@ impl SimWorld {
         result
     }
 
+    /// Rolls the black-hole coin for one I/O on `id` (see
+    /// [`ChaosConfiguration::black_hole_probability`](crate::ChaosConfiguration::black_hole_probability)).
+    pub fn roll_black_hole(&self, id: ConnectionId) {
+        let mut inner = self.inner.write();
+        let now = inner.now();
+        let actions = inner.network.roll_black_hole(id, now);
+        inner.apply_network(actions);
+    }
+
+    /// Black-holes selected directions of a connection: `hole_send` makes this
+    /// endpoint's sends vanish, `hole_recv` its peer's. Writes keep succeeding
+    /// and the peer's reads never see data or EOF; only an abort still crosses.
+    ///
+    /// The scripted counterpart of
+    /// [`ChaosConfiguration::black_hole_probability`](crate::ChaosConfiguration::black_hole_probability);
+    /// it consumes no randomness, and a black hole is permanent for the
+    /// connection's lifetime.
+    pub fn black_hole_connection(&self, id: ConnectionId, hole_send: bool, hole_recv: bool) {
+        let mut inner = self.inner.write();
+        let actions = inner.network.black_hole(id, hole_send, hole_recv);
+        inner.apply_network(actions);
+    }
+
+    /// Returns whether `id`'s sends are black-holed.
+    #[must_use]
+    pub fn is_send_black_holed(&self, id: ConnectionId) -> bool {
+        self.inner.read().network.is_send_black_holed(id)
+    }
+
     /// Returns whether the send side is closed.
     #[must_use]
     pub fn is_send_closed(&self, id: ConnectionId) -> bool {
