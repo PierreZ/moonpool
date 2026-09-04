@@ -242,6 +242,68 @@ fn endpoints_communicate_again_after_the_recovery_boundary() {
     );
 }
 
+/// A black hole never recovers: recovery mode stops new ones, and a
+/// connection already holed stays holed until the application replaces it.
+#[test]
+fn a_black_holed_connection_stays_black_through_recovery_mode() {
+    let mut config = NetworkConfiguration::fast_local();
+    config.chaos.black_hole_probability = 1.0;
+    config.chaos.black_hole_cooldown = Duration::ZERO;
+    let mut sim = SimWorld::new_with_network_config_and_seed(config, 20_260_901);
+    let server_provider = sim.network_provider(ip(2));
+    let listener = drive(&mut sim, server_provider.bind("10.0.1.2:8080")).expect("bind");
+    let client_provider = sim.network_provider(ip(1));
+    let mut client = drive(&mut sim, client_provider.connect("10.0.1.2:8080")).expect("connect");
+    let (mut server, _) = drive(&mut sim, listener.accept()).expect("accept");
+
+    // --- chaos phase: the scripted hole, so the direction is known ---
+    sim.black_hole_connection(client.connection_id(), true, false);
+    drive(&mut sim, client.write_all(b"lost")).expect("a black-holed write succeeds");
+    while sim.has_pending_events() {
+        sim.step();
+    }
+    let mut buf = [0_u8; 16];
+    assert!(
+        poll_read_once(&mut server, &mut buf).is_pending(),
+        "the chaos phase must actually swallow the bytes, or the test proves nothing"
+    );
+
+    sim.enter_recovery_mode();
+
+    // --- damage already done stays done ---
+    assert!(
+        sim.is_send_black_holed(client.connection_id()),
+        "recovery mode must not un-hole a connection"
+    );
+    drive(&mut sim, client.write_all(b"still lost")).expect("write");
+    while sim.has_pending_events() {
+        sim.step();
+    }
+    assert!(
+        poll_read_once(&mut server, &mut buf).is_pending(),
+        "a black-holed connection stays black after the boundary"
+    );
+
+    // --- and a fresh connection, the application's way out, is clean ---
+    let mut fresh = drive(&mut sim, client_provider.connect("10.0.1.2:8080")).expect("connect");
+    let (mut fresh_server, _) = drive(&mut sim, listener.accept()).expect("accept");
+    drive(&mut sim, fresh.write_all(b"hello")).expect("write");
+    let mut received = [0_u8; 5];
+    drive(&mut sim, fresh_server.read_exact(&mut received)).expect("read");
+    assert_eq!(&received, b"hello");
+    assert!(
+        !sim.is_send_black_holed(fresh.connection_id())
+            && !sim.is_send_black_holed(fresh_server.connection_id()),
+        "the coin is off after the boundary, so a new connection is never holed"
+    );
+    sim.with_network_config(|config| {
+        assert_zero(
+            config.chaos.black_hole_probability,
+            "black holes are chaos and must be off",
+        );
+    });
+}
+
 /// Recovery mode stops the environment from breaking connections. It does not
 /// mend one the application has already seen close.
 #[test]

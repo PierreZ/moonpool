@@ -23,6 +23,8 @@ async fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
 
 #[path = "chaos/bit_flip.rs"]
 mod bit_flip;
+#[path = "chaos/black_hole.rs"]
+mod black_hole;
 #[path = "chaos/buggified_delay.rs"]
 mod buggified_delay;
 #[path = "chaos/buggify.rs"]

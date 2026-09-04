@@ -99,12 +99,12 @@ family and heals the partitions the simulator is holding.
 
 | At the cutoff | |
 |---|---|
-| Stopped | Network: partitions, clogs, bit flips, spontaneous closes, connect failures, clock drift, buggified sleep delays, new per-pair latency degradation |
+| Stopped | Network: partitions, clogs, bit flips, spontaneous closes, black holes, connect failures, clock drift, buggified sleep delays, new per-pair latency degradation |
 | Stopped | Storage: read/write/sync/crash faults, misdirected and phantom writes, new disk stall and throttle episodes, new disk failures |
 | Stopped | Block devices: EIO, read corruption, misdirected and phantom writes, persist failures, barrier violations |
 | Stopped | Fault injectors, including built-in attrition |
 | Healed | Every partition in force — directed pair cuts and asymmetric send-side / receive-side blocks alike |
-| Preserved | Corrupted sectors, lost/misdirected/phantom writes already applied, connections already closed, processes already killed, a disk that already failed (and the operations it parked), application state, the fixed extra latency a slow link already sampled |
+| Preserved | Corrupted sectors, lost/misdirected/phantom writes already applied, connections already closed or black-holed, processes already killed, a disk that already failed (and the operations it parked), application state, the fixed extra latency a slow link already sampled |
 | Left to expire | Finite effects already started: disk stall and throttle episodes, clogs, packets already scheduled with a delay |
 
 The persistent consequences of faults already injected remain part of the
@@ -207,7 +207,8 @@ SimulationBuilder::new()
 ```
 
 The mask covers `Clog`, `Partition`, `BitFlip`, `RandomClose`,
-`ConnectFailure`, `ClockDrift`, `BuggifiedDelay`, and `PairLatency`. Removing a
+`ConnectFailure`, `ClockDrift`, `BuggifiedDelay`, `PairLatency`, and
+`BlackHole`. Removing a
 family can only suppress a fault; it cannot enable a family the sampled profile
 turned off. Partial reads and writes are TCP/buggify behavior rather than
 independently sampled fault families and remain active.
@@ -298,6 +299,16 @@ Each ordered IP pair samples one fixed latency from this range at first contact 
 | `random_close_probability` | `f64` | 0.00001 (0.001%) |
 | `random_close_cooldown` | `Duration` | 5s |
 | `random_close_explicit_ratio` | `f64` | 0.3 (30% explicit) |
+
+### Black Hole
+
+A direction that accepts every write and delivers nothing, for the rest of the
+connection's life; see [Black Holes](../part3-building/10-network-faults.md#black-holes).
+
+| Field | Type | Default |
+|-------|------|---------|
+| `black_hole_probability` | `f64` | 0.0 (off) |
+| `black_hole_cooldown` | `Duration` | 5s |
 
 ### Clock Drift
 

@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    SimulationError, SimulationResult,
+    SimulationError, SimulationResult, assert_reachable,
     chaos::fault_events::SimFaultEvent,
     locality::{DomainLevel, LocalityInfo},
     network::{LinkLatencyConfig, NetworkConfiguration, PartitionStrategy},
@@ -545,6 +545,12 @@ impl NetworkSimulation {
         else {
             return;
         };
+        // The chunk left a black-holed sender: it was acknowledged into that
+        // side's buffer and is gone. No bytes, no wake — the reader keeps
+        // waiting for data that will never come.
+        if self.peer_send_black_holed(id) {
+            return;
+        }
         let delivered = if stable {
             data
         } else {
@@ -557,12 +563,27 @@ impl NetworkSimulation {
     }
 
     fn handle_fin_delivery(&mut self, id: ConnectionId, wakes: &mut WakeBatch) {
+        // A FIN is a send like any other: from a black-holed peer it vanishes,
+        // and the reader never sees EOF.
+        if self.peer_send_black_holed(id) {
+            return;
+        }
         if let Some(connection) = self.state.connections.get_mut(&id)
             && !connection.flags.is_closed()
         {
             connection.flags.set_remote_fin_received(true);
             wakes.push(self.waiters.reads.remove(&id));
         }
+    }
+
+    /// Whether the endpoint that sends *to* `id` has its sends black-holed.
+    fn peer_send_black_holed(&self, id: ConnectionId) -> bool {
+        self.state
+            .connections
+            .get(&id)
+            .and_then(|connection| connection.paired_connection)
+            .and_then(|peer| self.state.connections.get(&peer))
+            .is_some_and(|peer| peer.flags.send_black_holed())
     }
 
     fn calculate_flip_bit_count(random_value: u32, min_bits: u32, max_bits: u32) -> u32 {
@@ -1422,6 +1443,87 @@ impl NetworkSimulation {
             connection_id: id.0,
         });
         (Some(explicit), actions, wakes)
+    }
+
+    /// Roll the black-hole coin for one I/O on `id` (the `rollRandomClose`
+    /// shape: own probability, own cooldown, one `buggify_with_prob!` draw).
+    ///
+    /// A hit black-holes this endpoint's sends, its peer's, or both — the same
+    /// three-way direction draw a random close makes — and is recorded once as
+    /// [`SimFaultEvent::BlackHole`]. Nothing is returned to the caller: the
+    /// operation that drew the fault proceeds normally, which is the point.
+    /// Draws nothing while the family is off.
+    pub(crate) fn roll_black_hole(&mut self, id: ConnectionId, now: Duration) -> NetworkActions {
+        let config = &self.state.config.chaos;
+        if self
+            .state
+            .connections
+            .get(&id)
+            .is_none_or(|connection| connection.flags.is_closed())
+            || config.black_hole_probability <= 0.0
+            || now.saturating_sub(self.state.last_black_hole_time) < config.black_hole_cooldown
+            || !crate::buggify_with_prob!(config.black_hole_probability)
+        {
+            return NetworkActions::default();
+        }
+        self.state.last_black_hole_time = now;
+        let a = sim_random_f64();
+        let hole_recv = a < 0.66;
+        let hole_send = a > 0.33;
+        assert_reachable!("network: connection black-holed");
+        self.black_hole(id, hole_send, hole_recv)
+    }
+
+    /// Black-hole `id`'s sends (`hole_send`) and/or its peer's (`hole_recv`).
+    ///
+    /// Permanent for the connection's lifetime and idempotent per direction;
+    /// the fault is recorded only when a direction that was not yet holed is.
+    pub(crate) fn black_hole(
+        &mut self,
+        id: ConnectionId,
+        hole_send: bool,
+        hole_recv: bool,
+    ) -> NetworkActions {
+        let paired = self
+            .state
+            .connections
+            .get(&id)
+            .and_then(|c| c.paired_connection);
+        let mut newly_send = false;
+        if hole_send
+            && let Some(c) = self.state.connections.get_mut(&id)
+            && !c.flags.send_black_holed()
+        {
+            c.flags.set_send_black_holed(true);
+            newly_send = true;
+        }
+        let mut newly_recv = false;
+        if hole_recv
+            && let Some(c) = paired.and_then(|peer| self.state.connections.get_mut(&peer))
+            && !c.flags.send_black_holed()
+        {
+            c.flags.set_send_black_holed(true);
+            newly_recv = true;
+        }
+        let mut actions = NetworkActions::default();
+        let direction = match (newly_send, newly_recv) {
+            (true, true) => "both",
+            (true, false) => "send",
+            (false, true) => "recv",
+            (false, false) => return actions,
+        };
+        actions.record(SimFaultEvent::BlackHole {
+            connection_id: id.0,
+            direction: direction.to_string(),
+        });
+        actions
+    }
+
+    pub(crate) fn is_send_black_holed(&self, id: ConnectionId) -> bool {
+        self.state
+            .connections
+            .get(&id)
+            .is_some_and(|connection| connection.flags.send_black_holed())
     }
 
     pub(crate) fn close_graceful(
