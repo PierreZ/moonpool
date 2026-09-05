@@ -29,10 +29,10 @@ hyper = ["dep:moonpool-hyper"]
 prometheus = ["dep:moonpool-prometheus"]
 
 [dependencies]
-moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false }
-moonpool-hyper = { path = "../moonpool-hyper", version = "0.8.0", optional = true }
-moonpool-prometheus = { path = "../moonpool-prometheus", version = "0.8.0", optional = true }
-moonpool-sim = { path = "../moonpool-sim", version = "0.8.0", optional = true }
+moonpool-core = { path = "../moonpool-core", version = "0.9.0", default-features = false }
+moonpool-hyper = { path = "../moonpool-hyper", version = "0.9.0", optional = true }
+moonpool-prometheus = { path = "../moonpool-prometheus", version = "0.9.0", optional = true }
+moonpool-sim = { path = "../moonpool-sim", version = "0.9.0", optional = true }
 
 [dev-dependencies]
 async-trait = "0.1"
