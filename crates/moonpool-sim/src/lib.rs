@@ -127,11 +127,12 @@ pub mod storage;
 // Sim module re-exports
 pub use network::sim::NetworkEvent;
 pub use sim::{
-    Event, ProcessKillKind, ScheduleError, ScheduleId, Scheduled, Scheduler, SimFaultRecord,
-    SimWorld, SleepFuture, StorageOperation, WeakSimWorld, clear_rng_breakpoints,
-    clear_swarm_op_mask, current_sim_seed, draw_swarm_op_mask, reset_rng_call_count, reset_sim_rng,
+    DeterminismViolation, Event, ProcessKillKind, ScheduleError, ScheduleId, Scheduled, Scheduler,
+    SimFaultRecord, SimWorld, SleepFuture, StorageOperation, WeakSimWorld, begin_determinism_check,
+    begin_determinism_record, clear_rng_breakpoints, clear_swarm_op_mask, current_sim_seed,
+    draw_swarm_op_mask, finish_determinism_check, reset_rng_call_count, reset_sim_rng,
     rng_call_count, set_rng_breakpoints, set_sim_seed, sim_random, sim_random_bool, sim_random_f64,
-    sim_random_range, sim_random_range_or_default, swarm_op_enabled,
+    sim_random_range, sim_random_range_or_default, stop_determinism_canary, swarm_op_enabled,
 };
 
 // Locality vocabulary re-exports (shared by engine and runner)

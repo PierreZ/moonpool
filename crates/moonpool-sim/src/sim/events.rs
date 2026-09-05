@@ -260,10 +260,14 @@ impl<E> Scheduler<E> {
     }
 
     /// Pops the next live item and advances logical time to its timestamp.
+    ///
+    /// The new time is also published to the simulation stream's logical
+    /// clock, the time half of a determinism-canary fingerprint.
     pub fn pop(&mut self) -> Option<Scheduled<E>> {
         let scheduled = self.heap.pop()?;
         self.live.remove(&scheduled.id);
         self.now = scheduled.time;
+        crate::sim::rng::note_logical_time(self.now);
         Some(scheduled)
     }
 

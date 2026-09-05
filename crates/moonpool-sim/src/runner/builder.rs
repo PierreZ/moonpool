@@ -261,6 +261,10 @@ pub struct SimulationBuilder {
     /// `enable_chaos`/`Chaos` model.
     buggify_knobs: bool,
     swarm_operations: bool,
+    /// Run every seed twice and fail it when the second run's draw
+    /// fingerprints differ from the first's (see
+    /// [`SimulationBuilder::check_determinism`]).
+    check_determinism: bool,
     /// The trace floor for the run's subscriber and timeline (see
     /// [`SimulationBuilder::trace_level`]). `INFO` by default.
     trace_level: tracing::level_filters::LevelFilter,
@@ -309,6 +313,7 @@ impl SimulationBuilder {
             link_latency: None,
             buggify_knobs: false,
             swarm_operations: false,
+            check_determinism: false,
             trace_level: tracing::level_filters::LevelFilter::INFO,
             invariants: Vec::new(),
             fault_factories: Vec::new(),
@@ -915,6 +920,35 @@ impl SimulationBuilder {
         self
     }
 
+    /// Run every seed twice and fail it if the two runs differ — madsim's
+    /// `Runtime::check_determinism`, as a canary on the simulation stream.
+    ///
+    /// The first run records a 64-bit fingerprint after every draw on the
+    /// simulation stream: a probe of the generator's state after the draw
+    /// (taken on a clone, so checking consumes no randomness and a checked run
+    /// draws exactly what an unchecked one draws) mixed with the logical
+    /// clock. The second run, same seed, compares each draw's fingerprint
+    /// against the record, and afterwards the whole record must have been
+    /// consumed. Because task scheduling, `select!` offsets, swarm masks and
+    /// every fault coin are draws on that one stream, any uncontrolled
+    /// difference — a `HashMap` iterated in random order, wall-clock time, a
+    /// static that survives a run, an OS RNG — changes what gets drawn or when,
+    /// and the seed fails with the always-assertion
+    /// `"determinism canary: replay matched the recorded draw sequence"`
+    /// naming the first diverging draw (or the early exit).
+    ///
+    /// A canary, not a trace: it says *that* the two runs diverged and at
+    /// which draw, not why. Every seed costs two runs, and the replay's
+    /// assertion evaluations are counted in the report beside the first run's.
+    /// Like exploration it requires factory workloads (`workload_factory`,
+    /// `workloads`): an instance workload would carry its state into the
+    /// second run and diverge by construction.
+    #[must_use]
+    pub fn check_determinism(mut self) -> Self {
+        self.check_determinism = true;
+        self
+    }
+
     /// Enable frontier-based multiverse exploration.
     ///
     /// When enabled, globally new assertion outcomes create replay recipes.
@@ -1159,18 +1193,22 @@ impl SimulationBuilder {
     /// Factory entries are reconstructed by `resolve_entries` for every root
     /// and continuation. The rejected inputs are opaque mutable values whose
     /// pristine state cannot be recovered after one timeline has run.
-    fn validate_exploration_lifecycle(&self) {
-        if self.exploration_config.is_none() {
+    fn validate_rerun_lifecycle(&self) {
+        let feature = if self.exploration_config.is_some() {
+            "exploration"
+        } else if self.check_determinism {
+            "check_determinism"
+        } else {
             return;
-        }
+        };
 
         assert!(
             !self
                 .entries
                 .iter()
                 .any(|entry| matches!(entry, WorkloadEntry::Instance(..))),
-            "exploration requires fresh workloads for every timeline; use \
-             SimulationBuilder::workload_factory or SimulationBuilder::workloads instead of \
+            "{feature} runs a seed more than once and requires fresh workloads for every run; \
+             use SimulationBuilder::workload_factory or SimulationBuilder::workloads instead of \
              SimulationBuilder::workload"
         );
     }
@@ -1499,7 +1537,7 @@ impl SimulationBuilder {
     /// timeline (an instance workload). Also panics when a process group draws
     /// more than 255 processes, the most its `10.0.{group}.x` range can address.
     pub fn run(mut self) -> SimulationReport {
-        self.validate_exploration_lifecycle();
+        self.validate_rerun_lifecycle();
         if self.entries.is_empty() {
             return Self::empty_report();
         }
@@ -1623,7 +1661,12 @@ impl SimulationBuilder {
             iteration_count,
             start_time,
         ) {
+            crate::sim::stop_determinism_canary();
             return Some(*report);
+        }
+
+        if self.check_determinism {
+            self.run_determinism_check(state, obs_handle, seed, iteration_count);
         }
 
         #[cfg(feature = "exploration")]
@@ -1631,6 +1674,50 @@ impl SimulationBuilder {
 
         self.finish_iteration(state, seed, iteration_count);
         None
+    }
+
+    /// The determinism canary's second pass (see
+    /// [`SimulationBuilder::check_determinism`]): replay the seed exactly as
+    /// the root run was set up, compare every draw's fingerprint against the
+    /// record, and fail the iteration on the first divergence, an extra draw,
+    /// or an unconsumed tail.
+    fn run_determinism_check(
+        &mut self,
+        state: &mut RunState,
+        obs_handle: &SimulationLayerHandle,
+        seed: u64,
+        iteration_count: usize,
+    ) {
+        crate::sim::begin_determinism_check();
+        // The replay's assertion evaluations accumulate beside the root run's:
+        // the first run's counts are part of the report and must survive.
+        crate::chaos::assertions::skip_next_assertion_reset();
+        Self::reset_per_iteration_state(seed, obs_handle);
+        if let Some(recipe) = &self.replay_recipe {
+            self.pending_replay = Some(recipe.clone());
+        }
+        let (outcome, _start) =
+            self.run_orchestrator_for_iteration(state, obs_handle, seed, iteration_count);
+        if let Ok(output) = outcome {
+            let return_map = std::mem::take(&mut state.pending_return_map);
+            self.return_entries(output.workloads, return_map);
+        }
+        let verdict = crate::sim::finish_determinism_check();
+        let matched = verdict.is_ok();
+        let detail = match &verdict {
+            Ok(draws) => format!("{draws} draws replayed identically"),
+            Err(violation) => violation.to_string(),
+        };
+        crate::assert_always!(
+            matched,
+            "determinism canary: replay matched the recorded draw sequence",
+            { "seed" => seed, "verdict" => detail }
+        );
+        if !matched {
+            state
+                .metrics_collector
+                .mark_current_iteration_failed(seed, "determinism canary: the replay diverged");
+        }
     }
 
     /// Run the frontier exploration loop for this seed: hand the root run's
@@ -1679,7 +1766,7 @@ impl SimulationBuilder {
         if explorer.seed_stats().bug_found > 0 {
             state
                 .metrics_collector
-                .mark_current_iteration_failed_by_exploration(seed);
+                .mark_current_iteration_failed(seed, "exploration found a failing timeline");
         }
         state.explorer = Some(explorer);
     }
@@ -1700,6 +1787,12 @@ impl SimulationBuilder {
             crate::chaos::assertions::skip_next_assertion_reset();
         }
 
+        // The canary records from the first draw of the iteration (the swarm
+        // subsets and process-group counts included) so the replay is held to
+        // the whole run, not just the orchestrated part.
+        if self.check_determinism {
+            crate::sim::begin_determinism_record();
+        }
         Self::reset_per_iteration_state(seed, obs_handle);
 
         // Timeline replay: stage the recipe so the orchestrator installs its
@@ -2187,7 +2280,7 @@ mod tests {
             .enable_chaos([Chaos::Network(ChaosMode::Random)])
             .enable_exploration(test_exploration_config());
 
-        builder.validate_exploration_lifecycle();
+        builder.validate_rerun_lifecycle();
     }
 
     #[cfg(feature = "exploration")]
@@ -2202,12 +2295,14 @@ mod tests {
 
     #[cfg(feature = "exploration")]
     #[test]
-    #[should_panic(expected = "exploration requires fresh workloads for every timeline")]
+    #[should_panic(
+        expected = "exploration runs a seed more than once and requires fresh workloads"
+    )]
     fn exploration_rejects_instance_workloads() {
         SimulationBuilder::new()
             .workload(BasicWorkload)
             .enable_exploration(test_exploration_config())
-            .validate_exploration_lifecycle();
+            .validate_rerun_lifecycle();
     }
 
     struct FailingWorkload;

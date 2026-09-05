@@ -120,15 +120,16 @@ impl MetricsCollector {
         self.faulty_seeds.push(seed);
     }
 
-    /// Reclassify the current root iteration when one of its exploration
-    /// timelines finds a bug.
+    /// Reclassify the current iteration as failed after its result was
+    /// recorded, with `reason` as the failure it reports.
     ///
-    /// Exploration is part of the root seed's test result, so the public
-    /// iteration counts must still add up to `iterations`: one productive
-    /// seed with several failing continuations is one failed iteration, not
-    /// one successful root plus several extra failures.
-    #[cfg(feature = "exploration")]
-    pub(crate) fn mark_current_iteration_failed_by_exploration(&mut self, seed: u64) {
+    /// Used when a second pass over the same seed — an exploration timeline,
+    /// the determinism canary's replay — finds a failure the root run did not
+    /// show. That pass is part of the seed's test result, so the public
+    /// iteration counts must still add up to `iterations`: one seed with a
+    /// failing continuation is one failed iteration, not one successful root
+    /// plus an extra failure.
+    pub(crate) fn mark_current_iteration_failed(&mut self, seed: u64, reason: &str) {
         let Some(last_result) = self.individual_metrics.last_mut() else {
             return;
         };
@@ -151,10 +152,10 @@ impl MetricsCollector {
             .events_processed
             .saturating_sub(metrics.events_processed);
         *last_result = Err(SimulationError::InvalidState(format!(
-            "exploration found a failing timeline (root seed {seed})"
+            "{reason} (seed {seed})"
         )));
         self.faulty_seeds.push(seed);
-        tracing::error!(seed, "exploration found a failing timeline");
+        tracing::error!(seed, "{reason}");
     }
 
     /// Add faulty seeds reported by an external exploration phase.

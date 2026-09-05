@@ -30,6 +30,21 @@ When a seed produces a bug, you can narrow down exactly where the execution dive
 
 The explorer framework takes this further: it records call counts at fork points, creating a "recipe" of `count@seed` transitions that can replay an exact exploration path.
 
+## The Determinism Canary
+
+Everything above assumes nothing escapes the seed. Something always tries to: a `HashMap` iterated in its randomized order, a `static` that survives from one run into the next, a wall-clock timestamp, an OS random number pulled in by a dependency. Each one makes the simulation draw something different, or draw at a different moment, and the seed stops reproducing anything. moonpool ships a canary for exactly this, the mechanism madsim's `Runtime::check_determinism` uses:
+
+```rust
+SimulationBuilder::new()
+    .check_determinism()
+    .workload_factory(|| Box::new(MyWorkload::new()))
+    .run();
+```
+
+Every seed now runs twice. During the first run, each draw on the simulation stream records a 64-bit fingerprint: a probe of the generator's state *after* the draw, taken on a clone so the check consumes no randomness, mixed with the logical clock. During the second run the same hook compares each draw's fingerprint against the record, and when the run ends the whole record must have been consumed. Because task scheduling, `select!` offsets, swarm masks and every fault coin are draws on that one stream, any uncontrolled difference in scheduling, ordering, draw count or simulated timing shows up as a fingerprint that does not match, and the seed fails with the always-assertion `determinism canary: replay matched the recorded draw sequence`, naming the first diverging draw. A replay that matches a prefix and then stops early fails too: the leftover record is the evidence.
+
+Two things to know. It is a canary, not a trace: it tells you *that* the runs diverged and at which draw, and the call-count tools above take it from there. And it doubles the cost of every seed, so it belongs in a dedicated CI job or a debugging session, not in the default sweep. Like exploration it needs factory workloads; an instance workload would carry its state into the second run and diverge by construction.
+
 ## Multi-Seed Testing
 
 A single seed tests one execution path. To build confidence, you need many paths. Moonpool's builder supports two modes:

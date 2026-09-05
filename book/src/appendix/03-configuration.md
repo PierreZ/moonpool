@@ -25,6 +25,7 @@ The builder pattern for configuring and running simulation experiments. Created 
 | `set_debug_seeds(seeds)` | `Vec<u64>` | Use specific seeds for deterministic debugging |
 | `enable_chaos(surfaces)` | `impl IntoIterator<Item = Chaos>` | Enable network/storage/attrition chaos per seed, each in a `ChaosMode` (`Random` or `Swarm`) |
 | `swarm_operations()` | -- | Enable per-seed swarm of each workload's operation alphabet |
+| `check_determinism()` | -- | Run every seed twice and fail it if the replay's draw fingerprints differ (see [The Determinism Canary](../part2-foundations/03-seeds.md#the-determinism-canary)) |
 | `enable_exploration(config)` | `ExplorationConfig` | Enable fork-based multiverse exploration |
 | `replay_timeline(seed, recipe)` | `u64`, `Vec<(u64, u64)>` | Replay one explored timeline (a bug recipe) exactly |
 | `run()` | -- | Execute the simulation, returns `SimulationReport` |
@@ -36,6 +37,7 @@ A freshly created `SimulationBuilder::new()` has:
 - **iteration_control**: `IterationControl::UntilCoverageStable { plateau_seeds: 10, max_iterations: 1000 }`
 - **chaos**: all surfaces off (network/storage use `default()`, no attrition)
 - **swarm_operations**: `false` (workloads see the full operation alphabet)
+- **check_determinism**: `false` (each seed runs once)
 - **exploration**: disabled
 - **seeds**: empty (auto-generated)
 - No workloads, processes, invariants, or fault injectors
