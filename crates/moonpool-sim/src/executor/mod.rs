@@ -28,10 +28,11 @@
 //! Those two words are not in tension. Deterministic means "same seed, same
 //! execution, bit for bit", not "one fixed schedule". The ready queue is a
 //! `Vec` and the next task is chosen by `swap_remove` at a seeded-random
-//! index (madsim uses the same distribution). The RNG is a private ChaCha8
-//! stream derived from the iteration seed with [`EXEC_RNG_SALT`]; it is
-//! deliberately NOT the counted `SIM_RNG` stream, so scheduling decisions
-//! never perturb fork-explorer breakpoint replay (`count@seed` timelines).
+//! index (madsim uses the same distribution). The index is a draw on the
+//! simulation's one random stream ([`sim_random_range`]), the same stream
+//! every process, workload and fault injector draws from: scheduling is
+//! counted like any other decision, so a fork-explorer recipe (`count@seed`)
+//! replays the task order along with everything else.
 //!
 //! The payoff: when one simulation event wakes two tasks, FIFO would run
 //! them in registration order on every seed forever, structurally hiding
@@ -115,19 +116,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
+use crate::sim::rng::sim_random_range;
 use futures::FutureExt;
 use parking_lot::Mutex;
-use rand::{RngExt, SeedableRng};
-use rand_chacha::ChaCha8Rng;
-
-/// Salt mixed into the iteration seed before seeding the executor's
-/// scheduling RNG.
-///
-/// Decorrelates task-scheduling decisions from the in-run `SIM_RNG` stream
-/// (and the other salted streams) while keeping them fully reproducible from
-/// the same iteration seed. Like `CONFIG_RNG`/`SELECT_RNG`, this stream is
-/// uncounted: scheduling never perturbs fork-explorer breakpoint replay.
-const EXEC_RNG_SALT: u64 = 0x6578_6563_7363_6864; // "execschd"
 
 /// Ceiling on polls within one `run_until_stalled` drain (all builds).
 ///
@@ -318,9 +309,12 @@ where
 
 /// The deterministic single-threaded executor.
 ///
-/// One instance is created per simulation iteration, seeded from the
-/// iteration seed; dropping it cancels every task that is still alive (see
-/// the [module docs](self) for the kill-on-drop mechanics).
+/// One instance is created per simulation iteration; its scheduling draws
+/// come from the simulation stream the runner seeded ([`set_sim_seed`]).
+/// Dropping it cancels every task that is still alive (see the
+/// [module docs](self) for the kill-on-drop mechanics).
+///
+/// [`set_sim_seed`]: crate::set_sim_seed
 ///
 /// # Examples
 ///
@@ -334,14 +328,16 @@ where
 /// ```
 pub struct Executor {
     shared: Arc<Shared>,
-    /// Seeded scheduling RNG (uncounted stream, see [`EXEC_RNG_SALT`]).
-    rng: ChaCha8Rng,
     /// The iteration seed, kept for stall diagnostics.
     seed: u64,
 }
 
 impl Executor {
-    /// Create an executor whose scheduling decisions derive from `seed`.
+    /// Create an executor; `seed` names the iteration in stall diagnostics.
+    ///
+    /// Scheduling randomness is not seeded here: it is drawn from the
+    /// thread-local simulation stream, which the caller seeds with
+    /// [`set_sim_seed`](crate::set_sim_seed).
     #[must_use]
     pub fn new(seed: u64) -> Self {
         Self {
@@ -350,7 +346,6 @@ impl Executor {
                 wakers: Mutex::new(BTreeMap::new()),
                 next_id: AtomicU64::new(0),
             }),
-            rng: ChaCha8Rng::seed_from_u64(seed ^ EXEC_RNG_SALT),
             seed,
         }
     }
@@ -412,13 +407,13 @@ impl Executor {
                 if queue.is_empty() {
                     break;
                 }
-                // A single runnable is a forced choice: skip the RNG draw on
-                // the dominant one-event-wakes-one-task path (the stream is
-                // uncounted, so draw counts are not a stability contract).
+                // A single runnable is a forced choice: no draw on the
+                // dominant one-event-wakes-one-task path, so the shared
+                // stream only moves where there was something to decide.
                 let index = if queue.len() == 1 {
                     0
                 } else {
-                    self.rng.random_range(0..queue.len())
+                    sim_random_range(0..queue.len())
                 };
                 queue.swap_remove(index)
             };

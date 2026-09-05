@@ -25,8 +25,12 @@ fn sectors(count: usize, byte: u8) -> Vec<u8> {
     vec![byte; count * SECTOR_SIZE]
 }
 
+/// Seed the simulation stream (the store's only randomness source) and
+/// build a store over it.
 fn store_with(seed: u64, config: BlockFaultConfig) -> (SimBlockStore, SimBlockDeviceProvider) {
-    let store = SimBlockStore::new(seed, config);
+    moonpool_sim::reset_sim_rng();
+    moonpool_sim::set_sim_seed(seed);
+    let store = SimBlockStore::new(config);
     let provider = SimBlockDeviceProvider::new(store.clone());
     (store, provider)
 }

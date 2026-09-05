@@ -86,7 +86,7 @@
 
 use crate::locality::LinkClass;
 use crate::sim::rng::{
-    config_random_bool, sim_random_f64, sim_random_range, sim_random_range_or_default,
+    sim_random_bool, sim_random_f64, sim_random_range, sim_random_range_or_default,
 };
 use std::ops::Range;
 use std::time::Duration;
@@ -555,8 +555,8 @@ impl ChaosConfiguration {
     /// Create a swarm-testing chaos configuration for seed-based testing.
     ///
     /// Starts from [`random_for_seed`](Self::random_for_seed), then disables each
-    /// fault family with ~50% probability (drawn from the independent `CONFIG_RNG`
-    /// stream). This implements *swarm testing* (Groce et al., ISSTA 2012): each
+    /// fault family with ~50% probability (drawn from the simulation stream).
+    /// This implements *swarm testing* (Groce et al., ISSTA 2012): each
     /// seed exercises a random *subset* of fault families — including the all-off
     /// subset — instead of every family being slightly on at once (which lets
     /// families crowd each other out, the passive-suppression anti-pattern).
@@ -567,38 +567,38 @@ impl ChaosConfiguration {
         chaos
     }
 
-    /// Disable each fault family with ~50% probability using the `CONFIG_RNG`
+    /// Disable each fault family with ~50% probability using the simulation
     /// stream (see [`swarm_for_seed`](Self::swarm_for_seed)).
     ///
-    /// Draws exactly nine `config_random_bool` values (one per family) so the
-    /// `CONFIG_RNG` call sequence is fixed and reproducible per seed. Durations,
+    /// Draws exactly nine `sim_random_bool` values (one per family) so the
+    /// call sequence is fixed and reproducible per seed. Durations,
     /// cooldowns, and strategy stay as sampled — they are inert once their family
     /// is off.
     fn apply_swarm_mask(&mut self) {
-        if !config_random_bool(0.5) {
+        if !sim_random_bool(0.5) {
             self.clog_probability = 0.0;
         }
-        if !config_random_bool(0.5) {
+        if !sim_random_bool(0.5) {
             self.partition_probability = 0.0;
         }
-        if !config_random_bool(0.5) {
+        if !sim_random_bool(0.5) {
             self.bit_flip_probability = 0.0;
         }
-        if !config_random_bool(0.5) {
+        if !sim_random_bool(0.5) {
             self.random_close_probability = 0.0;
         }
-        if !config_random_bool(0.5) {
+        if !sim_random_bool(0.5) {
             self.connect_failure_mode = ConnectFailureMode::Disabled;
             self.connect_failure_probability = 0.0;
         }
-        self.clock_drift_enabled = config_random_bool(0.5);
-        self.buggified_delay_enabled = config_random_bool(0.5);
+        self.clock_drift_enabled = sim_random_bool(0.5);
+        self.buggified_delay_enabled = sim_random_bool(0.5);
         // Appended after the seven draws above so they stay stable across seeds.
-        if !config_random_bool(0.5) {
+        if !sim_random_bool(0.5) {
             self.max_pair_latency = Duration::ZERO..Duration::ZERO;
         }
         // Appended last, for the same reason.
-        if !config_random_bool(0.5) {
+        if !sim_random_bool(0.5) {
             self.black_hole_probability = 0.0;
         }
     }
@@ -983,7 +983,7 @@ impl NetworkConfiguration {
 #[cfg(test)]
 mod swarm_tests {
     use super::{ChaosConfiguration, ConnectFailureMode, NetworkConfiguration};
-    use crate::sim::rng::{reset_sim_rng, set_config_seed, set_sim_seed};
+    use crate::sim::rng::{reset_sim_rng, set_sim_seed};
 
     /// The on/off state of each swarmed fault family, in mask order.
     fn enabled_families(chaos: &ChaosConfiguration) -> [bool; 8] {
@@ -999,11 +999,10 @@ mod swarm_tests {
         ]
     }
 
-    /// Build a swarm config the way the runner does: both streams seeded per iteration.
+    /// Build a swarm config the way the runner does: the stream seeded per iteration.
     fn swarm_for(seed: u64) -> NetworkConfiguration {
         reset_sim_rng();
         set_sim_seed(seed);
-        set_config_seed(seed);
         NetworkConfiguration::swarm_for_seed()
     }
 

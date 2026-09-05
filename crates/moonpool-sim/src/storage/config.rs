@@ -75,7 +75,7 @@
 //! - Crash consistency: FDB AsyncFileKAIO, TigerBeetle deterministic testing
 
 use crate::network::config::{LatencyDistribution, random_latency_for_seed};
-use crate::sim::rng::{config_random_bool, sim_random_range};
+use crate::sim::rng::{sim_random_bool, sim_random_range};
 use std::time::Duration;
 
 /// Configuration for storage simulation parameters.
@@ -341,8 +341,8 @@ impl StorageConfiguration {
     /// Create a swarm-testing storage configuration for seed-based testing.
     ///
     /// Starts from [`random_for_seed`](Self::random_for_seed), then disables each
-    /// fault family with ~50% probability (drawn from the independent `CONFIG_RNG`
-    /// stream). This implements *swarm testing* (Groce et al., ISSTA 2012): each
+    /// fault family with ~50% probability (drawn from the simulation stream).
+    /// This implements *swarm testing* (Groce et al., ISSTA 2012): each
     /// seed exercises a random *subset* of storage fault families — including the
     /// all-off subset — instead of every family being slightly on at once (which
     /// lets families crowd each other out, the passive-suppression anti-pattern).
@@ -353,45 +353,45 @@ impl StorageConfiguration {
         config
     }
 
-    /// Disable each fault family with ~50% probability using the `CONFIG_RNG`
+    /// Disable each fault family with ~50% probability using the simulation
     /// stream (see [`swarm_for_seed`](Self::swarm_for_seed)).
     ///
-    /// Draws exactly ten `config_random_bool` values (one per family: the seven
+    /// Draws exactly ten `sim_random_bool` values (one per family: the seven
     /// per-op faults, the stall and throttle episode families, and the disk
-    /// failure) so the `CONFIG_RNG` call sequence is fixed and reproducible per
+    /// failure) so the call sequence is fixed and reproducible per
     /// seed. Performance
     /// parameters (IOPS, bandwidth, latencies) stay as sampled — only the fault
     /// families are masked.
     fn apply_swarm_mask(&mut self) {
-        if !config_random_bool(0.5) {
+        if !sim_random_bool(0.5) {
             self.read_fault_probability = 0.0;
         }
-        if !config_random_bool(0.5) {
+        if !sim_random_bool(0.5) {
             self.write_fault_probability = 0.0;
         }
-        if !config_random_bool(0.5) {
+        if !sim_random_bool(0.5) {
             self.crash_fault_probability = 0.0;
         }
-        if !config_random_bool(0.5) {
+        if !sim_random_bool(0.5) {
             self.misdirect_read_probability = 0.0;
         }
-        if !config_random_bool(0.5) {
+        if !sim_random_bool(0.5) {
             self.misdirect_write_probability = 0.0;
         }
-        if !config_random_bool(0.5) {
+        if !sim_random_bool(0.5) {
             self.phantom_write_probability = 0.0;
         }
-        if !config_random_bool(0.5) {
+        if !sim_random_bool(0.5) {
             self.sync_failure_probability = 0.0;
         }
-        if !config_random_bool(0.5) {
+        if !sim_random_bool(0.5) {
             self.disk_stall_probability = 0.0;
         }
-        if !config_random_bool(0.5) {
+        if !sim_random_bool(0.5) {
             self.disk_throttle_probability = 0.0;
         }
         // Appended last: keeps the nine draws above stable across seeds.
-        if !config_random_bool(0.5) {
+        if !sim_random_bool(0.5) {
             self.disk_failure_probability = 0.0;
         }
     }
@@ -503,7 +503,7 @@ impl StorageConfiguration {
 #[cfg(test)]
 mod swarm_tests {
     use super::StorageConfiguration;
-    use crate::sim::rng::{reset_sim_rng, set_config_seed, set_sim_seed};
+    use crate::sim::rng::{reset_sim_rng, set_sim_seed};
 
     /// The on/off state of each swarmed fault family, in mask order.
     fn enabled_families(config: &StorageConfiguration) -> [bool; 10] {
@@ -521,11 +521,10 @@ mod swarm_tests {
         ]
     }
 
-    /// Build a swarm config the way the runner does: both streams seeded per iteration.
+    /// Build a swarm config the way the runner does: the stream seeded per iteration.
     fn swarm_for(seed: u64) -> StorageConfiguration {
         reset_sim_rng();
         set_sim_seed(seed);
-        set_config_seed(seed);
         StorageConfiguration::swarm_for_seed()
     }
 
@@ -611,15 +610,14 @@ mod swarm_tests {
 mod buggify_knob_tests {
     use super::StorageConfiguration;
     use crate::chaos::{buggify_init, buggify_reset};
-    use crate::sim::rng::{reset_sim_rng, set_config_seed, set_sim_seed};
+    use crate::sim::rng::{reset_sim_rng, set_sim_seed};
 
-    /// Sample the buggify-spiked knobs the way the runner does: seed both RNG
-    /// streams and enable buggify before perturbing. Returns the spiked knobs
+    /// Sample the buggify-spiked knobs the way the runner does: seed the
+    /// stream and enable buggify before perturbing. Returns the spiked knobs
     /// (f64/`Duration` knobs as bits/nanos for exact comparison).
     fn buggified_knobs(seed: u64) -> [u64; 5] {
         reset_sim_rng();
         set_sim_seed(seed);
-        set_config_seed(seed);
         buggify_init(0.8);
         let mut config = StorageConfiguration::swarm_for_seed();
         config.apply_buggify_knobs();

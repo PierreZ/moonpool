@@ -99,10 +99,11 @@ and 200% of the configured range. With `.cluster()`, the seed also selects among
 `max_dead` budget. A flat `.processes()` campaign keeps its configured scope
 because it has no failure-domain topology to swarm.
 
-These regime choices come from the separate `CONFIG_RNG` stream. The injector
-still makes the same runtime draws for the actual recovery delay and victim, so
-changing the per-seed regime does not move `SIM_RNG` call counts or invalidate
-an exploration recipe. Same reasoning as [swarming network
+These regime choices are six draws on the simulation stream, taken once the
+world is built, in registration order. The injector
+still makes its usual single runtime draw per reboot for the actual recovery
+delay and victim, so a regime costs a fixed footprint at a fixed position and
+replays with the seed. Same reasoning as [swarming network
 faults](10-network-faults.md#swarm-testing-less-is-more).
 
 ## The max_dead Constraint
@@ -146,7 +147,7 @@ Because the budget is per pool, you can give each group its own regime. Every `C
 ])
 ```
 
-The two injectors run side by side during the chaos phase and never block each other: a dead matchmaker does not spend the acceptors' budget. Swarm regimes are drawn in registration order from `CONFIG_RNG`, so a campaign with several injectors replays exactly like one with a single injector. In the report each injector carries its filter in its name (`attrition[group=acceptor]`), so a failing seed says which regime was active.
+The two injectors run side by side during the chaos phase and never block each other: a dead matchmaker does not spend the acceptors' budget. Swarm regimes are drawn in registration order from the simulation stream, so a campaign with several injectors replays exactly like one with a single injector. In the report each injector carries its filter in its name (`attrition[group=acceptor]`), so a failing seed says which regime was active.
 
 ## Failure Domains: Correlated Reboots
 

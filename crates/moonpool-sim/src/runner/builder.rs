@@ -261,6 +261,10 @@ pub struct SimulationBuilder {
     /// `enable_chaos`/`Chaos` model.
     buggify_knobs: bool,
     swarm_operations: bool,
+    /// Run every seed twice and fail it when the second run's draw
+    /// fingerprints differ from the first's (see
+    /// [`SimulationBuilder::check_determinism`]).
+    check_determinism: bool,
     /// The trace floor for the run's subscriber and timeline (see
     /// [`SimulationBuilder::trace_level`]). `INFO` by default.
     trace_level: tracing::level_filters::LevelFilter,
@@ -309,6 +313,7 @@ impl SimulationBuilder {
             link_latency: None,
             buggify_knobs: false,
             swarm_operations: false,
+            check_determinism: false,
             trace_level: tracing::level_filters::LevelFilter::INFO,
             invariants: Vec::new(),
             fault_factories: Vec::new(),
@@ -853,9 +858,9 @@ impl SimulationBuilder {
     /// `Swarm` mode defeats passive suppression: when every fault is always
     /// slightly on (`Random`) families crowd each other out and the extreme
     /// single-family configs that surface bugs almost never occur. Subset
-    /// decisions are drawn from a dedicated `CONFIG_RNG` stream, so they are
-    /// reproducible per seed yet never perturb in-run randomness or fork-explorer
-    /// replay.
+    /// decisions are draws on the simulation stream, seeded for the iteration,
+    /// taken in a fixed order before the world is built, so the same seed
+    /// rebuilds the same subset on every run and replay.
     ///
     /// The workload operation-alphabet swarm is a separate, test-driver concern —
     /// see [`swarm_operations`](Self::swarm_operations).
@@ -912,6 +917,35 @@ impl SimulationBuilder {
     #[must_use]
     pub fn swarm_operations(mut self) -> Self {
         self.swarm_operations = true;
+        self
+    }
+
+    /// Run every seed twice and fail it if the two runs differ — madsim's
+    /// `Runtime::check_determinism`, as a canary on the simulation stream.
+    ///
+    /// The first run records a 64-bit fingerprint after every draw on the
+    /// simulation stream: a probe of the generator's state after the draw
+    /// (taken on a clone, so checking consumes no randomness and a checked run
+    /// draws exactly what an unchecked one draws) mixed with the logical
+    /// clock. The second run, same seed, compares each draw's fingerprint
+    /// against the record, and afterwards the whole record must have been
+    /// consumed. Because task scheduling, `select!` offsets, swarm masks and
+    /// every fault coin are draws on that one stream, any uncontrolled
+    /// difference — a `HashMap` iterated in random order, wall-clock time, a
+    /// static that survives a run, an OS RNG — changes what gets drawn or when,
+    /// and the seed fails with the always-assertion
+    /// `"determinism canary: replay matched the recorded draw sequence"`
+    /// naming the first diverging draw (or the early exit).
+    ///
+    /// A canary, not a trace: it says *that* the two runs diverged and at
+    /// which draw, not why. Every seed costs two runs, and the replay's
+    /// assertion evaluations are counted in the report beside the first run's.
+    /// Like exploration it requires factory workloads (`workload_factory`,
+    /// `workloads`): an instance workload would carry its state into the
+    /// second run and diverge by construction.
+    #[must_use]
+    pub fn check_determinism(mut self) -> Self {
+        self.check_determinism = true;
         self
     }
 
@@ -1048,8 +1082,9 @@ impl SimulationBuilder {
     /// from its [`ChaosMode`]: `None` ⇒ default (off), `Random` ⇒ `random_for_seed`,
     /// `Swarm` ⇒ `swarm_for_seed`.
     ///
-    /// The Swarm network subset (if any) draws from `CONFIG_RNG` before the
-    /// storage subset, keeping the per-seed draw order fixed and reproducible.
+    /// The Swarm network subset (if any) draws from the simulation stream
+    /// before the storage subset, keeping the per-seed draw order fixed and
+    /// reproducible.
     /// The caller's [`NetworkFaultMask`](crate::NetworkFaultMask) is applied
     /// afterward and consumes no draws.
     fn build_sim_for_iteration(
@@ -1096,7 +1131,7 @@ impl SimulationBuilder {
         sim.set_storage_config(storage_config);
         // Block devices follow the same chaos switch as stream storage:
         // Random turns every default-on fault family on, Swarm additionally
-        // keeps a per-seed subset (drawn from the uncounted config RNG).
+        // keeps a per-seed subset (drawn from the simulation stream).
         // The barrier-bounded crash model itself is always armed — it only
         // acts when a process actually crashes.
         let block_config = match storage_chaos {
@@ -1158,18 +1193,22 @@ impl SimulationBuilder {
     /// Factory entries are reconstructed by `resolve_entries` for every root
     /// and continuation. The rejected inputs are opaque mutable values whose
     /// pristine state cannot be recovered after one timeline has run.
-    fn validate_exploration_lifecycle(&self) {
-        if self.exploration_config.is_none() {
+    fn validate_rerun_lifecycle(&self) {
+        let feature = if self.exploration_config.is_some() {
+            "exploration"
+        } else if self.check_determinism {
+            "check_determinism"
+        } else {
             return;
-        }
+        };
 
         assert!(
             !self
                 .entries
                 .iter()
                 .any(|entry| matches!(entry, WorkloadEntry::Instance(..))),
-            "exploration requires fresh workloads for every timeline; use \
-             SimulationBuilder::workload_factory or SimulationBuilder::workloads instead of \
+            "{feature} runs a seed more than once and requires fresh workloads for every run; \
+             use SimulationBuilder::workload_factory or SimulationBuilder::workloads instead of \
              SimulationBuilder::workload"
         );
     }
@@ -1275,23 +1314,13 @@ impl SimulationBuilder {
     }
 
     /// Reset per-iteration state: capture buffers, RNG, buggify, and chaos.
-    fn reset_per_iteration_state(
-        seed: u64,
-        swarm_operations: bool,
-        obs_handle: &SimulationLayerHandle,
-    ) {
+    fn reset_per_iteration_state(seed: u64, obs_handle: &SimulationLayerHandle) {
         obs_handle.reset_for_seed();
         crate::sim::reset_sim_rng();
         crate::sim::set_sim_seed(seed);
-        // Seed the independent config RNG that drives swarm-subset decisions.
-        // Runs before `build_sim_for_iteration`, so `swarm_for_seed()` sees it.
-        crate::sim::set_config_seed(seed);
-        // Seed the independent select! branch-offset stream and install it as
-        // moonpool_core::select!'s offset source for this iteration.
-        crate::sim::set_select_seed(seed);
-        // Per-seed base for the workload operation-alphabet swarm mask; `None`
-        // disables masking so workloads see the full alphabet.
-        crate::sim::set_swarm_op_seed(swarm_operations.then_some(seed));
+        // Route moonpool_core::select!'s branch offsets through the simulation
+        // stream for this iteration.
+        crate::sim::install_select_offset();
         crate::chaos::reset_always_violations();
         // Use moderate probabilities: 50% activation rate, 25% firing rate.
         crate::chaos::buggify_init(0.5);
@@ -1508,20 +1537,20 @@ impl SimulationBuilder {
     /// timeline (an instance workload). Also panics when a process group draws
     /// more than 255 processes, the most its `10.0.{group}.x` range can address.
     pub fn run(mut self) -> SimulationReport {
-        self.validate_exploration_lifecycle();
+        self.validate_rerun_lifecycle();
         if self.entries.is_empty() {
             return Self::empty_report();
         }
 
         // Uninstall the select! offset override on every exit path (normal,
-        // early return, panic): without this, the seeded source installed by
-        // set_select_seed would leak past run() and later selects on this
-        // thread would silently keep drawing from the stale sim stream
+        // early return, panic): without this, the source installed by
+        // install_select_offset would leak past run() and later selects on
+        // this thread would silently keep drawing from the stale sim stream
         // instead of the documented entropy fallback.
         struct SelectOverrideReset;
         impl Drop for SelectOverrideReset {
             fn drop(&mut self) {
-                crate::sim::reset_select_rng();
+                crate::sim::uninstall_select_offset();
             }
         }
         let _select_reset = SelectOverrideReset;
@@ -1632,7 +1661,12 @@ impl SimulationBuilder {
             iteration_count,
             start_time,
         ) {
+            crate::sim::stop_determinism_canary();
             return Some(*report);
+        }
+
+        if self.check_determinism {
+            self.run_determinism_check(state, obs_handle, seed, iteration_count);
         }
 
         #[cfg(feature = "exploration")]
@@ -1640,6 +1674,50 @@ impl SimulationBuilder {
 
         self.finish_iteration(state, seed, iteration_count);
         None
+    }
+
+    /// The determinism canary's second pass (see
+    /// [`SimulationBuilder::check_determinism`]): replay the seed exactly as
+    /// the root run was set up, compare every draw's fingerprint against the
+    /// record, and fail the iteration on the first divergence, an extra draw,
+    /// or an unconsumed tail.
+    fn run_determinism_check(
+        &mut self,
+        state: &mut RunState,
+        obs_handle: &SimulationLayerHandle,
+        seed: u64,
+        iteration_count: usize,
+    ) {
+        crate::sim::begin_determinism_check();
+        // The replay's assertion evaluations accumulate beside the root run's:
+        // the first run's counts are part of the report and must survive.
+        crate::chaos::assertions::skip_next_assertion_reset();
+        Self::reset_per_iteration_state(seed, obs_handle);
+        if let Some(recipe) = &self.replay_recipe {
+            self.pending_replay = Some(recipe.clone());
+        }
+        let (outcome, _start) =
+            self.run_orchestrator_for_iteration(state, obs_handle, seed, iteration_count);
+        if let Ok(output) = outcome {
+            let return_map = std::mem::take(&mut state.pending_return_map);
+            self.return_entries(output.workloads, return_map);
+        }
+        let verdict = crate::sim::finish_determinism_check();
+        let matched = verdict.is_ok();
+        let detail = match &verdict {
+            Ok(draws) => format!("{draws} draws replayed identically"),
+            Err(violation) => violation.to_string(),
+        };
+        crate::assert_always!(
+            matched,
+            "determinism canary: replay matched the recorded draw sequence",
+            { "seed" => seed, "verdict" => detail }
+        );
+        if !matched {
+            state
+                .metrics_collector
+                .mark_current_iteration_failed(seed, "determinism canary: the replay diverged");
+        }
     }
 
     /// Run the frontier exploration loop for this seed: hand the root run's
@@ -1661,9 +1739,8 @@ impl SimulationBuilder {
             return;
         };
         explorer.observe_root_run(root_failed);
-        let swarm_operations = self.swarm_operations;
         explorer.explore(|job| {
-            Self::reset_per_iteration_state(seed, swarm_operations, obs_handle);
+            Self::reset_per_iteration_state(seed, obs_handle);
             // Keep the shared assertion region intact across exploration runs:
             // the discovery latches ARE the cumulative novelty. Without this,
             // SimWorld::create would zero the region and every run would
@@ -1689,7 +1766,7 @@ impl SimulationBuilder {
         if explorer.seed_stats().bug_found > 0 {
             state
                 .metrics_collector
-                .mark_current_iteration_failed_by_exploration(seed);
+                .mark_current_iteration_failed(seed, "exploration found a failing timeline");
         }
         state.explorer = Some(explorer);
     }
@@ -1710,7 +1787,13 @@ impl SimulationBuilder {
             crate::chaos::assertions::skip_next_assertion_reset();
         }
 
-        Self::reset_per_iteration_state(seed, self.swarm_operations, obs_handle);
+        // The canary records from the first draw of the iteration (the swarm
+        // subsets and process-group counts included) so the replay is held to
+        // the whole run, not just the orchestrated part.
+        if self.check_determinism {
+            crate::sim::begin_determinism_record();
+        }
+        Self::reset_per_iteration_state(seed, obs_handle);
 
         // Timeline replay: stage the recipe so the orchestrator installs its
         // breakpoints once the SimWorld's RNG reset has happened.
@@ -1754,9 +1837,16 @@ impl SimulationBuilder {
             self.buggify_knobs,
             seed,
         );
-        // Exploration replay: `SimWorld` construction reset the tracked RNG,
-        // so this is the earliest point where breakpoints survive until the
-        // run. The counted stream starts here, matching the recorded anchors.
+        // `SimWorld` construction reset and reseeded the stream, so the run's
+        // counted draws start here. The workload operation-alphabet swarm mask
+        // is its first four draws (a fixed footprint at a fixed position);
+        // without `.swarm_operations()` the reset left no mask and workloads
+        // see the full alphabet.
+        if self.swarm_operations {
+            crate::sim::draw_swarm_op_mask();
+        }
+        // Exploration replay: this is the earliest point where breakpoints
+        // survive until the run, and the recorded anchors count from here.
         if let Some(breakpoints) = self.pending_replay.take() {
             crate::sim::set_rng_breakpoints(breakpoints);
         }
@@ -1768,9 +1858,9 @@ impl SimulationBuilder {
         }
         let start_time = Instant::now();
         // Derive the per-seed attrition regimes, in registration order: `Swarm`
-        // draws a fresh reboot regime from `CONFIG_RNG` (after the network/storage
-        // masks, keeping the draw order fixed); `Random` uses the configured
-        // weights as written.
+        // draws a fresh reboot regime from the simulation stream (after the
+        // network/storage masks, keeping the draw order fixed); `Random` uses
+        // the configured weights as written.
         let attritions: Vec<Attrition> = self
             .attritions
             .iter()
@@ -2135,12 +2225,11 @@ mod tests {
     ) -> (crate::NetworkConfiguration, u64) {
         crate::sim::reset_sim_rng();
         crate::sim::set_sim_seed(seed);
-        crate::sim::set_config_seed(seed);
         let sim =
             SimulationBuilder::build_sim_for_iteration(Some(mode), None, mask, None, false, seed);
         let config = sim.with_network_config(Clone::clone);
-        let next_config_draw = crate::sim::config_random_f64().to_bits();
-        (config, next_config_draw)
+        let draws_consumed = crate::sim::rng_call_count();
+        (config, draws_consumed)
     }
 
     #[test]
@@ -2163,15 +2252,15 @@ mod tests {
     }
 
     #[test]
-    fn network_fault_mask_preserves_swarm_config_rng_position() {
-        let (seed, baseline, baseline_next_draw) = (0..1000_u64)
+    fn network_fault_mask_consumes_no_draws() {
+        let (seed, baseline, baseline_draws) = (0..1000_u64)
             .find_map(|seed| {
-                let (config, next_draw) =
+                let (config, draws) =
                     sampled_network_config(ChaosMode::Swarm, crate::NetworkFaultMask::all(), seed);
-                (config.chaos.bit_flip_probability > 0.0).then_some((seed, config, next_draw))
+                (config.chaos.bit_flip_probability > 0.0).then_some((seed, config, draws))
             })
             .expect("expected Swarm to select bit flips within 1000 seeds");
-        let (masked, masked_next_draw) = sampled_network_config(
+        let (masked, masked_draws) = sampled_network_config(
             ChaosMode::Swarm,
             crate::NetworkFaultMask::all().without(crate::NetworkFault::BitFlip),
             seed,
@@ -2180,7 +2269,7 @@ mod tests {
         let mut expected = baseline;
         expected.chaos.bit_flip_probability = 0.0;
         assert_eq!(masked, expected);
-        assert_eq!(masked_next_draw, baseline_next_draw);
+        assert_eq!(masked_draws, baseline_draws);
     }
 
     #[cfg(feature = "exploration")]
@@ -2191,7 +2280,7 @@ mod tests {
             .enable_chaos([Chaos::Network(ChaosMode::Random)])
             .enable_exploration(test_exploration_config());
 
-        builder.validate_exploration_lifecycle();
+        builder.validate_rerun_lifecycle();
     }
 
     #[cfg(feature = "exploration")]
@@ -2206,12 +2295,14 @@ mod tests {
 
     #[cfg(feature = "exploration")]
     #[test]
-    #[should_panic(expected = "exploration requires fresh workloads for every timeline")]
+    #[should_panic(
+        expected = "exploration runs a seed more than once and requires fresh workloads"
+    )]
     fn exploration_rejects_instance_workloads() {
         SimulationBuilder::new()
             .workload(BasicWorkload)
             .enable_exploration(test_exploration_config())
-            .validate_exploration_lifecycle();
+            .validate_rerun_lifecycle();
     }
 
     struct FailingWorkload;

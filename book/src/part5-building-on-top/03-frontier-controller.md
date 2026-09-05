@@ -33,7 +33,7 @@ pub struct ExploreJob {
 }
 ```
 
-A job says: *replay this prefix, then keep going with the fresh randomness of the final segment's seed*. Executing a job means running one complete simulation from the beginning with the recipe's RNG breakpoints installed. Because the simulation is deterministic and every uncounted RNG stream (executor scheduling, `select!` offsets, swarm masks) is a pure function of the root seed and the replayed prefix, replay is *exact* — and cheap enough that no live-checkpoint machinery is needed.
+A job says: *replay this prefix, then keep going with the fresh randomness of the final segment's seed*. Executing a job means running one complete simulation from the beginning with the recipe's RNG breakpoints installed. Because the simulation is deterministic and every decision — executor scheduling, `select!` offsets, swarm masks, faults, the workload's own draws — is a counted draw on the one simulation stream, replay is *exact* — and cheap enough that no live-checkpoint machinery is needed.
 
 ## The Discovery Journal
 

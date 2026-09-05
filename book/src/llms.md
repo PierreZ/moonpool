@@ -797,6 +797,7 @@ Use the runner mode that matches the current stage:
 | Main campaign | default or explicit `.until_coverage_stable(plateau, cap)` |
 | Fixed-size CI campaign | `.set_iterations(n)` |
 | Replay explorer failure | `.replay_timeline(seed, recipe)` |
+| Hunt an entropy leak | `.check_determinism()` (every seed runs twice; a diverging replay fails the seed) |
 
 `UntilCoverageStable` is the builder default: 10 quiet seeds and a 1,000-seed
 cap. Under `cargo xtask sim run`, LLVM sanitizer coverage supplies the plateau

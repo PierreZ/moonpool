@@ -1,8 +1,9 @@
 //! Deterministic backing store for simulated block devices.
 //!
-//! One [`SimBlockStore`] owns every simulated device (keyed by path), a single
-//! seeded RNG stream for all fault and crash decisions, the caller-provided
-//! eligibility mask, and the observable fault record log.
+//! One [`SimBlockStore`] owns every simulated device (keyed by path), the
+//! caller-provided eligibility mask, and the observable fault record log.
+//! Every fault and crash decision is a draw on the simulation's one random
+//! stream (`sim_random`), the same stream the code under test draws from.
 //!
 //! ## Barrier-bounded crash model
 //!
@@ -34,6 +35,7 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use super::BlockFaultConfig;
+use crate::sim::rng::{sim_random, sim_random_range};
 use crate::storage::SectorBitSet;
 use crate::{assert_always, assert_reachable};
 
@@ -265,7 +267,10 @@ impl RegionState {
 }
 
 /// Deterministic fill pattern for never-written and lost sectors: zeros or
-/// per-sector garbage, chosen once per device from the store's seeded RNG.
+/// per-sector garbage, chosen once per device (a draw on the simulation
+/// stream). The garbage itself is a pure function of `(seed, region, sector)`
+/// — a keyed generator, not a randomness source — so re-reading a lost sector
+/// returns the same bytes.
 struct FillPattern {
     garbage: bool,
     seed: u64,
@@ -295,7 +300,6 @@ struct DeviceState {
 }
 
 struct StoreState {
-    rng: ChaCha8Rng,
     config: BlockFaultConfig,
     /// Whether the barrier-violation family was ever armed on this store.
     ///
@@ -337,10 +341,10 @@ impl StoreState {
 /// Shared deterministic store behind every [`SimBlockDevice`](super::SimBlockDevice).
 ///
 /// Cloning is cheap and shares state. All randomness (fault firing, crash
-/// resolution, fill patterns) is drawn from one `ChaCha8` stream seeded at
-/// construction: the same seed and operation sequence produce bit-identical
-/// device states, crash resolutions, and fault firings. Inside a simulation,
-/// derive the seed from the iteration seed (e.g. `current_sim_seed()`).
+/// resolution, fill patterns) is drawn from the simulation's one thread-local
+/// stream ([`sim_random`]), so the same seed and operation sequence produce
+/// bit-identical device states, crash resolutions, and fault firings, and a
+/// store never holds a stream of its own.
 #[derive(Clone)]
 pub struct SimBlockStore {
     inner: Arc<Mutex<StoreState>>,
@@ -357,12 +361,14 @@ impl fmt::Debug for SimBlockStore {
 }
 
 impl SimBlockStore {
-    /// Create a store with the given RNG seed and fault configuration.
+    /// Create a store with the given fault configuration.
+    ///
+    /// The store draws from the thread-local simulation stream, which the
+    /// caller seeds with [`set_sim_seed`](crate::set_sim_seed).
     #[must_use]
-    pub fn new(seed: u64, config: BlockFaultConfig) -> Self {
+    pub fn new(config: BlockFaultConfig) -> Self {
         Self {
             inner: Arc::new(Mutex::new(StoreState {
-                rng: ChaCha8Rng::seed_from_u64(seed),
                 barrier_violation_armed: config.barrier_violation_probability > 0.0,
                 config,
                 devices: BTreeMap::new(),
@@ -587,8 +593,8 @@ impl SimBlockStore {
             }
             states.push(RegionState::new(spec.name, spec.size));
         }
-        let garbage = inner.rng.random::<f64>() < inner.config.garbage_fill_probability;
-        let fill_seed = inner.rng.random::<u64>();
+        let garbage = sim_random::<f64>() < inner.config.garbage_fill_probability;
+        let fill_seed = sim_random::<u64>();
         if garbage {
             assert_reachable!("block: device uses garbage fill for unwritten sectors");
         } else {
@@ -688,7 +694,7 @@ impl SimBlockStore {
 
         // EIO: targeted injections fire unconditionally; the random family is
         // rolled first, then gated by config and mask.
-        let eio_roll = inner.rng.random::<f64>();
+        let eio_roll = sim_random::<f64>();
         let targeted = range_has_bit(&state.eio_read, sectors.clone());
         let random_hit =
             inner.config.eio_read_probability > 0.0 && eio_roll < inner.config.eio_read_probability;
@@ -710,7 +716,7 @@ impl SimBlockStore {
         // Read-time corruption plants latent faults per sector.
         let mut corrupted = false;
         for sector in sectors.clone() {
-            let roll = inner.rng.random::<f64>();
+            let roll = sim_random::<f64>();
             if inner.config.read_corruption_probability > 0.0
                 && roll < inner.config.read_corruption_probability
                 && eligible_one(inner.eligibility.as_ref(), path, region, sector)
@@ -821,7 +827,7 @@ impl SimBlockStore {
         let mask = inner.eligibility.as_ref();
 
         // EIO.
-        let eio_roll = inner.rng.random::<f64>();
+        let eio_roll = sim_random::<f64>();
         let targeted = range_has_bit(&state.eio_write, sectors.clone());
         let random_hit = inner.config.eio_write_probability > 0.0
             && eio_roll < inner.config.eio_write_probability;
@@ -838,7 +844,7 @@ impl SimBlockStore {
         }
 
         // Phantom write: acknowledged, never applied.
-        let phantom_roll = inner.rng.random::<f64>();
+        let phantom_roll = sim_random::<f64>();
         if inner.config.phantom_write_probability > 0.0
             && phantom_roll < inner.config.phantom_write_probability
             && mask_allows(mask, path, region, sectors.clone())
@@ -856,7 +862,7 @@ impl SimBlockStore {
 
         // Misdirected write: lands at the wrong sector-aligned offset within
         // the same region.
-        let misdirect_roll = inner.rng.random::<f64>();
+        let misdirect_roll = sim_random::<f64>();
         let write_sectors = sectors.end - sectors.start;
         let region_sectors = state.visible_sectors();
         if inner.config.misdirected_write_probability > 0.0
@@ -864,7 +870,7 @@ impl SimBlockStore {
             && region_sectors > write_sectors
         {
             let max_start = region_sectors - write_sectors;
-            let mut mistaken = inner.rng.random_range(0..=max_start);
+            let mut mistaken = sim_random_range(0..max_start + 1);
             if mistaken == sectors.start {
                 mistaken = (mistaken + 1) % (max_start + 1);
             }
@@ -936,7 +942,7 @@ impl SimBlockStore {
                 path: path.to_string(),
             })?;
 
-        let failure_roll = inner.rng.random::<f64>();
+        let failure_roll = sim_random::<f64>();
         if inner.config.persist_failure_probability > 0.0
             && failure_roll < inner.config.persist_failure_probability
         {
@@ -957,7 +963,7 @@ impl SimBlockStore {
             for sector in state.dirty_sectors() {
                 let sector_usize = usize::try_from(sector).expect("sector index fits in usize");
                 let lied = lie_probability > 0.0
-                    && inner.rng.random::<f64>() < lie_probability
+                    && sim_random::<f64>() < lie_probability
                     && inner
                         .eligibility
                         .as_ref()
@@ -1028,7 +1034,7 @@ impl SimBlockStore {
             return report;
         }
 
-        let clean = inner.rng.random::<f64>() < inner.config.clean_crash_probability;
+        let clean = sim_random::<f64>() < inner.config.clean_crash_probability;
         let mut lied_per_region: Vec<Vec<u64>> = Vec::with_capacity(device.regions.len());
         if clean {
             assert_reachable!("block crash: clean crash preserved all buffered writes");
@@ -1043,7 +1049,6 @@ impl SimBlockStore {
             }
         } else {
             let mut ctx = CrashCtx {
-                rng: &mut inner.rng,
                 config: &inner.config,
                 mask: inner.eligibility.as_ref(),
                 path,
@@ -1096,7 +1101,6 @@ fn commit_sector(state: &mut RegionState, sector: u64) {
 
 /// Split borrows of the store shared by the crash-resolution helpers.
 struct CrashCtx<'a> {
-    rng: &'a mut ChaCha8Rng,
     config: &'a BlockFaultConfig,
     mask: Option<&'a BlockEligibilityMask>,
     path: &'a str,
@@ -1115,7 +1119,7 @@ fn resolve_region_crash(
     // region reverts to its last durable size (dropping buffered writes in
     // the reverted tail).
     if state.visible.len() > state.committed.len() {
-        if ctx.rng.random::<f64>() < ctx.config.grow_survives_crash_probability {
+        if sim_random::<f64>() < ctx.config.grow_survives_crash_probability {
             assert_reachable!("block crash: unpersisted grow survived");
             state.grow_committed_to_visible(fill, region);
         } else {
@@ -1144,12 +1148,10 @@ fn resolve_region_crash(
     let mut window: Option<Range<u64>> = None;
     if !dirty.is_empty()
         && ctx.config.correlated_rollback_probability > 0.0
-        && ctx.rng.random::<f64>() < ctx.config.correlated_rollback_probability
+        && sim_random::<f64>() < ctx.config.correlated_rollback_probability
     {
-        let anchor = dirty[ctx.rng.random_range(0..dirty.len())];
-        let run = ctx
-            .rng
-            .random_range(1..=ctx.config.correlated_rollback_max_run.max(1));
+        let anchor = dirty[sim_random_range(0..dirty.len())];
+        let run = sim_random_range(1..ctx.config.correlated_rollback_max_run.max(1) + 1);
         window = Some(anchor..anchor.saturating_add(run));
     }
     let mut correlated_fired = false;
@@ -1160,7 +1162,7 @@ fn resolve_region_crash(
         correlated_fired |= in_window;
         let lied = state.lied.is_set(sector_usize);
         let outcome = choose_outcome(ctx, region, sector, lied, in_window);
-        apply_outcome(ctx.rng, state, fill, region, sector, outcome);
+        apply_outcome(state, fill, region, sector, outcome);
         note_outcome_reachable(outcome, fill.garbage);
         report.resolutions.push(BlockSectorResolution {
             region,
@@ -1198,7 +1200,7 @@ fn choose_outcome(
     if in_window || lied {
         return BlockCrashOutcome::KeptOld;
     }
-    let roll = ctx.rng.random::<f64>();
+    let roll = sim_random::<f64>();
     let eligible = eligible_one(ctx.mask, ctx.path, region, sector);
     let lost_at = ctx.config.crash_lost_probability;
     let latent_at = lost_at + ctx.config.crash_latent_fault_probability;
@@ -1234,7 +1236,6 @@ fn choose_outcome(
 
 /// Materialize one sector's crash resolution into the committed image.
 fn apply_outcome(
-    rng: &mut ChaCha8Rng,
     state: &mut RegionState,
     fill: &FillPattern,
     region: RegionId,
@@ -1257,8 +1258,8 @@ fn apply_outcome(
             state.committed_written.clear(sector_usize);
         }
         BlockCrashOutcome::Shorn => {
-            let split = rng.random_range(1..SECTOR_SIZE);
-            let prefix_new = rng.random::<bool>();
+            let split = sim_random_range(1..SECTOR_SIZE);
+            let prefix_new = sim_random::<bool>();
             let (committed, visible) = (&mut state.committed, &state.visible);
             if prefix_new {
                 committed[start..start + split].copy_from_slice(&visible[start..start + split]);

@@ -13,8 +13,8 @@ use hyper::{Request, Response, StatusCode};
 use moonpool_hyper::HyperIo;
 
 use moonpool_sim::{
-    NetworkProvider, Process, SimContext, SimulationBuilder, SimulationReport, SimulationResult,
-    TcpListenerTrait, Workload,
+    NetworkFault, NetworkFaultMask, NetworkProvider, Process, SimContext, SimulationBuilder,
+    SimulationReport, SimulationResult, TcpListenerTrait, Workload,
 };
 
 // ============================================================================
@@ -240,6 +240,10 @@ fn test_hyper_http_basic() {
         SimulationBuilder::new()
             .processes(1, || Box::new(HyperServer))
             .workload(HyperClient)
+            // This is an HTTP plumbing test, not a chaos test: the default
+            // network config's buggify-gated connect failures are opted out
+            // (the client does not retry a refused connect).
+            .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::ConnectFailure))
             .set_iterations(3)
             .set_debug_seeds(vec![1, 2, 3]),
     );

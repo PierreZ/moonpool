@@ -279,9 +279,8 @@ impl Attrition {
     /// importantly the **never-reboot** case (needed to find slow leaks / timer
     /// overflows) and single-mode cases ("always crash", "graceful-only").
     ///
-    /// Draws exactly six values from the independent
-    /// `CONFIG_RNG` stream (fixed sequence ⇒ reproducible per seed, never
-    /// perturbs in-run randomness). The first draw, with ~50% probability, sets
+    /// Draws exactly six values from the simulation stream (fixed sequence ⇒
+    /// reproducible per seed). The first draw, with ~50% probability, sets
     /// `max_dead = 0` — the never-reboot regime, where the injector's
     /// `dead_count() >= max_dead` gate is always true so it never reboots. The
     /// remaining three each mask one reboot-kind weight to `0.0` with ~50%
@@ -303,29 +302,29 @@ impl Attrition {
         topology: Option<&super::locality::MachineRegistry>,
     ) -> Attrition {
         let mut regime = self.clone();
-        if !crate::sim::config_random_bool(0.5) {
+        if !crate::sim::sim_random_bool(0.5) {
             regime.max_dead = 0;
         }
-        if !crate::sim::config_random_bool(0.5) {
+        if !crate::sim::sim_random_bool(0.5) {
             regime.prob_graceful = 0.0;
         }
-        if !crate::sim::config_random_bool(0.5) {
+        if !crate::sim::sim_random_bool(0.5) {
             regime.prob_crash = 0.0;
         }
-        if !crate::sim::config_random_bool(0.5) {
+        if !crate::sim::sim_random_bool(0.5) {
             regime.prob_wipe = 0.0;
         }
 
         // Scale the whole window rather than sampling the eventual delay here:
-        // the injector still performs its usual single SIM_RNG draw, preserving
-        // counted-stream call positions and exploration recipes.
+        // the injector still performs its usual single draw per reboot, so the
+        // regime costs a fixed six draws at build time and nothing at runtime.
         let recovery = self.recovery_delay_ms.clone().unwrap_or(1000..10000);
-        let scale_percent = crate::sim::rng::config_random_range(50..201);
+        let scale_percent = crate::sim::sim_random_range(50..201);
         regime.recovery_delay_ms = Some(Self::scaled_range(recovery, scale_percent));
 
         // Twelve is divisible by every possible candidate count (1..=4), so
         // reducing it modulo the viable set does not bias one scope.
-        let scope_draw = crate::sim::rng::config_random_range(0..12);
+        let scope_draw = crate::sim::sim_random_range(0..12);
         if let Some(topology) = topology.filter(|topology| !topology.is_empty()) {
             let scopes = Self::viable_scopes(topology, regime.max_dead);
             regime.scope = scopes[scope_draw % scopes.len()];
@@ -385,7 +384,7 @@ mod swarm_tests {
     use std::net::IpAddr;
 
     use super::{Attrition, AttritionScope, AttritionVictims};
-    use crate::sim::rng::{rng_call_count, set_config_seed, set_sim_seed};
+    use crate::sim::rng::{rng_call_count, set_sim_seed};
     use crate::{LocalityInfo, runner::locality::MachineRegistry};
 
     /// A representative base regime: all three reboot kinds enabled.
@@ -404,7 +403,7 @@ mod swarm_tests {
 
     #[test]
     fn swarm_keeps_the_victim_filter() {
-        set_config_seed(7);
+        set_sim_seed(7);
         let mut filtered = base();
         filtered.victims = AttritionVictims::group("acceptor");
         assert_eq!(
@@ -413,9 +412,9 @@ mod swarm_tests {
         );
     }
 
-    /// Build a swarm regime the way the runner does: config stream seeded per iteration.
+    /// Build a swarm regime the way the runner does: the stream seeded per iteration.
     fn swarm_for(seed: u64) -> Attrition {
-        set_config_seed(seed);
+        set_sim_seed(seed);
         base().swarm_for_seed()
     }
 
@@ -468,14 +467,15 @@ mod swarm_tests {
     }
 
     #[test]
-    fn attrition_swarm_never_advances_the_counted_rng() {
+    fn attrition_swarm_costs_exactly_six_draws() {
+        // The regime is drawn from the one simulation stream at a fixed
+        // position, so its footprint is part of every seed's replay.
         set_sim_seed(42);
-        set_config_seed(42);
         let before = rng_call_count();
 
         let _ = base().swarm_for_seed();
 
-        assert_eq!(rng_call_count(), before);
+        assert_eq!(rng_call_count() - before, 6);
     }
 
     fn topology(processes_per_machine: usize) -> MachineRegistry {
@@ -502,7 +502,7 @@ mod swarm_tests {
         let topology = topology(1);
         let scopes = (0..100_u64)
             .map(|seed| {
-                set_config_seed(seed);
+                set_sim_seed(seed);
                 base().swarm_for_seed_with_topology(Some(&topology)).scope
             })
             .collect::<Vec<_>>();
@@ -519,7 +519,7 @@ mod swarm_tests {
     fn clustered_swarm_rejects_scopes_that_exceed_max_dead() {
         let topology = topology(3);
         for seed in 0..100_u64 {
-            set_config_seed(seed);
+            set_sim_seed(seed);
             let regime = base().swarm_for_seed_with_topology(Some(&topology));
             assert_eq!(regime.scope, AttritionScope::PerProcess);
         }

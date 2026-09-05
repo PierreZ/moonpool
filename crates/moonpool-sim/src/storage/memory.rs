@@ -19,6 +19,8 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::io;
 
+use crate::sim::rng::{sim_random, sim_random_range};
+
 /// Size of a disk sector in bytes.
 ///
 /// Most storage devices operate in 512-byte sectors. Operations that don't
@@ -193,7 +195,9 @@ pub struct InMemoryStorage {
     pending_writes: Vec<PendingWrite>,
     /// Total size of the storage in bytes
     size: u64,
-    /// Seed for deterministic random generation
+    /// Key for the unwritten-sector fill: a pure function of `(seed, sector)`,
+    /// so a never-written sector reads the same garbage every time. Fault
+    /// decisions never use it; they draw on the simulation stream.
     seed: u64,
 }
 
@@ -605,16 +609,15 @@ impl InMemoryStorage {
     ///
     /// Panics if `size` does not fit in `usize`.
     pub fn apply_crash(&mut self, crash_fault_probability: f64) {
-        let mut rng = ChaCha8Rng::seed_from_u64(self.seed);
-
         for pending in &self.pending_writes {
             if pending.is_phantom {
                 // Phantom writes just disappear - nothing to do
                 continue;
             }
 
-            // Check if this write experiences a crash fault
-            if rng.random::<f64>() >= crash_fault_probability {
+            // Check if this write experiences a crash fault: a draw on the
+            // simulation stream, like every other fault decision.
+            if sim_random::<f64>() >= crash_fault_probability {
                 continue;
             }
 
@@ -625,7 +628,7 @@ impl InMemoryStorage {
             let end_sector = (offset_usize + pending.data.len()).div_ceil(SECTOR_SIZE);
 
             if start_sector < end_sector && end_sector <= self.faults.len() {
-                let faulted_sector = rng.random_range(start_sector..end_sector);
+                let faulted_sector = sim_random_range(start_sector..end_sector);
                 self.faults.set(faulted_sector);
             }
         }

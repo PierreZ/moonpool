@@ -5,9 +5,9 @@
 //! that offset comes from decides the determinism story:
 //!
 //! - **Simulation**: moonpool-sim installs an override per iteration via
-//!   [`set_select_offset_override`], backed by a seeded RNG stream. Same seed,
-//!   same offsets, exact replay; different seeds explore different branch
-//!   orderings.
+//!   [`set_select_offset_override`], backed by the simulation's one seeded
+//!   stream (each `select!` is one counted draw). Same seed, same offsets,
+//!   exact replay; different seeds explore different branch orderings.
 //! - **Production** (no override installed): a thread-local [`SmallRng`]
 //!   lazily seeded from [`std::collections::hash_map::RandomState`] (the same
 //!   entropy trick tokio's own `FastRand` uses). Behaviorally equivalent to

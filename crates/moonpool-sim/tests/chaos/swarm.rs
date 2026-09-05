@@ -1,6 +1,6 @@
 //! End-to-end integration test for swarm testing (`SimulationBuilder::swarm`).
 //!
-//! Verifies that the swarm-subset wiring (per-seed `CONFIG_RNG` seeding plus the
+//! Verifies that the swarm-subset wiring (the per-seed subset draws plus the
 //! swarm branch in `build_sim_for_iteration`) drives a full run cleanly across
 //! many seeds: every seed builds its own per-seed fault subset and the
 //! orchestrator completes. The per-seed subset logic itself (which families are

@@ -42,9 +42,12 @@ Each seed replays exactly. The *population* of seeds covers the ordering
 space. Ordering bugs, the kind that survive code review because both orders
 look fine locally, live exactly there.
 
-The scheduling RNG is a private ChaCha8 stream salted from the iteration
-seed. It is deliberately not the counted `SIM_RNG` stream: scheduling
-decisions never shift the fork explorer's `count@seed` replay bookkeeping.
+The scheduling index is a draw on the simulation's one random stream, the
+same `sim_random_range` a process reaches through `ctx.random()`. There is no
+private scheduling RNG: which task runs next is counted like every other
+decision, so a fork-explorer `count@seed` recipe replays the schedule along
+with the faults and the workload. The only time the executor does not draw is
+when exactly one task is runnable, which is a forced choice, not a decision.
 
 ## Where is the reactor?
 
